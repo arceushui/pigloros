@@ -133,10 +133,9 @@ impl Driver for RuleAgentDriver {
         let payload = DecisionPayload { action, tick: self.tick };
 
         let mut buf = Vec::new();
-        ciborium::into_writer(&payload, &mut buf).map_err(|e| RuntimeError::InvalidPayload {
-            event_type: EVENT_TYPE_DECISION.to_owned(),
-            reason: e.to_string(),
-        })?;
+        // Writing to Vec<u8> is infallible with ciborium.
+        ciborium::into_writer(&payload, &mut buf)
+            .expect("ciborium write to Vec<u8> is infallible");
 
         let draft = pos_core::event::EventDraft::new(
             self.entity,
@@ -258,6 +257,27 @@ mod tests {
         }
 
         assert_eq!(state.get("decisions").and_then(serde_json::Value::as_u64), Some(3));
+    }
+
+    #[test]
+    fn default_creates_plugin_with_four_actions() {
+        let plugin = RuleAgentPlugin::default();
+        assert_eq!(plugin.actions().len(), 4);
+        assert_eq!(plugin.actions()[0], "idle");
+    }
+
+    #[test]
+    fn plugin_id_and_name() {
+        let plugin = RuleAgentPlugin::new();
+        let _id = plugin.id(); // covers Plugin::id()
+        assert_eq!(plugin.name(), "rule-agent");
+    }
+
+    #[test]
+    fn driver_name_is_correct() {
+        let entity = EntityId::new();
+        let driver = RuleAgentDriver::new(entity, vec!["a".to_owned()]);
+        assert_eq!(driver.name(), "rule-agent-driver");
     }
 
     #[test]

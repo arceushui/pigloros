@@ -119,10 +119,9 @@ impl Driver for SyntheticDriver {
         let payload = ObsPayload { value, tick: self.tick };
 
         let mut buf = Vec::new();
-        ciborium::into_writer(&payload, &mut buf).map_err(|e| RuntimeError::InvalidPayload {
-            event_type: EVENT_TYPE.to_owned(),
-            reason: e.to_string(),
-        })?;
+        // Writing to Vec<u8> is infallible with ciborium.
+        ciborium::into_writer(&payload, &mut buf)
+            .expect("ciborium write to Vec<u8> is infallible");
 
         let draft = pos_core::event::EventDraft::new(
             self.entity,
@@ -225,6 +224,44 @@ mod tests {
     }
 
     #[test]
+    fn default_creates_plugin() {
+        let plugin = SyntheticObsPlugin::default();
+        let cap = plugin.capability();
+        assert_eq!(cap.owned_event_types.len(), 1);
+    }
+
+    #[test]
+    fn plugin_id_name_capability() {
+        let plugin = SyntheticObsPlugin::new();
+        let _id = plugin.id(); // covers Plugin::id()
+        assert_eq!(plugin.name(), "synthetic-obs");
+        let cap = plugin.capability();
+        assert_eq!(cap.owned_event_types[0].as_str(), EVENT_TYPE);
+        assert_eq!(cap.owned_entity_kinds[0], ENTITY_KIND);
+        assert!(cap.has_driver);
+        assert!(cap.has_reducer);
+    }
+
+    #[test]
+    fn driver_name_is_correct() {
+        let entity = EntityId::new();
+        let driver = SyntheticDriver::new(entity);
+        assert_eq!(driver.name(), "synthetic-driver");
+    }
+
+    #[test]
+    fn with_amplitude_driver_scales_values() {
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let tl = store.create_timeline("test-amp").unwrap();
+        let entity = EntityId::new();
+        let mut driver = SyntheticDriver::with_amplitude(entity, 2.0);
+        let out = driver.step(store.as_ref(), tl.id()).unwrap();
+        let payload: ObsPayload = ciborium::from_reader(out.drafts[0].payload.as_slice()).unwrap();
+        // tick=0 → sin(0) * 2.0 = 0.0
+        assert!((payload.value - 0.0_f64).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn driver_produces_deterministic_values() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("test").unwrap();
@@ -274,5 +311,101 @@ mod tests {
         }
 
         assert_eq!(state.get("observations").and_then(serde_json::Value::as_u64), Some(3));
+    }
+
+    #[test]
+    fn reducer_skips_invalid_cbor_payload() {
+        // Covers the outer `if let Ok(payload)` else branch (line 175):
+        // when the CBOR can't be decoded, the block is skipped silently.
+        use pos_core::{
+            clock::{Seq, WallTime},
+            crypto::Hash,
+            event::{CanonicalBytes, SchemaVersion},
+            ids::{EntityId, EventId},
+        };
+        let reducer = SyntheticReducer;
+        let entity = EntityId::new();
+        let mut state = reducer.initial();
+
+        let bad_event = Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new(EVENT_TYPE),
+            payload: CanonicalBytes::from_vec(vec![0xFF, 0xFE, 0xFD]), // invalid CBOR
+            wall_time: WallTime::from_micros(0),
+            seq: Seq::ZERO,
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0u8; 32]),
+        };
+        reducer.apply(&mut state, &bad_event);
+        // observations is incremented even though payload decode failed
+        assert_eq!(state.get("observations").and_then(serde_json::Value::as_u64), Some(1));
+    }
+
+    #[test]
+    fn reducer_ignores_non_matching_event_type() {
+        // Covers the early `return;` in reducer.apply when event_type != EVENT_TYPE
+        use pos_core::{
+            clock::{Seq, WallTime},
+            crypto::Hash,
+            event::{CanonicalBytes, SchemaVersion},
+            ids::{EntityId, EventId},
+        };
+        let reducer = SyntheticReducer;
+        let entity = EntityId::new();
+        let mut state = reducer.initial();
+
+        let non_matching_event = Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new("other.event"),
+            payload: CanonicalBytes::from_vec(vec![]),
+            wall_time: WallTime::from_micros(0),
+            seq: Seq::ZERO,
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0u8; 32]),
+        };
+        reducer.apply(&mut state, &non_matching_event);
+        // observations should still be 0 since the event was ignored
+        assert_eq!(state.get("observations").and_then(serde_json::Value::as_u64), Some(0));
+    }
+
+    #[test]
+    fn reducer_handles_nan_value_gracefully() {
+        // Covers the `if let Some(n)` path in reducer.apply — when from_f64(NaN) returns None
+        // We create an event with a valid payload but a NaN value to hit that branch.
+        // NaN: serde_json::Number::from_f64(f64::NAN) returns None, so the state.set is skipped.
+        let reducer = SyntheticReducer;
+        let entity = EntityId::new();
+        let mut state = reducer.initial();
+
+        // We build an event with NaN encoded in the CBOR payload.
+        // ciborium encodes NaN as an f64 normally.
+        let payload = ObsPayload { value: f64::NAN, tick: 0 };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&payload, &mut buf).unwrap();
+
+        let event = Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new(EVENT_TYPE),
+            payload: CanonicalBytes::from_vec(buf),
+            wall_time: WallTime::from_micros(0),
+            seq: Seq::ZERO,
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0u8; 32]),
+        };
+        reducer.apply(&mut state, &event);
+        // observations incremented even though NaN value was skipped
+        assert_eq!(state.get("observations").and_then(serde_json::Value::as_u64), Some(1));
     }
 }

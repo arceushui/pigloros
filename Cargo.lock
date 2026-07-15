@@ -523,6 +523,7 @@ dependencies = [
  "pos-time",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "ulid",
 ]
