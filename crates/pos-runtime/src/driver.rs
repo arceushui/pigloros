@@ -92,8 +92,14 @@ mod tests {
 
     struct IdleDriver;
     impl Driver for IdleDriver {
-        fn name(&self) -> &str { "idle" }
-        fn step(&mut self, _: &dyn EventStore, _: TimelineId) -> Result<StepOutput, RuntimeError> {
+        fn name(&self) -> &str {
+            "idle"
+        }
+        fn step(
+            &mut self,
+            _: &dyn EventStore,
+            _: TimelineId,
+        ) -> Result<StepOutput, RuntimeError> {
             Ok(StepOutput::empty())
         }
     }
@@ -143,5 +149,7 @@ mod tests {
     fn driver_name() {
         let mut d = TickDriver { entity: EntityId::new(), ticks: 0 };
         assert_eq!(d.name(), "tick");
+        let mut idle = IdleDriver;
+        assert_eq!(idle.name(), "idle");
     }
 }

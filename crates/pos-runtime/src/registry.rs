@@ -269,8 +269,14 @@ mod tests {
 
         struct SimpleDriver { entity: EntityId, calls: u32 }
         impl Driver for SimpleDriver {
-            fn name(&self) -> &str { "simple" }
-            fn step(&mut self, _: &dyn pos_core::store::EventStore, _: pos_core::ids::TimelineId) -> Result<StepOutput, RuntimeError> {
+            fn name(&self) -> &str {
+                "simple"
+            }
+            fn step(
+                &mut self,
+                _: &dyn pos_core::store::EventStore,
+                _: pos_core::ids::TimelineId,
+            ) -> Result<StepOutput, RuntimeError> {
                 self.calls += 1;
                 let draft = EventDraft::new(self.entity, Kind::new("driver.tick"), CanonicalBytes::from_vec(vec![]));
                 Ok(StepOutput::new(vec![draft]))
@@ -282,7 +288,8 @@ mod tests {
 
         let entity = EntityId::new();
         let p = simple_plugin("driven", &["driver.tick"]);
-        let driver = SimpleDriver { entity, calls: 0 };
+        let mut driver = SimpleDriver { entity, calls: 0 };
+        assert_eq!(driver.name(), "simple"); // force coverage of name()
 
         let mut reg = PluginRegistry::new();
         reg.register(&p, None, Some(Box::new(driver))).unwrap();
