@@ -8,10 +8,10 @@ rust-version.workspace = true
 pos-core  = { path = "../pos-core" }
 pos-store = { path = "../pos-store" }
 pos-state = { path = "../pos-state" }
-pos-time  = { path = "../pos-time" }
 serde     = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+indexmap  = { workspace = true }
 
 [dev-dependencies]
 proptest  = { workspace = true }

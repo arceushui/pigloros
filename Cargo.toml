@@ -38,6 +38,9 @@ dryoc = "0.9"
 # Error handling
 thiserror = "2"
 
+# Ordered maps (insertion-order guaranteed)
+indexmap = "2"
+
 # SQLite
 rusqlite = { version = "0.36", features = ["bundled"] }
 

@@ -5,7 +5,7 @@
 //! - reducers into `ProjectionRegistry`
 //! - drivers into the runtime's step loop
 
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 use pos_core::{ids::PluginId, Plugin, Reducer};
 use pos_state::ProjectionRegistry;
@@ -13,6 +13,7 @@ use pos_state::ProjectionRegistry;
 use crate::{
     driver::Driver,
     error::RuntimeError,
+    recorder::RECORDER_EVENT_TYPE,
     schema::{EventTypeSchema, SchemaRegistry},
 };
 
@@ -25,9 +26,11 @@ struct PluginEntry {
 /// The central plugin registry.
 ///
 /// Plugins register here; the registry wires their components into the
-/// appropriate sub-registries.
+/// appropriate sub-registries. Iteration order (`step_all`, `plugin_names`) is
+/// guaranteed to match registration order.
 pub struct PluginRegistry {
-    plugins: HashMap<PluginId, PluginEntry>,
+    /// `IndexMap` preserves insertion order — `step_all` / `plugin_names` are stable.
+    plugins: IndexMap<PluginId, PluginEntry>,
     pub schemas: SchemaRegistry,
     pub projections: ProjectionRegistry,
 }
@@ -35,9 +38,17 @@ pub struct PluginRegistry {
 impl PluginRegistry {
     #[must_use]
     pub fn new() -> Self {
+        let mut schemas = SchemaRegistry::new();
+        // Auto-register the Recorder's internal event type so that
+        // Recorder::to_draft() output passes SchemaRegistry::validate().
+        schemas.register(EventTypeSchema {
+            event_type: pos_core::event::Kind::new(RECORDER_EVENT_TYPE),
+            description: "Internal: nondeterministic output recorded by the Recorder".to_owned(),
+            json_schema: None,
+        });
         Self {
-            plugins: HashMap::new(),
-            schemas: SchemaRegistry::new(),
+            plugins: IndexMap::new(),
+            schemas,
             projections: ProjectionRegistry::new(),
         }
     }
