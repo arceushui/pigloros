@@ -134,6 +134,82 @@ impl ProjectionRegistry {
             .find(|(n, _)| n == name)
             .and_then(|(_, slot)| slot.registry.get(entity))
     }
+
+    /// Return the names of all registered reducers in insertion order.
+    #[must_use]
+    pub fn reducer_names(&self) -> Vec<&str> {
+        self.slots.iter().map(|(n, _)| n.as_str()).collect()
+    }
+
+    /// Reset all accumulated state back to empty.
+    ///
+    /// Registered reducers are kept; only the per-entity state accumulation is
+    /// cleared. This is equivalent to calling [`Self::register`] for every
+    /// reducer again but preserving insertion order.
+    pub fn clear_state(&mut self) {
+        for (_, slot) in &mut self.slots {
+            slot.registry = StateRegistry::new();
+        }
+    }
+
+    /// Restore accumulated state from a previously captured snapshot map.
+    ///
+    /// Resets all accumulated state first (via [`Self::clear_state`]), then
+    /// loads the corresponding [`StateRegistry`] for each reducer name found in
+    /// `snapshot`. Reducer names present in `snapshot` but not registered are
+    /// ignored; registered reducers with no entry in `snapshot` remain empty.
+    ///
+    /// This is the counterpart of [`Self::state_snapshot`] and is used by
+    /// `pos-time` snapshot consistency verification to seed the incremental path.
+    pub fn restore_from_snapshot(
+        &mut self,
+        snapshot: &std::collections::HashMap<String, StateRegistry>,
+    ) {
+        self.clear_state();
+        for (name, slot) in &mut self.slots {
+            if let Some(restored) = snapshot.get(name) {
+                slot.registry = restored.clone();
+            }
+        }
+    }
+
+    /// Extract a snapshot of all per-reducer state as a serialisable map.
+    ///
+    /// The returned map is keyed by reducer name and contains each reducer's
+    /// accumulated [`StateRegistry`]. This is used by `pos-time` snapshot
+    /// capture and consistency verification.
+    #[must_use]
+    pub fn state_snapshot(&self) -> std::collections::HashMap<String, StateRegistry> {
+        self.slots
+            .iter()
+            .map(|(name, slot)| (name.clone(), slot.registry.clone()))
+            .collect()
+    }
+
+    /// Compare this registry's accumulated state against a previously captured
+    /// snapshot map (as returned by [`Self::state_snapshot`]).
+    ///
+    /// Returns the first differing `(reducer_name, entity_id)` pair, or `None`
+    /// when the states are identical.
+    #[must_use]
+    pub fn diff_against_snapshot(
+        &self,
+        snapshot: &std::collections::HashMap<String, StateRegistry>,
+        all_entities: &[EntityId],
+    ) -> Option<(String, EntityId)> {
+        for (name, slot) in &self.slots {
+            let snap_reg = snapshot
+                .get(name)
+                .cloned()
+                .unwrap_or_default();
+            for entity in all_entities {
+                if slot.registry.get_or_default(entity) != snap_reg.get_or_default(entity) {
+                    return Some((name.clone(), *entity));
+                }
+            }
+        }
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------

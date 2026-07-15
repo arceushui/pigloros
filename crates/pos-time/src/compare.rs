@@ -2,8 +2,9 @@
 
 use std::collections::HashSet;
 
-use pos_core::{CoreError, EntityId, Event, Reducer, Seq, StateRegistry, TimelineId};
+use pos_core::{CoreError, EntityId, Event, Seq, TimelineId};
 use pos_core::store::{EventStore, SeqRange};
+use pos_state::ProjectionRegistry;
 
 /// The result of comparing two diverged timelines.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -23,11 +24,14 @@ pub struct ForkDiff {
 /// `fork_seq` is the last sequence number the two timelines share.
 /// Events from `fork_seq + 1` onwards are read from each timeline and compared.
 ///
+/// `registry_a` and `registry_b` are separate [`ProjectionRegistry`] instances —
+/// one per fork arm — so that each arm's reducers accumulate state in isolation
+/// and plugins on different forks never clobber each other's keys.
+///
 /// Steps:
 /// 1. Read post-fork events from `a` and `b`.
-/// 2. Collect `only_in_a` and `only_in_b` (each timeline's post-fork events are
-///    by definition disjoint from the other's after a fork).
-/// 3. Replay those events through `reducers` on each side.
+/// 2. Collect `only_in_a` and `only_in_b`.
+/// 3. Fold post-fork events through `registry_a` and `registry_b` respectively.
 /// 4. Collect entity IDs that appear in either side and compare final state.
 ///
 /// # Errors
@@ -37,7 +41,8 @@ pub fn compare(
     a: TimelineId,
     b: TimelineId,
     fork_seq: Seq,
-    reducers: &[(&str, Box<dyn Reducer>)],
+    registry_a: &mut ProjectionRegistry,
+    registry_b: &mut ProjectionRegistry,
 ) -> Result<ForkDiff, CoreError> {
     let post_fork_range = SeqRange::from_seq(fork_seq.next());
 
@@ -45,20 +50,10 @@ pub fn compare(
     let events_b = store.read(b, post_fork_range)?;
 
     // Build state for A post-fork.
-    let mut reg_a = StateRegistry::new();
-    for event in &events_a {
-        for (_, reducer) in reducers {
-            reg_a.apply(reducer.as_ref(), event);
-        }
-    }
+    registry_a.fold_events(&events_a);
 
     // Build state for B post-fork.
-    let mut reg_b = StateRegistry::new();
-    for event in &events_b {
-        for (_, reducer) in reducers {
-            reg_b.apply(reducer.as_ref(), event);
-        }
-    }
+    registry_b.fold_events(&events_b);
 
     // Collect all entity IDs seen in either side.
     let all_entities: HashSet<EntityId> = events_a
@@ -67,10 +62,21 @@ pub fn compare(
         .map(|e| e.entity)
         .collect();
 
-    // Entities whose state differs.
+    let snap_a = registry_a.state_snapshot();
+    let snap_b = registry_b.state_snapshot();
+
+    // Entities whose state differs across any registered reducer.
     let diverged_entities: Vec<EntityId> = all_entities
         .into_iter()
-        .filter(|eid| reg_a.get_or_default(eid) != reg_b.get_or_default(eid))
+        .filter(|eid| {
+            // Check all reducer names present in either snapshot.
+            let names: HashSet<&String> = snap_a.keys().chain(snap_b.keys()).collect();
+            names.iter().any(|name| {
+                let reg_a = snap_a.get(*name).cloned().unwrap_or_default();
+                let reg_b = snap_b.get(*name).cloned().unwrap_or_default();
+                reg_a.get_or_default(eid) != reg_b.get_or_default(eid)
+            })
+        })
         .collect();
 
     Ok(ForkDiff {
@@ -89,6 +95,7 @@ mod tests {
         ids::EntityId,
         Event, Reducer, State,
     };
+    use pos_state::ProjectionRegistry;
     use pos_store::{open_store, StoreConfig};
 
     // ── helpers ──────────────────────────────────────────────────────────────
@@ -108,8 +115,10 @@ mod tests {
         }
     }
 
-    fn reducers() -> Vec<(&'static str, Box<dyn Reducer>)> {
-        vec![("count", Box::new(CountReducer))]
+    fn make_registry() -> ProjectionRegistry {
+        let mut reg = ProjectionRegistry::new();
+        reg.register("count", Box::new(CountReducer));
+        reg
     }
 
     fn draft(entity: EntityId) -> EventDraft {
@@ -140,7 +149,8 @@ mod tests {
             fork_a.id(),
             fork_b.id(),
             fork_seq,
-            &reducers(),
+            &mut make_registry(),
+            &mut make_registry(),
         )
         .unwrap();
 
@@ -177,7 +187,8 @@ mod tests {
             fork_a.id(),
             fork_b.id(),
             fork_seq,
-            &reducers(),
+            &mut make_registry(),
+            &mut make_registry(),
         )
         .unwrap();
 
@@ -187,5 +198,63 @@ mod tests {
 
         // shared_entity has different counts on A (2) vs B (3) -> diverged.
         assert!(diff.diverged_entities.contains(&shared_entity));
+    }
+
+    #[test]
+    fn compare_isolated_registries_no_clobber() {
+        // Two registries must not share state even when both see events for the
+        // same entity. This exercises the isolation guarantee that motivated the
+        // fix from a single shared reducers slice.
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let parent = store.create_timeline("parent").unwrap();
+        let entity = EntityId::new();
+
+        let shared: Vec<EventDraft> = (0..2).map(|_| draft(entity)).collect();
+        let committed = store.append(parent.id(), &shared).unwrap();
+        let fork_seq = committed.last().unwrap().seq;
+
+        let fork_a = store.fork(parent.id(), fork_seq, "iso-a").unwrap();
+        let fork_b = store.fork(parent.id(), fork_seq, "iso-b").unwrap();
+
+        // Only A gets new events; B stays at the fork point.
+        let new_a: Vec<EventDraft> = (0..3).map(|_| draft(entity)).collect();
+        store.append(fork_a.id(), &new_a).unwrap();
+
+        let mut reg_a = make_registry();
+        let mut reg_b = make_registry();
+
+        let diff = compare(
+            store.as_ref(),
+            fork_a.id(),
+            fork_b.id(),
+            fork_seq,
+            &mut reg_a,
+            &mut reg_b,
+        )
+        .unwrap();
+
+        // B has no post-fork events.
+        assert_eq!(diff.only_in_b.len(), 0);
+        // A saw 3 events, B saw 0 → the entity state must diverge.
+        assert!(diff.diverged_entities.contains(&entity));
+
+        // Verify registry isolation: reg_a accumulated 3 events, reg_b accumulated 0.
+        let count_a = reg_a
+            .state_snapshot()
+            .get("count")
+            .and_then(|r| r.get(&entity))
+            .and_then(|s| s.get("n"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let count_b = reg_b
+            .state_snapshot()
+            .get("count")
+            .and_then(|r| r.get(&entity))
+            .and_then(|s| s.get("n"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+
+        assert_eq!(count_a, 3, "reg_a should have folded 3 post-fork events");
+        assert_eq!(count_b, 0, "reg_b should have seen no post-fork events");
     }
 }

@@ -1,47 +1,52 @@
 //! Timeline snapshots: capture state at the current head and verify consistency.
 
-use pos_core::{CoreError, EntityId, Reducer, Seq, StateRegistry, TimelineId};
-use pos_core::store::{EventStore, SeqRange};
+use std::collections::{HashMap, HashSet};
 
-/// A snapshot of all entity states at a specific sequence number on a timeline.
+use pos_core::{CoreError, EntityId, Seq, StateRegistry, TimelineId};
+use pos_core::store::{EventStore, SeqRange};
+use pos_state::ProjectionRegistry;
+
+/// A snapshot of all per-reducer entity states at a specific sequence number
+/// on a timeline.
+///
+/// The `registry` field is a map from reducer name → [`StateRegistry`] that
+/// mirrors the full [`ProjectionRegistry`] state at capture time. It is kept
+/// serialisable so snapshots can be persisted and loaded without re-running
+/// every registered reducer.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Snapshot {
     /// The timeline this snapshot was taken from.
     pub timeline: TimelineId,
     /// The sequence number at which the snapshot was taken (inclusive).
     pub at_seq: Seq,
-    /// Per-entity state at `at_seq`.
-    pub state: StateRegistry,
+    /// Per-reducer, per-entity state at `at_seq`.
+    pub registry: HashMap<String, StateRegistry>,
 }
 
 /// Take a snapshot of the current head of `timeline`.
 ///
-/// Each `(name, reducer)` pair in `reducers` is folded over all events on the
-/// timeline. The resulting `StateRegistry` is captured inside the `Snapshot`.
+/// All events on the timeline are folded through every reducer registered in
+/// `registry`. The resulting per-reducer state is captured inside the returned
+/// [`Snapshot`].
 ///
 /// # Errors
 /// Propagates [`CoreError`] from the underlying store.
 pub fn snapshot(
     store: &dyn EventStore,
     timeline: TimelineId,
-    reducers: &[(&str, Box<dyn Reducer>)],
+    registry: &mut ProjectionRegistry,
 ) -> Result<Snapshot, CoreError> {
     let events = store.read(timeline, SeqRange::all())?;
     let at_seq = events
         .last()
         .map_or(Seq::ZERO, |e| e.seq);
 
-    let mut registry = StateRegistry::new();
-    for event in &events {
-        for (_, reducer) in reducers {
-            registry.apply(reducer.as_ref(), event);
-        }
-    }
+    registry.fold_events(&events);
 
     Ok(Snapshot {
         timeline,
         at_seq,
-        state: registry,
+        registry: registry.state_snapshot(),
     })
 }
 
@@ -59,10 +64,16 @@ pub enum SnapshotError {
 /// Verify that `snapshot` + tail events produces the same state as a full replay.
 ///
 /// Steps:
-/// 1. Read events after `snapshot.at_seq` (the "tail").
-/// 2. Clone `snapshot.state` and fold the tail through `reducers`.
-/// 3. Do a full replay from seq 0 through `reducers`.
-/// 4. Compare both `StateRegistry` instances; return `Err(Inconsistent)` on mismatch.
+/// 1. Read events after `snapshot.at_seq` (the "tail") and all events.
+/// 2. Restore `registry` to `snap.registry` state, then fold the tail to build
+///    the incremental projection.
+/// 3. Reset `registry` to empty and fold all events to build the full-replay
+///    reference projection.
+/// 4. Compare both state maps; return `Err(Inconsistent)` on any mismatch.
+///
+/// `registry` must be pre-populated with the same reducers used when the
+/// snapshot was originally taken. Its accumulated state is managed internally
+/// and will be in the full-replay state when this function returns.
 ///
 /// # Errors
 /// Returns [`SnapshotError::Store`] on I/O failure or
@@ -70,43 +81,39 @@ pub enum SnapshotError {
 pub fn verify_snapshot_consistency(
     store: &dyn EventStore,
     snap: &Snapshot,
-    reducers: &[(&str, Box<dyn Reducer>)],
+    registry: &mut ProjectionRegistry,
 ) -> Result<(), SnapshotError> {
-    // --- 1. Build state by cloning the snapshot and folding the tail ----------
+    // --- 1. Read events -------------------------------------------------------
     let tail_range = SeqRange::from_seq(snap.at_seq.next());
     let tail_events = store.read(snap.timeline, tail_range)?;
-
-    let mut incremental = snap.state.clone();
-    for event in &tail_events {
-        for (_, reducer) in reducers {
-            incremental.apply(reducer.as_ref(), event);
-        }
-    }
-
-    // --- 2. Full replay from seq 0 -------------------------------------------
     let all_events = store.read(snap.timeline, SeqRange::all())?;
-    let mut full = StateRegistry::new();
-    for event in &all_events {
-        for (_, reducer) in reducers {
-            full.apply(reducer.as_ref(), event);
-        }
-    }
 
-    // --- 3. Compare ----------------------------------------------------------
-    // Collect all entity IDs seen in either registry.
-    let mut all_entities: std::collections::HashSet<EntityId> =
-        std::collections::HashSet::new();
-    // We compare by iterating through the full replay (which has all entities).
-    // We access incremental's state via get_or_default.
-    for event in &all_events {
-        all_entities.insert(event.entity);
-    }
+    // Collect all entity IDs seen across all events.
+    let all_entities: Vec<EntityId> = all_events
+        .iter()
+        .map(|e| e.entity)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
 
-    for entity in all_entities {
-        let inc_state = incremental.get_or_default(&entity);
-        let full_state = full.get_or_default(&entity);
-        if inc_state != full_state {
-            return Err(SnapshotError::Inconsistent { entity });
+    // --- 2. Incremental path: snap.registry state + tail fold -----------------
+    registry.restore_from_snapshot(&snap.registry);
+    registry.fold_events(&tail_events);
+    let inc_state = registry.state_snapshot();
+
+    // --- 3. Full replay path: clean slate + all events -----------------------
+    registry.clear_state();
+    registry.fold_events(&all_events);
+    let full_state = registry.state_snapshot();
+
+    // --- 4. Compare -----------------------------------------------------------
+    for entity in &all_entities {
+        for name in full_state.keys() {
+            let inc_reg = inc_state.get(name).cloned().unwrap_or_default();
+            let full_reg = full_state.get(name).cloned().unwrap_or_default();
+            if inc_reg.get_or_default(entity) != full_reg.get_or_default(entity) {
+                return Err(SnapshotError::Inconsistent { entity: *entity });
+            }
         }
     }
 
@@ -121,6 +128,7 @@ mod tests {
         ids::EntityId,
         Event, Reducer, State,
     };
+    use pos_state::{EntityStateProjection, ProjectionRegistry};
     use pos_store::{open_store, StoreConfig};
 
     // ── helpers ──────────────────────────────────────────────────────────────
@@ -140,16 +148,20 @@ mod tests {
         }
     }
 
-    fn reducers() -> Vec<(&'static str, Box<dyn Reducer>)> {
-        vec![("count", Box::new(CountReducer))]
+    fn make_registry() -> ProjectionRegistry {
+        let mut reg = ProjectionRegistry::new();
+        reg.register("count", Box::new(CountReducer));
+        reg
     }
 
     fn draft(entity: EntityId) -> EventDraft {
         EventDraft::new(entity, Kind::new("test.tick"), CanonicalBytes::from_vec(vec![]))
     }
 
-    fn count_in_registry(reg: &StateRegistry, entity: &EntityId) -> u64 {
-        reg.get(entity)
+    fn count_in_snapshot(snap: &Snapshot, entity: &EntityId) -> u64 {
+        snap.registry
+            .get("count")
+            .and_then(|r| r.get(entity))
             .and_then(|s| s.get("n"))
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0)
@@ -166,10 +178,11 @@ mod tests {
         let drafts: Vec<EventDraft> = (0..4).map(|_| draft(entity)).collect();
         store.append(tl.id(), &drafts).unwrap();
 
-        let snap = snapshot(store.as_ref(), tl.id(), &reducers()).unwrap();
+        let mut reg = make_registry();
+        let snap = snapshot(store.as_ref(), tl.id(), &mut reg).unwrap();
 
         // State should show 4 events applied.
-        assert_eq!(count_in_registry(&snap.state, &entity), 4);
+        assert_eq!(count_in_snapshot(&snap, &entity), 4);
         // at_seq should be the seq of the 4th event (non-zero).
         assert!(snap.at_seq > Seq::ZERO);
         assert_eq!(snap.timeline, tl.id());
@@ -185,8 +198,11 @@ mod tests {
         let drafts: Vec<EventDraft> = (0..3).map(|_| draft(entity)).collect();
         store.append(tl.id(), &drafts).unwrap();
 
-        let snap = snapshot(store.as_ref(), tl.id(), &reducers()).unwrap();
-        verify_snapshot_consistency(store.as_ref(), &snap, &reducers()).unwrap();
+        let mut reg = make_registry();
+        let snap = snapshot(store.as_ref(), tl.id(), &mut reg).unwrap();
+
+        let mut verify_reg = make_registry();
+        verify_snapshot_consistency(store.as_ref(), &snap, &mut verify_reg).unwrap();
     }
 
     #[test]
@@ -199,14 +215,45 @@ mod tests {
         // Initial 3 events -> snapshot
         let drafts: Vec<EventDraft> = (0..3).map(|_| draft(entity)).collect();
         store.append(tl.id(), &drafts).unwrap();
-        let snap = snapshot(store.as_ref(), tl.id(), &reducers()).unwrap();
+        let mut reg = make_registry();
+        let snap = snapshot(store.as_ref(), tl.id(), &mut reg).unwrap();
 
         // Append 2 more events after the snapshot.
         let tail: Vec<EventDraft> = (0..2).map(|_| draft(entity)).collect();
         store.append(tl.id(), &tail).unwrap();
 
         // Consistency should hold: snapshot(3) + tail(2) == full replay(5).
-        verify_snapshot_consistency(store.as_ref(), &snap, &reducers()).unwrap();
+        let mut verify_reg = make_registry();
+        verify_snapshot_consistency(store.as_ref(), &snap, &mut verify_reg).unwrap();
+    }
+
+    #[test]
+    fn snapshot_isolates_multiple_reducers() {
+        // Register two reducers — their states should be tracked independently.
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let tl = store.create_timeline("multi-reducer").unwrap();
+        let entity = EntityId::new();
+
+        let drafts: Vec<EventDraft> = (0..5).map(|_| draft(entity)).collect();
+        store.append(tl.id(), &drafts).unwrap();
+
+        let mut reg = ProjectionRegistry::new();
+        reg.register("count", Box::new(CountReducer));
+        reg.register("entity_state", Box::new(EntityStateProjection));
+
+        let snap = snapshot(store.as_ref(), tl.id(), &mut reg).unwrap();
+
+        // "count" reducer sees n=5.
+        assert_eq!(count_in_snapshot(&snap, &entity), 5);
+        // "entity_state" reducer also tracks independently.
+        let ec = snap
+            .registry
+            .get("entity_state")
+            .and_then(|r| r.get(&entity))
+            .and_then(|s| s.get("event_count"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        assert_eq!(ec, 5, "entity_state should count 5 events independently");
     }
 }
 
@@ -220,6 +267,7 @@ mod extra_tests {
         ids::{EntityId, EventId},
         Event, Reducer, State,
     };
+    use pos_state::ProjectionRegistry;
     use pos_store::{open_store, StoreConfig};
 
     struct CountReducer;
@@ -232,8 +280,10 @@ mod extra_tests {
         }
     }
 
-    fn reducers() -> Vec<(&'static str, Box<dyn Reducer>)> {
-        vec![("count", Box::new(CountReducer))]
+    fn make_registry() -> ProjectionRegistry {
+        let mut reg = ProjectionRegistry::new();
+        reg.register("count", Box::new(CountReducer));
+        reg
     }
 
     fn draft(entity: EntityId) -> EventDraft {
@@ -242,32 +292,38 @@ mod extra_tests {
 
     #[test]
     fn verify_snapshot_consistency_detects_corrupted_snapshot() {
-        // Covers the Err(Inconsistent) branch in verify_snapshot_consistency.
-        // Build a valid snapshot, then manually corrupt its state before verifying.
+        // Covers the case where snapshot.registry has been tampered with.
+        // Build a valid snapshot via normal snapshot(), then manually corrupt
+        // the registry map before verifying.
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("t").unwrap();
         let entity = EntityId::new();
 
         store.append(tl.id(), &[draft(entity)]).unwrap();
-        let mut snap = snapshot(store.as_ref(), tl.id(), &reducers()).unwrap();
+        let mut reg = make_registry();
+        let mut snap = snapshot(store.as_ref(), tl.id(), &mut reg).unwrap();
 
-        // Corrupt the snapshot state by resetting entity count to a wrong value.
-        snap.state.apply(&CountReducer, &Event {
-            id: EventId::new(),
-            entity,
-            event_type: Kind::new("corrupt"),
-            payload: CanonicalBytes::from_vec(vec![]),
-            wall_time: WallTime::from_micros(0),
-            seq: pos_core::clock::Seq::from_u64(999),
-            causation_id: None,
-            correlation_id: None,
-            schema_version: SchemaVersion::V1,
-            signature: None,
-            payload_hash: Hash::from_bytes([0u8; 32]),
-        });
+        // Corrupt the snapshot by injecting a bogus extra count for the entity.
+        if let Some(count_reg) = snap.registry.get_mut("count") {
+            count_reg.apply(&CountReducer, &Event {
+                id: EventId::new(),
+                entity,
+                event_type: Kind::new("corrupt"),
+                payload: CanonicalBytes::from_vec(vec![]),
+                wall_time: WallTime::from_micros(0),
+                seq: pos_core::clock::Seq::from_u64(999),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: SchemaVersion::V1,
+                signature: None,
+                payload_hash: Hash::from_bytes([0u8; 32]),
+            });
+        }
 
-        // Now the snapshot state differs from full replay — should detect inconsistency.
-        let result = verify_snapshot_consistency(store.as_ref(), &snap, &reducers());
+        // Now the snapshot registry state (2 events) differs from a full replay (1 event).
+        // verify_snapshot_consistency must detect the inconsistency.
+        let mut verify_reg = make_registry();
+        let result = verify_snapshot_consistency(store.as_ref(), &snap, &mut verify_reg);
         assert!(result.is_err(), "corrupted snapshot should fail consistency check");
     }
 }

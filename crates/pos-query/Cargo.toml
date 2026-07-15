@@ -7,8 +7,6 @@ rust-version.workspace = true
 [dependencies]
 pos-core  = { path = "../pos-core" }
 pos-store = { path = "../pos-store" }
-pos-state = { path = "../pos-state" }
-pos-time  = { path = "../pos-time" }
 serde = { workspace = true }
 thiserror = { workspace = true }
 

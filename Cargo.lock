@@ -526,9 +526,7 @@ name = "pos-query"
 version = "0.1.0"
 dependencies = [
  "pos-core",
- "pos-state",
  "pos-store",
- "pos-time",
  "proptest",
  "serde",
  "thiserror",
