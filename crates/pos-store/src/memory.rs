@@ -37,16 +37,6 @@ impl MemoryStore {
         }
     }
 
-    /// Create a root (non-forked) timeline.
-    pub fn create_timeline(&mut self, name: impl Into<String>) -> Timeline {
-        let meta = TimelineMeta::root(name);
-        let timeline = Timeline::new(meta);
-        self.timelines.insert(timeline.id(), timeline.clone());
-        self.events.insert(timeline.id(), Vec::new());
-        self.chain_heads.insert(timeline.id(), genesis_hash());
-        timeline
-    }
-
     /// Collect all events for a timeline, walking the fork chain.
     /// Returns events sorted by seq, stitching parent[`0..fork_seq`] + child events.
     fn collect_events_in_range(
@@ -127,6 +117,15 @@ impl Default for MemoryStore {
 }
 
 impl EventStore for MemoryStore {
+    fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
+        let meta = TimelineMeta::root(name);
+        let timeline = Timeline::new(meta);
+        self.timelines.insert(timeline.id(), timeline.clone());
+        self.events.insert(timeline.id(), Vec::new());
+        self.chain_heads.insert(timeline.id(), genesis_hash());
+        Ok(timeline)
+    }
+
     fn append(
         &mut self,
         timeline: TimelineId,
@@ -190,7 +189,7 @@ impl EventStore for MemoryStore {
         &mut self,
         parent: TimelineId,
         at_seq: Seq,
-        name: impl Into<String>,
+        name: &str,
     ) -> Result<Timeline, CoreError> {
         let parent_tl = self
             .timelines
@@ -280,7 +279,7 @@ mod tests {
     #[test]
     fn create_and_get_timeline() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("main");
+        let tl = store.create_timeline("main").unwrap();
         let got = store.get_timeline(tl.id()).unwrap();
         assert_eq!(got.as_ref().map(Timeline::id), Some(tl.id()));
     }
@@ -288,7 +287,7 @@ mod tests {
     #[test]
     fn append_and_read_events() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("main");
+        let tl = store.create_timeline("main").unwrap();
         let entity = EntityId::new();
         let drafts = vec![
             make_draft(entity, b"first"),
@@ -308,7 +307,7 @@ mod tests {
     #[test]
     fn payload_is_opaque_and_unchanged() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("main");
+        let tl = store.create_timeline("main").unwrap();
         let entity = EntityId::new();
         let raw = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xFF, 0x00];
         store
@@ -321,7 +320,7 @@ mod tests {
     #[test]
     fn seq_is_monotonically_increasing() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("main");
+        let tl = store.create_timeline("main").unwrap();
         let entity = EntityId::new();
         let drafts: Vec<EventDraft> = (0..10).map(|i| make_draft(entity, &[i])).collect();
         let committed = store.append(tl.id(), &drafts).unwrap();
@@ -333,7 +332,7 @@ mod tests {
     #[test]
     fn read_range_filters_correctly() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("main");
+        let tl = store.create_timeline("main").unwrap();
         let entity = EntityId::new();
         let drafts: Vec<EventDraft> = (0..5u8).map(|i| make_draft(entity, &[i])).collect();
         store.append(tl.id(), &drafts).unwrap();
@@ -349,7 +348,7 @@ mod tests {
     #[test]
     fn fork_is_copy_on_write_child_events_do_not_affect_parent() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("main");
+        let tl = store.create_timeline("main").unwrap();
         let entity = EntityId::new();
 
         // Append 3 events to parent
@@ -383,7 +382,7 @@ mod tests {
     #[test]
     fn parent_events_after_fork_point_invisible_to_child() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("main");
+        let tl = store.create_timeline("main").unwrap();
         let entity = EntityId::new();
 
         store
@@ -404,7 +403,7 @@ mod tests {
     #[test]
     fn fork_beyond_head_returns_error() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("main");
+        let tl = store.create_timeline("main").unwrap();
         let result = store.fork(tl.id(), Seq::from_u64(99), "bad-fork");
         assert!(matches!(result, Err(CoreError::ForkBeyondHead { .. })));
     }
@@ -429,9 +428,9 @@ mod tests {
     #[test]
     fn list_timelines_returns_all() {
         let mut store = MemoryStore::new();
-        store.create_timeline("a");
-        store.create_timeline("b");
-        store.create_timeline("c");
+        store.create_timeline("a").unwrap();
+        store.create_timeline("b").unwrap();
+        store.create_timeline("c").unwrap();
         let list = store.list_timelines().unwrap();
         assert_eq!(list.len(), 3);
     }
@@ -439,7 +438,7 @@ mod tests {
     #[test]
     fn replay_is_deterministic() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("main");
+        let tl = store.create_timeline("main").unwrap();
         let entity = EntityId::new();
         let drafts: Vec<EventDraft> = (0..5u8).map(|i| make_draft(entity, &[i])).collect();
         store.append(tl.id(), &drafts).unwrap();
@@ -454,7 +453,7 @@ mod tests {
     #[test]
     fn empty_batch_append_returns_empty() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("main");
+        let tl = store.create_timeline("main").unwrap();
         let result = store.append(tl.id(), &[]).unwrap();
         assert!(result.is_empty());
     }
@@ -462,7 +461,7 @@ mod tests {
     #[test]
     fn fork_at_zero_has_empty_parent_events() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("main");
+        let tl = store.create_timeline("main").unwrap();
         let entity = EntityId::new();
         store
             .append(tl.id(), &[make_draft(entity, b"after")])
@@ -485,7 +484,7 @@ mod tests {
     fn grandchild_fork_chain_stitches_correctly() {
         // Exercises compute_chain_hash_at for multi-level fork (parent timeline branch).
         let mut store = MemoryStore::new();
-        let root = store.create_timeline("root");
+        let root = store.create_timeline("root").unwrap();
         let entity = EntityId::new();
 
         // Append 3 events to root.
@@ -526,7 +525,7 @@ mod tests {
     #[test]
     fn multiple_forks_from_same_parent_are_independent() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("main");
+        let tl = store.create_timeline("main").unwrap();
         let entity = EntityId::new();
         store
             .append(tl.id(), &[make_draft(entity, b"shared")])

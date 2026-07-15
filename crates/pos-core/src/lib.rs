@@ -31,5 +31,5 @@ pub use manifest::{AdapterRecord, ReproManifest};
 pub use plugin::{Capability, Plugin};
 pub use schema::{SchemaVersionMap, Upcaster, UpcasterRegistry};
 pub use state::{Reducer, State, StateRegistry};
-pub use store::{EventStore, SeqRange};
+pub use store::{EventStore, SeqRange, TimelineExport};
 pub use timeline::{Timeline, TimelineMeta, TimelineMode};

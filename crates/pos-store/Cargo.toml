@@ -4,6 +4,11 @@ edition.workspace = true
 version.workspace = true
 rust-version.workspace = true
 
+# Backend features — sqlite is on by default; disable with --no-default-features
+[features]
+default = ["sqlite"]
+sqlite = ["dep:rusqlite"]
+
 [dependencies]
 pos-core = { path = "../pos-core" }
 pos-crypto = { path = "../pos-crypto" }
@@ -13,7 +18,7 @@ serde_json = { workspace = true }
 ciborium = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
-rusqlite = { workspace = true }
+rusqlite = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

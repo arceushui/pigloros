@@ -84,29 +84,6 @@ impl SqliteStore {
             .map_err(|e| CoreError::Storage(e.to_string()))
     }
 
-    /// Create a new root (non-forked) timeline with the given name.
-    ///
-    /// # Errors
-    /// Returns `CoreError::Storage` if the database insert fails.
-    pub fn create_timeline(&mut self, name: impl Into<String>) -> Result<Timeline, CoreError> {
-        let meta = TimelineMeta::root(name);
-        let timeline = Timeline::new(meta);
-        let chain_head = genesis_hash();
-        self.conn
-            .execute(
-                "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
-                 VALUES (?1, ?2, ?3, NULL, NULL, 0, ?4)",
-                params![
-                    timeline.id().to_string(),
-                    timeline.meta.name.as_deref().unwrap_or(""),
-                    mode_str(timeline.mode()),
-                    chain_head.as_bytes().as_slice(),
-                ],
-            )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-        Ok(timeline)
-    }
-
     fn get_chain_head(&self, timeline_id: TimelineId) -> Result<pos_core::Hash, CoreError> {
         let bytes: Vec<u8> = self
             .conn
@@ -252,6 +229,25 @@ impl SqliteStore {
 }
 
 impl EventStore for SqliteStore {
+    fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
+        let meta = TimelineMeta::root(name);
+        let timeline = Timeline::new(meta);
+        let chain_head = genesis_hash();
+        self.conn
+            .execute(
+                "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
+                 VALUES (?1, ?2, ?3, NULL, NULL, 0, ?4)",
+                params![
+                    timeline.id().to_string(),
+                    timeline.meta.name.as_deref().unwrap_or(""),
+                    mode_str(timeline.mode()),
+                    chain_head.as_bytes().as_slice(),
+                ],
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        Ok(timeline)
+    }
+
     fn append(
         &mut self,
         timeline: TimelineId,
@@ -372,7 +368,7 @@ impl EventStore for SqliteStore {
         &mut self,
         parent: TimelineId,
         at_seq: Seq,
-        name: impl Into<String>,
+        name: &str,
     ) -> Result<Timeline, CoreError> {
         let head = self.get_head_seq(parent)?;
         if at_seq > head {
