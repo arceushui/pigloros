@@ -1,0 +1,45 @@
+[workspace]
+members = [
+    "crates/pos-core",
+    "crates/pos-crypto",
+    "crates/pos-store",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.80"
+version = "0.1.0"
+license = "MIT"
+
+[workspace.dependencies]
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ciborium = "0.2"
+
+# IDs
+ulid = { version = "2", features = ["serde"] }
+
+# Zero-copy byte buffers
+bytes = "1"
+serde_bytes = "0.11"
+
+# Crypto
+blake3 = "1"
+ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
+rand = "0.9"
+dryoc = "0.9"
+
+# Error handling
+thiserror = "2"
+
+# SQLite
+rusqlite = { version = "0.36", features = ["bundled"] }
+
+# Testing
+proptest = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1

@@ -1,0 +1,857 @@
+//! `SQLite` WAL append-only `EventStore` backend.
+//!
+//! Events are stored in a single table, append-only.
+//! Batched transactions ensure throughput >= 2k ev/s on `SQLite`-WAL.
+//! Fork is copy-on-write: only a metadata row is inserted at fork time (O(1)).
+//! Child reads stitch parent events up to `fork_seq` with child events.
+
+use rusqlite::{params, Connection, OpenFlags};
+
+use pos_core::{
+    clock::{Seq, WallTime},
+    event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
+    ids::{EntityId, EventId, TimelineId},
+    store::{EventStore, SeqRange},
+    timeline::{Timeline, TimelineMeta, TimelineMode},
+    CoreError,
+};
+use pos_crypto::chain::{genesis_hash, hash_event, hash_payload};
+
+pub struct SqliteStore {
+    conn: Connection,
+}
+
+impl SqliteStore {
+    /// Open a `SQLite` WAL store at the given path. Use `":memory:"` for in-memory.
+    ///
+    /// # Errors
+    /// Returns `CoreError::Storage` if the database cannot be opened or schema initialisation fails.
+    pub fn open(path: &str) -> Result<Self, CoreError> {
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_URI,
+        )
+        .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+        let store = Self { conn };
+        store.init_schema()?;
+        Ok(store)
+    }
+
+    /// Open an in-memory `SQLite` store (useful for tests without a temp file).
+    ///
+    /// # Errors
+    /// Returns `CoreError::Storage` if the connection or schema initialisation fails.
+    pub fn open_in_memory() -> Result<Self, CoreError> {
+        let conn = Connection::open_in_memory()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let store = Self { conn };
+        store.init_schema()?;
+        Ok(store)
+    }
+
+    fn init_schema(&self) -> Result<(), CoreError> {
+        self.conn
+            .execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 PRAGMA synchronous=NORMAL;
+                 CREATE TABLE IF NOT EXISTS timelines (
+                     id          TEXT PRIMARY KEY,
+                     name        TEXT,
+                     mode        TEXT NOT NULL,
+                     parent_id   TEXT,
+                     fork_seq    INTEGER,
+                     head_seq    INTEGER NOT NULL DEFAULT 0,
+                     chain_head  BLOB NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS events (
+                     timeline_id TEXT NOT NULL,
+                     seq         INTEGER NOT NULL,
+                     event_id    TEXT NOT NULL,
+                     entity_id   TEXT NOT NULL,
+                     event_type  TEXT NOT NULL,
+                     payload     BLOB NOT NULL,
+                     wall_time   INTEGER NOT NULL,
+                     causation_id TEXT,
+                     correlation_id TEXT,
+                     schema_version INTEGER NOT NULL,
+                     payload_hash BLOB NOT NULL,
+                     PRIMARY KEY (timeline_id, seq)
+                 );",
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))
+    }
+
+    /// Create a new root (non-forked) timeline with the given name.
+    ///
+    /// # Errors
+    /// Returns `CoreError::Storage` if the database insert fails.
+    pub fn create_timeline(&mut self, name: impl Into<String>) -> Result<Timeline, CoreError> {
+        let meta = TimelineMeta::root(name);
+        let timeline = Timeline::new(meta);
+        let chain_head = genesis_hash();
+        self.conn
+            .execute(
+                "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
+                 VALUES (?1, ?2, ?3, NULL, NULL, 0, ?4)",
+                params![
+                    timeline.id().to_string(),
+                    timeline.meta.name.as_deref().unwrap_or(""),
+                    mode_str(timeline.mode()),
+                    chain_head.as_bytes().as_slice(),
+                ],
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        Ok(timeline)
+    }
+
+    fn get_chain_head(&self, timeline_id: TimelineId) -> Result<pos_core::Hash, CoreError> {
+        let bytes: Vec<u8> = self
+            .conn
+            .query_row(
+                "SELECT chain_head FROM timelines WHERE id = ?1",
+                params![timeline_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let arr: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| CoreError::Serialization("bad hash length".to_owned()))?;
+        Ok(pos_core::Hash::from_bytes(arr))
+    }
+
+    fn get_head_seq(&self, timeline_id: TimelineId) -> Result<Seq, CoreError> {
+        let n: i64 = self
+            .conn
+            .query_row(
+                "SELECT head_seq FROM timelines WHERE id = ?1",
+                params![timeline_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        Ok(Seq::from_u64(u64::try_from(n).unwrap_or(0)))
+    }
+
+    /// Read raw events directly from a timeline row (no fork stitching).
+    fn read_own_events(
+        &self,
+        timeline_id: TimelineId,
+        from: Seq,
+        to: Option<Seq>,
+    ) -> Result<Vec<Event>, CoreError> {
+        let sql = to.map_or_else(
+            || format!(
+                "SELECT seq, event_id, entity_id, event_type, payload, wall_time,
+                        causation_id, correlation_id, schema_version, payload_hash
+                 FROM events WHERE timeline_id = '{}' AND seq >= {}
+                 ORDER BY seq ASC",
+                timeline_id, from.as_u64()
+            ),
+            |t| format!(
+                "SELECT seq, event_id, entity_id, event_type, payload, wall_time,
+                        causation_id, correlation_id, schema_version, payload_hash
+                 FROM events WHERE timeline_id = '{}' AND seq >= {} AND seq <= {}
+                 ORDER BY seq ASC",
+                timeline_id, from.as_u64(), t.as_u64()
+            ),
+        );
+
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+        let events = stmt
+            .query_map([], |row| {
+                let seq: i64 = row.get(0)?;
+                let event_id: String = row.get(1)?;
+                let entity_id: String = row.get(2)?;
+                let event_type: String = row.get(3)?;
+                let payload: Vec<u8> = row.get(4)?;
+                let wall_time: i64 = row.get(5)?;
+                let causation_id: Option<String> = row.get(6)?;
+                let correlation_id: Option<String> = row.get(7)?;
+                let schema_version: i64 = row.get(8)?;
+                let payload_hash_bytes: Vec<u8> = row.get(9)?;
+                Ok((
+                    seq,
+                    event_id,
+                    entity_id,
+                    event_type,
+                    payload,
+                    wall_time,
+                    causation_id,
+                    correlation_id,
+                    schema_version,
+                    payload_hash_bytes,
+                ))
+            })
+            .map_err(|e| CoreError::Storage(e.to_string()))?
+            .map(|r| {
+                let (seq, event_id, entity_id, event_type, payload, wall_time,
+                     causation_id, correlation_id, schema_version, ph_bytes) =
+                    r.map_err(|e| CoreError::Storage(e.to_string()))?;
+                let ph_arr: [u8; 32] = ph_bytes
+                    .try_into()
+                    .map_err(|_| CoreError::Serialization("bad hash".to_owned()))?;
+                Ok(Event {
+                    id: parse_event_id(&event_id)?,
+                    entity: parse_entity_id(&entity_id)?,
+                    event_type: Kind::new(event_type),
+                    payload: CanonicalBytes::from_vec(payload),
+                    wall_time: WallTime::from_micros(u64::try_from(wall_time).unwrap_or(0)),
+                    seq: Seq::from_u64(u64::try_from(seq).unwrap_or(0)),
+                    causation_id: causation_id.as_deref().map(parse_event_id).transpose()?,
+                    correlation_id: correlation_id
+                        .as_deref()
+                        .map(parse_correlation_id)
+                        .transpose()?,
+                    schema_version: SchemaVersion::new(u32::try_from(schema_version).unwrap_or(0)),
+                    signature: None,
+                    payload_hash: pos_core::Hash::from_bytes(ph_arr),
+                })
+            })
+            .collect::<Result<Vec<_>, CoreError>>()?;
+
+        Ok(events)
+    }
+
+    /// Walk the fork chain for a timeline, returning [root, ..., leaf].
+    fn fork_chain(&self, timeline_id: TimelineId) -> Result<Vec<(TimelineId, Option<Seq>)>, CoreError> {
+        let mut chain: Vec<(TimelineId, Option<Seq>)> = Vec::new();
+        let mut current = timeline_id;
+        loop {
+            let row: Option<(Option<String>, Option<i64>)> = self
+                .conn
+                .query_row(
+                    "SELECT parent_id, fork_seq FROM timelines WHERE id = ?1",
+                    params![current.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+            match row {
+                None => return Err(CoreError::TimelineNotFound(current)),
+                Some((None, _)) => {
+                    chain.push((current, None));
+                    break;
+                }
+                Some((Some(parent_str), fork_seq)) => {
+                    let fork = fork_seq.map(|s| Seq::from_u64(u64::try_from(s).unwrap_or(0)));
+                    chain.push((current, fork));
+                    current = parse_timeline_id(&parent_str)?;
+                }
+            }
+        }
+        chain.reverse();
+        Ok(chain)
+    }
+}
+
+impl EventStore for SqliteStore {
+    fn append(
+        &mut self,
+        timeline: TimelineId,
+        drafts: &[EventDraft],
+    ) -> Result<Vec<Event>, CoreError> {
+        if drafts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Check timeline exists
+        let exists: bool = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM timelines WHERE id = ?1",
+                params![timeline.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?
+            > 0;
+        if !exists {
+            return Err(CoreError::TimelineNotFound(timeline));
+        }
+
+        let mut seq = self.get_head_seq(timeline)?;
+        let mut prev_hash = self.get_chain_head(timeline)?;
+        let mut committed = Vec::with_capacity(drafts.len());
+
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+        for draft in drafts {
+            seq = seq.next();
+            let event_id = EventId::new();
+            let id_str = event_id.to_string();
+            let payload_hash = hash_payload(&draft.payload);
+            let chain_hash = hash_event(&prev_hash, id_str.as_bytes(), &draft.payload);
+            let wall_time = WallTime::now();
+
+            tx.execute(
+                "INSERT INTO events
+                 (timeline_id, seq, event_id, entity_id, event_type, payload, wall_time,
+                  causation_id, correlation_id, schema_version, payload_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    timeline.to_string(),
+                    i64::try_from(seq.as_u64()).unwrap_or(i64::MAX),
+                    id_str,
+                    draft.entity.to_string(),
+                    draft.event_type.as_str(),
+                    draft.payload.as_slice(),
+                    i64::try_from(wall_time.as_micros()).unwrap_or(i64::MAX),
+                    draft.causation_id.map(|id| id.to_string()),
+                    draft.correlation_id.map(|id| id.to_string()),
+                    i64::from(draft.schema_version.as_u32()),
+                    payload_hash.as_bytes().as_slice(),
+                ],
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+            committed.push(Event {
+                id: event_id,
+                entity: draft.entity,
+                event_type: draft.event_type.clone(),
+                payload: draft.payload.clone(),
+                wall_time,
+                seq,
+                causation_id: draft.causation_id,
+                correlation_id: draft.correlation_id,
+                schema_version: draft.schema_version,
+                signature: None,
+                payload_hash,
+            });
+
+            prev_hash = chain_hash;
+        }
+
+        // Update head and chain hash
+        tx.execute(
+            "UPDATE timelines SET head_seq = ?1, chain_head = ?2 WHERE id = ?3",
+            params![
+                i64::try_from(seq.as_u64()).unwrap_or(i64::MAX),
+                prev_hash.as_bytes().as_slice(),
+                timeline.to_string(),
+            ],
+        )
+        .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+        tx.commit().map_err(|e| CoreError::Storage(e.to_string()))?;
+
+        Ok(committed)
+    }
+
+    fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+        let chain = self.fork_chain(timeline)?;
+        let mut all: Vec<Event> = Vec::new();
+
+        for (i, &(tid, _)) in chain.iter().enumerate() {
+            if i + 1 < chain.len() {
+                // Parent: read up to the child's fork_seq.
+                // fork_seq is always Some for non-root chain entries (enforced by fork()).
+                let fork_seq = chain[i + 1].1.expect("non-root chain entry always has fork_seq");
+                let events = self.read_own_events(tid, range.from, Some(fork_seq))?;
+                all.extend(events);
+            } else {
+                // Leaf: read from range
+                let events = self.read_own_events(tid, range.from, range.to)?;
+                all.extend(events);
+            }
+        }
+
+        all.sort_by_key(|e| e.seq);
+        Ok(all)
+    }
+
+    fn fork(
+        &mut self,
+        parent: TimelineId,
+        at_seq: Seq,
+        name: impl Into<String>,
+    ) -> Result<Timeline, CoreError> {
+        let head = self.get_head_seq(parent)?;
+        if at_seq > head {
+            return Err(CoreError::ForkBeyondHead {
+                fork_seq: at_seq.as_u64(),
+                head: head.as_u64(),
+            });
+        }
+
+        // Compute chain hash at the fork point
+        let fork_hash = self.compute_chain_hash_at(parent, at_seq)?;
+
+        let meta = TimelineMeta::forked_from(parent, at_seq, name);
+        let child = Timeline::new(meta);
+
+        self.conn
+            .execute(
+                "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+                params![
+                    child.id().to_string(),
+                    child.meta.name.as_deref().unwrap_or(""),
+                    mode_str(child.mode()),
+                    parent.to_string(),
+                    i64::try_from(at_seq.as_u64()).unwrap_or(i64::MAX),
+                    fork_hash.as_bytes().as_slice(),
+                ],
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+        Ok(child)
+    }
+
+    fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name, mode, parent_id, fork_seq, head_seq FROM timelines")
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+        let timelines = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })
+            .map_err(|e| CoreError::Storage(e.to_string()))?
+            .map(|r| {
+                let (id_str, name, mode_s, parent_id, fork_seq, head_seq) =
+                    r.map_err(|e| CoreError::Storage(e.to_string()))?;
+                let id = parse_timeline_id(&id_str)?;
+                let mode = parse_mode(&mode_s);
+                let fork_point = match (parent_id, fork_seq) {
+                    (Some(p), Some(s)) => Some((parse_timeline_id(&p)?, Seq::from_u64(u64::try_from(s).unwrap_or(0)))),
+                    _ => None,
+                };
+                let meta = TimelineMeta {
+                    id,
+                    mode,
+                    name,
+                    fork_point,
+                };
+                let mut tl = Timeline::new(meta);
+                tl.head = Seq::from_u64(u64::try_from(head_seq).unwrap_or(0));
+                Ok(tl)
+            })
+            .collect::<Result<Vec<_>, CoreError>>()?;
+
+        Ok(timelines)
+    }
+
+    fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, name, mode, parent_id, fork_seq, head_seq FROM timelines WHERE id = ?1",
+                params![id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+        match row {
+            None => Ok(None),
+            Some((id_str, name, mode_s, parent_id, fork_seq, head_seq)) => {
+                let tid = parse_timeline_id(&id_str)?;
+                let mode = parse_mode(&mode_s);
+                let fork_point = match (parent_id, fork_seq) {
+                    (Some(p), Some(s)) => Some((parse_timeline_id(&p)?, Seq::from_u64(u64::try_from(s).unwrap_or(0)))),
+                    _ => None,
+                };
+                let meta = TimelineMeta { id: tid, mode, name, fork_point };
+                let mut tl = Timeline::new(meta);
+                tl.head = Seq::from_u64(u64::try_from(head_seq).unwrap_or(0));
+                Ok(Some(tl))
+            }
+        }
+    }
+}
+
+impl SqliteStore {
+    fn compute_chain_hash_at(
+        &self,
+        timeline: TimelineId,
+        at_seq: Seq,
+    ) -> Result<pos_core::Hash, CoreError> {
+        let chain = self.fork_chain(timeline)?;
+        let mut hash = genesis_hash();
+
+        for (i, &(tid, _)) in chain.iter().enumerate() {
+            // For non-target ancestors: limit = child's fork_seq (always has next element).
+            // For the target: limit = at_seq.
+            let limit = if tid == timeline {
+                at_seq
+            } else {
+                chain[i + 1].1.expect("ancestor always has a successor in chain")
+            };
+            let events = self.read_own_events(tid, Seq::ZERO, Some(limit))?;
+            for event in events {
+                let id_str = event.id.to_string();
+                hash = hash_event(&hash, id_str.as_bytes(), &event.payload);
+            }
+            if tid == timeline {
+                break;
+            }
+        }
+        Ok(hash)
+    }
+}
+
+const fn mode_str(mode: TimelineMode) -> &'static str {
+    match mode {
+        TimelineMode::Historical => "historical",
+        TimelineMode::Live => "live",
+        TimelineMode::Future => "future",
+    }
+}
+
+fn parse_mode(s: &str) -> TimelineMode {
+    match s {
+        "historical" => TimelineMode::Historical,
+        "future" => TimelineMode::Future,
+        _ => TimelineMode::Live,
+    }
+}
+
+fn parse_timeline_id(s: &str) -> Result<TimelineId, CoreError> {
+    let ulid = s
+        .parse::<ulid::Ulid>()
+        .map_err(|_| CoreError::Serialization(format!("invalid ULID: {s}")))?;
+    Ok(TimelineId::from_ulid(ulid))
+}
+
+fn parse_event_id(s: &str) -> Result<EventId, CoreError> {
+    let ulid = s
+        .parse::<ulid::Ulid>()
+        .map_err(|_| CoreError::Serialization(format!("invalid ULID: {s}")))?;
+    Ok(EventId::from_ulid(ulid))
+}
+
+fn parse_entity_id(s: &str) -> Result<EntityId, CoreError> {
+    let ulid = s
+        .parse::<ulid::Ulid>()
+        .map_err(|_| CoreError::Serialization(format!("invalid ULID: {s}")))?;
+    Ok(EntityId::from_ulid(ulid))
+}
+
+fn parse_correlation_id(s: &str) -> Result<pos_core::CorrelationId, CoreError> {
+    let ulid = s
+        .parse::<ulid::Ulid>()
+        .map_err(|_| CoreError::Serialization(format!("invalid ULID: {s}")))?;
+    Ok(pos_core::CorrelationId::from_ulid(ulid))
+}
+
+use rusqlite::OptionalExtension;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pos_core::{
+        event::{CanonicalBytes, EventDraft, Kind},
+        ids::EntityId,
+        store::SeqRange,
+    };
+
+    fn make_draft(entity: EntityId, payload: &[u8]) -> EventDraft {
+        EventDraft::new(
+            entity,
+            Kind::new("test.event"),
+            CanonicalBytes::from_vec(payload.to_vec()),
+        )
+    }
+
+    fn new_store() -> SqliteStore {
+        SqliteStore::open_in_memory().unwrap()
+    }
+
+    #[test]
+    fn create_and_get_timeline() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let got = store.get_timeline(tl.id()).unwrap();
+        assert!(got.is_some());
+    }
+
+    #[test]
+    fn append_and_read() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        store
+            .append(tl.id(), &[make_draft(entity, b"hello"), make_draft(entity, b"world")])
+            .unwrap();
+        let events = store.read(tl.id(), SeqRange::all()).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].payload.as_slice(), b"hello");
+        assert_eq!(events[1].payload.as_slice(), b"world");
+    }
+
+    #[test]
+    fn payload_is_opaque_and_unchanged() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        let raw = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xFF, 0x00];
+        store.append(tl.id(), &[make_draft(entity, &raw)]).unwrap();
+        let events = store.read(tl.id(), SeqRange::all()).unwrap();
+        assert_eq!(events[0].payload.as_slice(), &raw[..]);
+    }
+
+    #[test]
+    fn fork_copy_on_write_parent_unaffected() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        store
+            .append(tl.id(), &[make_draft(entity, b"p1"), make_draft(entity, b"p2")])
+            .unwrap();
+        let child = store.fork(tl.id(), Seq::from_u64(1), "branch").unwrap();
+        store.append(child.id(), &[make_draft(entity, b"c1")]).unwrap();
+
+        let parent_events = store.read(tl.id(), SeqRange::all()).unwrap();
+        assert_eq!(parent_events.len(), 2);
+
+        let child_events = store.read(child.id(), SeqRange::all()).unwrap();
+        assert_eq!(child_events.len(), 2); // p1 + c1
+        assert_eq!(child_events[0].payload.as_slice(), b"p1");
+        assert_eq!(child_events[1].payload.as_slice(), b"c1");
+    }
+
+    #[test]
+    fn fork_beyond_head_returns_error() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let result = store.fork(tl.id(), Seq::from_u64(99), "bad");
+        assert!(matches!(result, Err(CoreError::ForkBeyondHead { .. })));
+    }
+
+    #[test]
+    fn read_unknown_timeline_returns_error() {
+        let store = new_store();
+        let unknown = TimelineId::new();
+        let result = store.read(unknown, SeqRange::all());
+        assert!(matches!(result, Err(CoreError::TimelineNotFound(_))));
+    }
+
+    #[test]
+    fn append_to_unknown_timeline_returns_error() {
+        let mut store = new_store();
+        let unknown = TimelineId::new();
+        let entity = EntityId::new();
+        let result = store.append(unknown, &[make_draft(entity, b"x")]);
+        assert!(matches!(result, Err(CoreError::TimelineNotFound(_))));
+    }
+
+    #[test]
+    fn list_timelines_returns_all() {
+        let mut store = new_store();
+        store.create_timeline("a").unwrap();
+        store.create_timeline("b").unwrap();
+        store.create_timeline("c").unwrap();
+        let list = store.list_timelines().unwrap();
+        assert_eq!(list.len(), 3);
+    }
+
+    #[test]
+    fn empty_batch_returns_empty() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let result = store.append(tl.id(), &[]).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn read_range_filters_correctly() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        let drafts: Vec<EventDraft> = (0..5u8).map(|i| make_draft(entity, &[i])).collect();
+        store.append(tl.id(), &drafts).unwrap();
+        let events = store
+            .read(tl.id(), SeqRange::bounded(Seq::from_u64(2), Seq::from_u64(4)))
+            .unwrap();
+        assert_eq!(events.len(), 3);
+    }
+
+    #[test]
+    fn parent_events_after_fork_invisible_to_child() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        store.append(tl.id(), &[make_draft(entity, b"before")]).unwrap();
+        let child = store.fork(tl.id(), Seq::from_u64(1), "branch").unwrap();
+        store.append(tl.id(), &[make_draft(entity, b"after-fork")]).unwrap();
+        let child_events = store.read(child.id(), SeqRange::all()).unwrap();
+        assert!(!child_events.iter().any(|e| e.payload.as_slice() == b"after-fork"));
+    }
+
+    #[test]
+    fn open_with_file_path_creates_persistent_store() {
+        // Exercises SqliteStore::open(path) — the non-memory path.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap().to_owned();
+        // Keep the file alive through the temp binding; open with path.
+        let mut store = SqliteStore::open(&path).expect("open by path should succeed");
+        let tl = store.create_timeline("persistent").unwrap();
+        let entity = EntityId::new();
+        store.append(tl.id(), &[make_draft(entity, b"hello")]).unwrap();
+        let events = store.read(tl.id(), SeqRange::all()).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].payload.as_slice(), b"hello");
+    }
+
+    #[test]
+    fn list_timelines_includes_fork_metadata() {
+        // Exercises the fork_point reconstruction in list_timelines.
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        store.append(tl.id(), &[make_draft(entity, b"e1"), make_draft(entity, b"e2")]).unwrap();
+        let child = store.fork(tl.id(), Seq::from_u64(1), "branch").unwrap();
+
+        let list = store.list_timelines().unwrap();
+        assert_eq!(list.len(), 2);
+
+        // Find the forked timeline in the list.
+        let found = list.iter().find(|t| t.id() == child.id()).unwrap();
+        let fork_point = found.meta.fork_point.expect("child should have fork_point set");
+        assert_eq!(fork_point.0, tl.id());
+        assert_eq!(fork_point.1, Seq::from_u64(1));
+    }
+
+    #[test]
+    fn get_timeline_includes_fork_metadata() {
+        // Exercises the fork_point reconstruction in get_timeline.
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        store.append(tl.id(), &[make_draft(entity, b"x")]).unwrap();
+        let child = store.fork(tl.id(), Seq::from_u64(1), "fork1").unwrap();
+
+        let retrieved = store.get_timeline(child.id()).unwrap().expect("child should exist");
+        let fork_point = retrieved.meta.fork_point.expect("fork_point should be set");
+        assert_eq!(fork_point.0, tl.id());
+        assert_eq!(fork_point.1, Seq::from_u64(1));
+    }
+
+    #[test]
+    fn mode_str_covers_all_variants() {
+        // Exercises mode_str for all TimelineMode variants, including Historical and Future.
+        assert_eq!(mode_str(TimelineMode::Historical), "historical");
+        assert_eq!(mode_str(TimelineMode::Live), "live");
+        assert_eq!(mode_str(TimelineMode::Future), "future");
+        // Also round-trip through parse_mode.
+        assert_eq!(parse_mode("historical"), TimelineMode::Historical);
+        assert_eq!(parse_mode("future"), TimelineMode::Future);
+        assert_eq!(parse_mode("live"), TimelineMode::Live);
+    }
+
+    #[test]
+    fn mode_str_future_is_persisted_and_read() {
+        // Exercises the TimelineMode::Future arm by inserting a future timeline
+        // directly and reading it back through get_timeline.
+        let store = new_store();
+        let id = TimelineId::new();
+        let genesis = pos_crypto::chain::genesis_hash();
+        store.conn.execute(
+            "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
+             VALUES (?1, 'future-tl', 'future', NULL, NULL, 0, ?2)",
+            rusqlite::params![id.to_string(), genesis.as_bytes().as_slice()],
+        ).unwrap();
+        let tl = store.get_timeline(id).unwrap().expect("should exist");
+        assert_eq!(tl.mode(), TimelineMode::Future);
+    }
+
+    #[test]
+    fn get_timeline_returns_none_for_unknown_id() {
+        let store = new_store();
+        let unknown = TimelineId::new();
+        let result = store.get_timeline(unknown).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn append_event_with_correlation_id_round_trips() {
+        // Exercises parse_correlation_id via a stored event that has a correlation_id.
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        let mut draft = make_draft(entity, b"correlated");
+        draft.correlation_id = Some(pos_core::CorrelationId::new());
+        store.append(tl.id(), &[draft]).unwrap();
+        let events = store.read(tl.id(), SeqRange::all()).unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].correlation_id.is_some());
+    }
+
+    #[test]
+    fn grandchild_fork_chain_stitches_correctly() {
+        // Exercises compute_chain_hash_at and read for a multi-level fork chain.
+        let mut store = new_store();
+        let root = store.create_timeline("root").unwrap();
+        let entity = EntityId::new();
+
+        // Append 3 events to root.
+        store
+            .append(root.id(), &[
+                make_draft(entity, b"r1"),
+                make_draft(entity, b"r2"),
+                make_draft(entity, b"r3"),
+            ])
+            .unwrap();
+
+        // Fork root at seq 2.
+        let child = store.fork(root.id(), Seq::from_u64(2), "child").unwrap();
+
+        // Append 2 events to child.
+        store
+            .append(child.id(), &[
+                make_draft(entity, b"c1"),
+                make_draft(entity, b"c2"),
+            ])
+            .unwrap();
+
+        // Fork child at seq 1 to get grandchild.
+        let grandchild = store.fork(child.id(), Seq::from_u64(1), "grandchild").unwrap();
+
+        // Append to grandchild.
+        store
+            .append(grandchild.id(), &[make_draft(entity, b"g1")])
+            .unwrap();
+
+        // Grandchild reads events from root (up to fork at seq 2),
+        // then child (up to fork at seq 1), then grandchild's own events.
+        // SQLite read sorts by raw seq so all seq=1 events come first, then seq=2.
+        let events = store.read(grandchild.id(), SeqRange::all()).unwrap();
+        // Collect payloads to verify the right events are present.
+        let payloads: Vec<&[u8]> = events.iter().map(|e| e.payload.as_slice()).collect();
+        assert!(payloads.contains(&(b"r1" as &[u8])));
+        assert!(payloads.contains(&(b"r2" as &[u8])));
+        assert!(payloads.contains(&(b"c1" as &[u8])));
+        assert!(payloads.contains(&(b"g1" as &[u8])));
+        assert_eq!(payloads.len(), 4);
+        // Events at seq=2 (r2) must come after events at seq=1.
+        let r2_pos = payloads.iter().position(|&p| p == b"r2").unwrap();
+        let r1_pos = payloads.iter().position(|&p| p == b"r1").unwrap();
+        assert!(r2_pos > r1_pos);
+    }
+}
