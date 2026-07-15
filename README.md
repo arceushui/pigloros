@@ -2,7 +2,7 @@
 
 A simulation world you join to preview your decisions.
 
-> **Current stage:** Pre-product. Wave 1 (kernel primitives) complete.
+> **Current stage:** Pre-product. Wave 2 (temporal engine) complete — starting Wave 3 (plugin runtime).
 
 ## Repository Layout
 
@@ -42,6 +42,6 @@ cargo clippy --workspace --all-targets -- -D warnings -W clippy::pedantic
 cargo llvm-cov --workspace --summary-only
 ```
 
-Wave 1 stats: **176 tests · 0 failures · 100% line coverage · clippy clean**
+Wave 1 stats: **193 tests · 0 failures · 100% line coverage · clippy clean**
 
-Wave 2 stats: **230 tests · 0 failures · clippy clean**
+Wave 2 stats: **233 tests · 0 failures · 100% line coverage · clippy pedantic clean**
