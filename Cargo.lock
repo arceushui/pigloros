@@ -533,6 +533,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pos-runtime"
+version = "0.1.0"
+dependencies = [
+ "pos-core",
+ "pos-state",
+ "pos-store",
+ "pos-time",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "pos-state"
 version = "0.1.0"
 dependencies = [

@@ -6,6 +6,7 @@ members = [
     "crates/pos-state",
     "crates/pos-time",
     "crates/pos-query",
+    "crates/pos-runtime",
 ]
 resolver = "2"
 

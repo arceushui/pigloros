@@ -552,3 +552,92 @@ mod extra_tests {
         assert!(debug_str.contains("beta"));
     }
 }
+
+#[cfg(test)]
+mod wave3_tests {
+    use super::*;
+    use pos_core::{
+        clock::{Seq, WallTime},
+        crypto::Hash,
+        event::{CanonicalBytes, Kind, SchemaVersion},
+        ids::{EntityId, EventId},
+        Event, Reducer, State,
+    };
+
+    struct TR;
+    impl Reducer for TR {
+        fn initial(&self) -> State { State::new() }
+        fn apply(&self, state: &mut State, _: &Event) {
+            let n = state.get("n").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            state.set("n", serde_json::json!(n + 1));
+        }
+    }
+
+    fn ev(entity: EntityId) -> Event {
+        Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new("t"),
+            payload: CanonicalBytes::from_vec(vec![]),
+            wall_time: WallTime::from_micros(0),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0u8; 32]),
+        }
+    }
+
+    #[test]
+    fn reducer_names_returns_registered_names() {
+        let mut reg = ProjectionRegistry::new();
+        reg.register("alpha", Box::new(TR));
+        reg.register("beta", Box::new(TR));
+        let names = reg.reducer_names();
+        assert!(names.contains(&"alpha"));
+        assert!(names.contains(&"beta"));
+        assert_eq!(names.len(), 2);
+    }
+
+    #[test]
+    fn diff_against_snapshot_identical_returns_none() {
+        let entity = EntityId::new();
+        let mut reg = ProjectionRegistry::new();
+        reg.register("r", Box::new(TR));
+        reg.apply_event(&ev(entity));
+
+        let snap = reg.state_snapshot();
+        let diff = reg.diff_against_snapshot(&snap, &[entity]);
+        assert!(diff.is_none());
+    }
+
+    #[test]
+    fn diff_against_snapshot_diverged_returns_some() {
+        let entity = EntityId::new();
+        let mut reg = ProjectionRegistry::new();
+        reg.register("r", Box::new(TR));
+        reg.apply_event(&ev(entity));
+
+        let snap = reg.state_snapshot();
+        // Apply another event — now reg diverges from the snapshot
+        reg.apply_event(&ev(entity));
+        let diff = reg.diff_against_snapshot(&snap, &[entity]);
+        assert!(diff.is_some());
+        let (name, eid) = diff.unwrap();
+        assert_eq!(name, "r");
+        assert_eq!(eid, entity);
+    }
+
+    #[test]
+    fn diff_against_empty_snapshot_returns_some_when_reg_has_state() {
+        let entity = EntityId::new();
+        let mut reg = ProjectionRegistry::new();
+        reg.register("r", Box::new(TR));
+        reg.apply_event(&ev(entity));
+
+        let empty_snap = std::collections::HashMap::new();
+        let diff = reg.diff_against_snapshot(&empty_snap, &[entity]);
+        assert!(diff.is_some());
+    }
+}
