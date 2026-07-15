@@ -840,6 +840,26 @@ mod tests {
     }
 
     #[test]
+    fn schema_version_not_duplicated_on_reopen() {
+        // Opens the same file twice — second open finds version=1 already set,
+        // so the INSERT branch is skipped (covers the if version == 0 false path).
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap().to_owned();
+        {
+            let _store = SqliteStore::open(&path).unwrap();
+            // First open: inserts schema_version = 1
+        }
+        {
+            let store = SqliteStore::open(&path).unwrap();
+            // Second open: version already = 1, INSERT is skipped
+            let count: i64 = store.conn
+                .query_row("SELECT COUNT(*) FROM schema_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, 1, "schema_version should have exactly one row");
+        }
+    }
+
+    #[test]
     fn explicit_wall_time_is_preserved() {
         let mut store = new_store();
         let tl = store.create_timeline("main").unwrap();

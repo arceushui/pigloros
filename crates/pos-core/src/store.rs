@@ -288,6 +288,46 @@ mod tests {
     }
 
     #[test]
+    fn import_timeline_empty_events_skips_append() {
+        // Covers the `if !export.events.is_empty()` false branch (line 153 skipped).
+        let meta = TimelineMeta::root("empty");
+        let timeline = Timeline::new(meta);
+        let export = TimelineExport { timeline, events: vec![] };
+        let mut store = TrivialStore::new();
+        let imported = store.import_timeline(export).unwrap();
+        let _ = imported.id();
+    }
+
+    #[test]
+    fn trivial_store_read_returns_empty() {
+        let store = TrivialStore::new();
+        let id = crate::ids::TimelineId::new();
+        let result = store.read(id, SeqRange::all()).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn trivial_store_fork_returns_timeline() {
+        let mut store = TrivialStore::new();
+        let id = crate::ids::TimelineId::new();
+        let tl = store.fork(id, Seq::ZERO, "fork").unwrap();
+        let _ = tl.id();
+    }
+
+    #[test]
+    fn trivial_store_list_timelines_returns_empty() {
+        let store = TrivialStore::new();
+        assert!(store.list_timelines().unwrap().is_empty());
+    }
+
+    #[test]
+    fn trivial_store_get_timeline_returns_none() {
+        let store = TrivialStore::new();
+        let id = crate::ids::TimelineId::new();
+        assert!(store.get_timeline(id).unwrap().is_none());
+    }
+
+    #[test]
     fn seq_range_all_starts_at_zero() {
         let r = SeqRange::all();
         assert_eq!(r.from, Seq::ZERO);
