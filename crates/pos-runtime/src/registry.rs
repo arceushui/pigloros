@@ -165,7 +165,7 @@ mod tests {
 
     impl Plugin for TestPlugin {
         fn id(&self) -> PluginId { self.id }
-        fn name(&self) -> &str { self.name }
+        fn name(&self) -> &'static str { self.name }
         fn capability(&self) -> Capability { self.cap.clone() }
     }
 
@@ -269,7 +269,7 @@ mod tests {
 
         struct SimpleDriver { entity: EntityId, calls: u32 }
         impl Driver for SimpleDriver {
-            fn name(&self) -> &str {
+            fn name(&self) -> &'static str {
                 "simple"
             }
             fn step(

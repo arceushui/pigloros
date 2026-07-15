@@ -7,6 +7,10 @@ members = [
     "crates/pos-time",
     "crates/pos-query",
     "crates/pos-runtime",
+    "plugins/entities/rule-agent",
+    "plugins/observations/synthetic",
+    "apps/pos-experiment",
+    "apps/pos-cli",
 ]
 resolver = "2"
 

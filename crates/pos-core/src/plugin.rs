@@ -20,7 +20,7 @@ pub struct Capability {
 /// The kernel only carries this as a type — no I/O, no execution here.
 pub trait Plugin: Send + Sync {
     fn id(&self) -> PluginId;
-    fn name(&self) -> &str;
+    fn name(&self) -> &'static str;
     fn capability(&self) -> Capability;
 }
 

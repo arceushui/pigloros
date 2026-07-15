@@ -56,7 +56,7 @@ pub trait Driver: Send + Sync {
     ) -> Result<StepOutput, RuntimeError>;
 
     /// Human-readable name for this driver (used in logs/diagnostics).
-    fn name(&self) -> &str;
+    fn name(&self) -> &'static str;
 }
 
 #[cfg(test)]
@@ -74,7 +74,7 @@ mod tests {
     }
 
     impl Driver for TickDriver {
-        fn name(&self) -> &str { "tick" }
+        fn name(&self) -> &'static str { "tick" }
         fn step(
             &mut self,
             _store: &dyn EventStore,
@@ -92,7 +92,7 @@ mod tests {
 
     struct IdleDriver;
     impl Driver for IdleDriver {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "idle"
         }
         fn step(

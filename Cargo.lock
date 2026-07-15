@@ -511,6 +511,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
+name = "pos-cli"
+version = "0.1.0"
+dependencies = [
+ "pos-core",
+ "pos-experiment",
+ "pos-query",
+ "pos-runtime",
+ "pos-state",
+ "pos-store",
+ "pos-time",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "ulid",
+]
+
+[[package]]
 name = "pos-core"
 version = "0.1.0"
 dependencies = [
@@ -539,6 +556,48 @@ dependencies = [
  "rand_core 0.6.4",
  "serde",
  "serde_bytes",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "pos-experiment"
+version = "0.1.0"
+dependencies = [
+ "pos-core",
+ "pos-query",
+ "pos-runtime",
+ "pos-state",
+ "pos-store",
+ "pos-time",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "pos-plugin-rule-agent"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "pos-core",
+ "pos-runtime",
+ "pos-store",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "pos-plugin-synthetic-obs"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "pos-core",
+ "pos-runtime",
+ "pos-store",
+ "serde",
  "serde_json",
  "thiserror",
 ]

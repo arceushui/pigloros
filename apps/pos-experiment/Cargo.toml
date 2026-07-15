@@ -1,0 +1,19 @@
+[package]
+name = "pos-experiment"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pos-core     = { path = "../../crates/pos-core" }
+pos-store    = { path = "../../crates/pos-store" }
+pos-state    = { path = "../../crates/pos-state" }
+pos-time     = { path = "../../crates/pos-time" }
+pos-query    = { path = "../../crates/pos-query" }
+pos-runtime  = { path = "../../crates/pos-runtime" }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
