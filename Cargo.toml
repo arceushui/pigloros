@@ -3,6 +3,9 @@ members = [
     "crates/pos-core",
     "crates/pos-crypto",
     "crates/pos-store",
+    "crates/pos-state",
+    "crates/pos-time",
+    "crates/pos-query",
 ]
 resolver = "2"
 

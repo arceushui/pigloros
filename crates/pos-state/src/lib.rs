@@ -1,0 +1,478 @@
+#![forbid(unsafe_code)]
+#![deny(clippy::all)]
+#![warn(clippy::pedantic)]
+
+//! `pos-state` — projection layer over the `pos-core` primitives.
+//!
+//! Provides:
+//! - [`ProjectionRegistry`]: a named registry of [`Reducer`] implementations.
+//! - [`EntityStateProjection`]: a built-in `Reducer` that folds event metadata per entity.
+//! - [`RelationshipIndex`]: an adjacency index for directed [`Relationship`] values.
+//!
+//! No I/O, no async.
+
+use std::collections::HashMap;
+
+use pos_core::{EntityId, Event, Reducer, Relationship, State, StateRegistry};
+
+// ---------------------------------------------------------------------------
+// EntityStateProjection
+// ---------------------------------------------------------------------------
+
+/// A [`Reducer`] that folds each event into minimal per-entity state.
+///
+/// After each event the state contains:
+/// - `"last_event_type"`: the event-type string of the most-recent event.
+/// - `"event_count"`: the running count of events applied to this entity.
+#[derive(Clone, Debug, Default)]
+pub struct EntityStateProjection;
+
+impl Reducer for EntityStateProjection {
+    fn initial(&self) -> State {
+        State::new()
+    }
+
+    fn apply(&self, state: &mut State, event: &Event) {
+        // Increment event counter.
+        let count = state
+            .get("event_count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        state.set(
+            "event_count",
+            serde_json::Value::Number((count + 1).into()),
+        );
+        // Record the event type.
+        state.set(
+            "last_event_type",
+            serde_json::Value::String(event.event_type.as_str().to_owned()),
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ProjectionRegistry
+// ---------------------------------------------------------------------------
+
+/// One named slot inside the registry.
+struct Slot {
+    reducer: Box<dyn Reducer>,
+    registry: StateRegistry,
+}
+
+/// A named registry of [`Reducer`] implementations backed by per-name [`StateRegistry`]s.
+///
+/// Plugins register reducers during Wave 3 initialisation; the registry then
+/// applies every incoming event to every registered reducer in insertion order.
+#[derive(Default)]
+pub struct ProjectionRegistry {
+    /// Ordered list so iteration is deterministic.
+    slots: Vec<(String, Slot)>,
+}
+
+impl std::fmt::Debug for ProjectionRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names: Vec<&str> = self.slots.iter().map(|(n, _)| n.as_str()).collect();
+        f.debug_struct("ProjectionRegistry")
+            .field("reducers", &names)
+            .finish()
+    }
+}
+
+impl ProjectionRegistry {
+    /// Create an empty registry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a named reducer.
+    ///
+    /// If a reducer with the same name was already registered it is replaced and
+    /// its accumulated state is cleared.
+    pub fn register(&mut self, name: &str, reducer: Box<dyn Reducer>) {
+        // Remove any previous entry with the same name.
+        self.slots.retain(|(n, _)| n != name);
+        self.slots.push((
+            name.to_owned(),
+            Slot {
+                reducer,
+                registry: StateRegistry::new(),
+            },
+        ));
+    }
+
+    /// Apply a single event to every registered reducer.
+    pub fn apply_event(&mut self, event: &Event) {
+        for (_, slot) in &mut self.slots {
+            slot.registry.apply(slot.reducer.as_ref(), event);
+        }
+    }
+
+    /// Batch-fold a slice of events into every registered reducer.
+    pub fn fold_events(&mut self, events: &[Event]) {
+        for event in events {
+            self.apply_event(event);
+        }
+    }
+
+    /// Return the state for a given entity from the **first** registered reducer.
+    ///
+    /// Returns `None` if no reducers have been registered or the entity is unknown.
+    /// To query a specific reducer use [`Self::state_for_reducer`].
+    #[must_use]
+    pub fn state_for(&self, entity: &EntityId) -> Option<&State> {
+        let (_, slot) = self.slots.first()?;
+        slot.registry.get(entity)
+    }
+
+    /// Return the state for a given entity from the reducer identified by `name`.
+    #[must_use]
+    pub fn state_for_reducer(&self, name: &str, entity: &EntityId) -> Option<&State> {
+        self.slots
+            .iter()
+            .find(|(n, _)| n == name)
+            .and_then(|(_, slot)| slot.registry.get(entity))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RelationshipIndex
+// ---------------------------------------------------------------------------
+
+/// Adjacency index for directed [`Relationship`] values.
+///
+/// NOT a [`Reducer`] — relationships are not per-entity event state; they are
+/// recorded explicitly by callers that know when a relationship is established.
+#[derive(Clone, Debug, Default)]
+pub struct RelationshipIndex {
+    outgoing: HashMap<EntityId, Vec<Relationship>>,
+    incoming: HashMap<EntityId, Vec<Relationship>>,
+}
+
+impl RelationshipIndex {
+    /// Create an empty index.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a relationship in both the outgoing and incoming indices.
+    pub fn record(&mut self, rel: Relationship) {
+        self.outgoing
+            .entry(rel.source)
+            .or_default()
+            .push(rel.clone());
+        self.incoming.entry(rel.target).or_default().push(rel);
+    }
+
+    /// All relationships whose source is `id`.
+    #[must_use]
+    pub fn outgoing_from(&self, id: &EntityId) -> &[Relationship] {
+        self.outgoing.get(id).map_or(&[], Vec::as_slice)
+    }
+
+    /// All relationships whose target is `id`.
+    #[must_use]
+    pub fn incoming_to(&self, id: &EntityId) -> &[Relationship] {
+        self.incoming.get(id).map_or(&[], Vec::as_slice)
+    }
+
+    /// Union of outgoing targets and incoming sources — the direct neighbours of `id`.
+    ///
+    /// Each neighbour appears at most once even if it is both a source and a target.
+    #[must_use]
+    pub fn neighbours(&self, id: &EntityId) -> Vec<EntityId> {
+        let mut seen: std::collections::HashSet<EntityId> = std::collections::HashSet::new();
+        let mut result = Vec::new();
+
+        for rel in self.outgoing_from(id) {
+            if seen.insert(rel.target) {
+                result.push(rel.target);
+            }
+        }
+        for rel in self.incoming_to(id) {
+            if seen.insert(rel.source) {
+                result.push(rel.source);
+            }
+        }
+        result
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pos_core::{
+        clock::{Seq, WallTime},
+        crypto::Hash,
+        entity::RelationshipKind,
+        event::{CanonicalBytes, Kind, SchemaVersion},
+        ids::EventId,
+    };
+    use proptest::prelude::*;
+
+    // ------------------------------------------------------------------
+    // Helpers
+    // ------------------------------------------------------------------
+
+    fn make_event(entity: EntityId) -> Event {
+        make_event_typed(entity, "test.tick")
+    }
+
+    fn make_event_typed(entity: EntityId, kind: &str) -> Event {
+        Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new(kind),
+            payload: CanonicalBytes::from_vec(vec![]),
+            wall_time: WallTime::from_micros(0),
+            seq: Seq::ZERO,
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0u8; 32]),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // ProjectionRegistry tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn projection_registry_applies_to_all_reducers() {
+        let mut registry = ProjectionRegistry::new();
+        registry.register("a", Box::new(EntityStateProjection));
+        registry.register("b", Box::new(EntityStateProjection));
+
+        let entity = EntityId::new();
+        registry.apply_event(&make_event(entity));
+
+        let count_a = registry
+            .state_for_reducer("a", &entity)
+            .and_then(|s| s.get("event_count"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let count_b = registry
+            .state_for_reducer("b", &entity)
+            .and_then(|s| s.get("event_count"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        assert_eq!(count_a, 1, "reducer 'a' should have seen 1 event");
+        assert_eq!(count_b, 1, "reducer 'b' should have seen 1 event");
+    }
+
+    #[test]
+    fn projection_registry_fold_events() {
+        let mut registry = ProjectionRegistry::new();
+        registry.register("main", Box::new(EntityStateProjection));
+
+        let entity = EntityId::new();
+        let events: Vec<Event> = (0..5).map(|_| make_event(entity)).collect();
+        registry.fold_events(&events);
+
+        let count = registry
+            .state_for_reducer("main", &entity)
+            .and_then(|s| s.get("event_count"))
+            .and_then(serde_json::Value::as_u64)
+            .expect("event_count should be present");
+        assert_eq!(count, 5);
+    }
+
+    #[test]
+    fn projection_registry_state_for_returns_first_reducers_view() {
+        let mut registry = ProjectionRegistry::new();
+        registry.register("first", Box::new(EntityStateProjection));
+        registry.register("second", Box::new(EntityStateProjection));
+
+        let entity = EntityId::new();
+        registry.apply_event(&make_event(entity));
+
+        let state = registry.state_for(&entity).expect("state should exist");
+        let count = state
+            .get("event_count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        assert_eq!(count, 1);
+    }
+
+    // ------------------------------------------------------------------
+    // EntityStateProjection tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn entity_state_projection_counts_events() {
+        let proj = EntityStateProjection;
+        let entity = EntityId::new();
+        let mut state_reg = StateRegistry::new();
+
+        for _ in 0..3 {
+            state_reg.apply(&proj, &make_event(entity));
+        }
+
+        let count = state_reg
+            .get(&entity)
+            .and_then(|s| s.get("event_count"))
+            .and_then(serde_json::Value::as_u64)
+            .expect("event_count should be present");
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn entity_state_projection_different_entities_tracked_separately() {
+        let proj = EntityStateProjection;
+        let a = EntityId::new();
+        let b = EntityId::new();
+        let mut state_reg = StateRegistry::new();
+
+        state_reg.apply(&proj, &make_event(a));
+        state_reg.apply(&proj, &make_event(a));
+        state_reg.apply(&proj, &make_event(b));
+
+        let count_a = state_reg
+            .get(&a)
+            .and_then(|s| s.get("event_count"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let count_b = state_reg
+            .get(&b)
+            .and_then(|s| s.get("event_count"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        assert_eq!(count_a, 2);
+        assert_eq!(count_b, 1);
+    }
+
+    #[test]
+    fn entity_state_projection_records_last_event_type() {
+        let proj = EntityStateProjection;
+        let entity = EntityId::new();
+        let mut state_reg = StateRegistry::new();
+
+        state_reg.apply(&proj, &make_event_typed(entity, "first.type"));
+        state_reg.apply(&proj, &make_event_typed(entity, "second.type"));
+
+        let last = state_reg
+            .get(&entity)
+            .and_then(|s| s.get("last_event_type"))
+            .and_then(serde_json::Value::as_str)
+            .expect("last_event_type should be present");
+        assert_eq!(last, "second.type");
+    }
+
+    // ------------------------------------------------------------------
+    // RelationshipIndex tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn relationship_index_records_and_queries() {
+        let mut index = RelationshipIndex::new();
+        let a = EntityId::new();
+        let b = EntityId::new();
+        let c = EntityId::new();
+
+        index.record(Relationship::new(a, b, RelationshipKind::new("trusts")));
+        index.record(Relationship::new(a, c, RelationshipKind::new("employs")));
+        index.record(Relationship::new(c, b, RelationshipKind::new("trusts")));
+
+        assert_eq!(index.outgoing_from(&a).len(), 2);
+        assert_eq!(index.incoming_to(&b).len(), 2);
+        assert_eq!(index.outgoing_from(&c).len(), 1);
+        assert_eq!(index.incoming_to(&c).len(), 1);
+
+        let lone = EntityId::new();
+        assert!(index.outgoing_from(&lone).is_empty());
+        assert!(index.incoming_to(&lone).is_empty());
+    }
+
+    #[test]
+    fn relationship_index_neighbours() {
+        let mut index = RelationshipIndex::new();
+        let hub = EntityId::new();
+        let x = EntityId::new();
+        let y = EntityId::new();
+        let z = EntityId::new();
+
+        // hub → x  (outgoing target = x)
+        index.record(Relationship::new(hub, x, RelationshipKind::new("link")));
+        // y → hub  (incoming source = y)
+        index.record(Relationship::new(y, hub, RelationshipKind::new("link")));
+        // z → hub  (incoming source = z)
+        index.record(Relationship::new(z, hub, RelationshipKind::new("link")));
+
+        let mut neighbours = index.neighbours(&hub);
+        neighbours.sort();
+        let mut expected = vec![x, y, z];
+        expected.sort();
+        assert_eq!(neighbours, expected);
+    }
+
+    #[test]
+    fn relationship_index_neighbours_no_duplicates() {
+        let mut index = RelationshipIndex::new();
+        let a = EntityId::new();
+        let b = EntityId::new();
+
+        // a → b and b → a: from a's perspective b appears in both lists.
+        index.record(Relationship::new(a, b, RelationshipKind::new("link")));
+        index.record(Relationship::new(b, a, RelationshipKind::new("link")));
+
+        let neighbours = index.neighbours(&a);
+        assert_eq!(neighbours.len(), 1);
+        assert_eq!(neighbours[0], b);
+    }
+
+    // ------------------------------------------------------------------
+    // proptest: fold determinism
+    // ------------------------------------------------------------------
+
+    proptest! {
+        #[test]
+        fn fold_deterministic(n_events in 1usize..=20) {
+            let entity = EntityId::new();
+            let events: Vec<Event> = (0..n_events).map(|_| make_event(entity)).collect();
+
+            let mut reg1 = ProjectionRegistry::new();
+            reg1.register("p", Box::new(EntityStateProjection));
+            reg1.fold_events(&events);
+
+            let mut reg2 = ProjectionRegistry::new();
+            reg2.register("p", Box::new(EntityStateProjection));
+            reg2.fold_events(&events);
+
+            let count1 = reg1
+                .state_for_reducer("p", &entity)
+                .and_then(|s| s.get("event_count"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let count2 = reg2
+                .state_for_reducer("p", &entity)
+                .and_then(|s| s.get("event_count"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+
+            prop_assert_eq!(count1, count2);
+            prop_assert_eq!(count1, n_events as u64);
+        }
+    }
+}
+
+#[cfg(test)]
+mod extra_tests {
+    use super::*;
+
+    #[test]
+    fn projection_registry_debug_shows_reducer_names() {
+        let mut reg = ProjectionRegistry::new();
+        reg.register("alpha", Box::new(EntityStateProjection::default()));
+        reg.register("beta", Box::new(EntityStateProjection::default()));
+        let debug_str = format!("{reg:?}");
+        assert!(debug_str.contains("alpha"));
+        assert!(debug_str.contains("beta"));
+    }
+}

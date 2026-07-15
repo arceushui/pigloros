@@ -1,0 +1,25 @@
+#![forbid(unsafe_code)]
+#![deny(clippy::all)]
+#![warn(clippy::pedantic)]
+
+//! `pos-time` — timeline replay, snapshots, and fork-comparison utilities.
+//!
+//! Builds on top of `pos-core` (traits/types), `pos-store` (backend factory),
+//! and `pos-state` (projection registry).
+//!
+//! | Module | Purpose |
+//! |--------|---------|
+//! | [`replay`] | Fold all (or partial) events through a `ProjectionRegistry` |
+//! | [`snapshot`] | Capture and verify state snapshots |
+//! | [`compare`] | Diff two divergent timelines after a fork |
+//! | [`merge`] | Types for Wave-5 merge support (no impl yet) |
+
+pub mod compare;
+pub mod merge;
+pub mod replay;
+pub mod snapshot;
+
+pub use compare::{compare, ForkDiff};
+pub use merge::{MergeConflict, MergeResult, MergeSpec, MergeStrategy};
+pub use replay::{replay, replay_at};
+pub use snapshot::{snapshot, verify_snapshot_consistency, Snapshot, SnapshotError};

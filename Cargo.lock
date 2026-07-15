@@ -522,6 +522,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "pos-query"
+version = "0.1.0"
+dependencies = [
+ "pos-core",
+ "pos-state",
+ "pos-store",
+ "pos-time",
+ "proptest",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "pos-state"
+version = "0.1.0"
+dependencies = [
+ "pos-core",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "pos-store"
 version = "0.1.0"
 dependencies = [
@@ -536,6 +560,19 @@ dependencies = [
  "tempfile",
  "thiserror",
  "ulid",
+]
+
+[[package]]
+name = "pos-time"
+version = "0.1.0"
+dependencies = [
+ "pos-core",
+ "pos-state",
+ "pos-store",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
