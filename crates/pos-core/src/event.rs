@@ -146,6 +146,12 @@ pub struct EventDraft {
     pub causation_id: Option<EventId>,
     pub correlation_id: Option<CorrelationId>,
     pub schema_version: SchemaVersion,
+    /// Optional wall-clock time override.
+    ///
+    /// When `Some`, the store backend records this exact timestamp instead of calling
+    /// `WallTime::now()`. Set this during deterministic replay to preserve the original
+    /// timestamp bit-for-bit.
+    pub wall_time: Option<WallTime>,
 }
 
 impl EventDraft {
@@ -157,7 +163,18 @@ impl EventDraft {
             causation_id: None,
             correlation_id: None,
             schema_version: SchemaVersion::default(),
+            wall_time: None,
         }
+    }
+
+    /// Override the wall-clock time that will be stored with this event.
+    ///
+    /// Use during deterministic replay to re-inject the original timestamp so that
+    /// re-appended events are bit-identical to the originals.
+    #[must_use]
+    pub fn with_wall_time(mut self, t: WallTime) -> Self {
+        self.wall_time = Some(t);
+        self
     }
 }
 

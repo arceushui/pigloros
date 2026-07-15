@@ -157,7 +157,7 @@ impl EventStore for MemoryStore {
                 entity: draft.entity,
                 event_type: draft.event_type.clone(),
                 payload: draft.payload.clone(),
-                wall_time: WallTime::now(),
+                wall_time: draft.wall_time.unwrap_or_else(WallTime::now),
                 seq,
                 causation_id: draft.causation_id,
                 correlation_id: draft.correlation_id,
@@ -469,6 +469,31 @@ mod tests {
         let child = store.fork(tl.id(), Seq::ZERO, "empty-fork").unwrap();
         let child_events = store.read(child.id(), SeqRange::all()).unwrap();
         assert!(child_events.is_empty());
+    }
+
+    #[test]
+    fn explicit_wall_time_is_preserved() {
+        let mut store = MemoryStore::new();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        let pinned = WallTime::from_micros(123_456_789);
+        let draft = make_draft(entity, b"pinned")
+            .with_wall_time(pinned);
+        let committed = store.append(tl.id(), &[draft]).unwrap();
+        assert_eq!(committed[0].wall_time, pinned);
+        let read_back = store.read(tl.id(), SeqRange::all()).unwrap();
+        assert_eq!(read_back[0].wall_time, pinned);
+    }
+
+    #[test]
+    fn absent_wall_time_yields_nonzero_timestamp() {
+        let mut store = MemoryStore::new();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        let draft = make_draft(entity, b"no-wall-time");
+        // wall_time is None — store must call WallTime::now(), which is >0 on any real system.
+        let committed = store.append(tl.id(), &[draft]).unwrap();
+        assert!(committed[0].wall_time.as_micros() > 0);
     }
 
     #[test]

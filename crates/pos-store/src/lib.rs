@@ -93,7 +93,11 @@ pub fn open_store(config: StoreConfig) -> Result<Box<dyn EventStore>, CoreError>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pos_core::store::SeqRange;
+    use pos_core::{
+        event::{CanonicalBytes, EventDraft, Kind},
+        ids::EntityId,
+        store::SeqRange,
+    };
 
     /// Helper: run a minimal contract against any backend via the port.
     fn contract(store: &mut dyn EventStore) {
@@ -129,7 +133,6 @@ mod tests {
     fn export_import_roundtrip_memory() {
         let mut src = open_store(StoreConfig::Memory).unwrap();
         let tl = src.create_timeline("source").unwrap();
-        use pos_core::{event::{CanonicalBytes, EventDraft, Kind}, ids::EntityId};
         let entity = EntityId::new();
         let drafts = vec![
             EventDraft::new(entity, Kind::new("test.event"), CanonicalBytes::from_vec(b"hello".to_vec())),
@@ -153,8 +156,6 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[test]
     fn export_memory_import_sqlite() {
-        use pos_core::{event::{CanonicalBytes, EventDraft, Kind}, ids::EntityId};
-
         let mut src = open_store(StoreConfig::Memory).unwrap();
         let tl = src.create_timeline("mem-src").unwrap();
         let entity = EntityId::new();

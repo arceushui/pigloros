@@ -53,35 +53,62 @@ impl SqliteStore {
     }
 
     fn init_schema(&self) -> Result<(), CoreError> {
-        self.conn
-            .execute_batch(
-                "PRAGMA journal_mode=WAL;
-                 PRAGMA synchronous=NORMAL;
-                 CREATE TABLE IF NOT EXISTS timelines (
-                     id          TEXT PRIMARY KEY,
-                     name        TEXT,
-                     mode        TEXT NOT NULL,
-                     parent_id   TEXT,
-                     fork_seq    INTEGER,
-                     head_seq    INTEGER NOT NULL DEFAULT 0,
-                     chain_head  BLOB NOT NULL
-                 );
-                 CREATE TABLE IF NOT EXISTS events (
-                     timeline_id TEXT NOT NULL,
-                     seq         INTEGER NOT NULL,
-                     event_id    TEXT NOT NULL,
-                     entity_id   TEXT NOT NULL,
-                     event_type  TEXT NOT NULL,
-                     payload     BLOB NOT NULL,
-                     wall_time   INTEGER NOT NULL,
-                     causation_id TEXT,
-                     correlation_id TEXT,
-                     schema_version INTEGER NOT NULL,
-                     payload_hash BLOB NOT NULL,
-                     PRIMARY KEY (timeline_id, seq)
-                 );",
+        self.conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             CREATE TABLE IF NOT EXISTS schema_version (
+                 version INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS timelines (
+                 id          TEXT PRIMARY KEY,
+                 name        TEXT,
+                 mode        TEXT NOT NULL,
+                 parent_id   TEXT,
+                 fork_seq    INTEGER,
+                 head_seq    INTEGER NOT NULL DEFAULT 0,
+                 chain_head  BLOB NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS events (
+                 timeline_id TEXT NOT NULL,
+                 seq         INTEGER NOT NULL,
+                 event_id    TEXT NOT NULL,
+                 entity_id   TEXT NOT NULL,
+                 event_type  TEXT NOT NULL,
+                 payload     BLOB NOT NULL,
+                 wall_time   INTEGER NOT NULL,
+                 causation_id TEXT,
+                 correlation_id TEXT,
+                 schema_version INTEGER NOT NULL,
+                 payload_hash BLOB NOT NULL,
+                 PRIMARY KEY (timeline_id, seq)
+             );",
+        )
+        .map_err(|e| CoreError::Storage(e.to_string()))?;
+        self.run_migrations()
+    }
+
+    fn run_migrations(&self) -> Result<(), CoreError> {
+        // Get current schema version (0 if table is empty)
+        let version: i64 = self.conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |row| row.get(0),
             )
-            .map_err(|e| CoreError::Storage(e.to_string()))
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+        // Future migrations go here as version increments:
+        // if version < 1 { /* migration 1 */ }
+        // if version < 2 { /* migration 2 */ }
+
+        // Record current version if schema_version was empty
+        if version == 0 {
+            self.conn
+                .execute("INSERT INTO schema_version (version) VALUES (1)", [])
+                .map_err(|e| CoreError::Storage(e.to_string()))?;
+        }
+
+        Ok(())
     }
 
     fn get_chain_head(&self, timeline_id: TimelineId) -> Result<pos_core::Hash, CoreError> {
@@ -286,7 +313,7 @@ impl EventStore for SqliteStore {
             let id_str = event_id.to_string();
             let payload_hash = hash_payload(&draft.payload);
             let chain_hash = hash_event(&prev_hash, id_str.as_bytes(), &draft.payload);
-            let wall_time = WallTime::now();
+            let wall_time = draft.wall_time.unwrap_or_else(WallTime::now);
 
             tx.execute(
                 "INSERT INTO events
@@ -797,6 +824,43 @@ mod tests {
         let events = store.read(tl.id(), SeqRange::all()).unwrap();
         assert_eq!(events.len(), 1);
         assert!(events[0].correlation_id.is_some());
+    }
+
+    #[test]
+    fn schema_version_is_set_after_open() {
+        let store = new_store();
+        let version: i64 = store.conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |row| row.get(0),
+            )
+            .expect("schema_version query should succeed");
+        assert!(version >= 1, "schema_version should be at least 1 after open, got {version}");
+    }
+
+    #[test]
+    fn explicit_wall_time_is_preserved() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        let pinned = WallTime::from_micros(999_888_777);
+        let draft = make_draft(entity, b"pinned")
+            .with_wall_time(pinned);
+        let committed = store.append(tl.id(), &[draft]).unwrap();
+        assert_eq!(committed[0].wall_time, pinned);
+        let read_back = store.read(tl.id(), SeqRange::all()).unwrap();
+        assert_eq!(read_back[0].wall_time, pinned);
+    }
+
+    #[test]
+    fn absent_wall_time_yields_nonzero_timestamp() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        let draft = make_draft(entity, b"no-wall-time");
+        let committed = store.append(tl.id(), &[draft]).unwrap();
+        assert!(committed[0].wall_time.as_micros() > 0);
     }
 
     #[test]

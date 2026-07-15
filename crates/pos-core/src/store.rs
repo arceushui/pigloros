@@ -145,6 +145,7 @@ pub trait EventStore: Send {
                     draft.causation_id = e.causation_id;
                     draft.correlation_id = e.correlation_id;
                     draft.schema_version = e.schema_version;
+                    draft.wall_time = Some(e.wall_time);
                     draft
                 })
                 .collect();
@@ -152,14 +153,139 @@ pub trait EventStore: Send {
         }
         Ok(tl)
     }
+
+    /// Import a timeline snapshot preserving the original [`TimelineId`] and event IDs.
+    ///
+    /// Unlike [`import_timeline`], this variant creates the timeline with its original
+    /// identity — required for cross-node shared worlds (Wave 6) where timelines must
+    /// have stable, addressable identities.
+    ///
+    /// Backends that support identity-preserving import should override this method.
+    /// The default implementation falls back to [`import_timeline`], which assigns a new
+    /// `TimelineId`. That is safe for local use but loses the original identity.
+    ///
+    /// # Errors
+    /// Returns a [`CoreError::Storage`] error if a timeline with that ID already exists
+    /// (when overridden by a backend that enforces uniqueness).
+    fn import_timeline_with_id(&mut self, export: TimelineExport) -> Result<Timeline, CoreError> {
+        // Default implementation falls back to import_timeline (loses IDs).
+        // Backends that support identity-preserving import should override this.
+        self.import_timeline(export)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        clock::{Seq, WallTime},
+        crypto::Hash,
+        event::{CanonicalBytes, EventDraft, Kind, SchemaVersion},
+        ids::{EntityId, EventId, TimelineId},
+        timeline::{Timeline, TimelineMeta},
+    };
 
     // The EventStore trait lives here; implementations are in pos-store.
     // These tests verify the trait contract is sound (not that it compiles with an impl).
+
+    /// Minimal in-memory store used only for trait-level tests in pos-core.
+    struct TrivialStore {
+        counter: u64,
+    }
+
+    impl TrivialStore {
+        fn new() -> Self {
+            Self { counter: 0 }
+        }
+    }
+
+    impl EventStore for TrivialStore {
+        fn create_timeline(&mut self, _name: &str) -> Result<Timeline, CoreError> {
+            let meta = TimelineMeta::root("test");
+            Ok(Timeline::new(meta))
+        }
+
+        fn append(
+            &mut self,
+            _timeline: TimelineId,
+            drafts: &[EventDraft],
+        ) -> Result<Vec<Event>, CoreError> {
+            let events = drafts
+                .iter()
+                .map(|d| {
+                    self.counter += 1;
+                    Event {
+                        id: EventId::new(),
+                        entity: d.entity,
+                        event_type: d.event_type.clone(),
+                        payload: d.payload.clone(),
+                        wall_time: d.wall_time.unwrap_or_else(WallTime::now),
+                        seq: Seq::from_u64(self.counter),
+                        causation_id: d.causation_id,
+                        correlation_id: d.correlation_id,
+                        schema_version: d.schema_version,
+                        signature: None,
+                        payload_hash: Hash::from_bytes([0u8; 32]),
+                    }
+                })
+                .collect();
+            Ok(events)
+        }
+
+        fn read(&self, _timeline: TimelineId, _range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        fn fork(
+            &mut self,
+            _parent: TimelineId,
+            _at_seq: Seq,
+            _name: &str,
+        ) -> Result<Timeline, CoreError> {
+            let meta = TimelineMeta::root("fork");
+            Ok(Timeline::new(meta))
+        }
+
+        fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        fn get_timeline(&self, _id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn import_timeline_with_id_defaults_to_import_timeline() {
+        // The default `import_timeline_with_id` falls back to `import_timeline`, which
+        // creates a new TimelineId. This test documents that known behaviour so that
+        // Wave 6 backends that need identity-preserving import know they must override it.
+        let entity = EntityId::new();
+        let dummy_event = Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new("test.event"),
+            payload: CanonicalBytes::from_vec(b"hello".to_vec()),
+            wall_time: WallTime::from_micros(1_000),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0u8; 32]),
+        };
+        let meta = TimelineMeta::root("original");
+        let timeline = Timeline::new(meta);
+        // The default impl will *not* preserve the original TimelineId — that's the point.
+        // Wave 6 backends must override import_timeline_with_id to preserve identity.
+        let export = TimelineExport { timeline, events: vec![dummy_event] };
+
+        let mut store = TrivialStore::new();
+        // Default fallback succeeds but assigns a new TimelineId.
+        let imported = store.import_timeline_with_id(export).unwrap();
+        // The returned timeline has *some* valid id (just not the original one).
+        let _ = imported.id();
+    }
 
     #[test]
     fn seq_range_all_starts_at_zero() {
