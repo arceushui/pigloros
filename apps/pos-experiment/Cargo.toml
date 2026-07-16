@@ -11,6 +11,7 @@ pos-state    = { path = "../../crates/pos-state" }
 pos-time     = { path = "../../crates/pos-time" }
 pos-query    = { path = "../../crates/pos-query" }
 pos-runtime  = { path = "../../crates/pos-runtime" }
+blake3       = { workspace = true }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
 thiserror    = { workspace = true }

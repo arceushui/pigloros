@@ -242,10 +242,16 @@ fn verify_manifest_against_store(
 
     let matched = if let Some(tl) = tl {
         let events = store.read(tl.id(), SeqRange::all())?;
-        let head_hash = events
-            .last()
-            .map_or(pos_core::crypto::Hash::zero(), |e| e.payload_hash);
-        head_hash == manifest.head_hash
+        let chain_head = if events.is_empty() {
+            pos_core::crypto::Hash::zero()
+        } else {
+            let mut hasher = blake3::Hasher::new();
+            for e in &events {
+                hasher.update(e.payload_hash.as_bytes());
+            }
+            pos_core::crypto::Hash::from_bytes(*hasher.finalize().as_bytes())
+        };
+        chain_head == manifest.head_hash
     } else {
         false
     };
@@ -805,5 +811,50 @@ mod final_coverage {
         // verify falls back to Memory store → timeline not found → MISMATCH.
         let result = cmd_experiment_verify(manifest_path.to_str().unwrap());
         assert!(result.is_err(), "Memory fallback should give MISMATCH");
+    }
+
+    #[test]
+    fn verify_manifest_with_events_uses_chain_head_hash() {
+        // Cover lines 248-252: the non-empty events blake3 path in verify_manifest_against_store.
+        use pos_core::event::{CanonicalBytes, EventDraft, Kind};
+        use pos_core::ids::EntityId;
+
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let tl = store.create_timeline("chain-verify-test").unwrap();
+        let entity = EntityId::new();
+        let draft = EventDraft::new(
+            entity,
+            Kind::new("test.event"),
+            CanonicalBytes::from_vec(vec![]),
+        );
+        let committed = store.append(tl.id(), &[draft]).unwrap();
+        assert!(!committed.is_empty());
+
+        // Compute the expected chain_head manually
+        let events = store.read(tl.id(), SeqRange::all()).unwrap();
+        let mut hasher = blake3::Hasher::new();
+        for e in &events {
+            hasher.update(e.payload_hash.as_bytes());
+        }
+        let chain_head =
+            pos_core::crypto::Hash::from_bytes(*hasher.finalize().as_bytes());
+
+        // Manifest with the correct chain_head → should match (OK)
+        let manifest = pos_core::ReproManifest::new(
+            tl.id(),
+            chain_head,
+            pos_core::clock::WallTime::from_micros(0),
+        );
+        let result = verify_manifest_against_store(&manifest, store.as_ref());
+        assert!(result.is_ok(), "chain_head from non-empty timeline should match");
+
+        // Manifest with wrong hash → should MISMATCH
+        let bad_manifest = pos_core::ReproManifest::new(
+            tl.id(),
+            pos_core::crypto::Hash::from_bytes([0xDEu8; 32]),
+            pos_core::clock::WallTime::from_micros(0),
+        );
+        let bad_result = verify_manifest_against_store(&bad_manifest, store.as_ref());
+        assert!(bad_result.is_err(), "wrong hash should give MISMATCH");
     }
 }
