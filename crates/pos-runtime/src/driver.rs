@@ -147,9 +147,9 @@ mod tests {
 
     #[test]
     fn driver_name() {
-        let mut d = TickDriver { entity: EntityId::new(), ticks: 0 };
+        let d = TickDriver { entity: EntityId::new(), ticks: 0 };
         assert_eq!(d.name(), "tick");
-        let mut idle = IdleDriver;
+        let idle = IdleDriver;
         assert_eq!(idle.name(), "idle");
     }
 }

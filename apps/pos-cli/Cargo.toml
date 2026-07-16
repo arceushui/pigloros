@@ -15,7 +15,9 @@ pos-state      = { path = "../../crates/pos-state" }
 pos-time       = { path = "../../crates/pos-time" }
 pos-query      = { path = "../../crates/pos-query" }
 pos-runtime    = { path = "../../crates/pos-runtime" }
-pos-experiment = { path = "../pos-experiment" }
+pos-experiment           = { path = "../pos-experiment" }
+pos-plugin-rule-agent    = { path = "../../plugins/entities/rule-agent" }
+pos-plugin-synthetic-obs = { path = "../../plugins/observations/synthetic" }
 ulid           = { workspace = true }
 serde          = { workspace = true }
 serde_json     = { workspace = true }

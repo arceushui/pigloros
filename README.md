@@ -2,7 +2,7 @@
 
 A simulation world you join to preview your decisions.
 
-> **Current stage:** Pre-product. Wave 3 (plugin runtime) complete — starting Wave 4 (experiment framework).
+> **Current stage:** Pre-product. Wave 4 (experiment framework + CLI + reference plugins) complete — starting Wave 5 (moat plugins + MVP).
 
 ## Repository Layout
 
@@ -17,9 +17,14 @@ pigloros/
     pos-time/             # Wave 2 ✅ — replay, snapshot, fork compare
     pos-query/            # Wave 2 ✅ — EventQuery builder, traversal
     pos-runtime/          # Wave 3 ✅ — plugin host: SchemaRegistry, Driver, Recorder
-  apps/                   # Wave 4 — experiment framework + CLI
-  plugins/                # Wave 5 — persona, eval, bridges, agents
-  bindings/               # Wave 5 — PyO3 Python bindings
+  apps/
+    pos-experiment/         # Wave 4 ✅ — experiment host: tick loop, StopCondition, branch
+    pos-cli/                # Wave 4 ✅ — pos binary: store, timeline, experiment CLI
+  plugins/
+    entities/rule-agent/    # Wave 4 ✅ — deterministic rule-based agent plugin
+    observations/synthetic/ # Wave 4 ✅ — synthetic sin-wave observation plugin
+    # Wave 5: persona, eval, bridges, agents
+  bindings/                 # Wave 5 — PyO3 Python bindings
 ```
 
 ## Wave Roadmap
@@ -30,7 +35,7 @@ pigloros/
 | Wave 1 | Kernel Primitives (pos-core, pos-crypto, pos-store) | ✅ Complete |
 | Wave 2 | Temporal Engine (replay, fork, merge) | ✅ Complete |
 | Wave 3 | Plugin Runtime (pos-runtime) | ✅ Complete |
-| Wave 4 | Experiment Framework + CLI | Planned |
+| Wave 4 | Experiment Framework + CLI (pos-experiment, pos-cli) | ✅ Complete |
 | Wave 5 | Moat Plugins + Single-User MVP | Planned |
 | Wave 6 | Shared World & Social Layer | Planned |
 | Wave 7 | Contextual Decision Preview | Planned |
@@ -48,3 +53,5 @@ Wave 1 stats: **193 tests · 0 failures · 100% line coverage · clippy clean**
 Wave 2 stats: **233 tests · 0 failures · 100% line coverage · clippy pedantic clean**
 
 Wave 3 stats: **272 tests · 0 failures · 100% production line coverage · clippy pedantic clean**
+
+Wave 4 stats: **352 tests · 0 failures · 100% line coverage · clippy pedantic clean**

@@ -149,9 +149,10 @@ impl Default for PluginRegistry {
 mod tests {
     use super::*;
     use pos_core::{
-        clock::WallTime,
-        event::{CanonicalBytes, EventDraft, Kind},
-        ids::{EntityId, PluginId},
+        clock::{Seq, WallTime},
+        crypto::Hash,
+        event::{CanonicalBytes, EventDraft, Kind, SchemaVersion},
+        ids::{EntityId, EventId, PluginId},
         Capability, Event, Plugin, Reducer, State,
     };
 
@@ -209,7 +210,6 @@ mod tests {
         let p = simple_plugin("counter", &["counter.tick"]);
         reg.register(&p, Some(Box::new(CountReducer)), None).unwrap();
         // Apply an event and verify the reducer ran
-        use pos_core::{crypto::Hash, event::SchemaVersion, ids::EventId, clock::Seq};
         let event = Event {
             id: EventId::new(),
             entity: EntityId::new(),
@@ -288,7 +288,7 @@ mod tests {
 
         let entity = EntityId::new();
         let p = simple_plugin("driven", &["driver.tick"]);
-        let mut driver = SimpleDriver { entity, calls: 0 };
+        let driver = SimpleDriver { entity, calls: 0 };
         assert_eq!(driver.name(), "simple"); // force coverage of name()
 
         let mut reg = PluginRegistry::new();

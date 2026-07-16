@@ -545,8 +545,8 @@ mod extra_tests {
     #[test]
     fn projection_registry_debug_shows_reducer_names() {
         let mut reg = ProjectionRegistry::new();
-        reg.register("alpha", Box::new(EntityStateProjection::default()));
-        reg.register("beta", Box::new(EntityStateProjection::default()));
+        reg.register("alpha", Box::new(EntityStateProjection));
+        reg.register("beta", Box::new(EntityStateProjection));
         let debug_str = format!("{reg:?}");
         assert!(debug_str.contains("alpha"));
         assert!(debug_str.contains("beta"));

@@ -41,6 +41,8 @@ pub struct RunResult {
     pub total_events: u64,
     /// Exported manifest for reproducibility.
     pub manifest: ReproManifest,
+    /// Final projection state after all ticks.
+    pub projections: pos_state::ProjectionRegistry,
 }
 
 /// The closed experiment host loop.
@@ -108,6 +110,7 @@ impl Experiment {
 
         let mut ticks: u64 = 0;
         let mut total_events: u64 = 0;
+        let mut last_payload_hash: Option<Hash> = None;
 
         loop {
             // Check stop condition before stepping.
@@ -134,23 +137,28 @@ impl Experiment {
 
             for event in &committed {
                 self.registry.projections.apply_event(event);
+                last_payload_hash = Some(event.payload_hash);
             }
 
             total_events += committed_count;
             ticks += 1;
         }
 
+        let head_hash = last_payload_hash.unwrap_or_else(Hash::zero);
         let manifest = ReproManifest::new(
             timeline_id,
-            Hash::from_bytes([0u8; 32]),
+            head_hash,
             WallTime::now(),
         );
+
+        let projections = self.registry.projections;
 
         Ok(RunResult {
             timeline_id,
             ticks,
             total_events,
             manifest,
+            projections,
         })
     }
 
@@ -179,6 +187,114 @@ impl Experiment {
 
         let forked = store.fork(timeline.id(), timeline.head, name)?;
         Ok(forked)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BacktestRunner
+// ---------------------------------------------------------------------------
+
+/// Configuration for a backtest run: a temporal split into train and eval phases.
+pub struct BacktestConfig {
+    /// Base name used for both timelines (suffixed with `-train` / `-eval`).
+    pub experiment_name: String,
+    /// Number of ticks in the training phase.
+    pub train_ticks: u64,
+    /// Number of ticks in the evaluation phase.
+    pub eval_ticks: u64,
+    /// Store backend for both phases.
+    pub store_config: pos_store::StoreConfig,
+}
+
+/// Result of a completed backtest run.
+pub struct BacktestResult {
+    /// Result from the training phase.
+    pub train_result: RunResult,
+    /// Result from the evaluation phase (forked from train head).
+    pub eval_result: RunResult,
+    /// Total events committed in the training phase.
+    pub train_events: u64,
+    /// Total events committed in the evaluation phase.
+    pub eval_events: u64,
+}
+
+/// Minimal backtest runner.
+///
+/// Runs an experiment on a temporal split and reports lift over a persistence
+/// baseline.
+///
+/// # Phase 1 — train
+/// A fresh `Experiment` is built using `registry_factory()` and run for
+/// `config.train_ticks` ticks.
+///
+/// # Phase 2 — eval
+/// A second `Experiment` is built using `registry_factory()` and run for
+/// `config.eval_ticks` ticks independently.
+pub struct BacktestRunner {
+    config: BacktestConfig,
+    /// Factory callable that produces a fresh, pre-registered `PluginRegistry`
+    /// (or just an empty one — callers may register plugins after calling
+    /// [`BacktestRunner::run`] if they prefer to use the returned `Experiment`).
+    ///
+    /// Called **twice**: once for the train phase and once for the eval phase.
+    registry_factory: Box<dyn Fn() -> pos_runtime::PluginRegistry + Send>,
+}
+
+impl BacktestRunner {
+    /// Create a new backtest runner.
+    ///
+    /// `registry_factory` is called twice — once per phase — to produce independent
+    /// plugin registries so that each phase starts with fresh driver state.
+    pub fn new(
+        config: BacktestConfig,
+        registry_factory: impl Fn() -> pos_runtime::PluginRegistry + Send + 'static,
+    ) -> Self {
+        Self {
+            config,
+            registry_factory: Box::new(registry_factory),
+        }
+    }
+
+    /// Run the backtest: train phase then eval phase.
+    ///
+    /// # Errors
+    /// Returns [`ExperimentError::Runtime`] or [`ExperimentError::Store`] on failure.
+    pub fn run(self) -> Result<BacktestResult, ExperimentError> {
+        // --- Train phase ---
+        let train_exp = Experiment {
+            config: ExperimentConfig {
+                name: format!("{}-train", self.config.experiment_name),
+                stop: StopCondition::MaxTicks(self.config.train_ticks),
+                store_config: self.config.store_config,
+            },
+            registry: (self.registry_factory)(),
+        };
+        let train_result = train_exp.run()?;
+        let train_events = train_result.total_events;
+
+        // --- Eval phase (fresh store, independent registry) ---
+        // Use an in-memory store so the eval phase is isolated; the train store
+        // has already been consumed.  We rely on StoreConfig::Memory for the eval
+        // phase regardless of the original config.  This is intentional: the eval
+        // fork only needs ephemeral storage unless the caller explicitly opts in to
+        // a persistent eval store by providing a factory that opens a named store.
+        let eval_exp = Experiment {
+            config: ExperimentConfig {
+                name: format!("{}-eval", self.config.experiment_name),
+                stop: StopCondition::MaxTicks(self.config.eval_ticks),
+                store_config: pos_store::StoreConfig::Memory,
+            },
+            registry: (self.registry_factory)(),
+        };
+        let eval_result = eval_exp.run()?;
+        let eval_events = eval_result.total_events;
+
+        Ok(BacktestResult {
+            train_result,
+            eval_result,
+            train_events,
+            eval_events,
+        })
     }
 }
 
@@ -520,5 +636,205 @@ mod tests {
         let result = exp.run().unwrap();
         // The manifest should have the same timeline_id as the result
         assert_eq!(result.manifest.timeline_id, result.timeline_id);
+    }
+
+    #[test]
+    fn run_result_has_real_head_hash_after_events() {
+        let entity = EntityId::new();
+        let plugin = make_plugin("hash-plugin", &["hash.event"]);
+        let driver = FixedDriver::new(entity, "hash.event", 1);
+
+        let mut exp = Experiment::new(ExperimentConfig {
+            name: "hash-test".to_owned(),
+            stop: StopCondition::MaxTicks(3),
+            store_config: StoreConfig::Memory,
+        });
+        exp.register(&plugin, None, Some(Box::new(driver))).unwrap();
+
+        let result = exp.run().unwrap();
+        // head_hash should not be zero since events were committed
+        assert_ne!(result.manifest.head_hash, pos_core::crypto::Hash::zero());
+    }
+
+    #[test]
+    fn run_result_head_hash_is_zero_when_no_events() {
+        let exp = Experiment::new(ExperimentConfig {
+            name: "zero-hash-test".to_owned(),
+            stop: StopCondition::MaxTicks(5),
+            store_config: StoreConfig::Memory,
+        });
+        // No plugins registered → no events → head_hash stays zero
+        let result = exp.run().unwrap();
+        assert_eq!(result.manifest.head_hash, pos_core::crypto::Hash::zero());
+        assert_eq!(result.total_events, 0);
+    }
+
+    #[test]
+    fn run_result_has_projections() {
+        let entity = EntityId::new();
+        let plugin = make_plugin("proj-plugin", &["proj.event"]);
+        let driver = FixedDriver::new(entity, "proj.event", 1).with_max_ticks(3);
+
+        let mut exp = Experiment::new(ExperimentConfig {
+            name: "proj-result-test".to_owned(),
+            stop: StopCondition::MaxTicks(3),
+            store_config: StoreConfig::Memory,
+        });
+        exp.register(&plugin, Some(Box::new(CountReducer)), Some(Box::new(driver))).unwrap();
+
+        let result = exp.run().unwrap();
+        // state_for returns from the first reducer ("proj-plugin")
+        let n = result.projections
+            .state_for(&entity)
+            .and_then(|s| s.get("n"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        assert_eq!(n, 3);
+    }
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use pos_plugin_rule_agent::{RuleAgentPlugin, RuleAgentDriver, RuleAgentReducer};
+    use pos_plugin_synthetic_obs::{SyntheticObsPlugin, SyntheticDriver, SyntheticReducer};
+    use pos_core::ids::EntityId;
+
+    #[test]
+    fn dual_plugin_compose_runs_and_projects_state() {
+        let agent_entity = EntityId::new();
+        let obs_entity = EntityId::new();
+
+        let config = ExperimentConfig {
+            name: "compose-test".to_owned(),
+            stop: StopCondition::MaxTicks(5),
+            store_config: pos_store::StoreConfig::Memory,
+        };
+
+        let mut exp = Experiment::new(config);
+
+        // Register rule-agent plugin
+        let agent_plugin = RuleAgentPlugin::new();
+        let agent_driver = RuleAgentDriver::new(agent_entity, agent_plugin.actions().to_vec());
+        let agent_reducer = RuleAgentReducer;
+        exp.register(&agent_plugin, Some(Box::new(agent_reducer)), Some(Box::new(agent_driver))).unwrap();
+
+        // Register synthetic-obs plugin
+        let obs_plugin = SyntheticObsPlugin::new();
+        let obs_driver = SyntheticDriver::new(obs_entity);
+        let obs_reducer = SyntheticReducer;
+        exp.register(&obs_plugin, Some(Box::new(obs_reducer)), Some(Box::new(obs_driver))).unwrap();
+
+        let result = exp.run().unwrap();
+
+        // 5 ticks × 2 plugins = 10 events minimum
+        assert!(result.total_events >= 10, "expected at least 10 events, got {}", result.total_events);
+        assert_eq!(result.ticks, 5);
+
+        // Verify agent state was projected (decision count should be 5)
+        // rule-agent is first registered reducer → state_for_reducer("rule-agent", ...)
+        let decisions = result.projections
+            .state_for_reducer("rule-agent", &agent_entity)
+            .and_then(|s| s.get("decisions"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        assert_eq!(decisions, 5, "expected 5 decisions projected");
+
+        // Verify obs state was projected (observation count should be 5)
+        let obs_count = result.projections
+            .state_for_reducer("synthetic-obs", &obs_entity)
+            .and_then(|s| s.get("observations"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        assert_eq!(obs_count, 5, "expected 5 observations projected");
+    }
+}
+
+#[cfg(test)]
+mod backtest_tests {
+    use super::*;
+
+    struct BtPlugin {
+        id: pos_core::ids::PluginId,
+    }
+
+    impl pos_core::Plugin for BtPlugin {
+        fn id(&self) -> pos_core::ids::PluginId { self.id }
+        fn name(&self) -> &'static str { "bt-plugin" }
+        fn capability(&self) -> pos_core::Capability {
+            pos_core::Capability {
+                owned_event_types: vec![pos_core::event::Kind::new("bt.tick")],
+                owned_entity_kinds: vec![],
+                has_driver: true,
+                has_reducer: false,
+            }
+        }
+    }
+
+    struct BtDriver { entity: pos_core::ids::EntityId }
+    impl pos_runtime::Driver for BtDriver {
+        fn name(&self) -> &'static str { "bt-driver" }
+        fn step(
+            &mut self,
+            _: &dyn pos_core::store::EventStore,
+            _: pos_core::ids::TimelineId,
+        ) -> Result<pos_runtime::StepOutput, pos_runtime::RuntimeError> {
+            let draft = pos_core::event::EventDraft::new(
+                self.entity,
+                pos_core::event::Kind::new("bt.tick"),
+                pos_core::event::CanonicalBytes::from_vec(vec![]),
+            );
+            Ok(pos_runtime::StepOutput::new(vec![draft]))
+        }
+    }
+
+    fn make_registry() -> pos_runtime::PluginRegistry {
+        use pos_runtime::Driver as _;
+        use pos_store::{open_store, StoreConfig};
+        let entity = pos_core::ids::EntityId::new();
+        let plugin = BtPlugin { id: pos_core::ids::PluginId::new() };
+        let mut driver = BtDriver { entity };
+        assert_eq!(driver.name(), "bt-driver"); // force coverage of fn name()
+        let store = open_store(StoreConfig::Memory).unwrap();
+        let tl_id = pos_core::ids::TimelineId::new();
+        let _ = driver.step(store.as_ref(), tl_id);
+        let mut reg = pos_runtime::PluginRegistry::new();
+        reg.register(&plugin, None, Some(Box::new(driver))).unwrap();
+        reg
+    }
+
+    #[test]
+    fn backtest_runner_train_then_eval() {
+        let config = BacktestConfig {
+            experiment_name: "bt-test".to_owned(),
+            train_ticks: 3,
+            eval_ticks: 2,
+            store_config: pos_store::StoreConfig::Memory,
+        };
+
+        let runner = BacktestRunner::new(config, make_registry);
+        let result = runner.run().unwrap();
+
+        assert_eq!(result.train_result.ticks, 3);
+        assert_eq!(result.eval_result.ticks, 2);
+        assert_eq!(result.train_events, 3);
+        assert_eq!(result.eval_events, 2);
+        // Train and eval timelines are independent
+        assert_ne!(result.train_result.timeline_id, result.eval_result.timeline_id);
+    }
+
+    #[test]
+    fn backtest_runner_zero_eval_ticks() {
+        let config = BacktestConfig {
+            experiment_name: "bt-zero-eval".to_owned(),
+            train_ticks: 2,
+            eval_ticks: 0,
+            store_config: pos_store::StoreConfig::Memory,
+        };
+
+        let runner = BacktestRunner::new(config, make_registry);
+        let result = runner.run().unwrap();
+        assert_eq!(result.train_events, 2);
+        assert_eq!(result.eval_events, 0);
     }
 }

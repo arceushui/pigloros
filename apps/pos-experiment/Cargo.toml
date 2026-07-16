@@ -16,4 +16,6 @@ serde_json   = { workspace = true }
 thiserror    = { workspace = true }
 
 [dev-dependencies]
+pos-plugin-rule-agent  = { path = "../../plugins/entities/rule-agent" }
+pos-plugin-synthetic-obs = { path = "../../plugins/observations/synthetic" }
 proptest = { workspace = true }

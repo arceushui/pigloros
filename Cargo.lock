@@ -516,6 +516,8 @@ version = "0.1.0"
 dependencies = [
  "pos-core",
  "pos-experiment",
+ "pos-plugin-rule-agent",
+ "pos-plugin-synthetic-obs",
  "pos-query",
  "pos-runtime",
  "pos-state",
@@ -566,6 +568,8 @@ name = "pos-experiment"
 version = "0.1.0"
 dependencies = [
  "pos-core",
+ "pos-plugin-rule-agent",
+ "pos-plugin-synthetic-obs",
  "pos-query",
  "pos-runtime",
  "pos-state",
