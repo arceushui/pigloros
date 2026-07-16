@@ -75,6 +75,27 @@ impl PluginRegistry {
 
         let cap = plugin.capability();
 
+        if cap.has_driver != driver.is_some() {
+            return Err(RuntimeError::CapabilityMismatch {
+                name: name.clone(),
+                reason: if cap.has_driver {
+                    "has_driver=true but no driver provided".to_owned()
+                } else {
+                    "has_driver=false but a driver was provided".to_owned()
+                },
+            });
+        }
+        if cap.has_reducer != reducer.is_some() {
+            return Err(RuntimeError::CapabilityMismatch {
+                name: name.clone(),
+                reason: if cap.has_reducer {
+                    "has_reducer=true but no reducer provided".to_owned()
+                } else {
+                    "has_reducer=false but a reducer was provided".to_owned()
+                },
+            });
+        }
+
         // Register event type schemas
         for kind in &cap.owned_event_types {
             self.schemas.register(EventTypeSchema {
@@ -152,9 +173,10 @@ mod tests {
         clock::{Seq, WallTime},
         crypto::Hash,
         event::{CanonicalBytes, EventDraft, Kind, SchemaVersion},
-        ids::{EntityId, EventId, PluginId},
+        ids::{EntityId, EventId, PluginId, TimelineId},
         Capability, Event, Plugin, Reducer, State,
     };
+    use pos_store::{open_store, StoreConfig};
 
     // ── Test helpers ──────────────────────────────────────────────────────────
 
@@ -171,14 +193,23 @@ mod tests {
     }
 
     fn simple_plugin(name: &'static str, event_types: &[&str]) -> TestPlugin {
+        plugin_with_caps(name, event_types, false, false)
+    }
+
+    fn plugin_with_caps(
+        name: &'static str,
+        event_types: &[&str],
+        has_driver: bool,
+        has_reducer: bool,
+    ) -> TestPlugin {
         TestPlugin {
             id: PluginId::new(),
             name,
             cap: Capability {
                 owned_event_types: event_types.iter().map(|s| Kind::new(*s)).collect(),
                 owned_entity_kinds: vec![],
-                has_driver: false,
-                has_reducer: false,
+                has_driver,
+                has_reducer,
             },
         }
     }
@@ -189,6 +220,20 @@ mod tests {
         fn apply(&self, state: &mut State, _: &Event) {
             let n = state.get("n").and_then(serde_json::Value::as_u64).unwrap_or(0);
             state.set("n", serde_json::json!(n + 1));
+        }
+    }
+
+    struct NoopDriver;
+    impl crate::driver::Driver for NoopDriver {
+        fn name(&self) -> &'static str {
+            "noop"
+        }
+        fn step(
+            &mut self,
+            _: &dyn pos_core::store::EventStore,
+            _: pos_core::ids::TimelineId,
+        ) -> Result<crate::driver::StepOutput, RuntimeError> {
+            Ok(crate::driver::StepOutput::empty())
         }
     }
 
@@ -207,7 +252,7 @@ mod tests {
     #[test]
     fn register_plugin_with_reducer_wires_projections() {
         let mut reg = PluginRegistry::new();
-        let p = simple_plugin("counter", &["counter.tick"]);
+        let p = plugin_with_caps("counter", &["counter.tick"], false, true);
         reg.register(&p, Some(Box::new(CountReducer)), None).unwrap();
         // Apply an event and verify the reducer ran
         let event = Event {
@@ -287,7 +332,7 @@ mod tests {
         let tl = store.create_timeline("t").unwrap();
 
         let entity = EntityId::new();
-        let p = simple_plugin("driven", &["driver.tick"]);
+        let p = plugin_with_caps("driven", &["driver.tick"], true, false);
         let driver = SimpleDriver { entity, calls: 0 };
         assert_eq!(driver.name(), "simple"); // force coverage of name()
 
@@ -334,5 +379,36 @@ mod tests {
         );
         reg.schemas.validate(&valid).unwrap();
         assert!(reg.schemas.validate(&invalid).is_err());
+    }
+
+    #[test]
+    fn register_rejects_capability_mismatch() {
+        let mut reg = PluginRegistry::new();
+        let p = plugin_with_caps("mismatch", &["x.y"], true, false);
+        let err = reg.register(&p, None, None).unwrap_err();
+        assert!(matches!(err, RuntimeError::CapabilityMismatch { .. }));
+
+        let p2 = plugin_with_caps("mismatch2", &["x.y"], false, false);
+        let err = reg
+            .register(&p2, Some(Box::new(CountReducer)), None)
+            .unwrap_err();
+        assert!(matches!(err, RuntimeError::CapabilityMismatch { .. }));
+
+        let p3 = plugin_with_caps("mismatch3", &["x.y"], false, true);
+        let err = reg.register(&p3, None, None).unwrap_err();
+        assert!(matches!(err, RuntimeError::CapabilityMismatch { .. }));
+
+        let p4 = plugin_with_caps("mismatch4", &["x.y"], false, false);
+        let mut noop = NoopDriver;
+        assert_eq!(crate::driver::Driver::name(&noop), "noop");
+        let _ = crate::driver::Driver::step(
+            &mut noop,
+            open_store(StoreConfig::Memory).unwrap().as_ref(),
+            TimelineId::new(),
+        );
+        let err = reg
+            .register(&p4, None, Some(Box::new(noop)))
+            .unwrap_err();
+        assert!(matches!(err, RuntimeError::CapabilityMismatch { .. }));
     }
 }

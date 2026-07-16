@@ -48,20 +48,79 @@ pub enum EvalError {
 }
 
 // ---------------------------------------------------------------------------
-// Private payload types (CBOR-serialized)
+// Payload types (CBOR-serialized)
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize, Deserialize)]
-struct PredictionPayload {
-    entity_id: String,
-    predicted_prob: f64,
-    prediction_id: String,
+/// Payload for an `eval.prediction` event.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PredictionPayload {
+    /// Entity the prediction is about (string form for CBOR stability).
+    pub entity_id: String,
+    /// Predicted probability in `[0.0, 1.0]`.
+    pub predicted_prob: f64,
+    /// Stable id used to join with a later [`OutcomePayload`].
+    pub prediction_id: String,
 }
 
-#[derive(Serialize, Deserialize)]
-struct OutcomePayload {
-    prediction_id: String,
+/// Payload for an `eval.outcome` event.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OutcomePayload {
+    /// Must match a prior [`PredictionPayload::prediction_id`].
+    pub prediction_id: String,
+    /// Observed binary outcome.
+    pub outcome: bool,
+}
+
+/// Build an `eval.prediction` [`EventDraft`].
+///
+/// # Panics
+/// Never panics; CBOR encoding of [`PredictionPayload`] is infallible.
+#[must_use]
+pub fn draft_prediction(
+    entity: pos_core::ids::EntityId,
+    entity_id: &str,
+    predicted_prob: f64,
+    prediction_id: &str,
+) -> pos_core::event::EventDraft {
+    use pos_core::event::{CanonicalBytes, EventDraft, Kind};
+
+    let payload = PredictionPayload {
+        entity_id: entity_id.to_owned(),
+        predicted_prob,
+        prediction_id: prediction_id.to_owned(),
+    };
+    let mut buf = Vec::new();
+    ciborium::into_writer(&payload, &mut buf).expect("CBOR encoding infallible for payload");
+    EventDraft::new(
+        entity,
+        Kind::new(EVENT_TYPE_PREDICTION),
+        CanonicalBytes::from_vec(buf),
+    )
+}
+
+/// Build an `eval.outcome` [`EventDraft`].
+///
+/// # Panics
+/// Never panics; CBOR encoding of [`OutcomePayload`] is infallible.
+#[must_use]
+pub fn draft_outcome(
+    entity: pos_core::ids::EntityId,
+    prediction_id: &str,
     outcome: bool,
+) -> pos_core::event::EventDraft {
+    use pos_core::event::{CanonicalBytes, EventDraft, Kind};
+
+    let payload = OutcomePayload {
+        prediction_id: prediction_id.to_owned(),
+        outcome,
+    };
+    let mut buf = Vec::new();
+    ciborium::into_writer(&payload, &mut buf).expect("CBOR encoding infallible for payload");
+    EventDraft::new(
+        entity,
+        Kind::new(EVENT_TYPE_OUTCOME),
+        CanonicalBytes::from_vec(buf),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -412,7 +471,7 @@ mod tests {
         clock::{Seq, WallTime},
         crypto::Hash,
         event::{CanonicalBytes, EventDraft, Kind, SchemaVersion},
-        ids::{EntityId, EventId},
+        ids::{EntityId, EventId, TimelineId},
     };
     use pos_store::{open_store, StoreConfig};
 
@@ -1042,5 +1101,62 @@ mod tests {
         let s = eval_err.to_string();
         assert!(s.contains("payload decode error"));
         assert!(s.contains("bad payload"));
+    }
+
+    #[test]
+    fn draft_prediction_and_outcome_round_trip() {
+        let entity = EntityId::new();
+        let pred = draft_prediction(entity, "e1", 0.75, "p1");
+        assert_eq!(pred.event_type.as_str(), EVENT_TYPE_PREDICTION);
+        let decoded: PredictionPayload =
+            ciborium::from_reader(pred.payload.as_slice()).expect("valid CBOR");
+        assert_eq!(decoded.entity_id, "e1");
+        assert!((decoded.predicted_prob - 0.75).abs() < 1e-10);
+        assert_eq!(decoded.prediction_id, "p1");
+
+        let out = draft_outcome(entity, "p1", true);
+        assert_eq!(out.event_type.as_str(), EVENT_TYPE_OUTCOME);
+        let decoded_o: OutcomePayload =
+            ciborium::from_reader(out.payload.as_slice()).expect("valid CBOR");
+        assert_eq!(decoded_o.prediction_id, "p1");
+        assert!(decoded_o.outcome);
+    }
+
+    #[test]
+    fn compute_report_store_error_on_unknown_timeline() {
+        let store = open_store(StoreConfig::Memory).unwrap();
+        let missing = TimelineId::new();
+        let err = compute_report(store.as_ref(), missing).unwrap_err();
+        assert!(matches!(err, EvalError::Store(_)));
+    }
+
+    #[test]
+    fn compute_report_decode_error_on_bad_prediction_payload() {
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let tl = store.create_timeline("eval-bad-pred").unwrap();
+        let entity = EntityId::new();
+        let draft = EventDraft::new(
+            entity,
+            Kind::new(EVENT_TYPE_PREDICTION),
+            CanonicalBytes::from_vec(vec![0xFF, 0x00]),
+        );
+        store.append(tl.id(), &[draft]).unwrap();
+        let err = compute_report(store.as_ref(), tl.id()).unwrap_err();
+        assert!(matches!(err, EvalError::Decode(_)));
+    }
+
+    #[test]
+    fn compute_report_decode_error_on_bad_outcome_payload() {
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let tl = store.create_timeline("eval-bad-out").unwrap();
+        let entity = EntityId::new();
+        let draft = EventDraft::new(
+            entity,
+            Kind::new(EVENT_TYPE_OUTCOME),
+            CanonicalBytes::from_vec(vec![0xFF, 0x00]),
+        );
+        store.append(tl.id(), &[draft]).unwrap();
+        let err = compute_report(store.as_ref(), tl.id()).unwrap_err();
+        assert!(matches!(err, EvalError::Decode(_)));
     }
 }

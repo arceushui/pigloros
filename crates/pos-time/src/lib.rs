@@ -12,7 +12,7 @@
 //! | [`replay`] | Fold all (or partial) events through a `ProjectionRegistry` |
 //! | [`snapshot`] | Capture and verify state snapshots |
 //! | [`compare`] | Diff two divergent timelines after a fork |
-//! | [`merge`] | Types for Wave-5 merge support (no impl yet) |
+//! | [`merge`] | Conflict-free / strategy-guided timeline merge |
 
 pub mod compare;
 pub mod merge;
@@ -20,6 +20,9 @@ pub mod replay;
 pub mod snapshot;
 
 pub use compare::{compare, ForkDiff};
-pub use merge::{can_merge_conflict_free, merge, MergeConflict, MergeResult, MergeSpec, MergeStrategy};
+pub use merge::{
+    can_merge_conflict_free, merge, merge_with_strategy, MergeConflict, MergeResult, MergeSpec,
+    MergeStrategy,
+};
 pub use replay::{replay, replay_at};
 pub use snapshot::{snapshot, verify_snapshot_consistency, Snapshot, SnapshotError};

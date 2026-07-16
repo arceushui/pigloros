@@ -15,7 +15,11 @@ use serde::Serialize;
 /// This is required for the hash chain to be tamper-evident regardless of struct field order.
 ///
 /// # Errors
-/// Returns [`CoreError::Serialization`] if the value cannot be serialized.
+/// Returns [`CoreError::Serialization`] if the value cannot be serialized to a CBOR value.
+///
+/// # Panics
+/// Panics only if writing a `ciborium::Value` into an in-memory `Vec<u8>` fails, which
+/// is not expected for well-formed values.
 pub fn encode<T: Serialize>(value: &T) -> Result<CanonicalBytes, CoreError> {
     // Step 1: serialize to ciborium::Value via serde
     let cv = serde_to_cbor_value(value)?;
@@ -23,8 +27,8 @@ pub fn encode<T: Serialize>(value: &T) -> Result<CanonicalBytes, CoreError> {
     let sorted = sort_map_keys(cv);
     // Step 3: encode to bytes
     let mut buf = Vec::new();
-    ciborium::into_writer(&sorted, &mut buf)
-        .map_err(|e| CoreError::Serialization(e.to_string()))?;
+    // Encoding a `ciborium::Value` into an in-memory buffer is infallible.
+    ciborium::into_writer(&sorted, &mut buf).expect("CBOR encode to Vec is infallible");
     Ok(CanonicalBytes::from_vec(buf))
 }
 
@@ -262,5 +266,24 @@ mod tests {
         let decoded: Value = ciborium::from_reader(encoded.as_slice()).unwrap();
         // Must be a map — otherwise the test would panic.
         assert!(matches!(decoded, Value::Map(_)));
+    }
+
+    #[test]
+    fn decode_rejects_invalid_cbor() {
+        let bad = CanonicalBytes::from_vec(vec![0xFF, 0x00, 0x01]);
+        let result: Result<u32, _> = decode(&bad);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn encode_propagates_serialize_errors() {
+        struct Boom;
+        impl Serialize for Boom {
+            fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("boom"))
+            }
+        }
+        let err = encode(&Boom).unwrap_err();
+        assert!(err.to_string().contains("boom") || matches!(err, CoreError::Serialization(_)));
     }
 }

@@ -2,12 +2,12 @@
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
-//! `pos-plugin-geo` — H3/S2 spatial cloaking plugin.
+//! `pos-plugin-geo` — degree-grid spatial cloaking plugin.
 //!
 //! Owns event type `"geo.location"` and entity kind `"geo-entity"`.
-//! Provides spatial cloaking: exact lat/lng → discretized grid cell → world space.
+//! Provides spatial cloaking: exact lat/lng → discretized grid cell.
 //!
-//! For Wave 5, we implement pure-Rust discretization without external dependencies.
+//! Wave 5 uses a pure-Rust degree-grid snap ([`SpatialCloaker`]); H3/S2 are deferred.
 //! Privacy property: exact coordinates are snapped to a configurable grid resolution
 //! (e.g., 0.1 degree cells), preventing exact location tracking.
 

@@ -19,6 +19,7 @@ pos-experiment           = { path = "../pos-experiment" }
 pos-plugin-rule-agent    = { path = "../../plugins/entities/rule-agent" }
 pos-plugin-synthetic-obs = { path = "../../plugins/observations/synthetic" }
 pos-plugin-eval          = { path = "../../plugins/eval" }
+pos-plugin-persona       = { path = "../../plugins/persona" }
 blake3         = { workspace = true }
 ulid           = { workspace = true }
 serde          = { workspace = true }

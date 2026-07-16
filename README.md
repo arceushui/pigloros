@@ -2,7 +2,7 @@
 
 A simulation world you join to preview your decisions.
 
-> **Current stage:** Pre-product. Wave 5 (moat plugins: persona, world, agent, geo, bridges, eval) complete — single-user MVP ready.
+> **Current stage:** Pre-product. Wave 5 moat plugin crates + closed eval loop in `pos-mvp` / CLI backtest. LLM bridges, H3, and shared world remain deferred.
 
 ## Repository Layout
 
@@ -14,35 +14,37 @@ pigloros/
     pos-crypto/           # Wave 1 ✅ — BLAKE3 + Ed25519 + canonical CBOR
     pos-store/            # Wave 1 ✅ — EventStore trait + SQLite WAL + in-memory
     pos-state/            # Wave 2 ✅ — ProjectionRegistry, fold layer
-    pos-time/             # Wave 2 ✅ — replay, snapshot, fork compare
+    pos-time/             # Wave 2 ✅ — replay, snapshot, fork compare, merge
     pos-query/            # Wave 2 ✅ — EventQuery builder, traversal
     pos-runtime/          # Wave 3 ✅ — plugin host: SchemaRegistry, Driver, Recorder
   apps/
-    pos-experiment/         # Wave 4 ✅ — experiment host: tick loop, StopCondition, branch
-    pos-cli/                # Wave 4 ✅ — pos binary: store, timeline, experiment CLI
+    pos-experiment/       # Wave 4 ✅ — experiment host: tick loop, StopCondition, branch, backtest
+    pos-cli/              # Wave 4/5 ✅ — pos binary: store, timeline, experiment, merge
+    pos-mvp/              # Wave 5 ✅ — Kyoto vs Osaka trip preview + CalibrationReport
   plugins/
-    entities/rule-agent/    # Wave 4 ✅ — deterministic rule-based agent plugin
+    entities/rule-agent/  # Wave 4 ✅ — deterministic rule-based agent plugin
     observations/synthetic/ # Wave 4 ✅ — synthetic sin-wave observation plugin
-    persona/                # Wave 5 ✅ — PersonaState projection (identity, risk tolerance)
-    world/                  # Wave 5 ✅ — WorldState projection (entities, events)
-    agent/                  # Wave 5 ✅ — AgentEngine trait + DecisionMaker + LLM bridge
-    geo/                    # Wave 5 ✅ — GeoStore, GeoEntity, Location + distance queries
-    bridges/                # Wave 5 ✅ — Claude API integration for LLM-driven agents
-    eval/                   # Wave 5 ✅ — CalibrationHarness (Brier/ECE/lift metrics)
-  bindings/                 # Wave 6 — PyO3 Python bindings
+    persona/              # Wave 5 ✅ — PersonaModel + PersonaEvalDriver (closes eval loop)
+    world/                # Wave 5 ✅ — WorldBackend + SimpleKinematic (rapier deferred)
+    agent/                # Wave 5 ✅ — AgentPolicy + RoundRobin/RandomSeed (no LLM yet)
+    geo/                  # Wave 5 ✅ — SpatialCloaker degree-grid cloaking (not H3)
+    bridges/              # Wave 5 ✅ — BridgeIngestor draft API (no HTTP/Claude yet)
+    eval/                 # Wave 5 ✅ — compute_report → CalibrationReport (Brier/ECE/lift)
 ```
+
+Wave 6 will add `bindings/piglor-py` (PyO3); that directory is not in-tree yet.
 
 ## Wave Roadmap
 
 | Wave | Description | Status |
 |---|---|---|
-| Wave 0 | Tracer Bullet — validate prediction baseline | Pending |
+| Wave 0 | Tracer Bullet — validate prediction baseline | Deferred (folded into Wave 5 MVP loop) |
 | Wave 1 | Kernel Primitives (pos-core, pos-crypto, pos-store) | ✅ Complete |
 | Wave 2 | Temporal Engine (replay, fork, merge) | ✅ Complete |
 | Wave 3 | Plugin Runtime (pos-runtime) | ✅ Complete |
 | Wave 4 | Experiment Framework + CLI (pos-experiment, pos-cli) | ✅ Complete |
 | Wave 5 | Moat Plugins + Single-User MVP | ✅ Complete |
-| Wave 6 | Shared World & Social Layer | Planned |
+| Wave 6 | Shared World & Social Layer (+ PyO3 bindings) | Planned |
 | Wave 7 | Contextual Decision Preview | Planned |
 
 ## Development
@@ -61,4 +63,4 @@ Wave 3 stats: **272 tests · 0 failures · 100% production line coverage · clip
 
 Wave 4 stats: **359 tests · 0 failures · 100% line coverage · clippy pedantic clean**
 
-Wave 5 stats: **536 tests · 0 failures · 100% line coverage · clippy pedantic clean**
+Wave 5 stats: **577 tests · 0 failures · 100% line coverage · clippy pedantic clean**

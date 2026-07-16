@@ -125,6 +125,15 @@ mod tests {
         EventDraft::new(entity, Kind::new("test.tick"), CanonicalBytes::from_vec(vec![]))
     }
 
+    fn count_for(reg: &ProjectionRegistry, entity: EntityId) -> u64 {
+        reg.state_snapshot()
+            .get("count")
+            .and_then(|r| r.get(&entity))
+            .and_then(|s| s.get("n"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    }
+
     // ── tests ─────────────────────────────────────────────────────────────────
 
     #[test]
@@ -239,22 +248,47 @@ mod tests {
         assert!(diff.diverged_entities.contains(&entity));
 
         // Verify registry isolation: reg_a accumulated 3 events, reg_b accumulated 0.
-        let count_a = reg_a
-            .state_snapshot()
-            .get("count")
-            .and_then(|r| r.get(&entity))
-            .and_then(|s| s.get("n"))
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        let count_b = reg_b
-            .state_snapshot()
-            .get("count")
-            .and_then(|r| r.get(&entity))
-            .and_then(|s| s.get("n"))
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
+        let count_a = count_for(&reg_a, entity);
+        let count_b = count_for(&reg_b, entity);
+        let _ = count_for(&reg_b, EntityId::new());
 
         assert_eq!(count_a, 3, "reg_a should have folded 3 post-fork events");
         assert_eq!(count_b, 0, "reg_b should have seen no post-fork events");
+    }
+
+    #[test]
+    fn compare_unknown_timeline_returns_store_error() {
+        let store = open_store(StoreConfig::Memory).unwrap();
+        let mut reg_a = make_registry();
+        let mut reg_b = make_registry();
+        let err = compare(
+            store.as_ref(),
+            TimelineId::new(),
+            TimelineId::new(),
+            Seq::ZERO,
+            &mut reg_a,
+            &mut reg_b,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CoreError::TimelineNotFound(_)));
+    }
+
+    #[test]
+    fn compare_second_timeline_missing_returns_error() {
+        // Covers the `events_b` read error path (first timeline exists).
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let a = store.create_timeline("a").unwrap();
+        let mut reg_a = make_registry();
+        let mut reg_b = make_registry();
+        let err = compare(
+            store.as_ref(),
+            a.id(),
+            TimelineId::new(),
+            Seq::ZERO,
+            &mut reg_a,
+            &mut reg_b,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CoreError::TimelineNotFound(_)));
     }
 }

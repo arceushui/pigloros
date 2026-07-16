@@ -145,13 +145,8 @@ impl Reducer for SyntheticReducer {
     fn initial(&self) -> State {
         let mut s = State::new();
         s.set("observations", serde_json::Value::Number(0.into()));
-        s.set(
-            "last_value",
-            serde_json::Value::Number(
-                serde_json::Number::from_f64(0.0)
-                    .unwrap_or_else(|| serde_json::Number::from(0)),
-            ),
-        );
+        // 0.0 is always a finite f64, so from_f64 cannot fail here.
+        s.set("last_value", serde_json::json!(0.0));
         s
     }
 

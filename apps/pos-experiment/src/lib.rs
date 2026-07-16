@@ -465,6 +465,7 @@ mod tests {
         id: PluginId,
         name: &'static str,
         event_types: Vec<Kind>,
+        has_reducer: bool,
     }
 
     impl Plugin for TestPlugin {
@@ -475,7 +476,7 @@ mod tests {
                 owned_event_types: self.event_types.clone(),
                 owned_entity_kinds: vec![],
                 has_driver: true,
-                has_reducer: false,
+                has_reducer: self.has_reducer,
             }
         }
     }
@@ -485,7 +486,14 @@ mod tests {
             id: PluginId::new(),
             name,
             event_types: event_types.iter().map(|s| Kind::new(*s)).collect(),
+            has_reducer: false,
         }
+    }
+
+    fn make_plugin_with_reducer(name: &'static str, event_types: &[&str]) -> TestPlugin {
+        let mut p = make_plugin(name, event_types);
+        p.has_reducer = true;
+        p
     }
 
     /// A driver that emits `n` events of `event_type` per tick, for at most `max_ticks` ticks.
@@ -633,7 +641,7 @@ mod tests {
     #[test]
     fn experiment_fold_projects_state() {
         let entity = EntityId::new();
-        let plugin = make_plugin("state-plugin", &["state.event"]);
+        let plugin = make_plugin_with_reducer("state-plugin", &["state.event"]);
         let driver = FixedDriver::new(entity, "state.event", 1).with_max_ticks(3);
 
         let mut exp = Experiment::new(ExperimentConfig {
@@ -817,7 +825,7 @@ mod tests {
     #[test]
     fn run_result_has_projections() {
         let entity = EntityId::new();
-        let plugin = make_plugin("proj-plugin", &["proj.event"]);
+        let plugin = make_plugin_with_reducer("proj-plugin", &["proj.event"]);
         let driver = FixedDriver::new(entity, "proj.event", 1).with_max_ticks(3);
 
         let mut exp = Experiment::new(ExperimentConfig {

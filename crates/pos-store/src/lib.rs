@@ -15,11 +15,12 @@
 //!
 //! | Feature | Default | Dependency |
 //! |---------|---------|------------|
-//! | `sqlite` | ✅ on | `rusqlite` + `SQLCipher` |
+//! | `sqlite` | ✅ on | `rusqlite` (WAL; encryption / `SQLCipher` deferred) |
 //!
 //! Disable `SQLite` entirely: `--no-default-features`
 
 pub mod memory;
+pub mod stitch;
 
 #[cfg(feature = "sqlite")]
 pub mod sqlite;

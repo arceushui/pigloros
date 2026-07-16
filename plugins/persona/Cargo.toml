@@ -6,7 +6,11 @@ edition = "2021"
 [dependencies]
 pos-core = { path = "../../crates/pos-core" }
 pos-runtime = { path = "../../crates/pos-runtime" }
+pos-plugin-eval = { path = "../eval" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 ciborium = { workspace = true }
+
+[dev-dependencies]
+pos-store = { path = "../../crates/pos-store" }

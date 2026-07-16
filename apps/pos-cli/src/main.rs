@@ -5,12 +5,10 @@
 //! `pos` — CLI entry point for `PiglorOS`.
 //!
 //! Subcommands:
-//!   pos store init `<path>`
-//!   pos store info `<path>`
-//!   pos timeline list `<path>`
-//!   pos timeline fork `<path>` `<tl_id>` `<at_seq>` `<name>`
-//!   pos experiment run `<path>` --ticks `<N>`
-//!   pos experiment verify `<manifest.json>`
+//!   pos store init|info `<path>`
+//!   pos timeline list|fork|replay|snapshot|compare|merge …
+//!   pos events log …
+//!   pos experiment run|verify|backtest …
 //!   pos version
 
 use pos_core::{clock::Seq, ids::TimelineId, store::SeqRange};
@@ -140,8 +138,20 @@ fn handle_timeline(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             }
             cmd_timeline_compare(&args[1], &args[2], &args[3], &args[4])
         }
+        Some("merge") => {
+            if args.len() < 6 {
+                return Err(
+                    "Usage: pos timeline merge <path> <tl-a-id> <tl-b-id> <fork-seq> <name> [--strategy disjoint|prefer-a|prefer-b]"
+                        .into(),
+                );
+            }
+            let strategy = parse_merge_strategy_flag(&args[6..])?;
+            cmd_timeline_merge(&args[1], &args[2], &args[3], &args[4], &args[5], strategy)
+        }
         _ => {
-            eprintln!("Usage: pos timeline <list|fork|replay|snapshot|compare> ...");
+            eprintln!(
+                "Usage: pos timeline <list|fork|replay|snapshot|compare|merge> ..."
+            );
             Ok(())
         }
     }
@@ -184,16 +194,19 @@ fn cmd_timeline_replay(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std::e
         path: path.to_owned(),
     })?;
 
-    let events = store.read(tl_id, SeqRange::all())?;
-    for event in &events {
-        println!("{} | {} | {} | {}",
-            event.seq.as_u64(),
-            event.entity,
-            event.event_type.as_str(),
-            event.wall_time.as_micros()
-        );
-    }
+    let mut registry = pos_state::ProjectionRegistry::new();
+    registry.register("entity_state", Box::new(pos_state::EntityStateProjection));
+    pos_time::replay(store.as_ref(), tl_id, &mut registry)?;
 
+    let events = store.read(tl_id, SeqRange::all())?;
+    let entity_count = events
+        .iter()
+        .map(|e| e.entity)
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+
+    println!("events: {}", events.len());
+    println!("entity_count: {entity_count}");
     Ok(())
 }
 
@@ -250,6 +263,58 @@ fn cmd_timeline_compare(
     println!("only_in_a: {}", diff.only_in_a.len());
     println!("only_in_b: {}", diff.only_in_b.len());
     println!("diverged_entities: {}", diff.diverged_entities.len());
+
+    Ok(())
+}
+
+fn parse_merge_strategy_flag(
+    args: &[String],
+) -> Result<pos_time::MergeStrategy, Box<dyn std::error::Error>> {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--strategy" {
+            let name = args
+                .get(i + 1)
+                .ok_or("--strategy requires a value (disjoint|prefer-a|prefer-b)")?;
+            return Ok(pos_time::MergeStrategy::parse(name)?);
+        }
+        i += 1;
+    }
+    Ok(pos_time::MergeStrategy::DisjointCrdt)
+}
+
+fn cmd_timeline_merge(
+    path: &str,
+    first_timeline_str: &str,
+    second_timeline_str: &str,
+    fork_seq_str: &str,
+    name: &str,
+    strategy: pos_time::MergeStrategy,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let timeline_a = parse_timeline_id(first_timeline_str)?;
+    let timeline_b = parse_timeline_id(second_timeline_str)?;
+    let fork_seq = parse_seq(fork_seq_str)?;
+
+    let mut store = open_store(StoreConfig::Sqlite {
+        path: path.to_owned(),
+    })?;
+
+    println!("strategy: {strategy:?}");
+    match pos_time::can_merge_conflict_free(store.as_ref(), timeline_a, timeline_b, fork_seq) {
+        Ok(conflict_free) => println!("conflict_free: {conflict_free}"),
+        Err(e) => println!("conflict_free: check-failed ({e})"),
+    }
+
+    let merged = pos_time::merge_with_strategy(
+        store.as_mut(),
+        timeline_a,
+        timeline_b,
+        fork_seq,
+        name,
+        strategy,
+    )?;
+    println!("merged_timeline: {}", merged.id());
+    println!("head: {}", merged.head.as_u64());
 
     Ok(())
 }
@@ -384,9 +449,12 @@ fn cmd_experiment_run(path: &str, ticks: u64) -> Result<(), Box<dyn std::error::
 fn cmd_experiment_backtest(path: &str, train_ticks: u64, eval_ticks: u64) -> Result<(), Box<dyn std::error::Error>> {
     use pos_core::ids::EntityId;
     use pos_experiment::{BacktestConfig, BacktestRunner};
+    use pos_plugin_eval::{EvalPlugin, EvalReducer};
+    use pos_plugin_persona::{
+        PersonaEvalDriver, PersonaModel, PersonaPlugin, PersonaReducer,
+    };
     use pos_plugin_rule_agent::{RuleAgentDriver, RuleAgentPlugin, RuleAgentReducer};
     use pos_plugin_synthetic_obs::{SyntheticDriver, SyntheticObsPlugin, SyntheticReducer};
-    use pos_plugin_eval::{EvalPlugin, EvalReducer};
 
     let config = BacktestConfig {
         experiment_name: "cli-backtest".to_owned(),
@@ -400,7 +468,6 @@ fn cmd_experiment_backtest(path: &str, train_ticks: u64, eval_ticks: u64) -> Res
     let registry_factory = || {
         let mut reg = pos_runtime::PluginRegistry::new();
 
-        // Register rule-agent plugin
         let agent_entity = EntityId::new();
         let agent_plugin = RuleAgentPlugin::new();
         reg.register(
@@ -410,24 +477,39 @@ fn cmd_experiment_backtest(path: &str, train_ticks: u64, eval_ticks: u64) -> Res
                 agent_entity,
                 agent_plugin.actions().to_vec(),
             ))),
-        ).expect("fresh plugin id cannot conflict");
+        )
+        .expect("fresh plugin id cannot conflict");
 
-        // Register synthetic-obs plugin
         let obs_entity = EntityId::new();
         let obs_plugin = SyntheticObsPlugin::new();
         reg.register(
             &obs_plugin,
             Some(Box::new(SyntheticReducer)),
             Some(Box::new(SyntheticDriver::new(obs_entity))),
-        ).expect("fresh plugin id cannot conflict");
+        )
+        .expect("fresh plugin id cannot conflict");
 
-        // Register eval plugin (reducer only, no driver)
-        let eval_plugin = EvalPlugin::new();
+        let persona_entity = EntityId::new();
+        let persona_model = PersonaModel::new(vec![
+            ("nature".to_owned(), 0.8),
+            ("city".to_owned(), 0.5),
+            ("food".to_owned(), 0.9),
+            ("quiet".to_owned(), 0.7),
+        ]);
+        let persona_plugin = PersonaPlugin::new();
         reg.register(
-            &eval_plugin,
-            Some(Box::new(EvalReducer)),
-            None,
-        ).expect("fresh plugin id cannot conflict");
+            &persona_plugin,
+            Some(Box::new(PersonaReducer)),
+            Some(Box::new(PersonaEvalDriver::trip_preview(
+                persona_entity,
+                persona_model,
+            ))),
+        )
+        .expect("fresh plugin id cannot conflict");
+
+        let eval_plugin = EvalPlugin::new();
+        reg.register(&eval_plugin, Some(Box::new(EvalReducer)), None)
+            .expect("fresh plugin id cannot conflict");
 
         reg
     };
@@ -444,6 +526,7 @@ fn cmd_experiment_backtest(path: &str, train_ticks: u64, eval_ticks: u64) -> Res
         println!("brier_score: {:.6}", report.brier_score);
         println!("ece: {:.6}", report.ece);
         println!("n_resolved: {}", report.n_resolved);
+        println!("n_predictions: {}", report.n_predictions);
     }
 
     Ok(())
@@ -1010,6 +1093,151 @@ mod tests {
     fn handle_timeline_compare_missing_args_returns_err() {
         let a = args(&["compare", "path", "tl1"]);
         assert!(handle_timeline(&a).is_err());
+    }
+
+    #[test]
+    fn handle_timeline_merge_executes() {
+        let (_dir, path) = tmp_db();
+        handle_store(&args(&["init", &path])).unwrap();
+        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
+        let timelines = store.list_timelines().unwrap();
+        let base_id = timelines[0].id();
+        let entity_a = EntityId::new();
+        let entity_b = EntityId::new();
+        store
+            .append(
+                base_id,
+                &[EventDraft::new(
+                    entity_a,
+                    Kind::new("base.event"),
+                    CanonicalBytes::from_vec(vec![]),
+                )],
+            )
+            .unwrap();
+        let fork_a = store.fork(base_id, timelines[0].head, "fork-a").unwrap();
+        // head may have advanced; re-read
+        let base_head = store
+            .list_timelines()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id() == base_id)
+            .unwrap()
+            .head;
+        let fork_b = store.fork(base_id, base_head, "fork-b").unwrap();
+        store
+            .append(
+                fork_a.id(),
+                &[EventDraft::new(
+                    entity_a,
+                    Kind::new("a.event"),
+                    CanonicalBytes::from_vec(vec![]),
+                )],
+            )
+            .unwrap();
+        store
+            .append(
+                fork_b.id(),
+                &[EventDraft::new(
+                    entity_b,
+                    Kind::new("b.event"),
+                    CanonicalBytes::from_vec(vec![]),
+                )],
+            )
+            .unwrap();
+        let fork_seq = base_head.as_u64().to_string();
+        let a_id = fork_a.id().to_string();
+        let b_id = fork_b.id().to_string();
+        drop(store);
+
+        let a = args(&[
+            "merge",
+            &path,
+            &a_id,
+            &b_id,
+            &fork_seq,
+            "merged",
+            "--strategy",
+            "disjoint",
+        ]);
+        handle_timeline(&a).unwrap();
+    }
+
+    #[test]
+    fn handle_timeline_merge_missing_args_returns_err() {
+        let a = args(&["merge", "path", "tl1"]);
+        assert!(handle_timeline(&a).is_err());
+    }
+
+    #[test]
+    fn parse_merge_strategy_flag_defaults_and_parses() {
+        assert!(matches!(
+            parse_merge_strategy_flag(&[]).unwrap(),
+            pos_time::MergeStrategy::DisjointCrdt
+        ));
+        let a: Vec<String> = vec!["--strategy".to_owned(), "prefer-a".to_owned()];
+        assert!(matches!(
+            parse_merge_strategy_flag(&a).unwrap(),
+            pos_time::MergeStrategy::PreferA
+        ));
+    }
+
+    #[test]
+    fn parse_merge_strategy_flag_skips_non_strategy_args() {
+        // Covers the `i += 1` branch when scanning past unrelated flags.
+        let a: Vec<String> = vec![
+            "--other".to_owned(),
+            "val".to_owned(),
+            "--strategy".to_owned(),
+            "prefer-b".to_owned(),
+        ];
+        assert!(matches!(
+            parse_merge_strategy_flag(&a).unwrap(),
+            pos_time::MergeStrategy::PreferB
+        ));
+    }
+
+    #[test]
+    fn parse_merge_strategy_flag_missing_value_returns_err() {
+        let a: Vec<String> = vec!["--strategy".to_owned()];
+        assert!(parse_merge_strategy_flag(&a).is_err());
+    }
+
+    #[test]
+    fn parse_merge_strategy_flag_invalid_returns_err() {
+        let a: Vec<String> = vec!["--strategy".to_owned(), "nope".to_owned()];
+        assert!(parse_merge_strategy_flag(&a).is_err());
+    }
+
+    #[test]
+    fn handle_timeline_merge_missing_timeline_returns_err() {
+        // Covers cmd_timeline_merge error path when merge_with_strategy fails.
+        let (_dir, path) = tmp_db();
+        handle_store(&args(&["init", &path])).unwrap();
+        let missing_a = TimelineId::new().to_string();
+        let missing_b = TimelineId::new().to_string();
+        let a = args(&["merge", &path, &missing_a, &missing_b, "0", "merged"]);
+        assert!(handle_timeline(&a).is_err());
+    }
+
+    #[test]
+    fn cmd_experiment_backtest_resolves_eval() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("backtest-resolved.db")
+            .to_str()
+            .unwrap()
+            .to_owned();
+        cmd_experiment_backtest(&path, 3, 2).unwrap();
+        // compute_report on the store to assert n_resolved > 0
+        let store = open_store(StoreConfig::Sqlite { path }).unwrap();
+        let tls = store.list_timelines().unwrap();
+        let eval_tl = tls
+            .iter()
+            .find(|t| t.meta.name.as_deref() == Some("cli-backtest-eval"))
+            .expect("eval timeline");
+        let report = pos_plugin_eval::compute_report(store.as_ref(), eval_tl.id()).unwrap();
+        assert!(report.n_resolved > 0, "n_resolved={}", report.n_resolved);
     }
 
 }

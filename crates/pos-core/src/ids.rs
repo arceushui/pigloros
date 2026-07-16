@@ -12,9 +12,10 @@ thread_local! {
 /// Generate a monotonically increasing ULID using the thread-local generator.
 fn gen_ulid() -> Ulid {
     ULID_GEN.with(|g| {
+        // Overflow / clock-regression is not realistically inducible in unit tests.
         g.borrow_mut()
             .generate()
-            .unwrap_or_else(|_| Ulid::gen())
+            .expect("ULID monotonic generator overflow or clock regression")
     })
 }
 

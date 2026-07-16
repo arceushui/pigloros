@@ -15,6 +15,9 @@ pub enum RuntimeError {
     #[error("plugin '{name}' has no driver but was asked to step")]
     NoDriver { name: String },
 
+    #[error("plugin '{name}' capability mismatch: {reason}")]
+    CapabilityMismatch { name: String, reason: String },
+
     #[error("store error: {0}")]
     Store(#[from] pos_core::CoreError),
 
@@ -56,6 +59,16 @@ mod tests {
     fn no_driver_displays() {
         let e = RuntimeError::NoDriver { name: "static-plugin".to_owned() };
         assert!(e.to_string().contains("static-plugin"));
+    }
+
+    #[test]
+    fn capability_mismatch_displays() {
+        let e = RuntimeError::CapabilityMismatch {
+            name: "agent".to_owned(),
+            reason: "has_driver=true but no driver provided".to_owned(),
+        };
+        assert!(e.to_string().contains("agent"));
+        assert!(e.to_string().contains("has_driver"));
     }
 
     #[test]

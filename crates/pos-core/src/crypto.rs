@@ -139,4 +139,20 @@ mod tests {
         let h = Hash::from_bytes(raw);
         assert_eq!(h.as_bytes(), &raw);
     }
+
+    #[test]
+    fn hash_rejects_wrong_byte_length() {
+        let mut buf = Vec::new();
+        ciborium::into_writer(&[0u8; 16], &mut buf).unwrap();
+        let result: Result<Hash, _> = ciborium::from_reader(buf.as_slice());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn signature_rejects_wrong_byte_length() {
+        let mut buf = Vec::new();
+        ciborium::into_writer(&[0u8; 32], &mut buf).unwrap();
+        let result: Result<Signature, _> = ciborium::from_reader(buf.as_slice());
+        assert!(result.is_err());
+    }
 }

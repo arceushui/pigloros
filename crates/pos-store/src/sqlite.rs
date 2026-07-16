@@ -33,7 +33,7 @@ impl SqliteStore {
                 | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_URI,
         )
-        .map_err(|e| CoreError::Storage(e.to_string()))?;
+        .map_err(storage_err)?;
 
         let store = Self { conn };
         store.init_schema()?;
@@ -43,12 +43,16 @@ impl SqliteStore {
     /// Open an in-memory `SQLite` store (useful for tests without a temp file).
     ///
     /// # Errors
-    /// Returns `CoreError::Storage` if the connection or schema initialisation fails.
+    /// This constructor does not return schema/`SQLite` errors via [`Result`]; see `# Panics`.
+    ///
+    /// # Panics
+    /// Panics if the in-memory connection or schema initialisation fails (not expected
+    /// under normal `SQLite` operation).
     pub fn open_in_memory() -> Result<Self, CoreError> {
-        let conn = Connection::open_in_memory()
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        // In-memory open + schema init are treated as infallible in practice.
+        let conn = Connection::open_in_memory().expect("in-memory sqlite open");
         let store = Self { conn };
-        store.init_schema()?;
+        store.init_schema().expect("in-memory schema init");
         Ok(store)
     }
 
@@ -83,7 +87,7 @@ impl SqliteStore {
                  PRIMARY KEY (timeline_id, seq)
              );",
         )
-        .map_err(|e| CoreError::Storage(e.to_string()))?;
+        .map_err(storage_err)?;
         self.run_migrations()
     }
 
@@ -95,7 +99,7 @@ impl SqliteStore {
                 [],
                 |row| row.get(0),
             )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+            .map_err(storage_err)?;
 
         // Future migrations go here as version increments:
         // if version < 1 { /* migration 1 */ }
@@ -105,7 +109,7 @@ impl SqliteStore {
         if version == 0 {
             self.conn
                 .execute("INSERT INTO schema_version (version) VALUES (1)", [])
-                .map_err(|e| CoreError::Storage(e.to_string()))?;
+                .map_err(storage_err)?;
         }
 
         Ok(())
@@ -119,7 +123,7 @@ impl SqliteStore {
                 params![timeline_id.to_string()],
                 |row| row.get(0),
             )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+            .map_err(storage_err)?;
         let arr: [u8; 32] = bytes
             .try_into()
             .map_err(|_| CoreError::Serialization("bad hash length".to_owned()))?;
@@ -134,7 +138,7 @@ impl SqliteStore {
                 params![timeline_id.to_string()],
                 |row| row.get(0),
             )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+            .map_err(storage_err)?;
         Ok(Seq::from_u64(u64::try_from(n).unwrap_or(0)))
     }
 
@@ -165,7 +169,7 @@ impl SqliteStore {
         let mut stmt = self
             .conn
             .prepare(&sql)
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+            .map_err(storage_err)?;
 
         let events = stmt
             .query_map([], |row| {
@@ -192,11 +196,11 @@ impl SqliteStore {
                     payload_hash_bytes,
                 ))
             })
-            .map_err(|e| CoreError::Storage(e.to_string()))?
+            .map_err(storage_err)?
             .map(|r| {
                 let (seq, event_id, entity_id, event_type, payload, wall_time,
                      causation_id, correlation_id, schema_version, ph_bytes) =
-                    r.map_err(|e| CoreError::Storage(e.to_string()))?;
+                    r.map_err(storage_err)?;
                 let ph_arr: [u8; 32] = ph_bytes
                     .try_into()
                     .map_err(|_| CoreError::Serialization("bad hash".to_owned()))?;
@@ -235,7 +239,7 @@ impl SqliteStore {
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()
-                .map_err(|e| CoreError::Storage(e.to_string()))?;
+                .map_err(storage_err)?;
 
             match row {
                 None => return Err(CoreError::TimelineNotFound(current)),
@@ -271,7 +275,7 @@ impl EventStore for SqliteStore {
                     chain_head.as_bytes().as_slice(),
                 ],
             )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+            .map_err(storage_err)?;
         Ok(timeline)
     }
 
@@ -292,7 +296,7 @@ impl EventStore for SqliteStore {
                 params![timeline.to_string()],
                 |row| row.get::<_, i64>(0),
             )
-            .map_err(|e| CoreError::Storage(e.to_string()))?
+            .map_err(storage_err)?
             > 0;
         if !exists {
             return Err(CoreError::TimelineNotFound(timeline));
@@ -305,7 +309,7 @@ impl EventStore for SqliteStore {
         let tx = self
             .conn
             .transaction()
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+            .map_err(storage_err)?;
 
         for draft in drafts {
             seq = seq.next();
@@ -334,7 +338,7 @@ impl EventStore for SqliteStore {
                     payload_hash.as_bytes().as_slice(),
                 ],
             )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+            .map_err(storage_err)?;
 
             committed.push(Event {
                 id: event_id,
@@ -362,9 +366,9 @@ impl EventStore for SqliteStore {
                 timeline.to_string(),
             ],
         )
-        .map_err(|e| CoreError::Storage(e.to_string()))?;
+        .map_err(storage_err)?;
 
-        tx.commit().map_err(|e| CoreError::Storage(e.to_string()))?;
+        tx.commit().map_err(storage_err)?;
 
         Ok(committed)
     }
@@ -375,20 +379,19 @@ impl EventStore for SqliteStore {
 
         for (i, &(tid, _)) in chain.iter().enumerate() {
             if i + 1 < chain.len() {
-                // Parent: read up to the child's fork_seq.
+                // Parent: all own events up to the child's fork_seq (raw local seq).
                 // fork_seq is always Some for non-root chain entries (enforced by fork()).
                 let fork_seq = chain[i + 1].1.expect("non-root chain entry always has fork_seq");
-                let events = self.read_own_events(tid, range.from, Some(fork_seq))?;
+                let events = self.read_own_events(tid, Seq::ZERO, Some(fork_seq))?;
                 all.extend(events);
             } else {
-                // Leaf: read from range
-                let events = self.read_own_events(tid, range.from, range.to)?;
+                // Leaf: all own events; range applied after logical renumber.
+                let events = self.read_own_events(tid, Seq::ZERO, None)?;
                 all.extend(events);
             }
         }
 
-        all.sort_by_key(|e| e.seq);
-        Ok(all)
+        Ok(crate::stitch::renumber_and_filter(all, range))
     }
 
     fn fork(
@@ -424,7 +427,7 @@ impl EventStore for SqliteStore {
                     fork_hash.as_bytes().as_slice(),
                 ],
             )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+            .map_err(storage_err)?;
 
         Ok(child)
     }
@@ -433,7 +436,7 @@ impl EventStore for SqliteStore {
         let mut stmt = self
             .conn
             .prepare("SELECT id, name, mode, parent_id, fork_seq, head_seq FROM timelines")
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+            .map_err(storage_err)?;
 
         let timelines = stmt
             .query_map([], |row| {
@@ -446,10 +449,10 @@ impl EventStore for SqliteStore {
                     row.get::<_, i64>(5)?,
                 ))
             })
-            .map_err(|e| CoreError::Storage(e.to_string()))?
+            .map_err(storage_err)?
             .map(|r| {
                 let (id_str, name, mode_s, parent_id, fork_seq, head_seq) =
-                    r.map_err(|e| CoreError::Storage(e.to_string()))?;
+                    r.map_err(storage_err)?;
                 let id = parse_timeline_id(&id_str)?;
                 let mode = parse_mode(&mode_s);
                 let fork_point = match (parent_id, fork_seq) {
@@ -489,7 +492,7 @@ impl EventStore for SqliteStore {
                 },
             )
             .optional()
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+            .map_err(storage_err)?;
 
         match row {
             None => Ok(None),
@@ -537,6 +540,12 @@ impl SqliteStore {
         }
         Ok(hash)
     }
+}
+
+// Owned `Error` so this can be used as a `map_err` function item.
+#[allow(clippy::needless_pass_by_value)]
+fn storage_err(e: rusqlite::Error) -> CoreError {
+    CoreError::Storage(e.to_string())
 }
 
 const fn mode_str(mode: TimelineMode) -> &'static str {
@@ -590,8 +599,9 @@ mod tests {
     use super::*;
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
-        ids::EntityId,
+        ids::{EntityId, EventId},
         store::SeqRange,
+        CoreError,
     };
 
     fn make_draft(entity: EntityId, payload: &[u8]) -> EventDraft {
@@ -918,20 +928,197 @@ mod tests {
             .append(grandchild.id(), &[make_draft(entity, b"g1")])
             .unwrap();
 
-        // Grandchild reads events from root (up to fork at seq 2),
-        // then child (up to fork at seq 1), then grandchild's own events.
-        // SQLite read sorts by raw seq so all seq=1 events come first, then seq=2.
+        // Grandchild logical view matches MemoryStore: r1, r2, c1, g1.
         let events = store.read(grandchild.id(), SeqRange::all()).unwrap();
-        // Collect payloads to verify the right events are present.
         let payloads: Vec<&[u8]> = events.iter().map(|e| e.payload.as_slice()).collect();
-        assert!(payloads.contains(&(b"r1" as &[u8])));
-        assert!(payloads.contains(&(b"r2" as &[u8])));
-        assert!(payloads.contains(&(b"c1" as &[u8])));
-        assert!(payloads.contains(&(b"g1" as &[u8])));
-        assert_eq!(payloads.len(), 4);
-        // Events at seq=2 (r2) must come after events at seq=1.
-        let r2_pos = payloads.iter().position(|&p| p == b"r2").unwrap();
-        let r1_pos = payloads.iter().position(|&p| p == b"r1").unwrap();
-        assert!(r2_pos > r1_pos);
+        assert_eq!(payloads, vec![b"r1" as &[u8], b"r2", b"c1", b"g1"]);
+        assert_eq!(events[0].seq.as_u64(), 1);
+        assert_eq!(events[3].seq.as_u64(), 4);
+    }
+
+    #[test]
+    fn open_rejects_directory_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = SqliteStore::open(dir.path().to_str().unwrap());
+        assert!(
+            matches!(result, Err(CoreError::Storage(_))),
+            "expected Storage error opening a directory path"
+        );
+    }
+
+    #[test]
+    fn get_chain_head_rejects_bad_hash_length() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE timelines SET chain_head = ?1 WHERE id = ?2",
+                rusqlite::params![vec![1u8, 2, 3], tl.id().to_string()],
+            )
+            .unwrap();
+        let err = store.get_chain_head(tl.id()).unwrap_err();
+        assert!(matches!(err, CoreError::Serialization(_)));
+    }
+
+    #[test]
+    fn read_rejects_invalid_event_id_ulid() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        store.append(tl.id(), &[make_draft(entity, b"x")]).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE events SET event_id = 'not-a-ulid' WHERE timeline_id = ?1",
+                rusqlite::params![tl.id().to_string()],
+            )
+            .unwrap();
+        let err = store.read(tl.id(), SeqRange::all()).unwrap_err();
+        assert!(matches!(err, CoreError::Serialization(_)));
+    }
+
+    #[test]
+    fn read_rejects_invalid_entity_id_ulid() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        store.append(tl.id(), &[make_draft(entity, b"x")]).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE events SET entity_id = 'bad-entity' WHERE timeline_id = ?1",
+                rusqlite::params![tl.id().to_string()],
+            )
+            .unwrap();
+        let err = store.read(tl.id(), SeqRange::all()).unwrap_err();
+        assert!(matches!(err, CoreError::Serialization(_)));
+    }
+
+    #[test]
+    fn read_rejects_invalid_causation_id_ulid() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        let mut draft = make_draft(entity, b"x");
+        draft.causation_id = Some(EventId::new());
+        store.append(tl.id(), &[draft]).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE events SET causation_id = 'bad-cause' WHERE timeline_id = ?1",
+                rusqlite::params![tl.id().to_string()],
+            )
+            .unwrap();
+        let err = store.read(tl.id(), SeqRange::all()).unwrap_err();
+        assert!(matches!(err, CoreError::Serialization(_)));
+    }
+
+    #[test]
+    fn read_rejects_invalid_correlation_id_ulid() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        let mut draft = make_draft(entity, b"x");
+        draft.correlation_id = Some(pos_core::CorrelationId::new());
+        store.append(tl.id(), &[draft]).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE events SET correlation_id = 'bad-corr' WHERE timeline_id = ?1",
+                rusqlite::params![tl.id().to_string()],
+            )
+            .unwrap();
+        let err = store.read(tl.id(), SeqRange::all()).unwrap_err();
+        assert!(matches!(err, CoreError::Serialization(_)));
+    }
+
+    #[test]
+    fn read_rejects_bad_payload_hash_length() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        store.append(tl.id(), &[make_draft(entity, b"x")]).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE events SET payload_hash = ?1 WHERE timeline_id = ?2",
+                rusqlite::params![vec![9u8, 9], tl.id().to_string()],
+            )
+            .unwrap();
+        let err = store.read(tl.id(), SeqRange::all()).unwrap_err();
+        assert!(matches!(err, CoreError::Serialization(_)));
+    }
+
+    #[test]
+    fn get_timeline_rejects_invalid_parent_ulid() {
+        let store = new_store();
+        let id = TimelineId::new();
+        let genesis = pos_crypto::chain::genesis_hash();
+        store
+            .conn
+            .execute(
+                "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
+                 VALUES (?1, 'bad-parent', 'live', 'not-ulid', 0, 0, ?2)",
+                rusqlite::params![id.to_string(), genesis.as_bytes().as_slice()],
+            )
+            .unwrap();
+        let err = store.get_timeline(id).unwrap_err();
+        assert!(matches!(err, CoreError::Serialization(_)));
+    }
+
+    #[test]
+    fn list_timelines_rejects_invalid_timeline_ulid() {
+        let store = new_store();
+        let genesis = pos_crypto::chain::genesis_hash();
+        store
+            .conn
+            .execute(
+                "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
+                 VALUES ('not-ulid', 'x', 'live', NULL, NULL, 0, ?1)",
+                rusqlite::params![genesis.as_bytes().as_slice()],
+            )
+            .unwrap();
+        let err = store.list_timelines().unwrap_err();
+        assert!(matches!(err, CoreError::Serialization(_)));
+    }
+
+    #[test]
+    fn parse_helpers_reject_invalid_ulids() {
+        assert!(parse_timeline_id("nope").is_err());
+        assert!(parse_event_id("nope").is_err());
+        assert!(parse_entity_id("nope").is_err());
+        assert!(parse_correlation_id("nope").is_err());
+    }
+
+    #[test]
+    fn get_head_seq_fails_for_unknown_timeline() {
+        let store = new_store();
+        let err = store.get_head_seq(TimelineId::new()).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    fn get_chain_head_fails_for_unknown_timeline() {
+        let store = new_store();
+        let err = store.get_chain_head(TimelineId::new()).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    fn fork_chain_rejects_invalid_parent_ulid() {
+        let store = new_store();
+        let id = TimelineId::new();
+        let genesis = pos_crypto::chain::genesis_hash();
+        store
+            .conn
+            .execute(
+                "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
+                 VALUES (?1, 'x', 'live', 'bad-parent-ulid', 0, 0, ?2)",
+                rusqlite::params![id.to_string(), genesis.as_bytes().as_slice()],
+            )
+            .unwrap();
+        let err = store.fork_chain(id).unwrap_err();
+        assert!(matches!(err, CoreError::Serialization(_)));
     }
 }

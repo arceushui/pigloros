@@ -10,10 +10,13 @@
 
 use pos_core::{
     event::{CanonicalBytes, Event, EventDraft, Kind},
-    ids::{EntityId, PluginId},
+    ids::{EntityId, PluginId, TimelineId},
     plugin::{Capability, Plugin},
     state::{Reducer, State},
+    store::EventStore,
 };
+use pos_plugin_eval::{draft_outcome, draft_prediction};
+use pos_runtime::{Driver, RuntimeError, StepOutput};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -96,7 +99,7 @@ impl Plugin for PersonaPlugin {
                 Kind::new(EVENT_TYPE_DECISION),
             ],
             owned_entity_kinds: vec![ENTITY_KIND.to_owned()],
-            has_driver: false,
+            has_driver: true,
             has_reducer: true,
         }
     }
@@ -233,6 +236,121 @@ impl PersonaModel {
 }
 
 // ---------------------------------------------------------------------------
+// PersonaEvalDriver — closes the eval loop
+// ---------------------------------------------------------------------------
+
+/// One binary preference question used by [`PersonaEvalDriver`].
+#[derive(Debug, Clone)]
+pub struct PreferencePair {
+    /// Option A description (matched against preference dimensions).
+    pub option_a: String,
+    /// Option B description.
+    pub option_b: String,
+    /// Ground-truth: whether the user actually prefers A over B.
+    pub prefers_a: bool,
+}
+
+/// Driver that emits `persona.decision` plus matched `eval.prediction` /
+/// `eval.outcome` events each tick — closing the calibration loop.
+///
+/// On tick `i` (cycling through `pairs`):
+/// 1. `persona.decision` from [`PersonaModel::to_draft`]
+/// 2. `eval.prediction` with `predicted_prob = score(option_a)` (P(prefer A))
+/// 3. `eval.outcome` with the pair's ground-truth `prefers_a`
+pub struct PersonaEvalDriver {
+    entity: EntityId,
+    model: PersonaModel,
+    pairs: Vec<PreferencePair>,
+    tick: u64,
+}
+
+impl PersonaEvalDriver {
+    /// Create a driver over the given preference pairs.
+    ///
+    /// # Panics
+    /// Panics if `pairs` is empty.
+    #[must_use]
+    pub fn new(entity: EntityId, model: PersonaModel, pairs: Vec<PreferencePair>) -> Self {
+        assert!(!pairs.is_empty(), "PersonaEvalDriver requires at least one pair");
+        Self {
+            entity,
+            model,
+            pairs,
+            tick: 0,
+        }
+    }
+
+    /// Default Kyoto vs Osaka trip-preview pairs with ground truth favoring Kyoto.
+    #[must_use]
+    pub fn trip_preview(entity: EntityId, model: PersonaModel) -> Self {
+        Self::new(
+            entity,
+            model,
+            vec![
+                PreferencePair {
+                    option_a: "kyoto nature quiet temples".to_owned(),
+                    option_b: "osaka city food nightlife".to_owned(),
+                    prefers_a: true,
+                },
+                PreferencePair {
+                    option_a: "kyoto gardens quiet".to_owned(),
+                    option_b: "osaka street food city".to_owned(),
+                    prefers_a: true,
+                },
+                PreferencePair {
+                    option_a: "osaka city nightlife".to_owned(),
+                    option_b: "kyoto nature temples".to_owned(),
+                    prefers_a: false,
+                },
+                PreferencePair {
+                    option_a: "kyoto quiet nature".to_owned(),
+                    option_b: "osaka food city".to_owned(),
+                    prefers_a: true,
+                },
+                PreferencePair {
+                    option_a: "osaka food nightlife".to_owned(),
+                    option_b: "kyoto quiet temples".to_owned(),
+                    prefers_a: false,
+                },
+            ],
+        )
+    }
+}
+
+impl Driver for PersonaEvalDriver {
+    fn name(&self) -> &'static str {
+        "persona-eval"
+    }
+
+    fn step(
+        &mut self,
+        _store: &dyn EventStore,
+        _timeline: TimelineId,
+    ) -> Result<StepOutput, RuntimeError> {
+        let idx = usize::try_from(self.tick % u64::try_from(self.pairs.len()).unwrap_or(1))
+            .unwrap_or(0);
+        let pair = &self.pairs[idx];
+        let prediction_id = format!("pred-{}", self.tick);
+        let entity_id = self.entity.to_string();
+
+        let predicted_prob = self.model.score_option(&pair.option_a);
+        let decision = self
+            .model
+            .to_draft(self.entity, &pair.option_a, &pair.option_b);
+        let prediction = draft_prediction(
+            self.entity,
+            &entity_id,
+            predicted_prob,
+            &prediction_id,
+        );
+        let outcome = draft_outcome(self.entity, &prediction_id, pair.prefers_a);
+
+        self.tick += 1;
+        Ok(StepOutput::new(vec![decision, prediction, outcome]))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -277,7 +395,7 @@ mod tests {
             .iter()
             .any(|k| k.as_str() == EVENT_TYPE_DECISION));
         assert_eq!(cap.owned_entity_kinds, vec![ENTITY_KIND.to_owned()]);
-        assert!(!cap.has_driver);
+        assert!(cap.has_driver);
         assert!(cap.has_reducer);
     }
 
@@ -707,5 +825,68 @@ mod tests {
         let payload: DecisionPayload =
             ciborium::from_reader(draft.payload.as_slice()).expect("valid CBOR");
         assert_eq!(payload.chosen, "best option");
+    }
+
+    // ── PersonaEvalDriver tests ───────────────────────────────────────────────
+
+    #[test]
+    fn persona_eval_driver_emits_decision_prediction_outcome() {
+        use pos_store::{open_store, StoreConfig};
+
+        let model = PersonaModel::new(vec![("nature".to_owned(), 0.8)]);
+        let entity = EntityId::new();
+        let mut driver = PersonaEvalDriver::trip_preview(entity, model);
+        assert_eq!(driver.name(), "persona-eval");
+
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let tl = store.create_timeline("persona-eval").unwrap();
+        let out = driver.step(store.as_ref(), tl.id()).unwrap();
+
+        assert_eq!(out.drafts.len(), 3);
+        assert_eq!(out.drafts[0].event_type.as_str(), EVENT_TYPE_DECISION);
+        assert_eq!(out.drafts[1].event_type.as_str(), "eval.prediction");
+        assert_eq!(out.drafts[2].event_type.as_str(), "eval.outcome");
+    }
+
+    #[test]
+    fn persona_eval_driver_closes_eval_loop() {
+        use pos_plugin_eval::{compute_report, EvalPlugin, EvalReducer};
+        use pos_runtime::PluginRegistry;
+        use pos_store::{open_store, StoreConfig};
+
+        let model = PersonaModel::new(vec![
+            ("nature".to_owned(), 0.8),
+            ("city".to_owned(), 0.5),
+            ("food".to_owned(), 0.9),
+            ("quiet".to_owned(), 0.7),
+        ]);
+        let entity = EntityId::new();
+
+        let mut registry = PluginRegistry::new();
+        let persona = PersonaPlugin::new();
+        registry
+            .register(
+                &persona,
+                Some(Box::new(PersonaReducer)),
+                Some(Box::new(PersonaEvalDriver::trip_preview(entity, model))),
+            )
+            .unwrap();
+        let eval = EvalPlugin::new();
+        registry
+            .register(&eval, Some(Box::new(EvalReducer)), None)
+            .unwrap();
+
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let tl = store.create_timeline("loop").unwrap();
+        for _ in 0..5 {
+            let drafts = registry.step_all(store.as_ref(), tl.id()).unwrap();
+            registry.schemas.validate_batch(&drafts).unwrap();
+            store.append(tl.id(), &drafts).unwrap();
+        }
+
+        let report = compute_report(store.as_ref(), tl.id()).unwrap();
+        assert_eq!(report.n_predictions, 5);
+        assert_eq!(report.n_resolved, 5);
+        assert!(report.brier_score >= 0.0);
     }
 }

@@ -4,33 +4,62 @@
 
 //! `PiglorOS` Single-User MVP: Trip Preview — Kyoto vs Osaka.
 //!
-//! This MVP demonstrates:
-//! 1. A `PersonaModel` that scores trip options by preference dimensions.
-//! 2. A `BacktestRunner` that runs train + eval phases with a shared store.
-//! 3. Wave 5 plugin composition (rule-agent + synthetic-obs).
+//! Composes persona + eval (+ geo cloaking) and proves a closed calibration loop:
+//! persona decisions emit matched `eval.prediction` / `eval.outcome` pairs so
+//! [`pos_plugin_eval::compute_report`] yields `n_resolved > 0`.
 
 use pos_core::ids::EntityId;
 use pos_experiment::{BacktestConfig, BacktestRunner};
-use pos_plugin_persona::PersonaModel;
-use pos_plugin_rule_agent::{RuleAgentDriver, RuleAgentPlugin, RuleAgentReducer};
-use pos_plugin_synthetic_obs::{SyntheticDriver, SyntheticObsPlugin, SyntheticReducer};
+use pos_plugin_eval::{EvalPlugin, EvalReducer};
+use pos_plugin_geo::{GeoPlugin, GeoReducer, SpatialCloaker};
+use pos_plugin_persona::{
+    PersonaEvalDriver, PersonaModel, PersonaPlugin, PersonaReducer,
+};
 use pos_runtime::PluginRegistry;
 use pos_store::StoreConfig;
+
+fn default_preferences() -> Vec<(String, f64)> {
+    vec![
+        ("nature".to_owned(), 0.8),
+        ("city".to_owned(), 0.5),
+        ("food".to_owned(), 0.9),
+        ("quiet".to_owned(), 0.7),
+    ]
+}
+
+fn build_registry() -> PluginRegistry {
+    let entity = EntityId::new();
+    let model = PersonaModel::new(default_preferences());
+
+    let mut registry = PluginRegistry::new();
+
+    let persona = PersonaPlugin::new();
+    registry
+        .register(
+            &persona,
+            Some(Box::new(PersonaReducer)),
+            Some(Box::new(PersonaEvalDriver::trip_preview(entity, model))),
+        )
+        .expect("persona plugin registration failed");
+
+    let eval = EvalPlugin::new();
+    registry
+        .register(&eval, Some(Box::new(EvalReducer)), None)
+        .expect("eval plugin registration failed");
+
+    let geo = GeoPlugin::new();
+    registry
+        .register(&geo, Some(Box::new(GeoReducer)), None)
+        .expect("geo plugin registration failed");
+
+    registry
+}
 
 fn main() {
     println!("PiglorOS Single-User MVP: Trip Preview — Kyoto vs Osaka");
     println!();
 
-    // 1. Create a PersonaModel with preferences
-    let preferences = vec![
-        ("nature".to_owned(), 0.8),
-        ("city".to_owned(), 0.5),
-        ("food".to_owned(), 0.9),
-        ("quiet".to_owned(), 0.7),
-    ];
-    let model = PersonaModel::new(preferences);
-
-    // 2. Print scores for kyoto vs osaka
+    let model = PersonaModel::new(default_preferences());
     let kyoto_score = model.score_option("kyoto nature quiet temples");
     let osaka_score = model.score_option("osaka city food nightlife");
 
@@ -39,7 +68,15 @@ fn main() {
     println!("  Osaka (city, food, nightlife): {osaka_score:.3}");
     println!();
 
-    // 3. Run a BacktestRunner with 5 train ticks + 5 eval ticks
+    // Degree-grid cloaking (not H3) for destination coords
+    let cloaker = SpatialCloaker::new(0.1);
+    let (kyoto_lat, kyoto_lng) = cloaker.cloak(35.0116, 135.7681);
+    let (osaka_lat, osaka_lng) = cloaker.cloak(34.6937, 135.5023);
+    println!("Cloaked destination cells (0.1° grid):");
+    println!("  Kyoto: ({kyoto_lat:.1}, {kyoto_lng:.1})");
+    println!("  Osaka: ({osaka_lat:.1}, {osaka_lng:.1})");
+    println!();
+
     let config = BacktestConfig {
         experiment_name: "mvp-trip-preview".to_owned(),
         train_ticks: 5,
@@ -47,55 +84,38 @@ fn main() {
         store_config: StoreConfig::Memory,
     };
 
-    let runner = BacktestRunner::new(config, || {
-        let agent_entity = EntityId::new();
-        let obs_entity = EntityId::new();
+    let result = BacktestRunner::new(config, build_registry)
+        .run()
+        .expect("backtest run failed");
 
-        let agent_plugin = RuleAgentPlugin::new();
-        let agent_driver = RuleAgentDriver::new(agent_entity, agent_plugin.actions().to_vec());
-        let agent_reducer = RuleAgentReducer;
-
-        let obs_plugin = SyntheticObsPlugin::new();
-        let obs_driver = SyntheticDriver::new(obs_entity);
-        let obs_reducer = SyntheticReducer;
-
-        let mut registry = PluginRegistry::new();
-        registry
-            .register(
-                &agent_plugin,
-                Some(Box::new(agent_reducer)),
-                Some(Box::new(agent_driver)),
-            )
-            .expect("agent plugin registration failed");
-        registry
-            .register(
-                &obs_plugin,
-                Some(Box::new(obs_reducer)),
-                Some(Box::new(obs_driver)),
-            )
-            .expect("obs plugin registration failed");
-
-        registry
-    });
-
-    let result = runner.run().expect("backtest run failed");
-
-    // 4. Print results
     println!("Backtest results:");
     println!("  Train events: {}", result.train_events);
     println!("  Eval events:  {}", result.eval_events);
+    println!("  Persistence lift: {:.3}", result.persistence_lift);
+
+    let report = result
+        .eval_report
+        .as_ref()
+        .expect("eval report should be present");
+    println!();
+    println!("CalibrationReport (eval timeline):");
+    println!("  n_predictions: {}", report.n_predictions);
+    println!("  n_resolved:    {}", report.n_resolved);
+    println!("  brier_score:   {:.4}", report.brier_score);
+    println!("  ece:           {:.4}", report.ece);
     println!(
-        "  Persistence lift: {:.3}",
-        result.persistence_lift
+        "  lift_vs_persistence: {:.4}",
+        report.lift_vs_persistence
     );
     println!();
 
-    println!("MVP complete — Wave 5 Single-User MVP scaffold ready");
-}
+    assert!(
+        report.n_resolved > 0,
+        "MVP must close the eval loop (n_resolved > 0)"
+    );
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+    println!("MVP complete — persona + eval loop closed");
+}
 
 #[cfg(test)]
 mod tests {
@@ -103,7 +123,6 @@ mod tests {
 
     #[test]
     fn mvp_smoke_test() {
-        // Just ensure the persona model works
         let model = PersonaModel::new(vec![
             ("nature".to_owned(), 0.8),
             ("food".to_owned(), 0.9),
@@ -113,8 +132,24 @@ mod tests {
     }
 
     #[test]
+    fn mvp_backtest_resolves_predictions() {
+        let config = BacktestConfig {
+            experiment_name: "mvp-test".to_owned(),
+            train_ticks: 3,
+            eval_ticks: 3,
+            store_config: StoreConfig::Memory,
+        };
+        let result = BacktestRunner::new(config, build_registry)
+            .run()
+            .expect("backtest");
+        let report = result.eval_report.expect("report");
+        // Fork inherits train events; eval adds more — all should resolve.
+        assert!(report.n_resolved >= 3);
+        assert!(report.brier_score >= 0.0);
+    }
+
+    #[test]
     fn main_does_not_panic() {
-        // Call main to ensure it runs without panicking
         main();
     }
 }

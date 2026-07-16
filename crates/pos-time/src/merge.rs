@@ -1,6 +1,4 @@
-//! Types for Wave-5 merge support.
-//!
-//! Provides conflict-free merge for divergent timelines with disjoint entity sets.
+//! Conflict-free (and strategy-guided) merge for divergent timelines.
 
 use std::collections::HashSet;
 
@@ -10,7 +8,6 @@ use pos_core::{
 };
 
 /// Specification for how to merge two divergent timelines.
-/// Implementation lands in Wave 5. This type establishes the interface.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MergeSpec {
     /// The common base timeline (the original before forking).
@@ -26,14 +23,31 @@ pub struct MergeSpec {
 }
 
 /// Strategy for resolving conflicts when merging divergent timelines.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MergeStrategy {
-    /// Accept both sides for disjoint entity sets; surface conflicts otherwise.
+    /// Accept both sides only when entity sets are disjoint; error otherwise.
     DisjointCrdt,
-    /// Always take A's version on conflict.
+    /// On overlapping entities, keep fork A's post-fork events and drop B's.
     PreferA,
-    /// Always take B's version on conflict.
+    /// On overlapping entities, keep fork B's post-fork events and drop A's.
     PreferB,
+}
+
+impl MergeStrategy {
+    /// Parse a CLI/strategy name (`disjoint`, `prefer-a`, `prefer-b`).
+    ///
+    /// # Errors
+    /// Returns an error string if the name is not recognized.
+    pub fn parse(name: &str) -> Result<Self, String> {
+        match name.to_ascii_lowercase().as_str() {
+            "disjoint" | "disjoint-crdt" | "disjoint_crdt" => Ok(Self::DisjointCrdt),
+            "prefer-a" | "prefer_a" | "a" => Ok(Self::PreferA),
+            "prefer-b" | "prefer_b" | "b" => Ok(Self::PreferB),
+            other => Err(format!(
+                "unknown merge strategy '{other}' (expected disjoint|prefer-a|prefer-b)"
+            )),
+        }
+    }
 }
 
 /// A conflict that could not be auto-resolved.
@@ -47,7 +61,12 @@ pub struct MergeConflict {
     pub in_b: Vec<Event>,
 }
 
-/// Result of a merge attempt.
+/// Structured merge outcome (ADR-008 contract type).
+///
+/// The live [`merge`] / [`merge_with_strategy`] APIs currently return
+/// `Result<Timeline, CoreError>` and map disjoint conflicts to
+/// [`CoreError::Storage`]. This enum remains for callers/tests that want an
+/// explicit clean-vs-conflicts shape without going through the store.
 #[derive(Clone, Debug)]
 pub enum MergeResult {
     /// Clean merge — all events from both sides applied.
@@ -56,16 +75,9 @@ pub enum MergeResult {
     Conflicts(Vec<MergeConflict>),
 }
 
-/// Merge two divergent timelines with disjoint entity sets.
+/// Merge two divergent timelines using [`MergeStrategy::DisjointCrdt`].
 ///
-/// # Algorithm
-/// 1. Read events from `timeline_a` with seq > `fork_seq` → `events_a`
-/// 2. Read events from `timeline_b` with seq > `fork_seq` → `events_b`
-/// 3. Check for conflicts: if any `entity_id` appears in BOTH `events_a` and `events_b`,
-///    return `Err(CoreError::Storage("merge conflict: overlapping entity ..."))`
-/// 4. Merge: create a new timeline (`target_name`), append events from both arms
-///    sorted by `wall_time` for determinism
-/// 5. Return the new merged timeline
+/// Convenience wrapper around [`merge_with_strategy`].
 ///
 /// # Errors
 /// Returns [`CoreError::Storage`] if there are overlapping entities or store I/O fails.
@@ -77,31 +89,76 @@ pub fn merge(
     fork_seq: Seq,
     target_name: &str,
 ) -> Result<Timeline, CoreError> {
-    // Read post-fork events from both timelines
+    merge_with_strategy(
+        store,
+        timeline_a,
+        timeline_b,
+        fork_seq,
+        target_name,
+        MergeStrategy::DisjointCrdt,
+    )
+}
+
+/// Merge two divergent timelines according to `strategy`.
+///
+/// # Algorithm
+/// 1. Read events from each timeline with seq > `fork_seq`
+/// 2. Apply strategy:
+///    - [`MergeStrategy::DisjointCrdt`]: error if any entity appears in both arms
+///    - [`MergeStrategy::PreferA`]: drop B events for overlapping entities
+///    - [`MergeStrategy::PreferB`]: drop A events for overlapping entities
+/// 3. Fork the parent at `fork_seq`, append surviving events sorted by `wall_time`
+///
+/// # Errors
+/// Returns [`CoreError::Storage`] on conflict ([`MergeStrategy::DisjointCrdt`]) or store I/O failure.
+/// Returns [`CoreError::TimelineNotFound`] if either timeline does not exist.
+pub fn merge_with_strategy(
+    store: &mut dyn EventStore,
+    timeline_a: TimelineId,
+    timeline_b: TimelineId,
+    fork_seq: Seq,
+    target_name: &str,
+    strategy: MergeStrategy,
+) -> Result<Timeline, CoreError> {
     let next_seq = Seq::from_u64(fork_seq.as_u64() + 1);
     let events_a = store.read(timeline_a, SeqRange::from_seq(next_seq))?;
     let events_b = store.read(timeline_b, SeqRange::from_seq(next_seq))?;
 
-    // Check for overlapping entities
     let entities_a: HashSet<EntityId> = events_a.iter().map(|e| e.entity).collect();
     let entities_b: HashSet<EntityId> = events_b.iter().map(|e| e.entity).collect();
+    let overlap: HashSet<EntityId> = entities_a.intersection(&entities_b).copied().collect();
 
-    let overlap: Vec<_> = entities_a.intersection(&entities_b).collect();
-    if !overlap.is_empty() {
-        let entity_str = format!("{:?}", overlap[0]);
-        return Err(CoreError::Storage(format!(
-            "merge conflict: overlapping entity {entity_str}"
-        )));
-    }
+    let mut merged = match strategy {
+        MergeStrategy::DisjointCrdt => {
+            if let Some(entity) = overlap.iter().next() {
+                return Err(CoreError::Storage(format!(
+                    "merge conflict: overlapping entity {entity:?}"
+                )));
+            }
+            let mut out = Vec::new();
+            out.extend_from_slice(&events_a);
+            out.extend_from_slice(&events_b);
+            out
+        }
+        MergeStrategy::PreferA => {
+            let mut out = Vec::new();
+            out.extend_from_slice(&events_a);
+            out.extend(events_b.into_iter().filter(|e| !overlap.contains(&e.entity)));
+            out
+        }
+        MergeStrategy::PreferB => {
+            let mut out = Vec::new();
+            out.extend(events_a.into_iter().filter(|e| !overlap.contains(&e.entity)));
+            out.extend_from_slice(&events_b);
+            out
+        }
+    };
 
-    // Merge events: combine both arms and sort by wall_time
-    let mut merged = Vec::new();
-    merged.extend_from_slice(&events_a);
-    merged.extend_from_slice(&events_b);
     merged.sort_by_key(|e| e.wall_time);
 
-    // Create new timeline and append merged events
-    let base_timeline = store.get_timeline(timeline_a)?.ok_or(CoreError::TimelineNotFound(timeline_a))?;
+    let base_timeline = store
+        .get_timeline(timeline_a)?
+        .ok_or(CoreError::TimelineNotFound(timeline_a))?;
     let parent_id = if let Some((parent, _)) = base_timeline.meta.fork_point {
         parent
     } else {
@@ -125,7 +182,9 @@ pub fn merge(
         store.append(result_timeline.id(), &drafts)?;
     }
 
-    store.get_timeline(result_timeline.id()).and_then(|opt| opt.ok_or(CoreError::TimelineNotFound(result_timeline.id())))
+    store
+        .get_timeline(result_timeline.id())
+        .and_then(|opt| opt.ok_or(CoreError::TimelineNotFound(result_timeline.id())))
 }
 
 /// Check if two divergent timelines can be merged without conflicts.
@@ -189,7 +248,6 @@ mod tests {
         assert_eq!(spec.fork_a, back.fork_a);
         assert_eq!(spec.fork_b, back.fork_b);
 
-        // Also verify all strategy variants round-trip.
         for strategy in [
             MergeStrategy::DisjointCrdt,
             MergeStrategy::PreferA,
@@ -201,21 +259,35 @@ mod tests {
     }
 
     #[test]
+    fn merge_strategy_parse() {
+        assert_eq!(
+            MergeStrategy::parse("disjoint").unwrap(),
+            MergeStrategy::DisjointCrdt
+        );
+        assert_eq!(
+            MergeStrategy::parse("prefer-a").unwrap(),
+            MergeStrategy::PreferA
+        );
+        assert_eq!(
+            MergeStrategy::parse("prefer-b").unwrap(),
+            MergeStrategy::PreferB
+        );
+        assert!(MergeStrategy::parse("nope").is_err());
+    }
+
+    #[test]
     fn merge_disjoint_entities_succeeds() {
         let mut store = setup_store();
 
-        // Create base timeline with one event
         let base = store.create_timeline("base").unwrap();
         let entity_base = EntityId::new();
         store
             .append(base.id(), &[make_draft(entity_base, "base.event", b"base")])
             .unwrap();
 
-        // Fork two branches
         let fork_a = store.fork(base.id(), Seq::from_u64(1), "fork_a").unwrap();
         let fork_b = store.fork(base.id(), Seq::from_u64(1), "fork_b").unwrap();
 
-        // Append disjoint entities to each fork
         let entity_a = EntityId::new();
         let entity_b = EntityId::new();
 
@@ -226,7 +298,6 @@ mod tests {
             .append(fork_b.id(), &[make_draft(entity_b, "b.event", b"b1")])
             .unwrap();
 
-        // Merge should succeed
         let merged = merge(
             &mut store,
             fork_a.id(),
@@ -236,9 +307,7 @@ mod tests {
         )
         .unwrap();
 
-        // Verify merged timeline contains events from both arms
         let events = store.read(merged.id(), SeqRange::all()).unwrap();
-        // Should have base event + events from both arms
         assert_eq!(events.len(), 3);
 
         let entities: HashSet<EntityId> = events.iter().map(|e| e.entity).collect();
@@ -291,7 +360,6 @@ mod tests {
         let events = store.read(merged.id(), SeqRange::all()).unwrap();
         let post_fork_events: Vec<_> = events.iter().filter(|e| e.seq > Seq::from_u64(1)).collect();
 
-        // Should have 3 post-fork events (2 from A, 1 from B)
         assert_eq!(post_fork_events.len(), 3);
     }
 
@@ -311,7 +379,6 @@ mod tests {
         let fork_a = store.fork(base.id(), Seq::from_u64(1), "fork_a").unwrap();
         let fork_b = store.fork(base.id(), Seq::from_u64(1), "fork_b").unwrap();
 
-        // Both arms modify the same entity
         store
             .append(fork_a.id(), &[make_draft(shared_entity, "a.event", b"a")])
             .unwrap();
@@ -319,7 +386,6 @@ mod tests {
             .append(fork_b.id(), &[make_draft(shared_entity, "b.event", b"b")])
             .unwrap();
 
-        // Merge should fail with conflict
         let result = merge(
             &mut store,
             fork_a.id(),
@@ -328,13 +394,82 @@ mod tests {
             "merged",
         );
 
-        assert!(result.is_err());
-        if let Err(CoreError::Storage(msg)) = result {
-            assert!(msg.contains("merge conflict"));
-            assert!(msg.contains("overlapping entity"));
-        } else {
-            panic!("Expected Storage error with merge conflict message");
-        }
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("merge conflict"), "msg={msg}");
+        assert!(msg.contains("overlapping entity"), "msg={msg}");
+    }
+
+    #[test]
+    fn merge_prefer_a_keeps_a_on_overlap() {
+        let mut store = setup_store();
+
+        let base = store.create_timeline("base").unwrap();
+        let shared = EntityId::new();
+        store
+            .append(base.id(), &[make_draft(shared, "base.event", b"base")])
+            .unwrap();
+
+        let fork_a = store.fork(base.id(), Seq::from_u64(1), "fork_a").unwrap();
+        let fork_b = store.fork(base.id(), Seq::from_u64(1), "fork_b").unwrap();
+
+        store
+            .append(fork_a.id(), &[make_draft(shared, "a.event", b"a")])
+            .unwrap();
+        store
+            .append(fork_b.id(), &[make_draft(shared, "b.event", b"b")])
+            .unwrap();
+
+        let merged = merge_with_strategy(
+            &mut store,
+            fork_a.id(),
+            fork_b.id(),
+            Seq::from_u64(1),
+            "merged-a",
+            MergeStrategy::PreferA,
+        )
+        .unwrap();
+
+        let events = store.read(merged.id(), SeqRange::all()).unwrap();
+        let post: Vec<_> = events.iter().filter(|e| e.seq > Seq::from_u64(1)).collect();
+        assert_eq!(post.len(), 1);
+        assert_eq!(post[0].event_type.as_str(), "a.event");
+    }
+
+    #[test]
+    fn merge_prefer_b_keeps_b_on_overlap() {
+        let mut store = setup_store();
+
+        let base = store.create_timeline("base").unwrap();
+        let shared = EntityId::new();
+        store
+            .append(base.id(), &[make_draft(shared, "base.event", b"base")])
+            .unwrap();
+
+        let fork_a = store.fork(base.id(), Seq::from_u64(1), "fork_a").unwrap();
+        let fork_b = store.fork(base.id(), Seq::from_u64(1), "fork_b").unwrap();
+
+        store
+            .append(fork_a.id(), &[make_draft(shared, "a.event", b"a")])
+            .unwrap();
+        store
+            .append(fork_b.id(), &[make_draft(shared, "b.event", b"b")])
+            .unwrap();
+
+        let merged = merge_with_strategy(
+            &mut store,
+            fork_a.id(),
+            fork_b.id(),
+            Seq::from_u64(1),
+            "merged-b",
+            MergeStrategy::PreferB,
+        )
+        .unwrap();
+
+        let events = store.read(merged.id(), SeqRange::all()).unwrap();
+        let post: Vec<_> = events.iter().filter(|e| e.seq > Seq::from_u64(1)).collect();
+        assert_eq!(post.len(), 1);
+        assert_eq!(post[0].event_type.as_str(), "b.event");
     }
 
     #[test]
@@ -413,7 +548,6 @@ mod tests {
         let fork_a = store.fork(base.id(), Seq::from_u64(1), "fork_a").unwrap();
         let fork_b = store.fork(base.id(), Seq::from_u64(1), "fork_b").unwrap();
 
-        // No events appended to either fork
         let merged = merge(
             &mut store,
             fork_a.id(),
@@ -424,7 +558,6 @@ mod tests {
         .unwrap();
 
         let events = store.read(merged.id(), SeqRange::all()).unwrap();
-        // Should only have base event
         assert_eq!(events.len(), 1);
     }
 
@@ -436,7 +569,6 @@ mod tests {
         let fork_a = store.fork(base.id(), Seq::ZERO, "fork_a").unwrap();
         let fork_b = store.fork(base.id(), Seq::ZERO, "fork_b").unwrap();
 
-        // Create events with specific wall times
         let entity_a = EntityId::new();
         let entity_b = EntityId::new();
 
@@ -453,7 +585,6 @@ mod tests {
 
         let events = store.read(merged.id(), SeqRange::all()).unwrap();
 
-        // Events should be sorted by wall_time, so entity_b (1000) comes before entity_a (2000)
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].entity, entity_b);
         assert_eq!(events[1].entity, entity_a);
@@ -503,7 +634,6 @@ mod tests {
         let fork_a = store.fork(base.id(), Seq::ZERO, "fork_a").unwrap();
         let fork_b = store.fork(base.id(), Seq::ZERO, "fork_b").unwrap();
 
-        // Only fork_b has events
         store
             .append(fork_b.id(), &[make_draft(EntityId::new(), "b.event", b"b")])
             .unwrap();
@@ -525,7 +655,6 @@ mod tests {
         let fork_a = store.fork(base.id(), Seq::ZERO, "fork_a").unwrap();
         let fork_b = store.fork(base.id(), Seq::ZERO, "fork_b").unwrap();
 
-        // Only fork_a has events
         store
             .append(fork_a.id(), &[make_draft(EntityId::new(), "a.event", b"a")])
             .unwrap();
@@ -570,11 +699,9 @@ mod tests {
     fn merge_root_timelines_without_fork() {
         let mut store = setup_store();
 
-        // Create two independent root timelines (not forked from anything)
         let root_a = store.create_timeline("root_a").unwrap();
         let root_b = store.create_timeline("root_b").unwrap();
 
-        // Add disjoint events to each
         let entity_a = EntityId::new();
         let entity_b = EntityId::new();
 
@@ -585,7 +712,6 @@ mod tests {
             .append(root_b.id(), &[make_draft(entity_b, "b.event", b"b")])
             .unwrap();
 
-        // Merge from fork_seq = 0 (no common history)
         let merged = merge(&mut store, root_a.id(), root_b.id(), Seq::ZERO, "merged").unwrap();
 
         let events = store.read(merged.id(), SeqRange::all()).unwrap();

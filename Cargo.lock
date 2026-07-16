@@ -518,6 +518,7 @@ dependencies = [
  "pos-core",
  "pos-experiment",
  "pos-plugin-eval",
+ "pos-plugin-persona",
  "pos-plugin-rule-agent",
  "pos-plugin-synthetic-obs",
  "pos-query",
@@ -591,15 +592,11 @@ version = "0.1.0"
 dependencies = [
  "pos-core",
  "pos-experiment",
- "pos-plugin-agent",
  "pos-plugin-eval",
  "pos-plugin-geo",
  "pos-plugin-persona",
- "pos-plugin-rule-agent",
- "pos-plugin-synthetic-obs",
  "pos-runtime",
  "pos-store",
- "serde_json",
 ]
 
 [[package]]
@@ -659,7 +656,9 @@ version = "0.1.0"
 dependencies = [
  "ciborium",
  "pos-core",
+ "pos-plugin-eval",
  "pos-runtime",
+ "pos-store",
  "serde",
  "serde_json",
  "thiserror",

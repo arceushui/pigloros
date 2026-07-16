@@ -72,22 +72,8 @@ impl MemoryStore {
             let _ = (meta, prev_fork_seq); // suppress unused warnings
         }
 
-        // Sort by logical position (insertion order) rather than raw seq,
-        // since child timelines restart seq from 1.
-        // Filter by range using the logical seq (position in all).
-        let filtered = all
-            .into_iter()
-            .enumerate()
-            .map(|(i, mut e)| {
-                // Re-number seq to reflect logical position in the stitched timeline
-                e.seq = Seq::from_u64((i + 1) as u64);
-                e
-            })
-            .filter(|e| {
-                e.seq >= range.from && range.to.map_or(true, |to| e.seq <= to)
-            })
-            .collect();
-        Ok(filtered)
+        // Child timelines restart local seq at 1 — renumber to a single logical view.
+        Ok(crate::stitch::renumber_and_filter(all, range))
     }
 
     /// Walk the fork chain from `timeline_id` back to the root, returning [root, ..., `timeline_id`].
