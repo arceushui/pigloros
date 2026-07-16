@@ -584,6 +584,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pos-plugin-eval"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "pos-core",
+ "pos-runtime",
+ "pos-store",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "pos-plugin-rule-agent"
 version = "0.1.0"
 dependencies = [

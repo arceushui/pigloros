@@ -23,7 +23,8 @@ pigloros/
   plugins/
     entities/rule-agent/    # Wave 4 ✅ — deterministic rule-based agent plugin
     observations/synthetic/ # Wave 4 ✅ — synthetic sin-wave observation plugin
-    # Wave 5: persona, eval, bridges, agents
+    eval/                   # Wave 5 🔨 — calibration harness (Brier/ECE/lift metrics)
+    # Wave 5: persona, bridges, agent, world, geo
   bindings/                 # Wave 5 — PyO3 Python bindings
 ```
 
@@ -55,3 +56,5 @@ Wave 2 stats: **233 tests · 0 failures · 100% line coverage · clippy pedantic
 Wave 3 stats: **272 tests · 0 failures · 100% production line coverage · clippy pedantic clean**
 
 Wave 4 stats: **359 tests · 0 failures · 100% line coverage · clippy pedantic clean**
+
+Wave 5 stats (in progress): **390 tests · 0 failures · 100% line coverage · clippy pedantic clean**

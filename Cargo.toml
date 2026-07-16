@@ -9,6 +9,7 @@ members = [
     "crates/pos-runtime",
     "plugins/entities/rule-agent",
     "plugins/observations/synthetic",
+    "plugins/eval",
     "apps/pos-experiment",
     "apps/pos-cli",
 ]
