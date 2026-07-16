@@ -32,6 +32,7 @@ pub use pos_core::CoreError;
 ///
 /// `Memory` is always available. The `Sqlite` variants require the
 /// `sqlite` Cargo feature (enabled by default).
+#[derive(Clone, Debug)]
 pub enum StoreConfig {
     /// Pure in-memory store. Fast, no persistence. Ideal for tests and
     /// short-lived experiments.

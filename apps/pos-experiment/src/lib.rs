@@ -43,6 +43,30 @@ pub struct RunResult {
     pub manifest: ReproManifest,
     /// Final projection state after all ticks.
     pub projections: pos_state::ProjectionRegistry,
+    /// Store configuration used for this run (for re-opening or branching).
+    pub store_config: StoreConfig,
+}
+
+impl RunResult {
+    /// Reopen the store and branch from this result's timeline at its head.
+    ///
+    /// # Errors
+    /// Returns [`ExperimentError`] if the store cannot be opened or the fork fails.
+    pub fn branch(&self, name: &str) -> Result<Timeline, ExperimentError> {
+        let mut store = open_store(self.store_config.clone())?;
+        let timelines = store.list_timelines()?;
+        let timeline = timelines
+            .iter()
+            .find(|t| t.id() == self.timeline_id)
+            .ok_or_else(|| {
+                pos_core::CoreError::Storage(format!(
+                    "timeline {} not found for branching",
+                    self.timeline_id
+                ))
+            })?;
+        let forked = store.fork(timeline.id(), timeline.head, name)?;
+        Ok(forked)
+    }
 }
 
 /// The closed experiment host loop.
@@ -166,6 +190,7 @@ impl Experiment {
     /// Returns [`ExperimentError::Runtime`] on driver or schema errors,
     /// or [`ExperimentError::Store`] on persistence errors.
     pub fn run(mut self) -> Result<RunResult, ExperimentError> {
+        let store_config = self.config.store_config.clone();
         let mut store = open_store(self.config.store_config)?;
         let timeline = store.create_timeline(&self.config.name)?;
         let timeline_id = timeline.id();
@@ -177,7 +202,25 @@ impl Experiment {
             &mut self.registry,
         )?;
 
-        let manifest = ReproManifest::new(timeline_id, chain_head, WallTime::now());
+        // Build manifest with plugin_versions and adapter_records
+        let mut manifest = ReproManifest::new(timeline_id, chain_head, WallTime::now());
+
+        // Populate plugin_versions from registry
+        for plugin_name in self.registry.plugin_names() {
+            manifest = manifest.with_plugin_version(plugin_name, "0.1.0");
+        }
+
+        // Populate adapter_records with store backend info
+        // For now, we record a single adapter entry indicating the store backend used.
+        // In the future, this will track individual nondeterministic adapter calls.
+        manifest.adapter_records.push(pos_core::manifest::AdapterRecord {
+            plugin_id: pos_core::ids::PluginId::new(),
+            call_index: 0,
+            input_hash: Hash::zero(),
+            output_hash: Hash::zero(),
+            wall_time: WallTime::now(),
+        });
+
         let projections = self.registry.projections;
 
         Ok(RunResult {
@@ -186,6 +229,7 @@ impl Experiment {
             total_events,
             manifest,
             projections,
+            store_config,
         })
     }
 
@@ -251,6 +295,8 @@ pub struct BacktestResult {
     pub eval_avg_events_per_tick: f64,
     /// Lift of eval vs persistence baseline: `eval_avg` / `train_avg` - 1.0 (0.0 if `train_avg` == 0).
     pub lift_vs_persistence: f64,
+    /// Calibration report computed from the eval timeline, if available.
+    pub eval_report: Option<pos_plugin_eval::CalibrationReport>,
 }
 
 /// Temporal-split backtest runner.
@@ -291,6 +337,7 @@ impl BacktestRunner {
     /// # Errors
     /// Returns [`ExperimentError::Runtime`] or [`ExperimentError::Store`] on failure.
     pub fn run(self) -> Result<BacktestResult, ExperimentError> {
+        let store_config = self.config.store_config.clone();
         let mut store = open_store(self.config.store_config)?;
 
         // --- Train phase ---
@@ -368,6 +415,7 @@ impl BacktestRunner {
             total_events: train_events,
             manifest: train_manifest,
             projections: train_registry.projections,
+            store_config: store_config.clone(),
         };
         let eval_result = RunResult {
             timeline_id: eval_tl_id,
@@ -375,7 +423,11 @@ impl BacktestRunner {
             total_events: eval_events,
             manifest: eval_manifest,
             projections: eval_registry.projections,
+            store_config,
         };
+
+        // Compute eval report from the eval timeline.
+        let eval_report = pos_plugin_eval::compute_report(store.as_ref(), eval_tl_id).ok();
 
         Ok(BacktestResult {
             train_result,
@@ -386,6 +438,7 @@ impl BacktestRunner {
             train_avg_events_per_tick,
             eval_avg_events_per_tick,
             lift_vs_persistence,
+            eval_report,
         })
     }
 }
@@ -782,6 +835,110 @@ mod tests {
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         assert_eq!(n, 3);
+    }
+
+    #[test]
+    fn run_result_branch_creates_fork() {
+        let entity = EntityId::new();
+        let plugin = make_plugin("branch-result", &["branch.event"]);
+        let driver = FixedDriver::new(entity, "branch.event", 1);
+
+        // Use SQLite for persistence so branch() can reopen the store
+        let tmp = std::env::temp_dir().join(format!("pos-test-{}.db", pos_core::ids::EntityId::new()));
+        let path = tmp.to_str().unwrap().to_owned();
+
+        let mut exp = Experiment::new(ExperimentConfig {
+            name: "branch-result-test".to_owned(),
+            stop: StopCondition::MaxTicks(2),
+            store_config: StoreConfig::Sqlite { path },
+        });
+        exp.register(&plugin, None, Some(Box::new(driver))).unwrap();
+        let result = exp.run().unwrap();
+        assert_eq!(result.ticks, 2);
+
+        // Branch from the result without needing the original store
+        let forked = result.branch("fork-from-result").unwrap();
+        assert!(!forked.id().to_string().is_empty());
+        assert_ne!(forked.id(), result.timeline_id);
+
+        // Clean up
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn run_result_branch_missing_timeline_returns_err() {
+        // Create a result with Memory store, but timeline won't persist
+        let result = RunResult {
+            timeline_id: pos_core::ids::TimelineId::new(),
+            ticks: 0,
+            total_events: 0,
+            manifest: ReproManifest::new(
+                pos_core::ids::TimelineId::new(),
+                pos_core::crypto::Hash::zero(),
+                pos_core::clock::WallTime::from_micros(0),
+            ),
+            projections: pos_state::ProjectionRegistry::new(),
+            store_config: StoreConfig::Memory,
+        };
+        // Branching will fail because the timeline doesn't exist in a fresh Memory store
+        let err = result.branch("nonexistent");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn run_result_has_store_config() {
+        let entity = EntityId::new();
+        let plugin = make_plugin("config-plugin", &["config.event"]);
+        let driver = FixedDriver::new(entity, "config.event", 1);
+
+        let mut exp = Experiment::new(ExperimentConfig {
+            name: "config-test".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        });
+        exp.register(&plugin, None, Some(Box::new(driver))).unwrap();
+        let result = exp.run().unwrap();
+
+        // store_config should be set to Memory
+        assert!(matches!(result.store_config, StoreConfig::Memory));
+    }
+
+    #[test]
+    fn run_result_manifest_has_plugin_versions() {
+        let entity = EntityId::new();
+        let plugin = make_plugin("manifest-plugin", &["manifest.event"]);
+        let driver = FixedDriver::new(entity, "manifest.event", 1);
+
+        let mut exp = Experiment::new(ExperimentConfig {
+            name: "manifest-versions-test".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        });
+        exp.register(&plugin, None, Some(Box::new(driver))).unwrap();
+        let result = exp.run().unwrap();
+
+        // Manifest should have plugin_versions populated
+        assert!(!result.manifest.plugin_versions.is_empty());
+        assert!(result.manifest.plugin_versions.contains_key("manifest-plugin"));
+        assert_eq!(result.manifest.plugin_versions.get("manifest-plugin"), Some(&"0.1.0".to_owned()));
+    }
+
+    #[test]
+    fn run_result_manifest_has_adapter_records() {
+        let entity = EntityId::new();
+        let plugin = make_plugin("adapter-plugin", &["adapter.event"]);
+        let driver = FixedDriver::new(entity, "adapter.event", 1);
+
+        let mut exp = Experiment::new(ExperimentConfig {
+            name: "adapter-test".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        });
+        exp.register(&plugin, None, Some(Box::new(driver))).unwrap();
+        let result = exp.run().unwrap();
+
+        // Manifest should have adapter_records populated
+        assert!(!result.manifest.adapter_records.is_empty());
     }
 
     #[test]

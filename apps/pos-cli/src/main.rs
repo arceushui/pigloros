@@ -44,13 +44,14 @@ fn run_with_args(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     match args.get(1).map(String::as_str) {
         Some("store") => handle_store(&args[2..]),
         Some("timeline") => handle_timeline(&args[2..]),
+        Some("events") => handle_events(&args[2..]),
         Some("experiment") => handle_experiment(&args[2..]),
         Some("version") => {
             println!("pos-cli {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         _ => {
-            eprintln!("Usage: pos <store|timeline|experiment|version>");
+            eprintln!("Usage: pos <store|timeline|events|experiment|version>");
             Ok(())
         }
     }
@@ -121,8 +122,26 @@ fn handle_timeline(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             }
             cmd_timeline_fork(&args[1], &args[2], &args[3], &args[4])
         }
+        Some("replay") => {
+            if args.len() < 3 {
+                return Err("Usage: pos timeline replay <path> <timeline-id>".into());
+            }
+            cmd_timeline_replay(&args[1], &args[2])
+        }
+        Some("snapshot") => {
+            if args.len() < 3 {
+                return Err("Usage: pos timeline snapshot <path> <timeline-id>".into());
+            }
+            cmd_timeline_snapshot(&args[1], &args[2])
+        }
+        Some("compare") => {
+            if args.len() < 5 {
+                return Err("Usage: pos timeline compare <path> <tl-a-id> <tl-b-id> <fork-seq>".into());
+            }
+            cmd_timeline_compare(&args[1], &args[2], &args[3], &args[4])
+        }
         _ => {
-            eprintln!("Usage: pos timeline <list|fork> ...");
+            eprintln!("Usage: pos timeline <list|fork|replay|snapshot|compare> ...");
             Ok(())
         }
     }
@@ -159,6 +178,128 @@ fn cmd_timeline_fork(
     Ok(())
 }
 
+fn cmd_timeline_replay(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let tl_id = parse_timeline_id(tl_id_str)?;
+    let store = open_store(StoreConfig::Sqlite {
+        path: path.to_owned(),
+    })?;
+
+    let events = store.read(tl_id, SeqRange::all())?;
+    for event in &events {
+        println!("{} | {} | {} | {}",
+            event.seq.as_u64(),
+            event.entity,
+            event.event_type.as_str(),
+            event.wall_time.as_micros()
+        );
+    }
+
+    Ok(())
+}
+
+fn cmd_timeline_snapshot(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let tl_id = parse_timeline_id(tl_id_str)?;
+    let store = open_store(StoreConfig::Sqlite {
+        path: path.to_owned(),
+    })?;
+
+    let mut registry = pos_state::ProjectionRegistry::new();
+    registry.register("entity_state", Box::new(pos_state::EntityStateProjection));
+
+    let snapshot = pos_time::snapshot(store.as_ref(), tl_id, &mut registry)?;
+
+    // Count unique entities across all reducers in the snapshot
+    let mut entities = std::collections::HashSet::new();
+    for state_reg in snapshot.registry.values() {
+        // StateRegistry is a HashMap internally, but we need to access it through serde
+        // For now, just serialize and count keys
+        let json = serde_json::to_value(state_reg).unwrap_or_default();
+        if let Some(obj) = json.as_object() {
+            entities.extend(obj.keys().cloned());
+        }
+    }
+
+    println!("at_seq: {}", snapshot.at_seq.as_u64());
+    println!("entity_count: {}", entities.len());
+
+    Ok(())
+}
+
+fn cmd_timeline_compare(
+    path: &str,
+    first_timeline_str: &str,
+    second_timeline_str: &str,
+    fork_seq_str: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let timeline_a = parse_timeline_id(first_timeline_str)?;
+    let timeline_b = parse_timeline_id(second_timeline_str)?;
+    let fork_seq = parse_seq(fork_seq_str)?;
+
+    let store = open_store(StoreConfig::Sqlite {
+        path: path.to_owned(),
+    })?;
+
+    let mut reg_a = pos_state::ProjectionRegistry::new();
+    reg_a.register("entity_state", Box::new(pos_state::EntityStateProjection));
+
+    let mut reg_b = pos_state::ProjectionRegistry::new();
+    reg_b.register("entity_state", Box::new(pos_state::EntityStateProjection));
+
+    let diff = pos_time::compare(store.as_ref(), timeline_a, timeline_b, fork_seq, &mut reg_a, &mut reg_b)?;
+
+    println!("only_in_a: {}", diff.only_in_a.len());
+    println!("only_in_b: {}", diff.only_in_b.len());
+    println!("diverged_entities: {}", diff.diverged_entities.len());
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// events subcommands
+// ---------------------------------------------------------------------------
+
+fn handle_events(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some("log") = args.first().map(String::as_str) {
+        if args.len() < 3 {
+            return Err("Usage: pos events log <path> <timeline-id> [--limit N]".into());
+        }
+        let limit = parse_limit_flag(&args[3..])?;
+        cmd_events_log(&args[1], &args[2], limit)
+    } else {
+        eprintln!("Usage: pos events <log> ...");
+        Ok(())
+    }
+}
+
+fn cmd_events_log(
+    path: &str,
+    tl_id_str: &str,
+    limit: Option<usize>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let tl_id = parse_timeline_id(tl_id_str)?;
+    let store = open_store(StoreConfig::Sqlite {
+        path: path.to_owned(),
+    })?;
+
+    let events = store.read(tl_id, SeqRange::all())?;
+    let events_to_show = if let Some(n) = limit {
+        &events[..events.len().min(n)]
+    } else {
+        &events[..]
+    };
+
+    for event in events_to_show {
+        println!("{} | {} | {} | {}",
+            event.seq.as_u64(),
+            event.entity,
+            event.event_type.as_str(),
+            event.wall_time.as_micros()
+        );
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // experiment subcommands
 // ---------------------------------------------------------------------------
@@ -171,6 +312,13 @@ fn handle_experiment(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             let ticks = parse_ticks_flag(&args[2..])?;
             cmd_experiment_run(path, ticks)
         }
+        Some("backtest") => {
+            // pos experiment backtest <path> --train-ticks <N> --eval-ticks <M>
+            let path = args.get(1).ok_or("Usage: pos experiment backtest <path> --train-ticks <N> --eval-ticks <M>")?;
+            let train_ticks = parse_ticks_flag(&args[2..])?;
+            let eval_ticks = parse_eval_ticks_flag(&args[2..])?;
+            cmd_experiment_backtest(path, train_ticks, eval_ticks)
+        }
         Some("verify") => {
             let manifest_path = args
                 .get(1)
@@ -178,7 +326,7 @@ fn handle_experiment(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             cmd_experiment_verify(manifest_path)
         }
         _ => {
-            eprintln!("Usage: pos experiment <run|verify> ...");
+            eprintln!("Usage: pos experiment <run|backtest|verify> ...");
             Ok(())
         }
     }
@@ -230,6 +378,74 @@ fn cmd_experiment_run(path: &str, ticks: u64) -> Result<(), Box<dyn std::error::
         "Experiment complete: {} ticks, {} events, timeline={}, manifest={}",
         result.ticks, result.total_events, result.timeline_id, manifest_path
     );
+    Ok(())
+}
+
+fn cmd_experiment_backtest(path: &str, train_ticks: u64, eval_ticks: u64) -> Result<(), Box<dyn std::error::Error>> {
+    use pos_core::ids::EntityId;
+    use pos_experiment::{BacktestConfig, BacktestRunner};
+    use pos_plugin_rule_agent::{RuleAgentDriver, RuleAgentPlugin, RuleAgentReducer};
+    use pos_plugin_synthetic_obs::{SyntheticDriver, SyntheticObsPlugin, SyntheticReducer};
+    use pos_plugin_eval::{EvalPlugin, EvalReducer};
+
+    let config = BacktestConfig {
+        experiment_name: "cli-backtest".to_owned(),
+        train_ticks,
+        eval_ticks,
+        store_config: StoreConfig::Sqlite {
+            path: path.to_owned(),
+        },
+    };
+
+    let registry_factory = || {
+        let mut reg = pos_runtime::PluginRegistry::new();
+
+        // Register rule-agent plugin
+        let agent_entity = EntityId::new();
+        let agent_plugin = RuleAgentPlugin::new();
+        reg.register(
+            &agent_plugin,
+            Some(Box::new(RuleAgentReducer)),
+            Some(Box::new(RuleAgentDriver::new(
+                agent_entity,
+                agent_plugin.actions().to_vec(),
+            ))),
+        ).expect("fresh plugin id cannot conflict");
+
+        // Register synthetic-obs plugin
+        let obs_entity = EntityId::new();
+        let obs_plugin = SyntheticObsPlugin::new();
+        reg.register(
+            &obs_plugin,
+            Some(Box::new(SyntheticReducer)),
+            Some(Box::new(SyntheticDriver::new(obs_entity))),
+        ).expect("fresh plugin id cannot conflict");
+
+        // Register eval plugin (reducer only, no driver)
+        let eval_plugin = EvalPlugin::new();
+        reg.register(
+            &eval_plugin,
+            Some(Box::new(EvalReducer)),
+            None,
+        ).expect("fresh plugin id cannot conflict");
+
+        reg
+    };
+
+    let runner = BacktestRunner::new(config, registry_factory);
+    let result = runner.run()?;
+
+    println!("train_events: {}", result.train_events);
+    println!("eval_events: {}", result.eval_events);
+    println!("persistence_lift: {:.6}", result.persistence_lift);
+    println!("lift_vs_persistence: {:.6}", result.lift_vs_persistence);
+
+    if let Some(report) = &result.eval_report {
+        println!("brier_score: {:.6}", report.brier_score);
+        println!("ece: {:.6}", report.ece);
+        println!("n_resolved: {}", report.n_resolved);
+    }
+
     Ok(())
 }
 
@@ -295,12 +511,37 @@ fn cmd_experiment_verify(manifest_path: &str) -> Result<(), Box<dyn std::error::
 fn parse_ticks_flag(args: &[String]) -> Result<u64, Box<dyn std::error::Error>> {
     let mut it = args.iter();
     while let Some(flag) = it.next() {
-        if flag == "--ticks" {
-            let val = it.next().ok_or("--ticks requires a value")?;
+        if flag == "--ticks" || flag == "--train-ticks" {
+            let val = it.next().ok_or("--ticks/--train-ticks requires a value")?;
             return val.parse::<u64>().map_err(|e| format!("invalid ticks: {e}").into());
         }
     }
-    Err("missing --ticks <N>".into())
+    Err("missing --ticks or --train-ticks <N>".into())
+}
+
+/// Parse `--eval-ticks <M>` from a slice of args, returning `M`.
+fn parse_eval_ticks_flag(args: &[String]) -> Result<u64, Box<dyn std::error::Error>> {
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        if flag == "--eval-ticks" {
+            let val = it.next().ok_or("--eval-ticks requires a value")?;
+            return val.parse::<u64>().map_err(|e| format!("invalid eval-ticks: {e}").into());
+        }
+    }
+    Err("missing --eval-ticks <M>".into())
+}
+
+/// Parse `--limit <N>` from a slice of args, returning `Some(N)` or `None` if not present.
+fn parse_limit_flag(args: &[String]) -> Result<Option<usize>, Box<dyn std::error::Error>> {
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        if flag == "--limit" {
+            let val = it.next().ok_or("--limit requires a value")?;
+            let n: usize = val.parse().map_err(|e| format!("invalid limit: {e}"))?;
+            return Ok(Some(n));
+        }
+    }
+    Ok(None)
 }
 
 /// Parse a ULID string into a [`TimelineId`].
@@ -324,6 +565,10 @@ fn parse_seq(s: &str) -> Result<Seq, Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pos_core::{
+        event::{CanonicalBytes, EventDraft, Kind},
+        ids::EntityId,
+    };
 
     #[test]
     fn parse_ticks_flag_extracts_value() {
@@ -563,6 +808,208 @@ mod tests {
         let a: Vec<String> = vec!["--other".to_owned(), "val".to_owned(), "--ticks".to_owned(), "7".to_owned()];
         let n = parse_ticks_flag(&a).unwrap();
         assert_eq!(n, 7);
+    }
+
+    #[test]
+    fn parse_ticks_flag_accepts_train_ticks_flag() {
+        let a: Vec<String> = vec!["--train-ticks".to_owned(), "10".to_owned()];
+        let n = parse_ticks_flag(&a).unwrap();
+        assert_eq!(n, 10);
+    }
+
+    #[test]
+    fn parse_eval_ticks_flag_extracts_value() {
+        let a: Vec<String> = vec!["--eval-ticks".to_owned(), "5".to_owned()];
+        let n = parse_eval_ticks_flag(&a).unwrap();
+        assert_eq!(n, 5);
+    }
+
+    #[test]
+    fn parse_eval_ticks_flag_missing_returns_err() {
+        let a: Vec<String> = vec!["--other".to_owned()];
+        assert!(parse_eval_ticks_flag(&a).is_err());
+    }
+
+    #[test]
+    fn parse_eval_ticks_flag_invalid_number_returns_err() {
+        let a: Vec<String> = vec!["--eval-ticks".to_owned(), "notanumber".to_owned()];
+        assert!(parse_eval_ticks_flag(&a).is_err());
+    }
+
+    #[test]
+    fn parse_eval_ticks_flag_skips_non_eval_ticks_flags() {
+        let a: Vec<String> = vec!["--other".to_owned(), "val".to_owned(), "--eval-ticks".to_owned(), "8".to_owned()];
+        let n = parse_eval_ticks_flag(&a).unwrap();
+        assert_eq!(n, 8);
+    }
+
+    #[test]
+    fn handle_experiment_backtest_executes() {
+        let (_dir, path) = tmp_db();
+        let a = args(&["backtest", &path, "--train-ticks", "2", "--eval-ticks", "1"]);
+        handle_experiment(&a).unwrap();
+    }
+
+    #[test]
+    fn handle_experiment_backtest_missing_path_returns_err() {
+        let a = args(&["backtest"]);
+        assert!(handle_experiment(&a).is_err());
+    }
+
+    #[test]
+    fn handle_experiment_backtest_missing_train_ticks_returns_err() {
+        let (_dir, path) = tmp_db();
+        let a = args(&["backtest", &path]);
+        assert!(handle_experiment(&a).is_err());
+    }
+
+    #[test]
+    fn handle_experiment_backtest_missing_eval_ticks_returns_err() {
+        let (_dir, path) = tmp_db();
+        let a = args(&["backtest", &path, "--train-ticks", "2"]);
+        assert!(handle_experiment(&a).is_err());
+    }
+
+    #[test]
+    fn cmd_experiment_backtest_wires_all_plugins() {
+        // Directly call cmd_experiment_backtest to cover all plugin registration lines.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("backtest-test.db").to_str().unwrap().to_owned();
+        cmd_experiment_backtest(&path, 2, 1).unwrap();
+    }
+
+    #[test]
+    fn parse_limit_flag_extracts_value() {
+        let a: Vec<String> = vec!["--limit".to_owned(), "10".to_owned()];
+        let n = parse_limit_flag(&a).unwrap();
+        assert_eq!(n, Some(10));
+    }
+
+    #[test]
+    fn parse_limit_flag_missing_returns_none() {
+        let a: Vec<String> = vec!["--other".to_owned()];
+        let n = parse_limit_flag(&a).unwrap();
+        assert_eq!(n, None);
+    }
+
+    #[test]
+    fn parse_limit_flag_invalid_number_returns_err() {
+        let a: Vec<String> = vec!["--limit".to_owned(), "notanumber".to_owned()];
+        assert!(parse_limit_flag(&a).is_err());
+    }
+
+    #[test]
+    fn parse_limit_flag_skips_non_limit_flags() {
+        let a: Vec<String> = vec!["--other".to_owned(), "val".to_owned(), "--limit".to_owned(), "5".to_owned()];
+        let n = parse_limit_flag(&a).unwrap();
+        assert_eq!(n, Some(5));
+    }
+
+    #[test]
+    fn handle_events_log_executes() {
+        let (_dir, path) = tmp_db();
+        handle_store(&args(&["init", &path])).unwrap();
+
+        // Add some events to log
+        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
+        let timelines = store.list_timelines().unwrap();
+        let tl_id = timelines[0].id();
+        let entity = EntityId::new();
+        let drafts = vec![
+            EventDraft::new(entity, Kind::new("test.event"), CanonicalBytes::from_vec(vec![])),
+        ];
+        store.append(tl_id, &drafts).unwrap();
+        drop(store);
+
+        let tl_id_str = tl_id.to_string();
+        let a = args(&["log", &path, &tl_id_str]);
+        handle_events(&a).unwrap();
+    }
+
+    #[test]
+    fn handle_events_log_with_limit() {
+        let (_dir, path) = tmp_db();
+        handle_store(&args(&["init", &path])).unwrap();
+        let store = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
+        let timelines = store.list_timelines().unwrap();
+        let tl_id = timelines[0].id().to_string();
+        let a = args(&["log", &path, &tl_id, "--limit", "5"]);
+        handle_events(&a).unwrap();
+    }
+
+    #[test]
+    fn handle_events_unknown_subcommand_is_ok() {
+        let a = args(&["unknown"]);
+        handle_events(&a).unwrap();
+    }
+
+    #[test]
+    fn handle_events_log_missing_path_returns_err() {
+        let a = args(&["log"]);
+        assert!(handle_events(&a).is_err());
+    }
+
+    #[test]
+    fn handle_timeline_replay_executes() {
+        let (_dir, path) = tmp_db();
+        handle_store(&args(&["init", &path])).unwrap();
+
+        // Add some events to replay
+        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
+        let timelines = store.list_timelines().unwrap();
+        let tl_id = timelines[0].id();
+        let entity = EntityId::new();
+        let drafts = vec![
+            EventDraft::new(entity, Kind::new("test.event"), CanonicalBytes::from_vec(vec![])),
+        ];
+        store.append(tl_id, &drafts).unwrap();
+        drop(store);
+
+        let tl_id_str = tl_id.to_string();
+        let a = args(&["replay", &path, &tl_id_str]);
+        handle_timeline(&a).unwrap();
+    }
+
+    #[test]
+    fn handle_timeline_snapshot_executes() {
+        let (_dir, path) = tmp_db();
+        handle_store(&args(&["init", &path])).unwrap();
+        let store = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
+        let timelines = store.list_timelines().unwrap();
+        let tl_id = timelines[0].id().to_string();
+        let a = args(&["snapshot", &path, &tl_id]);
+        handle_timeline(&a).unwrap();
+    }
+
+    #[test]
+    fn handle_timeline_compare_executes() {
+        let (_dir, path) = tmp_db();
+        handle_store(&args(&["init", &path])).unwrap();
+        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
+        let timelines = store.list_timelines().unwrap();
+        let tl_id = timelines[0].id().to_string();
+        let forked = store.fork(timelines[0].id(), timelines[0].head, "fork-b").unwrap();
+        let fork_id = forked.id().to_string();
+        let a = args(&["compare", &path, &tl_id, &fork_id, "0"]);
+        handle_timeline(&a).unwrap();
+    }
+
+    #[test]
+    fn handle_timeline_replay_missing_path_returns_err() {
+        let a = args(&["replay"]);
+        assert!(handle_timeline(&a).is_err());
+    }
+
+    #[test]
+    fn handle_timeline_snapshot_missing_path_returns_err() {
+        let a = args(&["snapshot"]);
+        assert!(handle_timeline(&a).is_err());
+    }
+
+    #[test]
+    fn handle_timeline_compare_missing_args_returns_err() {
+        let a = args(&["compare", "path", "tl1"]);
+        assert!(handle_timeline(&a).is_err());
     }
 
 }
@@ -811,6 +1258,13 @@ mod final_coverage {
         // verify falls back to Memory store → timeline not found → MISMATCH.
         let result = cmd_experiment_verify(manifest_path.to_str().unwrap());
         assert!(result.is_err(), "Memory fallback should give MISMATCH");
+    }
+
+    #[test]
+    fn run_events_dispatch() {
+        let args: Vec<String> = vec!["pos".to_owned(), "events".to_owned()];
+        let result = run_with_args(&args);
+        assert!(result.is_ok());
     }
 
     #[test]

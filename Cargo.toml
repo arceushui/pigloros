@@ -10,8 +10,14 @@ members = [
     "plugins/entities/rule-agent",
     "plugins/observations/synthetic",
     "plugins/eval",
+    "plugins/agent",
+    "plugins/bridges",
+    "plugins/persona",
+    "plugins/geo",
+    "plugins/world",
     "apps/pos-experiment",
     "apps/pos-cli",
+    "apps/pos-mvp",
 ]
 resolver = "2"
 

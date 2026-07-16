@@ -18,6 +18,7 @@ pos-runtime    = { path = "../../crates/pos-runtime" }
 pos-experiment           = { path = "../pos-experiment" }
 pos-plugin-rule-agent    = { path = "../../plugins/entities/rule-agent" }
 pos-plugin-synthetic-obs = { path = "../../plugins/observations/synthetic" }
+pos-plugin-eval          = { path = "../../plugins/eval" }
 blake3         = { workspace = true }
 ulid           = { workspace = true }
 serde          = { workspace = true }

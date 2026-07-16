@@ -1,0 +1,21 @@
+[package]
+name = "pos-mvp"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "pos-mvp"
+path = "src/main.rs"
+
+[dependencies]
+pos-core = { path = "../../crates/pos-core" }
+pos-experiment = { path = "../pos-experiment" }
+pos-store = { path = "../../crates/pos-store" }
+pos-plugin-eval = { path = "../../plugins/eval" }
+pos-plugin-persona = { path = "../../plugins/persona" }
+pos-plugin-synthetic-obs = { path = "../../plugins/observations/synthetic" }
+pos-plugin-rule-agent = { path = "../../plugins/entities/rule-agent" }
+pos-plugin-agent = { path = "../../plugins/agent" }
+pos-plugin-geo = { path = "../../plugins/geo" }
+pos-runtime = { path = "../../crates/pos-runtime" }
+serde_json = { workspace = true }

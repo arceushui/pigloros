@@ -517,6 +517,7 @@ dependencies = [
  "blake3",
  "pos-core",
  "pos-experiment",
+ "pos-plugin-eval",
  "pos-plugin-rule-agent",
  "pos-plugin-synthetic-obs",
  "pos-query",
@@ -570,6 +571,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "pos-core",
+ "pos-plugin-eval",
  "pos-plugin-rule-agent",
  "pos-plugin-synthetic-obs",
  "pos-query",
@@ -584,6 +586,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "pos-mvp"
+version = "0.1.0"
+dependencies = [
+ "pos-core",
+ "pos-experiment",
+ "pos-plugin-agent",
+ "pos-plugin-eval",
+ "pos-plugin-geo",
+ "pos-plugin-persona",
+ "pos-plugin-rule-agent",
+ "pos-plugin-synthetic-obs",
+ "pos-runtime",
+ "pos-store",
+ "serde_json",
+]
+
+[[package]]
+name = "pos-plugin-agent"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "pos-core",
+ "pos-runtime",
+ "pos-store",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "pos-plugin-bridges"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "pos-core",
+ "pos-runtime",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "pos-plugin-eval"
 version = "0.1.0"
 dependencies = [
@@ -591,6 +635,31 @@ dependencies = [
  "pos-core",
  "pos-runtime",
  "pos-store",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "pos-plugin-geo"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "pos-core",
+ "pos-runtime",
+ "pos-store",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "pos-plugin-persona"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "pos-core",
+ "pos-runtime",
  "serde",
  "serde_json",
  "thiserror",
@@ -611,6 +680,19 @@ dependencies = [
 
 [[package]]
 name = "pos-plugin-synthetic-obs"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "pos-core",
+ "pos-runtime",
+ "pos-store",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "pos-plugin-world"
 version = "0.1.0"
 dependencies = [
  "ciborium",

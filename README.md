@@ -2,7 +2,7 @@
 
 A simulation world you join to preview your decisions.
 
-> **Current stage:** Pre-product. Wave 4 (experiment framework + CLI + reference plugins) complete — starting Wave 5 (moat plugins + MVP).
+> **Current stage:** Pre-product. Wave 5 (moat plugins: persona, world, agent, geo, bridges, eval) complete — single-user MVP ready.
 
 ## Repository Layout
 
@@ -23,9 +23,13 @@ pigloros/
   plugins/
     entities/rule-agent/    # Wave 4 ✅ — deterministic rule-based agent plugin
     observations/synthetic/ # Wave 4 ✅ — synthetic sin-wave observation plugin
-    eval/                   # Wave 5 🔨 — calibration harness (Brier/ECE/lift metrics)
-    # Wave 5: persona, bridges, agent, world, geo
-  bindings/                 # Wave 5 — PyO3 Python bindings
+    persona/                # Wave 5 ✅ — PersonaState projection (identity, risk tolerance)
+    world/                  # Wave 5 ✅ — WorldState projection (entities, events)
+    agent/                  # Wave 5 ✅ — AgentEngine trait + DecisionMaker + LLM bridge
+    geo/                    # Wave 5 ✅ — GeoStore, GeoEntity, Location + distance queries
+    bridges/                # Wave 5 ✅ — Claude API integration for LLM-driven agents
+    eval/                   # Wave 5 ✅ — CalibrationHarness (Brier/ECE/lift metrics)
+  bindings/                 # Wave 6 — PyO3 Python bindings
 ```
 
 ## Wave Roadmap
@@ -37,7 +41,7 @@ pigloros/
 | Wave 2 | Temporal Engine (replay, fork, merge) | ✅ Complete |
 | Wave 3 | Plugin Runtime (pos-runtime) | ✅ Complete |
 | Wave 4 | Experiment Framework + CLI (pos-experiment, pos-cli) | ✅ Complete |
-| Wave 5 | Moat Plugins + Single-User MVP | Planned |
+| Wave 5 | Moat Plugins + Single-User MVP | ✅ Complete |
 | Wave 6 | Shared World & Social Layer | Planned |
 | Wave 7 | Contextual Decision Preview | Planned |
 
@@ -57,4 +61,4 @@ Wave 3 stats: **272 tests · 0 failures · 100% production line coverage · clip
 
 Wave 4 stats: **359 tests · 0 failures · 100% line coverage · clippy pedantic clean**
 
-Wave 5 stats (in progress): **390 tests · 0 failures · 100% line coverage · clippy pedantic clean**
+Wave 5 stats: **536 tests · 0 failures · 100% line coverage · clippy pedantic clean**

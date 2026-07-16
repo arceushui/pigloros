@@ -20,6 +20,6 @@ pub mod replay;
 pub mod snapshot;
 
 pub use compare::{compare, ForkDiff};
-pub use merge::{MergeConflict, MergeResult, MergeSpec, MergeStrategy};
+pub use merge::{can_merge_conflict_free, merge, MergeConflict, MergeResult, MergeSpec, MergeStrategy};
 pub use replay::{replay, replay_at};
 pub use snapshot::{snapshot, verify_snapshot_consistency, Snapshot, SnapshotError};
