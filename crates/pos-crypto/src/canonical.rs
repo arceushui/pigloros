@@ -20,12 +20,10 @@ use serde::Serialize;
 /// # Panics
 /// Panics only if writing a `ciborium::Value` into an in-memory `Vec<u8>` fails, which
 /// is not expected for well-formed values.
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn encode<T: Serialize>(value: &T) -> Result<CanonicalBytes, CoreError> {
     encode_canonical_bytes(value)
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn encode_canonical_bytes<T: Serialize>(value: &T) -> Result<CanonicalBytes, CoreError> {
     let cv = serde_to_cbor_value(value)?;
     let sorted = sort_map_keys(cv);
@@ -38,7 +36,6 @@ fn encode_canonical_bytes<T: Serialize>(value: &T) -> Result<CanonicalBytes, Cor
 ///
 /// # Errors
 /// Returns [`CoreError::Serialization`] if the bytes cannot be decoded into `T`.
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn decode<T: serde::de::DeserializeOwned>(bytes: &CanonicalBytes) -> Result<T, CoreError> {
     match ciborium::from_reader(bytes.as_slice()) {
         Ok(value) => Ok(value),
@@ -47,7 +44,6 @@ pub fn decode<T: serde::de::DeserializeOwned>(bytes: &CanonicalBytes) -> Result<
 }
 
 /// Serialize any serde-serializable type to a `ciborium::Value`.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn serde_to_cbor_value<T: Serialize>(value: &T) -> Result<Value, CoreError> {
     let json = match serde_json::to_value(value) {
         Ok(json) => json,
@@ -57,7 +53,6 @@ fn serde_to_cbor_value<T: Serialize>(value: &T) -> Result<Value, CoreError> {
 }
 
 /// Total conversion: every `serde_json::Value` maps to a CBOR `Value`.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn json_value_to_cbor(json: serde_json::Value) -> Value {
     use serde_json::Value as J;
     match json {
@@ -81,7 +76,6 @@ fn json_value_to_cbor(json: serde_json::Value) -> Value {
 }
 
 /// Sort map keys recursively per RFC 8949 §4.2.1: sort by (`key_length`, `key_bytes`) ascending.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn sort_map_keys(value: Value) -> Value {
     match value {
         Value::Map(mut pairs) => {
@@ -98,7 +92,6 @@ fn sort_map_keys(value: Value) -> Value {
     }
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn compare_cbor_keys(a: &Value, b: &Value) -> std::cmp::Ordering {
     let a_bytes = cbor_key_bytes(a);
     let b_bytes = cbor_key_bytes(b);
@@ -109,7 +102,6 @@ fn compare_cbor_keys(a: &Value, b: &Value) -> std::cmp::Ordering {
 }
 
 /// Get the canonical CBOR encoding of a map key for sorting purposes.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn cbor_key_bytes(key: &Value) -> Vec<u8> {
     let mut buf = Vec::new();
     let _ = ciborium::into_writer(key, &mut buf);

@@ -181,7 +181,6 @@ pub fn merge_with_strategy(
     merge_result_timeline(store, result_timeline.id())
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn merge_post_fork_events(
     store: &dyn EventStore,
     timeline_a: TimelineId,
@@ -193,7 +192,6 @@ fn merge_post_fork_events(
     Ok((events_a, events_b))
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn merge_append_merged(
     store: &mut dyn EventStore,
     timeline: TimelineId,
@@ -213,7 +211,6 @@ fn merge_append_merged(
     store.append(timeline, &drafts).map(|_| ())
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn merge_result_timeline(store: &dyn EventStore, id: TimelineId) -> Result<Timeline, CoreError> {
     match store.get_timeline(id)? {
         Some(timeline) => Ok(timeline),

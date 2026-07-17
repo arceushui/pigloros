@@ -177,7 +177,6 @@ impl SqliteStore {
 
         let mut stmt = self.conn.prepare(&sql).map_err(storage_err)?;
 
-        // `query_map` itself is infallible; row/iteration errors surface in the map below.
         let events = stmt
             .query_map([], |row| {
                 let seq: i64 = row.get(0)?;
@@ -203,7 +202,7 @@ impl SqliteStore {
                     payload_hash_bytes,
                 ))
             })
-            .expect("rusqlite query_map defers errors to row iteration")
+            .map_err(storage_err)?
             .map(|r| {
                 let (
                     seq,
@@ -305,12 +304,8 @@ fn timeline_fields_to_timeline(
     parent_id: Option<String>,
     fork_seq: Option<i64>,
     head_seq: i64,
-    id_fallback: Option<TimelineId>,
 ) -> Result<Timeline, CoreError> {
-    let id = match id_fallback {
-        Some(fallback) => parse_timeline_id(id_str).unwrap_or(fallback),
-        None => parse_timeline_id(id_str)?,
-    };
+    let id = parse_timeline_id(id_str)?;
     let mode = parse_mode(mode_s);
     let fork_point = match (parent_id, fork_seq) {
         (Some(p), Some(s)) => Some((
@@ -373,8 +368,8 @@ impl EventStore for SqliteStore {
             return Err(CoreError::TimelineNotFound(timeline));
         }
 
-        let mut seq = timeline_meta_ok(self.get_head_seq(timeline));
-        let mut prev_hash = timeline_meta_ok(self.get_chain_head(timeline));
+        let mut seq = self.get_head_seq(timeline)?;
+        let mut prev_hash = self.get_chain_head(timeline)?;
         let mut committed = Vec::with_capacity(drafts.len());
 
         let tx = self.conn.transaction().map_err(storage_err)?;
@@ -505,13 +500,11 @@ impl EventStore for SqliteStore {
 
         let timelines = stmt
             .query_map([], read_timeline_row)
-            .expect("rusqlite query_map defers errors to row iteration")
+            .map_err(storage_err)?
             .map(|r| {
                 let (id_str, name, mode_s, parent_id, fork_seq, head_seq) =
                     r.map_err(storage_err)?;
-                timeline_fields_to_timeline(
-                    &id_str, name, &mode_s, parent_id, fork_seq, head_seq, None,
-                )
+                timeline_fields_to_timeline(&id_str, name, &mode_s, parent_id, fork_seq, head_seq)
             })
             .collect::<Result<Vec<_>, CoreError>>()?;
 
@@ -531,17 +524,9 @@ impl EventStore for SqliteStore {
 
         match row {
             None => Ok(None),
-            Some((id_str, name, mode_s, parent_id, fork_seq, head_seq)) => {
-                Ok(Some(timeline_fields_to_timeline(
-                    &id_str,
-                    name,
-                    &mode_s,
-                    parent_id,
-                    fork_seq,
-                    head_seq,
-                    Some(id),
-                )?))
-            }
+            Some((id_str, name, mode_s, parent_id, fork_seq, head_seq)) => Ok(Some(
+                timeline_fields_to_timeline(&id_str, name, &mode_s, parent_id, fork_seq, head_seq)?,
+            )),
         }
     }
 }
@@ -576,12 +561,6 @@ impl SqliteStore {
         }
         Ok(hash)
     }
-}
-
-/// Timeline existence was already checked — collapse the residual Result for coverage.
-#[cfg_attr(coverage_nightly, coverage(off))]
-fn timeline_meta_ok<T>(r: Result<T, CoreError>) -> T {
-    r.expect("timeline existence was checked immediately above")
 }
 
 // Owned `Error` so this can be used as a `map_err` function item.

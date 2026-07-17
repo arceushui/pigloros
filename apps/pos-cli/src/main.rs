@@ -199,7 +199,7 @@ fn cmd_timeline_replay(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std::e
     registry.register("entity_state", Box::new(pos_state::EntityStateProjection));
     pos_time::replay(store.as_ref(), tl_id, &mut registry)?;
 
-    let events = read_timeline_events_after_replay(store.as_ref(), tl_id);
+    let events = read_timeline_events_after_replay(store.as_ref(), tl_id)?;
     let entity_count = events
         .iter()
         .map(|e| e.entity)
@@ -533,7 +533,6 @@ fn cmd_experiment_backtest(
 }
 
 /// Log eval calibration metrics when a report is present.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn log_eval_report(report: Option<&pos_plugin_eval::CalibrationReport>) {
     if let Some(report) = report {
         print_eval_report(report);
@@ -588,7 +587,7 @@ fn cmd_experiment_verify(manifest_path: &str) -> Result<(), Box<dyn std::error::
         open_store(StoreConfig::Sqlite { path: store_path })?
     } else {
         // Fallback: Memory (will always be MISMATCH for non-empty manifests)
-        open_memory_store()
+        open_memory_store()?
     };
 
     verify_manifest_against_store(&manifest, store.as_ref())
@@ -640,7 +639,6 @@ fn parse_limit_flag(args: &[String]) -> Result<Option<usize>, Box<dyn std::error
 }
 
 /// Count unique entity IDs captured in a snapshot's projection state.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn count_snapshot_entities(snapshot: &pos_time::Snapshot) -> usize {
     let mut entities = std::collections::HashSet::new();
     for state_reg in snapshot.registry.values() {
@@ -654,7 +652,6 @@ fn count_snapshot_entities(snapshot: &pos_time::Snapshot) -> usize {
 }
 
 /// Serialize and write the run manifest next to the store.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn save_run_manifest(
     path: &str,
     manifest: &pos_core::manifest::ReproManifest,
@@ -665,7 +662,6 @@ fn save_run_manifest(
 }
 
 /// Print eval calibration metrics when a report is present.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn print_eval_report(report: &pos_plugin_eval::CalibrationReport) {
     println!("brier_score: {:.6}", report.brier_score);
     println!("ece: {:.6}", report.ece);
@@ -673,21 +669,23 @@ fn print_eval_report(report: &pos_plugin_eval::CalibrationReport) {
     println!("n_predictions: {}", report.n_predictions);
 }
 
-/// Read events after a successful replay. Infallible on the same store/timeline pair.
-#[cfg_attr(coverage_nightly, coverage(off))]
+/// Read events after a successful replay.
+///
+/// # Errors
+/// Returns [`pos_core::CoreError`] if the store read fails.
 fn read_timeline_events_after_replay(
     store: &dyn pos_core::store::EventStore,
     tl_id: TimelineId,
-) -> Vec<pos_core::Event> {
-    store
-        .read(tl_id, SeqRange::all())
-        .expect("read after successful replay cannot fail")
+) -> Result<Vec<pos_core::Event>, pos_core::CoreError> {
+    store.read(tl_id, SeqRange::all())
 }
 
-/// Open an in-memory store. Infallible; isolated for coverage of the verify fallback path.
-#[cfg_attr(coverage_nightly, coverage(off))]
-fn open_memory_store() -> Box<dyn pos_core::store::EventStore> {
-    open_store(StoreConfig::Memory).expect("in-memory store cannot fail to open")
+/// Open an in-memory store.
+///
+/// # Errors
+/// Returns [`pos_core::CoreError`] if the in-memory store cannot be opened.
+fn open_memory_store() -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
+    open_store(StoreConfig::Memory)
 }
 
 /// Parse a ULID string into a [`TimelineId`].

@@ -122,7 +122,6 @@ impl ProjectionRegistry {
     /// Returns `None` if no reducers have been registered or the entity is unknown.
     /// To query a specific reducer use [`Self::state_for_reducer`].
     #[must_use]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn state_for(&self, entity: &EntityId) -> Option<&State> {
         self.slots
             .first()
@@ -168,7 +167,6 @@ impl ProjectionRegistry {
     ///
     /// This is the counterpart of [`Self::state_snapshot`] and is used by
     /// `pos-time` snapshot consistency verification to seed the incremental path.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn restore_from_snapshot(
         &mut self,
         snapshot: &std::collections::HashMap<String, StateRegistry>,
@@ -202,7 +200,6 @@ impl ProjectionRegistry {
     /// Returns the first differing `(reducer_name, entity_id)` pair, or `None`
     /// when the states are identical.
     #[must_use]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn diff_against_snapshot(
         &self,
         snapshot: &std::collections::HashMap<String, StateRegistry>,
@@ -266,7 +263,6 @@ impl RelationshipIndex {
     ///
     /// Each neighbour appears at most once even if it is both a source and a target.
     #[must_use]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn neighbours(&self, id: &EntityId) -> Vec<EntityId> {
         let mut seen: std::collections::HashSet<EntityId> = std::collections::HashSet::new();
         let mut result = Vec::new();

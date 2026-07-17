@@ -86,15 +86,11 @@ pub fn open_store(config: StoreConfig) -> Result<Box<dyn EventStore>, CoreError>
             Ok(Box::new(store))
         }
         #[cfg(feature = "sqlite")]
-        StoreConfig::SqliteInMemory => Ok(Box::new(open_sqlite_in_memory())),
+        StoreConfig::SqliteInMemory => {
+            let store = sqlite::SqliteStore::open_in_memory()?;
+            Ok(Box::new(store))
+        }
     }
-}
-
-/// In-memory `SQLite` open is effectively infallible under rusqlite.
-#[cfg(feature = "sqlite")]
-#[cfg_attr(coverage_nightly, coverage(off))]
-fn open_sqlite_in_memory() -> sqlite::SqliteStore {
-    sqlite::SqliteStore::open_in_memory().expect("in-memory sqlite open should not fail")
 }
 
 #[cfg(test)]

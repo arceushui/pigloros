@@ -148,7 +148,6 @@ pub trait EventStore: Send {
     }
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn export_timeline_using(
     timeline_result: Result<Option<Timeline>, CoreError>,
     events_result: Result<Vec<Event>, CoreError>,
@@ -161,7 +160,6 @@ fn export_timeline_using(
     Ok(TimelineExport { timeline, events })
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn import_timeline_using<A>(
     create_result: Result<Timeline, CoreError>,
     events: Vec<Event>,

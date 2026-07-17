@@ -153,7 +153,6 @@ fn run_experiment_on_store(
 }
 
 /// Fork the train timeline for eval. Error path covered via fault-injection tests.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn fork_eval_timeline(
     store: &mut dyn pos_core::store::EventStore,
     train_tl_id: pos_core::ids::TimelineId,
@@ -348,15 +347,13 @@ impl BacktestRunner {
     /// Fork train timeline at head for the eval phase.
     ///
     /// Fork failures are exercised via [`fork_eval_timeline`] in `fault_injection_tests`.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn fork_train_for_eval_timeline(
         store: &mut dyn pos_core::store::EventStore,
         train_tl_id: pos_core::ids::TimelineId,
         train_head_seq: pos_core::clock::Seq,
         eval_name: &str,
-    ) -> Timeline {
+    ) -> Result<Timeline, ExperimentError> {
         fork_eval_timeline(store, train_tl_id, train_head_seq, eval_name)
-            .unwrap_or_else(|e| panic!("backtest fork failed: {e}"))
     }
 
     /// Run the backtest: train phase then eval phase.
@@ -398,7 +395,7 @@ impl BacktestRunner {
             train_tl_id,
             train_head_seq,
             &eval_name,
-        );
+        )?;
         let eval_tl_id = eval_tl.id();
 
         // --- Eval phase (same store, forked timeline) ---
