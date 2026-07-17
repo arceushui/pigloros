@@ -18,6 +18,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -118,7 +119,7 @@ jobs:
       # ~99.7% regions) to leave headroom for the handful of infallible-in-practice
       # error arms (e.g. float-precision fallbacks) that are impractical to hit
       # in a unit test. See README "Development" section for the measured numbers.
-      - name: cargo llvm-cov (honest floor: 99% lines + regions)
+      - name: "cargo llvm-cov (honest floor: 99% lines + regions)"
         run: >
           cargo llvm-cov --workspace --locked --summary-only
           --fail-under-lines 99
