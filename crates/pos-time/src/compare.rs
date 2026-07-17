@@ -2,8 +2,8 @@
 
 use std::collections::HashSet;
 
-use pos_core::{CoreError, EntityId, Event, Seq, TimelineId};
 use pos_core::store::{EventStore, SeqRange};
+use pos_core::{CoreError, EntityId, Event, Seq, TimelineId};
 use pos_state::ProjectionRegistry;
 
 /// The result of comparing two diverged timelines.
@@ -110,7 +110,10 @@ mod tests {
         }
 
         fn apply(&self, state: &mut State, _event: &Event) {
-            let n = state.get("n").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            let n = state
+                .get("n")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
             state.set("n", serde_json::json!(n + 1));
         }
     }
@@ -122,7 +125,11 @@ mod tests {
     }
 
     fn draft(entity: EntityId) -> EventDraft {
-        EventDraft::new(entity, Kind::new("test.tick"), CanonicalBytes::from_vec(vec![]))
+        EventDraft::new(
+            entity,
+            Kind::new("test.tick"),
+            CanonicalBytes::from_vec(vec![]),
+        )
     }
 
     fn count_for(reg: &ProjectionRegistry, entity: EntityId) -> u64 {
@@ -137,6 +144,7 @@ mod tests {
     // ── tests ─────────────────────────────────────────────────────────────────
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn compare_identical_timelines_no_diff() {
         // Fork a timeline, append nothing to either fork. Diff should be empty.
         let mut store = open_store(StoreConfig::Memory).unwrap();
@@ -170,6 +178,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn compare_diverged_timelines_detects_differences() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let parent = store.create_timeline("parent").unwrap();
@@ -210,6 +219,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn compare_isolated_registries_no_clobber() {
         // Two registries must not share state even when both see events for the
         // same entity. This exercises the isolation guarantee that motivated the
@@ -257,6 +267,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn compare_unknown_timeline_returns_store_error() {
         let store = open_store(StoreConfig::Memory).unwrap();
         let mut reg_a = make_registry();
@@ -274,6 +285,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn compare_second_timeline_missing_returns_error() {
         // Covers the `events_b` read error path (first timeline exists).
         let mut store = open_store(StoreConfig::Memory).unwrap();

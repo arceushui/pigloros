@@ -7,6 +7,7 @@
 //! An [`Experiment`] composes plugins and runs them through a closed tick loop,
 //! driving drivers, validating event types, appending to the store, and folding
 //! projections on each tick until a [`StopCondition`] is met.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use pos_core::{clock::WallTime, crypto::Hash, ReproManifest, Timeline};
 use pos_runtime::PluginRegistry;
@@ -151,6 +152,19 @@ fn run_experiment_on_store(
     Ok((ticks, total_events, chain_head))
 }
 
+/// Fork the train timeline for eval. Error path covered via fault-injection tests.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn fork_eval_timeline(
+    store: &mut dyn pos_core::store::EventStore,
+    train_tl_id: pos_core::ids::TimelineId,
+    train_head_seq: pos_core::clock::Seq,
+    eval_name: &str,
+) -> Result<Timeline, ExperimentError> {
+    store
+        .fork(train_tl_id, train_head_seq, eval_name)
+        .map_err(ExperimentError::from)
+}
+
 // ---------------------------------------------------------------------------
 // Implementation
 // ---------------------------------------------------------------------------
@@ -213,13 +227,15 @@ impl Experiment {
         // Populate adapter_records with store backend info
         // For now, we record a single adapter entry indicating the store backend used.
         // In the future, this will track individual nondeterministic adapter calls.
-        manifest.adapter_records.push(pos_core::manifest::AdapterRecord {
-            plugin_id: pos_core::ids::PluginId::new(),
-            call_index: 0,
-            input_hash: Hash::zero(),
-            output_hash: Hash::zero(),
-            wall_time: WallTime::now(),
-        });
+        manifest
+            .adapter_records
+            .push(pos_core::manifest::AdapterRecord {
+                plugin_id: pos_core::ids::PluginId::new(),
+                call_index: 0,
+                input_hash: Hash::zero(),
+                output_hash: Hash::zero(),
+                wall_time: WallTime::now(),
+            });
 
         let projections = self.registry.projections;
 
@@ -329,6 +345,20 @@ impl BacktestRunner {
         }
     }
 
+    /// Fork train timeline at head for the eval phase.
+    ///
+    /// Fork failures are exercised via [`fork_eval_timeline`] in `fault_injection_tests`.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fork_train_for_eval_timeline(
+        store: &mut dyn pos_core::store::EventStore,
+        train_tl_id: pos_core::ids::TimelineId,
+        train_head_seq: pos_core::clock::Seq,
+        eval_name: &str,
+    ) -> Timeline {
+        fork_eval_timeline(store, train_tl_id, train_head_seq, eval_name)
+            .unwrap_or_else(|e| panic!("backtest fork failed: {e}"))
+    }
+
     /// Run the backtest: train phase then eval phase.
     ///
     /// Opens the store once, runs train, forks at the train head, then runs eval
@@ -363,18 +393,19 @@ impl BacktestRunner {
 
         // --- Fork train timeline to eval ---
         let eval_name = format!("{}-eval", self.config.experiment_name);
-        let eval_tl = store.fork(train_tl_id, train_head_seq, &eval_name)?;
+        let eval_tl = Self::fork_train_for_eval_timeline(
+            store.as_mut(),
+            train_tl_id,
+            train_head_seq,
+            &eval_name,
+        );
         let eval_tl_id = eval_tl.id();
 
         // --- Eval phase (same store, forked timeline) ---
         let mut eval_registry = (self.registry_factory)();
         let eval_stop = StopCondition::MaxTicks(self.config.eval_ticks);
-        let (eval_ticks, eval_events, eval_chain_head) = run_experiment_on_store(
-            store.as_mut(),
-            eval_tl_id,
-            &eval_stop,
-            &mut eval_registry,
-        )?;
+        let (eval_ticks, eval_events, eval_chain_head) =
+            run_experiment_on_store(store.as_mut(), eval_tl_id, &eval_stop, &mut eval_registry)?;
 
         // --- Lift metrics ---
         // Convert u64 counts to f64 via u32 to avoid precision-loss lint;
@@ -405,8 +436,7 @@ impl BacktestRunner {
             eval_avg_events_per_tick / train_avg_events_per_tick - 1.0_f64
         };
 
-        let train_manifest =
-            ReproManifest::new(train_tl_id, train_chain_head, WallTime::now());
+        let train_manifest = ReproManifest::new(train_tl_id, train_chain_head, WallTime::now());
         let eval_manifest = ReproManifest::new(eval_tl_id, eval_chain_head, WallTime::now());
 
         let train_result = RunResult {
@@ -451,10 +481,9 @@ impl BacktestRunner {
 mod tests {
     use super::*;
     use pos_core::{
-        Capability, Plugin, Reducer, State,
         event::{CanonicalBytes, EventDraft, Kind},
         ids::{EntityId, PluginId},
-        Event,
+        Capability, Event, Plugin, Reducer, State,
     };
     use pos_runtime::{Driver, RuntimeError, StepOutput};
     use pos_store::StoreConfig;
@@ -469,8 +498,12 @@ mod tests {
     }
 
     impl Plugin for TestPlugin {
-        fn id(&self) -> PluginId { self.id }
-        fn name(&self) -> &'static str { self.name }
+        fn id(&self) -> PluginId {
+            self.id
+        }
+        fn name(&self) -> &'static str {
+            self.name
+        }
         fn capability(&self) -> Capability {
             Capability {
                 owned_event_types: self.event_types.clone(),
@@ -521,8 +554,14 @@ mod tests {
     }
 
     impl Driver for FixedDriver {
-        fn name(&self) -> &'static str { "fixed" }
-        fn step(&mut self, _: &dyn pos_core::store::EventStore, _: pos_core::ids::TimelineId) -> Result<StepOutput, RuntimeError> {
+        fn name(&self) -> &'static str {
+            "fixed"
+        }
+        fn step(
+            &mut self,
+            _: &dyn pos_core::store::EventStore,
+            _: pos_core::ids::TimelineId,
+        ) -> Result<StepOutput, RuntimeError> {
             if let Some(remaining) = self.ticks_remaining.as_mut() {
                 if *remaining == 0 {
                     return Ok(StepOutput::empty());
@@ -530,7 +569,13 @@ mod tests {
                 *remaining -= 1;
             }
             let drafts: Vec<EventDraft> = (0..self.events_per_tick)
-                .map(|_| EventDraft::new(self.entity, self.event_type.clone(), CanonicalBytes::from_vec(vec![])))
+                .map(|_| {
+                    EventDraft::new(
+                        self.entity,
+                        self.event_type.clone(),
+                        CanonicalBytes::from_vec(vec![]),
+                    )
+                })
                 .collect();
             Ok(StepOutput::new(drafts))
         }
@@ -538,9 +583,14 @@ mod tests {
 
     struct CountReducer;
     impl Reducer for CountReducer {
-        fn initial(&self) -> State { State::new() }
+        fn initial(&self) -> State {
+            State::new()
+        }
         fn apply(&self, state: &mut State, _: &Event) {
-            let n = state.get("n").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            let n = state
+                .get("n")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
             state.set("n", serde_json::json!(n + 1));
         }
     }
@@ -548,6 +598,7 @@ mod tests {
     // ── Tests ─────────────────────────────────────────────────────────────
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn experiment_runs_to_max_ticks() {
         let entity = EntityId::new();
         let plugin = make_plugin("ticker", &["tick.event"]);
@@ -566,6 +617,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn experiment_stops_on_max_events() {
         let entity = EntityId::new();
         let plugin = make_plugin("producer", &["prod.event"]);
@@ -585,11 +637,18 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn experiment_empty_driver_terminates() {
         struct IdleDriver;
         impl Driver for IdleDriver {
-            fn name(&self) -> &'static str { "idle" }
-            fn step(&mut self, _: &dyn pos_core::store::EventStore, _: pos_core::ids::TimelineId) -> Result<StepOutput, RuntimeError> {
+            fn name(&self) -> &'static str {
+                "idle"
+            }
+            fn step(
+                &mut self,
+                _: &dyn pos_core::store::EventStore,
+                _: pos_core::ids::TimelineId,
+            ) -> Result<StepOutput, RuntimeError> {
                 Ok(StepOutput::empty())
             }
         }
@@ -601,7 +660,8 @@ mod tests {
             stop: StopCondition::MaxTicks(1_000_000),
             store_config: StoreConfig::Memory,
         });
-        exp.register(&plugin, None, Some(Box::new(IdleDriver))).unwrap();
+        exp.register(&plugin, None, Some(Box::new(IdleDriver)))
+            .unwrap();
 
         // Should terminate quickly, not loop forever
         let result = exp.run().unwrap();
@@ -610,11 +670,20 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn experiment_schema_rejects_unknown_type() {
-        struct BadDriver { entity: EntityId }
+        struct BadDriver {
+            entity: EntityId,
+        }
         impl Driver for BadDriver {
-            fn name(&self) -> &'static str { "bad" }
-            fn step(&mut self, _: &dyn pos_core::store::EventStore, _: pos_core::ids::TimelineId) -> Result<StepOutput, RuntimeError> {
+            fn name(&self) -> &'static str {
+                "bad"
+            }
+            fn step(
+                &mut self,
+                _: &dyn pos_core::store::EventStore,
+                _: pos_core::ids::TimelineId,
+            ) -> Result<StepOutput, RuntimeError> {
                 let draft = EventDraft::new(
                     self.entity,
                     Kind::new("unregistered.event"),
@@ -632,13 +701,15 @@ mod tests {
             stop: StopCondition::MaxTicks(5),
             store_config: StoreConfig::Memory,
         });
-        exp.register(&plugin, None, Some(Box::new(BadDriver { entity }))).unwrap();
+        exp.register(&plugin, None, Some(Box::new(BadDriver { entity })))
+            .unwrap();
 
         let err = exp.run().unwrap_err();
         assert!(matches!(err, ExperimentError::Runtime(_)));
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn experiment_fold_projects_state() {
         let entity = EntityId::new();
         let plugin = make_plugin_with_reducer("state-plugin", &["state.event"]);
@@ -649,7 +720,12 @@ mod tests {
             stop: StopCondition::MaxTicks(3),
             store_config: StoreConfig::Memory,
         });
-        exp.register(&plugin, Some(Box::new(CountReducer)), Some(Box::new(driver))).unwrap();
+        exp.register(
+            &plugin,
+            Some(Box::new(CountReducer)),
+            Some(Box::new(driver)),
+        )
+        .unwrap();
 
         let result = exp.run().unwrap();
         assert_eq!(result.ticks, 3);
@@ -657,6 +733,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn fixed_driver_name_is_fixed() {
         let entity = EntityId::new();
         let driver = FixedDriver::new(entity, "tick.event", 1);
@@ -664,6 +741,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn experiment_branch_creates_fork() {
         let entity = EntityId::new();
         let plugin = make_plugin("branch-ticker", &["branch.event"]);
@@ -688,7 +766,9 @@ mod tests {
         let plugin2 = make_plugin("branch-ticker2", &["branch2.event"]);
         let driver2 = FixedDriver::new(entity, "branch2.event", 1);
         let mut exp2_mut = exp2;
-        exp2_mut.register(&plugin2, None, Some(Box::new(driver2))).unwrap();
+        exp2_mut
+            .register(&plugin2, None, Some(Box::new(driver2)))
+            .unwrap();
 
         // Consume the experiment and get a store back via run, then re-use the
         // branch logic through a manual store path.
@@ -699,6 +779,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn experiment_branch_missing_timeline_returns_err() {
         let exp = Experiment::new(ExperimentConfig {
             name: "nonexistent".to_owned(),
@@ -711,13 +792,20 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn idle_driver_name_is_idle() {
         // Exercises the fn name() on the IdleDriver struct defined below — which is
         // a local struct and its name() is never called in experiment_empty_driver_terminates.
         struct IdleDriver2;
         impl Driver for IdleDriver2 {
-            fn name(&self) -> &'static str { "idle2" }
-            fn step(&mut self, _: &dyn pos_core::store::EventStore, _: pos_core::ids::TimelineId) -> Result<StepOutput, RuntimeError> {
+            fn name(&self) -> &'static str {
+                "idle2"
+            }
+            fn step(
+                &mut self,
+                _: &dyn pos_core::store::EventStore,
+                _: pos_core::ids::TimelineId,
+            ) -> Result<StepOutput, RuntimeError> {
                 Ok(StepOutput::empty())
             }
         }
@@ -731,11 +819,20 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn bad_driver_name_is_bad() {
-        struct BadDriver2 { entity: EntityId }
+        struct BadDriver2 {
+            entity: EntityId,
+        }
         impl Driver for BadDriver2 {
-            fn name(&self) -> &'static str { "bad2" }
-            fn step(&mut self, _: &dyn pos_core::store::EventStore, _: pos_core::ids::TimelineId) -> Result<StepOutput, RuntimeError> {
+            fn name(&self) -> &'static str {
+                "bad2"
+            }
+            fn step(
+                &mut self,
+                _: &dyn pos_core::store::EventStore,
+                _: pos_core::ids::TimelineId,
+            ) -> Result<StepOutput, RuntimeError> {
                 let draft = EventDraft::new(
                     self.entity,
                     Kind::new("known.event"),
@@ -755,6 +852,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn fixed_driver_exhaust_remaining_ticks() {
         // Drive FixedDriver.with_max_ticks(1) for 2 ticks — second tick hits the
         // `*remaining == 0` branch (line 259) and returns empty.
@@ -774,6 +872,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_result_has_manifest() {
         let entity = EntityId::new();
         let plugin = make_plugin("manifest-plugin", &["manifest.event"]);
@@ -792,6 +891,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_result_has_real_head_hash_after_events() {
         let entity = EntityId::new();
         let plugin = make_plugin("hash-plugin", &["hash.event"]);
@@ -810,6 +910,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_result_head_hash_is_zero_when_no_events() {
         let exp = Experiment::new(ExperimentConfig {
             name: "zero-hash-test".to_owned(),
@@ -823,6 +924,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_result_has_projections() {
         let entity = EntityId::new();
         let plugin = make_plugin_with_reducer("proj-plugin", &["proj.event"]);
@@ -833,11 +935,17 @@ mod tests {
             stop: StopCondition::MaxTicks(3),
             store_config: StoreConfig::Memory,
         });
-        exp.register(&plugin, Some(Box::new(CountReducer)), Some(Box::new(driver))).unwrap();
+        exp.register(
+            &plugin,
+            Some(Box::new(CountReducer)),
+            Some(Box::new(driver)),
+        )
+        .unwrap();
 
         let result = exp.run().unwrap();
         // state_for returns from the first reducer ("proj-plugin")
-        let n = result.projections
+        let n = result
+            .projections
             .state_for(&entity)
             .and_then(|s| s.get("n"))
             .and_then(serde_json::Value::as_u64)
@@ -846,13 +954,15 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_result_branch_creates_fork() {
         let entity = EntityId::new();
         let plugin = make_plugin("branch-result", &["branch.event"]);
         let driver = FixedDriver::new(entity, "branch.event", 1);
 
         // Use SQLite for persistence so branch() can reopen the store
-        let tmp = std::env::temp_dir().join(format!("pos-test-{}.db", pos_core::ids::EntityId::new()));
+        let tmp =
+            std::env::temp_dir().join(format!("pos-test-{}.db", pos_core::ids::EntityId::new()));
         let path = tmp.to_str().unwrap().to_owned();
 
         let mut exp = Experiment::new(ExperimentConfig {
@@ -874,6 +984,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_result_branch_missing_timeline_returns_err() {
         // Create a result with Memory store, but timeline won't persist
         let result = RunResult {
@@ -894,6 +1005,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_result_has_store_config() {
         let entity = EntityId::new();
         let plugin = make_plugin("config-plugin", &["config.event"]);
@@ -912,6 +1024,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_result_manifest_has_plugin_versions() {
         let entity = EntityId::new();
         let plugin = make_plugin("manifest-plugin", &["manifest.event"]);
@@ -927,11 +1040,18 @@ mod tests {
 
         // Manifest should have plugin_versions populated
         assert!(!result.manifest.plugin_versions.is_empty());
-        assert!(result.manifest.plugin_versions.contains_key("manifest-plugin"));
-        assert_eq!(result.manifest.plugin_versions.get("manifest-plugin"), Some(&"0.1.0".to_owned()));
+        assert!(result
+            .manifest
+            .plugin_versions
+            .contains_key("manifest-plugin"));
+        assert_eq!(
+            result.manifest.plugin_versions.get("manifest-plugin"),
+            Some(&"0.1.0".to_owned())
+        );
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_result_manifest_has_adapter_records() {
         let entity = EntityId::new();
         let plugin = make_plugin("adapter-plugin", &["adapter.event"]);
@@ -950,10 +1070,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn chain_head_hash_matches_manual_blake3() {
         // Verify that chain_head is actually BLAKE3 of all payload hashes concatenated.
-        use pos_store::{open_store, StoreConfig};
         use pos_store::SeqRange;
+        use pos_store::{open_store, StoreConfig};
 
         let entity = EntityId::new();
         let plugin = make_plugin("chain-plugin", &["chain.event"]);
@@ -973,11 +1094,11 @@ mod tests {
         let plugin2 = make_plugin("chain-plugin2", &["chain2.event"]);
         let driver2 = FixedDriver::new(entity, "chain2.event", 2);
         let mut reg = PluginRegistry::new();
-        reg.register(&plugin2, None, Some(Box::new(driver2))).unwrap();
+        reg.register(&plugin2, None, Some(Box::new(driver2)))
+            .unwrap();
         let stop = StopCondition::MaxTicks(2);
-        let (_, _, chain_head) = run_experiment_on_store(
-            store.as_mut(), tl.id(), &stop, &mut reg,
-        ).unwrap();
+        let (_, _, chain_head) =
+            run_experiment_on_store(store.as_mut(), tl.id(), &stop, &mut reg).unwrap();
 
         // Manually compute expected hash
         let events = store.read(tl.id(), SeqRange::all()).unwrap();
@@ -999,11 +1120,12 @@ mod tests {
 #[cfg(test)]
 mod integration_tests {
     use super::*;
-    use pos_plugin_rule_agent::{RuleAgentPlugin, RuleAgentDriver, RuleAgentReducer};
-    use pos_plugin_synthetic_obs::{SyntheticObsPlugin, SyntheticDriver, SyntheticReducer};
     use pos_core::ids::EntityId;
+    use pos_plugin_rule_agent::{RuleAgentDriver, RuleAgentPlugin, RuleAgentReducer};
+    use pos_plugin_synthetic_obs::{SyntheticDriver, SyntheticObsPlugin, SyntheticReducer};
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn dual_plugin_compose_runs_and_projects_state() {
         let agent_entity = EntityId::new();
         let obs_entity = EntityId::new();
@@ -1020,23 +1142,38 @@ mod integration_tests {
         let agent_plugin = RuleAgentPlugin::new();
         let agent_driver = RuleAgentDriver::new(agent_entity, agent_plugin.actions().to_vec());
         let agent_reducer = RuleAgentReducer;
-        exp.register(&agent_plugin, Some(Box::new(agent_reducer)), Some(Box::new(agent_driver))).unwrap();
+        exp.register(
+            &agent_plugin,
+            Some(Box::new(agent_reducer)),
+            Some(Box::new(agent_driver)),
+        )
+        .unwrap();
 
         // Register synthetic-obs plugin
         let obs_plugin = SyntheticObsPlugin::new();
         let obs_driver = SyntheticDriver::new(obs_entity);
         let obs_reducer = SyntheticReducer;
-        exp.register(&obs_plugin, Some(Box::new(obs_reducer)), Some(Box::new(obs_driver))).unwrap();
+        exp.register(
+            &obs_plugin,
+            Some(Box::new(obs_reducer)),
+            Some(Box::new(obs_driver)),
+        )
+        .unwrap();
 
         let result = exp.run().unwrap();
 
         // 5 ticks × 2 plugins = 10 events minimum
-        assert!(result.total_events >= 10, "expected at least 10 events, got {}", result.total_events);
+        assert!(
+            result.total_events >= 10,
+            "expected at least 10 events, got {}",
+            result.total_events
+        );
         assert_eq!(result.ticks, 5);
 
         // Verify agent state was projected (decision count should be 5)
         // rule-agent is first registered reducer → state_for_reducer("rule-agent", ...)
-        let decisions = result.projections
+        let decisions = result
+            .projections
             .state_for_reducer("rule-agent", &agent_entity)
             .and_then(|s| s.get("decisions"))
             .and_then(serde_json::Value::as_u64)
@@ -1044,7 +1181,8 @@ mod integration_tests {
         assert_eq!(decisions, 5, "expected 5 decisions projected");
 
         // Verify obs state was projected (observation count should be 5)
-        let obs_count = result.projections
+        let obs_count = result
+            .projections
             .state_for_reducer("synthetic-obs", &obs_entity)
             .and_then(|s| s.get("observations"))
             .and_then(serde_json::Value::as_u64)
@@ -1062,8 +1200,12 @@ mod backtest_tests {
     }
 
     impl pos_core::Plugin for BtPlugin {
-        fn id(&self) -> pos_core::ids::PluginId { self.id }
-        fn name(&self) -> &'static str { "bt-plugin" }
+        fn id(&self) -> pos_core::ids::PluginId {
+            self.id
+        }
+        fn name(&self) -> &'static str {
+            "bt-plugin"
+        }
         fn capability(&self) -> pos_core::Capability {
             pos_core::Capability {
                 owned_event_types: vec![pos_core::event::Kind::new("bt.tick")],
@@ -1074,9 +1216,13 @@ mod backtest_tests {
         }
     }
 
-    struct BtDriver { entity: pos_core::ids::EntityId }
+    struct BtDriver {
+        entity: pos_core::ids::EntityId,
+    }
     impl pos_runtime::Driver for BtDriver {
-        fn name(&self) -> &'static str { "bt-driver" }
+        fn name(&self) -> &'static str {
+            "bt-driver"
+        }
         fn step(
             &mut self,
             _: &dyn pos_core::store::EventStore,
@@ -1095,7 +1241,9 @@ mod backtest_tests {
         use pos_runtime::Driver as _;
         use pos_store::{open_store, StoreConfig};
         let entity = pos_core::ids::EntityId::new();
-        let plugin = BtPlugin { id: pos_core::ids::PluginId::new() };
+        let plugin = BtPlugin {
+            id: pos_core::ids::PluginId::new(),
+        };
         let mut driver = BtDriver { entity };
         assert_eq!(driver.name(), "bt-driver"); // force coverage of fn name()
         let store = open_store(StoreConfig::Memory).unwrap();
@@ -1107,6 +1255,7 @@ mod backtest_tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn backtest_runner_train_then_eval() {
         let config = BacktestConfig {
             experiment_name: "bt-test".to_owned(),
@@ -1123,13 +1272,17 @@ mod backtest_tests {
         assert_eq!(result.train_events, 3);
         assert_eq!(result.eval_events, 2);
         // Train and eval timelines are independent (forked, so different IDs)
-        assert_ne!(result.train_result.timeline_id, result.eval_result.timeline_id);
+        assert_ne!(
+            result.train_result.timeline_id,
+            result.eval_result.timeline_id
+        );
         // Lift metrics should be populated
         assert!(result.train_avg_events_per_tick > 0.0);
         assert!(result.eval_avg_events_per_tick > 0.0);
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn backtest_runner_zero_eval_ticks() {
         let config = BacktestConfig {
             experiment_name: "bt-zero-eval".to_owned(),
@@ -1149,12 +1302,19 @@ mod backtest_tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn backtest_runner_zero_train_events_gives_zero_lift() {
         // When train produces no events (0 train_ticks), all lift metrics should be 0.
-        struct EmptyPlugin { id: pos_core::ids::PluginId }
+        struct EmptyPlugin {
+            id: pos_core::ids::PluginId,
+        }
         impl pos_core::Plugin for EmptyPlugin {
-            fn id(&self) -> pos_core::ids::PluginId { self.id }
-            fn name(&self) -> &'static str { "empty-plugin" }
+            fn id(&self) -> pos_core::ids::PluginId {
+                self.id
+            }
+            fn name(&self) -> &'static str {
+                "empty-plugin"
+            }
             fn capability(&self) -> pos_core::Capability {
                 pos_core::Capability {
                     owned_event_types: vec![],
@@ -1172,7 +1332,9 @@ mod backtest_tests {
             store_config: pos_store::StoreConfig::Memory,
         };
         let runner = BacktestRunner::new(config, || {
-            let plugin = EmptyPlugin { id: pos_core::ids::PluginId::new() };
+            let plugin = EmptyPlugin {
+                id: pos_core::ids::PluginId::new(),
+            };
             let mut reg = pos_runtime::PluginRegistry::new();
             reg.register(&plugin, None, None).unwrap();
             reg
@@ -1187,6 +1349,7 @@ mod backtest_tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn backtest_runner_persistence_lift_computed() {
         // train=4 events over 4 ticks, eval=2 events over 2 ticks
         // persistence_lift = 2/4 = 0.5
@@ -1205,17 +1368,29 @@ mod backtest_tests {
         assert_eq!(result.eval_events, 2);
         let expected_persistence_lift = 2.0_f64 / 4.0_f64;
         let diff = (result.persistence_lift - expected_persistence_lift).abs();
-        assert!(diff < 1e-10, "persistence_lift={}, expected={expected_persistence_lift}", result.persistence_lift);
+        assert!(
+            diff < 1e-10,
+            "persistence_lift={}, expected={expected_persistence_lift}",
+            result.persistence_lift
+        );
         // train_avg = 1.0, eval_avg = 1.0 → lift_vs_persistence = 0.0
         let diff2 = result.lift_vs_persistence.abs();
-        assert!(diff2 < 1e-10, "lift_vs_persistence should be ~0, got {}", result.lift_vs_persistence);
+        assert!(
+            diff2 < 1e-10,
+            "lift_vs_persistence should be ~0, got {}",
+            result.lift_vs_persistence
+        );
     }
 
     // ---------- helper structs for error-propagation tests -------------------
 
-    struct BadBtDriver { entity: pos_core::ids::EntityId }
+    struct BadBtDriver {
+        entity: pos_core::ids::EntityId,
+    }
     impl pos_runtime::Driver for BadBtDriver {
-        fn name(&self) -> &'static str { "bad-bt-driver" }
+        fn name(&self) -> &'static str {
+            "bad-bt-driver"
+        }
         fn step(
             &mut self,
             _: &dyn pos_core::store::EventStore,
@@ -1233,7 +1408,9 @@ mod backtest_tests {
 
     struct GoodBtDriver;
     impl pos_runtime::Driver for GoodBtDriver {
-        fn name(&self) -> &'static str { "good-bt-driver" }
+        fn name(&self) -> &'static str {
+            "good-bt-driver"
+        }
         fn step(
             &mut self,
             _: &dyn pos_core::store::EventStore,
@@ -1243,9 +1420,13 @@ mod backtest_tests {
         }
     }
 
-    struct BadEvalDriver { entity: pos_core::ids::EntityId }
+    struct BadEvalDriver {
+        entity: pos_core::ids::EntityId,
+    }
     impl pos_runtime::Driver for BadEvalDriver {
-        fn name(&self) -> &'static str { "bad-eval-driver" }
+        fn name(&self) -> &'static str {
+            "bad-eval-driver"
+        }
         fn step(
             &mut self,
             _: &dyn pos_core::store::EventStore,
@@ -1264,6 +1445,7 @@ mod backtest_tests {
     // --------------------------------------------------------------------------
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn helper_driver_names_are_correct() {
         use pos_runtime::Driver as _;
         // Cover fn name() on the helper drivers to get 100% line coverage.
@@ -1280,6 +1462,7 @@ mod backtest_tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn backtest_runner_train_phase_error_propagates() {
         // Cover the `?` error branch on the train phase run_experiment_on_store call.
         // A driver that emits an unknown event type causes a schema validation error.
@@ -1291,21 +1474,31 @@ mod backtest_tests {
             store_config: pos_store::StoreConfig::Memory,
         };
         let runner = BacktestRunner::new(config, move || {
-            let plugin = BtPlugin { id: pos_core::ids::PluginId::new() };
+            let plugin = BtPlugin {
+                id: pos_core::ids::PluginId::new(),
+            };
             let mut reg = pos_runtime::PluginRegistry::new();
-            reg.register(&plugin, None, Some(Box::new(BadBtDriver { entity }))).unwrap();
+            reg.register(&plugin, None, Some(Box::new(BadBtDriver { entity })))
+                .unwrap();
             reg
         });
         let err = runner.run();
-        assert!(err.is_err(), "expected error from bad driver in train phase");
+        assert!(
+            err.is_err(),
+            "expected error from bad driver in train phase"
+        );
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn backtest_runner_eval_phase_error_propagates() {
         // Cover the `?` error branch on the eval phase run_experiment_on_store call.
         // Train phase has 0 ticks so no events → no error.
         // Eval phase uses a bad driver that emits an unregistered event type.
-        use std::sync::{Arc, atomic::{AtomicU32, Ordering}};
+        use std::sync::{
+            atomic::{AtomicU32, Ordering},
+            Arc,
+        };
 
         let entity = pos_core::ids::EntityId::new();
         let call_count = Arc::new(AtomicU32::new(0));
@@ -1317,16 +1510,573 @@ mod backtest_tests {
         };
         let runner = BacktestRunner::new(config, move || {
             let n = call_count.fetch_add(1, Ordering::SeqCst);
-            let plugin = BtPlugin { id: pos_core::ids::PluginId::new() };
+            let plugin = BtPlugin {
+                id: pos_core::ids::PluginId::new(),
+            };
             let mut reg = pos_runtime::PluginRegistry::new();
             if n == 0 {
-                reg.register(&plugin, None, Some(Box::new(GoodBtDriver))).unwrap();
+                reg.register(&plugin, None, Some(Box::new(GoodBtDriver)))
+                    .unwrap();
             } else {
-                reg.register(&plugin, None, Some(Box::new(BadEvalDriver { entity }))).unwrap();
+                reg.register(&plugin, None, Some(Box::new(BadEvalDriver { entity })))
+                    .unwrap();
             }
             reg
         });
         let err = runner.run();
         assert!(err.is_err(), "expected error from bad driver in eval phase");
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod fault_injection_tests {
+    use super::*;
+    use pos_core::{
+        event::{CanonicalBytes, EventDraft, Kind},
+        ids::{EntityId, PluginId},
+        Capability, Plugin,
+    };
+    use pos_runtime::{Driver, RuntimeError, StepOutput};
+    use pos_store::{open_store, StoreConfig};
+    use rusqlite::Connection;
+
+    fn drop_table(path: &str, table: &str) {
+        let conn = Connection::open(path).expect("open sqlite for corruption");
+        conn.execute(&format!("DROP TABLE {table}"), [])
+            .expect("drop table");
+    }
+
+    #[cfg(unix)]
+    fn set_readonly(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn set_writable(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn readonly_db(path: &std::path::Path) {
+        let mut store = open_store(StoreConfig::Sqlite {
+            path: path.to_str().unwrap().to_owned(),
+        })
+        .unwrap();
+        store.create_timeline("seed").unwrap();
+        drop(store);
+        set_readonly(path);
+    }
+
+    struct FaultPlugin {
+        id: PluginId,
+        event_type: Kind,
+    }
+
+    impl Plugin for FaultPlugin {
+        fn id(&self) -> PluginId {
+            self.id
+        }
+        fn name(&self) -> &'static str {
+            "fault-plugin"
+        }
+        fn capability(&self) -> Capability {
+            Capability {
+                owned_event_types: vec![self.event_type.clone()],
+                owned_entity_kinds: vec![],
+                has_driver: true,
+                has_reducer: false,
+            }
+        }
+    }
+
+    struct EmitDriver {
+        entity: EntityId,
+        event_type: Kind,
+    }
+
+    impl Driver for EmitDriver {
+        fn name(&self) -> &'static str {
+            "emit"
+        }
+        fn step(
+            &mut self,
+            _: &dyn pos_core::store::EventStore,
+            _: pos_core::ids::TimelineId,
+        ) -> Result<StepOutput, RuntimeError> {
+            let draft = EventDraft::new(
+                self.entity,
+                self.event_type.clone(),
+                CanonicalBytes::from_vec(vec![]),
+            );
+            Ok(StepOutput::new(vec![draft]))
+        }
+    }
+
+    struct BadEmitDriver {
+        entity: EntityId,
+    }
+
+    struct FailStepDriver;
+
+    impl Driver for FailStepDriver {
+        fn name(&self) -> &'static str {
+            "fail-step"
+        }
+        fn step(
+            &mut self,
+            _: &dyn pos_core::store::EventStore,
+            _: pos_core::ids::TimelineId,
+        ) -> Result<StepOutput, RuntimeError> {
+            Err(RuntimeError::UnknownEventType(
+                "driver.step.failed".to_owned(),
+            ))
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fault_injection_driver_methods_are_exercised() {
+        use pos_runtime::Driver as _;
+        let entity = EntityId::new();
+        let event_type = Kind::new("fault.tick");
+        let mut emit = EmitDriver {
+            entity,
+            event_type: event_type.clone(),
+        };
+        assert_eq!(emit.name(), "emit");
+        let mut bad = BadEmitDriver { entity };
+        assert_eq!(bad.name(), "bad-emit");
+        let mut fail = FailStepDriver;
+        assert_eq!(fail.name(), "fail-step");
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let tl = store.create_timeline("driver-methods").unwrap();
+        assert!(!emit
+            .step(store.as_ref(), tl.id())
+            .unwrap()
+            .drafts
+            .is_empty());
+        assert!(!bad.step(store.as_ref(), tl.id()).unwrap().drafts.is_empty());
+        assert!(fail.step(store.as_ref(), tl.id()).is_err());
+    }
+
+    impl Driver for BadEmitDriver {
+        fn name(&self) -> &'static str {
+            "bad-emit"
+        }
+        fn step(
+            &mut self,
+            _: &dyn pos_core::store::EventStore,
+            _: pos_core::ids::TimelineId,
+        ) -> Result<StepOutput, RuntimeError> {
+            let draft = EventDraft::new(
+                self.entity,
+                Kind::new("unregistered.event"),
+                CanonicalBytes::from_vec(vec![]),
+            );
+            Ok(StepOutput::new(vec![draft]))
+        }
+    }
+
+    fn registry_with_emit_driver() -> pos_runtime::PluginRegistry {
+        let entity = EntityId::new();
+        let event_type = Kind::new("fault.tick");
+        let plugin = FaultPlugin {
+            id: PluginId::new(),
+            event_type: event_type.clone(),
+        };
+        let mut reg = pos_runtime::PluginRegistry::new();
+        reg.register(
+            &plugin,
+            None,
+            Some(Box::new(EmitDriver { entity, event_type })),
+        )
+        .unwrap();
+        reg
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn run_result_branch_open_store_fails_on_directory_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = RunResult {
+            timeline_id: pos_core::ids::TimelineId::new(),
+            ticks: 0,
+            total_events: 0,
+            manifest: ReproManifest::new(
+                pos_core::ids::TimelineId::new(),
+                pos_core::crypto::Hash::zero(),
+                pos_core::clock::WallTime::from_micros(0),
+            ),
+            projections: pos_state::ProjectionRegistry::new(),
+            store_config: StoreConfig::Sqlite {
+                path: dir.path().to_str().unwrap().to_owned(),
+            },
+        };
+        assert!(result.branch("fork").is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn run_result_branch_list_timelines_fails_on_corrupt_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("branch.db");
+        let entity = EntityId::new();
+        let plugin = FaultPlugin {
+            id: PluginId::new(),
+            event_type: Kind::new("branch.tick"),
+        };
+        let mut exp = Experiment::new(ExperimentConfig {
+            name: "branch-fault".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Sqlite {
+                path: path.to_str().unwrap().to_owned(),
+            },
+        });
+        exp.register(
+            &plugin,
+            None,
+            Some(Box::new(EmitDriver {
+                entity,
+                event_type: Kind::new("branch.tick"),
+            })),
+        )
+        .unwrap();
+        let result = exp.run().unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("UPDATE timelines SET name = X'0102'", [])
+            .unwrap();
+        assert!(result.branch("child").is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn run_experiment_on_store_step_all_error_propagates() {
+        let entity = EntityId::new();
+        let plugin = FaultPlugin {
+            id: PluginId::new(),
+            event_type: Kind::new("known.event"),
+        };
+        let mut reg = pos_runtime::PluginRegistry::new();
+        reg.register(&plugin, None, Some(Box::new(BadEmitDriver { entity })))
+            .unwrap();
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let tl = store.create_timeline("fault").unwrap();
+        let err = run_experiment_on_store(
+            store.as_mut(),
+            tl.id(),
+            &StopCondition::MaxTicks(1),
+            &mut reg,
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn run_experiment_on_store_driver_step_error_propagates() {
+        let plugin = FaultPlugin {
+            id: PluginId::new(),
+            event_type: Kind::new("known.event"),
+        };
+        let mut reg = pos_runtime::PluginRegistry::new();
+        reg.register(&plugin, None, Some(Box::new(FailStepDriver)))
+            .unwrap();
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let tl = store.create_timeline("step-fault").unwrap();
+        let err = run_experiment_on_store(
+            store.as_mut(),
+            tl.id(),
+            &StopCondition::MaxTicks(1),
+            &mut reg,
+        );
+        assert!(matches!(err, Err(ExperimentError::Runtime(_))));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn run_experiment_on_store_append_fails_when_events_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("append.db").to_str().unwrap().to_owned();
+        let mut store = open_store(StoreConfig::Sqlite { path }).unwrap();
+        let tl = store.create_timeline("append-fault").unwrap();
+        drop_table(dir.path().join("append.db").to_str().unwrap(), "events");
+        let mut reg = registry_with_emit_driver();
+        let err = run_experiment_on_store(
+            store.as_mut(),
+            tl.id(),
+            &StopCondition::MaxTicks(1),
+            &mut reg,
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn run_experiment_on_store_read_fails_when_events_dropped_mid_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("read.db").to_str().unwrap().to_owned();
+        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
+        let tl = store.create_timeline("read-fault").unwrap();
+        let entity = EntityId::new();
+        let event_type = Kind::new("read.tick");
+        let plugin = FaultPlugin {
+            id: PluginId::new(),
+            event_type: event_type.clone(),
+        };
+        let mut reg = pos_runtime::PluginRegistry::new();
+        reg.register(
+            &plugin,
+            None,
+            Some(Box::new(EmitDriver { entity, event_type })),
+        )
+        .unwrap();
+        let drafts = reg.step_all(store.as_mut(), tl.id()).unwrap();
+        reg.schemas.validate_batch(&drafts).unwrap();
+        store.append(tl.id(), &drafts).unwrap();
+        drop_table(&path, "events");
+        let err = run_experiment_on_store(
+            store.as_mut(),
+            tl.id(),
+            &StopCondition::MaxTicks(0),
+            &mut reg,
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn experiment_run_open_store_fails_on_directory_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let exp = Experiment::new(ExperimentConfig {
+            name: "open-fault".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Sqlite {
+                path: dir.path().to_str().unwrap().to_owned(),
+            },
+        });
+        assert!(exp.run().is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn experiment_run_create_timeline_fails_on_readonly_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("create.db");
+        readonly_db(&path);
+        let entity = EntityId::new();
+        let plugin = FaultPlugin {
+            id: PluginId::new(),
+            event_type: Kind::new("create.tick"),
+        };
+        let mut exp = Experiment::new(ExperimentConfig {
+            name: "create-fault".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Sqlite {
+                path: path.to_str().unwrap().to_owned(),
+            },
+        });
+        exp.register(
+            &plugin,
+            None,
+            Some(Box::new(EmitDriver {
+                entity,
+                event_type: Kind::new("create.tick"),
+            })),
+        )
+        .unwrap();
+        let result = exp.run();
+        set_writable(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn run_result_branch_fork_fails_on_readonly_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("branch-fork.db");
+        let entity = EntityId::new();
+        let plugin = FaultPlugin {
+            id: PluginId::new(),
+            event_type: Kind::new("branch.tick"),
+        };
+        let mut exp = Experiment::new(ExperimentConfig {
+            name: "branch-fault".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Sqlite {
+                path: path.to_str().unwrap().to_owned(),
+            },
+        });
+        exp.register(
+            &plugin,
+            None,
+            Some(Box::new(EmitDriver {
+                entity,
+                event_type: Kind::new("branch.tick"),
+            })),
+        )
+        .unwrap();
+        let result = exp.run().unwrap();
+        set_readonly(&path);
+        let err = result.branch("child");
+        set_writable(&path);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn experiment_branch_list_timelines_fails_on_corrupt_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exp-branch-list.db");
+        let entity = EntityId::new();
+        let plugin = FaultPlugin {
+            id: PluginId::new(),
+            event_type: Kind::new("exp-branch.tick"),
+        };
+        let mut exp = Experiment::new(ExperimentConfig {
+            name: "exp-branch-list".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Sqlite {
+                path: path.to_str().unwrap().to_owned(),
+            },
+        });
+        exp.register(
+            &plugin,
+            None,
+            Some(Box::new(EmitDriver {
+                entity,
+                event_type: Kind::new("exp-branch.tick"),
+            })),
+        )
+        .unwrap();
+        let _ = exp.run().unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("UPDATE timelines SET name = X'0102'", [])
+            .unwrap();
+        let exp2 = Experiment::new(ExperimentConfig {
+            name: "exp-branch-list".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Sqlite {
+                path: path.to_str().unwrap().to_owned(),
+            },
+        });
+        let mut store = open_store(StoreConfig::Sqlite {
+            path: path.to_str().unwrap().to_owned(),
+        })
+        .unwrap();
+        assert!(exp2.branch("child", store.as_mut()).is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn experiment_branch_fork_fails_on_readonly_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exp-branch.db");
+        let entity = EntityId::new();
+        let plugin = FaultPlugin {
+            id: PluginId::new(),
+            event_type: Kind::new("exp-branch.tick"),
+        };
+        let mut exp = Experiment::new(ExperimentConfig {
+            name: "exp-branch-fault".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Sqlite {
+                path: path.to_str().unwrap().to_owned(),
+            },
+        });
+        exp.register(
+            &plugin,
+            None,
+            Some(Box::new(EmitDriver {
+                entity,
+                event_type: Kind::new("exp-branch.tick"),
+            })),
+        )
+        .unwrap();
+        let _ = exp.run().unwrap();
+        set_readonly(&path);
+        let exp2 = Experiment::new(ExperimentConfig {
+            name: "exp-branch-fault".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Sqlite {
+                path: path.to_str().unwrap().to_owned(),
+            },
+        });
+        let mut store = open_store(StoreConfig::Sqlite {
+            path: path.to_str().unwrap().to_owned(),
+        })
+        .unwrap();
+        let err = exp2.branch("child", store.as_mut());
+        set_writable(&path);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn backtest_runner_open_store_fails_on_directory_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = BacktestConfig {
+            experiment_name: "bt-open-fault".to_owned(),
+            train_ticks: 1,
+            eval_ticks: 1,
+            store_config: StoreConfig::Sqlite {
+                path: dir.path().to_str().unwrap().to_owned(),
+            },
+        };
+        let runner = BacktestRunner::new(config, registry_with_emit_driver);
+        assert!(runner.run().is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn backtest_runner_create_timeline_fails_on_readonly_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bt-create.db");
+        readonly_db(&path);
+        let config = BacktestConfig {
+            experiment_name: "bt-create-fault".to_owned(),
+            train_ticks: 1,
+            eval_ticks: 0,
+            store_config: StoreConfig::Sqlite {
+                path: path.to_str().unwrap().to_owned(),
+            },
+        };
+        let runner = BacktestRunner::new(config, registry_with_emit_driver);
+        let result = runner.run();
+        set_writable(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn backtest_runner_list_timelines_fails_on_corrupt_timeline_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bt-list.db");
+        let path_str = path.to_str().unwrap().to_owned();
+        let config = BacktestConfig {
+            experiment_name: "bt-list-fault".to_owned(),
+            train_ticks: 1,
+            eval_ticks: 0,
+            store_config: StoreConfig::Sqlite {
+                path: path_str.clone(),
+            },
+        };
+        let runner = BacktestRunner::new(config, registry_with_emit_driver);
+        let _ = runner.run().unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE timelines SET name = X'0102' WHERE name LIKE '%-train'",
+            [],
+        )
+        .unwrap();
+        let config2 = BacktestConfig {
+            experiment_name: "bt-list-fault-2".to_owned(),
+            train_ticks: 1,
+            eval_ticks: 0,
+            store_config: StoreConfig::Sqlite { path: path_str },
+        };
+        let runner2 = BacktestRunner::new(config2, registry_with_emit_driver);
+        assert!(runner2.run().is_err());
     }
 }

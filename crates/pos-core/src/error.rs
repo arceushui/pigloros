@@ -35,6 +35,7 @@ mod tests {
     use crate::ids::TimelineId;
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn timeline_not_found_displays() {
         let id = TimelineId::new();
         let e = CoreError::TimelineNotFound(id);
@@ -42,6 +43,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn seq_out_of_range_displays() {
         let e = CoreError::SeqOutOfRange {
             requested: 100,
@@ -52,6 +54,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn fork_beyond_head_displays() {
         let e = CoreError::ForkBeyondHead {
             fork_seq: 99,
@@ -61,30 +64,35 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn storage_error_displays() {
         let e = CoreError::Storage("disk full".to_owned());
         assert!(e.to_string().contains("disk full"));
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn serialization_error_displays() {
         let e = CoreError::Serialization("bad cbor".to_owned());
         assert!(e.to_string().contains("bad cbor"));
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn payload_too_large_displays() {
         let e = CoreError::PayloadTooLarge { size: 1024 };
         assert!(e.to_string().contains("1024"));
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn signature_verification_failed_displays() {
         let e = CoreError::SignatureVerificationFailed;
         assert!(e.to_string().contains("verification failed"));
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn hash_chain_broken_displays() {
         let e = CoreError::HashChainBroken { seq: 7 };
         assert!(e.to_string().contains('7'));

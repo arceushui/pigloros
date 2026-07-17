@@ -9,11 +9,7 @@ use pos_core::{CanonicalBytes, Hash};
 /// Compute the BLAKE3 hash for a single event's entry in the chain.
 ///
 /// Input: `previous_hash || event_id_bytes || payload_bytes`
-pub fn hash_event(
-    previous_hash: &Hash,
-    event_id_bytes: &[u8],
-    payload: &CanonicalBytes,
-) -> Hash {
+pub fn hash_event(previous_hash: &Hash, event_id_bytes: &[u8], payload: &CanonicalBytes) -> Hash {
     let mut hasher = Hasher::new();
     hasher.update(previous_hash.as_bytes());
     hasher.update(event_id_bytes);
@@ -50,7 +46,7 @@ pub fn verify_chain<'a>(
 }
 
 /// An all-zeros genesis hash for the start of a new timeline.
-#[must_use] 
+#[must_use]
 pub const fn genesis_hash() -> Hash {
     Hash::zero()
 }
@@ -68,6 +64,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn hash_event_is_deterministic() {
         let prev = genesis_hash();
         let eid = id(1);
@@ -78,6 +75,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn different_payloads_produce_different_hashes() {
         let prev = genesis_hash();
         let eid = id(1);
@@ -87,6 +85,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn different_event_ids_produce_different_hashes() {
         let prev = genesis_hash();
         let p = payload(b"same");
@@ -96,6 +95,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn different_previous_hashes_produce_different_hashes() {
         let prev1 = Hash::from_bytes([1u8; 32]);
         let prev2 = Hash::from_bytes([2u8; 32]);
@@ -107,6 +107,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn verify_chain_accepts_intact_chain() {
         let g = genesis_hash();
         let eid1 = id(1);
@@ -117,15 +118,14 @@ mod tests {
         let h1 = hash_event(&g, &eid1, &p1);
         let h2 = hash_event(&h1, &eid2, &p2);
 
-        let entries: Vec<(&[u8], &CanonicalBytes, &Hash)> = vec![
-            (&eid1, &p1, &h1),
-            (&eid2, &p2, &h2),
-        ];
+        let entries: Vec<(&[u8], &CanonicalBytes, &Hash)> =
+            vec![(&eid1, &p1, &h1), (&eid2, &p2, &h2)];
         let result = verify_chain(&g, entries.into_iter());
         assert_eq!(result, Ok(h2));
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn verify_chain_detects_tampered_payload() {
         let g = genesis_hash();
         let eid1 = id(1);
@@ -147,6 +147,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn verify_chain_detects_tampered_middle_event() {
         let g = genesis_hash();
         let eids: Vec<Vec<u8>> = (0..4u8).map(id).collect();
@@ -163,7 +164,7 @@ mod tests {
         let entries: Vec<(&[u8], &CanonicalBytes, &Hash)> = vec![
             (&eids[0], &payloads[0], &hashes[1]),
             (&eids[1], &payloads[1], &hashes[2]),
-            (&eids[2], &tampered, &hashes[3]),  // tampered payload, stale hash
+            (&eids[2], &tampered, &hashes[3]), // tampered payload, stale hash
             (&eids[3], &payloads[3], &hashes[4]),
         ];
         let result = verify_chain(&g, entries.into_iter());
@@ -171,6 +172,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn verify_empty_chain_returns_genesis() {
         let g = genesis_hash();
         let result = verify_chain(&g, std::iter::empty());
@@ -178,18 +180,21 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn hash_payload_is_deterministic() {
         let p = payload(b"test data");
         assert_eq!(hash_payload(&p), hash_payload(&p));
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn hash_payload_differs_for_different_payloads() {
         assert_ne!(hash_payload(&payload(b"a")), hash_payload(&payload(b"b")));
     }
 
     proptest::proptest! {
         #[test]
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn hash_event_is_sensitive_to_payload_changes(data: Vec<u8>, extra: u8) {
             let prev = genesis_hash();
             let eid = id(1);

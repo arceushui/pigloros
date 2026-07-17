@@ -7,14 +7,13 @@
 //! Composes persona + eval (+ geo cloaking) and proves a closed calibration loop:
 //! persona decisions emit matched `eval.prediction` / `eval.outcome` pairs so
 //! [`pos_plugin_eval::compute_report`] yields `n_resolved > 0`.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use pos_core::ids::EntityId;
 use pos_experiment::{BacktestConfig, BacktestRunner};
 use pos_plugin_eval::{EvalPlugin, EvalReducer};
 use pos_plugin_geo::{GeoPlugin, GeoReducer, SpatialCloaker};
-use pos_plugin_persona::{
-    PersonaEvalDriver, PersonaModel, PersonaPlugin, PersonaReducer,
-};
+use pos_plugin_persona::{PersonaEvalDriver, PersonaModel, PersonaPlugin, PersonaReducer};
 use pos_runtime::PluginRegistry;
 use pos_store::StoreConfig;
 
@@ -103,10 +102,7 @@ fn main() {
     println!("  n_resolved:    {}", report.n_resolved);
     println!("  brier_score:   {:.4}", report.brier_score);
     println!("  ece:           {:.4}", report.ece);
-    println!(
-        "  lift_vs_persistence: {:.4}",
-        report.lift_vs_persistence
-    );
+    println!("  lift_vs_persistence: {:.4}", report.lift_vs_persistence);
     println!();
 
     assert!(
@@ -122,16 +118,15 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn mvp_smoke_test() {
-        let model = PersonaModel::new(vec![
-            ("nature".to_owned(), 0.8),
-            ("food".to_owned(), 0.9),
-        ]);
+        let model = PersonaModel::new(vec![("nature".to_owned(), 0.8), ("food".to_owned(), 0.9)]);
         let kyoto_score = model.score_option("kyoto nature");
         assert!(kyoto_score > 0.0);
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn mvp_backtest_resolves_predictions() {
         let config = BacktestConfig {
             experiment_name: "mvp-test".to_owned(),
@@ -149,6 +144,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn main_does_not_panic() {
         main();
     }

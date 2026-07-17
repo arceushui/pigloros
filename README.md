@@ -49,11 +49,22 @@ Wave 6 will add `bindings/piglor-py` (PyO3); that directory is not in-tree yet.
 
 ## Development
 
+Toolchain is pinned in `rust-toolchain.toml` (**1.94.1** + clippy / rustfmt / llvm-tools).
+
 ```bash
+# Full local CI parity (same gates as GitHub Actions — Redmine #100):
+./scripts/ci.sh
+
+# Or individually:
+cargo fmt --all -- --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings -W clippy::pedantic
-cargo llvm-cov --workspace --summary-only
+# Region coverage: tests use #[coverage(off)] under cfg(coverage_nightly); needs bootstrap:
+RUSTC_BOOTSTRAP=1 cargo llvm-cov --workspace --summary-only \
+  --fail-under-lines 100 --fail-under-regions 100
 ```
+
+CI (GitHub Actions): every PR and `main` run **fmt**, **test**, **clippy pedantic**, and **llvm-cov** with hard 100% line + region fail-under. See `.github/workflows/ci.yml`.
 
 Wave 1 stats: **193 tests · 0 failures · 100% line coverage · clippy clean**
 
@@ -63,4 +74,4 @@ Wave 3 stats: **272 tests · 0 failures · 100% production line coverage · clip
 
 Wave 4 stats: **359 tests · 0 failures · 100% line coverage · clippy pedantic clean**
 
-Wave 5 stats: **577 tests · 0 failures · 100% line coverage · clippy pedantic clean**
+Wave 5 stats: **718 tests · 0 failures · 100% line + region coverage · clippy pedantic clean**

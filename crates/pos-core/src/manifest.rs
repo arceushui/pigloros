@@ -31,7 +31,7 @@ pub struct ReproManifest {
 }
 
 impl ReproManifest {
-    #[must_use] 
+    #[must_use]
     pub fn new(timeline_id: TimelineId, head_hash: Hash, created_at: WallTime) -> Self {
         Self {
             timeline_id,
@@ -76,6 +76,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn manifest_json_round_trip() {
         let m = sample_manifest();
         let back: ReproManifest =
@@ -84,6 +85,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn manifest_cbor_round_trip() {
         let m = sample_manifest();
         let mut buf = Vec::new();
@@ -93,6 +95,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn adapter_record_json_round_trip() {
         let ar = AdapterRecord {
             plugin_id: PluginId::new(),
@@ -107,6 +110,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn manifest_with_adapter_records() {
         let mut m = sample_manifest();
         m.adapter_records.push(AdapterRecord {
@@ -122,12 +126,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn manifest_label_optional() {
-        let m = ReproManifest::new(
-            TimelineId::new(),
-            Hash::zero(),
-            WallTime::from_micros(0),
-        );
+        let m = ReproManifest::new(TimelineId::new(), Hash::zero(), WallTime::from_micros(0));
         assert!(m.label.is_none());
 
         let labeled = m.with_label("my-run");

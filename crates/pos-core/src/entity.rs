@@ -13,7 +13,7 @@ impl EntityKind {
         Self(s.into())
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -35,7 +35,7 @@ impl RelationshipKind {
         Self(s.into())
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -51,7 +51,7 @@ pub struct Entity {
 }
 
 impl Entity {
-    #[must_use] 
+    #[must_use]
     pub fn new(kind: EntityKind) -> Self {
         Self {
             id: EntityId::new(),
@@ -78,7 +78,7 @@ pub struct Relationship {
 }
 
 impl Relationship {
-    #[must_use] 
+    #[must_use]
     pub fn new(source: EntityId, target: EntityId, kind: RelationshipKind) -> Self {
         Self {
             id: RelationshipId::new(),
@@ -95,6 +95,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn entity_has_unique_id() {
         let a = Entity::new(EntityKind::new("agent"));
         let b = Entity::new(EntityKind::new("agent"));
@@ -102,15 +103,16 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn entity_json_round_trip() {
-        let e = Entity::new(EntityKind::new("location"))
-            .with_metadata("name", "Tokyo");
+        let e = Entity::new(EntityKind::new("location")).with_metadata("name", "Tokyo");
         let s = serde_json::to_string(&e).unwrap();
         let back: Entity = serde_json::from_str(&s).unwrap();
         assert_eq!(e, back);
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn entity_cbor_round_trip() {
         let e = Entity::new(EntityKind::new("agent"));
         let mut buf = Vec::new();
@@ -120,21 +122,30 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn entity_metadata_builder() {
         let e = Entity::new(EntityKind::new("twin"))
             .with_metadata("user", "alice")
             .with_metadata("locale", "ja");
-        assert_eq!(e.metadata.get("user").map(std::string::String::as_str), Some("alice"));
-        assert_eq!(e.metadata.get("locale").map(std::string::String::as_str), Some("ja"));
+        assert_eq!(
+            e.metadata.get("user").map(std::string::String::as_str),
+            Some("alice")
+        );
+        assert_eq!(
+            e.metadata.get("locale").map(std::string::String::as_str),
+            Some("ja")
+        );
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn entity_kind_display() {
         let k = EntityKind::new("world");
         assert_eq!(k.to_string(), "world");
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn relationship_json_round_trip() {
         let src = EntityId::new();
         let tgt = EntityId::new();
@@ -145,6 +156,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn relationship_cbor_round_trip() {
         let src = EntityId::new();
         let tgt = EntityId::new();
@@ -156,6 +168,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn relationship_has_unique_id() {
         let src = EntityId::new();
         let tgt = EntityId::new();
@@ -165,6 +178,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn entity_kind_json_round_trip() {
         let k = EntityKind::new("simulation.agent");
         let back: EntityKind = serde_json::from_str(&serde_json::to_string(&k).unwrap()).unwrap();
@@ -172,6 +186,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn relationship_kind_json_round_trip() {
         let k = RelationshipKind::new("co-located");
         let back: RelationshipKind =
@@ -180,12 +195,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn entity_kind_as_str() {
         let k = EntityKind::new("agent");
         assert_eq!(k.as_str(), "agent");
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn relationship_kind_as_str() {
         let k = RelationshipKind::new("trusts");
         assert_eq!(k.as_str(), "trusts");

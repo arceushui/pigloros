@@ -50,6 +50,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_capability_json_round_trip() {
         let cap = Capability {
             owned_event_types: vec![Kind::new("world.observation"), Kind::new("agent.decision")],
@@ -57,12 +58,12 @@ mod tests {
             has_driver: true,
             has_reducer: false,
         };
-        let back: Capability =
-            serde_json::from_str(&serde_json::to_string(&cap).unwrap()).unwrap();
+        let back: Capability = serde_json::from_str(&serde_json::to_string(&cap).unwrap()).unwrap();
         assert_eq!(cap, back);
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_capability_cbor_round_trip() {
         let cap = Capability {
             owned_event_types: vec![Kind::new("sensor.reading")],
@@ -77,8 +78,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_trait_is_implemented() {
-        let p = TestPlugin { id: PluginId::new() };
+        let p = TestPlugin {
+            id: PluginId::new(),
+        };
         assert_eq!(p.name(), "test-plugin");
         assert_eq!(p.capability().owned_event_types.len(), 1);
         assert_eq!(p.capability().owned_entity_kinds[0], "test.entity");
@@ -86,6 +90,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn default_capability_is_empty() {
         let cap = Capability::default();
         assert!(cap.owned_event_types.is_empty());
@@ -95,6 +100,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_id_is_returned_by_id_method() {
         let expected_id = PluginId::new();
         let p = TestPlugin { id: expected_id };

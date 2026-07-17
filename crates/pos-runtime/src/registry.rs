@@ -187,9 +187,15 @@ mod tests {
     }
 
     impl Plugin for TestPlugin {
-        fn id(&self) -> PluginId { self.id }
-        fn name(&self) -> &'static str { self.name }
-        fn capability(&self) -> Capability { self.cap.clone() }
+        fn id(&self) -> PluginId {
+            self.id
+        }
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn capability(&self) -> Capability {
+            self.cap.clone()
+        }
     }
 
     fn simple_plugin(name: &'static str, event_types: &[&str]) -> TestPlugin {
@@ -216,9 +222,14 @@ mod tests {
 
     struct CountReducer;
     impl Reducer for CountReducer {
-        fn initial(&self) -> State { State::new() }
+        fn initial(&self) -> State {
+            State::new()
+        }
         fn apply(&self, state: &mut State, _: &Event) {
-            let n = state.get("n").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            let n = state
+                .get("n")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
             state.set("n", serde_json::json!(n + 1));
         }
     }
@@ -240,6 +251,7 @@ mod tests {
     // ── Tests ─────────────────────────────────────────────────────────────────
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn register_plugin_wires_schemas() {
         let mut reg = PluginRegistry::new();
         let p = simple_plugin("world", &["world.observation", "world.action"]);
@@ -250,10 +262,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn register_plugin_with_reducer_wires_projections() {
         let mut reg = PluginRegistry::new();
         let p = plugin_with_caps("counter", &["counter.tick"], false, true);
-        reg.register(&p, Some(Box::new(CountReducer)), None).unwrap();
+        reg.register(&p, Some(Box::new(CountReducer)), None)
+            .unwrap();
         // Apply an event and verify the reducer ran
         let event = Event {
             id: EventId::new(),
@@ -274,17 +288,27 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn duplicate_plugin_returns_error() {
         let mut reg = PluginRegistry::new();
         let id = PluginId::new();
-        let p1 = TestPlugin { id, name: "dup", cap: Capability::default() };
-        let p2 = TestPlugin { id, name: "dup", cap: Capability::default() };
+        let p1 = TestPlugin {
+            id,
+            name: "dup",
+            cap: Capability::default(),
+        };
+        let p2 = TestPlugin {
+            id,
+            name: "dup",
+            cap: Capability::default(),
+        };
         reg.register(&p1, None, None).unwrap();
         let err = reg.register(&p2, None, None).unwrap_err();
         assert!(matches!(err, RuntimeError::DuplicatePlugin { .. }));
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn contains_len_is_empty() {
         let mut reg = PluginRegistry::new();
         assert!(reg.is_empty());
@@ -296,6 +320,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_names_iterator() {
         let mut reg = PluginRegistry::new();
         let p1 = simple_plugin("alpha", &[]);
@@ -308,11 +333,15 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn step_all_calls_drivers_and_collects_drafts() {
-        use pos_store::{open_store, StoreConfig};
         use crate::driver::{Driver, StepOutput};
+        use pos_store::{open_store, StoreConfig};
 
-        struct SimpleDriver { entity: EntityId, calls: u32 }
+        struct SimpleDriver {
+            entity: EntityId,
+            calls: u32,
+        }
         impl Driver for SimpleDriver {
             fn name(&self) -> &'static str {
                 "simple"
@@ -323,7 +352,11 @@ mod tests {
                 _: pos_core::ids::TimelineId,
             ) -> Result<StepOutput, RuntimeError> {
                 self.calls += 1;
-                let draft = EventDraft::new(self.entity, Kind::new("driver.tick"), CanonicalBytes::from_vec(vec![]));
+                let draft = EventDraft::new(
+                    self.entity,
+                    Kind::new("driver.tick"),
+                    CanonicalBytes::from_vec(vec![]),
+                );
                 Ok(StepOutput::new(vec![draft]))
             }
         }
@@ -345,6 +378,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn step_all_no_drivers_returns_empty() {
         use pos_store::{open_store, StoreConfig};
         let mut store = open_store(StoreConfig::Memory).unwrap();
@@ -357,12 +391,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_registry_default() {
         let reg = PluginRegistry::default();
         assert!(reg.is_empty());
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn schema_validation_after_registration() {
         let mut reg = PluginRegistry::new();
         let p = simple_plugin("agent", &["agent.decision"]);
@@ -382,6 +418,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn register_rejects_capability_mismatch() {
         let mut reg = PluginRegistry::new();
         let p = plugin_with_caps("mismatch", &["x.y"], true, false);
@@ -406,9 +443,7 @@ mod tests {
             open_store(StoreConfig::Memory).unwrap().as_ref(),
             TimelineId::new(),
         );
-        let err = reg
-            .register(&p4, None, Some(Box::new(noop)))
-            .unwrap_err();
+        let err = reg.register(&p4, None, Some(Box::new(noop))).unwrap_err();
         assert!(matches!(err, RuntimeError::CapabilityMismatch { .. }));
     }
 }

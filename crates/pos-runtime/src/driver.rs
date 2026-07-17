@@ -7,11 +7,7 @@
 //! - `Live` — the driver produces new events (nondeterministic sources go through the `Recorder`)
 //! - `Replay` — the driver reads events from the log (bit-exact)
 
-use pos_core::{
-    event::EventDraft,
-    ids::TimelineId,
-    store::EventStore,
-};
+use pos_core::{event::EventDraft, ids::TimelineId, store::EventStore};
 
 use crate::error::RuntimeError;
 
@@ -74,7 +70,9 @@ mod tests {
     }
 
     impl Driver for TickDriver {
-        fn name(&self) -> &'static str { "tick" }
+        fn name(&self) -> &'static str {
+            "tick"
+        }
         fn step(
             &mut self,
             _store: &dyn EventStore,
@@ -95,16 +93,13 @@ mod tests {
         fn name(&self) -> &'static str {
             "idle"
         }
-        fn step(
-            &mut self,
-            _: &dyn EventStore,
-            _: TimelineId,
-        ) -> Result<StepOutput, RuntimeError> {
+        fn step(&mut self, _: &dyn EventStore, _: TimelineId) -> Result<StepOutput, RuntimeError> {
             Ok(StepOutput::empty())
         }
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_produces_drafts() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("t").unwrap();
@@ -116,6 +111,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_tick_increments() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("t").unwrap();
@@ -129,6 +125,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn idle_driver_returns_empty() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("t").unwrap();
@@ -138,6 +135,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn step_output_new_and_empty() {
         let out = StepOutput::new(vec![]);
         assert!(out.drafts.is_empty());
@@ -146,8 +144,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_name() {
-        let d = TickDriver { entity: EntityId::new(), ticks: 0 };
+        let d = TickDriver {
+            entity: EntityId::new(),
+            ticks: 0,
+        };
         assert_eq!(d.name(), "tick");
         let idle = IdleDriver;
         assert_eq!(idle.name(), "idle");

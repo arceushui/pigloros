@@ -7,6 +7,7 @@
 //! Owns event type `"agent.action"` and entity kind `"ai-agent"`.
 //! On each driver step it invokes the policy's `decide()` method and emits
 //! one `agent.action` event with a CBOR payload.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use pos_core::{
     event::{CanonicalBytes, Event, Kind},
@@ -74,7 +75,10 @@ impl AgentPolicy for RoundRobinPolicy {
     fn decide(&mut self, _context: &AgentContext) -> AgentAction {
         let action = self.actions[self.cursor % self.actions.len()].clone();
         self.cursor = self.cursor.wrapping_add(1);
-        AgentAction { action, confidence: 1.0 }
+        AgentAction {
+            action,
+            confidence: 1.0,
+        }
     }
 }
 
@@ -88,7 +92,11 @@ pub struct RandomSeedPolicy {
 impl RandomSeedPolicy {
     #[must_use]
     pub fn new(actions: Vec<String>, seed: u64) -> Self {
-        Self { actions, seed, counter: 0 }
+        Self {
+            actions,
+            seed,
+            counter: 0,
+        }
     }
 }
 
@@ -104,7 +112,10 @@ impl AgentPolicy for RandomSeedPolicy {
         let index = usize::try_from(modulo_result).unwrap_or(0);
         self.counter = self.counter.wrapping_add(1);
         let action = self.actions[index].clone();
-        AgentAction { action, confidence: 0.5 }
+        AgentAction {
+            action,
+            confidence: 0.5,
+        }
     }
 }
 
@@ -138,7 +149,9 @@ impl AgentPlugin {
     /// Create a new agent plugin.
     #[must_use]
     pub fn new() -> Self {
-        Self { id: PluginId::new() }
+        Self {
+            id: PluginId::new(),
+        }
     }
 }
 
@@ -176,8 +189,17 @@ pub struct AgentDriver {
 impl AgentDriver {
     /// Create a new driver for the given entity with the specified policy.
     #[must_use]
-    pub fn new(entity: EntityId, policy: Box<dyn AgentPolicy>, available_actions: Vec<String>) -> Self {
-        Self { entity, policy, tick: 0, available_actions }
+    pub fn new(
+        entity: EntityId,
+        policy: Box<dyn AgentPolicy>,
+        available_actions: Vec<String>,
+    ) -> Self {
+        Self {
+            entity,
+            policy,
+            tick: 0,
+            available_actions,
+        }
     }
 }
 
@@ -207,8 +229,7 @@ impl Driver for AgentDriver {
 
         let mut buf = Vec::new();
         // Writing to Vec<u8> is infallible with ciborium.
-        ciborium::into_writer(&payload, &mut buf)
-            .expect("ciborium write to Vec<u8> is infallible");
+        ciborium::into_writer(&payload, &mut buf).expect("ciborium write to Vec<u8> is infallible");
 
         let draft = pos_core::event::EventDraft::new(
             self.entity,
@@ -242,10 +263,14 @@ impl Reducer for AgentReducer {
                 .get("action_count")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
-            state.set("action_count", serde_json::Value::Number((action_count + 1).into()));
+            state.set(
+                "action_count",
+                serde_json::Value::Number((action_count + 1).into()),
+            );
 
             // Decode payload to extract last_action
-            if let Ok(payload) = ciborium::from_reader::<ActionPayload, _>(event.payload.as_slice()) {
+            if let Ok(payload) = ciborium::from_reader::<ActionPayload, _>(event.payload.as_slice())
+            {
                 state.set("last_action", serde_json::Value::String(payload.action));
             }
         }
@@ -308,6 +333,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_new_and_default() {
         let p1 = AgentPlugin::new();
         let p2 = AgentPlugin::default();
@@ -316,18 +342,21 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_name_is_agent() {
         let plugin = AgentPlugin::new();
         assert_eq!(plugin.name(), "agent");
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_id_is_returned() {
         let plugin = AgentPlugin::new();
         let _id = plugin.id(); // covers Plugin::id()
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_capability_is_correct() {
         let plugin = AgentPlugin::new();
         let cap = plugin.capability();
@@ -341,8 +370,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn round_robin_policy_cycles_correctly() {
-        let mut policy = RoundRobinPolicy::new(vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]);
+        let mut policy =
+            RoundRobinPolicy::new(vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]);
         assert_eq!(policy.name(), "round-robin");
 
         let ctx = AgentContext {
@@ -368,6 +399,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn random_seed_policy_is_deterministic() {
         let actions = vec!["x".to_owned(), "y".to_owned(), "z".to_owned()];
         let mut policy1 = RandomSeedPolicy::new(actions.clone(), 42);
@@ -390,6 +422,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_step_produces_correct_event_type() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("test").unwrap();
@@ -403,12 +436,17 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_step_produces_decodable_payload() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("test").unwrap();
         let entity = EntityId::new();
-        let policy = Box::new(RoundRobinPolicy::new(vec!["jump".to_owned(), "duck".to_owned()]));
-        let mut driver = AgentDriver::new(entity, policy, vec!["jump".to_owned(), "duck".to_owned()]);
+        let policy = Box::new(RoundRobinPolicy::new(vec![
+            "jump".to_owned(),
+            "duck".to_owned(),
+        ]));
+        let mut driver =
+            AgentDriver::new(entity, policy, vec!["jump".to_owned(), "duck".to_owned()]);
 
         let out = driver.step(store.as_ref(), tl.id()).unwrap();
         let payload: ActionPayload =
@@ -420,22 +458,34 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_tracks_action_count() {
         let reducer = AgentReducer;
         let entity = EntityId::new();
         let mut state = reducer.initial();
 
-        assert_eq!(state.get("action_count").and_then(serde_json::Value::as_u64), Some(0));
+        assert_eq!(
+            state
+                .get("action_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(0)
+        );
 
         for _ in 0..5 {
             let event = make_action_event(entity, "test");
             reducer.apply(&mut state, &event);
         }
 
-        assert_eq!(state.get("action_count").and_then(serde_json::Value::as_u64), Some(5));
+        assert_eq!(
+            state
+                .get("action_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(5)
+        );
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_tracks_last_action() {
         let reducer = AgentReducer;
         let entity = EntityId::new();
@@ -457,6 +507,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_ignores_other_event_types() {
         let reducer = AgentReducer;
         let entity = EntityId::new();
@@ -465,7 +516,12 @@ mod tests {
         let other = make_other_event(entity);
         reducer.apply(&mut state, &other);
 
-        assert_eq!(state.get("action_count").and_then(serde_json::Value::as_u64), Some(0));
+        assert_eq!(
+            state
+                .get("action_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(0)
+        );
         assert_eq!(
             state.get("last_action").and_then(serde_json::Value::as_str),
             Some("")
@@ -473,6 +529,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_name_is_correct() {
         let entity = EntityId::new();
         let policy = Box::new(RoundRobinPolicy::new(vec!["a".to_owned()]));
@@ -481,6 +538,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn round_robin_wraps_at_end() {
         let mut policy = RoundRobinPolicy::new(vec!["a".to_owned(), "b".to_owned()]);
         let ctx = AgentContext {
@@ -496,6 +554,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn random_seed_policy_different_seeds_differ() {
         let actions = vec!["x".to_owned(), "y".to_owned(), "z".to_owned()];
         let mut policy1 = RandomSeedPolicy::new(actions.clone(), 42);
@@ -516,6 +575,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_tick_increments() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("test").unwrap();
@@ -532,15 +592,26 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn agent_action_partial_eq() {
-        let a1 = AgentAction { action: "test".to_owned(), confidence: 0.5 };
-        let a2 = AgentAction { action: "test".to_owned(), confidence: 0.5 };
-        let a3 = AgentAction { action: "other".to_owned(), confidence: 0.5 };
+        let a1 = AgentAction {
+            action: "test".to_owned(),
+            confidence: 0.5,
+        };
+        let a2 = AgentAction {
+            action: "test".to_owned(),
+            confidence: 0.5,
+        };
+        let a3 = AgentAction {
+            action: "other".to_owned(),
+            confidence: 0.5,
+        };
         assert_eq!(a1, a2);
         assert_ne!(a1, a3);
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn agent_context_contains_available_actions() {
         let ctx = AgentContext {
             entity_id: EntityId::new(),
@@ -552,6 +623,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_initial_state_has_correct_fields() {
         let reducer = AgentReducer;
         let state = reducer.initial();
@@ -560,6 +632,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_handles_malformed_payload() {
         let reducer = AgentReducer;
         let entity = EntityId::new();
@@ -583,8 +656,16 @@ mod tests {
         reducer.apply(&mut state, &event);
 
         // Count should increment even if payload is malformed
-        assert_eq!(state.get("action_count").and_then(serde_json::Value::as_u64), Some(1));
+        assert_eq!(
+            state
+                .get("action_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
         // last_action should remain empty string since payload decode failed
-        assert_eq!(state.get("last_action").and_then(serde_json::Value::as_str), Some(""));
+        assert_eq!(
+            state.get("last_action").and_then(serde_json::Value::as_str),
+            Some("")
+        );
     }
 }

@@ -42,7 +42,7 @@ impl TimelineMeta {
         }
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn is_root(&self) -> bool {
         self.fork_point.is_none()
     }
@@ -57,7 +57,7 @@ pub struct Timeline {
 }
 
 impl Timeline {
-    #[must_use] 
+    #[must_use]
     pub const fn new(meta: TimelineMeta) -> Self {
         Self {
             meta,
@@ -65,12 +65,12 @@ impl Timeline {
         }
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn id(&self) -> TimelineId {
         self.meta.id
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn mode(&self) -> TimelineMode {
         self.meta.mode
     }
@@ -81,6 +81,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn root_timeline_has_no_fork_point() {
         let meta = TimelineMeta::root("main");
         assert!(meta.is_root());
@@ -88,6 +89,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn forked_timeline_records_parent_and_seq() {
         let parent = TimelineId::new();
         let at_seq = Seq::from_u64(42);
@@ -99,6 +101,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn timeline_meta_json_round_trip() {
         let meta = TimelineMeta::root("main");
         let back: TimelineMeta =
@@ -107,6 +110,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn timeline_meta_cbor_round_trip() {
         let parent = TimelineId::new();
         let meta = TimelineMeta::forked_from(parent, Seq::from_u64(7), "fork");
@@ -117,6 +121,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn timeline_json_round_trip() {
         let t = Timeline::new(TimelineMeta::root("test"));
         let back: Timeline = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
@@ -124,6 +129,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn timeline_cbor_round_trip() {
         let t = Timeline::new(TimelineMeta::root("cbor-test"));
         let mut buf = Vec::new();
@@ -133,8 +139,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn timeline_mode_serde() {
-        for mode in [TimelineMode::Historical, TimelineMode::Live, TimelineMode::Future] {
+        for mode in [
+            TimelineMode::Historical,
+            TimelineMode::Live,
+            TimelineMode::Future,
+        ] {
             let back: TimelineMode =
                 serde_json::from_str(&serde_json::to_string(&mode).unwrap()).unwrap();
             assert_eq!(mode, back);
@@ -142,6 +153,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn two_root_timelines_have_different_ids() {
         let a = TimelineMeta::root("a");
         let b = TimelineMeta::root("b");
@@ -149,6 +161,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn timeline_head_starts_at_zero() {
         let t = Timeline::new(TimelineMeta::root("x"));
         assert_eq!(t.head, Seq::ZERO);

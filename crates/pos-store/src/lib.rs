@@ -18,6 +18,7 @@
 //! | `sqlite` | ✅ on | `rusqlite` (WAL; encryption / `SQLCipher` deferred) |
 //!
 //! Disable `SQLite` entirely: `--no-default-features`
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 pub mod memory;
 pub mod stitch;
@@ -85,11 +86,15 @@ pub fn open_store(config: StoreConfig) -> Result<Box<dyn EventStore>, CoreError>
             Ok(Box::new(store))
         }
         #[cfg(feature = "sqlite")]
-        StoreConfig::SqliteInMemory => {
-            let store = sqlite::SqliteStore::open_in_memory()?;
-            Ok(Box::new(store))
-        }
+        StoreConfig::SqliteInMemory => Ok(Box::new(open_sqlite_in_memory())),
     }
+}
+
+/// In-memory `SQLite` open is effectively infallible under rusqlite.
+#[cfg(feature = "sqlite")]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn open_sqlite_in_memory() -> sqlite::SqliteStore {
+    sqlite::SqliteStore::open_in_memory().expect("in-memory sqlite open should not fail")
 }
 
 #[cfg(test)]
@@ -110,6 +115,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn factory_memory() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         contract(&mut *store);
@@ -117,6 +123,7 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn factory_sqlite_in_memory() {
         let mut store = open_store(StoreConfig::SqliteInMemory).unwrap();
         contract(&mut *store);
@@ -124,6 +131,7 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn factory_sqlite_file() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().to_str().unwrap().to_owned();
@@ -131,14 +139,34 @@ mod tests {
         contract(&mut *store);
     }
 
+    #[cfg(feature = "sqlite")]
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn open_store_sqlite_rejects_directory_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = open_store(StoreConfig::Sqlite {
+            path: dir.path().to_str().unwrap().to_owned(),
+        });
+        assert!(matches!(result, Err(CoreError::Storage(_))));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn export_import_roundtrip_memory() {
         let mut src = open_store(StoreConfig::Memory).unwrap();
         let tl = src.create_timeline("source").unwrap();
         let entity = EntityId::new();
         let drafts = vec![
-            EventDraft::new(entity, Kind::new("test.event"), CanonicalBytes::from_vec(b"hello".to_vec())),
-            EventDraft::new(entity, Kind::new("test.event"), CanonicalBytes::from_vec(b"world".to_vec())),
+            EventDraft::new(
+                entity,
+                Kind::new("test.event"),
+                CanonicalBytes::from_vec(b"hello".to_vec()),
+            ),
+            EventDraft::new(
+                entity,
+                Kind::new("test.event"),
+                CanonicalBytes::from_vec(b"world".to_vec()),
+            ),
         ];
         src.append(tl.id(), &drafts).unwrap();
 
@@ -157,13 +185,20 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn export_memory_import_sqlite() {
         let mut src = open_store(StoreConfig::Memory).unwrap();
         let tl = src.create_timeline("mem-src").unwrap();
         let entity = EntityId::new();
-        src.append(tl.id(), &[
-            EventDraft::new(entity, Kind::new("e"), CanonicalBytes::from_vec(b"data".to_vec())),
-        ]).unwrap();
+        src.append(
+            tl.id(),
+            &[EventDraft::new(
+                entity,
+                Kind::new("e"),
+                CanonicalBytes::from_vec(b"data".to_vec()),
+            )],
+        )
+        .unwrap();
 
         let export = src.export_timeline(tl.id()).unwrap();
 

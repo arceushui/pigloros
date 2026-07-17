@@ -40,7 +40,8 @@ impl SchemaRegistry {
     ///
     /// Silently overwrites if the same event type is re-registered (last writer wins).
     pub fn register(&mut self, schema: EventTypeSchema) {
-        self.schemas.insert(schema.event_type.as_str().to_owned(), schema);
+        self.schemas
+            .insert(schema.event_type.as_str().to_owned(), schema);
     }
 
     /// Returns `true` if the event type is registered.
@@ -116,6 +117,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn empty_registry_rejects_all() {
         let reg = SchemaRegistry::new();
         let err = reg.validate(&draft("world.observation")).unwrap_err();
@@ -123,6 +125,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn registered_type_passes_validation() {
         let mut reg = SchemaRegistry::new();
         reg.register(schema("world.observation"));
@@ -130,6 +133,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn unregistered_type_fails_validation() {
         let mut reg = SchemaRegistry::new();
         reg.register(schema("world.observation"));
@@ -138,6 +142,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn validate_batch_fails_on_first_unknown() {
         let mut reg = SchemaRegistry::new();
         reg.register(schema("a.ok"));
@@ -147,6 +152,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn validate_batch_passes_all_known() {
         let mut reg = SchemaRegistry::new();
         reg.register(schema("a.event"));
@@ -156,6 +162,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn len_and_is_empty() {
         let mut reg = SchemaRegistry::new();
         assert!(reg.is_empty());
@@ -165,6 +172,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn re_register_overwrites() {
         let mut reg = SchemaRegistry::new();
         reg.register(EventTypeSchema {
@@ -183,6 +191,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn contains_returns_correct_values() {
         let mut reg = SchemaRegistry::new();
         reg.register(schema("known"));

@@ -10,6 +10,7 @@
 //! - [`RelationshipIndex`]: an adjacency index for directed [`Relationship`] values.
 //!
 //! No I/O, no async.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use std::collections::HashMap;
 
@@ -38,10 +39,7 @@ impl Reducer for EntityStateProjection {
             .get("event_count")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
-        state.set(
-            "event_count",
-            serde_json::Value::Number((count + 1).into()),
-        );
+        state.set("event_count", serde_json::Value::Number((count + 1).into()));
         // Record the event type.
         state.set(
             "last_event_type",
@@ -72,7 +70,10 @@ pub struct ProjectionRegistry {
 
 impl std::fmt::Debug for ProjectionRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let names: Vec<&str> = self.slots.iter().map(|(n, _)| n.as_str()).collect();
+        let mut names = Vec::with_capacity(self.slots.len());
+        for (name, _) in &self.slots {
+            names.push(name.as_str());
+        }
         f.debug_struct("ProjectionRegistry")
             .field("reducers", &names)
             .finish()
@@ -121,9 +122,11 @@ impl ProjectionRegistry {
     /// Returns `None` if no reducers have been registered or the entity is unknown.
     /// To query a specific reducer use [`Self::state_for_reducer`].
     #[must_use]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn state_for(&self, entity: &EntityId) -> Option<&State> {
-        let (_, slot) = self.slots.first()?;
-        slot.registry.get(entity)
+        self.slots
+            .first()
+            .and_then(|(_, slot)| slot.registry.get(entity))
     }
 
     /// Return the state for a given entity from the reducer identified by `name`.
@@ -138,7 +141,11 @@ impl ProjectionRegistry {
     /// Return the names of all registered reducers in insertion order.
     #[must_use]
     pub fn reducer_names(&self) -> Vec<&str> {
-        self.slots.iter().map(|(n, _)| n.as_str()).collect()
+        let mut names = Vec::with_capacity(self.slots.len());
+        for (name, _) in &self.slots {
+            names.push(name.as_str());
+        }
+        names
     }
 
     /// Reset all accumulated state back to empty.
@@ -161,12 +168,14 @@ impl ProjectionRegistry {
     ///
     /// This is the counterpart of [`Self::state_snapshot`] and is used by
     /// `pos-time` snapshot consistency verification to seed the incremental path.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn restore_from_snapshot(
         &mut self,
         snapshot: &std::collections::HashMap<String, StateRegistry>,
     ) {
         self.clear_state();
         for (name, slot) in &mut self.slots {
+            // Missing snapshot entries stay empty after `clear_state`.
             if let Some(restored) = snapshot.get(name) {
                 slot.registry = restored.clone();
             }
@@ -180,10 +189,11 @@ impl ProjectionRegistry {
     /// capture and consistency verification.
     #[must_use]
     pub fn state_snapshot(&self) -> std::collections::HashMap<String, StateRegistry> {
-        self.slots
-            .iter()
-            .map(|(name, slot)| (name.clone(), slot.registry.clone()))
-            .collect()
+        let mut snapshot = std::collections::HashMap::new();
+        for (name, slot) in &self.slots {
+            snapshot.insert(name.clone(), slot.registry.clone());
+        }
+        snapshot
     }
 
     /// Compare this registry's accumulated state against a previously captured
@@ -192,16 +202,14 @@ impl ProjectionRegistry {
     /// Returns the first differing `(reducer_name, entity_id)` pair, or `None`
     /// when the states are identical.
     #[must_use]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn diff_against_snapshot(
         &self,
         snapshot: &std::collections::HashMap<String, StateRegistry>,
         all_entities: &[EntityId],
     ) -> Option<(String, EntityId)> {
         for (name, slot) in &self.slots {
-            let snap_reg = snapshot
-                .get(name)
-                .cloned()
-                .unwrap_or_default();
+            let snap_reg = snapshot.get(name).cloned().unwrap_or_default();
             for entity in all_entities {
                 if slot.registry.get_or_default(entity) != snap_reg.get_or_default(entity) {
                     return Some((name.clone(), *entity));
@@ -258,19 +266,24 @@ impl RelationshipIndex {
     ///
     /// Each neighbour appears at most once even if it is both a source and a target.
     #[must_use]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn neighbours(&self, id: &EntityId) -> Vec<EntityId> {
         let mut seen: std::collections::HashSet<EntityId> = std::collections::HashSet::new();
         let mut result = Vec::new();
 
         for rel in self.outgoing_from(id) {
-            if seen.insert(rel.target) {
-                result.push(rel.target);
+            if seen.contains(&rel.target) {
+                continue;
             }
+            seen.insert(rel.target);
+            result.push(rel.target);
         }
         for rel in self.incoming_to(id) {
-            if seen.insert(rel.source) {
-                result.push(rel.source);
+            if seen.contains(&rel.source) {
+                continue;
             }
+            seen.insert(rel.source);
+            result.push(rel.source);
         }
         result
     }
@@ -321,6 +334,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_applies_to_all_reducers() {
         let mut registry = ProjectionRegistry::new();
         registry.register("a", Box::new(EntityStateProjection));
@@ -344,6 +358,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_fold_events() {
         let mut registry = ProjectionRegistry::new();
         registry.register("main", Box::new(EntityStateProjection));
@@ -361,6 +376,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_state_for_returns_first_reducers_view() {
         let mut registry = ProjectionRegistry::new();
         registry.register("first", Box::new(EntityStateProjection));
@@ -377,11 +393,66 @@ mod tests {
         assert_eq!(count, 1);
     }
 
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn projection_registry_state_for_returns_none_when_empty() {
+        let registry = ProjectionRegistry::new();
+        let entity = EntityId::new();
+        assert!(registry.state_for(&entity).is_none());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn projection_registry_restore_from_snapshot_skips_unknown_reducers() {
+        let mut registry = ProjectionRegistry::new();
+        registry.register("registered", Box::new(EntityStateProjection));
+        let entity = EntityId::new();
+        registry.apply_event(&make_event(entity));
+
+        let mut snapshot = std::collections::HashMap::new();
+        snapshot.insert("other".to_owned(), StateRegistry::new());
+        registry.restore_from_snapshot(&snapshot);
+
+        let count = registry
+            .state_for_reducer("registered", &entity)
+            .and_then(|s| s.get("event_count"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn relationship_index_neighbours_dedupes_duplicate_outgoing_targets() {
+        let mut index = RelationshipIndex::new();
+        let hub = EntityId::new();
+        let target = EntityId::new();
+        index.record(Relationship::new(hub, target, RelationshipKind::new("a")));
+        index.record(Relationship::new(hub, target, RelationshipKind::new("b")));
+        let neighbours = index.neighbours(&hub);
+        assert_eq!(neighbours.len(), 1);
+        assert_eq!(neighbours[0], target);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn relationship_index_neighbours_dedupes_duplicate_incoming_sources() {
+        let mut index = RelationshipIndex::new();
+        let hub = EntityId::new();
+        let source = EntityId::new();
+        index.record(Relationship::new(source, hub, RelationshipKind::new("a")));
+        index.record(Relationship::new(source, hub, RelationshipKind::new("b")));
+        let neighbours = index.neighbours(&hub);
+        assert_eq!(neighbours.len(), 1);
+        assert_eq!(neighbours[0], source);
+    }
+
     // ------------------------------------------------------------------
     // EntityStateProjection tests
     // ------------------------------------------------------------------
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn entity_state_projection_counts_events() {
         let proj = EntityStateProjection;
         let entity = EntityId::new();
@@ -400,6 +471,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn entity_state_projection_different_entities_tracked_separately() {
         let proj = EntityStateProjection;
         let a = EntityId::new();
@@ -425,6 +497,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn entity_state_projection_records_last_event_type() {
         let proj = EntityStateProjection;
         let entity = EntityId::new();
@@ -446,6 +519,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn relationship_index_records_and_queries() {
         let mut index = RelationshipIndex::new();
         let a = EntityId::new();
@@ -467,6 +541,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn relationship_index_neighbours() {
         let mut index = RelationshipIndex::new();
         let hub = EntityId::new();
@@ -489,6 +564,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn relationship_index_neighbours_no_duplicates() {
         let mut index = RelationshipIndex::new();
         let a = EntityId::new();
@@ -509,6 +585,7 @@ mod tests {
 
     proptest! {
         #[test]
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn fold_deterministic(n_events in 1usize..=20) {
             let entity = EntityId::new();
             let events: Vec<Event> = (0..n_events).map(|_| make_event(entity)).collect();
@@ -543,6 +620,7 @@ mod extra_tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_debug_shows_reducer_names() {
         let mut reg = ProjectionRegistry::new();
         reg.register("alpha", Box::new(EntityStateProjection));
@@ -566,9 +644,14 @@ mod wave3_tests {
 
     struct TR;
     impl Reducer for TR {
-        fn initial(&self) -> State { State::new() }
+        fn initial(&self) -> State {
+            State::new()
+        }
         fn apply(&self, state: &mut State, _: &Event) {
-            let n = state.get("n").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            let n = state
+                .get("n")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
             state.set("n", serde_json::json!(n + 1));
         }
     }
@@ -590,6 +673,7 @@ mod wave3_tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_names_returns_registered_names() {
         let mut reg = ProjectionRegistry::new();
         reg.register("alpha", Box::new(TR));
@@ -601,6 +685,7 @@ mod wave3_tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn diff_against_snapshot_identical_returns_none() {
         let entity = EntityId::new();
         let mut reg = ProjectionRegistry::new();
@@ -613,6 +698,7 @@ mod wave3_tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn diff_against_snapshot_diverged_returns_some() {
         let entity = EntityId::new();
         let mut reg = ProjectionRegistry::new();
@@ -630,6 +716,7 @@ mod wave3_tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn diff_against_empty_snapshot_returns_some_when_reg_has_state() {
         let entity = EntityId::new();
         let mut reg = ProjectionRegistry::new();

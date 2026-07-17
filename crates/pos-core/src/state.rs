@@ -12,7 +12,7 @@ pub struct State {
 }
 
 impl State {
-    #[must_use] 
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -21,7 +21,7 @@ impl State {
         self.fields.insert(key.into(), value);
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn get(&self, key: &str) -> Option<&serde_json::Value> {
         self.fields.get(key)
     }
@@ -41,17 +41,17 @@ pub struct StateRegistry {
 }
 
 impl StateRegistry {
-    #[must_use] 
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn get(&self, id: &EntityId) -> Option<&State> {
         self.states.get(id)
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn get_or_default(&self, id: &EntityId) -> State {
         self.states.get(id).cloned().unwrap_or_default()
     }
@@ -111,6 +111,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn state_is_a_fold() {
         let reducer = CountReducer;
         let entity = EntityId::new();
@@ -121,10 +122,14 @@ mod tests {
         }
 
         let state = registry.get(&entity).unwrap();
-        assert_eq!(state.get("count").and_then(serde_json::Value::as_u64), Some(5));
+        assert_eq!(
+            state.get("count").and_then(serde_json::Value::as_u64),
+            Some(5)
+        );
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn initial_state_for_unknown_entity() {
         let reducer = CountReducer;
         let entity = EntityId::new();
@@ -136,6 +141,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn state_json_round_trip() {
         let mut s = State::new();
         s.set("name", serde_json::Value::String("alice".into()));
@@ -145,6 +151,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn state_cbor_round_trip() {
         let mut s = State::new();
         s.set("x", serde_json::json!(true));
@@ -155,6 +162,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn state_registry_tracks_multiple_entities() {
         let reducer = CountReducer;
         let a = EntityId::new();
@@ -166,16 +174,25 @@ mod tests {
         registry.apply(&reducer, &make_event(b));
 
         assert_eq!(
-            registry.get(&a).unwrap().get("count").and_then(serde_json::Value::as_u64),
+            registry
+                .get(&a)
+                .unwrap()
+                .get("count")
+                .and_then(serde_json::Value::as_u64),
             Some(2)
         );
         assert_eq!(
-            registry.get(&b).unwrap().get("count").and_then(serde_json::Value::as_u64),
+            registry
+                .get(&b)
+                .unwrap()
+                .get("count")
+                .and_then(serde_json::Value::as_u64),
             Some(1)
         );
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn replay_gives_same_result_as_original() {
         let reducer = CountReducer;
         let entity = EntityId::new();

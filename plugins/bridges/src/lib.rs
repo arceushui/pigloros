@@ -23,6 +23,7 @@
 //! let draft = ingestor.ingest("owntracks", json_value, timestamp_micros);
 //! store.append(timeline_id, &[draft])?;
 //! ```
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use pos_core::{
     event::{CanonicalBytes, Event, EventDraft, Kind},
@@ -88,7 +89,9 @@ impl BridgePlugin {
     /// Create a new `BridgePlugin`.
     #[must_use]
     pub fn new() -> Self {
-        Self { id: PluginId::new() }
+        Self {
+            id: PluginId::new(),
+        }
     }
 }
 
@@ -187,7 +190,10 @@ impl Reducer for BridgeReducer {
             .get("observations")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
-        state.set("observations", serde_json::Value::Number((observations + 1).into()));
+        state.set(
+            "observations",
+            serde_json::Value::Number((observations + 1).into()),
+        );
 
         // Decode the CBOR payload and update last_* fields.
         if let Ok(observation) =
@@ -220,6 +226,7 @@ mod tests {
     // ── BridgePlugin tests ────────────────────────────────────────────────
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_new_and_default_have_same_name() {
         let p1 = BridgePlugin::new();
         let p2 = BridgePlugin::default();
@@ -228,6 +235,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_id_is_unique() {
         let p1 = BridgePlugin::new();
         let p2 = BridgePlugin::new();
@@ -235,6 +243,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_capability() {
         let plugin = BridgePlugin::new();
         let cap = plugin.capability();
@@ -248,6 +257,7 @@ mod tests {
     // ── BridgeIngestor tests ──────────────────────────────────────────────
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn ingestor_produces_event_draft() {
         let entity = EntityId::new();
         let ingestor = BridgeIngestor::new(entity);
@@ -267,6 +277,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn ingestor_handles_various_json_values() {
         let entity = EntityId::new();
         let ingestor = BridgeIngestor::new(entity);
@@ -291,7 +302,12 @@ mod tests {
 
     // ── BridgeReducer tests ───────────────────────────────────────────────
 
-    fn make_bridge_event(entity: EntityId, source: &str, value: serde_json::Value, timestamp_micros: u64) -> Event {
+    fn make_bridge_event(
+        entity: EntityId,
+        source: &str,
+        value: serde_json::Value,
+        timestamp_micros: u64,
+    ) -> Event {
         let observation = BridgeObservation {
             source: source.to_owned(),
             value,
@@ -316,55 +332,55 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_initial_state() {
         let reducer = BridgeReducer;
         let state = reducer.initial();
         assert_eq!(
-            state.get("observations").and_then(serde_json::Value::as_u64),
+            state
+                .get("observations")
+                .and_then(serde_json::Value::as_u64),
             Some(0)
         );
+        assert_eq!(state.get("last_source"), Some(&serde_json::Value::Null));
+        assert_eq!(state.get("last_value"), Some(&serde_json::Value::Null));
         assert_eq!(
-            state.get("last_source"),
-            Some(&serde_json::Value::Null)
-        );
-        assert_eq!(
-            state.get("last_value"),
-            Some(&serde_json::Value::Null)
-        );
-        assert_eq!(
-            state.get("last_timestamp_micros").and_then(serde_json::Value::as_u64),
+            state
+                .get("last_timestamp_micros")
+                .and_then(serde_json::Value::as_u64),
             Some(0)
         );
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_tracks_observation_count() {
         let reducer = BridgeReducer;
         let entity = EntityId::new();
         let mut state = reducer.initial();
 
         assert_eq!(
-            state.get("observations").and_then(serde_json::Value::as_u64),
+            state
+                .get("observations")
+                .and_then(serde_json::Value::as_u64),
             Some(0)
         );
 
         for i in 0_u64..5 {
-            let event = make_bridge_event(
-                entity,
-                "test",
-                serde_json::json!(i),
-                i,
-            );
+            let event = make_bridge_event(entity, "test", serde_json::json!(i), i);
             reducer.apply(&mut state, &event);
         }
 
         assert_eq!(
-            state.get("observations").and_then(serde_json::Value::as_u64),
+            state
+                .get("observations")
+                .and_then(serde_json::Value::as_u64),
             Some(5)
         );
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_updates_last_value() {
         let reducer = BridgeReducer;
         let entity = EntityId::new();
@@ -374,10 +390,15 @@ mod tests {
         let event1 = make_bridge_event(entity, "sensor-1", value1.clone(), 1_000);
         reducer.apply(&mut state, &event1);
 
-        assert_eq!(state.get("last_source").and_then(serde_json::Value::as_str), Some("sensor-1"));
+        assert_eq!(
+            state.get("last_source").and_then(serde_json::Value::as_str),
+            Some("sensor-1")
+        );
         assert_eq!(state.get("last_value"), Some(&value1));
         assert_eq!(
-            state.get("last_timestamp_micros").and_then(serde_json::Value::as_u64),
+            state
+                .get("last_timestamp_micros")
+                .and_then(serde_json::Value::as_u64),
             Some(1_000)
         );
 
@@ -385,15 +406,21 @@ mod tests {
         let event2 = make_bridge_event(entity, "sensor-2", value2.clone(), 2_000);
         reducer.apply(&mut state, &event2);
 
-        assert_eq!(state.get("last_source").and_then(serde_json::Value::as_str), Some("sensor-2"));
+        assert_eq!(
+            state.get("last_source").and_then(serde_json::Value::as_str),
+            Some("sensor-2")
+        );
         assert_eq!(state.get("last_value"), Some(&value2));
         assert_eq!(
-            state.get("last_timestamp_micros").and_then(serde_json::Value::as_u64),
+            state
+                .get("last_timestamp_micros")
+                .and_then(serde_json::Value::as_u64),
             Some(2_000)
         );
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_ignores_non_bridge_events() {
         let reducer = BridgeReducer;
         let entity = EntityId::new();
@@ -416,12 +443,15 @@ mod tests {
         reducer.apply(&mut state, &other_event);
 
         assert_eq!(
-            state.get("observations").and_then(serde_json::Value::as_u64),
+            state
+                .get("observations")
+                .and_then(serde_json::Value::as_u64),
             Some(0)
         );
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_handles_invalid_cbor_gracefully() {
         let reducer = BridgeReducer;
         let entity = EntityId::new();
@@ -445,19 +475,19 @@ mod tests {
 
         // Observation count incremented even though payload decode failed.
         assert_eq!(
-            state.get("observations").and_then(serde_json::Value::as_u64),
+            state
+                .get("observations")
+                .and_then(serde_json::Value::as_u64),
             Some(1)
         );
         // last_* fields remain at initial values.
-        assert_eq!(
-            state.get("last_source"),
-            Some(&serde_json::Value::Null)
-        );
+        assert_eq!(state.get("last_source"), Some(&serde_json::Value::Null));
     }
 
     // ── Roundtrip tests ───────────────────────────────────────────────────
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn roundtrip_ingest_to_reducer() {
         let entity = EntityId::new();
         let ingestor = BridgeIngestor::new(entity);
@@ -485,18 +515,26 @@ mod tests {
         reducer.apply(&mut state, &event);
 
         assert_eq!(
-            state.get("observations").and_then(serde_json::Value::as_u64),
+            state
+                .get("observations")
+                .and_then(serde_json::Value::as_u64),
             Some(1)
         );
-        assert_eq!(state.get("last_source").and_then(serde_json::Value::as_str), Some("thermo-1"));
+        assert_eq!(
+            state.get("last_source").and_then(serde_json::Value::as_str),
+            Some("thermo-1")
+        );
         assert_eq!(state.get("last_value"), Some(&value));
         assert_eq!(
-            state.get("last_timestamp_micros").and_then(serde_json::Value::as_u64),
+            state
+                .get("last_timestamp_micros")
+                .and_then(serde_json::Value::as_u64),
             Some(5_000_000)
         );
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn bridge_observation_cbor_roundtrip() {
         let obs = BridgeObservation {
             source: "test-source".to_owned(),
@@ -514,6 +552,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn bridge_error_from_core_error() {
         let core_err = pos_core::CoreError::Storage("test error".to_owned());
         let bridge_err: BridgeError = core_err.into();

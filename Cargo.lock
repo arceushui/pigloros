@@ -526,6 +526,7 @@ dependencies = [
  "pos-state",
  "pos-store",
  "pos-time",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
@@ -581,8 +582,10 @@ dependencies = [
  "pos-store",
  "pos-time",
  "proptest",
+ "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
 ]
 

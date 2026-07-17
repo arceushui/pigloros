@@ -15,3 +15,6 @@ pos-plugin-eval = { path = "../../plugins/eval" }
 pos-plugin-persona = { path = "../../plugins/persona" }
 pos-plugin-geo = { path = "../../plugins/geo" }
 pos-runtime = { path = "../../crates/pos-runtime" }
+
+[lints]
+workspace = true

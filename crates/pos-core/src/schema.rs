@@ -21,7 +21,7 @@ pub struct UpcasterRegistry {
 }
 
 impl UpcasterRegistry {
-    #[must_use] 
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -64,7 +64,7 @@ pub struct SchemaVersionMap {
 }
 
 impl SchemaVersionMap {
-    #[must_use] 
+    #[must_use]
     pub fn new() -> Self {
         Self {
             versions: HashMap::new(),
@@ -75,7 +75,7 @@ impl SchemaVersionMap {
         self.versions.insert(event_type.into(), version);
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn current(&self, event_type: &str) -> SchemaVersion {
         SchemaVersion::new(*self.versions.get(event_type).unwrap_or(&1))
     }
@@ -135,6 +135,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn identity_upcaster_no_op_for_current_version() {
         let mut reg = UpcasterRegistry::new();
         let kind = Kind::new("test.event");
@@ -144,33 +145,27 @@ mod tests {
             to: SchemaVersion::V1,
         }));
         let payload = CanonicalBytes::from_vec(b"data".to_vec());
-        let result = reg.upcast(
-            &kind,
-            SchemaVersion::V1,
-            SchemaVersion::V1,
-            payload.clone(),
-        );
+        let result = reg.upcast(&kind, SchemaVersion::V1, SchemaVersion::V1, payload.clone());
         assert_eq!(result.as_slice(), payload.as_slice());
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn migrating_upcaster_transforms_v1_to_v2() {
         let mut reg = UpcasterRegistry::new();
         let kind = Kind::new("thing.created");
-        reg.register(Box::new(MigratingUpcaster { event_type: kind.clone() }));
+        reg.register(Box::new(MigratingUpcaster {
+            event_type: kind.clone(),
+        }));
 
         let payload = CanonicalBytes::from_vec(b"original".to_vec());
-        let result = reg.upcast(
-            &kind,
-            SchemaVersion::new(1),
-            SchemaVersion::new(2),
-            payload,
-        );
+        let result = reg.upcast(&kind, SchemaVersion::new(1), SchemaVersion::new(2), payload);
 
         assert_eq!(result.as_slice(), b"original\xFF");
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn no_upcaster_returns_payload_unchanged() {
         let reg = UpcasterRegistry::new();
         let kind = Kind::new("unknown.event");
@@ -185,6 +180,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn already_at_current_version_returns_unchanged() {
         let reg = UpcasterRegistry::new();
         let kind = Kind::new("test.event");
@@ -199,12 +195,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn schema_version_map_returns_default_1_for_unknown() {
         let map = SchemaVersionMap::new();
         assert_eq!(map.current("unknown.event"), SchemaVersion::new(1));
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn schema_version_map_returns_registered_version() {
         let mut map = SchemaVersionMap::new();
         map.set("agent.action", 3);
@@ -212,6 +210,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn schema_version_map_json_round_trip() {
         let mut map = SchemaVersionMap::new();
         map.set("a.b", 2);
@@ -222,6 +221,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn schema_version_map_default_equals_new() {
         let via_default = SchemaVersionMap::default();
         let via_new = SchemaVersionMap::new();
@@ -230,6 +230,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn identity_upcaster_target_version_and_upcast_called() {
         // Exercises IdentityUpcaster::target_version() and upcast() by running a chain
         // where from < to so the loop body actually executes.
@@ -242,7 +243,12 @@ mod tests {
         }));
         let payload = CanonicalBytes::from_vec(b"data".to_vec());
         // from=1, to=2: loop runs, calls upcast() and target_version() on IdentityUpcaster
-        let result = reg.upcast(&kind, SchemaVersion::new(1), SchemaVersion::new(2), payload.clone());
+        let result = reg.upcast(
+            &kind,
+            SchemaVersion::new(1),
+            SchemaVersion::new(2),
+            payload.clone(),
+        );
         assert_eq!(result.as_slice(), payload.as_slice());
     }
 }

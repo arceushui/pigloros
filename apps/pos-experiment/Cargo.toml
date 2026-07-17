@@ -21,3 +21,8 @@ thiserror    = { workspace = true }
 pos-plugin-rule-agent  = { path = "../../plugins/entities/rule-agent" }
 pos-plugin-synthetic-obs = { path = "../../plugins/observations/synthetic" }
 proptest = { workspace = true }
+rusqlite = { workspace = true }
+tempfile = "3"
+
+[lints]
+workspace = true

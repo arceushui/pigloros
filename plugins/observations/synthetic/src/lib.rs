@@ -7,6 +7,7 @@
 //! Owns event type `"obs.synthetic"` and entity kind `"synthetic-source"`.
 //! On each driver step it produces one observation event with a sinusoidal
 //! value derived purely from the tick counter — no external entropy.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use pos_core::{
     event::{CanonicalBytes, Event, Kind},
@@ -53,7 +54,9 @@ impl SyntheticObsPlugin {
     /// Create a new synthetic observation plugin.
     #[must_use]
     pub fn new() -> Self {
-        Self { id: PluginId::new() }
+        Self {
+            id: PluginId::new(),
+        }
     }
 }
 
@@ -94,13 +97,21 @@ impl SyntheticDriver {
     /// Create a new driver for the given entity with default amplitude 1.0.
     #[must_use]
     pub fn new(entity: EntityId) -> Self {
-        Self { entity, tick: 0, amplitude: 1.0 }
+        Self {
+            entity,
+            tick: 0,
+            amplitude: 1.0,
+        }
     }
 
     /// Create a new driver with a custom amplitude.
     #[must_use]
     pub fn with_amplitude(entity: EntityId, amplitude: f64) -> Self {
-        Self { entity, tick: 0, amplitude }
+        Self {
+            entity,
+            tick: 0,
+            amplitude,
+        }
     }
 }
 
@@ -116,12 +127,14 @@ impl Driver for SyntheticDriver {
     ) -> Result<StepOutput, RuntimeError> {
         #[allow(clippy::cast_precision_loss)]
         let value = (self.tick as f64 * 0.1_f64).sin() * self.amplitude;
-        let payload = ObsPayload { value, tick: self.tick };
+        let payload = ObsPayload {
+            value,
+            tick: self.tick,
+        };
 
         let mut buf = Vec::new();
         // Writing to Vec<u8> is infallible with ciborium.
-        ciborium::into_writer(&payload, &mut buf)
-            .expect("ciborium write to Vec<u8> is infallible");
+        ciborium::into_writer(&payload, &mut buf).expect("ciborium write to Vec<u8> is infallible");
 
         let draft = pos_core::event::EventDraft::new(
             self.entity,
@@ -159,7 +172,10 @@ impl Reducer for SyntheticReducer {
             .get("observations")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
-        state.set("observations", serde_json::Value::Number((observations + 1).into()));
+        state.set(
+            "observations",
+            serde_json::Value::Number((observations + 1).into()),
+        );
 
         // Decode the CBOR payload to extract last_value
         if let Ok(payload) = ciborium::from_reader::<ObsPayload, _>(event.payload.as_slice()) {
@@ -206,6 +222,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_capability_is_correct() {
         let plugin = SyntheticObsPlugin::new();
         let cap = plugin.capability();
@@ -219,6 +236,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn default_creates_plugin() {
         let plugin = SyntheticObsPlugin::default();
         let cap = plugin.capability();
@@ -226,6 +244,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_id_name_capability() {
         let plugin = SyntheticObsPlugin::new();
         let _id = plugin.id(); // covers Plugin::id()
@@ -238,6 +257,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_name_is_correct() {
         let entity = EntityId::new();
         let driver = SyntheticDriver::new(entity);
@@ -245,6 +265,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn with_amplitude_driver_scales_values() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("test-amp").unwrap();
@@ -257,6 +278,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_produces_deterministic_values() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("test").unwrap();
@@ -291,12 +313,18 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_tracks_observation_count() {
         let reducer = SyntheticReducer;
         let entity = EntityId::new();
         let mut state = reducer.initial();
 
-        assert_eq!(state.get("observations").and_then(serde_json::Value::as_u64), Some(0));
+        assert_eq!(
+            state
+                .get("observations")
+                .and_then(serde_json::Value::as_u64),
+            Some(0)
+        );
 
         for i in 0..3_u64 {
             #[allow(clippy::cast_precision_loss)]
@@ -305,10 +333,16 @@ mod tests {
             reducer.apply(&mut state, &event);
         }
 
-        assert_eq!(state.get("observations").and_then(serde_json::Value::as_u64), Some(3));
+        assert_eq!(
+            state
+                .get("observations")
+                .and_then(serde_json::Value::as_u64),
+            Some(3)
+        );
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_skips_invalid_cbor_payload() {
         // Covers the outer `if let Ok(payload)` else branch (line 175):
         // when the CBOR can't be decoded, the block is skipped silently.
@@ -337,10 +371,16 @@ mod tests {
         };
         reducer.apply(&mut state, &bad_event);
         // observations is incremented even though payload decode failed
-        assert_eq!(state.get("observations").and_then(serde_json::Value::as_u64), Some(1));
+        assert_eq!(
+            state
+                .get("observations")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_ignores_non_matching_event_type() {
         // Covers the early `return;` in reducer.apply when event_type != EVENT_TYPE
         use pos_core::{
@@ -368,10 +408,16 @@ mod tests {
         };
         reducer.apply(&mut state, &non_matching_event);
         // observations should still be 0 since the event was ignored
-        assert_eq!(state.get("observations").and_then(serde_json::Value::as_u64), Some(0));
+        assert_eq!(
+            state
+                .get("observations")
+                .and_then(serde_json::Value::as_u64),
+            Some(0)
+        );
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_handles_nan_value_gracefully() {
         // Covers the `if let Some(n)` path in reducer.apply — when from_f64(NaN) returns None
         // We create an event with a valid payload but a NaN value to hit that branch.
@@ -382,7 +428,10 @@ mod tests {
 
         // We build an event with NaN encoded in the CBOR payload.
         // ciborium encodes NaN as an f64 normally.
-        let payload = ObsPayload { value: f64::NAN, tick: 0 };
+        let payload = ObsPayload {
+            value: f64::NAN,
+            tick: 0,
+        };
         let mut buf = Vec::new();
         ciborium::into_writer(&payload, &mut buf).unwrap();
 
@@ -401,6 +450,11 @@ mod tests {
         };
         reducer.apply(&mut state, &event);
         // observations incremented even though NaN value was skipped
-        assert_eq!(state.get("observations").and_then(serde_json::Value::as_u64), Some(1));
+        assert_eq!(
+            state
+                .get("observations")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
     }
 }

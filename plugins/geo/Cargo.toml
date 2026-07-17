@@ -13,3 +13,6 @@ ciborium = { workspace = true }
 
 [dev-dependencies]
 pos-store = { path = "../../crates/pos-store" }
+
+[lints]
+workspace = true

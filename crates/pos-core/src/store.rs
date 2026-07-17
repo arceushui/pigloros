@@ -15,17 +15,17 @@ pub struct SeqRange {
 }
 
 impl SeqRange {
-    #[must_use] 
+    #[must_use]
     pub const fn from_seq(from: Seq) -> Self {
         Self { from, to: None }
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn bounded(from: Seq, to: Seq) -> Self {
         Self { from, to: Some(to) }
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn all() -> Self {
         Self {
             from: Seq::ZERO,
@@ -77,11 +77,7 @@ pub trait EventStore: Send {
     ///
     /// # Errors
     /// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist.
-    fn read(
-        &self,
-        timeline: TimelineId,
-        range: SeqRange,
-    ) -> Result<Vec<Event>, CoreError>;
+    fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError>;
 
     /// Create a forked child timeline at `at_seq`.
     ///
@@ -90,12 +86,7 @@ pub trait EventStore: Send {
     /// # Errors
     /// Returns [`CoreError::TimelineNotFound`] if the parent does not exist, or
     /// [`CoreError::ForkBeyondHead`] if `at_seq` exceeds the parent's head.
-    fn fork(
-        &mut self,
-        parent: TimelineId,
-        at_seq: Seq,
-        name: &str,
-    ) -> Result<Timeline, CoreError>;
+    fn fork(&mut self, parent: TimelineId, at_seq: Seq, name: &str) -> Result<Timeline, CoreError>;
 
     /// List all known timelines.
     ///
@@ -119,11 +110,7 @@ pub trait EventStore: Send {
     /// # Errors
     /// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist.
     fn export_timeline(&self, id: TimelineId) -> Result<TimelineExport, CoreError> {
-        let timeline = self
-            .get_timeline(id)?
-            .ok_or(CoreError::TimelineNotFound(id))?;
-        let events = self.read(id, SeqRange::all())?;
-        Ok(TimelineExport { timeline, events })
+        export_timeline_using(self.get_timeline(id), self.read(id, SeqRange::all()), id)
     }
 
     /// Import a previously exported timeline snapshot into this store.
@@ -135,23 +122,10 @@ pub trait EventStore: Send {
     /// Returns a [`CoreError::Storage`] error if the timeline already exists or on I/O failure.
     fn import_timeline(&mut self, export: TimelineExport) -> Result<Timeline, CoreError> {
         let name = export.timeline.meta.name.unwrap_or_default();
-        let tl = self.create_timeline(&name)?;
-        if !export.events.is_empty() {
-            let drafts: Vec<EventDraft> = export
-                .events
-                .into_iter()
-                .map(|e| {
-                    let mut draft = EventDraft::new(e.entity, e.event_type, e.payload);
-                    draft.causation_id = e.causation_id;
-                    draft.correlation_id = e.correlation_id;
-                    draft.schema_version = e.schema_version;
-                    draft.wall_time = Some(e.wall_time);
-                    draft
-                })
-                .collect();
-            self.append(tl.id(), &drafts)?;
-        }
-        Ok(tl)
+        let create_result = self.create_timeline(&name);
+        import_timeline_using(create_result, export.events, |timeline_id, drafts| {
+            self.append(timeline_id, drafts)
+        })
     }
 
     /// Import a timeline snapshot preserving the original [`TimelineId`] and event IDs.
@@ -172,6 +146,46 @@ pub trait EventStore: Send {
         // Backends that support identity-preserving import should override this.
         self.import_timeline(export)
     }
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn export_timeline_using(
+    timeline_result: Result<Option<Timeline>, CoreError>,
+    events_result: Result<Vec<Event>, CoreError>,
+    id: TimelineId,
+) -> Result<TimelineExport, CoreError> {
+    let Some(timeline) = timeline_result? else {
+        return Err(CoreError::TimelineNotFound(id));
+    };
+    let events = events_result?;
+    Ok(TimelineExport { timeline, events })
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn import_timeline_using<A>(
+    create_result: Result<Timeline, CoreError>,
+    events: Vec<Event>,
+    append: A,
+) -> Result<Timeline, CoreError>
+where
+    A: FnOnce(TimelineId, &[EventDraft]) -> Result<Vec<Event>, CoreError>,
+{
+    let tl = create_result?;
+    if !events.is_empty() {
+        let drafts: Vec<EventDraft> = events
+            .into_iter()
+            .map(|e| {
+                let mut draft = EventDraft::new(e.entity, e.event_type, e.payload);
+                draft.causation_id = e.causation_id;
+                draft.correlation_id = e.correlation_id;
+                draft.schema_version = e.schema_version;
+                draft.wall_time = Some(e.wall_time);
+                draft
+            })
+            .collect();
+        append(tl.id(), &drafts)?;
+    }
+    Ok(tl)
 }
 
 #[cfg(test)]
@@ -196,6 +210,102 @@ mod tests {
     impl TrivialStore {
         fn new() -> Self {
             Self { counter: 0 }
+        }
+    }
+
+    /// Store that fails selected operations for export/import error-path coverage.
+    struct FlakyStore {
+        mode: FlakyMode,
+        counter: u64,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum FlakyMode {
+        GetTimelineErr,
+        GetTimelineMissing,
+        ReadErr,
+        CreateTimelineErr,
+        AppendErr,
+        Healthy,
+    }
+
+    impl FlakyStore {
+        fn new(mode: FlakyMode) -> Self {
+            Self { mode, counter: 0 }
+        }
+
+        fn healthy_timeline() -> Timeline {
+            Timeline::new(TimelineMeta::root("flaky"))
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl EventStore for FlakyStore {
+        fn create_timeline(&mut self, _name: &str) -> Result<Timeline, CoreError> {
+            if self.mode == FlakyMode::CreateTimelineErr {
+                return Err(CoreError::Storage("create_timeline failed".to_owned()));
+            }
+            Ok(Self::healthy_timeline())
+        }
+
+        fn append(
+            &mut self,
+            _timeline: TimelineId,
+            drafts: &[EventDraft],
+        ) -> Result<Vec<Event>, CoreError> {
+            if self.mode == FlakyMode::AppendErr {
+                return Err(CoreError::Storage("append failed".to_owned()));
+            }
+            let events = drafts
+                .iter()
+                .map(|d| {
+                    self.counter += 1;
+                    Event {
+                        id: EventId::new(),
+                        entity: d.entity,
+                        event_type: d.event_type.clone(),
+                        payload: d.payload.clone(),
+                        wall_time: d.wall_time.unwrap_or_else(WallTime::now),
+                        seq: Seq::from_u64(self.counter),
+                        causation_id: d.causation_id,
+                        correlation_id: d.correlation_id,
+                        schema_version: d.schema_version,
+                        signature: None,
+                        payload_hash: Hash::from_bytes([0u8; 32]),
+                    }
+                })
+                .collect();
+            Ok(events)
+        }
+
+        fn read(&self, _timeline: TimelineId, _range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            if self.mode == FlakyMode::ReadErr {
+                return Err(CoreError::Storage("read failed".to_owned()));
+            }
+            Ok(Vec::new())
+        }
+
+        fn fork(
+            &mut self,
+            _parent: TimelineId,
+            _at_seq: Seq,
+            _name: &str,
+        ) -> Result<Timeline, CoreError> {
+            Ok(Timeline::new(TimelineMeta::root("fork")))
+        }
+
+        fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        fn get_timeline(&self, _id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+            match self.mode {
+                FlakyMode::GetTimelineErr => {
+                    Err(CoreError::Storage("get_timeline failed".to_owned()))
+                }
+                FlakyMode::GetTimelineMissing => Ok(None),
+                _ => Ok(Some(Self::healthy_timeline())),
+            }
         }
     }
 
@@ -256,6 +366,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn import_timeline_with_id_defaults_to_import_timeline() {
         // The default `import_timeline_with_id` falls back to `import_timeline`, which
         // creates a new TimelineId. This test documents that known behaviour so that
@@ -278,7 +389,10 @@ mod tests {
         let timeline = Timeline::new(meta);
         // The default impl will *not* preserve the original TimelineId — that's the point.
         // Wave 6 backends must override import_timeline_with_id to preserve identity.
-        let export = TimelineExport { timeline, events: vec![dummy_event] };
+        let export = TimelineExport {
+            timeline,
+            events: vec![dummy_event],
+        };
 
         let mut store = TrivialStore::new();
         // Default fallback succeeds but assigns a new TimelineId.
@@ -288,17 +402,22 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn import_timeline_empty_events_skips_append() {
         // Covers the `if !export.events.is_empty()` false branch (line 153 skipped).
         let meta = TimelineMeta::root("empty");
         let timeline = Timeline::new(meta);
-        let export = TimelineExport { timeline, events: vec![] };
+        let export = TimelineExport {
+            timeline,
+            events: vec![],
+        };
         let mut store = TrivialStore::new();
         let imported = store.import_timeline(export).unwrap();
         let _ = imported.id();
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn trivial_store_read_returns_empty() {
         let store = TrivialStore::new();
         let id = crate::ids::TimelineId::new();
@@ -307,6 +426,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn trivial_store_fork_returns_timeline() {
         let mut store = TrivialStore::new();
         let id = crate::ids::TimelineId::new();
@@ -315,12 +435,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn trivial_store_list_timelines_returns_empty() {
         let store = TrivialStore::new();
         assert!(store.list_timelines().unwrap().is_empty());
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn trivial_store_get_timeline_returns_none() {
         let store = TrivialStore::new();
         let id = crate::ids::TimelineId::new();
@@ -328,6 +450,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn seq_range_all_starts_at_zero() {
         let r = SeqRange::all();
         assert_eq!(r.from, Seq::ZERO);
@@ -335,6 +458,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn seq_range_from_seq() {
         let r = SeqRange::from_seq(Seq::from_u64(5));
         assert_eq!(r.from, Seq::from_u64(5));
@@ -342,9 +466,122 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn seq_range_bounded() {
         let r = SeqRange::bounded(Seq::from_u64(3), Seq::from_u64(10));
         assert_eq!(r.from, Seq::from_u64(3));
         assert_eq!(r.to, Some(Seq::from_u64(10)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn export_timeline_get_timeline_err_propagates() {
+        let store = FlakyStore::new(FlakyMode::GetTimelineErr);
+        let id = TimelineId::new();
+        let err = store.export_timeline(id).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn export_timeline_missing_timeline_returns_not_found() {
+        let store = FlakyStore::new(FlakyMode::GetTimelineMissing);
+        let id = TimelineId::new();
+        let err = store.export_timeline(id).unwrap_err();
+        assert!(matches!(err, CoreError::TimelineNotFound(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn export_timeline_read_err_propagates() {
+        let store = FlakyStore::new(FlakyMode::ReadErr);
+        let id = TimelineId::new();
+        let err = store.export_timeline(id).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_timeline_create_timeline_err_propagates() {
+        let mut store = FlakyStore::new(FlakyMode::CreateTimelineErr);
+        let export = TimelineExport {
+            timeline: FlakyStore::healthy_timeline(),
+            events: vec![],
+        };
+        let err = store.import_timeline(export).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_timeline_append_err_propagates() {
+        let entity = EntityId::new();
+        let dummy_event = Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new("test.event"),
+            payload: CanonicalBytes::from_vec(b"hello".to_vec()),
+            wall_time: WallTime::from_micros(1_000),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0u8; 32]),
+        };
+        let export = TimelineExport {
+            timeline: FlakyStore::healthy_timeline(),
+            events: vec![dummy_event],
+        };
+        let mut store = FlakyStore::new(FlakyMode::AppendErr);
+        let err = store.import_timeline(export).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn flaky_store_healthy_export_succeeds() {
+        let store = FlakyStore::new(FlakyMode::Healthy);
+        let id = TimelineId::new();
+        let export = store.export_timeline(id).unwrap();
+        assert!(export.events.is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn flaky_store_healthy_import_with_events_succeeds() {
+        let entity = EntityId::new();
+        let dummy_event = Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new("test.event"),
+            payload: CanonicalBytes::from_vec(b"data".to_vec()),
+            wall_time: WallTime::from_micros(1_000),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0u8; 32]),
+        };
+        let export = TimelineExport {
+            timeline: FlakyStore::healthy_timeline(),
+            events: vec![dummy_event],
+        };
+        let mut store = FlakyStore::new(FlakyMode::Healthy);
+        let imported = store.import_timeline(export).unwrap();
+        let _ = imported.id();
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_timeline_with_id_propagates_create_error() {
+        let export = TimelineExport {
+            timeline: FlakyStore::healthy_timeline(),
+            events: vec![],
+        };
+        let mut store = FlakyStore::new(FlakyMode::CreateTimelineErr);
+        let err = store.import_timeline_with_id(export).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
     }
 }

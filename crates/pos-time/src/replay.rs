@@ -1,7 +1,7 @@
 //! Replay events from an `EventStore` through a `ProjectionRegistry`.
 
-use pos_core::{CoreError, Seq, TimelineId};
 use pos_core::store::{EventStore, SeqRange};
+use pos_core::{CoreError, Seq, TimelineId};
 use pos_state::ProjectionRegistry;
 
 /// Replay **all** events on `timeline` through every reducer in `registry`.
@@ -45,12 +45,47 @@ mod tests {
         clock::WallTime,
         crypto::Hash,
         event::{CanonicalBytes, EventDraft, Kind, SchemaVersion},
-        ids::{EntityId, EventId},
-        Event, Reducer, State,
+        ids::{EntityId, EventId, TimelineId},
+        store::{EventStore, SeqRange},
+        CoreError, Event, Reducer, State,
     };
     use pos_state::ProjectionRegistry;
     use pos_store::{open_store, StoreConfig};
     use proptest::prelude::*;
+
+    struct ReadFailStore;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl EventStore for ReadFailStore {
+        fn create_timeline(&mut self, _: &str) -> Result<pos_core::Timeline, CoreError> {
+            Err(CoreError::Storage("unused".to_owned()))
+        }
+
+        fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
+            Err(CoreError::Storage("unused".to_owned()))
+        }
+
+        fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
+            Err(CoreError::Storage("read failed".to_owned()))
+        }
+
+        fn fork(
+            &mut self,
+            _: TimelineId,
+            _: Seq,
+            _: &str,
+        ) -> Result<pos_core::Timeline, CoreError> {
+            Err(CoreError::Storage("unused".to_owned()))
+        }
+
+        fn list_timelines(&self) -> Result<Vec<pos_core::Timeline>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        fn get_timeline(&self, _: TimelineId) -> Result<Option<pos_core::Timeline>, CoreError> {
+            Ok(None)
+        }
+    }
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -64,13 +99,20 @@ mod tests {
         }
 
         fn apply(&self, state: &mut State, _event: &Event) {
-            let n = state.get("n").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            let n = state
+                .get("n")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
             state.set("n", serde_json::json!(n + 1));
         }
     }
 
     fn draft(entity: EntityId) -> EventDraft {
-        EventDraft::new(entity, Kind::new("test.tick"), CanonicalBytes::from_vec(vec![]))
+        EventDraft::new(
+            entity,
+            Kind::new("test.tick"),
+            CanonicalBytes::from_vec(vec![]),
+        )
     }
 
     fn make_event(entity: EntityId, seq: u64) -> Event {
@@ -99,6 +141,7 @@ mod tests {
     // ── tests ─────────────────────────────────────────────────────────────────
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn replay_empty_timeline_is_noop() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("empty").unwrap();
@@ -113,6 +156,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn replay_full_timeline_folds_all_events() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("full").unwrap();
@@ -129,6 +173,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn replay_at_seq_stops_at_boundary() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("partial").unwrap();
@@ -147,8 +192,29 @@ mod tests {
         assert_eq!(count_for(&reg, &entity), 3);
     }
 
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn replay_read_err_propagates() {
+        let store = ReadFailStore;
+        let mut reg = ProjectionRegistry::new();
+        reg.register("count", Box::new(CountReducer));
+        let err = replay(&store, TimelineId::new(), &mut reg).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn replay_at_read_err_propagates() {
+        let store = ReadFailStore;
+        let mut reg = ProjectionRegistry::new();
+        reg.register("count", Box::new(CountReducer));
+        let err = replay_at(&store, TimelineId::new(), Seq::from_u64(1), &mut reg).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
     proptest! {
         #[test]
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn replay_is_deterministic(event_count in 0usize..20) {
             let mut store = open_store(StoreConfig::Memory).unwrap();
             let tl = store.create_timeline("det").unwrap();

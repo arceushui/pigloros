@@ -46,7 +46,10 @@ pub struct RecordedOutput {
 impl RecordedOutput {
     #[must_use]
     pub fn new(bytes: Vec<u8>) -> Self {
-        Self { bytes, seq_hint: None }
+        Self {
+            bytes,
+            seq_hint: None,
+        }
     }
 }
 
@@ -106,10 +109,7 @@ impl Recorder {
         let all_events = store.read(timeline, SeqRange::all())?;
         let recorded: Vec<Vec<u8>> = all_events
             .into_iter()
-            .filter(|e| {
-                e.entity == entity
-                    && e.event_type.as_str() == RECORDER_EVENT_TYPE
-            })
+            .filter(|e| e.entity == entity && e.event_type.as_str() == RECORDER_EVENT_TYPE)
             .map(|e| e.payload.as_slice().to_vec())
             .collect();
         Ok(Self::new_replay(entity, recorded))
@@ -129,10 +129,7 @@ impl Recorder {
     /// # Errors
     /// Returns [`RuntimeError::ModeMismatch`] if called in wrong mode.
     /// Returns [`RuntimeError::Store`] if replay cursor is exhausted.
-    pub fn record(
-        &mut self,
-        output_bytes: Vec<u8>,
-    ) -> Result<RecordedOutput, RuntimeError> {
+    pub fn record(&mut self, output_bytes: Vec<u8>) -> Result<RecordedOutput, RuntimeError> {
         match self.mode {
             RunMode::Live => Ok(RecordedOutput::new(output_bytes)),
             RunMode::Replay => {
@@ -144,7 +141,10 @@ impl Recorder {
                 }
                 let bytes = self.replay_events[self.replay_cursor].clone();
                 self.replay_cursor += 1;
-                Ok(RecordedOutput { bytes, seq_hint: Some(self.replay_cursor as u64) })
+                Ok(RecordedOutput {
+                    bytes,
+                    seq_hint: Some(self.replay_cursor as u64),
+                })
             }
         }
     }
@@ -179,6 +179,7 @@ mod tests {
     use pos_store::{open_store, StoreConfig};
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn live_recorder_returns_provided_bytes() {
         let entity = EntityId::new();
         let mut rec = Recorder::new_live(entity);
@@ -188,6 +189,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn live_recorder_to_draft_returns_some() {
         let entity = EntityId::new();
         let rec = Recorder::new_live(entity);
@@ -198,6 +200,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn replay_recorder_returns_stored_bytes() {
         let entity = EntityId::new();
         let stored = vec![b"first".to_vec(), b"second".to_vec()];
@@ -215,6 +218,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn replay_cursor_exhaustion_returns_error() {
         let entity = EntityId::new();
         let mut rec = Recorder::new_replay(entity, vec![b"only".to_vec()]);
@@ -224,6 +228,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn replay_to_draft_returns_none() {
         let entity = EntityId::new();
         let rec = Recorder::new_replay(entity, vec![]);
@@ -232,6 +237,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn prepare_replay_loads_recorder_events_from_store() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("t").unwrap();
@@ -239,9 +245,21 @@ mod tests {
 
         // Write two recorded output events manually
         let drafts = vec![
-            EventDraft::new(entity, Kind::new(RECORDER_EVENT_TYPE), CanonicalBytes::from_vec(b"r1".to_vec())),
-            EventDraft::new(entity, Kind::new("other.event"), CanonicalBytes::from_vec(b"skip".to_vec())),
-            EventDraft::new(entity, Kind::new(RECORDER_EVENT_TYPE), CanonicalBytes::from_vec(b"r2".to_vec())),
+            EventDraft::new(
+                entity,
+                Kind::new(RECORDER_EVENT_TYPE),
+                CanonicalBytes::from_vec(b"r1".to_vec()),
+            ),
+            EventDraft::new(
+                entity,
+                Kind::new("other.event"),
+                CanonicalBytes::from_vec(b"skip".to_vec()),
+            ),
+            EventDraft::new(
+                entity,
+                Kind::new(RECORDER_EVENT_TYPE),
+                CanonicalBytes::from_vec(b"r2".to_vec()),
+            ),
         ];
         store.append(tl.id(), &drafts).unwrap();
 
@@ -252,12 +270,70 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_mode_display() {
         assert_eq!(RunMode::Live.to_string(), "Live");
         assert_eq!(RunMode::Replay.to_string(), "Replay");
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn prepare_replay_read_err_propagates() {
+        struct ReadFailStore;
+
+        #[cfg_attr(coverage_nightly, coverage(off))]
+        impl pos_core::store::EventStore for ReadFailStore {
+            fn create_timeline(
+                &mut self,
+                _: &str,
+            ) -> Result<pos_core::Timeline, pos_core::CoreError> {
+                Err(pos_core::CoreError::Storage("unused".to_owned()))
+            }
+
+            fn append(
+                &mut self,
+                _: pos_core::TimelineId,
+                _: &[EventDraft],
+            ) -> Result<Vec<pos_core::Event>, pos_core::CoreError> {
+                Err(pos_core::CoreError::Storage("unused".to_owned()))
+            }
+
+            fn read(
+                &self,
+                _: pos_core::TimelineId,
+                _: pos_core::store::SeqRange,
+            ) -> Result<Vec<pos_core::Event>, pos_core::CoreError> {
+                Err(pos_core::CoreError::Storage("read failed".to_owned()))
+            }
+
+            fn fork(
+                &mut self,
+                _: pos_core::TimelineId,
+                _: pos_core::Seq,
+                _: &str,
+            ) -> Result<pos_core::Timeline, pos_core::CoreError> {
+                Err(pos_core::CoreError::Storage("unused".to_owned()))
+            }
+
+            fn list_timelines(&self) -> Result<Vec<pos_core::Timeline>, pos_core::CoreError> {
+                Ok(Vec::new())
+            }
+
+            fn get_timeline(
+                &self,
+                _: pos_core::TimelineId,
+            ) -> Result<Option<pos_core::Timeline>, pos_core::CoreError> {
+                Ok(None)
+            }
+        }
+
+        let store = ReadFailStore;
+        let result = Recorder::prepare_replay(EntityId::new(), &store, pos_core::TimelineId::new());
+        assert!(matches!(result, Err(RuntimeError::Store(_))));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn live_replay_roundtrip() {
         // Simulate: live run records outputs, then replay reads them back identically.
         let entity = EntityId::new();

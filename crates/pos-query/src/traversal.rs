@@ -30,9 +30,7 @@ pub fn trace_relationships(
     // Plugin-defined payloads encode source/target; we filter on entity field only.
     let mut matching: Vec<Event> = all
         .into_iter()
-        .filter(|e| {
-            e.event_type.as_str() == relationship_event_type && e.entity == entity
-        })
+        .filter(|e| e.event_type.as_str() == relationship_event_type && e.entity == entity)
         .collect();
 
     // Sort by seq for determinism.
@@ -104,17 +102,14 @@ mod tests {
         )
     }
 
-    fn make_draft_with_cause(
-        entity: EntityId,
-        event_type: &str,
-        cause: EventId,
-    ) -> EventDraft {
+    fn make_draft_with_cause(entity: EntityId, event_type: &str, cause: EventId) -> EventDraft {
         let mut d = make_draft(entity, event_type);
         d.causation_id = Some(cause);
         d
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn causal_chain_single_event_no_cause() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("causal").unwrap();
@@ -130,6 +125,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn causal_chain_follows_causation_ids() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("causal").unwrap();
@@ -143,13 +139,19 @@ mod tests {
 
         // Append middle event caused by root.
         let mid_events = store
-            .append(tl.id(), &[make_draft_with_cause(entity, "mid.event", root.id)])
+            .append(
+                tl.id(),
+                &[make_draft_with_cause(entity, "mid.event", root.id)],
+            )
             .unwrap();
         let mid = mid_events[0].clone();
 
         // Append leaf event caused by mid.
         let leaf_events = store
-            .append(tl.id(), &[make_draft_with_cause(entity, "leaf.event", mid.id)])
+            .append(
+                tl.id(),
+                &[make_draft_with_cause(entity, "leaf.event", mid.id)],
+            )
             .unwrap();
         let leaf = leaf_events[0].clone();
 
@@ -161,6 +163,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn causal_chain_unknown_event_returns_empty() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("causal").unwrap();
@@ -171,6 +174,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn trace_relationships_returns_matching_events() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("rel").unwrap();
@@ -184,8 +188,7 @@ mod tests {
         ];
         store.append(tl.id(), &drafts).unwrap();
 
-        let rels =
-            trace_relationships(&*store, tl.id(), entity, "relationship.link").unwrap();
+        let rels = trace_relationships(&*store, tl.id(), entity, "relationship.link").unwrap();
         assert_eq!(rels.len(), 2);
         for e in &rels {
             assert_eq!(e.event_type.as_str(), "relationship.link");
@@ -194,6 +197,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn trace_relationships_empty_when_no_match() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("rel").unwrap();
@@ -203,12 +207,12 @@ mod tests {
             .append(tl.id(), &[make_draft(entity, "entity.action")])
             .unwrap();
 
-        let rels =
-            trace_relationships(&*store, tl.id(), entity, "relationship.link").unwrap();
+        let rels = trace_relationships(&*store, tl.id(), entity, "relationship.link").unwrap();
         assert!(rels.is_empty());
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn causal_chain_stops_at_broken_causation_link() {
         // Covers the `else { break }` branch: causation_id points to an event
         // not present in the store (e.g. it was on a different timeline).
@@ -226,5 +230,24 @@ mod tests {
         let chain = causal_chain(&*store, tl.id(), committed[0].id).unwrap();
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].id, committed[0].id);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn trace_relationships_unknown_timeline_returns_error() {
+        let store = open_store(StoreConfig::Memory).unwrap();
+        let unknown = TimelineId::new();
+        let entity = EntityId::new();
+        let err = trace_relationships(&*store, unknown, entity, "relationship.link").unwrap_err();
+        assert!(matches!(err, CoreError::TimelineNotFound(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn causal_chain_unknown_timeline_returns_error() {
+        let store = open_store(StoreConfig::Memory).unwrap();
+        let unknown = TimelineId::new();
+        let err = causal_chain(&*store, unknown, EventId::new()).unwrap_err();
+        assert!(matches!(err, CoreError::TimelineNotFound(_)));
     }
 }

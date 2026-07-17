@@ -4,18 +4,17 @@
 //! must see a single logical sequence: parent[`0..=fork_seq`] + child events,
 //! renumbered to `1..n`, then filtered by the requested [`SeqRange`].
 
-use pos_core::{
-    clock::Seq,
-    event::Event,
-    store::SeqRange,
-};
+use pos_core::{clock::Seq, event::Event, store::SeqRange};
 
 /// Assign logical seqs (`1..n` in chain order) and apply `range`.
 ///
 /// `segments` must already be in root→leaf order, each segment containing only
 /// that level's contribution (parent capped at `fork_seq`; leaf = own events).
 #[must_use]
-pub fn renumber_and_filter(segments: impl IntoIterator<Item = Event>, range: SeqRange) -> Vec<Event> {
+pub fn renumber_and_filter(
+    segments: impl IntoIterator<Item = Event>,
+    range: SeqRange,
+) -> Vec<Event> {
     segments
         .into_iter()
         .enumerate()
@@ -23,7 +22,7 @@ pub fn renumber_and_filter(segments: impl IntoIterator<Item = Event>, range: Seq
             e.seq = Seq::from_u64((i + 1) as u64);
             e
         })
-        .filter(|e| e.seq >= range.from && range.to.map_or(true, |to| e.seq <= to))
+        .filter(|e| e.seq >= range.from && range.to.is_none_or(|to| e.seq <= to))
         .collect()
 }
 
@@ -54,12 +53,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn renumbers_colliding_raw_seqs_in_order() {
         // Two levels both have local seq=1 — logical order must preserve segment order.
-        let out = renumber_and_filter(
-            vec![ev(b"parent", 1), ev(b"child", 1)],
-            SeqRange::all(),
-        );
+        let out = renumber_and_filter(vec![ev(b"parent", 1), ev(b"child", 1)], SeqRange::all());
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].seq.as_u64(), 1);
         assert_eq!(out[1].seq.as_u64(), 2);
@@ -68,6 +65,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn filters_by_logical_range() {
         let out = renumber_and_filter(
             vec![ev(b"a", 1), ev(b"b", 1), ev(b"c", 2)],

@@ -2,8 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use pos_core::{CoreError, EntityId, Seq, StateRegistry, TimelineId};
 use pos_core::store::{EventStore, SeqRange};
+use pos_core::{CoreError, EntityId, Seq, StateRegistry, TimelineId};
 use pos_state::ProjectionRegistry;
 
 /// A snapshot of all per-reducer entity states at a specific sequence number
@@ -37,9 +37,7 @@ pub fn snapshot(
     registry: &mut ProjectionRegistry,
 ) -> Result<Snapshot, CoreError> {
     let events = store.read(timeline, SeqRange::all())?;
-    let at_seq = events
-        .last()
-        .map_or(Seq::ZERO, |e| e.seq);
+    let at_seq = events.last().map_or(Seq::ZERO, |e| e.seq);
 
     registry.fold_events(&events);
 
@@ -131,6 +129,40 @@ mod tests {
     use pos_state::{EntityStateProjection, ProjectionRegistry};
     use pos_store::{open_store, StoreConfig};
 
+    struct ReadFailStore;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl pos_core::store::EventStore for ReadFailStore {
+        fn create_timeline(&mut self, _: &str) -> Result<pos_core::Timeline, CoreError> {
+            Err(CoreError::Storage("unused".to_owned()))
+        }
+
+        fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
+            Err(CoreError::Storage("unused".to_owned()))
+        }
+
+        fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
+            Err(CoreError::Storage("read failed".to_owned()))
+        }
+
+        fn fork(
+            &mut self,
+            _: TimelineId,
+            _: Seq,
+            _: &str,
+        ) -> Result<pos_core::Timeline, CoreError> {
+            Err(CoreError::Storage("unused".to_owned()))
+        }
+
+        fn list_timelines(&self) -> Result<Vec<pos_core::Timeline>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        fn get_timeline(&self, _: TimelineId) -> Result<Option<pos_core::Timeline>, CoreError> {
+            Ok(None)
+        }
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     struct CountReducer;
@@ -143,7 +175,10 @@ mod tests {
         }
 
         fn apply(&self, state: &mut State, _event: &Event) {
-            let n = state.get("n").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            let n = state
+                .get("n")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
             state.set("n", serde_json::json!(n + 1));
         }
     }
@@ -155,7 +190,11 @@ mod tests {
     }
 
     fn draft(entity: EntityId) -> EventDraft {
-        EventDraft::new(entity, Kind::new("test.tick"), CanonicalBytes::from_vec(vec![]))
+        EventDraft::new(
+            entity,
+            Kind::new("test.tick"),
+            CanonicalBytes::from_vec(vec![]),
+        )
     }
 
     fn count_in_snapshot(snap: &Snapshot, entity: &EntityId) -> u64 {
@@ -170,6 +209,7 @@ mod tests {
     // ── tests ─────────────────────────────────────────────────────────────────
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn snapshot_captures_state_at_head() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("snap").unwrap();
@@ -189,6 +229,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn verify_snapshot_consistency_passes_on_fresh_store() {
         // No tail events: snapshot IS the full replay.
         let mut store = open_store(StoreConfig::Memory).unwrap();
@@ -206,6 +247,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn verify_snapshot_consistency_with_tail_events() {
         // Take a snapshot, then append more events. Verification should still pass.
         let mut store = open_store(StoreConfig::Memory).unwrap();
@@ -228,6 +270,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn snapshot_isolates_multiple_reducers() {
         // Register two reducers — their states should be tracked independently.
         let mut store = open_store(StoreConfig::Memory).unwrap();
@@ -255,6 +298,15 @@ mod tests {
             .unwrap_or(0);
         assert_eq!(ec, 5, "entity_state should count 5 events independently");
     }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn snapshot_read_err_propagates() {
+        let store = ReadFailStore;
+        let mut reg = make_registry();
+        let err = snapshot(&store, TimelineId::new(), &mut reg).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
 }
 
 #[cfg(test)]
@@ -270,12 +322,89 @@ mod extra_tests {
     use pos_state::ProjectionRegistry;
     use pos_store::{open_store, StoreConfig};
 
+    struct ReadFailStore;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl pos_core::store::EventStore for ReadFailStore {
+        fn create_timeline(&mut self, _: &str) -> Result<pos_core::Timeline, CoreError> {
+            Err(CoreError::Storage("unused".to_owned()))
+        }
+
+        fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
+            Err(CoreError::Storage("unused".to_owned()))
+        }
+
+        fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
+            Err(CoreError::Storage("read failed".to_owned()))
+        }
+
+        fn fork(
+            &mut self,
+            _: TimelineId,
+            _: Seq,
+            _: &str,
+        ) -> Result<pos_core::Timeline, CoreError> {
+            Err(CoreError::Storage("unused".to_owned()))
+        }
+
+        fn list_timelines(&self) -> Result<Vec<pos_core::Timeline>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        fn get_timeline(&self, _: TimelineId) -> Result<Option<pos_core::Timeline>, CoreError> {
+            Ok(None)
+        }
+    }
+
+    /// Fails only on `SeqRange::all()` reads (second read in verify).
+    struct ReadFailOnAllEventsStore;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl pos_core::store::EventStore for ReadFailOnAllEventsStore {
+        fn create_timeline(&mut self, _: &str) -> Result<pos_core::Timeline, CoreError> {
+            Err(CoreError::Storage("unused".to_owned()))
+        }
+
+        fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
+            Err(CoreError::Storage("unused".to_owned()))
+        }
+
+        fn read(&self, _: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            if range.from == Seq::ZERO && range.to.is_none() {
+                return Err(CoreError::Storage("all-events read failed".to_owned()));
+            }
+            Ok(vec![])
+        }
+
+        fn fork(
+            &mut self,
+            _: TimelineId,
+            _: Seq,
+            _: &str,
+        ) -> Result<pos_core::Timeline, CoreError> {
+            Err(CoreError::Storage("unused".to_owned()))
+        }
+
+        fn list_timelines(&self) -> Result<Vec<pos_core::Timeline>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        fn get_timeline(&self, _: TimelineId) -> Result<Option<pos_core::Timeline>, CoreError> {
+            Ok(None)
+        }
+    }
+
     struct CountReducer;
 
     impl Reducer for CountReducer {
-        fn initial(&self) -> State { State::new() }
+        fn initial(&self) -> State {
+            State::new()
+        }
         fn apply(&self, state: &mut State, _event: &Event) {
-            let n = state.get("n").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            let n = state
+                .get("n")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
             state.set("n", serde_json::json!(n + 1));
         }
     }
@@ -291,6 +420,7 @@ mod extra_tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn verify_snapshot_consistency_detects_corrupted_snapshot() {
         // Covers the case where snapshot.registry has been tampered with.
         // Build a valid snapshot via normal snapshot(), then manually corrupt
@@ -305,25 +435,59 @@ mod extra_tests {
 
         // Corrupt the snapshot by injecting a bogus extra count for the entity.
         if let Some(count_reg) = snap.registry.get_mut("count") {
-            count_reg.apply(&CountReducer, &Event {
-                id: EventId::new(),
-                entity,
-                event_type: Kind::new("corrupt"),
-                payload: CanonicalBytes::from_vec(vec![]),
-                wall_time: WallTime::from_micros(0),
-                seq: pos_core::clock::Seq::from_u64(999),
-                causation_id: None,
-                correlation_id: None,
-                schema_version: SchemaVersion::V1,
-                signature: None,
-                payload_hash: Hash::from_bytes([0u8; 32]),
-            });
+            count_reg.apply(
+                &CountReducer,
+                &Event {
+                    id: EventId::new(),
+                    entity,
+                    event_type: Kind::new("corrupt"),
+                    payload: CanonicalBytes::from_vec(vec![]),
+                    wall_time: WallTime::from_micros(0),
+                    seq: pos_core::clock::Seq::from_u64(999),
+                    causation_id: None,
+                    correlation_id: None,
+                    schema_version: SchemaVersion::V1,
+                    signature: None,
+                    payload_hash: Hash::from_bytes([0u8; 32]),
+                },
+            );
         }
 
         // Now the snapshot registry state (2 events) differs from a full replay (1 event).
         // verify_snapshot_consistency must detect the inconsistency.
         let mut verify_reg = make_registry();
         let result = verify_snapshot_consistency(store.as_ref(), &snap, &mut verify_reg);
-        assert!(result.is_err(), "corrupted snapshot should fail consistency check");
+        assert!(
+            result.is_err(),
+            "corrupted snapshot should fail consistency check"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn verify_snapshot_consistency_read_err_propagates() {
+        let store = ReadFailStore;
+        let snap = Snapshot {
+            timeline: TimelineId::new(),
+            at_seq: Seq::ZERO,
+            registry: HashMap::new(),
+        };
+        let mut reg = make_registry();
+        let err = verify_snapshot_consistency(&store, &snap, &mut reg).unwrap_err();
+        assert!(matches!(err, SnapshotError::Store(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn verify_snapshot_consistency_all_events_read_err_propagates() {
+        let store = ReadFailOnAllEventsStore;
+        let snap = Snapshot {
+            timeline: TimelineId::new(),
+            at_seq: Seq::ZERO,
+            registry: HashMap::new(),
+        };
+        let mut reg = make_registry();
+        let err = verify_snapshot_consistency(&store, &snap, &mut reg).unwrap_err();
+        assert!(matches!(err, SnapshotError::Store(_)));
     }
 }

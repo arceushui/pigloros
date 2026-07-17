@@ -10,6 +10,7 @@
 //! Wave 5 uses a pure-Rust degree-grid snap ([`SpatialCloaker`]); H3/S2 are deferred.
 //! Privacy property: exact coordinates are snapped to a configurable grid resolution
 //! (e.g., 0.1 degree cells), preventing exact location tracking.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use pos_core::{
     event::{CanonicalBytes, Event, Kind},
@@ -84,8 +85,7 @@ impl SpatialCloaker {
         };
 
         let mut buf = Vec::new();
-        ciborium::into_writer(&payload, &mut buf)
-            .expect("ciborium write to Vec<u8> is infallible");
+        ciborium::into_writer(&payload, &mut buf).expect("ciborium write to Vec<u8> is infallible");
 
         pos_core::EventDraft::new(
             entity,
@@ -114,7 +114,9 @@ impl GeoPlugin {
     /// Create a new geo plugin.
     #[must_use]
     pub fn new() -> Self {
-        Self { id: PluginId::new() }
+        Self {
+            id: PluginId::new(),
+        }
     }
 }
 
@@ -148,8 +150,14 @@ impl Reducer for GeoReducer {
     fn initial(&self) -> State {
         let mut s = State::new();
         s.set("location_count", serde_json::Value::Number(0.into()));
-        s.set("last_cell_lat", serde_json::Value::Number(serde_json::Number::from_f64(0.0).unwrap_or(0.into())));
-        s.set("last_cell_lng", serde_json::Value::Number(serde_json::Number::from_f64(0.0).unwrap_or(0.into())));
+        s.set(
+            "last_cell_lat",
+            serde_json::Value::Number(serde_json::Number::from_f64(0.0).unwrap_or(0.into())),
+        );
+        s.set(
+            "last_cell_lng",
+            serde_json::Value::Number(serde_json::Number::from_f64(0.0).unwrap_or(0.into())),
+        );
         s
     }
 
@@ -159,10 +167,15 @@ impl Reducer for GeoReducer {
                 .get("location_count")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
-            state.set("location_count", serde_json::Value::Number((location_count + 1).into()));
+            state.set(
+                "location_count",
+                serde_json::Value::Number((location_count + 1).into()),
+            );
 
             // Decode payload to extract last cell coordinates.
-            if let Ok(payload) = ciborium::from_reader::<GeoLocationPayload, _>(event.payload.as_slice()) {
+            if let Ok(payload) =
+                ciborium::from_reader::<GeoLocationPayload, _>(event.payload.as_slice())
+            {
                 let lat_num = serde_json::Number::from_f64(payload.cell_lat).unwrap_or(0.into());
                 let lng_num = serde_json::Number::from_f64(payload.cell_lng).unwrap_or(0.into());
                 state.set("last_cell_lat", serde_json::Value::Number(lat_num));
@@ -227,6 +240,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_new_and_default() {
         let p1 = GeoPlugin::new();
         let p2 = GeoPlugin::default();
@@ -235,18 +249,21 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_name_is_geo() {
         let plugin = GeoPlugin::new();
         assert_eq!(plugin.name(), "geo");
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_id_is_returned() {
         let plugin = GeoPlugin::new();
         let _id = plugin.id();
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_capability_is_correct() {
         let plugin = GeoPlugin::new();
         let cap = plugin.capability();
@@ -260,6 +277,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn spatial_cloaker_snaps_to_grid() {
         const TOLERANCE: f64 = 1e-10;
         let cloaker = SpatialCloaker::new(0.1);
@@ -281,6 +299,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn spatial_cloaker_resolution_half_degree() {
         let cloaker = SpatialCloaker::new(0.5);
 
@@ -294,6 +313,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn spatial_cloaker_privacy_property() {
         let cloaker = SpatialCloaker::new(0.1);
 
@@ -306,6 +326,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn spatial_cloaker_to_draft_produces_correct_event_type() {
         let cloaker = SpatialCloaker::new(0.1);
         let entity = EntityId::new();
@@ -316,13 +337,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn spatial_cloaker_to_draft_has_decodable_payload() {
         let cloaker = SpatialCloaker::new(0.1);
         let entity = EntityId::new();
         let draft = cloaker.to_draft(entity, 37.07, -122.03);
 
-        let payload: GeoLocationPayload =
-            ciborium::from_reader(draft.payload.as_slice()).unwrap();
+        let payload: GeoLocationPayload = ciborium::from_reader(draft.payload.as_slice()).unwrap();
 
         assert!((payload.cell_lat - 37.1).abs() < f64::EPSILON);
         assert!((payload.cell_lng - (-122.0)).abs() < f64::EPSILON);
@@ -330,22 +351,34 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_tracks_location_count() {
         let reducer = GeoReducer;
         let entity = EntityId::new();
         let mut state = reducer.initial();
 
-        assert_eq!(state.get("location_count").and_then(serde_json::Value::as_u64), Some(0));
+        assert_eq!(
+            state
+                .get("location_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(0)
+        );
 
         for _ in 0..3 {
             let event = make_geo_event(entity, 37.0, -122.0, 0.1);
             reducer.apply(&mut state, &event);
         }
 
-        assert_eq!(state.get("location_count").and_then(serde_json::Value::as_u64), Some(3));
+        assert_eq!(
+            state
+                .get("location_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(3)
+        );
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_tracks_last_cell_coordinates() {
         let reducer = GeoReducer;
         let entity = EntityId::new();
@@ -354,17 +387,50 @@ mod tests {
         let event1 = make_geo_event(entity, 37.1, -122.1, 0.1);
         reducer.apply(&mut state, &event1);
 
-        assert!((state.get("last_cell_lat").and_then(serde_json::Value::as_f64).unwrap_or(0.0) - 37.1).abs() < f64::EPSILON);
-        assert!((state.get("last_cell_lng").and_then(serde_json::Value::as_f64).unwrap_or(0.0) - (-122.1)).abs() < f64::EPSILON);
+        assert!(
+            (state
+                .get("last_cell_lat")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0)
+                - 37.1)
+                .abs()
+                < f64::EPSILON
+        );
+        assert!(
+            (state
+                .get("last_cell_lng")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0)
+                - (-122.1))
+                .abs()
+                < f64::EPSILON
+        );
 
         let event2 = make_geo_event(entity, 38.0, -123.0, 0.1);
         reducer.apply(&mut state, &event2);
 
-        assert!((state.get("last_cell_lat").and_then(serde_json::Value::as_f64).unwrap_or(0.0) - 38.0).abs() < f64::EPSILON);
-        assert!((state.get("last_cell_lng").and_then(serde_json::Value::as_f64).unwrap_or(0.0) - (-123.0)).abs() < f64::EPSILON);
+        assert!(
+            (state
+                .get("last_cell_lat")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0)
+                - 38.0)
+                .abs()
+                < f64::EPSILON
+        );
+        assert!(
+            (state
+                .get("last_cell_lng")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0)
+                - (-123.0))
+                .abs()
+                < f64::EPSILON
+        );
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_ignores_other_event_types() {
         let reducer = GeoReducer;
         let entity = EntityId::new();
@@ -373,12 +439,34 @@ mod tests {
         let other = make_other_event(entity);
         reducer.apply(&mut state, &other);
 
-        assert_eq!(state.get("location_count").and_then(serde_json::Value::as_u64), Some(0));
-        assert!((state.get("last_cell_lat").and_then(serde_json::Value::as_f64).unwrap_or(0.0) - 0.0).abs() < f64::EPSILON);
-        assert!((state.get("last_cell_lng").and_then(serde_json::Value::as_f64).unwrap_or(0.0) - 0.0).abs() < f64::EPSILON);
+        assert_eq!(
+            state
+                .get("location_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(0)
+        );
+        assert!(
+            (state
+                .get("last_cell_lat")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0)
+                - 0.0)
+                .abs()
+                < f64::EPSILON
+        );
+        assert!(
+            (state
+                .get("last_cell_lng")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0)
+                - 0.0)
+                .abs()
+                < f64::EPSILON
+        );
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_initial_state_has_correct_fields() {
         let reducer = GeoReducer;
         let state = reducer.initial();
@@ -388,6 +476,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_handles_malformed_payload() {
         let reducer = GeoReducer;
         let entity = EntityId::new();
@@ -409,11 +498,25 @@ mod tests {
 
         reducer.apply(&mut state, &event);
 
-        assert_eq!(state.get("location_count").and_then(serde_json::Value::as_u64), Some(1));
-        assert!((state.get("last_cell_lat").and_then(serde_json::Value::as_f64).unwrap_or(0.0) - 0.0).abs() < f64::EPSILON);
+        assert_eq!(
+            state
+                .get("location_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+        assert!(
+            (state
+                .get("last_cell_lat")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0)
+                - 0.0)
+                .abs()
+                < f64::EPSILON
+        );
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn geo_location_payload_serializes_correctly() {
         let payload = GeoLocationPayload {
             cell_lat: 37.0,
@@ -429,6 +532,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn spatial_cloaker_negative_coordinates() {
         let cloaker = SpatialCloaker::new(0.1);
 
@@ -438,6 +542,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn spatial_cloaker_zero_coordinates() {
         let cloaker = SpatialCloaker::new(0.1);
 
@@ -447,6 +552,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn spatial_cloaker_clone() {
         let cloaker1 = SpatialCloaker::new(0.1);
         let cloaker2 = cloaker1;
@@ -459,16 +565,30 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn geo_location_payload_partial_eq() {
-        let p1 = GeoLocationPayload { cell_lat: 37.0, cell_lng: -122.0, resolution: 0.1 };
-        let p2 = GeoLocationPayload { cell_lat: 37.0, cell_lng: -122.0, resolution: 0.1 };
-        let p3 = GeoLocationPayload { cell_lat: 38.0, cell_lng: -122.0, resolution: 0.1 };
+        let p1 = GeoLocationPayload {
+            cell_lat: 37.0,
+            cell_lng: -122.0,
+            resolution: 0.1,
+        };
+        let p2 = GeoLocationPayload {
+            cell_lat: 37.0,
+            cell_lng: -122.0,
+            resolution: 0.1,
+        };
+        let p3 = GeoLocationPayload {
+            cell_lat: 38.0,
+            cell_lng: -122.0,
+            resolution: 0.1,
+        };
 
         assert_eq!(p1, p2);
         assert_ne!(p1, p3);
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_count_increments_correctly() {
         let reducer = GeoReducer;
         let entity = EntityId::new();
@@ -476,14 +596,25 @@ mod tests {
 
         let event1 = make_geo_event(entity, 37.0, -122.0, 0.1);
         reducer.apply(&mut state, &event1);
-        assert_eq!(state.get("location_count").and_then(serde_json::Value::as_u64), Some(1));
+        assert_eq!(
+            state
+                .get("location_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
 
         let event2 = make_geo_event(entity, 38.0, -123.0, 0.1);
         reducer.apply(&mut state, &event2);
-        assert_eq!(state.get("location_count").and_then(serde_json::Value::as_u64), Some(2));
+        assert_eq!(
+            state
+                .get("location_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(2)
+        );
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn spatial_cloaker_extreme_coordinates() {
         let cloaker = SpatialCloaker::new(0.1);
 

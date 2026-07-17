@@ -31,6 +31,7 @@ mod tests {
     use pos_core::ids::PluginId;
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn duplicate_plugin_displays() {
         let e = RuntimeError::DuplicatePlugin {
             id: PluginId::new(),
@@ -40,12 +41,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn unknown_event_type_displays() {
         let e = RuntimeError::UnknownEventType("world.unknown".to_owned());
         assert!(e.to_string().contains("world.unknown"));
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn invalid_payload_displays() {
         let e = RuntimeError::InvalidPayload {
             event_type: "agent.action".to_owned(),
@@ -56,12 +59,16 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn no_driver_displays() {
-        let e = RuntimeError::NoDriver { name: "static-plugin".to_owned() };
+        let e = RuntimeError::NoDriver {
+            name: "static-plugin".to_owned(),
+        };
         assert!(e.to_string().contains("static-plugin"));
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn capability_mismatch_displays() {
         let e = RuntimeError::CapabilityMismatch {
             name: "agent".to_owned(),
@@ -72,6 +79,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn mode_mismatch_displays() {
         let e = RuntimeError::ModeMismatch {
             expected: "Live".to_owned(),

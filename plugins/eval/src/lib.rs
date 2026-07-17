@@ -7,14 +7,15 @@
 //! Owns event types `"eval.prediction"` and `"eval.outcome"`.
 //! Tracks predictions and outcomes in State, and provides
 //! [`compute_report`] to produce a [`CalibrationReport`] from a timeline.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use pos_core::{
     event::{Event, Kind},
     ids::PluginId,
+    ids::TimelineId,
     plugin::{Capability, Plugin},
     state::{Reducer, State},
     store::EventStore,
-    ids::TimelineId,
     store::SeqRange,
 };
 use serde::{Deserialize, Serialize};
@@ -184,7 +185,9 @@ impl EvalPlugin {
     /// Create a new `EvalPlugin`.
     #[must_use]
     pub fn new() -> Self {
-        Self { id: PluginId::new() }
+        Self {
+            id: PluginId::new(),
+        }
     }
 }
 
@@ -260,8 +263,7 @@ impl Reducer for EvalReducer {
                 state.set("n_outcomes", serde_json::json!(n + 1));
 
                 // Decode CBOR payload; skip silently on decode error.
-                if let Ok(o) =
-                    ciborium::from_reader::<OutcomePayload, _>(event.payload.as_slice())
+                if let Ok(o) = ciborium::from_reader::<OutcomePayload, _>(event.payload.as_slice())
                 {
                     let mut arr = state
                         .get("outcomes")
@@ -434,12 +436,10 @@ pub fn compute_report(
         / n_resolved_f;
 
     // Population average predicted probability.
-    let population_avg: f64 =
-        resolved.iter().map(|p| p.predicted_prob).sum::<f64>() / n_resolved_f;
+    let population_avg: f64 = resolved.iter().map(|p| p.predicted_prob).sum::<f64>() / n_resolved_f;
 
     // Fraction positive (persistence baseline).
-    let fraction_positive: f64 =
-        resolved.iter().map(|p| p.outcome).sum::<f64>() / n_resolved_f;
+    let fraction_positive: f64 = resolved.iter().map(|p| p.outcome).sum::<f64>() / n_resolved_f;
 
     let outcomes_vec: Vec<f64> = resolved.iter().map(|p| p.outcome).collect();
 
@@ -550,6 +550,7 @@ mod tests {
     // ── EvalPlugin tests ─────────────────────────────────────────────────────
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_new_and_default_have_same_name() {
         let p1 = EvalPlugin::new();
         let p2 = EvalPlugin::default();
@@ -558,6 +559,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_id_is_unique() {
         let p1 = EvalPlugin::new();
         let p2 = EvalPlugin::new();
@@ -565,6 +567,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_capability() {
         let plugin = EvalPlugin::new();
         let cap = plugin.capability();
@@ -585,11 +588,14 @@ mod tests {
     // ── EvalReducer tests ─────────────────────────────────────────────────────
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_initial_state() {
         let reducer = EvalReducer;
         let state = reducer.initial();
         assert_eq!(
-            state.get("n_predictions").and_then(serde_json::Value::as_u64),
+            state
+                .get("n_predictions")
+                .and_then(serde_json::Value::as_u64),
             Some(0)
         );
         assert_eq!(
@@ -597,16 +603,23 @@ mod tests {
             Some(0)
         );
         assert_eq!(
-            state.get("predictions").and_then(serde_json::Value::as_array).map(Vec::len),
+            state
+                .get("predictions")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
             Some(0)
         );
         assert_eq!(
-            state.get("outcomes").and_then(serde_json::Value::as_array).map(Vec::len),
+            state
+                .get("outcomes")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
             Some(0)
         );
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_applies_prediction_events() {
         let reducer = EvalReducer;
         let entity = EntityId::new();
@@ -621,7 +634,9 @@ mod tests {
         reducer.apply(&mut state, &event);
 
         assert_eq!(
-            state.get("n_predictions").and_then(serde_json::Value::as_u64),
+            state
+                .get("n_predictions")
+                .and_then(serde_json::Value::as_u64),
             Some(1)
         );
         let preds = state
@@ -635,17 +650,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_applies_outcome_events() {
         let reducer = EvalReducer;
         let entity = EntityId::new();
         let mut state = reducer.initial();
 
-        let event = make_event(
-            entity,
-            EVENT_TYPE_OUTCOME,
-            encode_outcome("p1", true),
-            1,
-        );
+        let event = make_event(entity, EVENT_TYPE_OUTCOME, encode_outcome("p1", true), 1);
         reducer.apply(&mut state, &event);
 
         assert_eq!(
@@ -663,6 +674,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_ignores_other_event_types() {
         let reducer = EvalReducer;
         let entity = EntityId::new();
@@ -672,7 +684,9 @@ mod tests {
         reducer.apply(&mut state, &event);
 
         assert_eq!(
-            state.get("n_predictions").and_then(serde_json::Value::as_u64),
+            state
+                .get("n_predictions")
+                .and_then(serde_json::Value::as_u64),
             Some(0)
         );
         assert_eq!(
@@ -682,6 +696,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_skips_bad_cbor_payload_silently() {
         let reducer = EvalReducer;
         let entity = EntityId::new();
@@ -693,7 +708,9 @@ mod tests {
 
         // n_predictions incremented even though payload was invalid.
         assert_eq!(
-            state.get("n_predictions").and_then(serde_json::Value::as_u64),
+            state
+                .get("n_predictions")
+                .and_then(serde_json::Value::as_u64),
             Some(1)
         );
         // But no prediction was appended to the array.
@@ -706,6 +723,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_skips_bad_cbor_outcome_payload_silently() {
         let reducer = EvalReducer;
         let entity = EntityId::new();
@@ -729,6 +747,7 @@ mod tests {
     // ── compute_report tests ──────────────────────────────────────────────────
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_zero_predictions() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("eval-zero").unwrap();
@@ -744,6 +763,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_predictions_without_outcomes() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("eval-no-outcomes").unwrap();
@@ -759,6 +779,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_perfect_predictor() {
         // A perfect predictor: all probs=1.0 for positive outcomes, 0.0 for negative.
         let mut store = open_store(StoreConfig::Memory).unwrap();
@@ -780,6 +801,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_worst_predictor() {
         // Worst predictor: probs=1.0 for negative, 0.0 for positive.
         let mut store = open_store(StoreConfig::Memory).unwrap();
@@ -797,6 +819,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_brier_score_calculation() {
         // 4 resolved pairs with known Brier score.
         // Pairs: (0.9, true), (0.2, false), (0.7, true), (0.4, false)
@@ -827,6 +850,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_lift_vs_population_avg() {
         // Single prediction/outcome pair with known lift.
         // pred=0.9, outcome=true.
@@ -851,6 +875,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_lift_vs_persistence_positive() {
         // Model that beats base rate.
         // predictions: (0.9, true), (0.1, false) — perfectly calibrated.
@@ -878,6 +903,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_ece_calculation() {
         // 10 predictions each in a different bin, all well-calibrated.
         // pred=0.05 (bin 0), outcome=false; pred=0.15 (bin 1), outcome=false; etc.
@@ -903,6 +929,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_reliability_bins_populated() {
         // Put one prediction in each bin and verify bin fields.
         let mut store = open_store(StoreConfig::Memory).unwrap();
@@ -923,6 +950,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_bin_boundary_exact_1_goes_to_last_bin() {
         // predicted_prob=1.0 exactly should go to bin 9 (the last bin).
         let mut store = open_store(StoreConfig::Memory).unwrap();
@@ -938,6 +966,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_bin_boundary_exactly_zero() {
         // predicted_prob=0.0 should go to bin 0.
         let mut store = open_store(StoreConfig::Memory).unwrap();
@@ -953,6 +982,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_all_bins_populated() {
         // Add one prediction per bin to verify all 10 bins have n>0.
         let mut store = open_store(StoreConfig::Memory).unwrap();
@@ -975,6 +1005,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_non_matching_prediction_ids() {
         // Outcomes don't match any prediction_id → n_resolved=0.
         let mut store = open_store(StoreConfig::Memory).unwrap();
@@ -990,6 +1021,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_unrelated_events_ignored() {
         // Events with other type should not affect the report.
         let mut store = open_store(StoreConfig::Memory).unwrap();
@@ -1013,6 +1045,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reliability_bin_all_fields_populated() {
         // Verify all ReliabilityBin fields are correctly populated.
         let mut store = open_store(StoreConfig::Memory).unwrap();
@@ -1038,6 +1071,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_multiple_predictions_one_entity() {
         // 5 predictions + 5 outcomes → n_resolved=5, correct metrics.
         let mut store = open_store(StoreConfig::Memory).unwrap();
@@ -1060,11 +1094,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn brier_constant_empty_returns_zero() {
         assert!(brier_constant(0.5, &[]).abs() < f64::EPSILON);
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn brier_constant_known_value() {
         // brier_constant(0.5, [0.0, 1.0]) = mean(0.25, 0.25) = 0.25
         let result = brier_constant(0.5, &[0.0, 1.0]);
@@ -1072,6 +1108,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn build_bins_empty() {
         let bins = build_bins(&[]);
         assert_eq!(bins.len(), NUM_BINS);
@@ -1081,6 +1118,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_ece_empty_bins() {
         let bins = build_bins(&[]);
         let ece = compute_ece(&bins, 0);
@@ -1088,6 +1126,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn eval_error_store_variant() {
         let core_err = pos_core::CoreError::Storage("test error".to_owned());
         let eval_err: EvalError = core_err.into();
@@ -1096,6 +1135,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn eval_error_decode_variant() {
         let eval_err = EvalError::Decode("bad payload".to_owned());
         let s = eval_err.to_string();
@@ -1104,6 +1144,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn draft_prediction_and_outcome_round_trip() {
         let entity = EntityId::new();
         let pred = draft_prediction(entity, "e1", 0.75, "p1");
@@ -1123,6 +1164,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_store_error_on_unknown_timeline() {
         let store = open_store(StoreConfig::Memory).unwrap();
         let missing = TimelineId::new();
@@ -1131,6 +1173,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_decode_error_on_bad_prediction_payload() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("eval-bad-pred").unwrap();
@@ -1146,6 +1189,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_decode_error_on_bad_outcome_payload() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("eval-bad-out").unwrap();

@@ -123,10 +123,7 @@ impl EventStore for MemoryStore {
             .ok_or(CoreError::TimelineNotFound(timeline))?;
 
         let mut seq = tl.head;
-        let mut prev_hash = *self
-            .chain_heads
-            .get(&timeline)
-            .unwrap_or(&genesis_hash());
+        let mut prev_hash = *self.chain_heads.get(&timeline).unwrap_or(&genesis_hash());
 
         let events_vec = self.events.entry(timeline).or_default();
         let mut committed = Vec::with_capacity(drafts.len());
@@ -171,12 +168,7 @@ impl EventStore for MemoryStore {
         self.collect_events_in_range(timeline, range)
     }
 
-    fn fork(
-        &mut self,
-        parent: TimelineId,
-        at_seq: Seq,
-        name: &str,
-    ) -> Result<Timeline, CoreError> {
+    fn fork(&mut self, parent: TimelineId, at_seq: Seq, name: &str) -> Result<Timeline, CoreError> {
         let parent_tl = self
             .timelines
             .get(&parent)
@@ -212,11 +204,7 @@ impl EventStore for MemoryStore {
 
 impl MemoryStore {
     /// Compute the hash chain value at a specific seq in a timeline.
-    fn compute_chain_hash_at(
-        &self,
-        timeline: TimelineId,
-        at_seq: Seq,
-    ) -> Result<Hash, CoreError> {
+    fn compute_chain_hash_at(&self, timeline: TimelineId, at_seq: Seq) -> Result<Hash, CoreError> {
         let chain = self.fork_chain(timeline)?;
         let mut hash = genesis_hash();
 
@@ -228,8 +216,7 @@ impl MemoryStore {
                 at_seq
             } else {
                 // For parent timelines, use their child's fork point as the limit
-                meta.fork_point
-                    .map_or(Seq::from_u64(u64::MAX), |(_, s)| s)
+                meta.fork_point.map_or(Seq::from_u64(u64::MAX), |(_, s)| s)
             };
 
             for event in events.iter().filter(|e| e.seq <= limit) {
@@ -242,6 +229,13 @@ impl MemoryStore {
             }
         }
         Ok(hash)
+    }
+}
+
+#[cfg(test)]
+impl MemoryStore {
+    pub(crate) fn test_remove_timeline(&mut self, id: TimelineId) {
+        self.timelines.remove(&id);
     }
 }
 
@@ -263,6 +257,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn create_and_get_timeline() {
         let mut store = MemoryStore::new();
         let tl = store.create_timeline("main").unwrap();
@@ -271,6 +266,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_and_read_events() {
         let mut store = MemoryStore::new();
         let tl = store.create_timeline("main").unwrap();
@@ -291,19 +287,19 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn payload_is_opaque_and_unchanged() {
         let mut store = MemoryStore::new();
         let tl = store.create_timeline("main").unwrap();
         let entity = EntityId::new();
         let raw = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xFF, 0x00];
-        store
-            .append(tl.id(), &[make_draft(entity, &raw)])
-            .unwrap();
+        store.append(tl.id(), &[make_draft(entity, &raw)]).unwrap();
         let events = store.read(tl.id(), SeqRange::all()).unwrap();
         assert_eq!(events[0].payload.as_slice(), &raw[..]);
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn seq_is_monotonically_increasing() {
         let mut store = MemoryStore::new();
         let tl = store.create_timeline("main").unwrap();
@@ -316,6 +312,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn read_range_filters_correctly() {
         let mut store = MemoryStore::new();
         let tl = store.create_timeline("main").unwrap();
@@ -324,7 +321,10 @@ mod tests {
         store.append(tl.id(), &drafts).unwrap();
 
         let events = store
-            .read(tl.id(), SeqRange::bounded(Seq::from_u64(2), Seq::from_u64(4)))
+            .read(
+                tl.id(),
+                SeqRange::bounded(Seq::from_u64(2), Seq::from_u64(4)),
+            )
             .unwrap();
         assert_eq!(events.len(), 3);
         assert_eq!(events[0].payload.as_slice(), &[1u8]);
@@ -332,6 +332,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn fork_is_copy_on_write_child_events_do_not_affect_parent() {
         let mut store = MemoryStore::new();
         let tl = store.create_timeline("main").unwrap();
@@ -366,6 +367,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn parent_events_after_fork_point_invisible_to_child() {
         let mut store = MemoryStore::new();
         let tl = store.create_timeline("main").unwrap();
@@ -383,10 +385,13 @@ mod tests {
 
         // Child should NOT see "after-fork"
         let child_events = store.read(child.id(), SeqRange::all()).unwrap();
-        assert!(!child_events.iter().any(|e| e.payload.as_slice() == b"after-fork"));
+        assert!(!child_events
+            .iter()
+            .any(|e| e.payload.as_slice() == b"after-fork"));
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn fork_beyond_head_returns_error() {
         let mut store = MemoryStore::new();
         let tl = store.create_timeline("main").unwrap();
@@ -395,6 +400,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn read_unknown_timeline_returns_error() {
         let store = MemoryStore::new();
         let unknown = TimelineId::new();
@@ -403,6 +409,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_to_unknown_timeline_returns_error() {
         let mut store = MemoryStore::new();
         let unknown = TimelineId::new();
@@ -412,6 +419,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn list_timelines_returns_all() {
         let mut store = MemoryStore::new();
         store.create_timeline("a").unwrap();
@@ -422,6 +430,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn replay_is_deterministic() {
         let mut store = MemoryStore::new();
         let tl = store.create_timeline("main").unwrap();
@@ -437,6 +446,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn empty_batch_append_returns_empty() {
         let mut store = MemoryStore::new();
         let tl = store.create_timeline("main").unwrap();
@@ -445,6 +455,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn fork_at_zero_has_empty_parent_events() {
         let mut store = MemoryStore::new();
         let tl = store.create_timeline("main").unwrap();
@@ -458,13 +469,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn explicit_wall_time_is_preserved() {
         let mut store = MemoryStore::new();
         let tl = store.create_timeline("main").unwrap();
         let entity = EntityId::new();
         let pinned = WallTime::from_micros(123_456_789);
-        let draft = make_draft(entity, b"pinned")
-            .with_wall_time(pinned);
+        let draft = make_draft(entity, b"pinned").with_wall_time(pinned);
         let committed = store.append(tl.id(), &[draft]).unwrap();
         assert_eq!(committed[0].wall_time, pinned);
         let read_back = store.read(tl.id(), SeqRange::all()).unwrap();
@@ -472,6 +483,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn absent_wall_time_yields_nonzero_timestamp() {
         let mut store = MemoryStore::new();
         let tl = store.create_timeline("main").unwrap();
@@ -483,6 +495,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn memory_store_default_equals_new() {
         // Exercises MemoryStore::default()
         let store: MemoryStore = MemoryStore::default();
@@ -492,6 +505,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn grandchild_fork_chain_stitches_correctly() {
         // Exercises compute_chain_hash_at for multi-level fork (parent timeline branch).
         let mut store = MemoryStore::new();
@@ -500,11 +514,14 @@ mod tests {
 
         // Append 3 events to root.
         store
-            .append(root.id(), &[
-                make_draft(entity, b"r1"),
-                make_draft(entity, b"r2"),
-                make_draft(entity, b"r3"),
-            ])
+            .append(
+                root.id(),
+                &[
+                    make_draft(entity, b"r1"),
+                    make_draft(entity, b"r2"),
+                    make_draft(entity, b"r3"),
+                ],
+            )
             .unwrap();
 
         // Fork root at seq 2 to get child.
@@ -512,14 +529,16 @@ mod tests {
 
         // Append 2 events to child.
         store
-            .append(child.id(), &[
-                make_draft(entity, b"c1"),
-                make_draft(entity, b"c2"),
-            ])
+            .append(
+                child.id(),
+                &[make_draft(entity, b"c1"), make_draft(entity, b"c2")],
+            )
             .unwrap();
 
         // Fork child at seq 1 (its own event c1) to get grandchild.
-        let grandchild = store.fork(child.id(), Seq::from_u64(1), "grandchild").unwrap();
+        let grandchild = store
+            .fork(child.id(), Seq::from_u64(1), "grandchild")
+            .unwrap();
 
         // Append to grandchild.
         store
@@ -534,6 +553,46 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fork_unknown_parent_returns_timeline_not_found() {
+        let mut store = MemoryStore::new();
+        let unknown = TimelineId::new();
+        let result = store.fork(unknown, Seq::ZERO, "orphan");
+        assert!(matches!(result, Err(CoreError::TimelineNotFound(_))));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn read_fails_when_fork_parent_metadata_removed() {
+        let mut store = MemoryStore::new();
+        let root = store.create_timeline("root").unwrap();
+        let entity = EntityId::new();
+        store
+            .append(root.id(), &[make_draft(entity, b"evt")])
+            .unwrap();
+        let child = store.fork(root.id(), Seq::from_u64(1), "child").unwrap();
+        store.test_remove_timeline(root.id());
+        let err = store.read(child.id(), SeqRange::all()).unwrap_err();
+        assert!(matches!(err, CoreError::TimelineNotFound(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fork_fails_when_ancestor_metadata_removed() {
+        let mut store = MemoryStore::new();
+        let root = store.create_timeline("root").unwrap();
+        let entity = EntityId::new();
+        store
+            .append(root.id(), &[make_draft(entity, b"evt")])
+            .unwrap();
+        let child = store.fork(root.id(), Seq::from_u64(1), "child").unwrap();
+        store.test_remove_timeline(root.id());
+        let err = store.fork(child.id(), Seq::ZERO, "grandchild").unwrap_err();
+        assert!(matches!(err, CoreError::TimelineNotFound(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn multiple_forks_from_same_parent_are_independent() {
         let mut store = MemoryStore::new();
         let tl = store.create_timeline("main").unwrap();
@@ -560,5 +619,4 @@ mod tests {
         assert!(b_events.iter().any(|e| e.payload.as_slice() == b"b-only"));
         assert!(!b_events.iter().any(|e| e.payload.as_slice() == b"a-only"));
     }
-
 }

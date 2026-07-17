@@ -13,6 +13,7 @@
 //! | [`snapshot`] | Capture and verify state snapshots |
 //! | [`compare`] | Diff two divergent timelines after a fork |
 //! | [`merge`] | Conflict-free / strategy-guided timeline merge |
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 pub mod compare;
 pub mod merge;

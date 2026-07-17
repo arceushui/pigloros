@@ -7,17 +7,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub struct WallTime(u64);
 
 impl WallTime {
-    #[must_use] 
+    #[must_use]
     pub const fn from_micros(micros: u64) -> Self {
         Self(micros)
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn as_micros(self) -> u64 {
         self.0
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn now() -> Self {
         let micros = u64::try_from(
             SystemTime::now()
@@ -38,12 +38,12 @@ pub struct Seq(u64);
 impl Seq {
     pub const ZERO: Self = Self(0);
 
-    #[must_use] 
+    #[must_use]
     pub const fn from_u64(n: u64) -> Self {
         Self(n)
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn as_u64(self) -> u64 {
         self.0
     }
@@ -69,12 +69,12 @@ pub struct SimTime(i64);
 impl SimTime {
     pub const EPOCH: Self = Self(0);
 
-    #[must_use] 
+    #[must_use]
     pub const fn from_nanos(nanos: i64) -> Self {
         Self(nanos)
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn as_nanos(self) -> i64 {
         self.0
     }
@@ -96,22 +96,22 @@ pub struct SimDuration(i64);
 impl SimDuration {
     pub const ZERO: Self = Self(0);
 
-    #[must_use] 
+    #[must_use]
     pub const fn from_nanos(nanos: i64) -> Self {
         Self(nanos)
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn as_nanos(self) -> i64 {
         self.0
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn from_secs(secs: i64) -> Self {
         Self(secs * 1_000_000_000)
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn from_millis(millis: i64) -> Self {
         Self(millis * 1_000_000)
     }
@@ -122,6 +122,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn wall_time_round_trip_json() {
         let t = WallTime::from_micros(1_700_000_000_000_000);
         let s = serde_json::to_string(&t).unwrap();
@@ -130,6 +131,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn wall_time_round_trip_cbor() {
         let t = WallTime::from_micros(42);
         let mut buf = Vec::new();
@@ -139,6 +141,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn wall_time_ordering() {
         let earlier = WallTime::from_micros(100);
         let later = WallTime::from_micros(200);
@@ -146,18 +149,21 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn seq_zero_is_smallest() {
         assert_eq!(Seq::ZERO.as_u64(), 0);
         assert!(Seq::ZERO < Seq::from_u64(1));
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn seq_next_increments() {
         let s = Seq::from_u64(5);
         assert_eq!(s.next().as_u64(), 6);
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn seq_advance_mutates_and_returns_old() {
         let mut s = Seq::from_u64(3);
         let old = s.advance();
@@ -166,6 +172,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn seq_round_trip_json() {
         let s = Seq::from_u64(999);
         let back: Seq = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
@@ -173,6 +180,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn seq_round_trip_cbor() {
         let s = Seq::from_u64(999);
         let mut buf = Vec::new();
@@ -182,11 +190,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn sim_time_epoch_is_zero() {
         assert_eq!(SimTime::EPOCH.as_nanos(), 0);
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn sim_time_add_duration() {
         let t = SimTime::from_nanos(1000);
         let d = SimDuration::from_nanos(500);
@@ -194,6 +204,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn sim_time_sub_duration() {
         let a = SimTime::from_nanos(1000);
         let b = SimTime::from_nanos(400);
@@ -201,16 +212,19 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn sim_duration_from_secs() {
         assert_eq!(SimDuration::from_secs(1).as_nanos(), 1_000_000_000);
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn sim_duration_from_millis() {
         assert_eq!(SimDuration::from_millis(1).as_nanos(), 1_000_000);
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn sim_time_round_trip_json() {
         let t = SimTime::from_nanos(-42);
         let back: SimTime = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
@@ -218,6 +232,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn sim_time_round_trip_cbor() {
         let t = SimTime::from_nanos(999_999);
         let mut buf = Vec::new();
@@ -228,6 +243,7 @@ mod tests {
 
     proptest::proptest! {
         #[test]
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn seq_ord_is_total(a: u64, b: u64) {
             let sa = Seq::from_u64(a);
             let sb = Seq::from_u64(b);
@@ -238,6 +254,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn seq_ord_stable_after_serde(a: u64, b: u64) {
             let sa = Seq::from_u64(a);
             let sb = Seq::from_u64(b);
@@ -247,6 +264,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn wall_time_ord_is_total(a: u64, b: u64) {
             let ta = WallTime::from_micros(a);
             let tb = WallTime::from_micros(b);

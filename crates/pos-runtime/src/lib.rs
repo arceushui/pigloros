@@ -22,6 +22,7 @@
 //!   ├── Live mode  → records nondeterministic outputs as events
 //!   └── Replay mode → reads outputs from event log (bit-exact)
 //! ```
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 pub mod driver;
 pub mod error;

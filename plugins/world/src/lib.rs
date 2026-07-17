@@ -7,6 +7,7 @@
 //! Owns event types `"world.observation"`, `"world.action"` and entity kind `"world-body"`.
 //! For Wave 5 we build the interface and a simple 2D position model (no rapier dependency —
 //! rapier is deferred to Wave 6 when we need 3D physics).
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use pos_core::{
     event::{CanonicalBytes, Event, Kind},
@@ -81,13 +82,14 @@ impl WorldBackend for SimpleKinematicBackend {
     }
 
     fn step(&mut self, bodies: &[Body]) -> Vec<WorldObservation> {
-        bodies.iter().map(|body| {
-            WorldObservation {
+        bodies
+            .iter()
+            .map(|body| WorldObservation {
                 entity_id: body.entity_id,
                 x: body.x + body.vx,
                 y: body.y + body.vy,
-            }
-        }).collect()
+            })
+            .collect()
     }
 }
 
@@ -121,7 +123,9 @@ impl WorldPlugin {
     /// Create a new world plugin.
     #[must_use]
     pub fn new() -> Self {
-        Self { id: PluginId::new() }
+        Self {
+            id: PluginId::new(),
+        }
     }
 }
 
@@ -162,7 +166,11 @@ impl WorldDriver {
     /// Create a new world driver with the given backend.
     #[must_use]
     pub fn new(entities: Vec<Body>, backend: Box<dyn WorldBackend>) -> Self {
-        Self { entities, backend, tick: 0 }
+        Self {
+            entities,
+            backend,
+            tick: 0,
+        }
     }
 }
 
@@ -180,7 +188,11 @@ impl Driver for WorldDriver {
 
         // Update entities with new positions
         for obs in &observations {
-            if let Some(body) = self.entities.iter_mut().find(|b| b.entity_id == obs.entity_id) {
+            if let Some(body) = self
+                .entities
+                .iter_mut()
+                .find(|b| b.entity_id == obs.entity_id)
+            {
                 body.x = obs.x;
                 body.y = obs.y;
             }
@@ -235,7 +247,10 @@ impl Reducer for WorldReducer {
                 .get("observation_count")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
-            state.set("observation_count", serde_json::Value::Number((observation_count + 1).into()));
+            state.set(
+                "observation_count",
+                serde_json::Value::Number((observation_count + 1).into()),
+            );
         }
     }
 }
@@ -296,6 +311,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_new_and_default() {
         let p1 = WorldPlugin::new();
         let p2 = WorldPlugin::default();
@@ -304,18 +320,21 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_name_is_world() {
         let plugin = WorldPlugin::new();
         assert_eq!(plugin.name(), "world");
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_id_is_returned() {
         let plugin = WorldPlugin::new();
         let _id = plugin.id();
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_capability_is_correct() {
         let plugin = WorldPlugin::new();
         let cap = plugin.capability();
@@ -330,30 +349,31 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn simple_kinematic_backend_new() {
         let backend = SimpleKinematicBackend::new();
         assert_eq!(backend.name(), "simple-kinematic");
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn simple_kinematic_backend_name_is_correct() {
         let backend = SimpleKinematicBackend::new();
         assert_eq!(backend.name(), "simple-kinematic");
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn simple_kinematic_backend_step_moves_bodies() {
         let mut backend = SimpleKinematicBackend::new();
         let entity = EntityId::new();
-        let bodies = vec![
-            Body {
-                entity_id: entity,
-                x: 0.0,
-                y: 0.0,
-                vx: 1.0,
-                vy: 2.0,
-            },
-        ];
+        let bodies = vec![Body {
+            entity_id: entity,
+            x: 0.0,
+            y: 0.0,
+            vx: 1.0,
+            vy: 2.0,
+        }];
 
         let observations = backend.step(&bodies);
         assert_eq!(observations.len(), 1);
@@ -363,6 +383,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn simple_kinematic_backend_step_multiple_bodies() {
         let mut backend = SimpleKinematicBackend::new();
         let entity1 = EntityId::new();
@@ -393,6 +414,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_name_is_correct() {
         let backend = Box::new(SimpleKinematicBackend::new());
         let driver = WorldDriver::new(vec![], backend);
@@ -400,6 +422,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_step_produces_correct_event_type() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("test").unwrap();
@@ -420,6 +443,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_step_produces_decodable_payload() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("test").unwrap();
@@ -443,6 +467,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_updates_body_positions() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("test").unwrap();
@@ -466,7 +491,94 @@ mod tests {
         assert!((driver.entities[0].y - 2.0).abs() < f64::EPSILON);
     }
 
+    struct UnknownEntityBackend;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl WorldBackend for UnknownEntityBackend {
+        fn name(&self) -> &'static str {
+            "unknown-entity"
+        }
+
+        fn step(&mut self, _bodies: &[Body]) -> Vec<WorldObservation> {
+            vec![WorldObservation {
+                entity_id: EntityId::new(),
+                x: 9.0,
+                y: 9.0,
+            }]
+        }
+    }
+
+    struct MixedEntityBackend {
+        extra: EntityId,
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl WorldBackend for MixedEntityBackend {
+        fn name(&self) -> &'static str {
+            "mixed-entity"
+        }
+
+        fn step(&mut self, bodies: &[Body]) -> Vec<WorldObservation> {
+            let mut out: Vec<WorldObservation> = bodies
+                .iter()
+                .map(|body| WorldObservation {
+                    entity_id: body.entity_id,
+                    x: body.x + body.vx,
+                    y: body.y + body.vy,
+                })
+                .collect();
+            out.push(WorldObservation {
+                entity_id: self.extra,
+                x: 0.0,
+                y: 0.0,
+            });
+            out
+        }
+    }
+
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn driver_ignores_observations_for_unknown_entities() {
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let tl = store.create_timeline("test").unwrap();
+        let known = EntityId::new();
+        let body = Body {
+            entity_id: known,
+            x: 1.0,
+            y: 2.0,
+            vx: 0.0,
+            vy: 0.0,
+        };
+        let mut driver = WorldDriver::new(vec![body], Box::new(UnknownEntityBackend));
+        let out = driver.step(store.as_ref(), tl.id()).unwrap();
+        assert_eq!(out.drafts.len(), 1);
+        assert!((driver.entities[0].x - 1.0).abs() < f64::EPSILON);
+        assert!((driver.entities[0].y - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn driver_updates_known_and_skips_unknown_in_same_step() {
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let tl = store.create_timeline("test").unwrap();
+        let known = EntityId::new();
+        let unknown = EntityId::new();
+        let body = Body {
+            entity_id: known,
+            x: 0.0,
+            y: 0.0,
+            vx: 1.0,
+            vy: 2.0,
+        };
+        let mut driver =
+            WorldDriver::new(vec![body], Box::new(MixedEntityBackend { extra: unknown }));
+        driver.step(store.as_ref(), tl.id()).unwrap();
+        assert!((driver.entities[0].x - 1.0).abs() < f64::EPSILON);
+        assert!((driver.entities[0].y - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_initial_state_has_correct_fields() {
         let reducer = WorldReducer;
         let state = reducer.initial();
@@ -475,22 +587,34 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_tracks_observation_count() {
         let reducer = WorldReducer;
         let entity = EntityId::new();
         let mut state = reducer.initial();
 
-        assert_eq!(state.get("observation_count").and_then(serde_json::Value::as_u64), Some(0));
+        assert_eq!(
+            state
+                .get("observation_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(0)
+        );
 
         for _ in 0..5 {
             let event = make_observation_event(entity);
             reducer.apply(&mut state, &event);
         }
 
-        assert_eq!(state.get("observation_count").and_then(serde_json::Value::as_u64), Some(5));
+        assert_eq!(
+            state
+                .get("observation_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(5)
+        );
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_ignores_other_event_types() {
         let reducer = WorldReducer;
         let entity = EntityId::new();
@@ -499,30 +623,68 @@ mod tests {
         let other = make_other_event(entity);
         reducer.apply(&mut state, &other);
 
-        assert_eq!(state.get("observation_count").and_then(serde_json::Value::as_u64), Some(0));
+        assert_eq!(
+            state
+                .get("observation_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(0)
+        );
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn body_partial_eq() {
         let entity = EntityId::new();
-        let b1 = Body { entity_id: entity, x: 1.0, y: 2.0, vx: 0.0, vy: 0.0 };
-        let b2 = Body { entity_id: entity, x: 1.0, y: 2.0, vx: 0.0, vy: 0.0 };
-        let b3 = Body { entity_id: entity, x: 3.0, y: 4.0, vx: 0.0, vy: 0.0 };
+        let b1 = Body {
+            entity_id: entity,
+            x: 1.0,
+            y: 2.0,
+            vx: 0.0,
+            vy: 0.0,
+        };
+        let b2 = Body {
+            entity_id: entity,
+            x: 1.0,
+            y: 2.0,
+            vx: 0.0,
+            vy: 0.0,
+        };
+        let b3 = Body {
+            entity_id: entity,
+            x: 3.0,
+            y: 4.0,
+            vx: 0.0,
+            vy: 0.0,
+        };
         assert_eq!(b1, b2);
         assert_ne!(b1, b3);
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_observation_partial_eq() {
         let entity = EntityId::new();
-        let o1 = WorldObservation { entity_id: entity, x: 1.0, y: 2.0 };
-        let o2 = WorldObservation { entity_id: entity, x: 1.0, y: 2.0 };
-        let o3 = WorldObservation { entity_id: entity, x: 3.0, y: 4.0 };
+        let o1 = WorldObservation {
+            entity_id: entity,
+            x: 1.0,
+            y: 2.0,
+        };
+        let o2 = WorldObservation {
+            entity_id: entity,
+            x: 1.0,
+            y: 2.0,
+        };
+        let o3 = WorldObservation {
+            entity_id: entity,
+            x: 3.0,
+            y: 4.0,
+        };
         assert_eq!(o1, o2);
         assert_ne!(o1, o3);
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_empty_bodies_produces_no_events() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("test").unwrap();
@@ -534,18 +696,17 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn backend_step_with_zero_velocity() {
         let mut backend = SimpleKinematicBackend::new();
         let entity = EntityId::new();
-        let bodies = vec![
-            Body {
-                entity_id: entity,
-                x: 5.0,
-                y: 7.0,
-                vx: 0.0,
-                vy: 0.0,
-            },
-        ];
+        let bodies = vec![Body {
+            entity_id: entity,
+            x: 5.0,
+            y: 7.0,
+            vx: 0.0,
+            vy: 0.0,
+        }];
 
         let observations = backend.step(&bodies);
         assert_eq!(observations.len(), 1);
@@ -554,18 +715,17 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn backend_step_with_negative_velocity() {
         let mut backend = SimpleKinematicBackend::new();
         let entity = EntityId::new();
-        let bodies = vec![
-            Body {
-                entity_id: entity,
-                x: 10.0,
-                y: 10.0,
-                vx: -2.0,
-                vy: -3.0,
-            },
-        ];
+        let bodies = vec![Body {
+            entity_id: entity,
+            x: 10.0,
+            y: 10.0,
+            vx: -2.0,
+            vy: -3.0,
+        }];
 
         let observations = backend.step(&bodies);
         assert_eq!(observations.len(), 1);
@@ -574,6 +734,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_tick_increments() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("test").unwrap();

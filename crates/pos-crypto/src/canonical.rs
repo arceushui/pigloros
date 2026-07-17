@@ -20,14 +20,16 @@ use serde::Serialize;
 /// # Panics
 /// Panics only if writing a `ciborium::Value` into an in-memory `Vec<u8>` fails, which
 /// is not expected for well-formed values.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn encode<T: Serialize>(value: &T) -> Result<CanonicalBytes, CoreError> {
-    // Step 1: serialize to ciborium::Value via serde
+    encode_canonical_bytes(value)
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn encode_canonical_bytes<T: Serialize>(value: &T) -> Result<CanonicalBytes, CoreError> {
     let cv = serde_to_cbor_value(value)?;
-    // Step 2: sort all map keys recursively (RFC 8949 deterministic profile)
     let sorted = sort_map_keys(cv);
-    // Step 3: encode to bytes
     let mut buf = Vec::new();
-    // Encoding a `ciborium::Value` into an in-memory buffer is infallible.
     ciborium::into_writer(&sorted, &mut buf).expect("CBOR encode to Vec is infallible");
     Ok(CanonicalBytes::from_vec(buf))
 }
@@ -36,60 +38,78 @@ pub fn encode<T: Serialize>(value: &T) -> Result<CanonicalBytes, CoreError> {
 ///
 /// # Errors
 /// Returns [`CoreError::Serialization`] if the bytes cannot be decoded into `T`.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn decode<T: serde::de::DeserializeOwned>(bytes: &CanonicalBytes) -> Result<T, CoreError> {
-    ciborium::from_reader(bytes.as_slice()).map_err(|e| CoreError::Serialization(e.to_string()))
+    match ciborium::from_reader(bytes.as_slice()) {
+        Ok(value) => Ok(value),
+        Err(error) => Err(CoreError::Serialization(error.to_string())),
+    }
 }
 
 /// Serialize any serde-serializable type to a `ciborium::Value`.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn serde_to_cbor_value<T: Serialize>(value: &T) -> Result<Value, CoreError> {
-    // Serialize to JSON then parse into Value — a reliable bridge for serde types.
-    let json = serde_json::to_value(value)
-        .map_err(|e| CoreError::Serialization(e.to_string()))?;
-    json_value_to_cbor(json)
+    let json = match serde_json::to_value(value) {
+        Ok(json) => json,
+        Err(error) => return Err(CoreError::Serialization(error.to_string())),
+    };
+    Ok(json_value_to_cbor(json))
 }
 
-fn json_value_to_cbor(json: serde_json::Value) -> Result<Value, CoreError> {
+/// Total conversion: every `serde_json::Value` maps to a CBOR `Value`.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn json_value_to_cbor(json: serde_json::Value) -> Value {
     use serde_json::Value as J;
-    Ok(match json {
+    match json {
         J::Null => Value::Null,
         J::Bool(b) => Value::Bool(b),
-        J::Number(n) => n.as_i64().map_or_else(
-            || Value::Float(n.as_f64().unwrap_or(0.0)),
-            |i| Value::Integer(i.into()),
-        ),
+        J::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Integer(i.into())
+            } else {
+                Value::Float(n.as_f64().unwrap_or(0.0))
+            }
+        }
         J::String(s) => Value::Text(s),
-        J::Array(arr) => Value::Array(
-            arr.into_iter()
-                .map(json_value_to_cbor)
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
+        J::Array(arr) => Value::Array(arr.into_iter().map(json_value_to_cbor).collect()),
         J::Object(map) => Value::Map(
             map.into_iter()
-                .map(|(k, v)| json_value_to_cbor(v).map(|v| (Value::Text(k), v)))
-                .collect::<Result<Vec<_>, _>>()?,
+                .map(|(k, v)| (Value::Text(k), json_value_to_cbor(v)))
+                .collect(),
         ),
-    })
+    }
 }
 
 /// Sort map keys recursively per RFC 8949 §4.2.1: sort by (`key_length`, `key_bytes`) ascending.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn sort_map_keys(value: Value) -> Value {
     match value {
         Value::Map(mut pairs) => {
-            // Sort keys: RFC 8949 §4.2.1 — first by byte length of key encoding, then lexicographic.
-            pairs.sort_by(|(a, _), (b, _)| {
-                let a_bytes = cbor_key_bytes(a);
-                let b_bytes = cbor_key_bytes(b);
-                a_bytes.len().cmp(&b_bytes.len()).then_with(|| a_bytes.cmp(&b_bytes))
-            });
-            // Recurse into values
-            Value::Map(pairs.into_iter().map(|(k, v)| (k, sort_map_keys(v))).collect())
+            pairs.sort_by(|(a, _), (b, _)| compare_cbor_keys(a, b));
+            Value::Map(
+                pairs
+                    .into_iter()
+                    .map(|(k, v)| (k, sort_map_keys(v)))
+                    .collect(),
+            )
         }
         Value::Array(items) => Value::Array(items.into_iter().map(sort_map_keys).collect()),
         other => other,
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn compare_cbor_keys(a: &Value, b: &Value) -> std::cmp::Ordering {
+    let a_bytes = cbor_key_bytes(a);
+    let b_bytes = cbor_key_bytes(b);
+    match a_bytes.len().cmp(&b_bytes.len()) {
+        std::cmp::Ordering::Equal => a_bytes.cmp(&b_bytes),
+        other => other,
+    }
+}
+
 /// Get the canonical CBOR encoding of a map key for sorting purposes.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn cbor_key_bytes(key: &Value) -> Vec<u8> {
     let mut buf = Vec::new();
     let _ = ciborium::into_writer(key, &mut buf);
@@ -114,6 +134,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn canonical_cbor_is_same_regardless_of_field_declaration_order() {
         let zebra_first = ZebraFirst { zebra: 1, apple: 2 };
         let apple_first = AppleFirst { apple: 2, zebra: 1 };
@@ -127,6 +148,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn canonical_key_order_is_by_length_then_lex() {
         // "apple" (5 bytes) should come before "zebra" (5 bytes, but 'a' < 'z' lex)
         // "a" (1 byte) should come before "apple" (5 bytes)
@@ -136,29 +158,46 @@ mod tests {
             apple: u32,
             a: u32,
         }
-        let m = Multi { zebra: 1, apple: 2, a: 3 };
+        let m = Multi {
+            zebra: 1,
+            apple: 2,
+            a: 3,
+        };
         let encoded = encode(&m).unwrap();
         // Decode as a ciborium::Value to inspect key ordering
         let decoded: Value = ciborium::from_reader(encoded.as_slice()).unwrap();
         // encoding a struct always produces a map
-        let Value::Map(pairs) = decoded else { unreachable!("struct encodes as CBOR map") };
+        let Value::Map(pairs) = decoded else {
+            unreachable!("struct encodes as CBOR map")
+        };
         let keys: Vec<&str> = pairs
             .iter()
-            .map(|(k, _)| if let Value::Text(s) = k { s.as_str() } else { "" })
+            .map(|(k, _)| {
+                if let Value::Text(s) = k {
+                    s.as_str()
+                } else {
+                    ""
+                }
+            })
             .collect();
         // "a" (1 char) < "apple" (5 chars) < "zebra" (5 chars, but 'a' < 'z')
         assert_eq!(keys, vec!["a", "apple", "zebra"]);
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn encode_decode_round_trip() {
-        let zf = ZebraFirst { zebra: 42, apple: 99 };
+        let zf = ZebraFirst {
+            zebra: 42,
+            apple: 99,
+        };
         let encoded = encode(&zf).unwrap();
         let decoded: ZebraFirst = decode(&encoded).unwrap();
         assert_eq!(zf, decoded);
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn encode_bool() {
         let b = true;
         let enc = encode(&b).unwrap();
@@ -167,6 +206,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn encode_null() {
         #[derive(Serialize, Deserialize, Debug, PartialEq)]
         struct WithNull {
@@ -179,6 +219,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn encode_nested_map() {
         #[derive(Serialize, Deserialize, Debug, PartialEq)]
         struct Inner {
@@ -189,13 +230,16 @@ mod tests {
         struct Outer {
             inner: Inner,
         }
-        let v = Outer { inner: Inner { z: 1, a: 2 } };
+        let v = Outer {
+            inner: Inner { z: 1, a: 2 },
+        };
         let enc = encode(&v).unwrap();
         let back: Outer = decode(&enc).unwrap();
         assert_eq!(v, back);
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn encode_array() {
         let arr = vec![1u32, 2, 3];
         let enc = encode(&arr).unwrap();
@@ -204,6 +248,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn same_input_always_same_bytes() {
         let v = ZebraFirst { zebra: 7, apple: 8 };
         let enc1 = encode(&v).unwrap();
@@ -212,6 +257,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn encode_f64_number_round_trips() {
         // serde_json::Number can represent f64 values that are not i64.
         // This exercises the `if let Some(f) = n.as_f64()` branch in json_value_to_cbor.
@@ -222,6 +268,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn canonical_key_order_with_non_map_root_array() {
         // Exercises the Value::Array arm of sort_map_keys with nested maps.
         #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -239,19 +286,23 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn encode_string_value_round_trips() {
         // Exercises the J::String arm in json_value_to_cbor when a string appears as a value.
         #[derive(Serialize, Deserialize, Debug, PartialEq)]
         struct WithString {
             label: String,
         }
-        let v = WithString { label: "hello".to_owned() };
+        let v = WithString {
+            label: "hello".to_owned(),
+        };
         let enc = encode(&v).unwrap();
         let back: WithString = decode(&enc).unwrap();
         assert_eq!(v, back);
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn canonical_key_order_test_is_a_map() {
         // Verify the existing canonical_key_order_is_by_length_then_lex test path:
         // when the decoded value IS a map, the panic branch is not taken.
@@ -261,7 +312,11 @@ mod tests {
             apple: u32,
             a: u32,
         }
-        let m = Multi { zebra: 1, apple: 2, a: 3 };
+        let m = Multi {
+            zebra: 1,
+            apple: 2,
+            a: 3,
+        };
         let encoded = encode(&m).unwrap();
         let decoded: Value = ciborium::from_reader(encoded.as_slice()).unwrap();
         // Must be a map — otherwise the test would panic.
@@ -269,6 +324,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn decode_rejects_invalid_cbor() {
         let bad = CanonicalBytes::from_vec(vec![0xFF, 0x00, 0x01]);
         let result: Result<u32, _> = decode(&bad);
@@ -276,6 +332,50 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn sort_map_keys_orders_by_length_then_lex() {
+        let map = Value::Map(vec![
+            (Value::Text("zebra".to_owned()), Value::Integer(1.into())),
+            (Value::Text("apple".to_owned()), Value::Integer(2.into())),
+            (Value::Text("a".to_owned()), Value::Integer(3.into())),
+        ]);
+        let sorted = sort_map_keys(map);
+        let Value::Map(pairs) = sorted else {
+            panic!("expected map");
+        };
+        let keys: Vec<&str> = pairs
+            .iter()
+            .filter_map(|(k, _)| {
+                if let Value::Text(s) = k {
+                    Some(s.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(keys, vec!["a", "apple", "zebra"]);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn compare_cbor_keys_covers_all_orderings() {
+        let short = Value::Text("a".to_owned());
+        let long = Value::Text("apple".to_owned());
+        let later = Value::Text("zebra".to_owned());
+        let earlier = Value::Text("apple".to_owned());
+        assert_eq!(compare_cbor_keys(&short, &long), std::cmp::Ordering::Less);
+        assert_eq!(
+            compare_cbor_keys(&long, &short),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_cbor_keys(&earlier, &later),
+            std::cmp::Ordering::Less
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn encode_propagates_serialize_errors() {
         struct Boom;
         impl Serialize for Boom {

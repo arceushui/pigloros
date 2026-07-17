@@ -7,6 +7,7 @@
 //! This plugin represents a calibrated personal preference model as a simulation entity.
 //! It owns event types `"persona.preference"` and `"persona.decision"`,
 //! and entity kind `"persona"`.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use pos_core::{
     event::{CanonicalBytes, Event, EventDraft, Kind},
@@ -271,7 +272,10 @@ impl PersonaEvalDriver {
     /// Panics if `pairs` is empty.
     #[must_use]
     pub fn new(entity: EntityId, model: PersonaModel, pairs: Vec<PreferencePair>) -> Self {
-        assert!(!pairs.is_empty(), "PersonaEvalDriver requires at least one pair");
+        assert!(
+            !pairs.is_empty(),
+            "PersonaEvalDriver requires at least one pair"
+        );
         Self {
             entity,
             model,
@@ -327,8 +331,8 @@ impl Driver for PersonaEvalDriver {
         _store: &dyn EventStore,
         _timeline: TimelineId,
     ) -> Result<StepOutput, RuntimeError> {
-        let idx = usize::try_from(self.tick % u64::try_from(self.pairs.len()).unwrap_or(1))
-            .unwrap_or(0);
+        let idx =
+            usize::try_from(self.tick % u64::try_from(self.pairs.len()).unwrap_or(1)).unwrap_or(0);
         let pair = &self.pairs[idx];
         let prediction_id = format!("pred-{}", self.tick);
         let entity_id = self.entity.to_string();
@@ -337,12 +341,7 @@ impl Driver for PersonaEvalDriver {
         let decision = self
             .model
             .to_draft(self.entity, &pair.option_a, &pair.option_b);
-        let prediction = draft_prediction(
-            self.entity,
-            &entity_id,
-            predicted_prob,
-            &prediction_id,
-        );
+        let prediction = draft_prediction(self.entity, &entity_id, predicted_prob, &prediction_id);
         let outcome = draft_outcome(self.entity, &prediction_id, pair.prefers_a);
 
         self.tick += 1;
@@ -367,6 +366,7 @@ mod tests {
     // ── PersonaPlugin tests ──────────────────────────────────────────────────
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_new_and_default_have_same_name() {
         let p1 = PersonaPlugin::new();
         let p2 = PersonaPlugin::default();
@@ -375,6 +375,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_id_is_unique() {
         let p1 = PersonaPlugin::new();
         let p2 = PersonaPlugin::new();
@@ -382,6 +383,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_capability() {
         let plugin = PersonaPlugin::new();
         let cap = plugin.capability();
@@ -402,6 +404,7 @@ mod tests {
     // ── PersonaReducer tests ──────────────────────────────────────────────────
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_initial_state() {
         let reducer = PersonaReducer;
         let state = reducer.initial();
@@ -465,6 +468,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_applies_preference_events() {
         let reducer = PersonaReducer;
         let entity = EntityId::new();
@@ -487,6 +491,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_applies_decision_events() {
         let reducer = PersonaReducer;
         let entity = EntityId::new();
@@ -506,16 +511,19 @@ mod tests {
                 .and_then(serde_json::Value::as_u64),
             Some(1)
         );
-        assert!((state
-            .get("last_regret_prob")
-            .and_then(serde_json::Value::as_f64)
-            .unwrap_or(0.0)
-            - 0.15)
-            .abs()
-            < 1e-10);
+        assert!(
+            (state
+                .get("last_regret_prob")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0)
+                - 0.15)
+                .abs()
+                < 1e-10
+        );
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_ignores_other_event_types() {
         let reducer = PersonaReducer;
         let entity = EntityId::new();
@@ -539,6 +547,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_tracks_multiple_preferences() {
         let reducer = PersonaReducer;
         let entity = EntityId::new();
@@ -563,6 +572,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_tracks_multiple_decisions() {
         let reducer = PersonaReducer;
         let entity = EntityId::new();
@@ -587,6 +597,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_updates_last_regret_prob_from_latest_decision() {
         let reducer = PersonaReducer;
         let entity = EntityId::new();
@@ -599,13 +610,15 @@ mod tests {
             1,
         );
         reducer.apply(&mut state, &event1);
-        assert!((state
-            .get("last_regret_prob")
-            .and_then(serde_json::Value::as_f64)
-            .unwrap_or(0.0)
-            - 0.1)
-            .abs()
-            < 1e-10);
+        assert!(
+            (state
+                .get("last_regret_prob")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0)
+                - 0.1)
+                .abs()
+                < 1e-10
+        );
 
         let event2 = make_event(
             entity,
@@ -614,16 +627,19 @@ mod tests {
             2,
         );
         reducer.apply(&mut state, &event2);
-        assert!((state
-            .get("last_regret_prob")
-            .and_then(serde_json::Value::as_f64)
-            .unwrap_or(0.0)
-            - 0.3)
-            .abs()
-            < 1e-10);
+        assert!(
+            (state
+                .get("last_regret_prob")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0)
+                - 0.3)
+                .abs()
+                < 1e-10
+        );
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_handles_bad_cbor_payload_gracefully() {
         let reducer = PersonaReducer;
         let entity = EntityId::new();
@@ -650,6 +666,7 @@ mod tests {
     // ── PersonaModel tests ────────────────────────────────────────────────────
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn model_score_option_with_match() {
         let model = PersonaModel::new(vec![("spicy".to_owned(), 1.0)]);
         let score = model.score_option("spicy pizza");
@@ -658,6 +675,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn model_score_option_no_match() {
         let model = PersonaModel::new(vec![("spicy".to_owned(), 1.0)]);
         let score = model.score_option("bland soup");
@@ -665,17 +683,16 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn model_score_option_multiple_matches() {
-        let model = PersonaModel::new(vec![
-            ("spicy".to_owned(), 1.0),
-            ("sweet".to_owned(), -1.0),
-        ]);
+        let model = PersonaModel::new(vec![("spicy".to_owned(), 1.0), ("sweet".to_owned(), -1.0)]);
         let score = model.score_option("spicy and sweet dessert");
         // avg = (1.0 + (-1.0)) / 2 = 0.0, normalized: (0.0 + 1.0) / 2.0 = 0.5
         assert!((score - 0.5).abs() < 1e-10);
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn model_score_option_negative_preference() {
         let model = PersonaModel::new(vec![("bitter".to_owned(), -0.5)]);
         let score = model.score_option("bitter coffee");
@@ -684,6 +701,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn model_to_draft_chooses_higher_score() {
         let model = PersonaModel::new(vec![("spicy".to_owned(), 1.0)]);
         let entity = EntityId::new();
@@ -701,6 +719,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn model_to_draft_regret_prob_in_valid_range() {
         let model = PersonaModel::new(vec![("spicy".to_owned(), 1.0)]);
         let entity = EntityId::new();
@@ -713,6 +732,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn model_to_draft_close_scores_high_regret() {
         let model = PersonaModel::new(vec![]);
         let entity = EntityId::new();
@@ -725,6 +745,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn model_to_draft_large_diff_low_regret() {
         let model = PersonaModel::new(vec![("best".to_owned(), 1.0)]);
         let entity = EntityId::new();
@@ -737,6 +758,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn model_to_draft_tie_chooses_a() {
         let model = PersonaModel::new(vec![]);
         let entity = EntityId::new();
@@ -749,6 +771,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn model_score_option_empty_preferences() {
         let model = PersonaModel::new(vec![]);
         let score = model.score_option("anything");
@@ -756,6 +779,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn model_to_draft_produces_valid_cbor() {
         let model = PersonaModel::new(vec![("good".to_owned(), 0.5)]);
         let entity = EntityId::new();
@@ -774,6 +798,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn payload_preference_cbor_round_trip() {
         let p = PreferencePayload {
             dimension: "spicy".to_owned(),
@@ -789,6 +814,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn payload_decision_cbor_round_trip() {
         let d = DecisionPayload {
             option_a: "a".to_owned(),
@@ -806,17 +832,16 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn model_multiple_preferences_averaging() {
-        let model = PersonaModel::new(vec![
-            ("spicy".to_owned(), 1.0),
-            ("hot".to_owned(), 0.8),
-        ]);
+        let model = PersonaModel::new(vec![("spicy".to_owned(), 1.0), ("hot".to_owned(), 0.8)]);
         let score = model.score_option("spicy hot wings");
         // avg = (1.0 + 0.8) / 2 = 0.9, normalized: (0.9 + 1.0) / 2.0 = 0.95
         assert!((score - 0.95).abs() < 1e-10);
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn model_to_draft_option_b_wins() {
         let model = PersonaModel::new(vec![("best".to_owned(), 1.0)]);
         let entity = EntityId::new();
@@ -830,6 +855,7 @@ mod tests {
     // ── PersonaEvalDriver tests ───────────────────────────────────────────────
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn persona_eval_driver_emits_decision_prediction_outcome() {
         use pos_store::{open_store, StoreConfig};
 
@@ -849,6 +875,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn persona_eval_driver_closes_eval_loop() {
         use pos_plugin_eval::{compute_report, EvalPlugin, EvalReducer};
         use pos_runtime::PluginRegistry;

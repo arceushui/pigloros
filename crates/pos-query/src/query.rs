@@ -130,6 +130,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn event_query_returns_all_events_with_no_filters() {
         let (store, tl_id, _, _) = setup_store();
         let events = EventQuery::on(tl_id).execute(&*store).unwrap();
@@ -137,6 +138,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn event_query_filters_by_entity() {
         let (store, tl_id, entity_a, _) = setup_store();
         let events = EventQuery::on(tl_id)
@@ -150,6 +152,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn event_query_filters_by_event_type() {
         let (store, tl_id, _, _) = setup_store();
         let events = EventQuery::on(tl_id)
@@ -163,6 +166,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn event_query_filters_by_seq_range() {
         let (store, tl_id, _, _) = setup_store();
         // Seqs are 1-indexed; get seqs 2 and 3 only
@@ -177,6 +181,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn event_query_combined_filters() {
         let (store, tl_id, entity_a, _) = setup_store();
         let events = EventQuery::on(tl_id)
@@ -190,6 +195,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn event_query_unknown_timeline_returns_error() {
         let store = open_store(StoreConfig::Memory).unwrap();
         let unknown_tl = TimelineId::new();
@@ -198,6 +204,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn event_query_builder_default() {
         let tl = TimelineId::new();
         let q = EventQuery::on(tl);
@@ -208,6 +215,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn event_query_filters_by_from_seq_only() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("t").unwrap();
@@ -224,6 +232,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn event_query_filters_by_to_seq_only() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("t").unwrap();

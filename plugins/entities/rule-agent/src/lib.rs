@@ -7,14 +7,15 @@
 //! Owns event type `"agent.decision"` and entity kind `"rule-agent"`.
 //! On each driver step it cycles through a fixed action list and emits
 //! one `agent.decision` event with a CBOR payload.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use pos_core::{
     event::{CanonicalBytes, Event, Kind},
+    ids::TimelineId,
     ids::{EntityId, PluginId},
     plugin::{Capability, Plugin},
     state::{Reducer, State},
     store::EventStore,
-    ids::TimelineId,
 };
 use pos_runtime::{Driver, RuntimeError, StepOutput};
 use serde::{Deserialize, Serialize};
@@ -71,7 +72,10 @@ impl RuleAgentPlugin {
     #[must_use]
     pub fn with_actions(actions: Vec<String>) -> Self {
         assert!(!actions.is_empty(), "actions list must not be empty");
-        Self { id: PluginId::new(), actions }
+        Self {
+            id: PluginId::new(),
+            actions,
+        }
     }
 
     /// Return the actions list (for constructing drivers and reducers).
@@ -115,7 +119,11 @@ impl RuleAgentDriver {
     /// Create a new driver for the given entity.
     #[must_use]
     pub fn new(entity: EntityId, actions: Vec<String>) -> Self {
-        Self { entity, tick: 0, actions }
+        Self {
+            entity,
+            tick: 0,
+            actions,
+        }
     }
 }
 
@@ -130,12 +138,14 @@ impl Driver for RuleAgentDriver {
         _timeline: TimelineId,
     ) -> Result<StepOutput, RuntimeError> {
         let action = self.actions[self.tick as usize % self.actions.len()].clone();
-        let payload = DecisionPayload { action, tick: self.tick };
+        let payload = DecisionPayload {
+            action,
+            tick: self.tick,
+        };
 
         let mut buf = Vec::new();
         // Writing to Vec<u8> is infallible with ciborium.
-        ciborium::into_writer(&payload, &mut buf)
-            .expect("ciborium write to Vec<u8> is infallible");
+        ciborium::into_writer(&payload, &mut buf).expect("ciborium write to Vec<u8> is infallible");
 
         let draft = pos_core::event::EventDraft::new(
             self.entity,
@@ -168,7 +178,10 @@ impl Reducer for RuleAgentReducer {
                 .get("decisions")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
-            state.set("decisions", serde_json::Value::Number((decisions + 1).into()));
+            state.set(
+                "decisions",
+                serde_json::Value::Number((decisions + 1).into()),
+            );
         }
     }
 }
@@ -190,7 +203,10 @@ mod tests {
 
     fn make_decision_event(entity: EntityId) -> Event {
         // Build a minimal valid decision payload
-        let payload = DecisionPayload { action: "idle".to_owned(), tick: 0 };
+        let payload = DecisionPayload {
+            action: "idle".to_owned(),
+            tick: 0,
+        };
         let mut buf = Vec::new();
         ciborium::into_writer(&payload, &mut buf).unwrap();
 
@@ -210,6 +226,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_registers_correct_capability() {
         let plugin = RuleAgentPlugin::new();
         let cap = plugin.capability();
@@ -223,6 +240,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_produces_decision_events() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("test").unwrap();
@@ -244,22 +262,30 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_counts_decisions() {
         let reducer = RuleAgentReducer;
         let entity = EntityId::new();
         let mut state = reducer.initial();
 
-        assert_eq!(state.get("decisions").and_then(serde_json::Value::as_u64), Some(0));
+        assert_eq!(
+            state.get("decisions").and_then(serde_json::Value::as_u64),
+            Some(0)
+        );
 
         for _ in 0..3 {
             let event = make_decision_event(entity);
             reducer.apply(&mut state, &event);
         }
 
-        assert_eq!(state.get("decisions").and_then(serde_json::Value::as_u64), Some(3));
+        assert_eq!(
+            state.get("decisions").and_then(serde_json::Value::as_u64),
+            Some(3)
+        );
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn default_creates_plugin_with_four_actions() {
         let plugin = RuleAgentPlugin::default();
         assert_eq!(plugin.actions().len(), 4);
@@ -267,6 +293,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_id_and_name() {
         let plugin = RuleAgentPlugin::new();
         let _id = plugin.id(); // covers Plugin::id()
@@ -274,6 +301,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_name_is_correct() {
         let entity = EntityId::new();
         let driver = RuleAgentDriver::new(entity, vec!["a".to_owned()]);
@@ -281,6 +309,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn cbor_payload_is_valid() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("test").unwrap();

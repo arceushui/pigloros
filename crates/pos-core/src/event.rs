@@ -14,12 +14,12 @@ use crate::{
 pub struct CanonicalBytes(#[serde(with = "serde_bytes_wrapper")] Bytes);
 
 impl CanonicalBytes {
-    #[must_use] 
+    #[must_use]
     pub fn from_vec(v: Vec<u8>) -> Self {
         Self(Bytes::from(v))
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn from_static(b: &'static [u8]) -> Self {
         Self(Bytes::from_static(b))
     }
@@ -63,7 +63,7 @@ impl Kind {
         Self(s.into())
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -101,12 +101,12 @@ pub struct SchemaVersion(u32);
 impl SchemaVersion {
     pub const V1: Self = Self(1);
 
-    #[must_use] 
+    #[must_use]
     pub const fn new(v: u32) -> Self {
         Self(v)
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn as_u32(self) -> u32 {
         self.0
     }
@@ -200,6 +200,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn event_json_round_trip() {
         let e = sample_event();
         let s = serde_json::to_string(&e).unwrap();
@@ -208,6 +209,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn event_cbor_round_trip() {
         let e = sample_event();
         let mut buf = Vec::new();
@@ -217,6 +219,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn event_draft_cbor_round_trip() {
         let d = EventDraft::new(
             EntityId::new(),
@@ -230,6 +233,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn canonical_bytes_payload_is_opaque() {
         // Kernel round-trips arbitrary bytes unchanged — no interpretation.
         let raw = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xFF, 0x00, 0x01];
@@ -242,6 +246,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn canonical_bytes_empty_round_trip() {
         let cb = CanonicalBytes::from_vec(vec![]);
         assert!(cb.is_empty());
@@ -252,6 +257,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn canonical_bytes_clone_is_cheap() {
         let cb = CanonicalBytes::from_vec(vec![42u8; 1024]);
         let clone = cb.clone();
@@ -259,6 +265,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn kind_display() {
         let k = Kind::new("world.observation");
         assert_eq!(k.to_string(), "world.observation");
@@ -266,6 +273,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn kind_json_round_trip() {
         let k = Kind::new("agent.decision");
         let back: Kind = serde_json::from_str(&serde_json::to_string(&k).unwrap()).unwrap();
@@ -273,17 +281,20 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn schema_version_default_is_v1() {
         assert_eq!(SchemaVersion::default(), SchemaVersion::V1);
         assert_eq!(SchemaVersion::V1.as_u32(), 1);
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn schema_version_ordering() {
         assert!(SchemaVersion::new(1) < SchemaVersion::new(2));
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn determinism_serde() {
         let d = Determinism::Recorded;
         let back: Determinism = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
@@ -291,6 +302,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_mode_serde() {
         let m = RunMode::Replay;
         let back: RunMode = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
@@ -298,6 +310,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn event_with_all_optional_fields_round_trip() {
         let e = Event {
             id: EventId::new(),
@@ -318,6 +331,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn event_draft_defaults() {
         let entity = EntityId::new();
         let kind = Kind::new("test");
@@ -329,10 +343,33 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn canonical_bytes_len() {
         let cb = CanonicalBytes::from_vec(vec![1, 2, 3, 4, 5]);
         assert_eq!(cb.len(), 5);
         let empty = CanonicalBytes::from_vec(vec![]);
         assert_eq!(empty.len(), 0);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn canonical_bytes_rejects_non_bytes_json() {
+        let result: Result<CanonicalBytes, _> = serde_json::from_str("42");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn event_draft_rejects_non_bytes_payload_json() {
+        let draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new("test"),
+            CanonicalBytes::from_vec(vec![1, 2, 3]),
+        );
+        let mut value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&draft).unwrap()).unwrap();
+        value["payload"] = serde_json::json!(42);
+        let result: Result<EventDraft, _> = serde_json::from_value(value);
+        assert!(result.is_err());
     }
 }

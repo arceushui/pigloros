@@ -1,0 +1,121 @@
+# PiglorOS CI — mirrors README Development gates (Redmine #100).
+#
+# Decisions locked for "perfect" bar:
+# - Platform: GitHub Actions (remote is github.com/arceushui/pigloros)
+# - Triggers: every PR + pushes to main
+# - Jobs: fmt, test, clippy (pedantic), coverage (100% lines + regions) — all required
+# - Coverage: RUSTC_BOOTSTRAP=1 so cfg(coverage_nightly) can enable
+#   feature(coverage_attribute); tests use #[coverage(off)] for unhittable assert arms
+# - Runners: ubuntu-latest only (rusqlite bundled; no macOS matrix yet)
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Surface future warnings as errors in CI builds (clippy still has its own -D warnings).
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.1
+          components: rustfmt
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.1
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: clippy
+
+      - name: cargo clippy (pedantic, deny warnings)
+        run: >
+          cargo clippy --workspace --all-targets --
+          -D warnings -W clippy::pedantic
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Required: cargo-llvm-cov sets cfg(coverage_nightly); we need the unstable
+      # coverage_attribute feature on stable for #[coverage(off)] on tests.
+      RUSTC_BOOTSTRAP: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.1
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coverage
+
+      - name: cargo llvm-cov (100% lines + regions)
+        run: >
+          cargo llvm-cov --workspace --summary-only
+          --fail-under-lines 100
+          --fail-under-regions 100

@@ -6,6 +6,7 @@
 //!
 //! No I/O, no async, no domain logic. Everything else depends on this crate.
 //! Plugins are forbidden from importing domain concepts through this crate.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 pub mod clock;
 pub mod crypto;

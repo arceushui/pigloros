@@ -38,12 +38,11 @@ pub fn verify(
 /// # Errors
 /// Returns [`CoreError::SignatureVerificationFailed`] if the bytes are not a valid compressed Ed25519 point.
 pub fn verifying_key_from_public_key(pk: &PublicKey) -> Result<VerifyingKey, CoreError> {
-    VerifyingKey::from_bytes(pk.as_bytes())
-        .map_err(|_| CoreError::SignatureVerificationFailed)
+    VerifyingKey::from_bytes(pk.as_bytes()).map_err(|_| CoreError::SignatureVerificationFailed)
 }
 
 /// Convert a `VerifyingKey` to a core `PublicKey`.
-#[must_use] 
+#[must_use]
 pub fn public_key_from_verifying_key(vk: &VerifyingKey) -> PublicKey {
     PublicKey::from_bytes(vk.to_bytes())
 }
@@ -57,6 +56,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn sign_and_verify_round_trip() {
         let (sk, vk) = generate_keypair();
         let p = payload(b"sign me");
@@ -65,6 +65,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn tampered_payload_fails_verification() {
         let (sk, vk) = generate_keypair();
         let p = payload(b"original");
@@ -74,6 +75,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn wrong_key_fails_verification() {
         let (sk, _vk) = generate_keypair();
         let (_, other_vk) = generate_keypair();
@@ -83,6 +85,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn different_payloads_produce_different_signatures() {
         let (sk, _) = generate_keypair();
         let s1 = sign(&sk, &payload(b"a"));
@@ -91,6 +94,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn public_key_round_trip_via_verifying_key() {
         let (_, vk) = generate_keypair();
         let pk = public_key_from_verifying_key(&vk);
@@ -99,6 +103,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn invalid_public_key_bytes_returns_error() {
         let bad_pk = PublicKey::from_bytes([0u8; 32]);
         // All-zeros is not a valid compressed point on Ed25519
@@ -108,6 +113,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn empty_payload_signs_and_verifies() {
         let (sk, vk) = generate_keypair();
         let p = payload(b"");
@@ -116,6 +122,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn signature_is_64_bytes() {
         let (sk, _) = generate_keypair();
         let sig = sign(&sk, &payload(b"test"));

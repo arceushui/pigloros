@@ -5,17 +5,17 @@ use serde::{Deserialize, Serialize};
 pub struct Hash(#[serde(with = "bytes_32")] [u8; 32]);
 
 impl Hash {
-    #[must_use] 
+    #[must_use]
     pub const fn from_bytes(b: [u8; 32]) -> Self {
         Self(b)
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn zero() -> Self {
         Self([0u8; 32])
     }
@@ -26,12 +26,12 @@ impl Hash {
 pub struct PublicKey(#[serde(with = "bytes_32")] [u8; 32]);
 
 impl PublicKey {
-    #[must_use] 
+    #[must_use]
     pub const fn from_bytes(b: [u8; 32]) -> Self {
         Self(b)
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
@@ -42,12 +42,12 @@ impl PublicKey {
 pub struct Signature(#[serde(with = "bytes_64")] [u8; 64]);
 
 impl Signature {
-    #[must_use] 
+    #[must_use]
     pub const fn from_bytes(b: [u8; 64]) -> Self {
         Self(b)
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 64] {
         &self.0
     }
@@ -88,6 +88,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn hash_json_round_trip() {
         let h = Hash::from_bytes([42u8; 32]);
         let back: Hash = serde_json::from_str(&serde_json::to_string(&h).unwrap()).unwrap();
@@ -95,6 +96,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn hash_cbor_round_trip() {
         let h = Hash::from_bytes([0xABu8; 32]);
         let mut buf = Vec::new();
@@ -104,27 +106,29 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn hash_zero() {
         assert_eq!(Hash::zero().as_bytes(), &[0u8; 32]);
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn public_key_round_trip() {
         let pk = PublicKey::from_bytes([1u8; 32]);
-        let back: PublicKey =
-            serde_json::from_str(&serde_json::to_string(&pk).unwrap()).unwrap();
+        let back: PublicKey = serde_json::from_str(&serde_json::to_string(&pk).unwrap()).unwrap();
         assert_eq!(pk, back);
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn signature_round_trip() {
         let sig = Signature::from_bytes([7u8; 64]);
-        let back: Signature =
-            serde_json::from_str(&serde_json::to_string(&sig).unwrap()).unwrap();
+        let back: Signature = serde_json::from_str(&serde_json::to_string(&sig).unwrap()).unwrap();
         assert_eq!(sig, back);
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn signature_cbor_round_trip() {
         let sig = Signature::from_bytes([0xFFu8; 64]);
         let mut buf = Vec::new();
@@ -134,6 +138,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn hash_as_bytes_identity() {
         let raw = [5u8; 32];
         let h = Hash::from_bytes(raw);
@@ -141,6 +146,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn hash_rejects_wrong_byte_length() {
         let mut buf = Vec::new();
         ciborium::into_writer(&[0u8; 16], &mut buf).unwrap();
@@ -149,10 +155,25 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn signature_rejects_wrong_byte_length() {
         let mut buf = Vec::new();
         ciborium::into_writer(&[0u8; 32], &mut buf).unwrap();
         let result: Result<Signature, _> = ciborium::from_reader(buf.as_slice());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn hash_rejects_non_bytes_json() {
+        let result: Result<Hash, _> = serde_json::from_str("42");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn signature_rejects_non_bytes_json() {
+        let result: Result<Signature, _> = serde_json::from_str("99");
         assert!(result.is_err());
     }
 }
