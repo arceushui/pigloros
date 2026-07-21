@@ -9,16 +9,18 @@ use pos_state::ProjectionRegistry;
 /// Events are read with [`SeqRange::all`] and then folded via
 /// [`ProjectionRegistry::fold_events`]. An empty timeline is a no-op.
 ///
+/// Returns the events that were replayed so callers do not need a second read.
+///
 /// # Errors
 /// Propagates [`CoreError`] from the underlying store.
 pub fn replay(
     store: &dyn EventStore,
     timeline: TimelineId,
     registry: &mut ProjectionRegistry,
-) -> Result<(), CoreError> {
+) -> Result<Vec<pos_core::Event>, CoreError> {
     let events = store.read(timeline, SeqRange::all())?;
     registry.fold_events(&events);
-    Ok(())
+    Ok(events)
 }
 
 /// Replay events up to and **including** `at_seq` on `timeline`.

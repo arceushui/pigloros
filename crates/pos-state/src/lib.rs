@@ -419,6 +419,27 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn projection_registry_restore_from_snapshot_loads_matching_reducer() {
+        let mut registry = ProjectionRegistry::new();
+        registry.register("registered", Box::new(EntityStateProjection));
+        let entity = EntityId::new();
+        registry.apply_event(&make_event(entity));
+        let snapshot = registry.state_snapshot();
+
+        let mut restored = ProjectionRegistry::new();
+        restored.register("registered", Box::new(EntityStateProjection));
+        restored.restore_from_snapshot(&snapshot);
+
+        let count = restored
+            .state_for_reducer("registered", &entity)
+            .and_then(|s| s.get("event_count"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn relationship_index_neighbours_dedupes_duplicate_outgoing_targets() {
         let mut index = RelationshipIndex::new();
         let hub = EntityId::new();

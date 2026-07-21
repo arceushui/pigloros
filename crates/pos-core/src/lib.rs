@@ -32,5 +32,7 @@ pub use manifest::{AdapterRecord, ReproManifest};
 pub use plugin::{Capability, Plugin};
 pub use schema::{SchemaVersionMap, Upcaster, UpcasterRegistry};
 pub use state::{Reducer, State, StateRegistry};
-pub use store::{EventStore, SeqRange, TimelineExport};
+pub use store::{
+    export_timeline, import_timeline, import_timeline_with_id, EventStore, SeqRange, TimelineExport,
+};
 pub use timeline::{Timeline, TimelineMeta, TimelineMode};

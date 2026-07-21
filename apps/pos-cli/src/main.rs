@@ -197,9 +197,7 @@ fn cmd_timeline_replay(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std::e
 
     let mut registry = pos_state::ProjectionRegistry::new();
     registry.register("entity_state", Box::new(pos_state::EntityStateProjection));
-    pos_time::replay(store.as_ref(), tl_id, &mut registry)?;
-
-    let events = read_timeline_events_after_replay(store.as_ref(), tl_id)?;
+    let events = pos_time::replay(store.as_ref(), tl_id, &mut registry)?;
     let entity_count = events
         .iter()
         .map(|e| e.entity)
@@ -526,17 +524,9 @@ fn cmd_experiment_backtest(
     println!("eval_events: {}", result.eval_events);
     println!("persistence_lift: {:.6}", result.persistence_lift);
     println!("lift_vs_persistence: {:.6}", result.lift_vs_persistence);
-
-    log_eval_report(result.eval_report.as_ref());
+    print_eval_report(&result.eval_report);
 
     Ok(())
-}
-
-/// Log eval calibration metrics when a report is present.
-fn log_eval_report(report: Option<&pos_plugin_eval::CalibrationReport>) {
-    if let Some(report) = report {
-        print_eval_report(report);
-    }
 }
 
 fn verify_manifest_against_store(
@@ -587,7 +577,7 @@ fn cmd_experiment_verify(manifest_path: &str) -> Result<(), Box<dyn std::error::
         open_store(StoreConfig::Sqlite { path: store_path })?
     } else {
         // Fallback: Memory (will always be MISMATCH for non-empty manifests)
-        open_memory_store()?
+        open_memory_store().expect("StoreConfig::Memory open is infallible")
     };
 
     verify_manifest_against_store(&manifest, store.as_ref())
@@ -638,17 +628,42 @@ fn parse_limit_flag(args: &[String]) -> Result<Option<usize>, Box<dyn std::error
     Ok(None)
 }
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_STATE_REG_JSON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn state_registry_to_json(
+    state_reg: &pos_core::StateRegistry,
+) -> Result<serde_json::Value, serde_json::Error> {
+    #[cfg(test)]
+    if FAIL_STATE_REG_JSON.with(std::cell::Cell::get) {
+        return serde_json::from_str("{");
+    }
+    serde_json::to_value(state_reg)
+}
+
 /// Count unique entity IDs captured in a snapshot's projection state.
 fn count_snapshot_entities(snapshot: &pos_time::Snapshot) -> usize {
     let mut entities = std::collections::HashSet::new();
     for state_reg in snapshot.registry.values() {
-        if let Ok(value) = serde_json::to_value(state_reg) {
-            if let Some(states) = value.get("states").and_then(serde_json::Value::as_object) {
-                entities.extend(states.keys().cloned());
-            }
-        }
+        // Soft-skip registries that cannot be JSON-encoded.
+        let Ok(value) = state_registry_to_json(state_reg) else {
+            continue;
+        };
+        accumulate_entities_from_registry_json(&value, &mut entities);
     }
     entities.len()
+}
+
+/// Pull entity id keys from a serialized [`StateRegistry`]-shaped JSON value.
+fn accumulate_entities_from_registry_json(
+    value: &serde_json::Value,
+    entities: &mut std::collections::HashSet<String>,
+) {
+    if let Some(states) = value.get("states").and_then(serde_json::Value::as_object) {
+        entities.extend(states.keys().cloned());
+    }
 }
 
 /// Serialize and write the run manifest next to the store.
@@ -656,7 +671,9 @@ fn save_run_manifest(
     path: &str,
     manifest: &pos_core::manifest::ReproManifest,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let manifest_json = serde_json::to_string_pretty(manifest)?;
+    // `ReproManifest` is derived `Serialize` with plain fields — encoding cannot fail.
+    let manifest_json =
+        serde_json::to_string_pretty(manifest).expect("ReproManifest serialization is infallible");
     std::fs::write(path, &manifest_json)?;
     Ok(())
 }
@@ -667,17 +684,6 @@ fn print_eval_report(report: &pos_plugin_eval::CalibrationReport) {
     println!("ece: {:.6}", report.ece);
     println!("n_resolved: {}", report.n_resolved);
     println!("n_predictions: {}", report.n_predictions);
-}
-
-/// Read events after a successful replay.
-///
-/// # Errors
-/// Returns [`pos_core::CoreError`] if the store read fails.
-fn read_timeline_events_after_replay(
-    store: &dyn pos_core::store::EventStore,
-    tl_id: TimelineId,
-) -> Result<Vec<pos_core::Event>, pos_core::CoreError> {
-    store.read(tl_id, SeqRange::all())
 }
 
 /// Open an in-memory store.
@@ -714,6 +720,59 @@ mod tests {
         event::{CanonicalBytes, EventDraft, Kind},
         ids::EntityId,
     };
+
+    #[test]
+    fn accumulate_entities_skips_missing_or_non_object_states() {
+        let mut entities = std::collections::HashSet::new();
+        accumulate_entities_from_registry_json(&serde_json::Value::Null, &mut entities);
+        assert!(entities.is_empty());
+        accumulate_entities_from_registry_json(&serde_json::json!({"nope": 1}), &mut entities);
+        assert!(entities.is_empty());
+        accumulate_entities_from_registry_json(
+            &serde_json::json!({"states": "not-an-object"}),
+            &mut entities,
+        );
+        assert!(entities.is_empty());
+        accumulate_entities_from_registry_json(
+            &serde_json::json!({"states": {"e1": {}, "e2": {}}}),
+            &mut entities,
+        );
+        assert_eq!(entities.len(), 2);
+        assert!(entities.contains("e1"));
+        assert!(entities.contains("e2"));
+    }
+
+    #[test]
+    fn count_snapshot_entities_counts_unique_ids() {
+        let mut registry = std::collections::HashMap::new();
+        registry.insert("entity_state".to_owned(), pos_core::StateRegistry::new());
+        let snapshot = pos_time::Snapshot {
+            timeline: TimelineId::new(),
+            at_seq: Seq::ZERO,
+            registry,
+        };
+        assert_eq!(count_snapshot_entities(&snapshot), 0);
+    }
+
+    #[test]
+    fn count_snapshot_entities_soft_skips_json_errors() {
+        let mut registry = std::collections::HashMap::new();
+        registry.insert("entity_state".to_owned(), pos_core::StateRegistry::new());
+        let snapshot = pos_time::Snapshot {
+            timeline: TimelineId::new(),
+            at_seq: Seq::ZERO,
+            registry,
+        };
+        FAIL_STATE_REG_JSON.with(|f| f.set(true));
+        let n = count_snapshot_entities(&snapshot);
+        FAIL_STATE_REG_JSON.with(|f| f.set(false));
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn open_memory_store_ok() {
+        let _store = open_memory_store().expect("memory store");
+    }
 
     #[test]
     fn parse_ticks_flag_extracts_value() {
@@ -1470,9 +1529,9 @@ mod main_coverage {
             // cmd_experiment_verify uses Memory store internally so it won't find
             // the SQLite timeline. Use the in-memory path instead.
             // Create an in-memory store with the same timeline_id via import.
-            let export = store.export_timeline(tl.id()).unwrap();
+            let export = pos_core::store::export_timeline(store.as_ref(), tl.id()).unwrap();
             let mut mem = open_store(StoreConfig::Memory).unwrap();
-            mem.import_timeline(export).unwrap();
+            pos_core::store::import_timeline(mem.as_mut(), export).unwrap();
 
             // For the OK path, just verify the manifest json round-trips correctly.
             // The actual verify calls open_store(Memory) so it won't find the timeline,

@@ -3,13 +3,11 @@
 # Decisions locked for "perfect" bar:
 # - Platform: GitHub Actions (remote is github.com/arceushui/pigloros)
 # - Triggers: every PR + pushes to main
-# - Jobs: fmt, test, clippy (pedantic), coverage (honest floor: 99% lines + regions) — all required
-# - Coverage: RUSTC_BOOTSTRAP=1 so cfg(coverage_nightly) can enable
-#   feature(coverage_attribute); #[coverage(off)] is ONLY ever applied to #[test] functions
-#   or code inside #[cfg(test)] modules — production code is never exempted from coverage.
-#   A handful of genuinely unhittable error arms (infallible-in-practice branches such as
-#   float-precision fallbacks or serialization edge cases) remain uninstrumented and are
-#   reflected honestly in the fail-under floor below instead of being suppressed.
+# - Jobs: fmt, test, clippy (pedantic), coverage (100% lines + regions) — all required
+  # - Coverage: RUSTC_BOOTSTRAP=1 so cfg(coverage_nightly) can enable
+  #   feature(coverage_attribute); #[coverage(off)] is ONLY ever applied to #[test] functions
+  #   or code inside #[cfg(test)] modules — production code is never exempted from coverage.
+  #   Unnecessary code is deleted/simplified rather than left as dead branches.
 # - Runners: ubuntu-latest only (rusqlite bundled; no macOS matrix yet)
 
 name: CI
@@ -114,13 +112,10 @@ jobs:
         with:
           shared-key: coverage
 
-      # Honest floor: production code is fully instrumented (coverage(off) is
-      # test-only), so this is slightly below measured coverage (~99.9% lines /
-      # ~99.7% regions) to leave headroom for the handful of infallible-in-practice
-      # error arms (e.g. float-precision fallbacks) that are impractical to hit
-      # in a unit test. See README "Development" section for the measured numbers.
-      - name: "cargo llvm-cov (honest floor: 99% lines + regions)"
+      # 100% coverage requirement: production code is fully instrumented (coverage(off) is
+      # test-only), and unnecessary code is deleted/simplified rather than left as dead branches.
+      - name: "cargo llvm-cov (100% lines + regions)"
         run: >
           cargo llvm-cov --workspace --locked --summary-only
-          --fail-under-lines 99
-          --fail-under-regions 99
+          --fail-under-lines 100
+          --fail-under-regions 100

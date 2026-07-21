@@ -48,10 +48,12 @@ pub struct TimelineExport {
 /// `Send` is required; `Sync` is not — multi-threaded callers wrap in `Arc<Mutex<_>>`.
 ///
 /// # Provider independence
-/// All timeline lifecycle operations (create, append, read, fork, export, import)
-/// go through this trait. Callers should hold `Box<dyn EventStore>` or
-/// `Arc<Mutex<dyn EventStore>>` — never a concrete type — so the backend
-/// (`SQLite`, in-memory, `redb`, `TiKV`) can be swapped without changing call sites.
+/// All timeline lifecycle operations (create, append, read, fork) go through
+/// this trait. Export/import helpers live as free functions alongside the trait
+/// so backends are not forced to monomorphize unused default methods.
+/// Callers should hold `Box<dyn EventStore>` or `Arc<Mutex<dyn EventStore>>` —
+/// never a concrete type — so the backend (`SQLite`, in-memory, `redb`, `TiKV`)
+/// can be swapped without changing call sites.
 pub trait EventStore: Send {
     /// Create a new root timeline with the given name.
     ///
@@ -101,51 +103,48 @@ pub trait EventStore: Send {
     /// # Errors
     /// Returns a [`CoreError::Storage`] error on I/O failure.
     fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError>;
+}
 
-    /// Export a timeline and all its events as a portable snapshot.
-    ///
-    /// The snapshot can be serialised to JSON/CBOR and imported into any
-    /// `EventStore` backend — enabling migration between providers.
-    ///
-    /// # Errors
-    /// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist.
-    fn export_timeline(&self, id: TimelineId) -> Result<TimelineExport, CoreError> {
-        export_timeline_using(self.get_timeline(id), self.read(id, SeqRange::all()), id)
-    }
+/// Export a timeline and all its events as a portable snapshot.
+///
+/// # Errors
+/// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist.
+pub fn export_timeline(
+    store: &dyn EventStore,
+    id: TimelineId,
+) -> Result<TimelineExport, CoreError> {
+    export_timeline_using(store.get_timeline(id), store.read(id, SeqRange::all()), id)
+}
 
-    /// Import a previously exported timeline snapshot into this store.
-    ///
-    /// Creates the timeline and replays all events. If a timeline with the
-    /// same `TimelineId` already exists, returns a storage error.
-    ///
-    /// # Errors
-    /// Returns a [`CoreError::Storage`] error if the timeline already exists or on I/O failure.
-    fn import_timeline(&mut self, export: TimelineExport) -> Result<Timeline, CoreError> {
-        let name = export.timeline.meta.name.unwrap_or_default();
-        let create_result = self.create_timeline(&name);
-        import_timeline_using(create_result, export.events, |timeline_id, drafts| {
-            self.append(timeline_id, drafts)
-        })
-    }
+/// Import a previously exported timeline snapshot into `store`.
+///
+/// # Errors
+/// Returns a [`CoreError::Storage`] error if the timeline already exists or on I/O failure.
+pub fn import_timeline(
+    store: &mut dyn EventStore,
+    export: TimelineExport,
+) -> Result<Timeline, CoreError> {
+    let name = export.timeline.meta.name.unwrap_or_default();
+    let create_result = store.create_timeline(&name);
+    import_timeline_using(create_result, export.events, |timeline_id, drafts| {
+        store.append(timeline_id, drafts)
+    })
+}
 
-    /// Import a timeline snapshot preserving the original [`TimelineId`] and event IDs.
-    ///
-    /// Unlike [`import_timeline`], this variant creates the timeline with its original
-    /// identity — required for cross-node shared worlds (Wave 6) where timelines must
-    /// have stable, addressable identities.
-    ///
-    /// Backends that support identity-preserving import should override this method.
-    /// The default implementation falls back to [`import_timeline`], which assigns a new
-    /// `TimelineId`. That is safe for local use but loses the original identity.
-    ///
-    /// # Errors
-    /// Returns a [`CoreError::Storage`] error if a timeline with that ID already exists
-    /// (when overridden by a backend that enforces uniqueness).
-    fn import_timeline_with_id(&mut self, export: TimelineExport) -> Result<Timeline, CoreError> {
-        // Default implementation falls back to import_timeline (loses IDs).
-        // Backends that support identity-preserving import should override this.
-        self.import_timeline(export)
-    }
+/// Import a timeline snapshot preserving the original [`TimelineId`] and event IDs.
+///
+/// The current implementation falls back to [`import_timeline`], which assigns a new
+/// `TimelineId`. Wave 6 backends that need identity-preserving import should provide
+/// a dedicated path.
+///
+/// # Errors
+/// Returns a [`CoreError::Storage`] error if a timeline with that ID already exists
+/// (when a backend enforces uniqueness).
+pub fn import_timeline_with_id(
+    store: &mut dyn EventStore,
+    export: TimelineExport,
+) -> Result<Timeline, CoreError> {
+    import_timeline(store, export)
 }
 
 fn export_timeline_using(
@@ -394,7 +393,7 @@ mod tests {
 
         let mut store = TrivialStore::new();
         // Default fallback succeeds but assigns a new TimelineId.
-        let imported = store.import_timeline_with_id(export).unwrap();
+        let imported = import_timeline_with_id(&mut store, export).unwrap();
         // The returned timeline has *some* valid id (just not the original one).
         let _ = imported.id();
     }
@@ -410,7 +409,7 @@ mod tests {
             events: vec![],
         };
         let mut store = TrivialStore::new();
-        let imported = store.import_timeline(export).unwrap();
+        let imported = import_timeline(&mut store, export).unwrap();
         let _ = imported.id();
     }
 
@@ -476,7 +475,7 @@ mod tests {
     fn export_timeline_get_timeline_err_propagates() {
         let store = FlakyStore::new(FlakyMode::GetTimelineErr);
         let id = TimelineId::new();
-        let err = store.export_timeline(id).unwrap_err();
+        let err = export_timeline(&store, id).unwrap_err();
         assert!(matches!(err, CoreError::Storage(_)));
     }
 
@@ -485,7 +484,7 @@ mod tests {
     fn export_timeline_missing_timeline_returns_not_found() {
         let store = FlakyStore::new(FlakyMode::GetTimelineMissing);
         let id = TimelineId::new();
-        let err = store.export_timeline(id).unwrap_err();
+        let err = export_timeline(&store, id).unwrap_err();
         assert!(matches!(err, CoreError::TimelineNotFound(_)));
     }
 
@@ -494,7 +493,7 @@ mod tests {
     fn export_timeline_read_err_propagates() {
         let store = FlakyStore::new(FlakyMode::ReadErr);
         let id = TimelineId::new();
-        let err = store.export_timeline(id).unwrap_err();
+        let err = export_timeline(&store, id).unwrap_err();
         assert!(matches!(err, CoreError::Storage(_)));
     }
 
@@ -506,7 +505,7 @@ mod tests {
             timeline: FlakyStore::healthy_timeline(),
             events: vec![],
         };
-        let err = store.import_timeline(export).unwrap_err();
+        let err = import_timeline(&mut store, export).unwrap_err();
         assert!(matches!(err, CoreError::Storage(_)));
     }
 
@@ -532,7 +531,7 @@ mod tests {
             events: vec![dummy_event],
         };
         let mut store = FlakyStore::new(FlakyMode::AppendErr);
-        let err = store.import_timeline(export).unwrap_err();
+        let err = import_timeline(&mut store, export).unwrap_err();
         assert!(matches!(err, CoreError::Storage(_)));
     }
 
@@ -541,7 +540,7 @@ mod tests {
     fn flaky_store_healthy_export_succeeds() {
         let store = FlakyStore::new(FlakyMode::Healthy);
         let id = TimelineId::new();
-        let export = store.export_timeline(id).unwrap();
+        let export = export_timeline(&store, id).unwrap();
         assert!(export.events.is_empty());
     }
 
@@ -567,7 +566,7 @@ mod tests {
             events: vec![dummy_event],
         };
         let mut store = FlakyStore::new(FlakyMode::Healthy);
-        let imported = store.import_timeline(export).unwrap();
+        let imported = import_timeline(&mut store, export).unwrap();
         let _ = imported.id();
     }
 
@@ -579,7 +578,7 @@ mod tests {
             events: vec![],
         };
         let mut store = FlakyStore::new(FlakyMode::CreateTimelineErr);
-        let err = store.import_timeline_with_id(export).unwrap_err();
+        let err = import_timeline_with_id(&mut store, export).unwrap_err();
         assert!(matches!(err, CoreError::Storage(_)));
     }
 }

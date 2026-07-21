@@ -310,8 +310,8 @@ pub struct BacktestResult {
     pub eval_avg_events_per_tick: f64,
     /// Lift of eval vs persistence baseline: `eval_avg` / `train_avg` - 1.0 (0.0 if `train_avg` == 0).
     pub lift_vs_persistence: f64,
-    /// Calibration report computed from the eval timeline, if available.
-    pub eval_report: Option<pos_plugin_eval::CalibrationReport>,
+    /// Calibration report computed from the eval timeline.
+    pub eval_report: pos_plugin_eval::CalibrationReport,
 }
 
 /// Temporal-split backtest runner.
@@ -344,18 +344,6 @@ impl BacktestRunner {
         }
     }
 
-    /// Fork train timeline at head for the eval phase.
-    ///
-    /// Fork failures are exercised via [`fork_eval_timeline`] in `fault_injection_tests`.
-    fn fork_train_for_eval_timeline(
-        store: &mut dyn pos_core::store::EventStore,
-        train_tl_id: pos_core::ids::TimelineId,
-        train_head_seq: pos_core::clock::Seq,
-        eval_name: &str,
-    ) -> Result<Timeline, ExperimentError> {
-        fork_eval_timeline(store, train_tl_id, train_head_seq, eval_name)
-    }
-
     /// Run the backtest: train phase then eval phase.
     ///
     /// Opens the store once, runs train, forks at the train head, then runs eval
@@ -364,8 +352,16 @@ impl BacktestRunner {
     /// # Errors
     /// Returns [`ExperimentError::Runtime`] or [`ExperimentError::Store`] on failure.
     pub fn run(self) -> Result<BacktestResult, ExperimentError> {
+        let mut store = open_store(self.config.store_config.clone())?;
+        self.run_on_store(store.as_mut())
+    }
+
+    /// Run backtest phases on an already-opened store (test seam for fault injection).
+    fn run_on_store(
+        self,
+        store: &mut dyn pos_core::store::EventStore,
+    ) -> Result<BacktestResult, ExperimentError> {
         let store_config = self.config.store_config.clone();
-        let mut store = open_store(self.config.store_config)?;
 
         // --- Train phase ---
         let train_name = format!("{}-train", self.config.experiment_name);
@@ -374,12 +370,8 @@ impl BacktestRunner {
 
         let mut train_registry = (self.registry_factory)();
         let train_stop = StopCondition::MaxTicks(self.config.train_ticks);
-        let (train_ticks, train_events, train_chain_head) = run_experiment_on_store(
-            store.as_mut(),
-            train_tl_id,
-            &train_stop,
-            &mut train_registry,
-        )?;
+        let (train_ticks, train_events, train_chain_head) =
+            run_experiment_on_store(store, train_tl_id, &train_stop, &mut train_registry)?;
 
         // Find train head seq from the store's timeline list.
         let train_head_seq = store
@@ -390,19 +382,14 @@ impl BacktestRunner {
 
         // --- Fork train timeline to eval ---
         let eval_name = format!("{}-eval", self.config.experiment_name);
-        let eval_tl = Self::fork_train_for_eval_timeline(
-            store.as_mut(),
-            train_tl_id,
-            train_head_seq,
-            &eval_name,
-        )?;
+        let eval_tl = fork_eval_timeline(store, train_tl_id, train_head_seq, &eval_name)?;
         let eval_tl_id = eval_tl.id();
 
         // --- Eval phase (same store, forked timeline) ---
         let mut eval_registry = (self.registry_factory)();
         let eval_stop = StopCondition::MaxTicks(self.config.eval_ticks);
         let (eval_ticks, eval_events, eval_chain_head) =
-            run_experiment_on_store(store.as_mut(), eval_tl_id, &eval_stop, &mut eval_registry)?;
+            run_experiment_on_store(store, eval_tl_id, &eval_stop, &mut eval_registry)?;
 
         // --- Lift metrics ---
         // Convert u64 counts to f64 via u32 to avoid precision-loss lint;
@@ -453,8 +440,8 @@ impl BacktestRunner {
             store_config,
         };
 
-        // Compute eval report from the eval timeline.
-        let eval_report = pos_plugin_eval::compute_report(store.as_ref(), eval_tl_id).ok();
+        let eval_report = pos_plugin_eval::compute_report(store, eval_tl_id)
+            .map_err(|e| ExperimentError::Store(pos_core::CoreError::Storage(e.to_string())))?;
 
         Ok(BacktestResult {
             train_result,
@@ -2075,5 +2062,154 @@ mod fault_injection_tests {
         };
         let runner2 = BacktestRunner::new(config2, registry_with_emit_driver);
         assert!(runner2.run().is_err());
+    }
+
+    /// Test that `BacktestRunner::run_on_store` fails when fork returns an error.
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn backtest_runner_fork_eval_timeline_fails() {
+        use pos_core::{
+            clock::Seq,
+            event::Event,
+            ids::TimelineId,
+            store::{EventStore, SeqRange},
+            timeline::Timeline,
+            CoreError,
+        };
+
+        struct FaultyForkerStore {
+            base: pos_store::memory::MemoryStore,
+        }
+
+        impl EventStore for FaultyForkerStore {
+            fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
+                self.base.create_timeline(name)
+            }
+
+            fn append(
+                &mut self,
+                timeline: TimelineId,
+                drafts: &[pos_core::event::EventDraft],
+            ) -> Result<Vec<Event>, CoreError> {
+                self.base.append(timeline, drafts)
+            }
+
+            fn fork(
+                &mut self,
+                _parent: TimelineId,
+                _at_seq: Seq,
+                _name: &str,
+            ) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("fork failed for test".to_owned()))
+            }
+
+            fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+                self.base.list_timelines()
+            }
+
+            fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+                self.base.get_timeline(id)
+            }
+
+            fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+                self.base.read(timeline, range)
+            }
+        }
+
+        let mut store = FaultyForkerStore {
+            base: pos_store::memory::MemoryStore::new(),
+        };
+        let config = BacktestConfig {
+            experiment_name: "bt-fork-fault".to_owned(),
+            train_ticks: 0,
+            eval_ticks: 0,
+            store_config: StoreConfig::Memory,
+        };
+        let runner = BacktestRunner::new(config, registry_with_emit_driver);
+        let result = runner.run_on_store(&mut store);
+        assert!(matches!(
+            result,
+            Err(ExperimentError::Store(CoreError::Storage(_)))
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn backtest_runner_compute_report_error_propagates() {
+        use pos_core::{
+            clock::Seq,
+            event::Event,
+            ids::TimelineId,
+            store::{EventStore, SeqRange},
+            timeline::Timeline,
+            CoreError,
+        };
+        use std::cell::Cell;
+
+        // `run_experiment_on_store` reads once per phase for chain_head; allow those
+        // two reads, then fail the `compute_report` read.
+        struct FailReadAfterStore {
+            base: pos_store::memory::MemoryStore,
+            ok_reads_left: Cell<u32>,
+        }
+
+        impl EventStore for FailReadAfterStore {
+            fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
+                self.base.create_timeline(name)
+            }
+
+            fn append(
+                &mut self,
+                timeline: TimelineId,
+                drafts: &[pos_core::event::EventDraft],
+            ) -> Result<Vec<Event>, CoreError> {
+                self.base.append(timeline, drafts)
+            }
+
+            fn fork(
+                &mut self,
+                parent: TimelineId,
+                at_seq: Seq,
+                name: &str,
+            ) -> Result<Timeline, CoreError> {
+                self.base.fork(parent, at_seq, name)
+            }
+
+            fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+                self.base.list_timelines()
+            }
+
+            fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+                self.base.get_timeline(id)
+            }
+
+            fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+                let left = self.ok_reads_left.get();
+                if left == 0 {
+                    return Err(CoreError::Storage(
+                        "read failed for compute_report".to_owned(),
+                    ));
+                }
+                self.ok_reads_left.set(left - 1);
+                self.base.read(timeline, range)
+            }
+        }
+
+        let mut store = FailReadAfterStore {
+            base: pos_store::memory::MemoryStore::new(),
+            ok_reads_left: Cell::new(2),
+        };
+        let config = BacktestConfig {
+            experiment_name: "bt-compute-report-fault".to_owned(),
+            train_ticks: 0,
+            eval_ticks: 0,
+            store_config: StoreConfig::Memory,
+        };
+        let runner = BacktestRunner::new(config, registry_with_emit_driver);
+        let result = runner.run_on_store(&mut store);
+        assert!(matches!(
+            result,
+            Err(ExperimentError::Store(CoreError::Storage(_)))
+        ));
     }
 }

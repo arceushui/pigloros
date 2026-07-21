@@ -69,6 +69,10 @@ pub enum StoreConfig {
 /// Returns [`CoreError::Storage`] if the backend cannot be initialised
 /// (e.g. the `SQLite` file path is not writable or schema migration fails).
 ///
+/// # Panics
+///
+/// Panics if in-memory `SQLite` store cannot be opened (should never happen in practice).
+///
 /// # Examples
 ///
 /// ```rust
@@ -167,12 +171,12 @@ mod tests {
         src.append(tl.id(), &drafts).unwrap();
 
         // Export from source
-        let export = src.export_timeline(tl.id()).unwrap();
+        let export = pos_core::store::export_timeline(src.as_ref(), tl.id()).unwrap();
         assert_eq!(export.events.len(), 2);
 
         // Import into a fresh store — different backend, same data
         let mut dst = open_store(StoreConfig::Memory).unwrap();
-        let imported = dst.import_timeline(export).unwrap();
+        let imported = pos_core::store::import_timeline(dst.as_mut(), export).unwrap();
         let events = dst.read(imported.id(), SeqRange::all()).unwrap();
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].payload.as_slice(), b"hello");
@@ -196,12 +200,24 @@ mod tests {
         )
         .unwrap();
 
-        let export = src.export_timeline(tl.id()).unwrap();
+        let export = pos_core::store::export_timeline(src.as_ref(), tl.id()).unwrap();
 
         let mut dst = open_store(StoreConfig::SqliteInMemory).unwrap();
-        let imported = dst.import_timeline(export).unwrap();
+        let imported = pos_core::store::import_timeline(dst.as_mut(), export).unwrap();
         let events = dst.read(imported.id(), SeqRange::all()).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].payload.as_slice(), b"data");
+    }
+    #[cfg(feature = "sqlite")]
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn open_store_sqlite_in_memory_propagates_open_error() {
+        sqlite::FAIL_OPEN_IN_MEMORY.with(|f| f.set(true));
+        let result = open_store(StoreConfig::SqliteInMemory);
+        sqlite::FAIL_OPEN_IN_MEMORY.with(|f| f.set(false));
+        assert!(
+            matches!(result, Err(CoreError::Storage(_))),
+            "expected Storage error from injected open_in_memory failure"
+        );
     }
 }
