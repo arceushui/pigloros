@@ -111,6 +111,37 @@ mod tests {
     }
 
     #[test]
+    fn apply_society_context_ignores_unmatched_dimensions() {
+        let mut prefs = vec![("food".to_owned(), 0.5)];
+        let mut means = HashMap::new();
+        means.insert("trust".to_owned(), 0.9);
+        apply_society_context(&mut prefs, &means);
+        assert!((prefs[0].1 - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn fetch_society_means_trims_trailing_slash() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = r#"{"events":[{"event_type":"society.signal","payload":{"dimension":"trust","value":0.9}}]}"#;
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.read(&mut [0u8; 1024]);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        let means =
+            fetch_society_means(&format!("http://{addr}/"), "01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        assert!((means["trust"] - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn fetch_society_means_parses_mock_http() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
@@ -130,6 +161,28 @@ mod tests {
         let means =
             fetch_society_means(&format!("http://{addr}"), "01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
         assert!((means["trust"] - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn fetch_society_means_treats_missing_events_as_empty() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = r"{}";
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.read(&mut [0u8; 1024]);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        let means =
+            fetch_society_means(&format!("http://{addr}"), "01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        assert!(means.is_empty());
     }
 
     #[test]
