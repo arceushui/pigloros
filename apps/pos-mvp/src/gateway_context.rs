@@ -51,6 +51,57 @@ pub fn apply_society_context(prefs: &mut [(String, f64)], means: &HashMap<String
     }
 }
 
+/// Plain-language lines for society means (#76 / ADR-015 follow-on).
+///
+/// Covers society dimensions (`trust`, `opinion`, `economy`, `culture`,
+/// `polarization`) plus any other keys as generic preference-context hints.
+#[must_use]
+pub fn plain_language_context(means: &HashMap<String, f64>) -> Vec<String> {
+    let mut dims: Vec<(&String, f64)> = means.iter().map(|(k, v)| (k, *v)).collect();
+    dims.sort_by(|a, b| a.0.cmp(b.0));
+    dims.into_iter()
+        .map(|(dim, mean)| describe_dimension(dim, mean))
+        .collect()
+}
+
+fn describe_dimension(dim: &str, mean: f64) -> String {
+    let level = intensity_word(mean);
+    match dim.to_ascii_lowercase().as_str() {
+        "trust" => format!(
+            "Trust in the shared world looks {level} (mean {mean:.2}) — weigh how much you rely on others' signals."
+        ),
+        "opinion" => format!(
+            "Public opinion around this choice is {level} (mean {mean:.2}) — expect the crowd to lean that way."
+        ),
+        "economy" => format!(
+            "Economic conditions read {level} (mean {mean:.2}) — resource and cost pressure may matter."
+        ),
+        "culture" => format!(
+            "Cultural mood is {level} (mean {mean:.2}) — norms and identity cues may shape fit."
+        ),
+        "polarization" => format!(
+            "Polarization is {level} (mean {mean:.2}) — disagreement may be sharp; pick carefully."
+        ),
+        other => format!(
+            "Shared signal '{other}' is {level} (mean {mean:.2}) — preferences with this key may be nudged."
+        ),
+    }
+}
+
+fn intensity_word(mean: f64) -> &'static str {
+    if mean >= 0.75 {
+        "strong"
+    } else if mean >= 0.55 {
+        "elevated"
+    } else if mean >= 0.45 {
+        "balanced"
+    } else if mean >= 0.25 {
+        "soft"
+    } else {
+        "weak"
+    }
+}
+
 /// Poll gateway for society signal means. `gateway` is base URL (e.g. `http://127.0.0.1:8080`).
 pub fn fetch_society_means(
     gateway: &str,
@@ -98,6 +149,37 @@ mod tests {
         ];
         let means = society_means_from_events(&events);
         assert!((means["trust"] - 0.7).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn plain_language_covers_society_dimensions_and_generic() {
+        let mut means = HashMap::new();
+        means.insert("trust".to_owned(), 0.9);
+        means.insert("opinion".to_owned(), 0.6);
+        means.insert("economy".to_owned(), 0.5);
+        means.insert("culture".to_owned(), 0.3);
+        means.insert("polarization".to_owned(), 0.1);
+        means.insert("nature".to_owned(), 0.8);
+        let lines = plain_language_context(&means);
+        assert_eq!(lines.len(), 6);
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("Trust") && l.contains("strong")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("Public opinion") && l.contains("elevated")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("Economic") && l.contains("balanced")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("Cultural") && l.contains("soft")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("Polarization") && l.contains("weak")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("'nature'") && l.contains("strong")));
     }
 
     #[test]

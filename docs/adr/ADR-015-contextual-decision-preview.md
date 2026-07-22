@@ -1,5 +1,9 @@
 # ADR-015: Wave 7 Contextual Decision Preview
 
+**Redmine:** [#106](https://redmine.piglor.com/issues/106) (ADR) · [#107](https://redmine.piglor.com/issues/107) (MVP) · [#76](https://redmine.piglor.com/issues/76) (plain language)
+
+**Canonical wiki:** [ADR-015 on Redmine](https://redmine.piglor.com/projects/pigloros/wiki/ADR-015_Wave7_Contextual_Decision_Preview)
+
 **Status:** Accepted (in-repo)  
 **Wave:** 7  
 **Depends on:** Wave 5 `pos-mvp`, Wave 6 `piglor-gateway` + `plugins/society`

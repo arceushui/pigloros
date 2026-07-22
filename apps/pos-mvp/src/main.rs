@@ -15,7 +15,7 @@
 
 mod gateway_context;
 
-use gateway_context::{apply_society_context, fetch_society_means};
+use gateway_context::{apply_society_context, fetch_society_means, plain_language_context};
 use pos_core::ids::EntityId;
 use pos_experiment::{BacktestConfig, BacktestRunner};
 use pos_plugin_eval::{EvalPlugin, EvalReducer};
@@ -443,6 +443,10 @@ fn run_mvp(
                 println!("Shared context (from {gw}):");
                 for (dim, mean) in &means {
                     println!("  {dim} mean={mean:.2}");
+                }
+                println!("  In plain language:");
+                for line in plain_language_context(&means) {
+                    println!("    • {line}");
                 }
                 apply_society_context(&mut preferences, &means);
                 println!("  Preferences after context nudge:");
