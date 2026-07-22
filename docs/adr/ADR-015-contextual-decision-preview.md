@@ -1,6 +1,6 @@
 # ADR-015: Wave 7 Contextual Decision Preview
 
-**Redmine:** [#106](https://redmine.piglor.com/issues/106) (ADR) · [#107](https://redmine.piglor.com/issues/107) (MVP) · [#76](https://redmine.piglor.com/issues/76) (plain language)
+**Redmine:** [#106](https://redmine.piglor.com/issues/106) (ADR) · [#107](https://redmine.piglor.com/issues/107) (MVP) · [#76](https://redmine.piglor.com/issues/76) (plain language) · [#75](https://redmine.piglor.com/issues/75) (personal fork)
 
 **Canonical wiki:** [ADR-015 on Redmine](https://redmine.piglor.com/projects/pigloros/wiki/ADR-015_Wave7_Contextual_Decision_Preview)
 
@@ -40,8 +40,12 @@ No new crate; sync HTTP via `ureq` in `pos-mvp` only. Gateway remains optional �
 
 - LLM bridges / agent population (#72)
 - Full `piglor-client` UI (#70)
-- Fork/merge timelines for counterfactual branches
 - Auth on gateway (#68) — loopback demos only
+- Gateway-hosted fork API / WebSocket live twins (thin local `#75` CoW exists in `pos-mvp --fork-compare`)
+
+## Follow-on (#75 thin slice)
+
+`cargo run -p pos-mvp -- --fork-compare` runs a local Memory CoW of `shared-now`, forces each scenario option on a future arm, and prints a side-by-side `pos_time::compare` summary.
 
 ## Implementation
 

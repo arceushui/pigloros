@@ -17,7 +17,10 @@ pos-plugin-eval = { path = "../../plugins/eval" }
 pos-plugin-persona = { path = "../../plugins/persona" }
 pos-plugin-geo = { path = "../../plugins/geo" }
 pos-runtime = { path = "../../crates/pos-runtime" }
+pos-state = { path = "../../crates/pos-state" }
+pos-time = { path = "../../crates/pos-time" }
 serde_json = { workspace = true }
+ciborium = { workspace = true }
 ureq = { version = "2", default-features = false, features = ["json"] }
 
 [lints]

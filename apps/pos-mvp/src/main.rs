@@ -13,8 +13,10 @@
 //! ```
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+mod fork_compare;
 mod gateway_context;
 
+use fork_compare::{print_fork_compare, run_personal_fork_compare};
 use gateway_context::{apply_society_context, fetch_society_means, plain_language_context};
 use pos_core::ids::EntityId;
 use pos_experiment::{BacktestConfig, BacktestRunner};
@@ -155,6 +157,7 @@ enum CliAction {
         preferences: Vec<(String, f64)>,
         gateway: Option<String>,
         timeline: Option<String>,
+        fork_compare: bool,
     },
     Help,
 }
@@ -193,8 +196,14 @@ fn parse_cli(args: &[String]) -> Result<CliAction, String> {
     let mut prefs = prefs_from_scenario(scenario);
     let mut gateway: Option<String> = None;
     let mut timeline: Option<String> = None;
+    let mut fork_compare = false;
     i = 0;
     while i < args.len() {
+        if args[i] == "--fork-compare" {
+            fork_compare = true;
+            i += 1;
+            continue;
+        }
         if args[i] == "--gateway" {
             if let Some(url) = args.get(i + 1) {
                 gateway = Some(url.clone());
@@ -245,6 +254,7 @@ fn parse_cli(args: &[String]) -> Result<CliAction, String> {
         preferences: prefs,
         gateway,
         timeline,
+        fork_compare,
     })
 }
 
@@ -291,6 +301,7 @@ fn print_help() {
     println!("  --prefer key=value   Override a preference score in [-1, 1]");
     println!("  --gateway <url>      Shared-world context (with --timeline)");
     println!("  --timeline <id>      Timeline ULID on the gateway");
+    println!("  --fork-compare       Dual-future personal fork (#75) instead of backtest");
     println!("  -h, --help           Show this help");
     println!();
     println!("Examples:");
@@ -300,6 +311,7 @@ fn print_help() {
     println!(
         "  cargo run -p pos-mvp -- --scenario work --gateway http://127.0.0.1:8080 --timeline <id>"
     );
+    println!("  cargo run -p pos-mvp -- --scenario work --fork-compare");
 }
 
 fn build_registry_with(
@@ -428,6 +440,7 @@ fn run_mvp(
     mut preferences: Vec<(String, f64)>,
     gateway: Option<&str>,
     timeline: Option<&str>,
+    fork_compare: bool,
 ) {
     println!("PiglorOS — Decision preview");
     println!("Scenario: {} — {}", scenario.id, scenario.blurb);
@@ -497,6 +510,16 @@ fn run_mvp(
 
     print_privacy(scenario);
 
+    if fork_compare {
+        let summary =
+            run_personal_fork_compare(&preferences, scenario.option_a.tags, scenario.option_b.tags);
+        print_fork_compare(&summary, scenario.option_a.label, scenario.option_b.label);
+        println!();
+        println!("Same loop without fork:");
+        println!("  cargo run -p pos-mvp -- --scenario {}", scenario.id);
+        return;
+    }
+
     let pairs = eval_pairs_for(scenario);
     let prefs_for_registry = preferences;
     let config = BacktestConfig {
@@ -538,11 +561,13 @@ fn run_from_args(args: &[String]) -> Result<(), String> {
             preferences,
             gateway,
             timeline,
+            fork_compare,
         } => run_mvp(
             scenario,
             preferences,
             gateway.as_deref(),
             timeline.as_deref(),
+            fork_compare,
         ),
     }
     Ok(())
@@ -778,6 +803,7 @@ mod tests {
             prefs_from_scenario(default_scenario()),
             Some("http://127.0.0.1:1"),
             Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+            false,
         );
     }
 
@@ -804,6 +830,7 @@ mod tests {
             prefs_from_scenario(default_scenario()),
             Some(&format!("http://{addr}")),
             Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+            false,
         );
     }
 
@@ -830,7 +857,31 @@ mod tests {
             prefs_from_scenario(default_scenario()),
             Some(&format!("http://{addr}")),
             Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+            false,
         );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn run_mvp_fork_compare_path() {
+        run_mvp(
+            default_scenario(),
+            prefs_from_scenario(default_scenario()),
+            None,
+            None,
+            true,
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn parse_cli_fork_compare_flag() {
+        let CliAction::Run { fork_compare, .. } =
+            parse_cli(&["--fork-compare".to_owned()]).unwrap()
+        else {
+            panic!("expected Run");
+        };
+        assert!(fork_compare);
     }
 
     #[test]
@@ -854,6 +905,7 @@ mod tests {
             preferences,
             gateway,
             timeline,
+            fork_compare,
         } = parse_cli(&[
             "--scenario".to_owned(),
             "places".to_owned(),
@@ -870,6 +922,7 @@ mod tests {
         assert!(!preferences.is_empty());
         assert_eq!(gateway.as_deref(), Some("http://127.0.0.1:8080"));
         assert_eq!(timeline.as_deref(), Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"));
+        assert!(!fork_compare);
     }
 
     #[test]

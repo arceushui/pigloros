@@ -2,7 +2,7 @@
 
 A simulation world you join to preview your decisions.
 
-> **Current stage:** Pre-product. Wave 6 foundation delivered (#87 identity, #71 society, #69 gateway HTTP MVP). Wave 7 contextual decision preview in progress (ADR-015 / #106 #107; #76 plain-language context). WebSocket, auth, PyO3, LLM bridges, H3/rapier, and distributed store remain deferred.
+> **Current stage:** Pre-product. Wave 6 foundation delivered (#87 identity, #71 society, #69 gateway HTTP MVP). Wave 7 in progress — ADR-015/#76 context; #75 personal fork (`--fork-compare`). WebSocket, auth, PyO3, LLM bridges, H3/rapier, and distributed store remain deferred.
 
 ## Getting started
 
@@ -74,7 +74,7 @@ Wave 6 will add `bindings/piglor-py` (PyO3); that directory is not in-tree yet.
 | Wave 4 | Experiment Framework + CLI (pos-experiment, pos-cli) | ✅ Complete |
 | Wave 5 | Moat Plugins + Single-User MVP | ✅ Complete |
 | Wave 6 | Shared World & Social Layer (+ PyO3 bindings) | ✅ Foundation done — #87 #71 #69; WS/auth/PyO3/client deferred |
-| Wave 7 | Contextual Decision Preview | 🚧 In progress — ADR-015 / #106 #107; #76 plain-language next |
+| Wave 7 | Contextual Decision Preview | 🚧 In progress — ADR-015/#76 done; #75 `--fork-compare` |
 
 ## Development
 
