@@ -2,7 +2,7 @@
 
 A simulation world you join to preview your decisions.
 
-> **Current stage:** Pre-product. Wave 5 MVP closed; Wave 6 shared-world foundation in progress (`export_timeline_own` / `import_timeline_with_id`, `plugins/society`). LLM bridges, H3/rapier, gateway, and distributed store remain later slices.
+> **Current stage:** Pre-product. Wave 5 MVP closed; Wave 6 shared-world foundation in progress (`export_timeline_own` / `import_timeline_with_id`, `plugins/society`, `piglor-gateway` HTTP poll MVP). LLM bridges, H3/rapier, WebSocket stream, auth, and distributed store remain later slices.
 
 ## Getting started
 
@@ -19,6 +19,9 @@ cargo run -p pos-mvp --locked -- --scenario places --prefer food=1.0 --prefer na
 # Optional: durable store + experiment via the CLI (`pos` binary)
 cargo run -p pos-cli --locked -- store init --path /tmp/piglor.db
 cargo run -p pos-cli --locked -- --help
+
+# Wave 6: local HTTP gateway (ADR-014 / #69) — Memory store on loopback
+cargo run -p piglor-gateway --locked -- serve 127.0.0.1:8080
 ```
 
 Requires the pinned toolchain in `rust-toolchain.toml` (Rust **1.94.1**).

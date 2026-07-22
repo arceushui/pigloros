@@ -14,8 +14,10 @@ import sys
 from pathlib import Path
 
 # Real attribute forms only (applied after comment/string masking).
+# After mask_non_code, string interiors are spaces — #[ignore = "r"] -> #[ignore =    ].
+# Match loosely: #[ignore], #[ignore(...)], #[ignore = ...], #[cfg_attr(..., ignore)]
 IGNORE_ATTR = re.compile(
-    r"#\[\s*ignore(?:\s*\([^)]*\))?\s*\]"
+    r"#\[\s*ignore\b[^\]]*\]"
     r"|#\[\s*cfg_attr\s*\([^)]*\bignore\b[^)]*\)\s*\]"
 )
 DOC_IGNORE = re.compile(r"```(?:rust,)?ignore\b")

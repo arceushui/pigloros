@@ -39,7 +39,7 @@ async fn create_timeline(
     State(state): State<AppState>,
     Json(body): Json<CreateTimelineRequest>,
 ) -> Result<impl IntoResponse, GatewayError> {
-    let tl = state.gateway.create_timeline(&body.name)?;
+    let tl = state.gateway.create_timeline(&body.name).await?;
     Ok((
         StatusCode::CREATED,
         Json(json!({
@@ -55,7 +55,7 @@ async fn list_events(
     Path(id): Path<String>,
     Query(q): Query<EventsQuery>,
 ) -> Result<impl IntoResponse, GatewayError> {
-    let events = state.gateway.read_events_from(&id, q.from_seq)?;
+    let events = state.gateway.read_events_from(&id, q.from_seq).await?;
     let views: Vec<EventView> = events.iter().map(EventView::from).collect();
     Ok(Json(json!({ "events": views })))
 }
@@ -65,10 +65,10 @@ async fn post_action(
     Path(id): Path<String>,
     Json(body): Json<ActionRequest>,
 ) -> Result<impl IntoResponse, GatewayError> {
-    let event =
-        state
-            .gateway
-            .append_action(&id, &body.entity_id, &body.event_type, &body.payload)?;
+    let event = state
+        .gateway
+        .append_action(&id, &body.entity_id, &body.event_type, &body.payload)
+        .await?;
     Ok((StatusCode::CREATED, Json(EventView::from(&event))))
 }
 
@@ -80,7 +80,8 @@ async fn post_signal(
     let entity_id = body.entity_id.clone();
     let event = state
         .gateway
-        .append_signal(&id, &entity_id, &body.into_signal())?;
+        .append_signal(&id, &entity_id, &body.into_signal())
+        .await?;
     Ok((StatusCode::CREATED, Json(EventView::from(&event))))
 }
 
@@ -92,9 +93,7 @@ impl IntoResponse for GatewayError {
             }
             GatewayError::Encode(_) => StatusCode::UNPROCESSABLE_ENTITY,
             GatewayError::Store(CoreError::TimelineNotFound(_)) => StatusCode::NOT_FOUND,
-            GatewayError::Store(_) | GatewayError::LockPoisoned => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            GatewayError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let body = Json(json!({ "error": self.to_string() }));
         (status, body).into_response()
@@ -257,6 +256,37 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn missing_timeline_action_and_signal_not_found() {
+        let id = TimelineId::new().to_string();
+        let entity = EntityId::new().to_string();
+        let (status, _) = json_request(
+            test_app(),
+            "POST",
+            &format!("/v1/timelines/{id}/actions"),
+            Some(json!({
+                "entity_id": entity,
+                "payload": {}
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, _) = json_request(
+            test_app(),
+            "POST",
+            &format!("/v1/timelines/{id}/signals"),
+            Some(json!({
+                "entity_id": EntityId::new().to_string(),
+                "dimension": "trust",
+                "value": 0.1
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn create_timeline_store_error_maps() {
         use pos_core::{
             clock::Seq,
@@ -266,8 +296,8 @@ mod tests {
             timeline::{Timeline, TimelineMeta},
             CoreError,
         };
-        use std::sync::{Arc, Mutex};
-        use tokio::sync::broadcast;
+        use std::sync::Arc;
+        use tokio::sync::{broadcast, Mutex};
 
         struct FailCreate;
         impl EventStore for FailCreate {
@@ -342,8 +372,6 @@ mod tests {
         use axum::response::IntoResponse;
         let r = GatewayError::Encode("x".into()).into_response();
         assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let r = GatewayError::LockPoisoned.into_response();
-        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let r = GatewayError::Store(CoreError::Storage("boom".into())).into_response();
         assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }

@@ -65,3 +65,27 @@ rules:
               #[test]
               #[cfg_attr($COND, ignore = $REASON)]
               fn $F(...) { ... }
+          - pattern: |
+              #[cfg_attr($COND, ignore = $REASON)]
+              #[tokio::test]
+              async fn $F(...) { ... }
+          - pattern: |
+              #[tokio::test]
+              #[cfg_attr($COND, ignore = $REASON)]
+              async fn $F(...) { ... }
+          - pattern: |
+              #[ignore = $REASON]
+              #[test]
+              fn $F(...) { ... }
+          - pattern: |
+              #[test]
+              #[ignore = $REASON]
+              fn $F(...) { ... }
+          - pattern: |
+              #[ignore = $REASON]
+              #[tokio::test]
+              async fn $F(...) { ... }
+          - pattern: |
+              #[tokio::test]
+              #[ignore = $REASON]
+              async fn $F(...) { ... }

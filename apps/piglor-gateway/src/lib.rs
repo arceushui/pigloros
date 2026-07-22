@@ -21,15 +21,15 @@ use pos_core::{
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
 use pos_plugin_world::EVENT_TYPE_ACTION;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex};
 use ulid::Ulid;
 
 /// Default broadcast channel capacity for live event fan-out.
 pub const EVENT_BUS_CAPACITY: usize = 256;
 
-/// Shared gateway handle (sync store + live event bus).
+/// Shared gateway handle (async store mutex + live event bus).
 #[derive(Clone)]
 pub struct Gateway {
     store: Arc<Mutex<Box<dyn EventStore>>>,
@@ -61,9 +61,6 @@ pub enum GatewayError {
     /// Underlying store failure.
     #[error(transparent)]
     Store(#[from] CoreError),
-    /// Internal lock poisoned.
-    #[error("store lock poisoned")]
-    LockPoisoned,
 }
 
 impl Gateway {
@@ -87,8 +84,8 @@ impl Gateway {
     ///
     /// # Errors
     /// Returns [`GatewayError::Store`] on backend failure.
-    pub fn create_timeline(&self, name: &str) -> Result<Timeline, GatewayError> {
-        let mut guard = self.store.lock().map_err(|_| GatewayError::LockPoisoned)?;
+    pub async fn create_timeline(&self, name: &str) -> Result<Timeline, GatewayError> {
+        let mut guard = self.store.lock().await;
         Ok(guard.create_timeline(name)?)
     }
 
@@ -96,7 +93,7 @@ impl Gateway {
     ///
     /// # Errors
     /// Returns [`GatewayError::InvalidId`] or [`GatewayError::Store`].
-    pub fn read_events_from(
+    pub async fn read_events_from(
         &self,
         timeline_id: &str,
         from_seq: u64,
@@ -106,15 +103,15 @@ impl Gateway {
             from: Seq::from_u64(from_seq),
             to: None,
         };
-        let guard = self.store.lock().map_err(|_| GatewayError::LockPoisoned)?;
+        let guard = self.store.lock().await;
         Ok(guard.read(id, range)?)
     }
 
     /// Append one `world.action` draft. `payload` is arbitrary JSON → CBOR.
     ///
     /// # Errors
-    /// Returns encode / store / id errors.
-    pub fn append_action(
+    /// Returns store / id / unsupported-type errors.
+    pub async fn append_action(
         &self,
         timeline_id: &str,
         entity_id: &str,
@@ -128,14 +125,14 @@ impl Gateway {
         let entity = parse_entity_id(entity_id)?;
         let bytes = json_to_cbor(payload);
         let draft = EventDraft::new(entity, Kind::new(EVENT_TYPE_ACTION), bytes);
-        self.append_draft(timeline, draft)
+        self.append_draft(timeline, draft).await
     }
 
     /// Append one `society.signal` (fan-out convenience for #71).
     ///
     /// # Errors
     /// Returns encode / store / id errors.
-    pub fn append_signal(
+    pub async fn append_signal(
         &self,
         timeline_id: &str,
         entity_id: &str,
@@ -145,15 +142,23 @@ impl Gateway {
         let entity = parse_entity_id(entity_id)?;
         let draft = draft_signal(entity, signal);
         debug_assert_eq!(draft.event_type.as_str(), EVENT_TYPE_SIGNAL);
-        self.append_draft(timeline, draft)
+        self.append_draft(timeline, draft).await
     }
 
-    fn append_draft(&self, timeline: TimelineId, draft: EventDraft) -> Result<Event, GatewayError> {
-        let mut guard = self.store.lock().map_err(|_| GatewayError::LockPoisoned)?;
-        let mut committed = guard.append(timeline, &[draft])?;
-        let event = committed
-            .pop()
-            .ok_or_else(|| GatewayError::Store(CoreError::Storage("empty append".to_owned())))?;
+    async fn append_draft(
+        &self,
+        timeline: TimelineId,
+        draft: EventDraft,
+    ) -> Result<Event, GatewayError> {
+        // Release the store lock before bus fan-out so future WS handlers can
+        // re-enter the store without deadlocking on the same task.
+        let event = {
+            let mut guard = self.store.lock().await;
+            let mut committed = guard.append(timeline, &[draft])?;
+            committed
+                .pop()
+                .ok_or_else(|| GatewayError::Store(CoreError::Storage("empty append".to_owned())))?
+        };
         let notice = EventNotice {
             timeline_id: timeline.to_string(),
             event_id: event.id.to_string(),
@@ -180,8 +185,8 @@ fn parse_entity_id(s: &str) -> Result<EntityId, GatewayError> {
 
 fn json_to_cbor(value: &serde_json::Value) -> CanonicalBytes {
     let mut buf = Vec::new();
-    // `serde_json::Value` → CBOR into an in-memory `Vec` is infallible in practice.
-    ciborium::into_writer(value, &mut buf).expect("json Value always encodes to CBOR");
+    // Writing CBOR to Vec<u8> is infallible (same as plugins / pos-crypto).
+    ciborium::into_writer(value, &mut buf).expect("ciborium write to Vec<u8> is infallible");
     CanonicalBytes::from_vec(buf)
 }
 
@@ -276,18 +281,11 @@ mod tests {
         timeline::TimelineMeta,
     };
     use pos_store::{open_store, StoreConfig};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
+    use tokio::sync::{broadcast, Mutex};
 
     fn memory_gw() -> Gateway {
         Gateway::new(open_store(StoreConfig::Memory).unwrap())
-    }
-
-    fn poison(gw: &Gateway) {
-        let store = Arc::clone(&gw.store);
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = store.lock().unwrap();
-            panic!("poison gateway store");
-        }));
     }
 
     #[derive(Clone, Copy)]
@@ -365,11 +363,11 @@ mod tests {
         }
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn create_timeline_and_append_action_roundtrip() {
+    async fn create_timeline_and_append_action_roundtrip() {
         let gw = memory_gw();
-        let tl = gw.create_timeline("demo").unwrap();
+        let tl = gw.create_timeline("demo").await.unwrap();
         let entity = EntityId::new().to_string();
         let event = gw
             .append_action(
@@ -378,18 +376,19 @@ mod tests {
                 EVENT_TYPE_ACTION,
                 &serde_json::json!({"dx": 1.0, "dy": 0.0}),
             )
+            .await
             .unwrap();
         assert_eq!(event.event_type.as_str(), EVENT_TYPE_ACTION);
-        let events = gw.read_events_from(&tl.id().to_string(), 0).unwrap();
+        let events = gw.read_events_from(&tl.id().to_string(), 0).await.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].id, event.id);
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn append_action_rejects_other_types() {
+    async fn append_action_rejects_other_types() {
         let gw = memory_gw();
-        let tl = gw.create_timeline("demo").unwrap();
+        let tl = gw.create_timeline("demo").await.unwrap();
         let err = gw
             .append_action(
                 &tl.id().to_string(),
@@ -397,16 +396,17 @@ mod tests {
                 "world.observation",
                 &serde_json::json!({}),
             )
+            .await
             .unwrap_err();
         assert!(matches!(err, GatewayError::UnsupportedAction(_)));
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn append_signal_and_bus_notice() {
+    async fn append_signal_and_bus_notice() {
         let gw = memory_gw();
         let mut rx = gw.subscribe();
-        let tl = gw.create_timeline("society").unwrap();
+        let tl = gw.create_timeline("society").await.unwrap();
         let signal = SocietySignal {
             dimension: SocietyDimension::Trust,
             value: 0.8,
@@ -415,17 +415,18 @@ mod tests {
         };
         let event = gw
             .append_signal(&tl.id().to_string(), &EntityId::new().to_string(), &signal)
+            .await
             .unwrap();
         let notice = rx.try_recv().unwrap();
         assert_eq!(notice.event_id, event.id.to_string());
         assert_eq!(notice.event_type, EVENT_TYPE_SIGNAL);
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn invalid_ids_error() {
+    async fn invalid_ids_error() {
         let gw = memory_gw();
-        let err = gw.read_events_from("not-a-ulid", 0).unwrap_err();
+        let err = gw.read_events_from("not-a-ulid", 0).await.unwrap_err();
         assert!(matches!(err, GatewayError::InvalidId(_)));
         let err = gw
             .append_action(
@@ -434,9 +435,10 @@ mod tests {
                 EVENT_TYPE_ACTION,
                 &serde_json::json!({}),
             )
+            .await
             .unwrap_err();
         assert!(matches!(err, GatewayError::InvalidId(_)));
-        let tl = gw.create_timeline("ids").unwrap();
+        let tl = gw.create_timeline("ids").await.unwrap();
         let err = gw
             .append_action(
                 &tl.id().to_string(),
@@ -444,6 +446,7 @@ mod tests {
                 EVENT_TYPE_ACTION,
                 &serde_json::json!({}),
             )
+            .await
             .unwrap_err();
         assert!(matches!(err, GatewayError::InvalidId(_)));
         let err = gw
@@ -457,6 +460,7 @@ mod tests {
                     object: None,
                 },
             )
+            .await
             .unwrap_err();
         assert!(matches!(err, GatewayError::InvalidId(_)));
         let err = gw
@@ -470,13 +474,14 @@ mod tests {
                     object: None,
                 },
             )
+            .await
             .unwrap_err();
         assert!(matches!(err, GatewayError::InvalidId(_)));
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn store_and_lock_error_paths() {
+    async fn store_error_paths() {
         let fail_create = Gateway {
             store: Arc::new(Mutex::new(Box::new(ScriptedStore {
                 mode: ScriptMode::FailCreate,
@@ -484,7 +489,7 @@ mod tests {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
         };
         assert!(matches!(
-            fail_create.create_timeline("x"),
+            fail_create.create_timeline("x").await,
             Err(GatewayError::Store(_))
         ));
 
@@ -494,7 +499,7 @@ mod tests {
             }))),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
         };
-        let tl = empty_append.create_timeline("e").unwrap();
+        let tl = empty_append.create_timeline("e").await.unwrap();
         let err = empty_append
             .append_action(
                 &tl.id().to_string(),
@@ -502,6 +507,7 @@ mod tests {
                 EVENT_TYPE_ACTION,
                 &serde_json::json!({}),
             )
+            .await
             .unwrap_err();
         assert!(matches!(err, GatewayError::Store(_)));
 
@@ -511,7 +517,7 @@ mod tests {
             }))),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
         };
-        let tl = fail_append.create_timeline("a").unwrap();
+        let tl = fail_append.create_timeline("a").await.unwrap();
         let err = fail_append
             .append_action(
                 &tl.id().to_string(),
@@ -519,6 +525,7 @@ mod tests {
                 EVENT_TYPE_ACTION,
                 &serde_json::json!({}),
             )
+            .await
             .unwrap_err();
         assert!(matches!(err, GatewayError::Store(_)));
 
@@ -530,35 +537,16 @@ mod tests {
         };
         let err = fail_read
             .read_events_from(&TimelineId::new().to_string(), 0)
+            .await
             .unwrap_err();
         assert!(matches!(err, GatewayError::Store(_)));
-
-        let gw = memory_gw();
-        poison(&gw);
-        assert!(matches!(
-            gw.create_timeline("p"),
-            Err(GatewayError::LockPoisoned)
-        ));
-        assert!(matches!(
-            gw.read_events_from(&TimelineId::new().to_string(), 0),
-            Err(GatewayError::LockPoisoned)
-        ));
-        assert!(matches!(
-            gw.append_action(
-                &TimelineId::new().to_string(),
-                &EntityId::new().to_string(),
-                EVENT_TYPE_ACTION,
-                &serde_json::json!({}),
-            ),
-            Err(GatewayError::LockPoisoned)
-        ));
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn event_view_and_hex() {
+    async fn event_view_and_hex() {
         let gw = memory_gw();
-        let tl = gw.create_timeline("x").unwrap();
+        let tl = gw.create_timeline("x").await.unwrap();
         let event = gw
             .append_action(
                 &tl.id().to_string(),
@@ -566,6 +554,7 @@ mod tests {
                 EVENT_TYPE_ACTION,
                 &serde_json::json!({"k": "v"}),
             )
+            .await
             .unwrap();
         let view = EventView::from(&event);
         assert_eq!(view.event_type, EVENT_TYPE_ACTION);
@@ -593,7 +582,7 @@ mod tests {
     fn gateway_error_display() {
         let e = GatewayError::Encode("boom".into());
         assert!(e.to_string().contains("encode"));
-        let e = GatewayError::LockPoisoned;
-        assert!(e.to_string().contains("poisoned"));
+        let e = GatewayError::UnsupportedAction("x".into());
+        assert!(e.to_string().contains("unsupported"));
     }
 }

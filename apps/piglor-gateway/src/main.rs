@@ -36,6 +36,7 @@ fn run_with_args(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send
                 .get(2)
                 .map_or("127.0.0.1:8080", String::as_str)
                 .parse::<SocketAddr>()?;
+            warn_if_non_loopback(addr);
             let store_path = args.get(3).map(String::as_str);
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -55,6 +56,14 @@ fn run_with_args(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send
             eprintln!("  serve 127.0.0.1:8080 /tmp/g.db # SQLite store");
             Ok(())
         }
+    }
+}
+
+fn warn_if_non_loopback(addr: SocketAddr) {
+    if !addr.ip().is_loopback() {
+        eprintln!(
+            "WARNING: binding {addr} (non-loopback) with no auth — anyone can append. Prefer 127.0.0.1 until #68."
+        );
     }
 }
 
@@ -100,6 +109,13 @@ async fn serve(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn warn_if_non_loopback_covers_both_arms() {
+        warn_if_non_loopback("127.0.0.1:8080".parse().unwrap());
+        warn_if_non_loopback("0.0.0.0:8080".parse().unwrap());
+    }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
