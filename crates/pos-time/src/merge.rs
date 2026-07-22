@@ -315,10 +315,6 @@ mod tests {
             self.inner.read(timeline, range)
         }
 
-        fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
-            self.read(timeline, range)
-        }
-
         fn fork(
             &mut self,
             parent: TimelineId,
@@ -357,31 +353,6 @@ mod tests {
                 }
             }
             self.inner.get_timeline(id)
-        }
-
-        fn create_timeline_with_meta(
-            &mut self,
-            _: pos_core::timeline::TimelineMeta,
-        ) -> Result<Timeline, CoreError> {
-            Err(CoreError::Storage(
-                "create_timeline_with_meta not supported by this store".to_owned(),
-            ))
-        }
-        fn append_committed(&mut self, _: TimelineId, _: &[Event]) -> Result<(), CoreError> {
-            Err(CoreError::Storage(
-                "append_committed not supported by this store".to_owned(),
-            ))
-        }
-
-        fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
-            Err(CoreError::Storage(
-                "delete_timeline not supported by this store".to_owned(),
-            ))
-        }
-        fn chain_hash_at(&self, _: TimelineId, _: Seq) -> Result<pos_core::Hash, CoreError> {
-            Err(CoreError::Storage(
-                "chain_hash_at not supported by this store".to_owned(),
-            ))
         }
 
         fn import_committed(

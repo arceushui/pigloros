@@ -28,7 +28,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   # Surface future warnings as errors in CI builds (clippy still has its own -D warnings).
-  RUSTFLAGS: "-D warnings"
+  RUSTFLAGS: -D warnings
 
 jobs:
   fmt:
@@ -114,7 +114,7 @@ jobs:
 
       # 100% coverage requirement: production code is fully instrumented (coverage(off) is
       # test-only), and unnecessary code is deleted/simplified rather than left as dead branches.
-      - name: "cargo llvm-cov (100% lines + regions)"
+      - name: cargo llvm-cov 100pct lines and regions
         run: >
           cargo llvm-cov --workspace --locked --summary-only
           --fail-under-lines 100

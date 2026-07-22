@@ -7,6 +7,8 @@
 //! Owns event type `"society.signal"` and entity kind `"society-aggregate"`.
 //! Thin reducer tracks running means for trust / opinion / economy / culture /
 //! polarisation dimensions. No driver — signals are appended by hosts or gateway.
+//! Successful finite samples update per-dimension `count.*` / `sum.*` / `mean.*` / `last.*`
+//! and global `signals`. Bad CBOR and non-finite values are ignored (no counter bump).
 //!
 //! # Host wiring
 //!
@@ -212,20 +214,21 @@ impl Reducer for SocietyReducer {
             return;
         }
 
+        let Ok(signal) = ciborium::from_reader::<SocietySignal, _>(event.payload.as_slice()) else {
+            return;
+        };
+
+        // Bad CBOR / non-finite samples do not bump `signals` or dimension stats.
+        if !signal.value.is_finite() {
+            return;
+        }
+
         let signals = state
             .get("signals")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         state.set("signals", serde_json::Value::Number((signals + 1).into()));
 
-        let Ok(signal) = ciborium::from_reader::<SocietySignal, _>(event.payload.as_slice()) else {
-            return;
-        };
-
-        // Non-finite samples increment the total counter but do not update dimension stats.
-        if !signal.value.is_finite() {
-            return;
-        }
         // Scaffold contract: samples are clamped to `[0.0, 1.0]`.
         let value = signal.value.clamp(0.0, 1.0);
 
@@ -434,7 +437,7 @@ mod tests {
         );
         assert_eq!(
             state.get("signals").and_then(serde_json::Value::as_u64),
-            Some(1)
+            Some(0)
         );
         assert_eq!(
             state.get("count.trust").and_then(serde_json::Value::as_u64),
@@ -507,7 +510,7 @@ mod tests {
         reducer.apply(&mut state, &event);
         assert_eq!(
             state.get("signals").and_then(serde_json::Value::as_u64),
-            Some(1)
+            Some(0)
         );
         assert_eq!(
             state.get("count.trust").and_then(serde_json::Value::as_u64),

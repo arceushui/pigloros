@@ -1,24 +1,24 @@
 [workspace]
 members = [
-    "crates/pos-core",
-    "crates/pos-crypto",
-    "crates/pos-store",
-    "crates/pos-state",
-    "crates/pos-time",
-    "crates/pos-query",
-    "crates/pos-runtime",
-    "plugins/entities/rule-agent",
-    "plugins/observations/synthetic",
-    "plugins/eval",
-    "plugins/agent",
-    "plugins/bridges",
-    "plugins/persona",
-    "plugins/geo",
-    "plugins/world",
-    "plugins/society",
-    "apps/pos-experiment",
-    "apps/pos-cli",
-    "apps/pos-mvp",
+  "crates/pos-core",
+  "crates/pos-crypto",
+  "crates/pos-store",
+  "crates/pos-state",
+  "crates/pos-time",
+  "crates/pos-query",
+  "crates/pos-runtime",
+  "plugins/entities/rule-agent",
+  "plugins/observations/synthetic",
+  "plugins/eval",
+  "plugins/agent",
+  "plugins/bridges",
+  "plugins/persona",
+  "plugins/geo",
+  "plugins/world",
+  "plugins/society",
+  "apps/pos-experiment",
+  "apps/pos-cli",
+  "apps/pos-mvp",
 ]
 resolver = "2"
 
@@ -64,4 +64,7 @@ lto = true
 codegen-units = 1
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage_nightly)", "cfg(coverage)"] }
+unexpected_cfgs = { level = "warn", check-cfg = [
+  "cfg(coverage_nightly)",
+  "cfg(coverage)",
+] }

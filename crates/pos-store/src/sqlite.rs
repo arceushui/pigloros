@@ -3138,8 +3138,8 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn export_raw_fork_roundtrip_sqlite() {
-        use pos_core::store::{export_timeline_raw, import_timeline_with_id};
+    fn export_own_fork_roundtrip_sqlite() {
+        use pos_core::store::{export_timeline_own, import_timeline_with_id};
 
         let mut src = new_store();
         let root = src.create_timeline("root").unwrap();
@@ -3150,9 +3150,9 @@ mod tests {
             .unwrap();
 
         let mut dst = new_store();
-        import_timeline_with_id(&mut dst, export_timeline_raw(&src, root.id()).unwrap()).unwrap();
+        import_timeline_with_id(&mut dst, export_timeline_own(&src, root.id()).unwrap()).unwrap();
         let imported =
-            import_timeline_with_id(&mut dst, export_timeline_raw(&src, child.id()).unwrap())
+            import_timeline_with_id(&mut dst, export_timeline_own(&src, child.id()).unwrap())
                 .unwrap();
         assert_eq!(
             imported.meta.fork_point,
@@ -3181,7 +3181,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn identity_import_preserves_optional_name_none_sqlite() {
-        use pos_core::store::{export_timeline_raw, import_timeline_with_id};
+        use pos_core::store::{export_timeline_own, import_timeline_with_id};
 
         let mut src = new_store();
         let mut meta = TimelineMeta::root("named");
@@ -3192,7 +3192,7 @@ mod tests {
 
         let mut dst = new_store();
         let imported =
-            import_timeline_with_id(&mut dst, export_timeline_raw(&src, created.id()).unwrap())
+            import_timeline_with_id(&mut dst, export_timeline_own(&src, created.id()).unwrap())
                 .unwrap();
         assert!(imported.meta.name.is_none());
     }

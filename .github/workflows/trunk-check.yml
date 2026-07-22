@@ -1,0 +1,33 @@
+# Trunk Code Quality — complements .github/workflows/ci.yml (fmt/test/clippy/coverage).
+# Local: `trunk check` / `trunk check --all` (see scripts/ci.sh).
+
+name: Trunk Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: trunk-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: read-all
+
+jobs:
+  trunk_check:
+    name: Trunk Code Quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      checks: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Trunk Check
+        uses: trunk-io/trunk-action@v1
+        with:
+          check-mode: all

@@ -985,8 +985,10 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn export_raw_fork_roundtrip_preserves_cow() {
-        use pos_core::store::{export_timeline, export_timeline_raw, import_timeline_with_id};
+    fn export_own_fork_roundtrip_preserves_cow() {
+        use pos_core::store::{
+            export_timeline, export_timeline_own, export_timeline_raw, import_timeline_with_id,
+        };
 
         let mut src = MemoryStore::new();
         let root = src.create_timeline("root").unwrap();
@@ -1005,19 +1007,23 @@ mod tests {
         assert!(logical.timeline.meta.fork_point.is_none());
         assert_eq!(logical.events.len(), 2); // parent[..1] + child
 
-        // Raw export keeps CoW shape.
-        let raw = export_timeline_raw(&src, child.id()).unwrap();
+        // Own export keeps CoW shape (`_raw` is a legacy alias of `_own`).
+        let own = export_timeline_own(&src, child.id()).unwrap();
+        let raw_alias = export_timeline_raw(&src, child.id()).unwrap();
+        assert_eq!(own.timeline.id(), raw_alias.timeline.id());
+        assert_eq!(own.events.len(), raw_alias.events.len());
+        assert_eq!(own.parent_fork_hash, raw_alias.parent_fork_hash);
         assert_eq!(
-            raw.timeline.meta.fork_point,
+            own.timeline.meta.fork_point,
             Some((root.id(), Seq::from_u64(1)))
         );
-        assert_eq!(raw.events.len(), 1);
-        assert_eq!(raw.events[0].payload.as_slice(), b"c1");
+        assert_eq!(own.events.len(), 1);
+        assert_eq!(own.events[0].payload.as_slice(), b"c1");
 
         let mut dst = MemoryStore::new();
-        let parent_export = export_timeline_raw(&src, root.id()).unwrap();
+        let parent_export = export_timeline_own(&src, root.id()).unwrap();
         import_timeline_with_id(&mut dst, parent_export).unwrap();
-        let imported = import_timeline_with_id(&mut dst, raw).unwrap();
+        let imported = import_timeline_with_id(&mut dst, own).unwrap();
         assert_eq!(imported.id(), child.id());
         assert!(imported.meta.fork_point.is_some());
         let stitched = dst.read(child.id(), SeqRange::all()).unwrap();
@@ -1181,7 +1187,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn import_rejects_fork_parent_chain_hash_mismatch() {
-        use pos_core::store::{export_timeline_raw, import_timeline_with_id};
+        use pos_core::store::{export_timeline_own, import_timeline_with_id};
 
         let mut src = MemoryStore::new();
         let root = src.create_timeline("root").unwrap();
@@ -1191,13 +1197,13 @@ mod tests {
 
         let mut dst = MemoryStore::new();
         // Divergent parent with same id but different payload.
-        let mut parent_export = export_timeline_raw(&src, root.id()).unwrap();
+        let mut parent_export = export_timeline_own(&src, root.id()).unwrap();
         parent_export.events[0].payload = CanonicalBytes::from_vec(b"OTHER".to_vec());
         parent_export.events[0].payload_hash =
             pos_crypto::chain::hash_payload(&parent_export.events[0].payload);
         import_timeline_with_id(&mut dst, parent_export).unwrap();
 
-        let child_export = export_timeline_raw(&src, child.id()).unwrap();
+        let child_export = export_timeline_own(&src, child.id()).unwrap();
         assert!(child_export.parent_fork_hash.is_some());
         let err = import_timeline_with_id(&mut dst, child_export).unwrap_err();
         assert!(matches!(err, CoreError::Storage(ref m) if m.contains("chain hash mismatch")));

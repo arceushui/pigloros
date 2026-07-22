@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
-# Local parity with .github/workflows/ci.yml (Redmine #100).
+# Local parity with GitHub Actions (Redmine #100 + Trunk Check).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+
+echo "==> trunk check"
+if command -v trunk >/dev/null 2>&1; then
+  trunk check --all --ci --no-progress
+else
+  echo "WARNING: trunk not on PATH; skipping (install: curl https://get.trunk.io | bash)"
+fi
 
 echo "==> fmt"
 cargo fmt --all -- --check

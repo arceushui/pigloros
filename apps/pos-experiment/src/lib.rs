@@ -2115,44 +2115,6 @@ mod fault_injection_tests {
                 self.base.read(timeline, range)
             }
 
-            fn read_own(
-                &self,
-                timeline: TimelineId,
-                range: SeqRange,
-            ) -> Result<Vec<Event>, CoreError> {
-                self.read(timeline, range)
-            }
-
-            fn create_timeline_with_meta(
-                &mut self,
-                _: pos_core::timeline::TimelineMeta,
-            ) -> Result<Timeline, CoreError> {
-                Err(CoreError::Storage(
-                    "create_timeline_with_meta not supported by this store".to_owned(),
-                ))
-            }
-
-            fn append_committed(&mut self, _: TimelineId, _: &[Event]) -> Result<(), CoreError> {
-                Err(CoreError::Storage(
-                    "append_committed not supported by this store".to_owned(),
-                ))
-            }
-
-            fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
-                Err(CoreError::Storage(
-                    "delete_timeline not supported by this store".to_owned(),
-                ))
-            }
-            fn chain_hash_at(
-                &self,
-                _: pos_core::TimelineId,
-                _: pos_core::Seq,
-            ) -> Result<pos_core::Hash, pos_core::CoreError> {
-                Err(pos_core::CoreError::Storage(
-                    "chain_hash_at not supported by this store".to_owned(),
-                ))
-            }
-
             fn import_committed(
                 &mut self,
                 meta: pos_core::timeline::TimelineMeta,
@@ -2241,14 +2203,6 @@ mod fault_injection_tests {
                 self.base.read(timeline, range)
             }
 
-            fn read_own(
-                &self,
-                timeline: TimelineId,
-                range: SeqRange,
-            ) -> Result<Vec<Event>, CoreError> {
-                self.read(timeline, range)
-            }
-
             fn create_timeline_with_meta(
                 &mut self,
                 meta: pos_core::timeline::TimelineMeta,
@@ -2262,21 +2216,6 @@ mod fault_injection_tests {
                 events: &[Event],
             ) -> Result<(), CoreError> {
                 self.base.append_committed(timeline, events)
-            }
-
-            fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
-                Err(CoreError::Storage(
-                    "delete_timeline not supported by this store".to_owned(),
-                ))
-            }
-            fn chain_hash_at(
-                &self,
-                _: pos_core::TimelineId,
-                _: pos_core::Seq,
-            ) -> Result<pos_core::Hash, pos_core::CoreError> {
-                Err(pos_core::CoreError::Storage(
-                    "chain_hash_at not supported by this store".to_owned(),
-                ))
             }
 
             fn import_committed(
