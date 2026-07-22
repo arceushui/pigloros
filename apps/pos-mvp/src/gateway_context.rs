@@ -3,10 +3,32 @@
 //! Polls `piglor-gateway` for `society.signal` events and nudges preferences.
 
 use std::collections::HashMap;
+use std::io::Read;
+use std::time::Duration;
 
 const NUDGE_SCALE: f64 = 0.25;
+/// Overall HTTP deadline for gateway poll (connect + read).
+const GATEWAY_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+/// Cap response body size (matches gateway write limit).
+const MAX_GATEWAY_BODY_BYTES: u64 = 1024 * 1024;
+const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+/// Map society dimensions onto default scenario preference keys so ADR demos
+/// (`places` / `work`) actually change scores without `--prefer trust=…`.
+fn society_pref_aliases(dim: &str) -> &'static [&'static str] {
+    match dim {
+        "trust" => &["quiet", "focus"],
+        "opinion" => &["city", "collaboration"],
+        "economy" => &["food", "energy"],
+        "culture" => &["nature", "autonomy"],
+        "polarization" => &["collaboration", "energy"],
+        _ => &[],
+    }
+}
 
 /// Society dimension means extracted from gateway event poll (`dimension` → mean `value`).
+///
+/// Sample values and resulting means are clamped to `[0, 1]` (society semantics).
 pub fn society_means_from_events(events: &[serde_json::Value]) -> HashMap<String, f64> {
     let mut sums: HashMap<String, f64> = HashMap::new();
     let mut counts: HashMap<String, u32> = HashMap::new();
@@ -28,25 +50,33 @@ pub fn society_means_from_events(events: &[serde_json::Value]) -> HashMap<String
         else {
             continue;
         };
+        let value = value.clamp(0.0, 1.0);
         let key = dim.to_ascii_lowercase();
-        *sums.entry(key).or_insert(0.0) += value;
-        *counts.entry(dim.to_ascii_lowercase()).or_insert(0) += 1;
+        *sums.entry(key.clone()).or_insert(0.0) += value;
+        *counts.entry(key).or_insert(0) += 1;
     }
 
     sums.into_iter()
-        .filter_map(|(dim, sum)| {
-            let n = counts.get(&dim).copied().unwrap_or(0);
-            (n > 0).then_some((dim, sum / f64::from(n)))
+        .map(|(dim, sum)| {
+            let n = counts[&dim];
+            (dim, (sum / f64::from(n)).clamp(0.0, 1.0))
         })
         .collect()
 }
 
-/// Nudge preferences that share a key with a society dimension mean.
+/// Nudge preferences for matching keys **and** society→scenario aliases.
 pub fn apply_society_context(prefs: &mut [(String, f64)], means: &HashMap<String, f64>) {
     for (dim, mean) in means {
-        let nudge = (mean - 0.5) * NUDGE_SCALE;
-        if let Some((_, v)) = prefs.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case(dim)) {
-            *v = (*v + nudge).clamp(-1.0, 1.0);
+        let nudge = (*mean - 0.5) * NUDGE_SCALE;
+        let mut targets: Vec<&str> = vec![dim.as_str()];
+        targets.extend(society_pref_aliases(dim));
+        for target in targets {
+            if let Some((_, v)) = prefs
+                .iter_mut()
+                .find(|(k, _)| k.eq_ignore_ascii_case(target))
+            {
+                *v = (*v + nudge).clamp(-1.0, 1.0);
+            }
         }
     }
 }
@@ -102,24 +132,85 @@ fn intensity_word(mean: f64) -> &'static str {
     }
 }
 
+/// Reject non-ULID timeline ids before interpolating into the URL path.
+pub fn validate_timeline_id(timeline_id: &str) -> Result<(), String> {
+    ulid::Ulid::from_string(timeline_id)
+        .map(|_| ())
+        .map_err(|e| format!("invalid timeline id (expected ULID): {e}"))
+}
+
+fn warn_if_non_loopback(gateway: &str) {
+    let lower = gateway.to_ascii_lowercase();
+    let loopback =
+        lower.contains("127.0.0.1") || lower.contains("localhost") || lower.contains("[::1]");
+    if !loopback {
+        eprintln!(
+            "Warning: gateway URL is not loopback — ADR-015 demos assume local-only (no auth)."
+        );
+    }
+}
+
 /// Poll gateway for society signal means. `gateway` is base URL (e.g. `http://127.0.0.1:8080`).
+///
+/// Hardening: ULID path validation, 10s overall timeout, no redirects, 1 MiB body cap.
 pub fn fetch_society_means(
     gateway: &str,
     timeline_id: &str,
 ) -> Result<HashMap<String, f64>, String> {
+    validate_timeline_id(timeline_id)?;
+    warn_if_non_loopback(gateway);
+
     let base = gateway.trim_end_matches('/');
-    let url = format!("{base}/v1/timelines/{timeline_id}/events?from_seq=0");
-    let response = ureq::get(&url)
+    // ULID charset is path-safe; still percent-encode for defense in depth.
+    let encoded = urlencoding_path_segment(timeline_id);
+    let url = format!("{base}/v1/timelines/{encoded}/events?from_seq=0");
+
+    let agent = ureq::AgentBuilder::new()
+        .timeout(GATEWAY_HTTP_TIMEOUT)
+        .redirects(0)
+        .build();
+    let response = agent
+        .get(&url)
         .call()
         .map_err(|e| format!("gateway GET failed: {e}"))?;
-    let body: serde_json::Value = response
-        .into_json()
-        .map_err(|e| format!("gateway JSON parse failed: {e}"))?;
+
+    let mut body = String::new();
+    response
+        .into_reader()
+        .take(MAX_GATEWAY_BODY_BYTES + 1)
+        .read_to_string(&mut body)
+        .expect("reading capped gateway body into String");
+    if body.len() as u64 > MAX_GATEWAY_BODY_BYTES {
+        return Err(format!(
+            "gateway body too large: exceeded {MAX_GATEWAY_BODY_BYTES} bytes"
+        ));
+    }
+
+    let body: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("gateway JSON parse failed: {e}"))?;
     let events = body
         .get("events")
         .and_then(serde_json::Value::as_array)
         .map_or(&[] as &[serde_json::Value], Vec::as_slice);
     Ok(society_means_from_events(events))
+}
+
+/// Percent-encode a single path segment (ULIDs pass through unchanged).
+fn urlencoding_path_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(char::from(b));
+            }
+            _ => {
+                out.push('%');
+                out.push(char::from(HEX[(b >> 4) as usize]));
+                out.push(char::from(HEX[(b & 0xf) as usize]));
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -149,6 +240,23 @@ mod tests {
         ];
         let means = society_means_from_events(&events);
         assert!((means["trust"] - 0.7).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn society_means_clamps_out_of_range_samples() {
+        let events = vec![
+            serde_json::json!({
+                "event_type": "society.signal",
+                "payload": { "dimension": "trust", "value": 2.5 }
+            }),
+            serde_json::json!({
+                "event_type": "society.signal",
+                "payload": { "dimension": "opinion", "value": -1.0 }
+            }),
+        ];
+        let means = society_means_from_events(&events);
+        assert!((means["trust"] - 1.0).abs() < f64::EPSILON);
+        assert!((means["opinion"] - 0.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -193,12 +301,114 @@ mod tests {
     }
 
     #[test]
+    fn apply_society_context_hits_all_alias_families() {
+        let mut prefs = vec![
+            ("quiet".to_owned(), 0.5),
+            ("focus".to_owned(), 0.5),
+            ("city".to_owned(), 0.5),
+            ("collaboration".to_owned(), 0.5),
+            ("food".to_owned(), 0.5),
+            ("energy".to_owned(), 0.5),
+            ("nature".to_owned(), 0.5),
+            ("autonomy".to_owned(), 0.5),
+        ];
+        let mut means = HashMap::new();
+        means.insert("trust".to_owned(), 0.9);
+        means.insert("opinion".to_owned(), 0.9);
+        means.insert("economy".to_owned(), 0.9);
+        means.insert("culture".to_owned(), 0.9);
+        means.insert("polarization".to_owned(), 0.9);
+        apply_society_context(&mut prefs, &means);
+        assert!(prefs.iter().all(|(_, v)| *v > 0.5));
+    }
+
+    #[test]
+    fn apply_society_context_maps_trust_onto_places_quiet() {
+        let mut prefs = vec![
+            ("nature".to_owned(), 0.8),
+            ("city".to_owned(), 0.5),
+            ("food".to_owned(), 0.9),
+            ("quiet".to_owned(), 0.7),
+        ];
+        let mut means = HashMap::new();
+        means.insert("trust".to_owned(), 0.9);
+        let before = prefs[3].1;
+        apply_society_context(&mut prefs, &means);
+        assert!(prefs[3].1 > before, "quiet should rise via trust alias");
+    }
+
+    #[test]
+    fn apply_society_context_maps_trust_onto_work_focus() {
+        let mut prefs = vec![
+            ("autonomy".to_owned(), 0.8),
+            ("focus".to_owned(), 0.7),
+            ("collaboration".to_owned(), 0.5),
+            ("energy".to_owned(), 0.6),
+        ];
+        let mut means = HashMap::new();
+        means.insert("trust".to_owned(), 0.9);
+        let before = prefs[1].1;
+        apply_society_context(&mut prefs, &means);
+        assert!(prefs[1].1 > before, "focus should rise via trust alias");
+    }
+
+    #[test]
+    fn gateway_signal_to_places_score_changes() {
+        let events = vec![serde_json::json!({
+            "event_type": "society.signal",
+            "payload": { "dimension": "culture", "value": 0.95 }
+        })];
+        let means = society_means_from_events(&events);
+        let mut prefs = vec![
+            ("nature".to_owned(), 0.5),
+            ("city".to_owned(), 0.5),
+            ("food".to_owned(), 0.5),
+            ("quiet".to_owned(), 0.5),
+        ];
+        let model_before = pos_plugin_persona::PersonaModel::new(prefs.clone());
+        let score_before = model_before.score_option("kyoto nature quiet temples");
+        apply_society_context(&mut prefs, &means);
+        let model_after = pos_plugin_persona::PersonaModel::new(prefs);
+        let score_after = model_after.score_option("kyoto nature quiet temples");
+        assert!(
+            score_after > score_before,
+            "culture→nature alias should lift Kyoto score ({score_before} → {score_after})"
+        );
+    }
+
+    #[test]
     fn apply_society_context_ignores_unmatched_dimensions() {
         let mut prefs = vec![("food".to_owned(), 0.5)];
         let mut means = HashMap::new();
-        means.insert("trust".to_owned(), 0.9);
+        means.insert("unmapped_dim".to_owned(), 0.9);
         apply_society_context(&mut prefs, &means);
         assert!((prefs[0].1 - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn validate_timeline_id_accepts_ulid() {
+        validate_timeline_id("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+    }
+
+    #[test]
+    fn validate_timeline_id_rejects_path_injection() {
+        let err = validate_timeline_id("../evil").unwrap_err();
+        assert!(err.contains("invalid timeline"), "{err}");
+        let err = validate_timeline_id("not a ulid").unwrap_err();
+        assert!(err.contains("invalid timeline"), "{err}");
+    }
+
+    #[test]
+    fn urlencoding_leaves_ulid_unchanged() {
+        let id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        assert_eq!(urlencoding_path_segment(id), id);
+        assert!(urlencoding_path_segment("a/b").contains('%'));
+    }
+
+    #[test]
+    fn fetch_society_means_rejects_bad_timeline_id() {
+        let err = fetch_society_means("http://127.0.0.1:8080", "bad").unwrap_err();
+        assert!(err.contains("invalid timeline"), "{err}");
     }
 
     #[test]
@@ -309,6 +519,26 @@ mod tests {
     }
 
     #[test]
+    fn fetch_society_means_rejects_oversized_body() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Omit Content-Length so the client reads until close; send > 1 MiB.
+        let oversized = "x".repeat(usize::try_from(MAX_GATEWAY_BODY_BYTES).unwrap() + 8);
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.read(&mut [0u8; 1024]);
+            let response = format!("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{oversized}");
+            let _ = stream.write_all(response.as_bytes());
+        });
+        let err = fetch_society_means(&format!("http://{addr}"), "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+            .unwrap_err();
+        assert!(err.contains("too large"), "{err}");
+    }
+
+    #[test]
     fn society_means_skips_non_finite_and_missing_fields() {
         let events = vec![
             serde_json::json!({"event_type": "society.signal"}),
@@ -329,5 +559,13 @@ mod tests {
         let err = fetch_society_means("http://127.0.0.1:1", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
             .expect_err("unreachable port");
         assert!(err.contains("gateway") || err.contains("failed"));
+    }
+
+    #[test]
+    fn warn_if_non_loopback_runs() {
+        warn_if_non_loopback("http://127.0.0.1:8080");
+        warn_if_non_loopback("http://localhost:8080");
+        warn_if_non_loopback("http://[::1]:8080");
+        warn_if_non_loopback("http://example.com:8080");
     }
 }

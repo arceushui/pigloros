@@ -178,7 +178,9 @@ pub fn print_fork_compare(summary: &ForkCompareSummary, label_a: &str, label_b: 
         format!("Future B ({label_b}) fits your prefs better in this preview.")
     };
     println!("→ Side-by-side: {winner}");
-    println!("  (Live gateway-hosted forks / WS twins still deferred.)");
+    println!(
+        "  Thin #75 slice: local CoW + forced decisions; gateway-hosted twins / experiment-forward deferred."
+    );
 }
 
 #[cfg(test)]

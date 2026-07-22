@@ -31,8 +31,12 @@ cargo run -p pos-mvp -- --scenario work \
 
 1. HTTP `GET /v1/timelines/:id/events?from_seq=0` on the gateway (ADR-014).
 2. Fold `society.signal` events into per-dimension running means (`trust`, `opinion`, …).
-3. Nudge matching preference keys: `adjusted = clamp(pref + (mean - 0.5) * 0.25, -1, 1)`.
-4. Print context summary, then run the existing Wave 5 preview + backtest loop.
+3. Nudge preference keys: exact society dim match **or** scenario aliases
+   (`trust`→`quiet`/`focus`, `culture`→`nature`/`autonomy`, `opinion`→`city`/`collaboration`,
+   `economy`→`food`/`energy`, `polarization`→`collaboration`/`energy`):
+   `adjusted = clamp(pref + (mean - 0.5) * 0.25, -1, 1)`.
+4. Means clamped to `[0, 1]`. HTTP poll: ULID-validated path, 10s timeout, no redirects, 1 MiB body cap.
+5. Print context summary, then run the existing Wave 5 preview + backtest loop.
 
 No new crate; sync HTTP via `ureq` in `pos-mvp` only. Gateway remains optional — without flags, behaviour is unchanged.
 
@@ -43,9 +47,11 @@ No new crate; sync HTTP via `ureq` in `pos-mvp` only. Gateway remains optional �
 - Auth on gateway (#68) — loopback demos only
 - Gateway-hosted fork API / WebSocket live twins (thin local `#75` CoW exists in `pos-mvp --fork-compare`)
 
-## Follow-on (#75 thin slice)
+## Follow-on (#75 thin slice — not full ticket)
 
-`cargo run -p pos-mvp -- --fork-compare` runs a local Memory CoW of `shared-now`, forces each scenario option on a future arm, and prints a side-by-side `pos_time::compare` summary.
+`cargo run -p pos-mvp -- --fork-compare` runs a **local** Memory CoW of `shared-now`, forces each scenario option on a future arm, and prints a side-by-side `pos_time::compare` summary plus persona scores.
+
+**Deferred for a later #75 vertical:** gateway-seeded shared timeline, experiment tick loop with agents/humans, compare-driven verdict (not score reprint).
 
 ## Implementation
 

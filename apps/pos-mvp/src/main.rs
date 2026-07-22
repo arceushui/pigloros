@@ -842,7 +842,7 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let body = r#"{"events":[{"event_type":"society.signal","payload":{"dimension":"nature","value":0.9}}]}"#;
+        let body = r#"{"events":[{"event_type":"society.signal","payload":{"dimension":"trust","value":0.9}}]}"#;
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let _ = stream.read(&mut [0u8; 1024]);
