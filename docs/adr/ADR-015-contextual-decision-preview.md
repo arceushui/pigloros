@@ -1,6 +1,6 @@
 # ADR-015: Wave 7 Contextual Decision Preview
 
-**Redmine:** [#106](https://redmine.piglor.com/issues/106) (ADR) · [#107](https://redmine.piglor.com/issues/107) (MVP) · [#76](https://redmine.piglor.com/issues/76) (plain language) · [#75](https://redmine.piglor.com/issues/75) (personal fork)
+**Redmine:** [#106](https://redmine.piglor.com/issues/106) (ADR) · [#107](https://redmine.piglor.com/issues/107) (MVP) · [#76](https://redmine.piglor.com/issues/76) (plain language) · [#75](https://redmine.piglor.com/issues/75) (personal fork) · [#79](https://redmine.piglor.com/issues/79) (AI Influence Index)
 
 **Canonical wiki:** [ADR-015 on Redmine](https://redmine.piglor.com/projects/pigloros/wiki/ADR-015_Wave7_Contextual_Decision_Preview)
 
@@ -40,8 +40,13 @@ cargo run -p pos-mvp -- --scenario work \
 4. Means clamped to `[0, 1]`. HTTP poll: ULID-validated path, 10s timeout, no redirects,
    reject non-2xx, 1 MiB body cap, UTF-8 body required.
 5. Print context summary, then run the existing Wave 5 preview + backtest loop.
+6. **AI Influence Index (#79 / O12):** every decision preview prints a headline —
+   fraction of timeline info events from AI agents (`agent.action`, `agent.decision`,
+   future `agent.*`) with a traceable archetype breakdown (`goal-seeking`, `rule-bound`,
+   or `payload.archetype` / `payload.goal`). Without `--gateway`/`--timeline`, shows
+   `0%` local-preview note (same HTTP poll as society means when live).
 
-No new crate; sync HTTP via `ureq` in `pos-mvp` only. Gateway remains optional — without flags, behaviour is unchanged.
+No new crate; sync HTTP via `ureq` in `pos-mvp` only. Gateway remains optional — without flags, behaviour is unchanged aside from the always-on AI Influence headline.
 
 ### Non-goals (deferred)
 
@@ -58,8 +63,8 @@ No new crate; sync HTTP via `ureq` in `pos-mvp` only. Gateway remains optional �
 
 ## Implementation
 
-- Code: `apps/pos-mvp/src/gateway_context.rs`
-- Tests: JSON fixture parsing + preference nudge (no network in unit tests)
+- Code: `apps/pos-mvp/src/gateway_context.rs`, `apps/pos-mvp/src/ai_influence.rs`
+- Tests: JSON fixture parsing + preference nudge + AI Influence fixtures (no network in unit tests)
 
 ## Wave 6 closure
 

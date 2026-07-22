@@ -13,11 +13,13 @@
 //! ```
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+mod ai_influence;
 mod fork_compare;
 mod gateway_context;
 
+use ai_influence::{format_ai_influence_lines, local_ai_influence};
 use fork_compare::{print_fork_compare, run_personal_fork_compare};
-use gateway_context::{apply_society_context, fetch_society_means, plain_language_context};
+use gateway_context::{apply_society_context, fetch_timeline_context, plain_language_context};
 use pos_core::ids::EntityId;
 use pos_experiment::{BacktestConfig, BacktestRunner};
 use pos_plugin_eval::{EvalPlugin, EvalReducer};
@@ -299,7 +301,7 @@ fn print_help() {
         println!("                        {} — {}", s.id, s.blurb);
     }
     println!("  --prefer key=value   Override a preference score in [-1, 1]");
-    println!("  --gateway <url>      Shared-world context (with --timeline)");
+    println!("  --gateway <url>      Shared-world context + AI Influence (with --timeline)");
     println!("  --timeline <id>      Timeline ULID on the gateway");
     println!("  --fork-compare       Dual-future personal fork (#75) instead of backtest");
     println!("  -h, --help           Show this help");
@@ -435,6 +437,63 @@ fn print_privacy(scenario: &Scenario) {
     }
 }
 
+fn print_ai_influence_headline(index: &ai_influence::AiInfluenceIndex) {
+    for line in format_ai_influence_lines(index) {
+        println!("{line}");
+    }
+}
+
+/// Apply gateway society context (and print) after the AI Influence headline.
+fn apply_and_print_society(
+    gateway: &str,
+    timeline_id: &str,
+    means: &std::collections::HashMap<String, f64>,
+    preferences: &mut [(String, f64)],
+) {
+    if means.is_empty() {
+        println!("Shared context: no society signals on timeline {timeline_id}");
+        println!();
+        return;
+    }
+    println!("Shared context (from {gateway}):");
+    for (dim, mean) in means {
+        println!("  {dim} mean={mean:.2}");
+    }
+    println!("  In plain language:");
+    for line in plain_language_context(means) {
+        println!("    • {line}");
+    }
+    apply_society_context(preferences, means);
+    println!("  Preferences after context nudge:");
+    println!("    {}", format_prefs(preferences));
+    println!();
+}
+
+fn print_gateway_block(
+    gateway: Option<&str>,
+    timeline: Option<&str>,
+    preferences: &mut [(String, f64)],
+) {
+    // #79 — AI Influence Index is always the first product headline.
+    if let (Some(gw), Some(tl)) = (gateway, timeline) {
+        match fetch_timeline_context(gw, tl) {
+            Ok(ctx) => {
+                print_ai_influence_headline(&ctx.ai_influence);
+                println!();
+                apply_and_print_society(gw, tl, &ctx.society_means, preferences);
+            }
+            Err(err) => {
+                print_ai_influence_headline(&local_ai_influence());
+                eprintln!("Warning: could not load shared context: {err}");
+                println!();
+            }
+        }
+    } else {
+        print_ai_influence_headline(&local_ai_influence());
+        println!();
+    }
+}
+
 fn run_mvp(
     scenario: &Scenario,
     mut preferences: Vec<(String, f64)>,
@@ -446,32 +505,7 @@ fn run_mvp(
     println!("Scenario: {} — {}", scenario.id, scenario.blurb);
     println!();
 
-    if let (Some(gw), Some(tl)) = (gateway, timeline) {
-        match fetch_society_means(gw, tl) {
-            Ok(means) if means.is_empty() => {
-                println!("Shared context: no society signals on timeline {tl}");
-                println!();
-            }
-            Ok(means) => {
-                println!("Shared context (from {gw}):");
-                for (dim, mean) in &means {
-                    println!("  {dim} mean={mean:.2}");
-                }
-                println!("  In plain language:");
-                for line in plain_language_context(&means) {
-                    println!("    • {line}");
-                }
-                apply_society_context(&mut preferences, &means);
-                println!("  Preferences after context nudge:");
-                println!("    {}", format_prefs(&preferences));
-                println!();
-            }
-            Err(err) => {
-                eprintln!("Warning: could not load shared context: {err}");
-                println!();
-            }
-        }
-    }
+    print_gateway_block(gateway, timeline, &mut preferences);
 
     println!("Your preferences:");
     println!("  {}", format_prefs(&preferences));
@@ -842,7 +876,11 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let body = r#"{"events":[{"event_type":"society.signal","payload":{"dimension":"trust","value":0.9}}]}"#;
+        let body = r#"{"events":[
+            {"event_type":"society.signal","payload":{"dimension":"trust","value":0.9}},
+            {"event_type":"agent.action","payload":{"archetype":"scout"}},
+            {"event_type":"agent.decision","payload":{}}
+        ]}"#;
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let _ = stream.read(&mut [0u8; 1024]);

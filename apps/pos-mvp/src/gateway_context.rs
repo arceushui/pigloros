@@ -1,7 +1,8 @@
 //! Optional shared-world context for Wave 7 decision preview (ADR-015).
 //!
-//! Polls `piglor-gateway` for `society.signal` events and nudges preferences.
+//! Polls `piglor-gateway` for timeline events: society means + AI Influence Index (#79).
 
+use crate::ai_influence::{ai_influence_from_events, AiInfluenceIndex};
 use std::collections::HashMap;
 use std::io::Read;
 use std::time::Duration;
@@ -176,13 +177,28 @@ fn warn_if_non_loopback(gateway: &str) {
     }
 }
 
-/// Poll gateway for society signal means. `gateway` is base URL (e.g. `http://127.0.0.1:8080`).
+/// Society means + AI Influence from one gateway poll.
+pub struct TimelineContext {
+    pub society_means: HashMap<String, f64>,
+    pub ai_influence: AiInfluenceIndex,
+}
+
+/// One HTTP poll → society means and AI Influence Index (#79).
 ///
 /// Hardening: ULID path validation, 10s overall timeout, no redirects, 1 MiB body cap.
-pub fn fetch_society_means(
+pub fn fetch_timeline_context(gateway: &str, timeline_id: &str) -> Result<TimelineContext, String> {
+    let events = fetch_gateway_events(gateway, timeline_id)?;
+    Ok(TimelineContext {
+        society_means: society_means_from_events(&events),
+        ai_influence: ai_influence_from_events(&events),
+    })
+}
+
+/// Poll gateway event list. `gateway` is base URL (e.g. `http://127.0.0.1:8080`).
+fn fetch_gateway_events(
     gateway: &str,
     timeline_id: &str,
-) -> Result<HashMap<String, f64>, String> {
+) -> Result<Vec<serde_json::Value>, String> {
     validate_timeline_id(timeline_id)?;
     warn_if_non_loopback(gateway);
 
@@ -213,8 +229,9 @@ pub fn fetch_society_means(
     let events = body
         .get("events")
         .and_then(serde_json::Value::as_array)
-        .map_or(&[] as &[serde_json::Value], Vec::as_slice);
-    Ok(society_means_from_events(events))
+        .cloned()
+        .unwrap_or_default();
+    Ok(events)
 }
 
 fn read_capped_body(reader: &mut dyn Read, max_bytes: u64) -> Result<Vec<u8>, String> {
@@ -253,6 +270,14 @@ fn urlencoding_path_segment(s: &str) -> String {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    fn fetch_society_means(
+        gateway: &str,
+        timeline_id: &str,
+    ) -> Result<HashMap<String, f64>, String> {
+        Ok(fetch_timeline_context(gateway, timeline_id)?.society_means)
+    }
 
     #[test]
     fn society_means_from_fixture() {
@@ -462,6 +487,35 @@ mod tests {
         let id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
         assert_eq!(urlencoding_path_segment(id), id);
         assert!(urlencoding_path_segment("a/b").contains('%'));
+    }
+
+    #[test]
+    fn fetch_timeline_context_includes_ai_influence() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = r#"{"events":[
+            {"event_type":"society.signal","payload":{"dimension":"trust","value":0.9}},
+            {"event_type":"agent.action","payload":{"action":"nudge"}},
+            {"event_type":"world.action","payload":{}}
+        ]}"#;
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.read(&mut [0u8; 1024]);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        let ctx = fetch_timeline_context(&format!("http://{addr}"), "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+            .unwrap();
+        assert!((ctx.society_means["trust"] - 0.9).abs() < f64::EPSILON);
+        assert_eq!(ctx.ai_influence.total_events, 3);
+        assert_eq!(ctx.ai_influence.ai_events, 1);
+        assert!((ctx.ai_influence.index - (1.0 / 3.0)).abs() < 1e-9);
     }
 
     #[test]
