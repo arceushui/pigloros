@@ -33,9 +33,12 @@ cargo run -p pos-mvp -- --scenario work \
 2. Fold `society.signal` events into per-dimension running means (`trust`, `opinion`, …).
 3. Nudge preference keys: exact society dim match **or** scenario aliases
    (`trust`→`quiet`/`focus`, `culture`→`nature`/`autonomy`, `opinion`→`city`/`collaboration`,
-   `economy`→`food`/`energy`, `polarization`→`collaboration`/`energy`):
-   `adjusted = clamp(pref + (mean - 0.5) * 0.25, -1, 1)`.
-4. Means clamped to `[0, 1]`. HTTP poll: ULID-validated path, 10s timeout, no redirects, 1 MiB body cap.
+   `economy`→`food`/`energy`, `polarization`→`collaboration`/`energy`).
+   Each pref key is adjusted **once** by the average of contributing nudges
+   (overlapping aliases do not stack):
+   `adjusted = clamp(pref + avg(nudges) , -1, 1)` where `nudge = (mean - 0.5) * 0.25`.
+4. Means clamped to `[0, 1]`. HTTP poll: ULID-validated path, 10s timeout, no redirects,
+   reject non-2xx, 1 MiB body cap, UTF-8 body required.
 5. Print context summary, then run the existing Wave 5 preview + backtest loop.
 
 No new crate; sync HTTP via `ureq` in `pos-mvp` only. Gateway remains optional — without flags, behaviour is unchanged.

@@ -65,18 +65,44 @@ pub fn society_means_from_events(events: &[serde_json::Value]) -> HashMap<String
 }
 
 /// Nudge preferences for matching keys **and** society→scenario aliases.
+///
+/// Each preference key is adjusted **once** by the average of all contributing
+/// society nudges (exact dim match + aliases), so overlapping aliases
+/// (`opinion`/`polarization` → `collaboration`) do not stack additively.
 pub fn apply_society_context(prefs: &mut [(String, f64)], means: &HashMap<String, f64>) {
+    let mut by_pref: HashMap<String, Vec<f64>> = HashMap::new();
     for (dim, mean) in means {
         let nudge = (*mean - 0.5) * NUDGE_SCALE;
         let mut targets: Vec<&str> = vec![dim.as_str()];
         targets.extend(society_pref_aliases(dim));
+        targets.sort_unstable();
+        targets.dedup();
         for target in targets {
-            if let Some((_, v)) = prefs
-                .iter_mut()
-                .find(|(k, _)| k.eq_ignore_ascii_case(target))
-            {
-                *v = (*v + nudge).clamp(-1.0, 1.0);
+            by_pref
+                .entry(target.to_ascii_lowercase())
+                .or_default()
+                .push(nudge);
+        }
+    }
+    for (key, values) in by_pref {
+        let avg = average_f64(&values);
+        if let Some((_, v)) = prefs.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case(&key)) {
+            *v = (*v + avg).clamp(-1.0, 1.0);
+        }
+    }
+}
+
+fn average_f64(values: &[f64]) -> f64 {
+    match values {
+        [] => 0.0,
+        [only] => *only,
+        many => {
+            let sum: f64 = many.iter().sum();
+            let mut n = 0.0_f64;
+            for _ in many {
+                n += 1.0;
             }
+            sum / n
         }
     }
 }
@@ -173,18 +199,14 @@ pub fn fetch_society_means(
         .get(&url)
         .call()
         .map_err(|e| format!("gateway GET failed: {e}"))?;
-
-    let mut body = String::new();
-    response
-        .into_reader()
-        .take(MAX_GATEWAY_BODY_BYTES + 1)
-        .read_to_string(&mut body)
-        .expect("reading capped gateway body into String");
-    if body.len() as u64 > MAX_GATEWAY_BODY_BYTES {
-        return Err(format!(
-            "gateway body too large: exceeded {MAX_GATEWAY_BODY_BYTES} bytes"
-        ));
+    let status = response.status();
+    if !(200..300).contains(&status) {
+        return Err(format!("gateway returned HTTP {status}"));
     }
+
+    let mut reader = response.into_reader();
+    let bytes = read_capped_body(&mut reader, MAX_GATEWAY_BODY_BYTES)?;
+    let body = String::from_utf8(bytes).map_err(|e| format!("gateway body not UTF-8: {e}"))?;
 
     let body: serde_json::Value =
         serde_json::from_str(&body).map_err(|e| format!("gateway JSON parse failed: {e}"))?;
@@ -193,6 +215,20 @@ pub fn fetch_society_means(
         .and_then(serde_json::Value::as_array)
         .map_or(&[] as &[serde_json::Value], Vec::as_slice);
     Ok(society_means_from_events(events))
+}
+
+fn read_capped_body(reader: &mut dyn Read, max_bytes: u64) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    reader
+        .take(max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("gateway body read failed: {e}"))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(format!(
+            "gateway body too large: exceeded {max_bytes} bytes"
+        ));
+    }
+    Ok(bytes)
 }
 
 /// Percent-encode a single path segment (ULIDs pass through unchanged).
@@ -291,6 +327,13 @@ mod tests {
     }
 
     #[test]
+    fn average_f64_handles_empty_and_values() {
+        assert!((average_f64(&[]) - 0.0).abs() < f64::EPSILON);
+        assert!((average_f64(&[0.4]) - 0.4).abs() < f64::EPSILON);
+        assert!((average_f64(&[0.2, 0.4]) - 0.3).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn apply_society_context_nudges_matching_pref() {
         let mut prefs = vec![("trust".to_owned(), 0.5), ("food".to_owned(), 0.9)];
         let mut means = HashMap::new();
@@ -320,6 +363,22 @@ mod tests {
         means.insert("polarization".to_owned(), 0.9);
         apply_society_context(&mut prefs, &means);
         assert!(prefs.iter().all(|(_, v)| *v > 0.5));
+    }
+
+    #[test]
+    fn apply_society_context_averages_overlapping_aliases() {
+        let mut prefs = vec![("collaboration".to_owned(), 0.5)];
+        let mut means = HashMap::new();
+        // Both map to collaboration with the same mean → one averaged nudge, not 2×.
+        means.insert("opinion".to_owned(), 0.9);
+        means.insert("polarization".to_owned(), 0.9);
+        apply_society_context(&mut prefs, &means);
+        let expected = 0.5 + (0.9 - 0.5) * NUDGE_SCALE;
+        assert!(
+            (prefs[0].1 - expected).abs() < 1e-9,
+            "got {} want {expected} (no double stack)",
+            prefs[0].1
+        );
     }
 
     #[test]
@@ -478,6 +537,47 @@ mod tests {
     }
 
     #[test]
+    fn fetch_society_means_rejects_redirect_status() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = r#"{"events":[{"event_type":"society.signal","payload":{"dimension":"trust","value":0.9}}]}"#;
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.read(&mut [0u8; 1024]);
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: /elsewhere\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        let err = fetch_society_means(&format!("http://{addr}"), "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+            .unwrap_err();
+        assert!(err.contains("HTTP 302"), "{err}");
+    }
+
+    #[test]
+    fn fetch_society_means_rejects_non_utf8_body() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.read(&mut [0u8; 1024]);
+            let bytes =
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n\xff\xfe";
+            let _ = stream.write_all(bytes);
+        });
+        let err = fetch_society_means(&format!("http://{addr}"), "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+            .unwrap_err();
+        assert!(err.contains("UTF-8"), "{err}");
+    }
+
+    #[test]
     fn fetch_society_means_rejects_non_success_status() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
@@ -516,6 +616,29 @@ mod tests {
         let err = fetch_society_means(&format!("http://{addr}"), "01ARZ3NDEKTSV4RRFFQ69G5FAV")
             .unwrap_err();
         assert!(err.contains("JSON"), "{err}");
+    }
+
+    #[test]
+    fn read_capped_body_maps_io_errors() {
+        struct FailRead;
+        impl Read for FailRead {
+            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("boom"))
+            }
+        }
+        let mut fail = FailRead;
+        let err = read_capped_body(&mut fail, 64).unwrap_err();
+        assert!(err.contains("read failed"), "{err}");
+    }
+
+    #[test]
+    fn read_capped_body_ok_and_too_large() {
+        let mut ok = &b"hi"[..];
+        assert_eq!(read_capped_body(&mut ok, 10).unwrap(), b"hi");
+        let big = vec![b'x'; 20];
+        let mut reader = big.as_slice();
+        let err = read_capped_body(&mut reader, 8).unwrap_err();
+        assert!(err.contains("too large"), "{err}");
     }
 
     #[test]
