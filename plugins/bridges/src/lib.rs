@@ -17,7 +17,7 @@
 //!
 //! # Usage
 //!
-//! ```ignore
+//! ```text
 //! // In the experiment host:
 //! let ingestor = BridgeIngestor::new(entity_id);
 //! let draft = ingestor.ingest("owntracks", json_value, timestamp_micros);

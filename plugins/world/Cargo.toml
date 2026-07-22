@@ -3,6 +3,8 @@ name = "pos-plugin-world"
 edition.workspace = true
 version.workspace = true
 rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
 
 [dependencies]
 pos-core = { path = "../../crates/pos-core" }

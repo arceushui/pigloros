@@ -11,15 +11,30 @@ plugins:
       uri: https://github.com/trunk-io/plugins
 # This is the section where you manage your linters. (https://docs.trunk.io/check/configuration)
 lint:
+  definitions:
+    # Custom policy (not clippy/rustfmt): no #[ignore]; coverage(off) test-only.
+    - name: rust-test-policy
+      files: [rust]
+      commands:
+        - name: lint
+          run: python3 ${workspace}/.trunk/rust-test-policy.py ${target}
+          output: regex
+          parse_regex: "(?P<path>.*):(?P<line>-?\\d+):(?P<col>-?\\d+): \\[(?P<severity>[^\\]]*)\\] (?P<message>.+) \\((?P<code>[^\\)]*)\\)"
+          success_codes: [0, 1]
+          read_output_from: stdout
   enabled:
     - actionlint@1.7.12
     - git-diff-check
     - taplo@0.10.0
     - yamllint@1.38.0
     - rustfmt@1.65.0
+    - rust-test-policy
+    # Semgrep AST ban is CI-only: .github/workflows/semgrep.yml (semgrep/semgrep image).
 actions:
   enabled:
     - trunk-announce
-    - trunk-check-pre-push
+    # Format on commit; full check (incl. rust-test-policy / no #[ignore]) on commit + push.
     - trunk-fmt-pre-commit
+    - trunk-check-pre-commit
+    - trunk-check-pre-push
     - trunk-upgrade-available

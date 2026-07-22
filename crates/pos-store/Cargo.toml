@@ -3,6 +3,8 @@ name = "pos-store"
 edition.workspace = true
 version.workspace = true
 rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
 
 # Backend features — sqlite is on by default; disable with --no-default-features
 [features]

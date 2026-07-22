@@ -1,0 +1,40 @@
+# Dependency policy via cargo-deny (crates / licenses / advisories / sources).
+# Does not cover #[ignore] — that is Trunk rust-test-policy + Semgrep.
+
+name: cargo-deny
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: cargo-deny-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        include:
+          # New RustSec advisories should not hard-break every PR overnight.
+          - checks: advisories
+            continue-on-error: true
+          - checks: bans licenses sources
+            continue-on-error: false
+    continue-on-error: ${{ matrix.continue-on-error }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: cargo deny check
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check ${{ matrix.checks }}
+          rust-version: 1.94.1

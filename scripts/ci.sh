@@ -5,18 +5,33 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-echo "==> trunk check"
+echo "==> trunk check (rust-test-policy: no #[ignore]; coverage(off) test-only)"
 if command -v trunk >/dev/null 2>&1; then
   trunk check --all --ci --no-progress
 else
-  echo "WARNING: trunk not on PATH; skipping (install: curl https://get.trunk.io | bash)"
+  echo "WARNING: trunk not on PATH; running scripts/check-test-policy.sh fallback"
+  bash "$ROOT/scripts/check-test-policy.sh"
+fi
+
+echo "==> cargo deny (dependency policy — not #[ignore])"
+if command -v cargo-deny >/dev/null 2>&1; then
+  cargo deny check
+else
+  echo "WARNING: cargo-deny not on PATH; skipping (install: cargo install cargo-deny)"
 fi
 
 echo "==> fmt"
 cargo fmt --all -- --check
 
-echo "==> test"
-cargo test --workspace --locked
+echo "==> test (--include-ignored)"
+# Run ignored tests too so #[ignore] cannot silently skip coverage of a path.
+test_log="$(mktemp)"
+trap 'rm -f "$test_log"' EXIT
+cargo test --workspace --locked -- --include-ignored 2>&1 | tee "$test_log"
+if grep -E '[1-9][0-9]* ignored' "$test_log"; then
+  echo "ERROR: cargo test still reported ignored/skipped tests." >&2
+  exit 1
+fi
 
 echo "==> clippy"
 cargo clippy --workspace --all-targets --locked -- -D warnings -W clippy::pedantic
@@ -27,6 +42,7 @@ echo "==> coverage (100% lines + regions)"
 export RUSTC_BOOTSTRAP=1
 cargo llvm-cov --workspace --locked --summary-only \
   --fail-under-lines 100 \
-  --fail-under-regions 100
+  --fail-under-regions 100 \
+  -- --include-ignored
 
 echo "==> CI gates OK"

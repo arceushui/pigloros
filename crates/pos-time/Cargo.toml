@@ -3,6 +3,8 @@ name = "pos-time"
 edition.workspace = true
 version.workspace = true
 rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
 
 [dependencies]
 pos-core = { path = "../pos-core" }

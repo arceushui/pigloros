@@ -1,0 +1,67 @@
+# Semgrep — AST-level ban on ignored unit/integration tests.
+# Complements Trunk `rust-test-policy` (text scan) and `cargo test -- --include-ignored`.
+# coverage(off) production ban is enforced by Trunk rust-test-policy (more reliable).
+# Note: cargo-deny cannot ban #[ignore]; it only covers crates/licenses/advisories/sources.
+rules:
+  - id: ban-ignored-tests
+    message: Do not use #[ignore] on tests. CI runs --include-ignored; remove the attribute or delete the test.
+    severity: ERROR
+    languages: [rust]
+    patterns:
+      - pattern-either:
+          - pattern: |
+              #[ignore]
+              #[test]
+              fn $F(...) { ... }
+          - pattern: |
+              #[test]
+              #[ignore]
+              fn $F(...) { ... }
+          - pattern: |
+              #[ignore]
+              #[tokio::test]
+              async fn $F(...) { ... }
+          - pattern: |
+              #[tokio::test]
+              #[ignore]
+              async fn $F(...) { ... }
+          - pattern: |
+              #[ignore($REASON)]
+              #[test]
+              fn $F(...) { ... }
+          - pattern: |
+              #[test]
+              #[ignore($REASON)]
+              fn $F(...) { ... }
+          - pattern: |
+              #[ignore($REASON)]
+              #[tokio::test]
+              async fn $F(...) { ... }
+          - pattern: |
+              #[tokio::test]
+              #[ignore($REASON)]
+              async fn $F(...) { ... }
+          - pattern: |
+              #[cfg_attr($COND, ignore)]
+              #[test]
+              fn $F(...) { ... }
+          - pattern: |
+              #[test]
+              #[cfg_attr($COND, ignore)]
+              fn $F(...) { ... }
+          - pattern: |
+              #[cfg_attr($COND, ignore)]
+              #[tokio::test]
+              async fn $F(...) { ... }
+          - pattern: |
+              #[tokio::test]
+              #[cfg_attr($COND, ignore)]
+              async fn $F(...) { ... }
+          - pattern: |
+              #[cfg_attr($COND, ignore = $REASON)]
+              #[test]
+              fn $F(...) { ... }
+          - pattern: |
+              #[test]
+              #[cfg_attr($COND, ignore = $REASON)]
+              fn $F(...) { ... }

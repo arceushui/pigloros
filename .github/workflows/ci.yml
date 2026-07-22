@@ -4,10 +4,11 @@
 # - Platform: GitHub Actions (remote is github.com/arceushui/pigloros)
 # - Triggers: every PR + pushes to main
 # - Jobs: fmt, test, clippy (pedantic), coverage (100% lines + regions) — all required
-  # - Coverage: RUSTC_BOOTSTRAP=1 so cfg(coverage_nightly) can enable
-  #   feature(coverage_attribute); #[coverage(off)] is ONLY ever applied to #[test] functions
-  #   or code inside #[cfg(test)] modules — production code is never exempted from coverage.
-  #   Unnecessary code is deleted/simplified rather than left as dead branches.
+# - Test policy (no #[ignore]; coverage(off) test-only): Trunk `rust-test-policy` + Semgrep
+#   (`.semgrep.yml`). cargo-deny cannot ban source attributes — see cargo-deny.yml for deps.
+# - Tests: `cargo test -- --include-ignored` so ignored tests cannot silently skip.
+# - Coverage: RUSTC_BOOTSTRAP=1 so cfg(coverage_nightly) can enable feature(coverage_attribute).
+#   Unnecessary code is deleted/simplified rather than left as dead branches.
 # - Runners: ubuntu-latest only (rusqlite bundled; no macOS matrix yet)
 
 name: CI
@@ -61,8 +62,14 @@ jobs:
         with:
           shared-key: test
 
-      - name: cargo test --workspace --locked
-        run: cargo test --workspace --locked
+      - name: cargo test --workspace --locked -- --include-ignored
+        run: |
+          set -euo pipefail
+          cargo test --workspace --locked -- --include-ignored 2>&1 | tee /tmp/cargo-test.log
+          if grep -E '[1-9][0-9]* ignored' /tmp/cargo-test.log; then
+            echo "ERROR: cargo test still reported ignored/skipped tests" >&2
+            exit 1
+          fi
 
   clippy:
     name: clippy
@@ -119,3 +126,4 @@ jobs:
           cargo llvm-cov --workspace --locked --summary-only
           --fail-under-lines 100
           --fail-under-regions 100
+          -- --include-ignored
