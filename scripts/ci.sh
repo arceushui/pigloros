@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-echo "==> trunk check (rust-test-policy: no #[ignore]; coverage(off) test-only)"
+echo "==> trunk check (rust-test-policy: coverage(off) test-only; no ```ignore doctests)"
 if command -v trunk >/dev/null 2>&1; then
   trunk check --all --ci --no-progress
 else
@@ -13,7 +13,7 @@ else
   bash "$ROOT/scripts/check-test-policy.sh"
 fi
 
-echo "==> cargo deny (dependency policy — not #[ignore])"
+echo "==> cargo deny (dependency policy)"
 if command -v cargo-deny >/dev/null 2>&1; then
   cargo deny check
 else
@@ -24,7 +24,7 @@ echo "==> fmt"
 cargo fmt --all -- --check
 
 echo "==> test (--include-ignored)"
-# Run ignored tests too so #[ignore] cannot silently skip coverage of a path.
+# Run ignored tests too so #[ignore] cannot silently skip a path.
 test_log="$(mktemp)"
 trap 'rm -f "$test_log"' EXIT
 cargo test --workspace --locked -- --include-ignored 2>&1 | tee "$test_log"

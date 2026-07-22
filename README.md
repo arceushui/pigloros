@@ -81,8 +81,7 @@ Toolchain is pinned in `rust-toolchain.toml` (**1.94.1** + clippy / rustfmt / ll
 
 # Or individually:
 trunk check --all          # rustfmt + rust-test-policy + actionlint + …
-cargo deny check           # dependency bans/licenses/advisories/sources (not #[ignore])
-# Semgrep AST ban (CI uses semgrep/semgrep image): semgrep scan --config .semgrep.yml --error
+cargo deny check           # dependency bans/licenses/advisories/sources
 cargo fmt --all -- --check
 cargo test --workspace --locked -- --include-ignored
 cargo clippy --workspace --all-targets --locked -- -D warnings -W clippy::pedantic
@@ -92,7 +91,7 @@ RUSTC_BOOTSTRAP=1 cargo llvm-cov --workspace --locked --summary-only \
   --fail-under-lines 100 --fail-under-regions 100 -- --include-ignored
 ```
 
-CI (GitHub Actions): **Trunk Check** (`rust-test-policy`), **Semgrep**, **cargo-deny**, **fmt**, **test** (`--include-ignored`), **clippy pedantic**, and **llvm-cov**. See `.github/workflows/`.
+CI (GitHub Actions): **Trunk Check** (`rust-test-policy`), **cargo-deny**, **fmt**, **test** (`--include-ignored`), **clippy pedantic**, and **llvm-cov**. See `.github/workflows/`.
 
 Wave 1 stats: **193 tests · 0 failures · 100% line coverage · clippy clean**
 
@@ -108,10 +107,10 @@ Wave 5 stats: **717+ tests · 0 failures · 100% line / 100% region coverage · 
 
 | Gate | Tool | What it bans / enforces |
 |---|---|---|
-| Source `#[ignore]` / `cfg_attr(..., ignore)` | Trunk **`rust-test-policy`** + **Semgrep** CI (`.semgrep.yml`) | No ignored unit/async tests (comments/strings ignored); no production `coverage(off)` |
+| `coverage(off)` + doctest ` ```ignore ` | Trunk **`rust-test-policy`** | `coverage(off)` test-only; no rustdoc ignore fences |
 | Local git hooks | Trunk **`trunk-check-pre-commit`** + **`trunk-check-pre-push`** | Blocks commit/push if `rust-test-policy` fails (`trunk git-hooks sync`) |
-| Runtime skip | `cargo test -- --include-ignored` | Ignored tests still execute if somehow present |
-| Dependencies | **cargo-deny** (`deny.toml`) | Crates / licenses / advisories / sources — **not** `#[ignore]` |
+| Runtime `#[ignore]` | `cargo test -- --include-ignored` | Ignored tests still execute (source ban is redundant) |
+| Dependencies | **cargo-deny** (`deny.toml`) | Crates / licenses / advisories / sources |
 
 #### Git hooks (local)
 
@@ -123,7 +122,7 @@ trunk git-hooks sync   # once per clone / after enabling actions
 
 Enabled actions (see `.trunk/trunk.yaml`):
 
-- **pre-commit:** `trunk-fmt-pre-commit` + `trunk-check-pre-commit` (runs `rust-test-policy` → no `#[ignore]`)
+- **pre-commit:** `trunk-fmt-pre-commit` + `trunk-check-pre-commit` (runs `rust-test-policy`)
 - **pre-push:** `trunk-check-pre-push`
 
 `#[cfg_attr(coverage_nightly, coverage(off))]` is applied **only** to `#[test]` functions

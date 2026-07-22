@@ -4,9 +4,9 @@
 # - Platform: GitHub Actions (remote is github.com/arceushui/pigloros)
 # - Triggers: every PR + pushes to main
 # - Jobs: fmt, test, clippy (pedantic), coverage (100% lines + regions) — all required
-# - Test policy (no #[ignore]; coverage(off) test-only): Trunk `rust-test-policy` + Semgrep
-#   (`.semgrep.yml`). cargo-deny cannot ban source attributes — see cargo-deny.yml for deps.
-# - Tests: `cargo test -- --include-ignored` so ignored tests cannot silently skip.
+# - coverage(off) test-only + no ```ignore doctests: Trunk `rust-test-policy`
+# - Tests: `cargo test -- --include-ignored` so #[ignore] cannot silently skip
+# - Dependencies: cargo-deny.yml (crates/licenses/advisories/sources)
 # - Coverage: RUSTC_BOOTSTRAP=1 so cfg(coverage_nightly) can enable feature(coverage_attribute).
 #   Unnecessary code is deleted/simplified rather than left as dead branches.
 # - Runners: ubuntu-latest only (rusqlite bundled; no macOS matrix yet)

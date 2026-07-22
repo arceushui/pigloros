@@ -1,5 +1,6 @@
 # Dependency policy via cargo-deny (crates / licenses / advisories / sources).
-# Does not cover #[ignore] — that is Trunk rust-test-policy + Semgrep.
+# Source attrs (coverage(off), doctest fences) are Trunk rust-test-policy;
+# #[ignore] is handled by cargo test -- --include-ignored.
 
 name: cargo-deny
 

@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Trunk custom linter: no #[ignore]; coverage(off) only on test code.
+"""Trunk custom linter: coverage(off) only on test code; no ```ignore doctest fences.
+
+`#[ignore]` is not banned here — CI runs `cargo test -- --include-ignored`, which
+still executes ignored tests. This linter covers attributes CI does not rewrite.
 
 Prints Trunk regex diagnostics:
   path:line:col: [error] message (code)
 
-Ignores matches inside line comments, block comments, and string/char literals.
-Also bans #[cfg_attr(..., ignore)] forms.
+Ignores matches inside line comments, block comments, and string/char literals
+(except doc-line ```ignore, which is checked on raw /// / //! lines).
 """
 from __future__ import annotations
 
@@ -13,13 +16,6 @@ import re
 import sys
 from pathlib import Path
 
-# Real attribute forms only (applied after comment/string masking).
-# After mask_non_code, string interiors are spaces — #[ignore = "r"] -> #[ignore =    ].
-# Match loosely: #[ignore], #[ignore(...)], #[ignore = ...], #[cfg_attr(..., ignore)]
-IGNORE_ATTR = re.compile(
-    r"#\[\s*ignore\b[^\]]*\]"
-    r"|#\[\s*cfg_attr\s*\([^)]*\bignore\b[^)]*\)\s*\]"
-)
 DOC_IGNORE = re.compile(r"```(?:rust,)?ignore\b")
 COV_OFF = re.compile(r"coverage\s*\(\s*off\s*\)")
 TEST_ATTR = re.compile(r"#\[\s*(?:tokio::)?test(?:\s*\([^)]*\))?\s*\]")
@@ -37,13 +33,11 @@ def mask_non_code(text: str) -> str:
     i = 0
     n = len(text)
     while i < n:
-        # Line comment
         if text.startswith("//", i):
             while i < n and text[i] != "\n":
                 out.append(" ")
                 i += 1
             continue
-        # Block comment
         if text.startswith("/*", i):
             out.append("  ")
             i += 2
@@ -54,7 +48,6 @@ def mask_non_code(text: str) -> str:
                 out.append("  ")
                 i += 2
             continue
-        # Raw string r#"..."# / r##"..."##
         if text[i] == "r" and i + 1 < n and (text[i + 1] == '"' or text[i + 1] == "#"):
             j = i + 1
             hashes = 0
@@ -72,7 +65,6 @@ def mask_non_code(text: str) -> str:
                     out.extend(" " for _ in range(len(closing)))
                     i += len(closing)
                 continue
-        # Normal string
         if text[i] == '"':
             out.append(" ")
             i += 1
@@ -88,7 +80,6 @@ def mask_non_code(text: str) -> str:
                 out.append("\n" if text[i] == "\n" else " ")
                 i += 1
             continue
-        # Char literal
         if text[i] == "'":
             out.append(" ")
             i += 1
@@ -112,7 +103,6 @@ def check(path: Path) -> int:
     masked = mask_non_code(text)
     lines = text.splitlines()
     masked_lines = masked.splitlines()
-    # Pad if trailing newline differences
     while len(masked_lines) < len(lines):
         masked_lines.append("")
 
@@ -141,7 +131,6 @@ def check(path: Path) -> int:
         # Doc fences (//! / ///): masked // comments hide ```ignore; check raw doc lines.
         doc_line = stripped.startswith("//!") or stripped.startswith("///")
         if doc_line:
-            # Strip the doc marker then look for fence
             body = re.sub(r"^//[/!]\s?", "", stripped)
             if DOC_IGNORE.search(body):
                 emit(
@@ -159,15 +148,6 @@ def check(path: Path) -> int:
                 "forbidden-doc-ignore",
                 "```ignore doctest fence is forbidden — use ```text or a real doctest "
                 "(CI runs --include-ignored)",
-            )
-            findings += 1
-
-        if IGNORE_ATTR.search(masked_stripped):
-            emit(
-                str(path),
-                i + 1,
-                "forbidden-ignore",
-                "#[ignore] / #[cfg_attr(..., ignore)] is forbidden — every test must run in CI",
             )
             findings += 1
 

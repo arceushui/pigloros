@@ -1,7 +1,7 @@
 # Trunk Code Quality — complements .github/workflows/ci.yml (fmt/test/clippy/coverage).
-# Includes rust-test-policy (no #[ignore]; coverage(off) test-only).
-# Semgrep AST ban: .github/workflows/semgrep.yml · deps: cargo-deny.yml
-# Local: `trunk check` / `trunk check --all` (see scripts/ci.sh).
+# Includes rust-test-policy (coverage(off) test-only; no ```ignore doctest fences).
+# #[ignore] is enforced at runtime via cargo test -- --include-ignored (see ci.yml).
+# Deps: cargo-deny.yml. Local: `trunk check` / scripts/ci.sh.
 
 name: Trunk Check
 

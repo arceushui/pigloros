@@ -12,7 +12,8 @@ plugins:
 # This is the section where you manage your linters. (https://docs.trunk.io/check/configuration)
 lint:
   definitions:
-    # Custom policy (not clippy/rustfmt): no #[ignore]; coverage(off) test-only.
+    # Custom policy: coverage(off) test-only; no ```ignore doctest fences.
+    # #[ignore] is left to cargo test -- --include-ignored (CI still runs them).
     - name: rust-test-policy
       files: [rust]
       commands:
@@ -29,11 +30,10 @@ lint:
     - yamllint@1.38.0
     - rustfmt@1.65.0
     - rust-test-policy
-    # Semgrep AST ban is CI-only: .github/workflows/semgrep.yml (semgrep/semgrep image).
 actions:
   enabled:
     - trunk-announce
-    # Format on commit; full check (incl. rust-test-policy / no #[ignore]) on commit + push.
+    # Format on commit; full check (incl. rust-test-policy) on commit + push.
     - trunk-fmt-pre-commit
     - trunk-check-pre-commit
     - trunk-check-pre-push
