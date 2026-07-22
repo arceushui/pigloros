@@ -187,6 +187,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(listed["events"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["events"][0]["payload"]["dx"], 1);
     }
 
     #[tokio::test]
@@ -283,6 +284,30 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn malformed_json_body_is_rejected() {
+        let app = test_app();
+        let (status, created) = json_request(
+            app.clone(),
+            "POST",
+            "/v1/timelines",
+            Some(json!({"name": "m"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap();
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/v1/timelines/{id}/actions"))
+            .header("content-type", "application/json")
+            .body(Body::from("{not json"))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

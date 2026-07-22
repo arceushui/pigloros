@@ -26,6 +26,11 @@ cargo run -p piglor-gateway --locked -- serve 127.0.0.1:8080
 
 Requires the pinned toolchain in `rust-toolchain.toml` (Rust **1.94.1**).
 
+```bash
+# One-time per clone — enable Trunk git hooks (test policy on commit/push):
+trunk git-hooks sync
+```
+
 ## Repository Layout
 
 ```
@@ -68,7 +73,7 @@ Wave 6 will add `bindings/piglor-py` (PyO3); that directory is not in-tree yet.
 | Wave 3 | Plugin Runtime (pos-runtime) | ✅ Complete |
 | Wave 4 | Experiment Framework + CLI (pos-experiment, pos-cli) | ✅ Complete |
 | Wave 5 | Moat Plugins + Single-User MVP | ✅ Complete |
-| Wave 6 | Shared World & Social Layer (+ PyO3 bindings) | 🚧 In progress — ADR-011/014; #87 done; #71 society; #69 gateway HTTP MVP |
+| Wave 6 | Shared World & Social Layer (+ PyO3 bindings) | 🚧 In progress — #87 identity; #71 society; #69 gateway HTTP MVP (ADR-014); WS/auth/PyO3 deferred |
 | Wave 7 | Contextual Decision Preview | Planned |
 
 ## Development
@@ -104,6 +109,8 @@ Wave 4 stats: **359 tests · 0 failures · 100% line coverage · clippy pedantic
 Wave 5 stats: **717+ tests · 0 failures · 100% line / 100% region coverage · clippy pedantic clean**
 
 ### Test & coverage policy
+
+See **[docs/test-policy.md](docs/test-policy.md)** for the full policy (also mirrored in Cursor user rules).
 
 | Gate | Tool | What it bans / enforces |
 |---|---|---|

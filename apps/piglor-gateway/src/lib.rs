@@ -238,26 +238,39 @@ pub struct EventsQuery {
     pub from_seq: u64,
 }
 
-/// JSON view of a committed event (payload as hex for transport).
+/// JSON view of a committed event.
+///
+/// `payload` is the decoded CBOR body when it round-trips as JSON (actions posted
+/// via this gateway). `payload_hex` is always the canonical stored bytes (lowercase hex).
 #[derive(Debug, Serialize)]
 pub struct EventView {
     pub id: String,
     pub entity: String,
     pub event_type: String,
     pub seq: u64,
+    /// Decoded JSON when the stored CBOR payload is JSON-compatible; omitted otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<serde_json::Value>,
+    /// Canonical CBOR bytes as lowercase hex (for clients that decode CBOR themselves).
     pub payload_hex: String,
 }
 
 impl From<&Event> for EventView {
     fn from(event: &Event) -> Self {
+        let bytes = event.payload.as_slice();
         Self {
             id: event.id.to_string(),
             entity: event.entity.to_string(),
             event_type: event.event_type.as_str().to_owned(),
             seq: event.seq.as_u64(),
-            payload_hex: hex_encode(event.payload.as_slice()),
+            payload: decode_cbor_json(bytes),
+            payload_hex: hex_encode(bytes),
         }
     }
+}
+
+fn decode_cbor_json(bytes: &[u8]) -> Option<serde_json::Value> {
+    ciborium::from_reader(bytes).ok()
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -559,7 +572,17 @@ mod tests {
         let view = EventView::from(&event);
         assert_eq!(view.event_type, EVENT_TYPE_ACTION);
         assert!(!view.payload_hex.is_empty());
+        assert_eq!(view.payload, Some(serde_json::json!({"k": "v"})));
         assert_eq!(hex_encode(&[0x0a, 0xfb]), "0afb");
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn decode_cbor_json_roundtrip() {
+        let value = serde_json::json!({"n": 1});
+        let bytes = json_to_cbor(&value);
+        assert_eq!(decode_cbor_json(bytes.as_slice()), Some(value));
+        assert!(decode_cbor_json(&[0xff]).is_none());
     }
 
     #[test]

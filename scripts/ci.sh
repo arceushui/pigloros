@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-echo "==> trunk check (rust-test-policy: coverage(off) test-only; no ```ignore doctests)"
+echo "==> trunk check (rust-test-policy: coverage(off) test-only; no ignore doctest fences)"
 if command -v trunk >/dev/null 2>&1; then
   trunk check --all --ci --no-progress
 else

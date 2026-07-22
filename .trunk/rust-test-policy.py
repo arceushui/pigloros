@@ -155,14 +155,19 @@ def check(path: Path) -> int:
             continue
 
         allowed = bool(test_body_starts)
-        ahead = "\n".join(lines[i : min(len(lines), i + 10)])
-        if TEST_ATTR.search(ahead):
+        behind = "\n".join(lines[max(0, i - 20) : i + 1])
+        ahead = "\n".join(lines[i : min(len(lines), i + 20)])
+        if TEST_ATTR.search(ahead) or TEST_ATTR.search(behind):
             allowed = True
-        around = "\n".join(lines[max(0, i - 6) : min(len(lines), i + 4)])
+        around = "\n".join(lines[max(0, i - 10) : min(len(lines), i + 10)])
         if CFG_TEST.search(around) and (
             MOD_START.search(around) or re.search(r"\bimpl\b", around)
         ):
             allowed = True
+        # #[cfg_attr(coverage_nightly, coverage(off))] on #[test] / mod tests { }
+        if re.search(r"#\[\s*cfg_attr\s*\([^)]*coverage\s*\(\s*off", masked_stripped):
+            if TEST_ATTR.search(around) or CFG_TEST.search(around) or bool(test_body_starts):
+                allowed = True
 
         if not allowed:
             emit(
