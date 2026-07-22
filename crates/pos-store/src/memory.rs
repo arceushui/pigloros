@@ -4,7 +4,7 @@
 //! Reading from a forked child transparently stitches parent[`0..fork_seq`] + child events.
 //! Multi-level fork chains are supported: a child of a child walks the chain recursively.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use pos_core::{
     clock::{Seq, WallTime},
@@ -25,6 +25,8 @@ pub struct MemoryStore {
     timelines: HashMap<TimelineId, Timeline>,
     /// Running hash chain head per timeline.
     chain_heads: HashMap<TimelineId, Hash>,
+    /// Global `EventId` index for O(1) uniqueness checks.
+    event_ids: HashSet<EventId>,
 }
 
 impl MemoryStore {
@@ -34,6 +36,7 @@ impl MemoryStore {
             events: HashMap::new(),
             timelines: HashMap::new(),
             chain_heads: HashMap::new(),
+            event_ids: HashSet::new(),
         }
     }
 
@@ -150,6 +153,7 @@ impl EventStore for MemoryStore {
             };
 
             events_vec.push(event.clone());
+            self.event_ids.insert(event.id);
             committed.push(event);
             prev_hash = chain_hash;
         }
@@ -166,6 +170,21 @@ impl EventStore for MemoryStore {
             return Err(CoreError::TimelineNotFound(timeline));
         }
         self.collect_events_in_range(timeline, range)
+    }
+
+    fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+        if !self.timelines.contains_key(&timeline) {
+            return Err(CoreError::TimelineNotFound(timeline));
+        }
+        let events = self.events.get(&timeline).map_or(&[] as &[Event], Vec::as_slice);
+        let filtered: Vec<Event> = events
+            .iter()
+            .filter(|e| {
+                e.seq >= range.from && range.to.is_none_or(|to| e.seq <= to)
+            })
+            .cloned()
+            .collect();
+        Ok(filtered)
     }
 
     fn fork(&mut self, parent: TimelineId, at_seq: Seq, name: &str) -> Result<Timeline, CoreError> {
@@ -200,6 +219,106 @@ impl EventStore for MemoryStore {
     fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
         Ok(self.timelines.get(&id).cloned())
     }
+
+    fn create_timeline_with_meta(&mut self, meta: TimelineMeta) -> Result<Timeline, CoreError> {
+        // Resolve fork parent before duplicate-id check (parity with SqliteStore).
+        let chain = if let Some((parent, at_seq)) = meta.fork_point {
+            let parent_tl = self
+                .timelines
+                .get(&parent)
+                .ok_or(CoreError::TimelineNotFound(parent))?;
+            if at_seq > parent_tl.head {
+                return Err(CoreError::ForkBeyondHead {
+                    fork_seq: at_seq.as_u64(),
+                    head: parent_tl.head.as_u64(),
+                });
+            }
+            self.compute_chain_hash_at(parent, at_seq)?
+        } else {
+            genesis_hash()
+        };
+        if self.timelines.contains_key(&meta.id) {
+            return Err(CoreError::Storage(format!(
+                "timeline already exists: {}",
+                meta.id
+            )));
+        }
+        let id = meta.id;
+        let timeline = Timeline::new(meta);
+        self.timelines.insert(id, timeline.clone());
+        self.events.insert(id, Vec::new());
+        self.chain_heads.insert(id, chain);
+        Ok(timeline)
+    }
+
+    fn append_committed(
+        &mut self,
+        timeline: TimelineId,
+        events: &[Event],
+    ) -> Result<(), CoreError> {
+        if !self.timelines.contains_key(&timeline) {
+            return Err(CoreError::TimelineNotFound(timeline));
+        }
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        let head = self.timelines[&timeline].head;
+        let ordered = pos_core::store::validate_committed_batch(
+            head,
+            events,
+            &mut |id| self.event_ids.contains(id),
+            &|event| pos_crypto::chain::hash_payload(&event.payload) == event.payload_hash,
+        )?;
+
+        let mut prev_hash = *self.chain_heads.get(&timeline).unwrap_or(&genesis_hash());
+        let mut new_head = head;
+        for event in &ordered {
+            let id_str = event.id.to_string();
+            prev_hash = hash_event(&prev_hash, id_str.as_bytes(), &event.payload);
+            new_head = event.seq;
+            self.event_ids.insert(event.id);
+        }
+
+        self.events.entry(timeline).or_default().extend(ordered);
+        self.timelines.get_mut(&timeline).unwrap().head = new_head;
+        self.chain_heads.insert(timeline, prev_hash);
+        Ok(())
+    }
+
+    fn delete_timeline(&mut self, id: TimelineId) -> Result<(), CoreError> {
+        if !self.timelines.contains_key(&id) {
+            return Err(CoreError::TimelineNotFound(id));
+        }
+        if self
+            .timelines
+            .values()
+            .any(|t| t.meta.fork_point.is_some_and(|(parent, _)| parent == id))
+        {
+            return Err(CoreError::Storage(
+                "cannot delete timeline that still has forks".to_owned(),
+            ));
+        }
+        self.timelines.remove(&id);
+        // Always present: create/fork/import insert an events entry with the timeline.
+        for event in self.events.remove(&id).expect("timeline events entry") {
+            self.event_ids.remove(&event.id);
+        }
+        self.chain_heads.remove(&id);
+        Ok(())
+    }
+
+    fn chain_hash_at(&self, timeline: TimelineId, at_seq: Seq) -> Result<Hash, CoreError> {
+        self.compute_chain_hash_at(timeline, at_seq)
+    }
+
+    fn import_committed(
+        &mut self,
+        meta: TimelineMeta,
+        events: &[Event],
+    ) -> Result<Timeline, CoreError> {
+        pos_core::store::import_committed_with_rollback(self, meta, events)
+    }
 }
 
 impl MemoryStore {
@@ -208,15 +327,19 @@ impl MemoryStore {
         let chain = self.fork_chain(timeline)?;
         let mut hash = genesis_hash();
 
-        for tid in &chain {
+        for (i, tid) in chain.iter().enumerate() {
             let events = self.events.get(tid).map_or(&[] as &[Event], Vec::as_slice);
-            let meta = &self.timelines[tid].meta;
 
+            // Ancestors: limit to the *child's* fork_seq onto this timeline (matches SQLite /
+            // CoW stitch). Target timeline: limit to `at_seq`.
             let limit = if *tid == timeline {
                 at_seq
             } else {
-                // For parent timelines, use their child's fork point as the limit
-                meta.fork_point.map_or(Seq::from_u64(u64::MAX), |(_, s)| s)
+                self.timelines[&chain[i + 1]]
+                    .meta
+                    .fork_point
+                    .expect("ancestor always has a successor in chain")
+                    .1
             };
 
             for event in events.iter().filter(|e| e.seq <= limit) {
@@ -244,8 +367,8 @@ mod tests {
     use super::*;
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
-        ids::EntityId,
-        store::SeqRange,
+        ids::{EntityId, EventId},
+        store::{SeqRange, TimelineExport},
     };
 
     fn make_draft(entity: EntityId, payload: &[u8]) -> EventDraft {
@@ -618,5 +741,538 @@ mod tests {
         assert!(!a_events.iter().any(|e| e.payload.as_slice() == b"b-only"));
         assert!(b_events.iter().any(|e| e.payload.as_slice() == b"b-only"));
         assert!(!b_events.iter().any(|e| e.payload.as_slice() == b"a-only"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_timeline_with_id_preserves_timeline_and_event_ids() {
+        use pos_core::store::{export_timeline, import_timeline_with_id};
+
+        let mut src = MemoryStore::new();
+        let tl = src.create_timeline("shared").unwrap();
+        let entity = EntityId::new();
+        let committed = src
+            .append(
+                tl.id(),
+                &[make_draft(entity, b"one"), make_draft(entity, b"two")],
+            )
+            .unwrap();
+        let export = export_timeline(&src, tl.id()).unwrap();
+        let original_tl_id = tl.id();
+        let original_event_ids: Vec<_> = committed.iter().map(|e| e.id).collect();
+
+        let mut dst = MemoryStore::new();
+        let imported = import_timeline_with_id(&mut dst, export).unwrap();
+        assert_eq!(imported.id(), original_tl_id);
+        let events = dst.read(original_tl_id, SeqRange::all()).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].id, original_event_ids[0]);
+        assert_eq!(events[1].id, original_event_ids[1]);
+        assert_eq!(events[0].payload.as_slice(), b"one");
+        assert_eq!(events[1].payload.as_slice(), b"two");
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn create_timeline_with_meta_rejects_duplicate_and_missing_parent() {
+        let mut store = MemoryStore::new();
+        let root = store.create_timeline("root").unwrap();
+        let err = store
+            .create_timeline_with_meta(root.meta.clone())
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+
+        let orphan = TimelineMeta::forked_from(TimelineId::new(), Seq::from_u64(1), "orphan");
+        let err = store.create_timeline_with_meta(orphan).unwrap_err();
+        assert!(matches!(err, CoreError::TimelineNotFound(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn create_timeline_with_meta_fork_uses_parent_chain() {
+        let mut store = MemoryStore::new();
+        let root = store.create_timeline("root").unwrap();
+        let entity = EntityId::new();
+        store
+            .append(root.id(), &[make_draft(entity, b"r1")])
+            .unwrap();
+        let child_meta = TimelineMeta {
+            id: TimelineId::new(),
+            mode: pos_core::timeline::TimelineMode::Historical,
+            name: Some("child".to_owned()),
+            fork_point: Some((root.id(), Seq::from_u64(1))),
+        };
+        let child = store.create_timeline_with_meta(child_meta).unwrap();
+        assert!(child.meta.fork_point.is_some());
+        store.append_committed(child.id(), &[]).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_committed_is_atomic_on_mid_batch_failure() {
+        let mut store = MemoryStore::new();
+        let tl = store.create_timeline("t").unwrap();
+        let entity = EntityId::new();
+        let good = store
+            .append(tl.id(), &[make_draft(entity, b"ok")])
+            .unwrap()
+            .remove(0);
+
+        let mut bad = good.clone();
+        bad.id = EventId::new();
+        bad.seq = Seq::from_u64(2);
+        bad.payload = CanonicalBytes::from_vec(b"bad".to_vec());
+        bad.payload_hash = pos_core::Hash::from_bytes([9u8; 32]); // mismatch
+
+        let mut later = good.clone();
+        later.id = EventId::new();
+        later.seq = Seq::from_u64(3);
+        later.payload = CanonicalBytes::from_vec(b"later".to_vec());
+        later.payload_hash = pos_crypto::chain::hash_payload(&later.payload);
+
+        let err = store
+            .append_committed(tl.id(), &[bad, later])
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+
+        // No partial apply: still only the originally appended event.
+        let events = store.read(tl.id(), SeqRange::all()).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].payload.as_slice(), b"ok");
+        assert_eq!(store.get_timeline(tl.id()).unwrap().unwrap().head, Seq::from_u64(1));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn delete_timeline_removes_events_and_blocks_with_forks() {
+        let mut store = MemoryStore::new();
+        let root = store.create_timeline("root").unwrap();
+        let entity = EntityId::new();
+        store
+            .append(root.id(), &[make_draft(entity, b"r1")])
+            .unwrap();
+        let child = store
+            .fork(root.id(), Seq::from_u64(1), "child")
+            .unwrap();
+
+        let err = store.delete_timeline(root.id()).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+
+        store.delete_timeline(child.id()).unwrap();
+        store.delete_timeline(root.id()).unwrap();
+        assert!(store.get_timeline(root.id()).unwrap().is_none());
+        let err = store.delete_timeline(root.id()).unwrap_err();
+        assert!(matches!(err, CoreError::TimelineNotFound(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_timeline_with_id_rolls_back_create_on_append_fail() {
+        use pos_core::store::{export_timeline, import_timeline_with_id};
+
+        let mut src = MemoryStore::new();
+        let tl = src.create_timeline("shared").unwrap();
+        let entity = EntityId::new();
+        let mut committed = src
+            .append(tl.id(), &[make_draft(entity, b"one")])
+            .unwrap();
+        let export = export_timeline(&src, tl.id()).unwrap();
+        // Corrupt payload hash so append_committed fails after create.
+        let mut bad_export = export;
+        bad_export.events[0].payload_hash = pos_core::Hash::from_bytes([1u8; 32]);
+
+        let mut dst = MemoryStore::new();
+        let err = import_timeline_with_id(&mut dst, bad_export).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+        assert!(dst.get_timeline(tl.id()).unwrap().is_none());
+        let _ = committed.remove(0);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_committed_validates_seq_and_payload_hash() {
+        let mut store = MemoryStore::new();
+        let tl = store.create_timeline("t").unwrap();
+        let entity = EntityId::new();
+        let mut good = store
+            .append(tl.id(), &[make_draft(entity, b"x")])
+            .unwrap()
+            .remove(0);
+
+        // Empty committed append is ok.
+        store.append_committed(tl.id(), &[]).unwrap();
+
+        // Collision with existing head (not contiguous — expects head+1).
+        let err = store
+            .append_committed(tl.id(), &[good.clone()])
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("contiguous")));
+
+        // Missing timeline.
+        let err = store
+            .append_committed(TimelineId::new(), &[good.clone()])
+            .unwrap_err();
+        assert!(matches!(err, CoreError::TimelineNotFound(_)));
+
+        // Bad payload hash.
+        good.seq = Seq::from_u64(2);
+        good.payload_hash = pos_core::Hash::from_bytes([9u8; 32]);
+        let err = store
+            .append_committed(tl.id(), &[good.clone()])
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+
+        // Seq gap rejected.
+        good.seq = Seq::from_u64(3);
+        good.payload_hash = pos_crypto::chain::hash_payload(&good.payload);
+        let err = store.append_committed(tl.id(), &[good.clone()]).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("contiguous")));
+
+        // Seq 0 rejected.
+        good.seq = Seq::ZERO;
+        let err = store.append_committed(tl.id(), &[good]).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_committed_rejects_duplicate_event_id() {
+        let mut store = MemoryStore::new();
+        let tl = store.create_timeline("t").unwrap();
+        let entity = EntityId::new();
+        let first = store
+            .append(tl.id(), &[make_draft(entity, b"a")])
+            .unwrap()
+            .remove(0);
+
+        let mut dup = first.clone();
+        dup.seq = Seq::from_u64(2);
+        dup.payload = CanonicalBytes::from_vec(b"b".to_vec());
+        dup.payload_hash = pos_crypto::chain::hash_payload(&dup.payload);
+        // same EventId as first
+        let err = store.append_committed(tl.id(), &[dup]).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("duplicate")));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_committed_rejects_duplicate_id_in_batch() {
+        let mut store = MemoryStore::new();
+        let tl = store.create_timeline("t").unwrap();
+        let entity = EntityId::new();
+        let id = EventId::new();
+        let mk = |seq: u64, payload: &[u8]| {
+            let payload = CanonicalBytes::from_vec(payload.to_vec());
+            Event {
+                id,
+                entity,
+                event_type: Kind::new("t"),
+                payload: payload.clone(),
+                wall_time: WallTime::now(),
+                seq: Seq::from_u64(seq),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: pos_core::SchemaVersion::V1,
+                signature: None,
+                payload_hash: pos_crypto::chain::hash_payload(&payload),
+            }
+        };
+        let err = store
+            .append_committed(tl.id(), &[mk(1, b"a"), mk(2, b"b")])
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("duplicate")));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn export_raw_fork_roundtrip_preserves_cow() {
+        use pos_core::store::{export_timeline, export_timeline_raw, import_timeline_with_id};
+
+        let mut src = MemoryStore::new();
+        let root = src.create_timeline("root").unwrap();
+        let entity = EntityId::new();
+        src.append(root.id(), &[make_draft(entity, b"p1"), make_draft(entity, b"p2")])
+            .unwrap();
+        let child = src.fork(root.id(), Seq::from_u64(1), "child").unwrap();
+        src.append(child.id(), &[make_draft(entity, b"c1")])
+            .unwrap();
+
+        // Logical export flattens fork meta.
+        let logical = export_timeline(&src, child.id()).unwrap();
+        assert!(logical.timeline.meta.fork_point.is_none());
+        assert_eq!(logical.events.len(), 2); // parent[..1] + child
+
+        // Raw export keeps CoW shape.
+        let raw = export_timeline_raw(&src, child.id()).unwrap();
+        assert_eq!(raw.timeline.meta.fork_point, Some((root.id(), Seq::from_u64(1))));
+        assert_eq!(raw.events.len(), 1);
+        assert_eq!(raw.events[0].payload.as_slice(), b"c1");
+
+        let mut dst = MemoryStore::new();
+        let parent_export = export_timeline_raw(&src, root.id()).unwrap();
+        import_timeline_with_id(&mut dst, parent_export).unwrap();
+        let imported = import_timeline_with_id(&mut dst, raw).unwrap();
+        assert_eq!(imported.id(), child.id());
+        assert!(imported.meta.fork_point.is_some());
+        let stitched = dst.read(child.id(), SeqRange::all()).unwrap();
+        assert_eq!(stitched.len(), 2);
+        assert_eq!(stitched[0].payload.as_slice(), b"p1");
+        assert_eq!(stitched[1].payload.as_slice(), b"c1");
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn read_own_skips_parent_events() {
+        let mut store = MemoryStore::new();
+        let root = store.create_timeline("root").unwrap();
+        let entity = EntityId::new();
+        store
+            .append(root.id(), &[make_draft(entity, b"p1")])
+            .unwrap();
+        let child = store.fork(root.id(), Seq::from_u64(1), "child").unwrap();
+        store
+            .append(child.id(), &[make_draft(entity, b"c1")])
+            .unwrap();
+        let own = store.read_own(child.id(), SeqRange::all()).unwrap();
+        assert_eq!(own.len(), 1);
+        assert_eq!(own[0].payload.as_slice(), b"c1");
+        let missing = store.read_own(TimelineId::new(), SeqRange::all()).unwrap_err();
+        assert!(matches!(missing, CoreError::TimelineNotFound(_)));
+
+        let bounded = store
+            .read_own(child.id(), SeqRange::bounded(Seq::from_u64(1), Seq::from_u64(1)))
+            .unwrap();
+        assert_eq!(bounded.len(), 1);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn create_timeline_with_meta_rejects_fork_beyond_head() {
+        let mut store = MemoryStore::new();
+        let root = store.create_timeline("root").unwrap();
+        let entity = EntityId::new();
+        store
+            .append(root.id(), &[make_draft(entity, b"p1")])
+            .unwrap();
+        let mut meta = TimelineMeta::forked_from(root.id(), Seq::from_u64(9), "bad");
+        meta.id = TimelineId::new();
+        let err = store.create_timeline_with_meta(meta).unwrap_err();
+        assert!(matches!(err, CoreError::ForkBeyondHead { .. }));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nested_fork_chain_hash_ignores_parent_events_after_fork() {
+        let mut store = MemoryStore::new();
+        let root = store.create_timeline("root").unwrap();
+        let entity = EntityId::new();
+        store
+            .append(
+                root.id(),
+                &[make_draft(entity, b"r1"), make_draft(entity, b"r2")],
+            )
+            .unwrap();
+        let mid = store.fork(root.id(), Seq::from_u64(1), "mid").unwrap();
+        store
+            .append(mid.id(), &[make_draft(entity, b"m1")])
+            .unwrap();
+        // Parent continues after fork — must not affect mid/leaf chain heads.
+        store
+            .append(root.id(), &[make_draft(entity, b"r3")])
+            .unwrap();
+
+        let mut leaf_meta = TimelineMeta::forked_from(mid.id(), Seq::from_u64(1), "leaf");
+        leaf_meta.id = TimelineId::new();
+        let leaf = store.create_timeline_with_meta(leaf_meta).unwrap();
+
+        // Import-equivalent append on leaf must hash from the CoW snapshot, not root's new tip.
+        let payload = CanonicalBytes::from_vec(b"l1".to_vec());
+        let ev = Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new("t"),
+            payload: payload.clone(),
+            wall_time: WallTime::now(),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: pos_core::SchemaVersion::V1,
+            signature: None,
+            payload_hash: pos_crypto::chain::hash_payload(&payload),
+        };
+        store.append_committed(leaf.id(), &[ev]).unwrap();
+        let stitched = store.read(leaf.id(), SeqRange::all()).unwrap();
+        // leaf @ mid:1 → root[..1]=r1 + mid[..1]=m1 + leaf l1; root's post-fork r3 stays invisible.
+        assert_eq!(stitched.len(), 3);
+        assert_eq!(stitched[0].payload.as_slice(), b"r1");
+        assert_eq!(stitched[1].payload.as_slice(), b"m1");
+        assert_eq!(stitched[2].payload.as_slice(), b"l1");
+        assert!(stitched.iter().all(|e| e.payload.as_slice() != b"r3"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn logical_fork_export_remints_ids_so_import_beside_parent_works() {
+        use pos_core::store::{export_timeline, import_timeline_with_id};
+
+        let mut src = MemoryStore::new();
+        let root = src.create_timeline("root").unwrap();
+        let entity = EntityId::new();
+        src.append(root.id(), &[make_draft(entity, b"p1"), make_draft(entity, b"p2")])
+            .unwrap();
+        let child = src.fork(root.id(), Seq::from_u64(1), "child").unwrap();
+        src.append(child.id(), &[make_draft(entity, b"c1")])
+            .unwrap();
+
+        let logical = export_timeline(&src, child.id()).unwrap();
+        assert!(logical.timeline.meta.fork_point.is_none());
+        assert_eq!(logical.timeline.head, Seq::from_u64(2));
+        let parent_ids: std::collections::HashSet<_> = src
+            .read_own(root.id(), SeqRange::all())
+            .unwrap()
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        for e in &logical.events {
+            assert!(!parent_ids.contains(&e.id));
+        }
+
+        let mut dst = MemoryStore::new();
+        import_timeline_with_id(&mut dst, export_timeline(&src, root.id()).unwrap()).unwrap();
+        // Flattened child import must not collide with parent EventIds.
+        import_timeline_with_id(&mut dst, logical).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn create_timeline_with_meta_surfaces_broken_parent_chain() {
+        let mut store = MemoryStore::new();
+        // Parent row exists but its fork_point points at a missing grandparent.
+        let mut broken_meta =
+            TimelineMeta::forked_from(TimelineId::new(), Seq::from_u64(1), "broken");
+        broken_meta.id = TimelineId::new();
+        let broken = Timeline::new(broken_meta);
+        store.timelines.insert(broken.id(), broken.clone());
+        store.events.insert(broken.id(), Vec::new());
+        store
+            .chain_heads
+            .insert(broken.id(), pos_crypto::chain::genesis_hash());
+
+        let mut child_meta = TimelineMeta::forked_from(broken.id(), Seq::ZERO, "child");
+        child_meta.id = TimelineId::new();
+        let err = store.create_timeline_with_meta(child_meta).unwrap_err();
+        assert!(matches!(err, CoreError::TimelineNotFound(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_rejects_fork_parent_chain_hash_mismatch() {
+        use pos_core::store::{export_timeline_raw, import_timeline_with_id};
+
+        let mut src = MemoryStore::new();
+        let root = src.create_timeline("root").unwrap();
+        let entity = EntityId::new();
+        src.append(root.id(), &[make_draft(entity, b"p1")])
+            .unwrap();
+        let child = src.fork(root.id(), Seq::from_u64(1), "child").unwrap();
+
+        let mut dst = MemoryStore::new();
+        // Divergent parent with same id but different payload.
+        let mut parent_export = export_timeline_raw(&src, root.id()).unwrap();
+        parent_export.events[0].payload = CanonicalBytes::from_vec(b"OTHER".to_vec());
+        parent_export.events[0].payload_hash =
+            pos_crypto::chain::hash_payload(&parent_export.events[0].payload);
+        import_timeline_with_id(&mut dst, parent_export).unwrap();
+
+        let child_export = export_timeline_raw(&src, child.id()).unwrap();
+        assert!(child_export.parent_fork_hash.is_some());
+        let err = import_timeline_with_id(&mut dst, child_export).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("chain hash mismatch")));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_rejects_when_chain_hash_at_fails() {
+        use pos_core::store::import_timeline_with_id;
+
+        struct HashFailOnImport {
+            base: MemoryStore,
+        }
+        impl EventStore for HashFailOnImport {
+            fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
+                self.base.create_timeline(name)
+            }
+            fn append(
+                &mut self,
+                timeline: TimelineId,
+                drafts: &[EventDraft],
+            ) -> Result<Vec<Event>, CoreError> {
+                self.base.append(timeline, drafts)
+            }
+            fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+                self.base.read(timeline, range)
+            }
+            fn read_own(
+                &self,
+                timeline: TimelineId,
+                range: SeqRange,
+            ) -> Result<Vec<Event>, CoreError> {
+                self.base.read_own(timeline, range)
+            }
+            fn fork(
+                &mut self,
+                parent: TimelineId,
+                at_seq: Seq,
+                name: &str,
+            ) -> Result<Timeline, CoreError> {
+                self.base.fork(parent, at_seq, name)
+            }
+            fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+                self.base.list_timelines()
+            }
+            fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+                self.base.get_timeline(id)
+            }
+            fn create_timeline_with_meta(
+                &mut self,
+                meta: TimelineMeta,
+            ) -> Result<Timeline, CoreError> {
+                self.base.create_timeline_with_meta(meta)
+            }
+            fn append_committed(
+                &mut self,
+                timeline: TimelineId,
+                events: &[Event],
+            ) -> Result<(), CoreError> {
+                self.base.append_committed(timeline, events)
+            }
+            fn delete_timeline(&mut self, id: TimelineId) -> Result<(), CoreError> {
+                self.base.delete_timeline(id)
+            }
+            fn chain_hash_at(&self, _: TimelineId, _: Seq) -> Result<Hash, CoreError> {
+                Err(CoreError::Storage("chain lookup failed".to_owned()))
+            }
+            fn import_committed(
+                &mut self,
+                meta: TimelineMeta,
+                events: &[Event],
+            ) -> Result<Timeline, CoreError> {
+                pos_core::store::import_committed_with_rollback(self, meta, events)
+            }
+        }
+
+        let mut store = HashFailOnImport {
+            base: MemoryStore::new(),
+        };
+        let parent = store.create_timeline("root").unwrap();
+        let mut meta = TimelineMeta::forked_from(parent.id(), Seq::ZERO, "child");
+        meta.id = TimelineId::new();
+        let export = TimelineExport {
+            timeline: Timeline::new(meta),
+            events: vec![],
+            parent_fork_hash: Some(Hash::zero()),
+        };
+        let err = import_timeline_with_id(&mut store, export).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("chain lookup")));
     }
 }

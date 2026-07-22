@@ -23,6 +23,12 @@ thread_local! {
     pub(crate) static FAIL_OPEN_IN_MEMORY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Test-only fault injection: force `query` after `prepare` to fail.
     static FAIL_STMT_QUERY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test-only fault injection: force `BEGIN IMMEDIATE` in append/import to fail.
+    static FAIL_BEGIN_IMMEDIATE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test-only fault injection: make import_committed see a vanished timeline after write.
+    static FAIL_IMPORT_VANISH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test-only fault injection: make import_committed's get_timeline hit a storage error.
+    static FAIL_IMPORT_GET_STORAGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Test-only fault injection: force `Rows::next` to return Err.
     static FAIL_ROWS_NEXT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -114,8 +120,10 @@ impl SqliteStore {
                  correlation_id TEXT,
                  schema_version INTEGER NOT NULL,
                  payload_hash BLOB NOT NULL,
+                 signature   BLOB,
                  PRIMARY KEY (timeline_id, seq)
-             );",
+             );
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id);",
             )
             .map_err(storage_err)?;
         self.run_migrations()
@@ -132,18 +140,54 @@ impl SqliteStore {
             )
             .map_err(storage_err)?;
 
-        // Future migrations go here as version increments:
-        // if version < 1 { /* migration 1 */ }
-        // if version < 2 { /* migration 2 */ }
-
-        // Record current version if schema_version was empty
-        if version == 0 {
-            self.conn
-                .execute("INSERT INTO schema_version (version) VALUES (1)", [])
-                .map_err(storage_err)?;
+        // Always ensure v2 columns/indexes exist before stamping the version.
+        // Covers: fresh DBs (CREATE TABLE already has them — ALTER is no-op-ish),
+        // and legacy DBs that somehow lack a schema_version row (version == 0)
+        // while still having a pre-v2 events table without `signature`.
+        if version < 2 {
+            self.migrate_events_to_v2()?;
+            if version == 0 {
+                self.conn
+                    .execute("INSERT INTO schema_version (version) VALUES (2)", [])
+                    .map_err(storage_err)?;
+            } else {
+                self.conn
+                    .execute("UPDATE schema_version SET version = 2", [])
+                    .map_err(storage_err)?;
+            }
         }
 
         Ok(())
+    }
+
+    /// Add `signature` column + unique `event_id` index (idempotent where possible).
+    fn migrate_events_to_v2(&self) -> Result<(), CoreError> {
+        // Prefer probing the schema over matching error strings.
+        let has_signature = self
+            .conn
+            .prepare("SELECT signature FROM events LIMIT 0")
+            .is_ok();
+        if !has_signature {
+            self.conn
+                .execute("ALTER TABLE events ADD COLUMN signature BLOB", [])
+                .map_err(storage_err)?;
+        }
+        self.conn
+            .execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id)",
+                [],
+            )
+            .map_err(|e| {
+                CoreError::Storage(format!(
+                    "cannot enforce unique event_id index (duplicate EventIds in existing data?): {e}"
+                ))
+            })?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_run_migrations(&self) -> Result<(), CoreError> {
+        self.run_migrations()
     }
 
     fn get_head_seq(&self, timeline_id: TimelineId) -> Result<Seq, CoreError> {
@@ -169,7 +213,7 @@ impl SqliteStore {
             || {
                 format!(
                     "SELECT seq, event_id, entity_id, event_type, payload, wall_time,
-                        causation_id, correlation_id, schema_version, payload_hash
+                        causation_id, correlation_id, schema_version, payload_hash, signature
                  FROM events WHERE timeline_id = '{}' AND seq >= {}
                  ORDER BY seq ASC",
                     timeline_id,
@@ -179,7 +223,7 @@ impl SqliteStore {
             |t| {
                 format!(
                     "SELECT seq, event_id, entity_id, event_type, payload, wall_time,
-                        causation_id, correlation_id, schema_version, payload_hash
+                        causation_id, correlation_id, schema_version, payload_hash, signature
                  FROM events WHERE timeline_id = '{}' AND seq >= {} AND seq <= {}
                  ORDER BY seq ASC",
                     timeline_id,
@@ -222,9 +266,19 @@ impl SqliteStore {
             let correlation_id: Option<String> = row.get(7).map_err(storage_err)?;
             let schema_version: i64 = row.get(8).map_err(storage_err)?;
             let ph_bytes: Vec<u8> = row.get(9).map_err(storage_err)?;
+            let sig_bytes: Option<Vec<u8>> = row.get(10).map_err(storage_err)?;
             let ph_arr: [u8; 32] = ph_bytes
                 .try_into()
                 .map_err(|_| CoreError::Serialization("bad hash".to_owned()))?;
+            let signature = match sig_bytes {
+                None => None,
+                Some(bytes) => {
+                    let arr: [u8; 64] = bytes
+                        .try_into()
+                        .map_err(|_| CoreError::Serialization("bad signature length".to_owned()))?;
+                    Some(pos_core::Signature::from_bytes(arr))
+                }
+            };
             events.push(Event {
                 id: parse_event_id(&event_id)?,
                 entity: parse_entity_id(&entity_id)?,
@@ -238,7 +292,7 @@ impl SqliteStore {
                     .map(parse_correlation_id)
                     .transpose()?,
                 schema_version: SchemaVersion::new(u32::try_from(schema_version).unwrap_or(0)),
-                signature: None,
+                signature,
                 payload_hash: pos_core::Hash::from_bytes(ph_arr),
             });
         }
@@ -341,7 +395,7 @@ impl EventStore for SqliteStore {
                  VALUES (?1, ?2, ?3, NULL, NULL, 0, ?4)",
                 params![
                     timeline.id().to_string(),
-                    timeline.meta.name.as_deref().unwrap_or(""),
+                    timeline.meta.name.as_deref(),
                     mode_str(timeline.mode()),
                     chain_head.as_bytes().as_slice(),
                 ],
@@ -395,8 +449,8 @@ impl EventStore for SqliteStore {
             tx.execute(
                 "INSERT INTO events
                  (timeline_id, seq, event_id, entity_id, event_type, payload, wall_time,
-                  causation_id, correlation_id, schema_version, payload_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                  causation_id, correlation_id, schema_version, payload_hash, signature)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     timeline.to_string(),
                     i64::try_from(seq.as_u64()).unwrap_or(i64::MAX),
@@ -409,6 +463,7 @@ impl EventStore for SqliteStore {
                     draft.correlation_id.map(|id| id.to_string()),
                     i64::from(draft.schema_version.as_u32()),
                     payload_hash.as_bytes().as_slice(),
+                    Option::<&[u8]>::None,
                 ],
             )
             .map_err(storage_err)?;
@@ -469,6 +524,14 @@ impl EventStore for SqliteStore {
         Ok(crate::stitch::renumber_and_filter(all, range))
     }
 
+    fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+        // Ensure timeline exists (and surface TimelineNotFound for missing ids).
+        let _ = self
+            .get_timeline(timeline)?
+            .ok_or(CoreError::TimelineNotFound(timeline))?;
+        self.read_own_events(timeline, range.from, range.to)
+    }
+
     fn fork(&mut self, parent: TimelineId, at_seq: Seq, name: &str) -> Result<Timeline, CoreError> {
         let head = self.get_head_seq(parent)?;
         if at_seq > head {
@@ -490,7 +553,7 @@ impl EventStore for SqliteStore {
                  VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
                 params![
                     child.id().to_string(),
-                    child.meta.name.as_deref().unwrap_or(""),
+                    child.meta.name.as_deref(),
                     mode_str(child.mode()),
                     parent.to_string(),
                     i64::try_from(at_seq.as_u64()).unwrap_or(i64::MAX),
@@ -558,9 +621,251 @@ impl EventStore for SqliteStore {
             )),
         }
     }
+
+    fn create_timeline_with_meta(&mut self, meta: TimelineMeta) -> Result<Timeline, CoreError> {
+        let id = meta.id;
+        // Resolve fork parent before the duplicate-id check so storage failures on the
+        // parent lookup are exercised (and fail closed before INSERT).
+        let chain_head = match meta.fork_point {
+            Some((parent, at_seq)) => {
+                let parent_tl = self
+                    .get_timeline(parent)?
+                    .ok_or(CoreError::TimelineNotFound(parent))?;
+                if at_seq > parent_tl.head {
+                    return Err(CoreError::ForkBeyondHead {
+                        fork_seq: at_seq.as_u64(),
+                        head: parent_tl.head.as_u64(),
+                    });
+                }
+                self.compute_chain_hash_at(parent, at_seq)?
+            }
+            None => genesis_hash(),
+        };
+        if self.get_timeline(id)?.is_some() {
+            return Err(CoreError::Storage(format!("timeline already exists: {id}")));
+        }
+        let (parent_id, fork_seq) = match meta.fork_point {
+            Some((parent, at_seq)) => (Some(parent.to_string()), Some(seq_as_i64(at_seq))),
+            None => (None, None),
+        };
+        let timeline = Timeline::new(meta);
+        self.conn
+            .execute(
+                "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+                params![
+                    timeline.id().to_string(),
+                    timeline.meta.name.as_deref(),
+                    mode_str(timeline.mode()),
+                    parent_id,
+                    fork_seq,
+                    chain_head.as_bytes().as_slice(),
+                ],
+            )
+            .map_err(storage_err)?;
+        Ok(timeline)
+    }
+
+    fn append_committed(
+        &mut self,
+        timeline: TimelineId,
+        events: &[Event],
+    ) -> Result<(), CoreError> {
+        if events.is_empty() {
+            let _ = self
+                .get_timeline(timeline)?
+                .ok_or(CoreError::TimelineNotFound(timeline))?;
+            return Ok(());
+        }
+
+        let (head_seq, prev_hash) = match self.conn.query_row(
+            "SELECT head_seq, chain_head FROM timelines WHERE id = ?1",
+            params![timeline.to_string()],
+            |row| match (row.get::<_, i64>(0), row.get::<_, Vec<u8>>(1)) {
+                (Ok(n), Ok(bytes)) => Ok((n, bytes)),
+                (Err(e), _) | (_, Err(e)) => Err(e),
+            },
+        ) {
+            Ok((n, bytes)) => {
+                let arr: [u8; 32] = bytes
+                    .try_into()
+                    .map_err(|_| CoreError::Serialization("bad hash length".to_owned()))?;
+                (
+                    Seq::from_u64(u64::try_from(n).unwrap_or(0)),
+                    pos_core::Hash::from_bytes(arr),
+                )
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return Err(CoreError::TimelineNotFound(timeline));
+            }
+            Err(e) => return Err(storage_err(e)),
+        };
+
+        let ordered = pos_core::store::validate_committed_batch(
+            head_seq,
+            events,
+            &mut |id| {
+                self.conn
+                    .query_row(
+                        "SELECT 1 FROM events WHERE event_id = ?1",
+                        params![id.to_string()],
+                        |_| Ok(()),
+                    )
+                    .optional()
+                    .map(|row| row.is_some())
+                    .unwrap_or(true) // treat lookup failure as taken to fail closed
+            },
+            &|event| hash_payload(&event.payload) == event.payload_hash,
+        )?;
+
+        // Join an outer import transaction when present; otherwise own the txn.
+        let own_tx = self.conn.is_autocommit();
+        if own_tx {
+            self.conn
+                .execute_batch(begin_immediate_sql())
+                .map_err(storage_err)?;
+        }
+        let applied = self.write_committed_rows(timeline, head_seq, prev_hash, &ordered);
+        if own_tx {
+            match &applied {
+                Ok(()) => self.conn.execute_batch("COMMIT").map_err(storage_err)?,
+                Err(_) => {
+                    let _ = self.conn.execute_batch("ROLLBACK");
+                }
+            }
+        }
+        applied
+    }
+
+    fn delete_timeline(&mut self, id: TimelineId) -> Result<(), CoreError> {
+        let id_str = id.to_string();
+        // Refuse delete while child forks still reference this timeline.
+        let child_count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM timelines WHERE parent_id = ?1",
+                params![id_str],
+                |row| row.get(0),
+            )
+            .map_err(storage_err)?;
+        if child_count > 0 {
+            return Err(CoreError::Storage(
+                "cannot delete timeline that still has forks".to_owned(),
+            ));
+        }
+
+        let tx = self.conn.transaction().map_err(storage_err)?;
+        tx.execute("DELETE FROM events WHERE timeline_id = ?1", params![id_str])
+            .map_err(storage_err)?;
+        let deleted = tx
+            .execute("DELETE FROM timelines WHERE id = ?1", params![id_str])
+            .map_err(storage_err)?;
+        if deleted == 0 {
+            return Err(CoreError::TimelineNotFound(id));
+        }
+        tx.commit().map_err(storage_err)?;
+        Ok(())
+    }
+
+    fn chain_hash_at(
+        &self,
+        timeline: TimelineId,
+        at_seq: Seq,
+    ) -> Result<pos_core::Hash, CoreError> {
+        self.compute_chain_hash_at(timeline, at_seq)
+    }
+
+    fn import_committed(
+        &mut self,
+        meta: TimelineMeta,
+        events: &[Event],
+    ) -> Result<Timeline, CoreError> {
+        // Single transaction so create+append is all-or-nothing for concurrent readers.
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(storage_err)?;
+        let expected_id = meta.id;
+        let result = (|| {
+            self.create_timeline_with_meta(meta)?;
+            self.append_committed(expected_id, events)?;
+            #[cfg(test)]
+            if FAIL_IMPORT_VANISH.with(std::cell::Cell::get) {
+                // Delete row so get_timeline returns Ok(None) inside this transaction.
+                let _ = self.conn.execute(
+                    "DELETE FROM timelines WHERE id = ?1",
+                    params![expected_id.to_string()],
+                );
+            }
+            #[cfg(test)]
+            if FAIL_IMPORT_GET_STORAGE.with(std::cell::Cell::get) {
+                let _ = self.conn.execute_batch("DROP TABLE timelines");
+            }
+            self.get_timeline(expected_id)?
+                .ok_or(CoreError::TimelineNotFound(expected_id))
+        })();
+        match result {
+            Ok(tl) => {
+                self.conn.execute_batch("COMMIT").map_err(storage_err)?;
+                Ok(tl)
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
+    }
 }
 
 impl SqliteStore {
+    fn write_committed_rows(
+        &self,
+        timeline: TimelineId,
+        head_seq: Seq,
+        mut prev_hash: pos_core::Hash,
+        ordered: &[Event],
+    ) -> Result<(), CoreError> {
+        let mut new_head = head_seq;
+        for event in ordered {
+            let id_str = event.id.to_string();
+            prev_hash = hash_event(&prev_hash, id_str.as_bytes(), &event.payload);
+            let sig_bytes = event.signature.as_ref().map(|s| s.as_bytes().as_slice());
+            self.conn
+                .execute(
+                    "INSERT INTO events
+                     (timeline_id, seq, event_id, entity_id, event_type, payload, wall_time,
+                      causation_id, correlation_id, schema_version, payload_hash, signature)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    params![
+                        timeline.to_string(),
+                        seq_as_i64(event.seq),
+                        id_str,
+                        event.entity.to_string(),
+                        event.event_type.as_str(),
+                        event.payload.as_slice(),
+                        u64_as_i64(event.wall_time.as_micros()),
+                        event.causation_id.map(|id| id.to_string()),
+                        event.correlation_id.map(|id| id.to_string()),
+                        i64::from(event.schema_version.as_u32()),
+                        event.payload_hash.as_bytes().as_slice(),
+                        sig_bytes,
+                    ],
+                )
+                .map_err(storage_err)?;
+            new_head = event.seq;
+        }
+        self.conn
+            .execute(
+                "UPDATE timelines SET head_seq = ?1, chain_head = ?2 WHERE id = ?3",
+                params![
+                    seq_as_i64(new_head),
+                    prev_hash.as_bytes().as_slice(),
+                    timeline.to_string(),
+                ],
+            )
+            .map_err(storage_err)?;
+        Ok(())
+    }
+
     fn compute_chain_hash_at(
         &self,
         timeline: TimelineId,
@@ -598,12 +903,30 @@ fn storage_err(e: rusqlite::Error) -> CoreError {
     CoreError::Storage(e.to_string())
 }
 
+fn begin_immediate_sql() -> &'static str {
+    #[cfg(test)]
+    if FAIL_BEGIN_IMMEDIATE.with(std::cell::Cell::get) {
+        return "SELECT RAISE(ABORT, 'begin fault')";
+    }
+    "BEGIN IMMEDIATE"
+}
+
 const fn mode_str(mode: TimelineMode) -> &'static str {
     match mode {
         TimelineMode::Historical => "historical",
         TimelineMode::Live => "live",
         TimelineMode::Future => "future",
     }
+}
+
+/// Persist a [`Seq`] as `SQLite` INTEGER (saturates at [`i64::MAX`]).
+fn seq_as_i64(seq: Seq) -> i64 {
+    i64::try_from(seq.as_u64()).unwrap_or(i64::MAX)
+}
+
+/// Persist a `u64` micros value as `SQLite` INTEGER (saturates at [`i64::MAX`]).
+fn u64_as_i64(v: u64) -> i64 {
+    i64::try_from(v).unwrap_or(i64::MAX)
 }
 
 fn parse_mode(s: &str) -> TimelineMode {
@@ -950,30 +1273,39 @@ mod tests {
             )
             .expect("schema_version query should succeed");
         assert!(
-            version >= 1,
-            "schema_version should be at least 1 after open, got {version}"
+            version >= 2,
+            "schema_version should be at least 2 after open, got {version}"
         );
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn schema_version_not_duplicated_on_reopen() {
-        // Opens the same file twice — second open finds version=1 already set,
-        // so the INSERT branch is skipped (covers the if version == 0 false path).
+        // Opens the same file twice — second open finds version already set,
+        // so the INSERT branch is skipped (covers the version == 0 false path).
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().to_str().unwrap().to_owned();
         {
             let _store = SqliteStore::open(&path).unwrap();
-            // First open: inserts schema_version = 1
+            // First open: inserts schema_version = 2
         }
         {
             let store = SqliteStore::open(&path).unwrap();
-            // Second open: version already = 1, INSERT is skipped
+            // Second open: version already = 2, INSERT is skipped
             let count: i64 = store
                 .conn
                 .query_row("SELECT COUNT(*) FROM schema_version", [], |row| row.get(0))
                 .unwrap();
             assert_eq!(count, 1, "schema_version should have exactly one row");
+            let version: i64 = store
+                .conn
+                .query_row(
+                    "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(version, 2);
         }
     }
 
@@ -2207,5 +2539,1026 @@ mod tests {
             CoreError::Storage(_) | CoreError::Serialization(_) => {} // Expected for corrupt data
             other => panic!("Expected Storage or Serialization error, got {other:?}"),
         }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_timeline_with_id_preserves_identity_sqlite() {
+        use pos_core::store::{export_timeline, import_timeline_with_id};
+
+        let mut src = new_store();
+        let tl = src.create_timeline("shared").unwrap();
+        let entity = EntityId::new();
+        let committed = src
+            .append(
+                tl.id(),
+                &[make_draft(entity, b"one"), make_draft(entity, b"two")],
+            )
+            .unwrap();
+        let export = export_timeline(&src, tl.id()).unwrap();
+        let original_tl_id = tl.id();
+        let original_ids: Vec<_> = committed.iter().map(|e| e.id).collect();
+
+        let mut dst = new_store();
+        let imported = import_timeline_with_id(&mut dst, export).unwrap();
+        assert_eq!(imported.id(), original_tl_id);
+        let events = dst.read(original_tl_id, SeqRange::all()).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].id, original_ids[0]);
+        assert_eq!(events[1].id, original_ids[1]);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn delete_timeline_removes_and_blocks_fork_parent() {
+        let mut store = new_store();
+        let root = store.create_timeline("root").unwrap();
+        let entity = EntityId::new();
+        store
+            .append(
+                root.id(),
+                &[EventDraft::new(
+                    entity,
+                    Kind::new("t"),
+                    CanonicalBytes::from_vec(b"r1".to_vec()),
+                )],
+            )
+            .unwrap();
+        let child = store.fork(root.id(), Seq::from_u64(1), "child").unwrap();
+        let err = store.delete_timeline(root.id()).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+        store.delete_timeline(child.id()).unwrap();
+        store.delete_timeline(root.id()).unwrap();
+        assert!(store.get_timeline(root.id()).unwrap().is_none());
+        let err = store.delete_timeline(root.id()).unwrap_err();
+        assert!(matches!(err, CoreError::TimelineNotFound(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn delete_timeline_fails_when_query_row_errors() {
+        let mut store = new_store();
+        let tl = store.create_timeline("t").unwrap();
+        store
+            .conn
+            .execute_batch("DROP TABLE timelines; CREATE TABLE timelines (id TEXT)")
+            .unwrap();
+        let err = store.delete_timeline(tl.id()).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn delete_timeline_fails_when_already_in_transaction() {
+        let mut store = new_store();
+        let tl = store.create_timeline("t").unwrap();
+        store.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let err = store.delete_timeline(tl.id()).unwrap_err();
+        let _ = store.conn.execute_batch("ROLLBACK");
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn delete_timeline_fails_when_events_table_dropped() {
+        let mut store = new_store();
+        let tl = store.create_timeline("t").unwrap();
+        store.conn.execute_batch("DROP TABLE events").unwrap();
+        let err = store.delete_timeline(tl.id()).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn delete_timeline_fails_when_commit_hook_aborts() {
+        let mut store = new_store();
+        let tl = store.create_timeline("t").unwrap();
+        store.conn.commit_hook(Some(|| true));
+        let err = store.delete_timeline(tl.id()).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn delete_timeline_fails_when_timelines_delete_aborted() {
+        let mut store = new_store();
+        let tl = store.create_timeline("t").unwrap();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER deny_timeline_delete BEFORE DELETE ON timelines
+                 BEGIN SELECT RAISE(ABORT, 'blocked'); END;",
+            )
+            .unwrap();
+        let err = store.delete_timeline(tl.id()).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_committed_validates_seq_hash_and_ids_sqlite() {
+        let mut store = new_store();
+        let tl = store.create_timeline("t").unwrap();
+        let entity = EntityId::new();
+        let first = store
+            .append(tl.id(), &[make_draft(entity, b"a")])
+            .unwrap()
+            .remove(0);
+
+        store.append_committed(tl.id(), &[]).unwrap();
+
+        // Collision / non-contiguous with head.
+        let err = store
+            .append_committed(tl.id(), std::slice::from_ref(&first))
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("contiguous")));
+
+        // Gap.
+        let mut gap = first.clone();
+        gap.id = EventId::new();
+        gap.seq = Seq::from_u64(3);
+        gap.payload_hash = hash_payload(&gap.payload);
+        let err = store.append_committed(tl.id(), &[gap]).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("contiguous")));
+
+        // Seq 0.
+        let mut zero = first.clone();
+        zero.id = EventId::new();
+        zero.seq = Seq::ZERO;
+        zero.payload_hash = hash_payload(&zero.payload);
+        let err = store.append_committed(tl.id(), &[zero]).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+
+        // Bad payload hash.
+        let mut bad = first.clone();
+        bad.id = EventId::new();
+        bad.seq = Seq::from_u64(2);
+        bad.payload_hash = pos_core::Hash::from_bytes([9u8; 32]);
+        let err = store.append_committed(tl.id(), &[bad]).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("payload_hash")));
+
+        // Duplicate id within batch.
+        let mut a = first.clone();
+        a.id = EventId::new();
+        a.seq = Seq::from_u64(2);
+        a.payload = CanonicalBytes::from_vec(b"x".to_vec());
+        a.payload_hash = hash_payload(&a.payload);
+        let mut b = a.clone();
+        b.seq = Seq::from_u64(3);
+        b.payload = CanonicalBytes::from_vec(b"y".to_vec());
+        b.payload_hash = hash_payload(&b.payload);
+        let err = store.append_committed(tl.id(), &[a, b]).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("duplicate")));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_timeline_with_id_rolls_back_on_append_fail_sqlite() {
+        use pos_core::store::{export_timeline, import_timeline_with_id};
+        let mut src = new_store();
+        let tl = src.create_timeline("shared").unwrap();
+        let entity = EntityId::new();
+        src.append(
+            tl.id(),
+            &[EventDraft::new(
+                entity,
+                Kind::new("t"),
+                CanonicalBytes::from_vec(b"one".to_vec()),
+            )],
+        )
+        .unwrap();
+        let mut export = export_timeline(&src, tl.id()).unwrap();
+        export.events[0].payload_hash = pos_core::Hash::from_bytes([1u8; 32]);
+        let mut dst = new_store();
+        let err = import_timeline_with_id(&mut dst, export).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+        assert!(dst.get_timeline(tl.id()).unwrap().is_none());
+    }
+
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn create_timeline_with_meta_and_append_committed_error_paths() {
+        let mut store = new_store();
+        let root = store.create_timeline("root").unwrap();
+        let err = store
+            .create_timeline_with_meta(root.meta.clone())
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+
+        let orphan = TimelineMeta::forked_from(TimelineId::new(), Seq::from_u64(1), "orphan");
+        let err = store.create_timeline_with_meta(orphan).unwrap_err();
+        assert!(matches!(err, CoreError::TimelineNotFound(_)));
+
+        store.append_committed(root.id(), &[]).unwrap();
+        let err = store.append_committed(TimelineId::new(), &[]).unwrap_err();
+        assert!(matches!(err, CoreError::TimelineNotFound(_)));
+
+        let entity = EntityId::new();
+        let mut good = store
+            .append(root.id(), &[make_draft(entity, b"x")])
+            .unwrap()
+            .remove(0);
+        let err = store
+            .append_committed(root.id(), &[good.clone()])
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+
+        good.seq = Seq::from_u64(99);
+        good.payload_hash = pos_core::Hash::from_bytes([1u8; 32]);
+        let err = store
+            .append_committed(root.id(), &[good.clone()])
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+
+        good.seq = Seq::ZERO;
+        good.payload_hash = hash_payload(&good.payload);
+        let err = store.append_committed(root.id(), &[good]).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn create_timeline_with_meta_fork_child_succeeds() {
+        let mut store = new_store();
+        let root = store.create_timeline("root").unwrap();
+        let entity = EntityId::new();
+        store
+            .append(root.id(), &[make_draft(entity, b"r1")])
+            .unwrap();
+        let child_meta = TimelineMeta::forked_from(root.id(), Seq::from_u64(1), "imported-child");
+        // Preserve a chosen id by rebuilding meta (forked_from generates a new id).
+        let chosen = TimelineMeta {
+            id: TimelineId::new(),
+            mode: child_meta.mode,
+            name: child_meta.name,
+            fork_point: child_meta.fork_point,
+        };
+        let chosen_id = chosen.id;
+        let child = store.create_timeline_with_meta(chosen).unwrap();
+        assert_eq!(child.id(), chosen_id);
+        assert_eq!(child.meta.fork_point, Some((root.id(), Seq::from_u64(1))));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn create_timeline_with_meta_fails_when_get_timeline_errors() {
+        let mut store = new_store();
+        let meta = TimelineMeta::root("x");
+        store
+            .conn
+            .execute_batch("DROP TABLE timelines; CREATE TABLE timelines (id TEXT)")
+            .unwrap();
+        let err = store.create_timeline_with_meta(meta).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_committed_fails_when_events_table_dropped() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        let mut good = store
+            .append(tl.id(), &[make_draft(entity, b"x")])
+            .unwrap()
+            .remove(0);
+        good.id = EventId::new();
+        good.seq = Seq::from_u64(2);
+        good.payload_hash = hash_payload(&good.payload);
+        store.conn.execute_batch("DROP TABLE events").unwrap();
+        let err = store.append_committed(tl.id(), &[good]).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_committed_fails_when_chain_head_corrupted() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        let mut good = store
+            .append(tl.id(), &[make_draft(entity, b"x")])
+            .unwrap()
+            .remove(0);
+        good.id = EventId::new();
+        good.seq = Seq::from_u64(2);
+        good.payload_hash = hash_payload(&good.payload);
+        store
+            .conn
+            .execute(
+                "UPDATE timelines SET chain_head = ? WHERE id = ?",
+                params![vec![0u8; 16], tl.id().to_string()],
+            )
+            .unwrap();
+        let err = store.append_committed(tl.id(), &[good]).unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::Storage(_) | CoreError::Serialization(_)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn seq_as_i64_and_u64_as_i64_saturate() {
+        assert_eq!(seq_as_i64(Seq::from_u64(42)), 42);
+        assert_eq!(seq_as_i64(Seq::from_u64(u64::MAX)), i64::MAX);
+        assert_eq!(u64_as_i64(7), 7);
+        assert_eq!(u64_as_i64(u64::MAX), i64::MAX);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_committed_missing_timeline_with_events() {
+        let mut store = new_store();
+        let entity = EntityId::new();
+        let tl = store.create_timeline("tmp").unwrap();
+        let ev = store
+            .append(tl.id(), &[make_draft(entity, b"x")])
+            .unwrap()
+            .remove(0);
+        let err = store
+            .append_committed(TimelineId::new(), &[ev])
+            .unwrap_err();
+        assert!(matches!(err, CoreError::TimelineNotFound(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_committed_joins_outer_transaction() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        let mut ev = store
+            .append(tl.id(), &[make_draft(entity, b"x")])
+            .unwrap()
+            .remove(0);
+        ev.id = EventId::new();
+        ev.seq = Seq::from_u64(2);
+        ev.payload_hash = hash_payload(&ev.payload);
+        store.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        store.append_committed(tl.id(), &[ev]).unwrap();
+        store.conn.execute_batch("ROLLBACK").unwrap();
+        // Outer rollback undoes the joined append.
+        let events = store.read_own(tl.id(), SeqRange::all()).unwrap();
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_committed_fails_when_commit_hook_aborts() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        let mut ev = store
+            .append(tl.id(), &[make_draft(entity, b"x")])
+            .unwrap()
+            .remove(0);
+        ev.id = EventId::new();
+        ev.seq = Seq::from_u64(2);
+        ev.payload_hash = hash_payload(&ev.payload);
+        store.conn.commit_hook(Some(|| true));
+        let err = store.append_committed(tl.id(), &[ev]).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn create_timeline_with_meta_insert_fails_on_readonly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.sqlite");
+        let path_s = path.to_str().unwrap();
+        {
+            let mut store = SqliteStore::open(path_s).unwrap();
+            let _ = store.create_timeline("seed").unwrap();
+        }
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&path, perms).unwrap();
+        let mut store = SqliteStore::open(path_s).unwrap();
+        let err = store
+            .create_timeline_with_meta(TimelineMeta::root("x"))
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_committed_empty_get_timeline_err() {
+        let mut store = new_store();
+        let id = TimelineId::new();
+        store
+            .conn
+            .execute_batch("DROP TABLE timelines; CREATE TABLE timelines (id TEXT)")
+            .unwrap();
+        let err = store.append_committed(id, &[]).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_committed_preserves_optional_ids() {
+        use pos_core::ids::CorrelationId;
+        use pos_core::store::{export_timeline, import_timeline_with_id};
+
+        let mut src = new_store();
+        let tl = src.create_timeline("shared").unwrap();
+        let entity = EntityId::new();
+        let mut drafts = vec![make_draft(entity, b"one")];
+        drafts[0].causation_id = Some(EventId::new());
+        drafts[0].correlation_id = Some(CorrelationId::new());
+        src.append(tl.id(), &drafts).unwrap();
+        let export = export_timeline(&src, tl.id()).unwrap();
+        assert!(export.events[0].causation_id.is_some());
+        assert!(export.events[0].correlation_id.is_some());
+
+        let mut dst = new_store();
+        let imported = import_timeline_with_id(&mut dst, export).unwrap();
+        let events = dst.read(imported.id(), SeqRange::all()).unwrap();
+        assert!(events[0].causation_id.is_some());
+        assert!(events[0].correlation_id.is_some());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_committed_row_get_type_error() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        let mut ev = store
+            .append(tl.id(), &[make_draft(entity, b"x")])
+            .unwrap()
+            .remove(0);
+        ev.id = EventId::new();
+        ev.seq = Seq::from_u64(2);
+        ev.payload_hash = hash_payload(&ev.payload);
+        // Force head_seq to a non-integer blob so row.get::<i64> fails.
+        store
+            .conn
+            .execute(
+                "UPDATE timelines SET head_seq = x'00' WHERE id = ?",
+                params![tl.id().to_string()],
+            )
+            .unwrap();
+        let err = store.append_committed(tl.id(), &[ev]).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_committed_chain_head_type_error() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        let mut ev = store
+            .append(tl.id(), &[make_draft(entity, b"x")])
+            .unwrap()
+            .remove(0);
+        ev.id = EventId::new();
+        ev.seq = Seq::from_u64(2);
+        ev.payload_hash = hash_payload(&ev.payload);
+        // head_seq stays i64; chain_head becomes INTEGER so Vec<u8> get fails.
+        store
+            .conn
+            .execute(
+                "UPDATE timelines SET chain_head = 1 WHERE id = ?",
+                params![tl.id().to_string()],
+            )
+            .unwrap();
+        let err = store.append_committed(tl.id(), &[ev]).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_committed_update_head_fails() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        let mut ev = store
+            .append(tl.id(), &[make_draft(entity, b"x")])
+            .unwrap()
+            .remove(0);
+        ev.id = EventId::new();
+        ev.seq = Seq::from_u64(2);
+        ev.payload_hash = hash_payload(&ev.payload);
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER abort_head_update BEFORE UPDATE ON timelines
+                 BEGIN SELECT RAISE(ABORT, 'no update'); END;",
+            )
+            .unwrap();
+        let err = store.append_committed(tl.id(), &[ev]).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn signature_roundtrips_on_append_committed_and_read() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        let mut ev = store
+            .append(tl.id(), &[make_draft(entity, b"signed")])
+            .unwrap()
+            .remove(0);
+        // Re-import onto a fresh timeline with a signature attached.
+        let mut meta = TimelineMeta::root("imported");
+        meta.id = TimelineId::new();
+        let other = store.create_timeline_with_meta(meta).unwrap();
+        ev.seq = Seq::from_u64(1);
+        ev.id = EventId::new();
+        ev.signature = Some(pos_core::Signature::from_bytes([7u8; 64]));
+        ev.payload_hash = hash_payload(&ev.payload);
+        store.append_committed(other.id(), &[ev.clone()]).unwrap();
+        let read = store.read(other.id(), SeqRange::all()).unwrap();
+        assert_eq!(read[0].signature, ev.signature);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn read_rejects_bad_signature_blob_length() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        store.append(tl.id(), &[make_draft(entity, b"x")]).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE events SET signature = X'01' WHERE timeline_id = ?1",
+                params![tl.id().to_string()],
+            )
+            .unwrap();
+        let err = store.read(tl.id(), SeqRange::all()).unwrap_err();
+        assert!(matches!(err, CoreError::Serialization(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn migrates_v1_schema_to_v2_with_signature_column() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap().to_owned();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 CREATE TABLE schema_version (version INTEGER NOT NULL);
+                 INSERT INTO schema_version (version) VALUES (1);
+                 CREATE TABLE timelines (
+                     id TEXT PRIMARY KEY, name TEXT, mode TEXT NOT NULL,
+                     parent_id TEXT, fork_seq INTEGER, head_seq INTEGER NOT NULL DEFAULT 0,
+                     chain_head BLOB NOT NULL
+                 );
+                 CREATE TABLE events (
+                     timeline_id TEXT NOT NULL, seq INTEGER NOT NULL, event_id TEXT NOT NULL,
+                     entity_id TEXT NOT NULL, event_type TEXT NOT NULL, payload BLOB NOT NULL,
+                     wall_time INTEGER NOT NULL, causation_id TEXT, correlation_id TEXT,
+                     schema_version INTEGER NOT NULL, payload_hash BLOB NOT NULL,
+                     PRIMARY KEY (timeline_id, seq)
+                 );",
+            )
+            .unwrap();
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        let version: i64 = store
+            .conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 2);
+        // signature column must exist after migration
+        store
+            .conn
+            .prepare("SELECT signature FROM events LIMIT 0")
+            .unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn export_raw_fork_roundtrip_sqlite() {
+        use pos_core::store::{export_timeline_raw, import_timeline_with_id};
+
+        let mut src = new_store();
+        let root = src.create_timeline("root").unwrap();
+        let entity = EntityId::new();
+        src.append(root.id(), &[make_draft(entity, b"p1")])
+            .unwrap();
+        let child = src.fork(root.id(), Seq::from_u64(1), "child").unwrap();
+        src.append(child.id(), &[make_draft(entity, b"c1")])
+            .unwrap();
+
+        let mut dst = new_store();
+        import_timeline_with_id(&mut dst, export_timeline_raw(&src, root.id()).unwrap()).unwrap();
+        let imported =
+            import_timeline_with_id(&mut dst, export_timeline_raw(&src, child.id()).unwrap())
+                .unwrap();
+        assert_eq!(imported.meta.fork_point, Some((root.id(), Seq::from_u64(1))));
+        let own = dst.read_own(child.id(), SeqRange::all()).unwrap();
+        assert_eq!(own.len(), 1);
+        assert_eq!(own[0].payload.as_slice(), b"c1");
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn create_timeline_with_meta_rejects_fork_beyond_head_sqlite() {
+        let mut store = new_store();
+        let root = store.create_timeline("root").unwrap();
+        let entity = EntityId::new();
+        store
+            .append(root.id(), &[make_draft(entity, b"p1")])
+            .unwrap();
+        let mut meta = TimelineMeta::forked_from(root.id(), Seq::from_u64(99), "bad");
+        meta.id = TimelineId::new();
+        let err = store.create_timeline_with_meta(meta).unwrap_err();
+        assert!(matches!(err, CoreError::ForkBeyondHead { .. }));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn identity_import_preserves_optional_name_none_sqlite() {
+        use pos_core::store::{export_timeline_raw, import_timeline_with_id};
+
+        let mut src = new_store();
+        let mut meta = TimelineMeta::root("named");
+        meta.name = None;
+        meta.id = TimelineId::new();
+        let created = src.create_timeline_with_meta(meta).unwrap();
+        assert!(created.meta.name.is_none());
+
+        let mut dst = new_store();
+        let imported =
+            import_timeline_with_id(&mut dst, export_timeline_raw(&src, created.id()).unwrap())
+                .unwrap();
+        assert!(imported.meta.name.is_none());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_committed_fails_when_outer_txn_already_open() {
+        let mut store = new_store();
+        store.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let err = store
+            .import_committed(TimelineMeta::root("x"), &[])
+            .unwrap_err();
+        let _ = store.conn.execute_batch("ROLLBACK");
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_committed_fails_when_commit_hook_aborts() {
+        let mut store = new_store();
+        store.conn.commit_hook(Some(|| true));
+        let err = store
+            .import_committed(TimelineMeta::root("x"), &[])
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_committed_fails_when_begin_fault_injected() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        let mut ev = store
+            .append(tl.id(), &[make_draft(entity, b"x")])
+            .unwrap()
+            .remove(0);
+        ev.id = EventId::new();
+        ev.seq = Seq::from_u64(2);
+        ev.payload_hash = hash_payload(&ev.payload);
+        FAIL_BEGIN_IMMEDIATE.with(|f| f.set(true));
+        let err = store.append_committed(tl.id(), &[ev]).unwrap_err();
+        FAIL_BEGIN_IMMEDIATE.with(|f| f.set(false));
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_committed_fails_when_vanish_fault_injected() {
+        let mut store = new_store();
+        FAIL_IMPORT_VANISH.with(|f| f.set(true));
+        let err = store
+            .import_committed(TimelineMeta::root("x"), &[])
+            .unwrap_err();
+        FAIL_IMPORT_VANISH.with(|f| f.set(false));
+        assert!(matches!(err, CoreError::TimelineNotFound(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_committed_rolls_back_when_create_rejects_duplicate_id() {
+        let mut store = new_store();
+        let existing = store.create_timeline("root").unwrap();
+        let err = store
+            .import_committed(existing.meta.clone(), &[])
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+        // Outer txn rolled back; original timeline still present.
+        assert!(store.get_timeline(existing.id()).unwrap().is_some());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_committed_fails_when_get_storage_fault_injected() {
+        let mut store = new_store();
+        FAIL_IMPORT_GET_STORAGE.with(|f| f.set(true));
+        let err = store
+            .import_committed(TimelineMeta::root("x"), &[])
+            .unwrap_err();
+        FAIL_IMPORT_GET_STORAGE.with(|f| f.set(false));
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn create_timeline_with_meta_surfaces_broken_parent_chain_sqlite() {
+        let mut store = new_store();
+        let genesis = pos_crypto::chain::genesis_hash();
+        let broken_id = TimelineId::new();
+        let missing_parent = TimelineId::new();
+        store
+            .conn
+            .execute(
+                "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
+                 VALUES (?1, 'broken', 'live', ?2, 1, 0, ?3)",
+                params![
+                    broken_id.to_string(),
+                    missing_parent.to_string(),
+                    genesis.as_bytes().as_slice()
+                ],
+            )
+            .unwrap();
+        let mut child = TimelineMeta::forked_from(broken_id, Seq::ZERO, "child");
+        child.id = TimelineId::new();
+        let err = store.create_timeline_with_meta(child).unwrap_err();
+        assert!(matches!(err, CoreError::TimelineNotFound(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn create_timeline_with_meta_propagates_get_timeline_storage_err() {
+        let mut store = new_store();
+        store.conn.execute_batch("DROP TABLE timelines").unwrap();
+        let mut meta = TimelineMeta::forked_from(TimelineId::new(), Seq::from_u64(1), "x");
+        meta.id = TimelineId::new();
+        let err = store.create_timeline_with_meta(meta).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn migrates_legacy_events_table_when_schema_version_missing() {
+        // version == 0 path must still ALTER a pre-v2 events table (no signature column).
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap().to_owned();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 CREATE TABLE schema_version (version INTEGER NOT NULL);
+                 CREATE TABLE timelines (
+                     id TEXT PRIMARY KEY, name TEXT, mode TEXT NOT NULL,
+                     parent_id TEXT, fork_seq INTEGER, head_seq INTEGER NOT NULL DEFAULT 0,
+                     chain_head BLOB NOT NULL
+                 );
+                 CREATE TABLE events (
+                     timeline_id TEXT NOT NULL, seq INTEGER NOT NULL, event_id TEXT NOT NULL,
+                     entity_id TEXT NOT NULL, event_type TEXT NOT NULL, payload BLOB NOT NULL,
+                     wall_time INTEGER NOT NULL, causation_id TEXT, correlation_id TEXT,
+                     schema_version INTEGER NOT NULL, payload_hash BLOB NOT NULL,
+                     PRIMARY KEY (timeline_id, seq)
+                 );",
+            )
+            .unwrap();
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        let version: i64 = store
+            .conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 2);
+        store
+            .conn
+            .prepare("SELECT signature FROM events LIMIT 0")
+            .unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn read_own_missing_timeline_errors() {
+        let store = new_store();
+        let err = store
+            .read_own(TimelineId::new(), SeqRange::all())
+            .unwrap_err();
+        assert!(matches!(err, CoreError::TimelineNotFound(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn migrate_v2_ignores_duplicate_signature_column() {
+        let store = new_store();
+        store
+            .conn
+            .execute("UPDATE schema_version SET version = 1", [])
+            .unwrap();
+        store.test_run_migrations().unwrap();
+        let version: i64 = store
+            .conn
+            .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn migrate_v2_fails_when_alter_is_not_duplicate_column() {
+        let store = new_store();
+        store
+            .conn
+            .execute("UPDATE schema_version SET version = 1", [])
+            .unwrap();
+        store.conn.execute("DROP TABLE events", []).unwrap();
+        store
+            .conn
+            .execute("CREATE VIEW events AS SELECT 1 AS x", [])
+            .unwrap();
+        assert_storage_err(store.test_run_migrations());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn migrate_v2_fails_when_index_create_aborts() {
+        let store = new_store();
+        store
+            .conn
+            .execute("UPDATE schema_version SET version = 1", [])
+            .unwrap();
+        // Force index creation to fail: leave a non-unique duplicate event_id first.
+        // Drop the unique index so migration will recreate it, then insert dup ids.
+        store
+            .conn
+            .execute("DROP INDEX IF EXISTS idx_events_event_id", [])
+            .unwrap();
+        let tl = TimelineId::new();
+        let genesis = pos_crypto::chain::genesis_hash();
+        store
+            .conn
+            .execute(
+                "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
+                 VALUES (?1, 't', 'live', NULL, NULL, 0, ?2)",
+                params![tl.to_string(), genesis.as_bytes().as_slice()],
+            )
+            .unwrap();
+        let eid = EventId::new().to_string();
+        for seq in 1..=2 {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO events
+                     (timeline_id, seq, event_id, entity_id, event_type, payload, wall_time,
+                      causation_id, correlation_id, schema_version, payload_hash, signature)
+                     VALUES (?1, ?2, ?3, ?4, 't', X'00', 0, NULL, NULL, 1, ?5, NULL)",
+                    params![
+                        tl.to_string(),
+                        seq,
+                        eid,
+                        EntityId::new().to_string(),
+                        [0u8; 32].as_slice(),
+                    ],
+                )
+                .unwrap();
+        }
+        assert_storage_err(store.test_run_migrations());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn migrate_v2_fails_when_version_update_aborts() {
+        let store = new_store();
+        store
+            .conn
+            .execute("UPDATE schema_version SET version = 1", [])
+            .unwrap();
+        store.conn.execute("DROP TABLE schema_version", []).unwrap();
+        store
+            .conn
+            .execute(
+                "CREATE TABLE schema_version (version INTEGER NOT NULL CHECK (version < 2))",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute("INSERT INTO schema_version (version) VALUES (1)", [])
+            .unwrap();
+        assert_storage_err(store.test_run_migrations());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_committed_fails_closed_on_event_id_lookup_error() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        let mut ev = store
+            .append(tl.id(), &[make_draft(entity, b"x")])
+            .unwrap()
+            .remove(0);
+        ev.id = EventId::new();
+        ev.seq = Seq::from_u64(2);
+        ev.payload_hash = hash_payload(&ev.payload);
+        store.conn.execute("DROP TABLE events", []).unwrap();
+        let err = store.append_committed(tl.id(), &[ev]).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("duplicate")));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_committed_rejects_existing_event_id() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        let first = store
+            .append(tl.id(), &[make_draft(entity, b"a")])
+            .unwrap()
+            .remove(0);
+        let mut dup = first.clone();
+        dup.seq = Seq::from_u64(2);
+        dup.payload = CanonicalBytes::from_vec(b"b".to_vec());
+        dup.payload_hash = hash_payload(&dup.payload);
+        // keep first.id — must hit the SELECT-found path in id_is_taken
+        let err = store.append_committed(tl.id(), &[dup]).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("duplicate")));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn read_fails_on_wrong_type_signature() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        store.append(tl.id(), &[make_draft(entity, b"x")]).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE events SET signature = 123 WHERE timeline_id = ?1",
+                params![tl.id().to_string()],
+            )
+            .unwrap();
+        assert_storage_err(store.read(tl.id(), SeqRange::all()).map(|_| ()));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn read_own_propagates_get_timeline_storage_err() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        store
+            .conn
+            .execute("ALTER TABLE timelines RENAME TO timelines_real", [])
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "CREATE VIEW timelines AS SELECT * FROM no_such_timelines_table",
+                [],
+            )
+            .unwrap();
+        assert_storage_err(store.read_own(tl.id(), SeqRange::all()).map(|_| ()));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_committed_fails_when_insert_trigger_aborts() {
+        let mut store = new_store();
+        let tl = store.create_timeline("main").unwrap();
+        let entity = EntityId::new();
+        let mut ev = store
+            .append(tl.id(), &[make_draft(entity, b"x")])
+            .unwrap()
+            .remove(0);
+        ev.id = EventId::new();
+        ev.seq = Seq::from_u64(2);
+        ev.payload_hash = hash_payload(&ev.payload);
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER abort_committed_insert BEFORE INSERT ON events
+                 BEGIN SELECT RAISE(ABORT, 'no insert'); END;",
+            )
+            .unwrap();
+        let err = store.append_committed(tl.id(), &[ev]).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
     }
 }

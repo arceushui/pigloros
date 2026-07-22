@@ -33,6 +33,7 @@ pub use plugin::{Capability, Plugin};
 pub use schema::{SchemaVersionMap, Upcaster, UpcasterRegistry};
 pub use state::{Reducer, State, StateRegistry};
 pub use store::{
-    export_timeline, import_timeline, import_timeline_with_id, EventStore, SeqRange, TimelineExport,
+    export_timeline, export_timeline_raw, import_committed_with_rollback, import_timeline,
+    import_timeline_with_id, validate_committed_batch, EventStore, SeqRange, TimelineExport,
 };
 pub use timeline::{Timeline, TimelineMeta, TimelineMode};

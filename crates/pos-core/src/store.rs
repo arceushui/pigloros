@@ -1,9 +1,10 @@
 use crate::{
     clock::Seq,
+    crypto::Hash,
     error::CoreError,
     event::{Event, EventDraft},
     ids::TimelineId,
-    timeline::Timeline,
+    timeline::{Timeline, TimelineMeta},
 };
 
 /// Range of sequence numbers to read.
@@ -40,6 +41,13 @@ impl SeqRange {
 pub struct TimelineExport {
     pub timeline: Timeline,
     pub events: Vec<Event>,
+    /// Expected parent hash-chain tip at [`TimelineMeta::fork_point`].
+    ///
+    /// Set by [`export_timeline_raw`] for forked timelines so
+    /// [`import_timeline_with_id`] can reject divergent parent history.
+    /// Always `None` for roots and for flattened logical [`export_timeline`] snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_fork_hash: Option<Hash>,
 }
 
 /// The kernel's event-store abstraction. Implementations live in `pos-store`.
@@ -48,12 +56,9 @@ pub struct TimelineExport {
 /// `Send` is required; `Sync` is not — multi-threaded callers wrap in `Arc<Mutex<_>>`.
 ///
 /// # Provider independence
-/// All timeline lifecycle operations (create, append, read, fork) go through
-/// this trait. Export/import helpers live as free functions alongside the trait
-/// so backends are not forced to monomorphize unused default methods.
-/// Callers should hold `Box<dyn EventStore>` or `Arc<Mutex<dyn EventStore>>` —
-/// never a concrete type — so the backend (`SQLite`, in-memory, `redb`, `TiKV`)
-/// can be swapped without changing call sites.
+/// Timeline lifecycle and identity-preserving import go through this trait.
+/// Export/import helpers live as free functions alongside the trait so callers can
+/// hold `Box<dyn EventStore>` and swap backends without changing call sites.
 pub trait EventStore: Send {
     /// Create a new root timeline with the given name.
     ///
@@ -81,6 +86,14 @@ pub trait EventStore: Send {
     /// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist.
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError>;
 
+    /// Read events stored directly on this timeline (no fork stitching or renumbering).
+    ///
+    /// Used by [`export_timeline_raw`] for identity-preserving fork sync.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist.
+    fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError>;
+
     /// Create a forked child timeline at `at_seq`.
     ///
     /// The child is copy-on-write: it stores only its own events going forward.
@@ -103,9 +116,74 @@ pub trait EventStore: Send {
     /// # Errors
     /// Returns a [`CoreError::Storage`] error on I/O failure.
     fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError>;
+
+    /// Create a timeline using caller-supplied metadata (preserves [`TimelineId`]).
+    ///
+    /// Required for identity-preserving import across shared-world nodes (Wave 6 / #87).
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] if the id already exists or the backend cannot
+    /// honour the requested identity. Returns [`CoreError::TimelineNotFound`] if a
+    /// fork parent is missing. Returns [`CoreError::ForkBeyondHead`] if `fork_point.1`
+    /// exceeds the parent's head.
+    fn create_timeline_with_meta(&mut self, meta: TimelineMeta) -> Result<Timeline, CoreError>;
+
+    /// Append already-committed events, preserving event ids, seqs, and payload hashes.
+    ///
+    /// Used by [`import_timeline_with_id`]. Implementations must be all-or-nothing for the
+    /// batch (no partial apply on validation failure). Seqs must be contiguous from
+    /// `head + 1`, and each [`EventId`] must be unique in the store.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist, or
+    /// [`CoreError::Storage`] on conflict / validation failure.
+    fn append_committed(&mut self, timeline: TimelineId, events: &[Event])
+        -> Result<(), CoreError>;
+
+    /// Delete a timeline and its events.
+    ///
+    /// Used to roll back a failed [`import_timeline_with_id`] after create succeeded.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist, or
+    /// [`CoreError::Storage`] if the timeline still has dependent forks / I/O failure.
+    fn delete_timeline(&mut self, id: TimelineId) -> Result<(), CoreError>;
+
+    /// CoW-aware hash-chain value at `at_seq` on `timeline` (inclusive).
+    ///
+    /// Used by [`export_timeline_raw`] / [`import_timeline_with_id`] to bind fork imports
+    /// to parent history.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::TimelineNotFound`] if the timeline (or an ancestor) is missing,
+    /// or [`CoreError::Storage`] if the backend does not support hash chains.
+    fn chain_hash_at(&self, timeline: TimelineId, at_seq: Seq) -> Result<Hash, CoreError>;
+
+    /// Create a timeline and append committed events as one logical import.
+    ///
+    /// Must roll back a successful create if append or the final fetch fails (via
+    /// [`Self::delete_timeline`], or a stronger transactional rollback).
+    ///
+    /// # Errors
+    /// Returns the same classes of error as create/append/get, or a combined rollback error.
+    fn import_committed(
+        &mut self,
+        meta: TimelineMeta,
+        events: &[Event],
+    ) -> Result<Timeline, CoreError>;
 }
 
-/// Export a timeline and all its events as a portable snapshot.
+/// Export a timeline's **logical** event stream as a portable snapshot.
+///
+/// Uses [`EventStore::read`], which stitches parent history into forked children and
+/// renumbers seqs. [`Timeline::head`] is rewritten to the logical stream head (last
+/// event seq, or zero if empty).
+///
+/// When the source was a fork, `fork_point` is cleared and every event receives a
+/// **fresh** [`EventId`] (causation links remapped within the export; signatures
+/// cleared). That yields an independent root that will not collide with parent
+/// `EventId`s on import. For `CoW` fork round-trips that must keep `fork_point` and
+/// original ids, use [`export_timeline_raw`].
 ///
 /// # Errors
 /// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist.
@@ -113,7 +191,44 @@ pub fn export_timeline(
     store: &dyn EventStore,
     id: TimelineId,
 ) -> Result<TimelineExport, CoreError> {
-    export_timeline_using(store.get_timeline(id), store.read(id, SeqRange::all()), id)
+    let mut export =
+        export_timeline_using(store.get_timeline(id), store.read(id, SeqRange::all()), id)?;
+    let was_fork = export.timeline.meta.fork_point.take().is_some();
+    if was_fork {
+        materialize_fork_export_as_root(&mut export);
+    }
+    export.parent_fork_hash = None;
+    export.timeline.head = export
+        .events
+        .last()
+        .map_or(crate::clock::Seq::ZERO, |e| e.seq);
+    Ok(export)
+}
+
+/// Export only events stored on this timeline (no stitch / renumber).
+///
+/// Preserves [`TimelineMeta::fork_point`] so [`import_timeline_with_id`] can recreate
+/// a copy-on-write child. Parent timeline must already exist at the destination.
+/// Records [`TimelineExport::parent_fork_hash`] so the destination can reject a
+/// divergent parent history.
+///
+/// # Errors
+/// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist.
+pub fn export_timeline_raw(
+    store: &dyn EventStore,
+    id: TimelineId,
+) -> Result<TimelineExport, CoreError> {
+    let mut export =
+        export_timeline_using(store.get_timeline(id), store.read_own(id, SeqRange::all()), id)?;
+    match export.timeline.meta.fork_point {
+        Some((parent, at_seq)) => {
+            export.parent_fork_hash = Some(store.chain_hash_at(parent, at_seq)?);
+        }
+        None => {
+            export.parent_fork_hash = None;
+        }
+    }
+    Ok(export)
 }
 
 /// Import a previously exported timeline snapshot into `store`.
@@ -133,18 +248,173 @@ pub fn import_timeline(
 
 /// Import a timeline snapshot preserving the original [`TimelineId`] and event IDs.
 ///
-/// The current implementation falls back to [`import_timeline`], which assigns a new
-/// `TimelineId`. Wave 6 backends that need identity-preserving import should provide
-/// a dedicated path.
+/// Requires the backend to implement [`EventStore::create_timeline_with_meta`],
+/// [`EventStore::append_committed`], [`EventStore::delete_timeline`], and
+/// [`EventStore::chain_hash_at`] (Memory + `SQLite` do; test stubs may not).
+///
+/// Forked exports must come from [`export_timeline_raw`] (own events + `fork_point` +
+/// `parent_fork_hash`). Logical [`export_timeline`] snapshots of forks are flattened
+/// (no `fork_point`).
+///
+/// Uses [`EventStore::import_committed`] so backends can apply create+append atomically.
+/// The default import rolls back via delete on any failure after create, including a
+/// failed final timeline fetch. If rollback delete also fails, the combined error is
+/// returned (the id may remain occupied).
+///
+/// Signatures are persisted as opaque blobs; cryptographic verification is the caller's
+/// responsibility (see `pos_crypto::signing::verify_events_all_signed` / store helpers).
 ///
 /// # Errors
-/// Returns a [`CoreError::Storage`] error if a timeline with that ID already exists
-/// (when a backend enforces uniqueness).
+/// Returns a [`CoreError::Storage`] error if a timeline with that ID already exists,
+/// if the backend returns a different id, if a fork parent is missing / beyond head /
+/// hash-mismatched, or on I/O failure.
 pub fn import_timeline_with_id(
     store: &mut dyn EventStore,
     export: TimelineExport,
 ) -> Result<Timeline, CoreError> {
-    import_timeline(store, export)
+    let TimelineExport {
+        timeline,
+        events,
+        parent_fork_hash,
+    } = export;
+
+    if let Some((parent, at_seq)) = timeline.meta.fork_point {
+        let Some(expected) = parent_fork_hash else {
+            return Err(CoreError::Storage(
+                "forked import requires parent_fork_hash (use export_timeline_raw)".to_owned(),
+            ));
+        };
+        let actual = store.chain_hash_at(parent, at_seq)?;
+        if actual != expected {
+            return Err(CoreError::Storage(
+                "fork parent chain hash mismatch".to_owned(),
+            ));
+        }
+    }
+
+    store.import_committed(timeline.meta, &events)
+}
+
+/// Default create→append→fetch import with delete-based rollback.
+///
+/// Used by [`MemoryStore`](../../../../pos-store) and test stubs. `SQLite` overrides
+/// [`EventStore::import_committed`] with a single transaction instead.
+///
+/// # Errors
+/// Returns create/append/get errors, or a combined error when rollback delete fails.
+pub fn import_committed_with_rollback(
+    store: &mut dyn EventStore,
+    meta: TimelineMeta,
+    events: &[Event],
+) -> Result<Timeline, CoreError> {
+    let expected_id = meta.id;
+    let created = store.create_timeline_with_meta(meta)?;
+    if created.id() != expected_id {
+        return Err(rollback_import(
+            store,
+            created.id(),
+            CoreError::Storage("store did not honour requested TimelineId".to_owned()),
+        ));
+    }
+    if let Err(err) = store.append_committed(expected_id, events) {
+        return Err(rollback_import(store, expected_id, err));
+    }
+    match store.get_timeline(expected_id) {
+        Ok(Some(tl)) => Ok(tl),
+        Ok(None) => Err(rollback_import(
+            store,
+            expected_id,
+            CoreError::TimelineNotFound(expected_id),
+        )),
+        Err(err) => Err(rollback_import(store, expected_id, err)),
+    }
+}
+
+/// Delete a partially imported timeline; if delete fails, combine with the original error.
+fn rollback_import(
+    store: &mut dyn EventStore,
+    id: TimelineId,
+    err: CoreError,
+) -> CoreError {
+    match store.delete_timeline(id) {
+        Ok(()) => err,
+        Err(del_err) => CoreError::Storage(format!(
+            "import failed ({err}); rollback delete also failed ({del_err})"
+        )),
+    }
+}
+
+/// Flatten a forked logical export into an independent root: new event ids, remapped
+/// causation, cleared signatures (they bound the old identities).
+fn materialize_fork_export_as_root(export: &mut TimelineExport) {
+    use crate::ids::EventId;
+    use std::collections::HashMap;
+
+    let new_ids: Vec<EventId> = export.events.iter().map(|_| EventId::new()).collect();
+    let id_map: HashMap<EventId, EventId> = export
+        .events
+        .iter()
+        .zip(new_ids.iter().copied())
+        .map(|(event, new_id)| (event.id, new_id))
+        .collect();
+    for (event, new_id) in export.events.iter_mut().zip(new_ids) {
+        event.id = new_id;
+        if let Some(cid) = event.causation_id {
+            event.causation_id = id_map.get(&cid).copied();
+        }
+        event.signature = None;
+    }
+}
+
+/// Validate a committed-event batch before apply: sort, contiguous seqs from `head+1`,
+/// payload-hash integrity, and unique event ids (via `id_is_taken`).
+///
+/// `payload_hash_ok` should compare `event.payload_hash` to a fresh hash of `event.payload`.
+///
+/// # Errors
+/// Returns [`CoreError::Storage`] when validation fails.
+pub fn validate_committed_batch(
+    head: Seq,
+    events: &[Event],
+    id_is_taken: &mut dyn FnMut(&crate::ids::EventId) -> bool,
+    payload_hash_ok: &dyn Fn(&Event) -> bool,
+) -> Result<Vec<Event>, CoreError> {
+    if events.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut ordered = events.to_vec();
+    ordered.sort_by_key(|e| e.seq.as_u64());
+
+    let mut expected = head.next();
+    let mut seen = std::collections::HashSet::new();
+    for event in &ordered {
+        if event.seq.as_u64() == 0 {
+            return Err(CoreError::Storage(
+                "committed event seq must be >= 1".to_owned(),
+            ));
+        }
+        if event.seq != expected {
+            return Err(CoreError::Storage(format!(
+                "committed event seq {} is not contiguous (expected {})",
+                event.seq.as_u64(),
+                expected.as_u64()
+            )));
+        }
+        if !seen.insert(event.id) || id_is_taken(&event.id) {
+            return Err(CoreError::Storage(format!(
+                "duplicate EventId on committed import: {}",
+                event.id
+            )));
+        }
+        if !payload_hash_ok(event) {
+            return Err(CoreError::Storage(
+                "payload_hash mismatch on committed import".to_owned(),
+            ));
+        }
+        expected = expected.next();
+    }
+    Ok(ordered)
 }
 
 fn export_timeline_using(
@@ -156,7 +426,11 @@ fn export_timeline_using(
         return Err(CoreError::TimelineNotFound(id));
     };
     let events = events_result?;
-    Ok(TimelineExport { timeline, events })
+    Ok(TimelineExport {
+        timeline,
+        events,
+        parent_fork_hash: None,
+    })
 }
 
 fn import_timeline_using<A>(
@@ -168,24 +442,23 @@ where
     A: FnOnce(TimelineId, &[EventDraft]) -> Result<Vec<Event>, CoreError>,
 {
     let tl = create_result?;
-    if !events.is_empty() {
-        let drafts: Vec<EventDraft> = events
-            .into_iter()
-            .map(|e| {
-                let mut draft = EventDraft::new(e.entity, e.event_type, e.payload);
-                draft.causation_id = e.causation_id;
-                draft.correlation_id = e.correlation_id;
-                draft.schema_version = e.schema_version;
-                draft.wall_time = Some(e.wall_time);
-                draft
-            })
-            .collect();
-        append(tl.id(), &drafts)?;
-    }
+    let drafts: Vec<EventDraft> = events
+        .into_iter()
+        .map(|e| {
+            let mut draft = EventDraft::new(e.entity, e.event_type, e.payload);
+            draft.causation_id = e.causation_id;
+            draft.correlation_id = e.correlation_id;
+            draft.schema_version = e.schema_version;
+            draft.wall_time = Some(e.wall_time);
+            draft
+        })
+        .collect();
+    append(tl.id(), &drafts)?;
     Ok(tl)
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::{
@@ -282,6 +555,13 @@ mod tests {
             Ok(Vec::new())
         }
 
+        fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+
+            self.read(timeline, range)
+
+        }
+
+
         fn fork(
             &mut self,
             _parent: TimelineId,
@@ -304,6 +584,49 @@ mod tests {
                 _ => Ok(Some(Self::healthy_timeline())),
             }
         }
+
+        fn create_timeline_with_meta(
+            &mut self,
+            _meta: TimelineMeta,
+        ) -> Result<Timeline, CoreError> {
+            Err(CoreError::Storage(
+                "create_timeline_with_meta not supported by this store".to_owned(),
+            ))
+        }
+
+        fn append_committed(
+            &mut self,
+            _timeline: TimelineId,
+            _events: &[Event],
+        ) -> Result<(), CoreError> {
+            Err(CoreError::Storage(
+                "append_committed not supported by this store".to_owned(),
+            ))
+        }
+
+        fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
+            Err(CoreError::Storage(
+                "delete_timeline not supported by this store".to_owned(),
+            ))
+        }
+        fn chain_hash_at(
+            &self,
+            _: TimelineId,
+            _: Seq,
+        ) -> Result<Hash, CoreError> {
+            Err(CoreError::Storage(
+                "chain_hash_at not supported by this store".to_owned(),
+            ))
+        }
+
+        fn import_committed(
+            &mut self,
+            meta: TimelineMeta,
+            events: &[Event],
+        ) -> Result<Timeline, CoreError> {
+            import_committed_with_rollback(self, meta, events)
+        }
+
     }
 
     impl EventStore for TrivialStore {
@@ -343,6 +666,13 @@ mod tests {
             Ok(Vec::new())
         }
 
+        fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+
+            self.read(timeline, range)
+
+        }
+
+
         fn fork(
             &mut self,
             _parent: TimelineId,
@@ -360,14 +690,55 @@ mod tests {
         fn get_timeline(&self, _id: TimelineId) -> Result<Option<Timeline>, CoreError> {
             Ok(None)
         }
+
+        fn create_timeline_with_meta(
+            &mut self,
+            _meta: TimelineMeta,
+        ) -> Result<Timeline, CoreError> {
+            Err(CoreError::Storage(
+                "create_timeline_with_meta not supported by this store".to_owned(),
+            ))
+        }
+
+        fn append_committed(
+            &mut self,
+            _timeline: TimelineId,
+            _events: &[Event],
+        ) -> Result<(), CoreError> {
+            Err(CoreError::Storage(
+                "append_committed not supported by this store".to_owned(),
+            ))
+        }
+
+        fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
+            Err(CoreError::Storage(
+                "delete_timeline not supported by this store".to_owned(),
+            ))
+        }
+        fn chain_hash_at(
+            &self,
+            _: TimelineId,
+            _: Seq,
+        ) -> Result<Hash, CoreError> {
+            Err(CoreError::Storage(
+                "chain_hash_at not supported by this store".to_owned(),
+            ))
+        }
+
+        fn import_committed(
+            &mut self,
+            meta: TimelineMeta,
+            events: &[Event],
+        ) -> Result<Timeline, CoreError> {
+            import_committed_with_rollback(self, meta, events)
+        }
+
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn import_timeline_with_id_defaults_to_import_timeline() {
-        // The default `import_timeline_with_id` falls back to `import_timeline`, which
-        // creates a new TimelineId. This test documents that known behaviour so that
-        // Wave 6 backends that need identity-preserving import know they must override it.
+    fn import_timeline_with_id_requires_preserving_backend() {
+        // Default trait stubs reject identity-preserving import (Wave 6 / #87).
         let entity = EntityId::new();
         let dummy_event = Event {
             id: EventId::new(),
@@ -384,33 +755,1482 @@ mod tests {
         };
         let meta = TimelineMeta::root("original");
         let timeline = Timeline::new(meta);
-        // The default impl will *not* preserve the original TimelineId — that's the point.
-        // Wave 6 backends must override import_timeline_with_id to preserve identity.
         let export = TimelineExport {
             timeline,
             events: vec![dummy_event],
+                    parent_fork_hash: None,
         };
 
         let mut store = TrivialStore::new();
-        // Default fallback succeeds but assigns a new TimelineId.
-        let imported = import_timeline_with_id(&mut store, export).unwrap();
-        // The returned timeline has *some* valid id (just not the original one).
+        let err = import_timeline_with_id(&mut store, export).unwrap_err();
+        assert!(
+            matches!(err, CoreError::Storage(ref msg) if msg.contains("create_timeline_with_meta")),
+            "expected unsupported create_timeline_with_meta, got {err:?}"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_timeline_accepts_missing_name() {
+        let mut meta = TimelineMeta::root("named");
+        meta.name = None;
+        let export = TimelineExport {
+            timeline: Timeline::new(meta),
+            events: vec![],
+                    parent_fork_hash: None,
+        };
+        let mut store = TrivialStore::new();
+        assert!(import_timeline(&mut store, export).is_ok());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn create_timeline_with_meta_stub_rejects() {
+        let mut store = TrivialStore::new();
+        let err = store
+            .create_timeline_with_meta(TimelineMeta::root("x"))
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_committed_stub_rejects() {
+        let mut store = TrivialStore::new();
+        let err = store.append_committed(TimelineId::new(), &[]).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_timeline_with_events_uses_append() {
+        let entity = EntityId::new();
+        let dummy_event = Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new("test.event"),
+            payload: CanonicalBytes::from_vec(b"hello".to_vec()),
+            wall_time: WallTime::from_micros(1_000),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0u8; 32]),
+        };
+        let export = TimelineExport {
+            timeline: Timeline::new(TimelineMeta::root("with-events")),
+            events: vec![dummy_event],
+                    parent_fork_hash: None,
+        };
+        let mut store = TrivialStore::new();
+        let imported = import_timeline(&mut store, export).unwrap();
         let _ = imported.id();
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn import_timeline_empty_events_skips_append() {
-        // Covers the `if !export.events.is_empty()` false branch (line 153 skipped).
-        let meta = TimelineMeta::root("empty");
-        let timeline = Timeline::new(meta);
+    fn import_timeline_with_id_append_committed_err() {
+        struct AppendFailStore {
+            created: Option<TimelineId>,
+            deleted: bool,
+        }
+        impl EventStore for AppendFailStore {
+            fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+                self.read(timeline, range)
+            }
+
+            fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn get_timeline(&self, _: TimelineId) -> Result<Option<Timeline>, CoreError> {
+                Ok(None)
+            }
+            fn create_timeline_with_meta(
+                &mut self,
+                meta: TimelineMeta,
+            ) -> Result<Timeline, CoreError> {
+                let tl = Timeline::new(meta);
+                self.created = Some(tl.id());
+                Ok(tl)
+            }
+            fn append_committed(&mut self, _: TimelineId, _: &[Event]) -> Result<(), CoreError> {
+                Err(CoreError::Storage("append_committed failed".to_owned()))
+            }
+            fn delete_timeline(&mut self, id: TimelineId) -> Result<(), CoreError> {
+                assert_eq!(Some(id), self.created);
+                self.deleted = true;
+                Ok(())
+            }
+            fn chain_hash_at(
+                &self,
+                _: TimelineId,
+                _: Seq,
+            ) -> Result<Hash, CoreError> {
+                Err(CoreError::Storage(
+                    "chain_hash_at not supported by this store".to_owned(),
+                ))
+            }
+
+            fn import_committed(
+                &mut self,
+                meta: TimelineMeta,
+                events: &[Event],
+            ) -> Result<Timeline, CoreError> {
+                import_committed_with_rollback(self, meta, events)
+            }
+
+        }
+
+        let entity = EntityId::new();
+        let event = Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new("t"),
+            payload: CanonicalBytes::from_vec(b"x".to_vec()),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0u8; 32]),
+        };
+        let export = TimelineExport {
+            timeline: Timeline::new(TimelineMeta::root("x")),
+            events: vec![event],
+                    parent_fork_hash: None,
+        };
+        let mut store = AppendFailStore {
+            created: None,
+            deleted: false,
+        };
+        let err = import_timeline_with_id(&mut store, export).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+        assert!(store.deleted, "failed append must roll back via delete_timeline");
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_timeline_with_id_surfaces_rollback_delete_failure() {
+        struct AppendAndDeleteFailStore {
+            created: Option<TimelineId>,
+        }
+        impl EventStore for AppendAndDeleteFailStore {
+            fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+                self.read(timeline, range)
+            }
+            fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn get_timeline(&self, _: TimelineId) -> Result<Option<Timeline>, CoreError> {
+                Ok(None)
+            }
+            fn create_timeline_with_meta(
+                &mut self,
+                meta: TimelineMeta,
+            ) -> Result<Timeline, CoreError> {
+                let tl = Timeline::new(meta);
+                self.created = Some(tl.id());
+                Ok(tl)
+            }
+            fn append_committed(&mut self, _: TimelineId, _: &[Event]) -> Result<(), CoreError> {
+                Err(CoreError::Storage("append_committed failed".to_owned()))
+            }
+            fn delete_timeline(&mut self, id: TimelineId) -> Result<(), CoreError> {
+                assert_eq!(Some(id), self.created);
+                Err(CoreError::Storage("delete failed".to_owned()))
+            }
+            fn chain_hash_at(
+                &self,
+                _: TimelineId,
+                _: Seq,
+            ) -> Result<Hash, CoreError> {
+                Err(CoreError::Storage(
+                    "chain_hash_at not supported by this store".to_owned(),
+                ))
+            }
+
+            fn import_committed(
+                &mut self,
+                meta: TimelineMeta,
+                events: &[Event],
+            ) -> Result<Timeline, CoreError> {
+                import_committed_with_rollback(self, meta, events)
+            }
+
+        }
+
+        let export = TimelineExport {
+            timeline: Timeline::new(TimelineMeta::root("x")),
+            events: vec![Event {
+                id: EventId::new(),
+                entity: EntityId::new(),
+                event_type: Kind::new("t"),
+                payload: CanonicalBytes::from_vec(b"x".to_vec()),
+                wall_time: WallTime::from_micros(1),
+                seq: Seq::from_u64(1),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: SchemaVersion::V1,
+                signature: None,
+                payload_hash: Hash::from_bytes([0u8; 32]),
+            }],
+            parent_fork_hash: None,
+        };
+        let err = import_timeline_with_id(
+            &mut AppendAndDeleteFailStore { created: None },
+            export,
+        )
+        .unwrap_err();
+        match err {
+            CoreError::Storage(msg) => {
+                assert!(msg.contains("import failed"));
+                assert!(msg.contains("rollback delete also failed"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_timeline_with_id_success() {
+        struct HappyStore {
+            timeline: Option<Timeline>,
+        }
+        impl EventStore for HappyStore {
+            fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+                self.read(timeline, range)
+            }
+
+            fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+                Ok(self.timeline.clone().filter(|t| t.id() == id))
+            }
+            fn create_timeline_with_meta(
+                &mut self,
+                meta: TimelineMeta,
+            ) -> Result<Timeline, CoreError> {
+                let tl = Timeline::new(meta);
+                self.timeline = Some(tl.clone());
+                Ok(tl)
+            }
+            fn append_committed(&mut self, _: TimelineId, _: &[Event]) -> Result<(), CoreError> {
+                if let Some(tl) = &mut self.timeline {
+                    tl.head = Seq::from_u64(1);
+                }
+                Ok(())
+            }
+            fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
+                self.timeline = None;
+                Ok(())
+            }
+            fn chain_hash_at(
+                &self,
+                _: TimelineId,
+                _: Seq,
+            ) -> Result<Hash, CoreError> {
+                Err(CoreError::Storage(
+                    "chain_hash_at not supported by this store".to_owned(),
+                ))
+            }
+
+            fn import_committed(
+                &mut self,
+                meta: TimelineMeta,
+                events: &[Event],
+            ) -> Result<Timeline, CoreError> {
+                import_committed_with_rollback(self, meta, events)
+            }
+
+        }
+
+        let timeline = Timeline::new(TimelineMeta::root("keep-id"));
+        let expected = timeline.id();
         let export = TimelineExport {
             timeline,
             events: vec![],
+                    parent_fork_hash: None,
+        };
+        let imported =
+            import_timeline_with_id(&mut HappyStore { timeline: None }, export).unwrap();
+        assert_eq!(imported.id(), expected);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_timeline_with_id_rejects_wrong_returned_id() {
+        struct LieStore;
+        impl EventStore for LieStore {
+            fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+                self.read(timeline, range)
+            }
+
+            fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn get_timeline(&self, _: TimelineId) -> Result<Option<Timeline>, CoreError> {
+                Ok(None)
+            }
+            fn create_timeline_with_meta(
+                &mut self,
+                _meta: TimelineMeta,
+            ) -> Result<Timeline, CoreError> {
+                Ok(Timeline::new(TimelineMeta::root("lied")))
+            }
+            fn append_committed(&mut self, _: TimelineId, _: &[Event]) -> Result<(), CoreError> {
+                Ok(())
+            }
+            fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
+                Ok(())
+            }
+            fn chain_hash_at(
+                &self,
+                _: TimelineId,
+                _: Seq,
+            ) -> Result<Hash, CoreError> {
+                Err(CoreError::Storage(
+                    "chain_hash_at not supported by this store".to_owned(),
+                ))
+            }
+
+            fn import_committed(
+                &mut self,
+                meta: TimelineMeta,
+                events: &[Event],
+            ) -> Result<Timeline, CoreError> {
+                import_committed_with_rollback(self, meta, events)
+            }
+
+        }
+
+        let export = TimelineExport {
+            timeline: Timeline::new(TimelineMeta::root("wanted")),
+            events: vec![],
+                    parent_fork_hash: None,
+        };
+        let err = import_timeline_with_id(&mut LieStore, export).unwrap_err();
+        assert!(
+            matches!(err, CoreError::Storage(ref msg) if msg.contains("honour")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_timeline_with_id_fork_requires_preserving_create() {
+        // TrivialStore rejects create_timeline_with_meta — fork import needs a real backend.
+        let parent = TimelineId::new();
+        let meta = TimelineMeta::forked_from(parent, Seq::from_u64(1), "child");
+        let export = TimelineExport {
+            timeline: Timeline::new(meta),
+            events: vec![],
+                    parent_fork_hash: None,
         };
         let mut store = TrivialStore::new();
-        let imported = import_timeline(&mut store, export).unwrap();
-        let _ = imported.id();
+        let err = import_timeline_with_id(&mut store, export).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)), "{err:?}");
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn validate_committed_batch_rejects_gaps_and_dup_ids() {
+        let entity = crate::ids::EntityId::new();
+        let mk = |seq: u64, id: crate::ids::EventId| Event {
+            id,
+            entity,
+            event_type: Kind::new("t"),
+            payload: CanonicalBytes::from_vec(b"x".to_vec()),
+            wall_time: WallTime::now(),
+            seq: Seq::from_u64(seq),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::zero(),
+        };
+        let id = crate::ids::EventId::new();
+        let err = validate_committed_batch(
+            Seq::ZERO,
+            &[mk(2, id)],
+            &mut |_| false,
+            &|_| true,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("contiguous")));
+
+        let err = validate_committed_batch(
+            Seq::ZERO,
+            &[mk(1, id), mk(2, id)],
+            &mut |_| false,
+            &|_| true,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("duplicate")));
+
+        let err = validate_committed_batch(
+            Seq::ZERO,
+            &[mk(1, crate::ids::EventId::new())],
+            &mut |_| true,
+            &|_| true,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("duplicate")));
+
+        let err = validate_committed_batch(
+            Seq::ZERO,
+            &[mk(1, crate::ids::EventId::new())],
+            &mut |_| false,
+            &|_| false,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("payload_hash")));
+
+        let err = validate_committed_batch(
+            Seq::ZERO,
+            &[mk(0, crate::ids::EventId::new())],
+            &mut |_| false,
+            &|_| true,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains(">= 1")));
+
+        let ok = validate_committed_batch(Seq::ZERO, &[], &mut |_| false, &|_| true).unwrap();
+        assert!(ok.is_empty());
+
+        // Success path with contiguous events (covers Ok(ordered)).
+        let e1 = mk(1, crate::ids::EventId::new());
+        let e2 = mk(2, crate::ids::EventId::new());
+        let accepted = validate_committed_batch(
+            Seq::ZERO,
+            &[e2.clone(), e1.clone()], // out of order — must sort
+            &mut |_| false,
+            &|_| true,
+        )
+        .unwrap();
+        assert_eq!(accepted.len(), 2);
+        assert_eq!(accepted[0].id, e1.id);
+        assert_eq!(accepted[1].id, e2.id);
+    }
+
+    // Counted under llvm-cov: exercises `chain_hash_at` Err through the `?` on raw export.
+    #[test]
+    fn export_timeline_raw_chain_hash_err_arm_counted() {
+        struct HashFail {
+            id: TimelineId,
+        }
+        impl EventStore for HashFail {
+            fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+                self.read(timeline, range)
+            }
+            fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+                if id != self.id {
+                    return Ok(None);
+                }
+                let mut meta =
+                    TimelineMeta::forked_from(TimelineId::new(), Seq::from_u64(1), "child");
+                meta.id = self.id;
+                Ok(Some(Timeline::new(meta)))
+            }
+            fn create_timeline_with_meta(
+                &mut self,
+                _: TimelineMeta,
+            ) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append_committed(&mut self, _: TimelineId, _: &[Event]) -> Result<(), CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn chain_hash_at(&self, _: TimelineId, _: Seq) -> Result<Hash, CoreError> {
+                Err(CoreError::Storage("hash boom".to_owned()))
+            }
+            fn import_committed(
+                &mut self,
+                meta: TimelineMeta,
+                events: &[Event],
+            ) -> Result<Timeline, CoreError> {
+                import_committed_with_rollback(self, meta, events)
+            }
+        }
+
+        let id = TimelineId::new();
+        let err = export_timeline_raw(&HashFail { id }, id).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("hash boom")));
+    }
+
+    // Counted under llvm-cov: root raw export takes the None fork_point arm.
+    #[test]
+    fn export_timeline_raw_root_clears_parent_fork_hash_arm() {
+        struct RootStore {
+            id: TimelineId,
+        }
+        impl EventStore for RootStore {
+            fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+                self.read(timeline, range)
+            }
+            fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+                if id != self.id {
+                    return Ok(None);
+                }
+                let mut meta = TimelineMeta::root("root");
+                meta.id = self.id;
+                Ok(Some(Timeline::new(meta)))
+            }
+            fn create_timeline_with_meta(
+                &mut self,
+                _: TimelineMeta,
+            ) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append_committed(&mut self, _: TimelineId, _: &[Event]) -> Result<(), CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn chain_hash_at(&self, _: TimelineId, _: Seq) -> Result<Hash, CoreError> {
+                Ok(Hash::zero())
+            }
+            fn import_committed(
+                &mut self,
+                meta: TimelineMeta,
+                events: &[Event],
+            ) -> Result<Timeline, CoreError> {
+                import_committed_with_rollback(self, meta, events)
+            }
+        }
+
+        let id = TimelineId::new();
+        let raw = export_timeline_raw(&RootStore { id }, id).unwrap();
+        assert!(raw.timeline.meta.fork_point.is_none());
+        assert!(raw.parent_fork_hash.is_none());
+    }
+
+    // Counted under llvm-cov: matching parent_fork_hash takes the equality arm.
+    #[test]
+    fn import_timeline_with_id_accepts_matching_parent_fork_hash() {
+        struct MatchStore {
+            created: Option<Timeline>,
+        }
+        impl EventStore for MatchStore {
+            fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+                self.read(timeline, range)
+            }
+            fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+                Ok(self.created.clone().filter(|t| t.id() == id))
+            }
+            fn create_timeline_with_meta(
+                &mut self,
+                meta: TimelineMeta,
+            ) -> Result<Timeline, CoreError> {
+                let tl = Timeline::new(meta);
+                self.created = Some(tl.clone());
+                Ok(tl)
+            }
+            fn append_committed(&mut self, _: TimelineId, _: &[Event]) -> Result<(), CoreError> {
+                Ok(())
+            }
+            fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
+                Ok(())
+            }
+            fn chain_hash_at(&self, _: TimelineId, _: Seq) -> Result<Hash, CoreError> {
+                Ok(Hash::zero())
+            }
+            fn import_committed(
+                &mut self,
+                meta: TimelineMeta,
+                events: &[Event],
+            ) -> Result<Timeline, CoreError> {
+                import_committed_with_rollback(self, meta, events)
+            }
+        }
+
+        let mut meta = TimelineMeta::forked_from(TimelineId::new(), Seq::from_u64(1), "child");
+        meta.id = TimelineId::new();
+        let export = TimelineExport {
+            timeline: Timeline::new(meta),
+            events: vec![],
+            parent_fork_hash: Some(Hash::zero()),
+        };
+        let imported = import_timeline_with_id(&mut MatchStore { created: None }, export).unwrap();
+        assert!(imported.meta.fork_point.is_some());
+    }
+
+    // Counted under llvm-cov: `chain_hash_at` Err through import_timeline_with_id's `?`.
+    #[test]
+    fn import_timeline_with_id_chain_hash_err_arm_counted() {
+        struct HashFailStore;
+        impl EventStore for HashFailStore {
+            fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+                self.read(timeline, range)
+            }
+            fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn get_timeline(&self, _: TimelineId) -> Result<Option<Timeline>, CoreError> {
+                Ok(None)
+            }
+            fn create_timeline_with_meta(
+                &mut self,
+                _: TimelineMeta,
+            ) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append_committed(&mut self, _: TimelineId, _: &[Event]) -> Result<(), CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn chain_hash_at(&self, _: TimelineId, _: Seq) -> Result<Hash, CoreError> {
+                Err(CoreError::Storage("import hash boom".to_owned()))
+            }
+            fn import_committed(
+                &mut self,
+                meta: TimelineMeta,
+                events: &[Event],
+            ) -> Result<Timeline, CoreError> {
+                import_committed_with_rollback(self, meta, events)
+            }
+        }
+
+        let mut meta = TimelineMeta::forked_from(TimelineId::new(), Seq::from_u64(1), "child");
+        meta.id = TimelineId::new();
+        let export = TimelineExport {
+            timeline: Timeline::new(meta),
+            events: vec![],
+            parent_fork_hash: Some(Hash::zero()),
+        };
+        let err = import_timeline_with_id(&mut HashFailStore, export).unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::Storage(ref m) if m.contains("import hash boom")
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn export_timeline_flattens_empty_fork_meta() {
+        struct ForkStore {
+            id: TimelineId,
+        }
+        impl EventStore for ForkStore {
+            fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+                self.read(timeline, range)
+            }
+            fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+                if id != self.id {
+                    return Ok(None);
+                }
+                let meta = TimelineMeta::forked_from(TimelineId::new(), Seq::from_u64(1), "child");
+                let mut meta = meta;
+                meta.id = self.id;
+                Ok(Some(Timeline::new(meta)))
+            }
+            fn create_timeline_with_meta(
+                &mut self,
+                _: TimelineMeta,
+            ) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append_committed(&mut self, _: TimelineId, _: &[Event]) -> Result<(), CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn chain_hash_at(
+                &self,
+                _: TimelineId,
+                _: Seq,
+            ) -> Result<Hash, CoreError> {
+                Ok(Hash::zero())
+            }
+
+            fn import_committed(
+                &mut self,
+                meta: TimelineMeta,
+                events: &[Event],
+            ) -> Result<Timeline, CoreError> {
+                import_committed_with_rollback(self, meta, events)
+            }
+        }
+
+        let id = TimelineId::new();
+        let export = export_timeline(&ForkStore { id }, id).unwrap();
+        assert!(export.timeline.meta.fork_point.is_none());
+        assert!(export.events.is_empty());
+
+        let raw = export_timeline_raw(&ForkStore { id }, id).unwrap();
+        assert!(raw.timeline.meta.fork_point.is_some());
+        assert!(raw.parent_fork_hash.is_some());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn export_timeline_raw_propagates_chain_hash_err() {
+        struct HashFailStore {
+            id: TimelineId,
+        }
+        impl EventStore for HashFailStore {
+            fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+                self.read(timeline, range)
+            }
+            fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+                if id != self.id {
+                    return Ok(None);
+                }
+                let mut meta =
+                    TimelineMeta::forked_from(TimelineId::new(), Seq::from_u64(1), "child");
+                meta.id = self.id;
+                Ok(Some(Timeline::new(meta)))
+            }
+            fn create_timeline_with_meta(
+                &mut self,
+                _: TimelineMeta,
+            ) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append_committed(&mut self, _: TimelineId, _: &[Event]) -> Result<(), CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn chain_hash_at(&self, _: TimelineId, _: Seq) -> Result<Hash, CoreError> {
+                Err(CoreError::Storage("hash failed".to_owned()))
+            }
+            fn import_committed(
+                &mut self,
+                meta: TimelineMeta,
+                events: &[Event],
+            ) -> Result<Timeline, CoreError> {
+                import_committed_with_rollback(self, meta, events)
+            }
+        }
+
+        let id = TimelineId::new();
+        let err = export_timeline_raw(&HashFailStore { id }, id).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("hash failed")));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn export_timeline_raw_propagates_read_own_err() {
+        struct ReadOwnFail {
+            id: TimelineId,
+        }
+        impl EventStore for ReadOwnFail {
+            fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn read_own(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
+                Err(CoreError::Storage("read_own failed".to_owned()))
+            }
+            fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+                if id != self.id {
+                    return Ok(None);
+                }
+                Ok(Some(Timeline::new(TimelineMeta::root("r"))))
+            }
+            fn create_timeline_with_meta(
+                &mut self,
+                _: TimelineMeta,
+            ) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append_committed(&mut self, _: TimelineId, _: &[Event]) -> Result<(), CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn chain_hash_at(&self, _: TimelineId, _: Seq) -> Result<Hash, CoreError> {
+                Ok(Hash::zero())
+            }
+            fn import_committed(
+                &mut self,
+                meta: TimelineMeta,
+                events: &[Event],
+            ) -> Result<Timeline, CoreError> {
+                import_committed_with_rollback(self, meta, events)
+            }
+        }
+
+        let id = TimelineId::new();
+        let err = export_timeline_raw(&ReadOwnFail { id }, id).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("read_own")));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_timeline_with_id_requires_parent_fork_hash() {
+        let mut meta = TimelineMeta::forked_from(TimelineId::new(), Seq::from_u64(1), "child");
+        meta.id = TimelineId::new();
+        let export = TimelineExport {
+            timeline: Timeline::new(meta),
+            events: vec![],
+            parent_fork_hash: None,
+        };
+        let err = import_timeline_with_id(&mut TrivialStore::new(), export).unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::Storage(ref m) if m.contains("parent_fork_hash")
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_timeline_with_id_rejects_parent_fork_hash_mismatch() {
+        struct HashOkStore;
+        impl EventStore for HashOkStore {
+            fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+                self.read(timeline, range)
+            }
+            fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn get_timeline(&self, _: TimelineId) -> Result<Option<Timeline>, CoreError> {
+                Ok(None)
+            }
+            fn create_timeline_with_meta(
+                &mut self,
+                _: TimelineMeta,
+            ) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append_committed(&mut self, _: TimelineId, _: &[Event]) -> Result<(), CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn chain_hash_at(&self, _: TimelineId, _: Seq) -> Result<Hash, CoreError> {
+                Ok(Hash::zero())
+            }
+            fn import_committed(
+                &mut self,
+                meta: TimelineMeta,
+                events: &[Event],
+            ) -> Result<Timeline, CoreError> {
+                import_committed_with_rollback(self, meta, events)
+            }
+        }
+
+        let mut meta = TimelineMeta::forked_from(TimelineId::new(), Seq::from_u64(1), "child");
+        meta.id = TimelineId::new();
+        // Any non-zero expected hash mismatches HashOkStore's zero chain hash.
+        let mut expected = [0u8; 32];
+        expected[0] = 1;
+        let export = TimelineExport {
+            timeline: Timeline::new(meta),
+            events: vec![],
+            parent_fork_hash: Some(Hash::from_bytes(expected)),
+        };
+        let err = import_timeline_with_id(&mut HashOkStore, export).unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::Storage(ref m) if m.contains("chain hash mismatch")
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn export_timeline_sets_head_from_stitched_events() {
+        struct ForkWithEvents {
+            id: TimelineId,
+            event: Event,
+        }
+        impl EventStore for ForkWithEvents {
+            fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
+                Ok(vec![self.event.clone()])
+            }
+            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+                self.read(timeline, range)
+            }
+            fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+                if id != self.id {
+                    return Ok(None);
+                }
+                let mut meta =
+                    TimelineMeta::forked_from(TimelineId::new(), Seq::from_u64(1), "child");
+                meta.id = self.id;
+                let mut tl = Timeline::new(meta);
+                tl.head = Seq::from_u64(1); // child-local head; logical export overrides
+                Ok(Some(tl))
+            }
+            fn create_timeline_with_meta(
+                &mut self,
+                _: TimelineMeta,
+            ) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append_committed(&mut self, _: TimelineId, _: &[Event]) -> Result<(), CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn chain_hash_at(
+                &self,
+                _: TimelineId,
+                _: Seq,
+            ) -> Result<Hash, CoreError> {
+                Err(CoreError::Storage(
+                    "chain_hash_at not supported by this store".to_owned(),
+                ))
+            }
+
+            fn import_committed(
+                &mut self,
+                meta: TimelineMeta,
+                events: &[Event],
+            ) -> Result<Timeline, CoreError> {
+                import_committed_with_rollback(self, meta, events)
+            }
+
+        }
+
+        let id = TimelineId::new();
+        let entity = crate::ids::EntityId::new();
+        let event = Event {
+            id: crate::ids::EventId::new(),
+            entity,
+            event_type: Kind::new("t"),
+            payload: CanonicalBytes::from_vec(b"x".to_vec()),
+            wall_time: WallTime::now(),
+            seq: Seq::from_u64(3),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: Some(crate::Signature::from_bytes([1u8; 64])),
+            payload_hash: Hash::zero(),
+        };
+        let original_id = event.id;
+        let export = export_timeline(&ForkWithEvents { id, event }, id).unwrap();
+        assert!(export.timeline.meta.fork_point.is_none());
+        assert_eq!(export.events.len(), 1);
+        assert_eq!(export.timeline.head, Seq::from_u64(3));
+        // Fork flatten remints EventIds so parent history cannot collide on import.
+        assert_ne!(export.events[0].id, original_id);
+        assert!(export.events[0].signature.is_none());
+    }
+
+    // Intentionally NOT coverage(off): keeps materialize_fork_export_as_root arms counted
+    // under llvm-cov when other flatten tests are coverage(off).
+    #[test]
+    fn export_timeline_flatten_causation_arms_counted() {
+        struct S {
+            id: TimelineId,
+            events: Vec<Event>,
+        }
+        impl EventStore for S {
+            fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
+                Ok(self.events.clone())
+            }
+            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+                self.read(timeline, range)
+            }
+            fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+                if id != self.id {
+                    return Ok(None);
+                }
+                let mut meta =
+                    TimelineMeta::forked_from(TimelineId::new(), Seq::from_u64(1), "child");
+                meta.id = self.id;
+                Ok(Some(Timeline::new(meta)))
+            }
+            fn create_timeline_with_meta(
+                &mut self,
+                _: TimelineMeta,
+            ) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append_committed(&mut self, _: TimelineId, _: &[Event]) -> Result<(), CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn chain_hash_at(&self, _: TimelineId, _: Seq) -> Result<Hash, CoreError> {
+                Ok(Hash::zero())
+            }
+            fn import_committed(
+                &mut self,
+                meta: TimelineMeta,
+                events: &[Event],
+            ) -> Result<Timeline, CoreError> {
+                import_committed_with_rollback(self, meta, events)
+            }
+        }
+
+        let id = TimelineId::new();
+        let entity = EntityId::new();
+        let a = EventId::new();
+        let b = EventId::new();
+        let outside = EventId::new();
+        let mk = |eid: EventId, seq: u64, causation: Option<EventId>| Event {
+            id: eid,
+            entity,
+            event_type: Kind::new("t"),
+            payload: CanonicalBytes::from_vec(b"x".to_vec()),
+            wall_time: WallTime::now(),
+            seq: Seq::from_u64(seq),
+            causation_id: causation,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: Some(crate::Signature::from_bytes([9u8; 64])),
+            payload_hash: Hash::zero(),
+        };
+        let export = export_timeline(
+            &S {
+                id,
+                events: vec![
+                    mk(a, 1, None),
+                    mk(b, 2, Some(a)),
+                    mk(EventId::new(), 3, Some(outside)),
+                ],
+            },
+            id,
+        )
+        .unwrap();
+        assert_eq!(export.events[1].causation_id, Some(export.events[0].id));
+        assert!(export.events[2].causation_id.is_none());
+        assert!(export.events.iter().all(|e| e.signature.is_none()));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn export_timeline_remaps_causation_within_fork_flatten() {
+        struct ForkWithCausation {
+            id: TimelineId,
+            events: Vec<Event>,
+        }
+        impl EventStore for ForkWithCausation {
+            fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
+                Ok(self.events.clone())
+            }
+            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+                self.read(timeline, range)
+            }
+            fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+                if id != self.id {
+                    return Ok(None);
+                }
+                let mut meta =
+                    TimelineMeta::forked_from(TimelineId::new(), Seq::from_u64(1), "child");
+                meta.id = self.id;
+                Ok(Some(Timeline::new(meta)))
+            }
+            fn create_timeline_with_meta(
+                &mut self,
+                _: TimelineMeta,
+            ) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append_committed(&mut self, _: TimelineId, _: &[Event]) -> Result<(), CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn chain_hash_at(
+                &self,
+                _: TimelineId,
+                _: Seq,
+            ) -> Result<Hash, CoreError> {
+                Err(CoreError::Storage(
+                    "chain_hash_at not supported by this store".to_owned(),
+                ))
+            }
+
+            fn import_committed(
+                &mut self,
+                meta: TimelineMeta,
+                events: &[Event],
+            ) -> Result<Timeline, CoreError> {
+                import_committed_with_rollback(self, meta, events)
+            }
+
+        }
+
+        let id = TimelineId::new();
+        let entity = EntityId::new();
+        let first_id = EventId::new();
+        let second_id = EventId::new();
+        let outside = EventId::new();
+        let mk = |eid: EventId, seq: u64, causation: Option<EventId>| Event {
+            id: eid,
+            entity,
+            event_type: Kind::new("t"),
+            payload: CanonicalBytes::from_vec(b"x".to_vec()),
+            wall_time: WallTime::now(),
+            seq: Seq::from_u64(seq),
+            causation_id: causation,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::zero(),
+        };
+        let export = export_timeline(
+            &ForkWithCausation {
+                id,
+                events: vec![
+                    mk(first_id, 1, None),
+                    mk(second_id, 2, Some(first_id)),
+                    mk(EventId::new(), 3, Some(outside)),
+                ],
+            },
+            id,
+        )
+        .unwrap();
+        assert_ne!(export.events[0].id, first_id);
+        assert_eq!(export.events[1].causation_id, Some(export.events[0].id));
+        assert!(export.events[2].causation_id.is_none());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_timeline_with_id_get_timeline_err() {
+        struct GetFailStore;
+        impl EventStore for GetFailStore {
+            fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+                self.read(timeline, range)
+            }
+
+            fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn get_timeline(&self, _: TimelineId) -> Result<Option<Timeline>, CoreError> {
+                Err(CoreError::Storage("get failed".to_owned()))
+            }
+            fn create_timeline_with_meta(
+                &mut self,
+                meta: TimelineMeta,
+            ) -> Result<Timeline, CoreError> {
+                Ok(Timeline::new(meta))
+            }
+            fn append_committed(&mut self, _: TimelineId, _: &[Event]) -> Result<(), CoreError> {
+                Ok(())
+            }
+            fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
+                Ok(())
+            }
+            fn chain_hash_at(
+                &self,
+                _: TimelineId,
+                _: Seq,
+            ) -> Result<Hash, CoreError> {
+                Err(CoreError::Storage(
+                    "chain_hash_at not supported by this store".to_owned(),
+                ))
+            }
+
+            fn import_committed(
+                &mut self,
+                meta: TimelineMeta,
+                events: &[Event],
+            ) -> Result<Timeline, CoreError> {
+                import_committed_with_rollback(self, meta, events)
+            }
+
+        }
+
+        let export = TimelineExport {
+            timeline: Timeline::new(TimelineMeta::root("x")),
+            events: vec![],
+                    parent_fork_hash: None,
+        };
+        let err = import_timeline_with_id(&mut GetFailStore, export).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_timeline_with_id_missing_after_create() {
+        struct VanishStore;
+        impl EventStore for VanishStore {
+            fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+                self.read(timeline, range)
+            }
+
+            fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn get_timeline(&self, _: TimelineId) -> Result<Option<Timeline>, CoreError> {
+                Ok(None)
+            }
+            fn create_timeline_with_meta(
+                &mut self,
+                meta: TimelineMeta,
+            ) -> Result<Timeline, CoreError> {
+                Ok(Timeline::new(meta))
+            }
+            fn append_committed(&mut self, _: TimelineId, _: &[Event]) -> Result<(), CoreError> {
+                Ok(())
+            }
+            fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
+                Ok(())
+            }
+            fn chain_hash_at(
+                &self,
+                _: TimelineId,
+                _: Seq,
+            ) -> Result<Hash, CoreError> {
+                Err(CoreError::Storage(
+                    "chain_hash_at not supported by this store".to_owned(),
+                ))
+            }
+
+            fn import_committed(
+                &mut self,
+                meta: TimelineMeta,
+                events: &[Event],
+            ) -> Result<Timeline, CoreError> {
+                import_committed_with_rollback(self, meta, events)
+            }
+
+        }
+
+        let export = TimelineExport {
+            timeline: Timeline::new(TimelineMeta::root("x")),
+            events: vec![],
+                    parent_fork_hash: None,
+        };
+        let err = import_timeline_with_id(&mut VanishStore, export).unwrap_err();
+        assert!(matches!(err, CoreError::TimelineNotFound(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn delete_timeline_stub_rejects() {
+        let mut store = TrivialStore::new();
+        let err = store.delete_timeline(TimelineId::new()).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
     }
 
     #[test]
@@ -504,6 +2324,7 @@ mod tests {
         let export = TimelineExport {
             timeline: FlakyStore::healthy_timeline(),
             events: vec![],
+                    parent_fork_hash: None,
         };
         let err = import_timeline(&mut store, export).unwrap_err();
         assert!(matches!(err, CoreError::Storage(_)));
@@ -529,6 +2350,7 @@ mod tests {
         let export = TimelineExport {
             timeline: FlakyStore::healthy_timeline(),
             events: vec![dummy_event],
+                    parent_fork_hash: None,
         };
         let mut store = FlakyStore::new(FlakyMode::AppendErr);
         let err = import_timeline(&mut store, export).unwrap_err();
@@ -564,21 +2386,11 @@ mod tests {
         let export = TimelineExport {
             timeline: FlakyStore::healthy_timeline(),
             events: vec![dummy_event],
+                    parent_fork_hash: None,
         };
         let mut store = FlakyStore::new(FlakyMode::Healthy);
         let imported = import_timeline(&mut store, export).unwrap();
         let _ = imported.id();
     }
 
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn import_timeline_with_id_propagates_create_error() {
-        let export = TimelineExport {
-            timeline: FlakyStore::healthy_timeline(),
-            events: vec![],
-        };
-        let mut store = FlakyStore::new(FlakyMode::CreateTimelineErr);
-        let err = import_timeline_with_id(&mut store, export).unwrap_err();
-        assert!(matches!(err, CoreError::Storage(_)));
-    }
 }

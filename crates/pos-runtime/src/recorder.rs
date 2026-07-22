@@ -306,6 +306,14 @@ mod tests {
                 Err(pos_core::CoreError::Storage("read failed".to_owned()))
             }
 
+            fn read_own(
+                &self,
+                timeline: pos_core::TimelineId,
+                range: pos_core::store::SeqRange,
+            ) -> Result<Vec<pos_core::Event>, pos_core::CoreError> {
+                self.read(timeline, range)
+            }
+
             fn fork(
                 &mut self,
                 _: pos_core::TimelineId,
@@ -324,6 +332,52 @@ mod tests {
                 _: pos_core::TimelineId,
             ) -> Result<Option<pos_core::Timeline>, pos_core::CoreError> {
                 Ok(None)
+            }
+
+            fn create_timeline_with_meta(
+                &mut self,
+                _: pos_core::timeline::TimelineMeta,
+            ) -> Result<pos_core::Timeline, pos_core::CoreError> {
+                Err(pos_core::CoreError::Storage(
+                    "create_timeline_with_meta not supported by this store".to_owned(),
+                ))
+            }
+
+            fn append_committed(
+                &mut self,
+                _: pos_core::TimelineId,
+                _: &[pos_core::Event],
+            ) -> Result<(), pos_core::CoreError> {
+                Err(pos_core::CoreError::Storage(
+                    "append_committed not supported by this store".to_owned(),
+                ))
+            }
+
+            fn delete_timeline(
+                &mut self,
+                _: pos_core::TimelineId,
+            ) -> Result<(), pos_core::CoreError> {
+                Err(pos_core::CoreError::Storage(
+                    "delete_timeline not supported by this store".to_owned(),
+                ))
+            }
+
+            fn chain_hash_at(
+                &self,
+                _: pos_core::TimelineId,
+                _: pos_core::Seq,
+            ) -> Result<pos_core::Hash, pos_core::CoreError> {
+                Err(pos_core::CoreError::Storage(
+                    "chain_hash_at not supported by this store".to_owned(),
+                ))
+            }
+
+            fn import_committed(
+                &mut self,
+                meta: pos_core::timeline::TimelineMeta,
+                events: &[pos_core::Event],
+            ) -> Result<pos_core::Timeline, pos_core::CoreError> {
+                pos_core::store::import_committed_with_rollback(self, meta, events)
             }
         }
 

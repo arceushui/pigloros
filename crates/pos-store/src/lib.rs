@@ -97,6 +97,24 @@ pub fn open_store(config: StoreConfig) -> Result<Box<dyn EventStore>, CoreError>
     }
 }
 
+/// Cryptographically verify signed events in `export`, then identity-import.
+///
+/// Every event must carry a signature that verifies under `public_key` against its
+/// **payload** (metadata is not covered by the signature). An empty event list is allowed.
+///
+/// # Errors
+/// Returns [`CoreError::SignatureVerificationFailed`] if any event is unsigned or fails
+/// verify, or any error from [`pos_core::store::import_timeline_with_id`].
+pub fn import_timeline_with_verified_signatures(
+    store: &mut dyn EventStore,
+    export: TimelineExport,
+    public_key: &pos_core::PublicKey,
+) -> Result<pos_core::Timeline, CoreError> {
+    let vk = pos_crypto::signing::verifying_key_from_public_key(public_key)?;
+    pos_crypto::signing::verify_events_all_signed(&vk, &export.events)?;
+    pos_core::store::import_timeline_with_id(store, export)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,6 +226,115 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].payload.as_slice(), b"data");
     }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_with_verified_signatures_accepts_valid_and_rejects_bad() {
+        use pos_core::{
+            clock::{Seq, WallTime},
+            event::{Event, SchemaVersion},
+            ids::EventId,
+            store::TimelineExport,
+            timeline::{Timeline, TimelineMeta},
+        };
+        use pos_crypto::signing::{generate_keypair, public_key_from_verifying_key, sign};
+
+        let (sk, vk) = generate_keypair();
+        let pk = public_key_from_verifying_key(&vk);
+        let payload = CanonicalBytes::from_vec(b"signed".to_vec());
+        let sig = sign(&sk, &payload);
+        let entity = EntityId::new();
+        let event = Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new("t"),
+            payload: payload.clone(),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: Some(sig),
+            payload_hash: pos_crypto::chain::hash_payload(&payload),
+        };
+        let export = TimelineExport {
+            timeline: Timeline::new(TimelineMeta::root("signed")),
+            events: vec![event.clone()],
+                    parent_fork_hash: None,
+        };
+
+        let mut ok_store = open_store(StoreConfig::Memory).unwrap();
+        import_timeline_with_verified_signatures(ok_store.as_mut(), export.clone(), &pk).unwrap();
+
+        let (_, reject_vk) = generate_keypair();
+        let reject_key = public_key_from_verifying_key(&reject_vk);
+        let mut bad_store = open_store(StoreConfig::Memory).unwrap();
+        let err =
+            import_timeline_with_verified_signatures(bad_store.as_mut(), export, &reject_key)
+                .unwrap_err();
+        assert!(matches!(err, CoreError::SignatureVerificationFailed));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_with_verified_signatures_rejects_invalid_public_key() {
+        use pos_core::{
+            store::TimelineExport,
+            timeline::{Timeline, TimelineMeta},
+            PublicKey,
+        };
+
+        let export = TimelineExport {
+            timeline: Timeline::new(TimelineMeta::root("x")),
+            events: vec![],
+                    parent_fork_hash: None,
+        };
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let mut bytes = [0u8; 32];
+        bytes[31] = 0xff;
+        let bad = PublicKey::from_bytes(bytes);
+        let err = import_timeline_with_verified_signatures(store.as_mut(), export, &bad).unwrap_err();
+        assert!(matches!(err, CoreError::SignatureVerificationFailed));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn import_with_verified_signatures_rejects_unsigned_event() {
+        use pos_core::{
+            clock::{Seq, WallTime},
+            event::{Event, SchemaVersion},
+            ids::EventId,
+            store::TimelineExport,
+            timeline::{Timeline, TimelineMeta},
+        };
+        use pos_crypto::signing::{generate_keypair, public_key_from_verifying_key};
+
+        let (_, vk) = generate_keypair();
+        let pk = public_key_from_verifying_key(&vk);
+        let payload = CanonicalBytes::from_vec(b"unsigned".to_vec());
+        let export = TimelineExport {
+            timeline: Timeline::new(TimelineMeta::root("u")),
+            events: vec![Event {
+                id: EventId::new(),
+                entity: EntityId::new(),
+                event_type: Kind::new("t"),
+                payload: payload.clone(),
+                wall_time: WallTime::from_micros(1),
+                seq: Seq::from_u64(1),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: SchemaVersion::V1,
+                signature: None,
+                payload_hash: pos_crypto::chain::hash_payload(&payload),
+            }],
+            parent_fork_hash: None,
+        };
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let err =
+            import_timeline_with_verified_signatures(store.as_mut(), export, &pk).unwrap_err();
+        assert!(matches!(err, CoreError::SignatureVerificationFailed));
+    }
+
     #[cfg(feature = "sqlite")]
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]

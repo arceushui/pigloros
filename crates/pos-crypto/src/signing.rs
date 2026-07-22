@@ -33,6 +33,44 @@ pub fn verify(
         .map_err(|_| CoreError::SignatureVerificationFailed)
 }
 
+/// Verify every event that carries a signature against `verifying_key` and its payload.
+///
+/// Events with `signature: None` are skipped. Prefer [`verify_events_all_signed`] when
+/// an export is expected to be fully signed.
+///
+/// Note: signatures cover the **payload bytes only**, not id/seq/entity/causation metadata.
+///
+/// # Errors
+/// Returns [`CoreError::SignatureVerificationFailed`] on the first bad signature.
+pub fn verify_events(
+    verifying_key: &VerifyingKey,
+    events: &[pos_core::Event],
+) -> Result<(), CoreError> {
+    for event in events {
+        if let Some(sig) = &event.signature {
+            verify(verifying_key, &event.payload, sig)?;
+        }
+    }
+    Ok(())
+}
+
+/// Like [`verify_events`], but every event must carry a signature (empty slice is ok).
+///
+/// # Errors
+/// Returns [`CoreError::SignatureVerificationFailed`] if any event is unsigned or fails verify.
+pub fn verify_events_all_signed(
+    verifying_key: &VerifyingKey,
+    events: &[pos_core::Event],
+) -> Result<(), CoreError> {
+    for event in events {
+        let Some(sig) = &event.signature else {
+            return Err(CoreError::SignatureVerificationFailed);
+        };
+        verify(verifying_key, &event.payload, sig)?;
+    }
+    Ok(())
+}
+
 /// Convert a core `PublicKey` to an `ed25519_dalek::VerifyingKey`.
 ///
 /// # Errors
@@ -105,11 +143,15 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn invalid_public_key_bytes_returns_error() {
-        let bad_pk = PublicKey::from_bytes([0u8; 32]);
-        // All-zeros is not a valid compressed point on Ed25519
+        // Compressed Edwards-Y that fails decompression (last byte 0xff with zeros).
+        let mut bytes = [0u8; 32];
+        bytes[31] = 0xff;
+        let bad_pk = PublicKey::from_bytes(bytes);
         let result = verifying_key_from_public_key(&bad_pk);
-        // May succeed or fail depending on ed25519-dalek's validation — just ensure no panic
-        let _ = result;
+        assert!(matches!(
+            result,
+            Err(CoreError::SignatureVerificationFailed)
+        ));
     }
 
     #[test]
@@ -127,5 +169,73 @@ mod tests {
         let (sk, _) = generate_keypair();
         let sig = sign(&sk, &payload(b"test"));
         assert_eq!(sig.as_bytes().len(), 64);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn verify_events_skips_unsigned_and_checks_signed() {
+        use pos_core::{
+            clock::{Seq, WallTime},
+            crypto::Hash,
+            event::{Event, Kind, SchemaVersion},
+            ids::{EntityId, EventId},
+        };
+
+        let (sk, vk) = generate_keypair();
+        let p = payload(b"body");
+        let sig = sign(&sk, &p);
+        let signed = Event {
+            id: EventId::new(),
+            entity: EntityId::new(),
+            event_type: Kind::new("t"),
+            payload: p.clone(),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: Some(sig),
+            payload_hash: Hash::zero(),
+        };
+        let unsigned = Event {
+            signature: None,
+            ..signed.clone()
+        };
+        assert!(verify_events(&vk, &[unsigned, signed.clone()]).is_ok());
+
+        let (_, other_vk) = generate_keypair();
+        assert!(verify_events(&other_vk, &[signed]).is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn verify_events_all_signed_rejects_unsigned() {
+        use pos_core::{
+            clock::{Seq, WallTime},
+            crypto::Hash,
+            event::{Event, Kind, SchemaVersion},
+            ids::{EntityId, EventId},
+        };
+
+        let (sk, vk) = generate_keypair();
+        let p = payload(b"body");
+        let unsigned = Event {
+            id: EventId::new(),
+            entity: EntityId::new(),
+            event_type: Kind::new("t"),
+            payload: p.clone(),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::zero(),
+        };
+        assert!(verify_events_all_signed(&vk, std::slice::from_ref(&unsigned)).is_err());
+        let mut signed = unsigned;
+        signed.signature = Some(sign(&sk, &p));
+        assert!(verify_events_all_signed(&vk, &[signed]).is_ok());
+        assert!(verify_events_all_signed(&vk, &[]).is_ok());
     }
 }

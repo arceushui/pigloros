@@ -2,7 +2,7 @@
 
 A simulation world you join to preview your decisions.
 
-> **Current stage:** Pre-product. Wave 5 moat plugin crates + closed eval loop in `pos-mvp` / CLI backtest. LLM bridges, H3, and shared world remain deferred.
+> **Current stage:** Pre-product. Wave 5 MVP closed; Wave 6 shared-world foundation in progress (`export_timeline_raw` / `import_timeline_with_id`, `plugins/society`). LLM bridges, H3/rapier, gateway, and distributed store remain later slices.
 
 ## Getting started
 
@@ -49,6 +49,7 @@ pigloros/
     geo/                  # Wave 5 ✅ — SpatialCloaker degree-grid cloaking (not H3)
     bridges/              # Wave 5 ✅ — BridgeIngestor draft API (no HTTP/Claude yet)
     eval/                 # Wave 5 ✅ — compute_report → CalibrationReport (Brier/ECE/lift)
+    society/              # Wave 6 🚧 — SocietySignal + SocietyReducer (trust/opinion/… metrics)
 ```
 
 Wave 6 will add `bindings/piglor-py` (PyO3); that directory is not in-tree yet.
@@ -63,7 +64,7 @@ Wave 6 will add `bindings/piglor-py` (PyO3); that directory is not in-tree yet.
 | Wave 3 | Plugin Runtime (pos-runtime) | ✅ Complete |
 | Wave 4 | Experiment Framework + CLI (pos-experiment, pos-cli) | ✅ Complete |
 | Wave 5 | Moat Plugins + Single-User MVP | ✅ Complete |
-| Wave 6 | Shared World & Social Layer (+ PyO3 bindings) | Planned |
+| Wave 6 | Shared World & Social Layer (+ PyO3 bindings) | 🚧 In progress — ADR-011; #87 done; #71 society scaffold |
 | Wave 7 | Contextual Decision Preview | Planned |
 
 ## Development

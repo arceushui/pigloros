@@ -15,6 +15,7 @@ members = [
     "plugins/persona",
     "plugins/geo",
     "plugins/world",
+    "plugins/society",
     "apps/pos-experiment",
     "apps/pos-cli",
     "apps/pos-mvp",

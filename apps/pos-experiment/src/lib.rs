@@ -2114,6 +2114,51 @@ mod fault_injection_tests {
             fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
                 self.base.read(timeline, range)
             }
+
+            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+
+                self.read(timeline, range)
+
+            }
+
+
+            fn create_timeline_with_meta(
+                &mut self,
+                _: pos_core::timeline::TimelineMeta,
+            ) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage(
+                    "create_timeline_with_meta not supported by this store".to_owned(),
+                ))
+            }
+
+            fn append_committed(&mut self, _: TimelineId, _: &[Event]) -> Result<(), CoreError> {
+                Err(CoreError::Storage(
+                    "append_committed not supported by this store".to_owned(),
+                ))
+            }
+
+            fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
+                Err(CoreError::Storage(
+                    "delete_timeline not supported by this store".to_owned(),
+                ))
+            }
+            fn chain_hash_at(
+                &self,
+                _: pos_core::TimelineId,
+                _: pos_core::Seq,
+            ) -> Result<pos_core::Hash, pos_core::CoreError> {
+                Err(pos_core::CoreError::Storage(
+                    "chain_hash_at not supported by this store".to_owned(),
+                ))
+            }
+
+            fn import_committed(
+                &mut self,
+                meta: pos_core::timeline::TimelineMeta,
+                events: &[pos_core::Event],
+            ) -> Result<pos_core::Timeline, pos_core::CoreError> {
+                pos_core::store::import_committed_with_rollback(self, meta, events)
+            }
         }
 
         let mut store = FaultyForkerStore {
@@ -2135,6 +2180,7 @@ mod fault_injection_tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    #[allow(clippy::too_many_lines)]
     fn backtest_runner_compute_report_error_propagates() {
         use pos_core::{
             clock::Seq,
@@ -2192,6 +2238,51 @@ mod fault_injection_tests {
                 }
                 self.ok_reads_left.set(left - 1);
                 self.base.read(timeline, range)
+            }
+
+            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+
+                self.read(timeline, range)
+
+            }
+
+
+            fn create_timeline_with_meta(
+                &mut self,
+                meta: pos_core::timeline::TimelineMeta,
+            ) -> Result<Timeline, CoreError> {
+                self.base.create_timeline_with_meta(meta)
+            }
+
+            fn append_committed(
+                &mut self,
+                timeline: TimelineId,
+                events: &[Event],
+            ) -> Result<(), CoreError> {
+                self.base.append_committed(timeline, events)
+            }
+
+            fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
+                Err(CoreError::Storage(
+                    "delete_timeline not supported by this store".to_owned(),
+                ))
+            }
+            fn chain_hash_at(
+                &self,
+                _: pos_core::TimelineId,
+                _: pos_core::Seq,
+            ) -> Result<pos_core::Hash, pos_core::CoreError> {
+                Err(pos_core::CoreError::Storage(
+                    "chain_hash_at not supported by this store".to_owned(),
+                ))
+            }
+
+            fn import_committed(
+                &mut self,
+                meta: pos_core::timeline::TimelineMeta,
+                events: &[pos_core::Event],
+            ) -> Result<pos_core::Timeline, pos_core::CoreError> {
+                pos_core::store::import_committed_with_rollback(self, meta, events)
             }
         }
 
