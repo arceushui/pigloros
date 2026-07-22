@@ -13,6 +13,9 @@
 //! ```
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+mod gateway_context;
+
+use gateway_context::{apply_society_context, fetch_society_means};
 use pos_core::ids::EntityId;
 use pos_experiment::{BacktestConfig, BacktestRunner};
 use pos_plugin_eval::{EvalPlugin, EvalReducer};
@@ -150,6 +153,8 @@ enum CliAction {
     Run {
         scenario: &'static Scenario,
         preferences: Vec<(String, f64)>,
+        gateway: Option<String>,
+        timeline: Option<String>,
     },
     Help,
 }
@@ -186,8 +191,28 @@ fn parse_cli(args: &[String]) -> Result<CliAction, String> {
 
     // Pass 2: start from scenario defaults, then apply --prefer overrides.
     let mut prefs = prefs_from_scenario(scenario);
+    let mut gateway: Option<String> = None;
+    let mut timeline: Option<String> = None;
     i = 0;
     while i < args.len() {
+        if args[i] == "--gateway" {
+            if let Some(url) = args.get(i + 1) {
+                gateway = Some(url.clone());
+                i += 2;
+            } else {
+                return Err("--gateway: expected base URL".to_owned());
+            }
+            continue;
+        }
+        if args[i] == "--timeline" {
+            if let Some(id) = args.get(i + 1) {
+                timeline = Some(id.clone());
+                i += 2;
+            } else {
+                return Err("--timeline: expected timeline id".to_owned());
+            }
+            continue;
+        }
         if args[i] == "--prefer" {
             if let Some(spec) = args.get(i + 1) {
                 match parse_prefer_spec(spec) {
@@ -210,9 +235,16 @@ fn parse_cli(args: &[String]) -> Result<CliAction, String> {
         }
         i += 1;
     }
+    if (gateway.is_some() || timeline.is_some())
+        && gateway.as_ref().zip(timeline.as_ref()).is_none()
+    {
+        return Err("--gateway and --timeline must be used together".to_owned());
+    }
     Ok(CliAction::Run {
         scenario,
         preferences: prefs,
+        gateway,
+        timeline,
     })
 }
 
@@ -257,12 +289,17 @@ fn print_help() {
         println!("                        {} — {}", s.id, s.blurb);
     }
     println!("  --prefer key=value   Override a preference score in [-1, 1]");
+    println!("  --gateway <url>      Shared-world context (with --timeline)");
+    println!("  --timeline <id>      Timeline ULID on the gateway");
     println!("  -h, --help           Show this help");
     println!();
     println!("Examples:");
     println!("  cargo run -p pos-mvp");
     println!("  cargo run -p pos-mvp -- --scenario work --prefer autonomy=1.0 --prefer collaboration=0.2");
     println!("  cargo run -p pos-mvp -- --scenario places --prefer food=1.0 --prefer nature=0.2");
+    println!(
+        "  cargo run -p pos-mvp -- --scenario work --gateway http://127.0.0.1:8080 --timeline <id>"
+    );
 }
 
 fn build_registry_with(
@@ -386,10 +423,38 @@ fn print_privacy(scenario: &Scenario) {
     }
 }
 
-fn run_mvp(scenario: &Scenario, preferences: Vec<(String, f64)>) {
+fn run_mvp(
+    scenario: &Scenario,
+    mut preferences: Vec<(String, f64)>,
+    gateway: Option<&str>,
+    timeline: Option<&str>,
+) {
     println!("PiglorOS — Decision preview");
     println!("Scenario: {} — {}", scenario.id, scenario.blurb);
     println!();
+
+    if let (Some(gw), Some(tl)) = (gateway, timeline) {
+        match fetch_society_means(gw, tl) {
+            Ok(means) if means.is_empty() => {
+                println!("Shared context: no society signals on timeline {tl}");
+                println!();
+            }
+            Ok(means) => {
+                println!("Shared context (from {gw}):");
+                for (dim, mean) in &means {
+                    println!("  {dim} mean={mean:.2}");
+                }
+                apply_society_context(&mut preferences, &means);
+                println!("  Preferences after context nudge:");
+                println!("    {}", format_prefs(&preferences));
+                println!();
+            }
+            Err(err) => {
+                eprintln!("Warning: could not load shared context: {err}");
+                println!();
+            }
+        }
+    }
 
     println!("Your preferences:");
     println!("  {}", format_prefs(&preferences));
@@ -467,7 +532,14 @@ fn run_from_args(args: &[String]) -> Result<(), String> {
         CliAction::Run {
             scenario,
             preferences,
-        } => run_mvp(scenario, preferences),
+            gateway,
+            timeline,
+        } => run_mvp(
+            scenario,
+            preferences,
+            gateway.as_deref(),
+            timeline.as_deref(),
+        ),
     }
     Ok(())
 }
@@ -539,6 +611,7 @@ mod tests {
         let CliAction::Run {
             scenario,
             preferences,
+            ..
         } = parse_cli(&args).expect("parse ok")
         else {
             panic!("expected Run");
@@ -568,6 +641,7 @@ mod tests {
         let CliAction::Run {
             scenario,
             preferences,
+            ..
         } = parse_cli(&args).expect("parse ok")
         else {
             panic!("expected Run");
@@ -690,6 +764,117 @@ mod tests {
         else {
             panic!("expected Run");
         };
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn run_mvp_gateway_warning_on_unreachable() {
+        run_mvp(
+            default_scenario(),
+            prefs_from_scenario(default_scenario()),
+            Some("http://127.0.0.1:1"),
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn run_mvp_gateway_empty_means() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = r#"{"events":[]}"#;
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.read(&mut [0u8; 1024]);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        run_mvp(
+            default_scenario(),
+            prefs_from_scenario(default_scenario()),
+            Some(&format!("http://{addr}")),
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn run_mvp_gateway_applies_context() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = r#"{"events":[{"event_type":"society.signal","payload":{"dimension":"nature","value":0.9}}]}"#;
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.read(&mut [0u8; 1024]);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        run_mvp(
+            default_scenario(),
+            prefs_from_scenario(default_scenario()),
+            Some(&format!("http://{addr}")),
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn parse_cli_dangling_gateway_and_timeline() {
+        match parse_cli(&["--gateway".to_owned()]) {
+            Err(err) => assert!(err.contains("expected base URL"), "{err}"),
+            Ok(_) => panic!("expected dangling --gateway error"),
+        }
+        match parse_cli(&["--timeline".to_owned()]) {
+            Err(err) => assert!(err.contains("expected timeline id"), "{err}"),
+            Ok(_) => panic!("expected dangling --timeline error"),
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn parse_cli_accepts_gateway_and_timeline() {
+        let CliAction::Run {
+            scenario,
+            preferences,
+            gateway,
+            timeline,
+        } = parse_cli(&[
+            "--scenario".to_owned(),
+            "places".to_owned(),
+            "--gateway".to_owned(),
+            "http://127.0.0.1:8080".to_owned(),
+            "--timeline".to_owned(),
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+        ])
+        .unwrap()
+        else {
+            panic!("expected Run action");
+        };
+        assert_eq!(scenario.id, "places");
+        assert!(!preferences.is_empty());
+        assert_eq!(gateway.as_deref(), Some("http://127.0.0.1:8080"));
+        assert_eq!(timeline.as_deref(), Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn parse_cli_gateway_requires_timeline() {
+        match parse_cli(&["--gateway".to_owned(), "http://127.0.0.1:8080".to_owned()]) {
+            Err(err) => assert!(err.contains("together"), "{err}"),
+            Ok(_) => panic!("expected error when timeline missing"),
+        }
     }
 
     #[test]

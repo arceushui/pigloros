@@ -2,7 +2,7 @@
 
 A simulation world you join to preview your decisions.
 
-> **Current stage:** Pre-product. Wave 5 MVP closed; Wave 6 shared-world foundation in progress (`export_timeline_own` / `import_timeline_with_id`, `plugins/society`, `piglor-gateway` HTTP poll MVP). LLM bridges, H3/rapier, WebSocket stream, auth, and distributed store remain later slices.
+> **Current stage:** Pre-product. Wave 6 foundation delivered (#87 identity, #71 society, #69 gateway HTTP MVP). Wave 7 contextual decision preview in progress. WebSocket, auth, PyO3, LLM bridges, H3/rapier, and distributed store remain deferred.
 
 ## Getting started
 
@@ -47,8 +47,8 @@ pigloros/
   apps/
     pos-experiment/       # Wave 4 ✅ — experiment host: tick loop, StopCondition, branch, backtest
     pos-cli/              # Wave 4/5 ✅ — pos binary: store, timeline, experiment, merge
-    pos-mvp/              # Wave 5 ✅ — decision preview MVP (pluggable scenarios + CalibrationReport)
-    piglor-gateway/       # Wave 6 🚧 — local-first HTTP gateway (ADR-014 / #69)
+    pos-mvp/              # Wave 5/7 — decision preview (+ optional gateway context, ADR-015)
+    piglor-gateway/       # Wave 6 ✅ — local-first HTTP gateway (ADR-014 / #69)
   plugins/
     entities/rule-agent/  # Wave 4 ✅ — deterministic rule-based agent plugin
     observations/synthetic/ # Wave 4 ✅ — synthetic sin-wave observation plugin
@@ -58,7 +58,7 @@ pigloros/
     geo/                  # Wave 5 ✅ — SpatialCloaker degree-grid cloaking (not H3)
     bridges/              # Wave 5 ✅ — BridgeIngestor draft API (no HTTP/Claude yet)
     eval/                 # Wave 5 ✅ — compute_report → CalibrationReport (Brier/ECE/lift)
-    society/              # Wave 6 🚧 — SocietySignal + SocietyReducer (trust/opinion/… metrics)
+    society/              # Wave 6 ✅ — SocietySignal + SocietyReducer (trust/opinion/… metrics)
 ```
 
 Wave 6 will add `bindings/piglor-py` (PyO3); that directory is not in-tree yet.
@@ -73,8 +73,8 @@ Wave 6 will add `bindings/piglor-py` (PyO3); that directory is not in-tree yet.
 | Wave 3 | Plugin Runtime (pos-runtime) | ✅ Complete |
 | Wave 4 | Experiment Framework + CLI (pos-experiment, pos-cli) | ✅ Complete |
 | Wave 5 | Moat Plugins + Single-User MVP | ✅ Complete |
-| Wave 6 | Shared World & Social Layer (+ PyO3 bindings) | 🚧 In progress — #87 identity; #71 society; #69 gateway HTTP MVP (ADR-014); WS/auth/PyO3 deferred |
-| Wave 7 | Contextual Decision Preview | Planned |
+| Wave 6 | Shared World & Social Layer (+ PyO3 bindings) | ✅ Foundation done — #87 #71 #69; WS/auth/PyO3/client deferred |
+| Wave 7 | Contextual Decision Preview | 🚧 In progress — ADR-015 gateway context in `pos-mvp` |
 
 ## Development
 

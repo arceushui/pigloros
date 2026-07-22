@@ -17,6 +17,8 @@ pos-plugin-eval = { path = "../../plugins/eval" }
 pos-plugin-persona = { path = "../../plugins/persona" }
 pos-plugin-geo = { path = "../../plugins/geo" }
 pos-runtime = { path = "../../crates/pos-runtime" }
+serde_json = { workspace = true }
+ureq = { version = "2", default-features = false, features = ["json"] }
 
 [lints]
 workspace = true
