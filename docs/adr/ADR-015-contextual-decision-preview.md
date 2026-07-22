@@ -43,8 +43,15 @@ cargo run -p pos-mvp -- --scenario work \
 6. **AI Influence Index (#79 / O12):** every decision preview prints a headline —
    fraction of timeline info events from AI agents (`agent.action`, `agent.decision`,
    future `agent.*`) with a traceable archetype breakdown (`goal-seeking`, `rule-bound`,
-   or `payload.archetype` / `payload.goal`). Without `--gateway`/`--timeline`, shows
-   `0%` local-preview note (same HTTP poll as society means when live).
+   or `payload.archetype` / `payload.goal`). Modes:
+   - no gateway flags → `0%` local-preview note;
+   - poll failed → `n/a` Unavailable (not local-preview copy);
+   - live empty timeline → `0%` no events yet;
+   - live with events but no `agent.*` → `0%` plus a hint (gateway HTTP MVP accepts
+     `world.action` / `society.signal` only; seed agent events elsewhere or #72 for
+     a non-zero live index).
+7. **Personal fork (#75 thin):** `--fork-compare` uses a `DecisionChoiceProjection` so
+   `pos_time::compare` sees diverged twin state (`last_chosen`), not only event counts.
 
 No new crate; sync HTTP via `ureq` in `pos-mvp` only. Gateway remains optional — without flags, behaviour is unchanged aside from the always-on AI Influence headline.
 
@@ -57,14 +64,17 @@ No new crate; sync HTTP via `ureq` in `pos-mvp` only. Gateway remains optional �
 
 ## Follow-on (#75 thin slice — not full ticket)
 
-`cargo run -p pos-mvp -- --fork-compare` runs a **local** Memory CoW of `shared-now`, forces each scenario option on a future arm, and prints a side-by-side `pos_time::compare` summary plus persona scores.
+`cargo run -p pos-mvp -- --fork-compare` runs a **local** Memory CoW of `shared-now`,
+forces each scenario option on a future arm, projects `persona.decision.chosen` into
+entity state, and prints a side-by-side `pos_time::compare` summary (including non-zero
+`diverged_entities` when choices differ) plus persona scores.
 
 **Deferred for a later #75 vertical:** gateway-seeded shared timeline, experiment tick loop with agents/humans, compare-driven verdict (not score reprint).
 
 ## Implementation
 
-- Code: `apps/pos-mvp/src/gateway_context.rs`, `apps/pos-mvp/src/ai_influence.rs`
-- Tests: JSON fixture parsing + preference nudge + AI Influence fixtures (no network in unit tests)
+- Code: `apps/pos-mvp/src/gateway_context.rs`, `apps/pos-mvp/src/ai_influence.rs`, `apps/pos-mvp/src/fork_compare.rs`
+- Tests: JSON fixture parsing + preference nudge + AI Influence fixtures; fork compare asserts diverged entities (HTTP mocks use `TcpListener`)
 
 ## Wave 6 closure
 

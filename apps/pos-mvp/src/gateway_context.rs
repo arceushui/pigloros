@@ -166,11 +166,31 @@ pub fn validate_timeline_id(timeline_id: &str) -> Result<(), String> {
         .map_err(|e| format!("invalid timeline id (expected ULID): {e}"))
 }
 
+/// True when the gateway base URL's host is loopback (`127.0.0.1`, `localhost`, `::1`).
+///
+/// Parses scheme/userinfo/port carefully so hosts like `127.0.0.1.evil` are not treated
+/// as loopback (substring match would incorrectly skip the ADR-015 warning).
+fn gateway_host_is_loopback(gateway: &str) -> bool {
+    let s = gateway.trim();
+    // Normalize scheme case so `HTTP://` matches; then strip once.
+    let lower = s.to_ascii_lowercase();
+    let without_scheme = lower
+        .strip_prefix("http://")
+        .or_else(|| lower.strip_prefix("https://"))
+        .unwrap_or(lower.as_str());
+    let authority = without_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    let hostport = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(rest) = hostport.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        // IPv4 / hostname: strip `:port` from the right once.
+        hostport.rsplit_once(':').map_or(hostport, |(h, _)| h)
+    };
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
 fn warn_if_non_loopback(gateway: &str) {
-    let lower = gateway.to_ascii_lowercase();
-    let loopback =
-        lower.contains("127.0.0.1") || lower.contains("localhost") || lower.contains("[::1]");
-    if !loopback {
+    if !gateway_host_is_loopback(gateway) {
         eprintln!(
             "Warning: gateway URL is not loopback — ADR-015 demos assume local-only (no auth)."
         );
@@ -744,5 +764,20 @@ mod tests {
         warn_if_non_loopback("http://localhost:8080");
         warn_if_non_loopback("http://[::1]:8080");
         warn_if_non_loopback("http://example.com:8080");
+    }
+
+    #[test]
+    fn gateway_host_is_loopback_exact_hosts_only() {
+        assert!(gateway_host_is_loopback("http://127.0.0.1:8080"));
+        assert!(gateway_host_is_loopback("https://localhost"));
+        assert!(gateway_host_is_loopback("HTTP://LOCALHOST:9"));
+        assert!(gateway_host_is_loopback("http://[::1]:8080/v1"));
+        assert!(gateway_host_is_loopback("http://user@127.0.0.1:9"));
+        assert!(gateway_host_is_loopback("127.0.0.1:8080"));
+        assert!(gateway_host_is_loopback("http://127.0.0.1:8080?x=1"));
+        assert!(!gateway_host_is_loopback("http://127.0.0.1.evil:8080"));
+        assert!(!gateway_host_is_loopback("http://example.com:8080"));
+        assert!(!gateway_host_is_loopback("http://notlocalhost:8080"));
+        assert!(!gateway_host_is_loopback(""));
     }
 }

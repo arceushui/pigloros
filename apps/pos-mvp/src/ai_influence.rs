@@ -182,6 +182,12 @@ pub fn format_ai_influence_lines(index: &AiInfluenceIndex) -> Vec<String> {
                     .collect();
                 lines.push(format!("  Traceable archetypes: {}", parts.join(", ")));
             }
+            if index.ai_events == 0 {
+                lines.push(
+                    "  (no agent.* events yet — gateway HTTP posts world.action/society.signal; seed agent events or see #72 for a non-zero live index)"
+                        .to_owned(),
+                );
+            }
             lines
         }
     }
@@ -348,10 +354,12 @@ mod tests {
         let events = vec![serde_json::json!({ "event_type": "world.action" })];
         let idx = ai_influence_from_events(&events);
         let lines = format_ai_influence_lines(&idx);
-        assert_eq!(lines.len(), 1);
+        assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("0%"));
         assert!(lines[0].contains("0 of 1"));
         assert!(!lines[0].contains("Traceable"));
+        assert!(lines[1].contains("no agent.*"));
+        assert!(lines[1].contains("#72"));
     }
 
     #[test]

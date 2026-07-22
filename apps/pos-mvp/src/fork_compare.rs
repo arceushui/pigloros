@@ -6,13 +6,36 @@
 use pos_core::{
     event::{CanonicalBytes, EventDraft, Kind},
     ids::EntityId,
+    Event, Reducer, State,
 };
 use pos_plugin_persona::{
     DecisionPayload, PersonaModel, PreferencePayload, EVENT_TYPE_DECISION, EVENT_TYPE_PREFERENCE,
 };
-use pos_state::{EntityStateProjection, ProjectionRegistry};
+use pos_state::ProjectionRegistry;
 use pos_store::{open_store, StoreConfig};
 use pos_time::ForkDiff;
+
+/// Projection that records the twin's forced `persona.decision` choice.
+///
+/// [`pos_state::EntityStateProjection`] only stores `event_count` /
+/// `last_event_type`, so both futures looked identical to `pos_time::compare`.
+/// Folding `chosen` makes diverged-entity counts meaningful for this demo.
+struct DecisionChoiceProjection;
+
+impl Reducer for DecisionChoiceProjection {
+    fn initial(&self) -> State {
+        State::new()
+    }
+
+    fn apply(&self, state: &mut State, event: &Event) {
+        if event.event_type.as_str() != EVENT_TYPE_DECISION {
+            return;
+        }
+        if let Ok(payload) = ciborium::from_reader::<DecisionPayload, _>(event.payload.as_slice()) {
+            state.set("last_chosen", serde_json::Value::String(payload.chosen));
+        }
+    }
+}
 
 /// Summary of a dual-future personal fork compare.
 #[derive(Debug, Clone)]
@@ -86,9 +109,9 @@ pub fn run_personal_fork_compare(
         .expect("append future-b");
 
     let mut reg_a = ProjectionRegistry::new();
-    reg_a.register("entity_state", Box::new(EntityStateProjection));
+    reg_a.register("decision_choice", Box::new(DecisionChoiceProjection));
     let mut reg_b = ProjectionRegistry::new();
-    reg_b.register("entity_state", Box::new(EntityStateProjection));
+    reg_b.register("decision_choice", Box::new(DecisionChoiceProjection));
 
     let diff: ForkDiff = pos_time::compare(
         store.as_ref(),
@@ -196,6 +219,10 @@ mod tests {
         assert_eq!(summary.chosen_b, "osaka food");
         assert!(summary.only_in_a >= 1);
         assert!(summary.only_in_b >= 1);
+        assert_eq!(
+            summary.diverged_entities, 1,
+            "forced opposite choices must diverge twin entity state"
+        );
         assert!(summary.score_a > summary.score_b);
     }
 
@@ -205,6 +232,7 @@ mod tests {
         assert_eq!(summary.fork_seq, 0);
         assert_eq!(summary.only_in_a, 1);
         assert_eq!(summary.only_in_b, 1);
+        assert_eq!(summary.diverged_entities, 1);
     }
 
     #[test]
@@ -243,5 +271,69 @@ mod tests {
         assert_eq!(d.event_type.as_str(), EVENT_TYPE_DECISION);
         let d_a = forced_decision(e, "x", "y", true);
         assert_eq!(d_a.event_type.as_str(), EVENT_TYPE_DECISION);
+    }
+
+    #[test]
+    fn decision_choice_projection_ignores_non_decisions() {
+        use pos_core::{
+            clock::{Seq, WallTime},
+            crypto::Hash,
+            event::{CanonicalBytes as CB, SchemaVersion},
+            ids::EventId,
+        };
+
+        let proj = DecisionChoiceProjection;
+        let mut state = proj.initial();
+        let entity = EntityId::new();
+        let pref = preference_draft(entity, "nature", 0.5);
+        let event = Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new(EVENT_TYPE_PREFERENCE),
+            schema_version: SchemaVersion::V1,
+            payload: pref.payload,
+            payload_hash: Hash::from_bytes([0u8; 32]),
+            causation_id: None,
+            correlation_id: None,
+            seq: Seq::from_u64(1),
+            wall_time: WallTime::from_micros(0),
+            signature: None,
+        };
+        proj.apply(&mut state, &event);
+        assert!(state.get("last_chosen").is_none());
+
+        let draft = forced_decision(entity, "a", "b", true);
+        let decision = Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new(EVENT_TYPE_DECISION),
+            schema_version: SchemaVersion::V1,
+            payload: draft.payload,
+            payload_hash: Hash::from_bytes([0u8; 32]),
+            causation_id: None,
+            correlation_id: None,
+            seq: Seq::from_u64(2),
+            wall_time: WallTime::from_micros(1),
+            signature: None,
+        };
+        proj.apply(&mut state, &decision);
+        assert_eq!(state.get("last_chosen").and_then(|v| v.as_str()), Some("a"));
+
+        // Bad CBOR payload is ignored (no panic, no overwrite of prior choice).
+        let bad = Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new(EVENT_TYPE_DECISION),
+            schema_version: SchemaVersion::V1,
+            payload: CB::from_vec(vec![0xff, 0x00]),
+            payload_hash: Hash::from_bytes([0u8; 32]),
+            causation_id: None,
+            correlation_id: None,
+            seq: Seq::from_u64(3),
+            wall_time: WallTime::from_micros(2),
+            signature: None,
+        };
+        proj.apply(&mut state, &bad);
+        assert_eq!(state.get("last_chosen").and_then(|v| v.as_str()), Some("a"));
     }
 }

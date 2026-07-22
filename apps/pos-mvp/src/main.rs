@@ -303,8 +303,13 @@ fn print_help() {
     println!("  --prefer key=value   Override a preference score in [-1, 1]");
     println!("  --gateway <url>      Shared-world context + AI Influence (with --timeline)");
     println!("  --timeline <id>      Timeline ULID on the gateway");
-    println!("  --fork-compare       Dual-future personal fork (#75) instead of backtest");
+    println!("  --fork-compare       Dual-future personal fork (#75 thin slice)");
     println!("  -h, --help           Show this help");
+    println!();
+    println!("Notes:");
+    println!("  AI Influence Index counts agent.* events on the timeline. piglor-gateway HTTP");
+    println!("  currently accepts world.action / society.signal — seed agent.action elsewhere");
+    println!("  (or wait for #72) for a non-zero live index.");
     println!();
     println!("Examples:");
     println!("  cargo run -p pos-mvp");
@@ -456,7 +461,9 @@ fn apply_and_print_society(
         return;
     }
     println!("Shared context (from {gateway}):");
-    for (dim, mean) in means {
+    let mut dims: Vec<(&String, f64)> = means.iter().map(|(k, v)| (k, *v)).collect();
+    dims.sort_by(|a, b| a.0.cmp(b.0));
+    for (dim, mean) in dims {
         println!("  {dim} mean={mean:.2}");
     }
     println!("  In plain language:");
@@ -883,6 +890,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let body = r#"{"events":[
             {"event_type":"society.signal","payload":{"dimension":"trust","value":0.9}},
+            {"event_type":"society.signal","payload":{"dimension":"opinion","value":0.4}},
             {"event_type":"agent.action","payload":{"archetype":"scout"}},
             {"event_type":"agent.decision","payload":{}}
         ]}"#;
