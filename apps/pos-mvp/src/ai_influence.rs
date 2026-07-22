@@ -6,6 +6,9 @@
 
 use std::collections::BTreeMap;
 
+/// Max characters kept for archetype / goal labels printed to the CLI.
+const MAX_LABEL_CHARS: usize = 64;
+
 /// How the index was obtained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AiInfluenceMode {
@@ -13,6 +16,8 @@ pub enum AiInfluenceMode {
     Live,
     /// No `--gateway`/`--timeline`; still show a headline (assumed 0%).
     LocalPreview,
+    /// Flags were set but the gateway poll failed.
+    Unavailable,
 }
 
 /// First-class AI Influence Index for the decision preview.
@@ -36,6 +41,18 @@ pub fn local_ai_influence() -> AiInfluenceIndex {
         total_events: 0,
         by_archetype: BTreeMap::new(),
         mode: AiInfluenceMode::LocalPreview,
+    }
+}
+
+/// Headline when `--gateway`/`--timeline` were set but the poll failed.
+#[must_use]
+pub fn unavailable_ai_influence() -> AiInfluenceIndex {
+    AiInfluenceIndex {
+        index: 0.0,
+        ai_events: 0,
+        total_events: 0,
+        by_archetype: BTreeMap::new(),
+        mode: AiInfluenceMode::Unavailable,
     }
 }
 
@@ -76,16 +93,34 @@ fn influence_ratio(ai_events: u64, total_events: u64) -> f64 {
     if total_events == 0 {
         return 0.0;
     }
-    let ai = u32::try_from(ai_events).unwrap_or(u32::MAX);
     let total = u32::try_from(total_events).unwrap_or(u32::MAX);
+    let ai = u32::try_from(ai_events).unwrap_or(u32::MAX).min(total);
     f64::from(ai) / f64::from(total)
 }
 
-/// `agent.action` (goal-seeking ai-agent), `agent.decision` (rule-agent), and future `agent.*`.
+/// Any non-empty `agent.*` event type (ai-agent, rule-agent, future agents).
 fn is_ai_agent_event(event_type: &str) -> bool {
-    event_type == "agent.action"
-        || event_type == "agent.decision"
-        || (event_type.starts_with("agent.") && event_type.len() > "agent.".len())
+    event_type.starts_with("agent.") && event_type.len() > "agent.".len()
+}
+
+/// Strip control characters and truncate so CLI headlines stay single-line.
+fn sanitize_label(raw: &str) -> Option<String> {
+    let mut out = String::new();
+    for c in raw.chars() {
+        if c.is_control() {
+            continue;
+        }
+        if out.chars().count() >= MAX_LABEL_CHARS {
+            break;
+        }
+        out.push(c);
+    }
+    let trimmed = out.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
 }
 
 fn archetype_for(event: &serde_json::Value, event_type: &str) -> String {
@@ -93,24 +128,26 @@ fn archetype_for(event: &serde_json::Value, event_type: &str) -> String {
         .get("payload")
         .and_then(|p| p.get("archetype"))
         .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+        .and_then(sanitize_label)
     {
-        return label.to_owned();
+        return label;
     }
     if let Some(goal) = event
         .get("payload")
         .and_then(|p| p.get("goal"))
         .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+        .and_then(sanitize_label)
     {
         return format!("goal:{goal}");
     }
     match event_type {
         "agent.action" => "goal-seeking".to_owned(),
         "agent.decision" => "rule-bound".to_owned(),
-        other => other.strip_prefix("agent.").unwrap_or(other).to_owned(),
+        other => {
+            // `is_ai_agent_event` already requires a non-empty `agent.` prefix.
+            let suffix = &other["agent.".len()..];
+            sanitize_label(suffix).unwrap_or_else(|| "agent".to_owned())
+        }
     }
 }
 
@@ -124,6 +161,11 @@ pub fn format_ai_influence_lines(index: &AiInfluenceIndex) -> Vec<String> {
                 "AI Influence Index: {pct}% — local preview (no shared timeline; live share needs --gateway/--timeline)"
             ),
         ],
+        AiInfluenceMode::Unavailable => {
+            vec![
+                "AI Influence Index: n/a — gateway poll failed (see warning)".to_owned(),
+            ]
+        }
         AiInfluenceMode::Live if index.total_events == 0 => {
             vec!["AI Influence Index: 0% — no events on shared timeline yet".to_owned()]
         }
@@ -159,6 +201,19 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("AI Influence Index: 0%"));
         assert!(lines[0].contains("local preview"));
+        assert!(!lines[0].contains("n/a"));
+    }
+
+    #[test]
+    fn unavailable_formats_poll_failed_not_local() {
+        let idx = unavailable_ai_influence();
+        assert_eq!(idx.mode, AiInfluenceMode::Unavailable);
+        let lines = format_ai_influence_lines(&idx);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("n/a"));
+        assert!(lines[0].contains("gateway poll failed"));
+        assert!(!lines[0].contains("needs --gateway"));
+        assert!(!lines[0].contains("local preview"));
     }
 
     #[test]
@@ -229,6 +284,36 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_strips_controls_and_truncates() {
+        let events = vec![
+            serde_json::json!({
+                "event_type": "agent.action",
+                "payload": { "archetype": "evil\nextra-line" }
+            }),
+            serde_json::json!({
+                "event_type": "agent.action",
+                "payload": { "goal": format!("{}!", "x".repeat(80)) }
+            }),
+            serde_json::json!({
+                "event_type": "agent.action",
+                "payload": { "archetype": "\u{0001}\u{0002}" }
+            }),
+        ];
+        let idx = ai_influence_from_events(&events);
+        assert_eq!(idx.by_archetype.get("evilextra-line"), Some(&1));
+        let goal_key = idx
+            .by_archetype
+            .keys()
+            .find(|k| k.starts_with("goal:"))
+            .expect("goal key");
+        assert!(goal_key.starts_with("goal:"));
+        assert!(goal_key.len() <= "goal:".len() + MAX_LABEL_CHARS);
+        assert!(!goal_key.contains('\n'));
+        // Control-only archetype falls back to default.
+        assert_eq!(idx.by_archetype.get("goal-seeking"), Some(&1));
+    }
+
+    #[test]
     fn future_agent_event_types_count_as_ai() {
         let events = vec![serde_json::json!({
             "event_type": "agent.plan",
@@ -237,6 +322,25 @@ mod tests {
         let idx = ai_influence_from_events(&events);
         assert_eq!(idx.ai_events, 1);
         assert_eq!(idx.by_archetype.get("plan"), Some(&1));
+    }
+
+    #[test]
+    fn control_only_agent_suffix_falls_back_to_agent() {
+        let events = vec![serde_json::json!({
+            "event_type": "agent.\u{0001}\u{0002}",
+            "payload": {}
+        })];
+        let idx = ai_influence_from_events(&events);
+        assert_eq!(idx.ai_events, 1);
+        assert_eq!(idx.by_archetype.get("agent"), Some(&1));
+    }
+
+    #[test]
+    fn bare_agent_prefix_alone_is_not_ai() {
+        let events = vec![serde_json::json!({ "event_type": "agent." })];
+        let idx = ai_influence_from_events(&events);
+        assert_eq!(idx.total_events, 1);
+        assert_eq!(idx.ai_events, 0);
     }
 
     #[test]
@@ -251,11 +355,12 @@ mod tests {
     }
 
     #[test]
-    fn influence_ratio_saturates_huge_counts() {
+    fn influence_ratio_clamped_to_unit_interval() {
         assert!((influence_ratio(0, 0) - 0.0).abs() < f64::EPSILON);
         assert!((influence_ratio(1, 4) - 0.25).abs() < f64::EPSILON);
         assert!((influence_ratio(u64::MAX, u64::MAX) - 1.0).abs() < f64::EPSILON);
-        assert!(influence_ratio(u64::MAX, 2) > 1.0);
+        assert!((influence_ratio(u64::MAX, 2) - 1.0).abs() < f64::EPSILON);
+        assert!(influence_ratio(u64::MAX, 2) <= 1.0);
     }
 
     #[test]

@@ -17,7 +17,7 @@ mod ai_influence;
 mod fork_compare;
 mod gateway_context;
 
-use ai_influence::{format_ai_influence_lines, local_ai_influence};
+use ai_influence::{format_ai_influence_lines, local_ai_influence, unavailable_ai_influence};
 use fork_compare::{print_fork_compare, run_personal_fork_compare};
 use gateway_context::{apply_society_context, fetch_timeline_context, plain_language_context};
 use pos_core::ids::EntityId;
@@ -483,7 +483,7 @@ fn print_gateway_block(
                 apply_and_print_society(gw, tl, &ctx.society_means, preferences);
             }
             Err(err) => {
-                print_ai_influence_headline(&local_ai_influence());
+                print_ai_influence_headline(&unavailable_ai_influence());
                 eprintln!("Warning: could not load shared context: {err}");
                 println!();
             }
@@ -832,6 +832,11 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_mvp_gateway_warning_on_unreachable() {
+        // Headline copy for this path is covered by
+        // `unavailable_formats_poll_failed_not_local`; this smoke-runs the Err branch.
+        let lines = format_ai_influence_lines(&unavailable_ai_influence());
+        assert!(lines[0].contains("n/a") && lines[0].contains("gateway poll failed"));
+        assert!(!lines[0].contains("needs --gateway"));
         run_mvp(
             default_scenario(),
             prefs_from_scenario(default_scenario()),
