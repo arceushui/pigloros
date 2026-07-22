@@ -5,3 +5,4 @@
 SQLCipher.db
 *.db
 .cursor/
+**/__pycache__/
