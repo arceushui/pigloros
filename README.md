@@ -2,7 +2,7 @@
 
 A simulation world you join to preview your decisions.
 
-> **Current stage:** Pre-product. Wave 6 foundation delivered (#87 identity, #71 society, #69 gateway HTTP MVP). Wave 7 in progress — ADR-015/#76 context; #75 personal fork (`--fork-compare`). WebSocket, auth, PyO3, LLM bridges, H3/rapier, and distributed store remain deferred.
+> **Current stage:** Pre-product. Wave 6 **foundation** delivered (#87 identity, #71 society, #69 gateway HTTP MVP) — auth/WS/client/PyO3/agents/distributed store still deferred. Wave 7 **thin MVP** delivered on `main` (ADR-015, #76 plain language, #75 local `--fork-compare`, #79 AI Influence Index); science tickets #77/#78 remain open.
 
 ## Getting started
 
@@ -73,8 +73,8 @@ Wave 6 will add `bindings/piglor-py` (PyO3); that directory is not in-tree yet.
 | Wave 3 | Plugin Runtime (pos-runtime) | ✅ Complete |
 | Wave 4 | Experiment Framework + CLI (pos-experiment, pos-cli) | ✅ Complete |
 | Wave 5 | Moat Plugins + Single-User MVP | ✅ Complete |
-| Wave 6 | Shared World & Social Layer (+ PyO3 bindings) | ✅ Foundation done — #87 #71 #69; WS/auth/PyO3/client deferred |
-| Wave 7 | Contextual Decision Preview | 🚧 In progress — ADR-015/#76 done; #75 `--fork-compare` |
+| Wave 6 | Shared World & Social Layer (+ PyO3 bindings) | ✅ Foundation done — #87 #71 #69; WS/auth/PyO3/client/#72–74 deferred |
+| Wave 7 | Contextual Decision Preview | ✅ Thin MVP done — ADR-015/#76/#75 thin/#79; #77/#78 science open |
 
 ## Development
 
