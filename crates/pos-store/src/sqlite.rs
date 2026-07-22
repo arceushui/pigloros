@@ -2654,7 +2654,6 @@ mod tests {
         assert!(matches!(err, CoreError::Storage(_)));
     }
 
-
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_committed_validates_seq_hash_and_ids_sqlite() {
@@ -2735,7 +2734,6 @@ mod tests {
         assert!(matches!(err, CoreError::Storage(_)));
         assert!(dst.get_timeline(tl.id()).unwrap().is_none());
     }
-
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -3146,8 +3144,7 @@ mod tests {
         let mut src = new_store();
         let root = src.create_timeline("root").unwrap();
         let entity = EntityId::new();
-        src.append(root.id(), &[make_draft(entity, b"p1")])
-            .unwrap();
+        src.append(root.id(), &[make_draft(entity, b"p1")]).unwrap();
         let child = src.fork(root.id(), Seq::from_u64(1), "child").unwrap();
         src.append(child.id(), &[make_draft(entity, b"c1")])
             .unwrap();
@@ -3157,7 +3154,10 @@ mod tests {
         let imported =
             import_timeline_with_id(&mut dst, export_timeline_raw(&src, child.id()).unwrap())
                 .unwrap();
-        assert_eq!(imported.meta.fork_point, Some((root.id(), Seq::from_u64(1))));
+        assert_eq!(
+            imported.meta.fork_point,
+            Some((root.id(), Seq::from_u64(1)))
+        );
         let own = dst.read_own(child.id(), SeqRange::all()).unwrap();
         assert_eq!(own.len(), 1);
         assert_eq!(own[0].payload.as_slice(), b"c1");

@@ -1,3 +1,23 @@
+//! Event store port and timeline export/import helpers.
+//!
+//! # Which export / import path?
+//!
+//! | Intent | Export | Import | Notes |
+//! |--------|--------|--------|-------|
+//! | Independent clone | [`export_timeline`] | [`import_timeline`] | Remints timeline/event ids; converts to drafts (signatures dropped) |
+//! | Identity `CoW` | [`export_timeline_own`] | [`import_timeline_with_id`] | Parent first, then child; forks need `parent_fork_hash` |
+//! | Verified identity | [`export_timeline_own`] | `pos_store::import_timeline_with_verified_signatures` | Every event must be signed under one key |
+//!
+//! Prefer [`export_timeline_own`] (alias: [`export_timeline_cow`]) for copy-on-write sync.
+//! [`export_timeline_raw`] is the same function kept for existing call sites.
+//!
+//! # `CoW` sync order
+//!
+//! 1. `export_timeline_own(src, root)` → `import_timeline_with_id(dst, …)`
+//! 2. `export_timeline_own(src, child)` → `import_timeline_with_id(dst, …)`
+//!
+//! Importing a forked child before its parent fails (`TimelineNotFound`).
+
 use crate::{
     clock::Seq,
     crypto::Hash,
@@ -43,7 +63,7 @@ pub struct TimelineExport {
     pub events: Vec<Event>,
     /// Expected parent hash-chain tip at [`TimelineMeta::fork_point`].
     ///
-    /// Set by [`export_timeline_raw`] for forked timelines so
+    /// Set by [`export_timeline_own`] / [`export_timeline_raw`] for forked timelines so
     /// [`import_timeline_with_id`] can reject divergent parent history.
     /// Always `None` for roots and for flattened logical [`export_timeline`] snapshots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,7 +108,7 @@ pub trait EventStore: Send {
 
     /// Read events stored directly on this timeline (no fork stitching or renumbering).
     ///
-    /// Used by [`export_timeline_raw`] for identity-preserving fork sync.
+    /// Used by [`export_timeline_own`] for identity-preserving fork sync.
     ///
     /// # Errors
     /// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist.
@@ -151,7 +171,7 @@ pub trait EventStore: Send {
 
     /// CoW-aware hash-chain value at `at_seq` on `timeline` (inclusive).
     ///
-    /// Used by [`export_timeline_raw`] / [`import_timeline_with_id`] to bind fork imports
+    /// Used by [`export_timeline_own`] / [`import_timeline_with_id`] to bind fork imports
     /// to parent history.
     ///
     /// # Errors
@@ -183,7 +203,7 @@ pub trait EventStore: Send {
 /// **fresh** [`EventId`] (causation links remapped within the export; signatures
 /// cleared). That yields an independent root that will not collide with parent
 /// `EventId`s on import. For `CoW` fork round-trips that must keep `fork_point` and
-/// original ids, use [`export_timeline_raw`].
+/// original ids, use [`export_timeline_own`].
 ///
 /// # Errors
 /// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist.
@@ -205,7 +225,32 @@ pub fn export_timeline(
     Ok(export)
 }
 
+/// Export only events stored on this timeline (no stitch / renumber) — preferred `CoW` name.
+///
+/// Preserves [`TimelineMeta::fork_point`] so [`import_timeline_with_id`] can recreate
+/// a copy-on-write child. **Parent timeline must already exist at the destination.**
+/// Records [`TimelineExport::parent_fork_hash`] so the destination can reject a
+/// divergent parent history.
+///
+/// Same implementation as [`export_timeline_raw`] (kept for existing call sites) and
+/// [`export_timeline_cow`].
+///
+/// # Errors
+/// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist.
+pub fn export_timeline_own(
+    store: &dyn EventStore,
+    id: TimelineId,
+) -> Result<TimelineExport, CoreError> {
+    export_timeline_raw(store, id)
+}
+
+/// Alias for [`export_timeline_own`] (copy-on-write / identity-preserving export).
+pub use export_timeline_own as export_timeline_cow;
+
 /// Export only events stored on this timeline (no stitch / renumber).
+///
+/// Prefer [`export_timeline_own`] in new code. This name is retained for existing
+/// Wave 6 call sites and means the same thing.
 ///
 /// Preserves [`TimelineMeta::fork_point`] so [`import_timeline_with_id`] can recreate
 /// a copy-on-write child. Parent timeline must already exist at the destination.
@@ -218,8 +263,11 @@ pub fn export_timeline_raw(
     store: &dyn EventStore,
     id: TimelineId,
 ) -> Result<TimelineExport, CoreError> {
-    let mut export =
-        export_timeline_using(store.get_timeline(id), store.read_own(id, SeqRange::all()), id)?;
+    let mut export = export_timeline_using(
+        store.get_timeline(id),
+        store.read_own(id, SeqRange::all()),
+        id,
+    )?;
     match export.timeline.meta.fork_point {
         Some((parent, at_seq)) => {
             export.parent_fork_hash = Some(store.chain_hash_at(parent, at_seq)?);
@@ -231,7 +279,15 @@ pub fn export_timeline_raw(
     Ok(export)
 }
 
-/// Import a previously exported timeline snapshot into `store`.
+/// Import a previously exported timeline as a **new** logical clone.
+///
+/// Creates a fresh [`TimelineId`], converts events to [`EventDraft`]s, and appends
+/// via [`EventStore::append`] — so **event ids are reminted**, seqs restart from the
+/// store, and **signatures are not carried** (`EventDraft` has no signature field).
+///
+/// For identity-preserving `CoW` sync, use [`export_timeline_own`] +
+/// [`import_timeline_with_id`] instead. For crypto-checked identity import, see
+/// `pos_store::import_timeline_with_verified_signatures`.
 ///
 /// # Errors
 /// Returns a [`CoreError::Storage`] error if the timeline already exists or on I/O failure.
@@ -252,9 +308,12 @@ pub fn import_timeline(
 /// [`EventStore::append_committed`], [`EventStore::delete_timeline`], and
 /// [`EventStore::chain_hash_at`] (Memory + `SQLite` do; test stubs may not).
 ///
-/// Forked exports must come from [`export_timeline_raw`] (own events + `fork_point` +
+/// Forked exports must come from [`export_timeline_own`] (own events + `fork_point` +
 /// `parent_fork_hash`). Logical [`export_timeline`] snapshots of forks are flattened
 /// (no `fork_point`).
+///
+/// **Import parent before child.** A forked child whose parent is missing at the
+/// destination will fail.
 ///
 /// Uses [`EventStore::import_committed`] so backends can apply create+append atomically.
 /// The default import rolls back via delete on any failure after create, including a
@@ -263,6 +322,8 @@ pub fn import_timeline(
 ///
 /// Signatures are persisted as opaque blobs; cryptographic verification is the caller's
 /// responsibility (see `pos_crypto::signing::verify_events_all_signed` / store helpers).
+/// For mixed unsigned events or multiple signers, call `verify_events` yourself then
+/// this function — do not use the all-signed store helper.
 ///
 /// # Errors
 /// Returns a [`CoreError::Storage`] error if a timeline with that ID already exists,
@@ -281,7 +342,7 @@ pub fn import_timeline_with_id(
     if let Some((parent, at_seq)) = timeline.meta.fork_point {
         let Some(expected) = parent_fork_hash else {
             return Err(CoreError::Storage(
-                "forked import requires parent_fork_hash (use export_timeline_raw)".to_owned(),
+                "forked import requires parent_fork_hash (use export_timeline_own)".to_owned(),
             ));
         };
         let actual = store.chain_hash_at(parent, at_seq)?;
@@ -331,11 +392,7 @@ pub fn import_committed_with_rollback(
 }
 
 /// Delete a partially imported timeline; if delete fails, combine with the original error.
-fn rollback_import(
-    store: &mut dyn EventStore,
-    id: TimelineId,
-    err: CoreError,
-) -> CoreError {
+fn rollback_import(store: &mut dyn EventStore, id: TimelineId, err: CoreError) -> CoreError {
     match store.delete_timeline(id) {
         Ok(()) => err,
         Err(del_err) => CoreError::Storage(format!(
@@ -556,11 +613,8 @@ mod tests {
         }
 
         fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
-
             self.read(timeline, range)
-
         }
-
 
         fn fork(
             &mut self,
@@ -609,11 +663,7 @@ mod tests {
                 "delete_timeline not supported by this store".to_owned(),
             ))
         }
-        fn chain_hash_at(
-            &self,
-            _: TimelineId,
-            _: Seq,
-        ) -> Result<Hash, CoreError> {
+        fn chain_hash_at(&self, _: TimelineId, _: Seq) -> Result<Hash, CoreError> {
             Err(CoreError::Storage(
                 "chain_hash_at not supported by this store".to_owned(),
             ))
@@ -626,7 +676,6 @@ mod tests {
         ) -> Result<Timeline, CoreError> {
             import_committed_with_rollback(self, meta, events)
         }
-
     }
 
     impl EventStore for TrivialStore {
@@ -667,11 +716,8 @@ mod tests {
         }
 
         fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
-
             self.read(timeline, range)
-
         }
-
 
         fn fork(
             &mut self,
@@ -715,11 +761,7 @@ mod tests {
                 "delete_timeline not supported by this store".to_owned(),
             ))
         }
-        fn chain_hash_at(
-            &self,
-            _: TimelineId,
-            _: Seq,
-        ) -> Result<Hash, CoreError> {
+        fn chain_hash_at(&self, _: TimelineId, _: Seq) -> Result<Hash, CoreError> {
             Err(CoreError::Storage(
                 "chain_hash_at not supported by this store".to_owned(),
             ))
@@ -732,7 +774,6 @@ mod tests {
         ) -> Result<Timeline, CoreError> {
             import_committed_with_rollback(self, meta, events)
         }
-
     }
 
     #[test]
@@ -758,7 +799,7 @@ mod tests {
         let export = TimelineExport {
             timeline,
             events: vec![dummy_event],
-                    parent_fork_hash: None,
+            parent_fork_hash: None,
         };
 
         let mut store = TrivialStore::new();
@@ -777,7 +818,7 @@ mod tests {
         let export = TimelineExport {
             timeline: Timeline::new(meta),
             events: vec![],
-                    parent_fork_hash: None,
+            parent_fork_hash: None,
         };
         let mut store = TrivialStore::new();
         assert!(import_timeline(&mut store, export).is_ok());
@@ -821,7 +862,7 @@ mod tests {
         let export = TimelineExport {
             timeline: Timeline::new(TimelineMeta::root("with-events")),
             events: vec![dummy_event],
-                    parent_fork_hash: None,
+            parent_fork_hash: None,
         };
         let mut store = TrivialStore::new();
         let imported = import_timeline(&mut store, export).unwrap();
@@ -845,7 +886,11 @@ mod tests {
             fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
                 Ok(Vec::new())
             }
-            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            fn read_own(
+                &self,
+                timeline: TimelineId,
+                range: SeqRange,
+            ) -> Result<Vec<Event>, CoreError> {
                 self.read(timeline, range)
             }
 
@@ -874,11 +919,7 @@ mod tests {
                 self.deleted = true;
                 Ok(())
             }
-            fn chain_hash_at(
-                &self,
-                _: TimelineId,
-                _: Seq,
-            ) -> Result<Hash, CoreError> {
+            fn chain_hash_at(&self, _: TimelineId, _: Seq) -> Result<Hash, CoreError> {
                 Err(CoreError::Storage(
                     "chain_hash_at not supported by this store".to_owned(),
                 ))
@@ -891,7 +932,6 @@ mod tests {
             ) -> Result<Timeline, CoreError> {
                 import_committed_with_rollback(self, meta, events)
             }
-
         }
 
         let entity = EntityId::new();
@@ -911,7 +951,7 @@ mod tests {
         let export = TimelineExport {
             timeline: Timeline::new(TimelineMeta::root("x")),
             events: vec![event],
-                    parent_fork_hash: None,
+            parent_fork_hash: None,
         };
         let mut store = AppendFailStore {
             created: None,
@@ -919,7 +959,10 @@ mod tests {
         };
         let err = import_timeline_with_id(&mut store, export).unwrap_err();
         assert!(matches!(err, CoreError::Storage(_)));
-        assert!(store.deleted, "failed append must roll back via delete_timeline");
+        assert!(
+            store.deleted,
+            "failed append must roll back via delete_timeline"
+        );
     }
 
     #[test]
@@ -938,7 +981,11 @@ mod tests {
             fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
                 Ok(Vec::new())
             }
-            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            fn read_own(
+                &self,
+                timeline: TimelineId,
+                range: SeqRange,
+            ) -> Result<Vec<Event>, CoreError> {
                 self.read(timeline, range)
             }
             fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
@@ -965,11 +1012,7 @@ mod tests {
                 assert_eq!(Some(id), self.created);
                 Err(CoreError::Storage("delete failed".to_owned()))
             }
-            fn chain_hash_at(
-                &self,
-                _: TimelineId,
-                _: Seq,
-            ) -> Result<Hash, CoreError> {
+            fn chain_hash_at(&self, _: TimelineId, _: Seq) -> Result<Hash, CoreError> {
                 Err(CoreError::Storage(
                     "chain_hash_at not supported by this store".to_owned(),
                 ))
@@ -982,7 +1025,6 @@ mod tests {
             ) -> Result<Timeline, CoreError> {
                 import_committed_with_rollback(self, meta, events)
             }
-
         }
 
         let export = TimelineExport {
@@ -1002,11 +1044,8 @@ mod tests {
             }],
             parent_fork_hash: None,
         };
-        let err = import_timeline_with_id(
-            &mut AppendAndDeleteFailStore { created: None },
-            export,
-        )
-        .unwrap_err();
+        let err = import_timeline_with_id(&mut AppendAndDeleteFailStore { created: None }, export)
+            .unwrap_err();
         match err {
             CoreError::Storage(msg) => {
                 assert!(msg.contains("import failed"));
@@ -1032,7 +1071,11 @@ mod tests {
             fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
                 Ok(Vec::new())
             }
-            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            fn read_own(
+                &self,
+                timeline: TimelineId,
+                range: SeqRange,
+            ) -> Result<Vec<Event>, CoreError> {
                 self.read(timeline, range)
             }
 
@@ -1063,11 +1106,7 @@ mod tests {
                 self.timeline = None;
                 Ok(())
             }
-            fn chain_hash_at(
-                &self,
-                _: TimelineId,
-                _: Seq,
-            ) -> Result<Hash, CoreError> {
+            fn chain_hash_at(&self, _: TimelineId, _: Seq) -> Result<Hash, CoreError> {
                 Err(CoreError::Storage(
                     "chain_hash_at not supported by this store".to_owned(),
                 ))
@@ -1080,7 +1119,6 @@ mod tests {
             ) -> Result<Timeline, CoreError> {
                 import_committed_with_rollback(self, meta, events)
             }
-
         }
 
         let timeline = Timeline::new(TimelineMeta::root("keep-id"));
@@ -1088,10 +1126,9 @@ mod tests {
         let export = TimelineExport {
             timeline,
             events: vec![],
-                    parent_fork_hash: None,
+            parent_fork_hash: None,
         };
-        let imported =
-            import_timeline_with_id(&mut HappyStore { timeline: None }, export).unwrap();
+        let imported = import_timeline_with_id(&mut HappyStore { timeline: None }, export).unwrap();
         assert_eq!(imported.id(), expected);
     }
 
@@ -1109,7 +1146,11 @@ mod tests {
             fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
                 Ok(Vec::new())
             }
-            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            fn read_own(
+                &self,
+                timeline: TimelineId,
+                range: SeqRange,
+            ) -> Result<Vec<Event>, CoreError> {
                 self.read(timeline, range)
             }
 
@@ -1134,11 +1175,7 @@ mod tests {
             fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
                 Ok(())
             }
-            fn chain_hash_at(
-                &self,
-                _: TimelineId,
-                _: Seq,
-            ) -> Result<Hash, CoreError> {
+            fn chain_hash_at(&self, _: TimelineId, _: Seq) -> Result<Hash, CoreError> {
                 Err(CoreError::Storage(
                     "chain_hash_at not supported by this store".to_owned(),
                 ))
@@ -1151,13 +1188,12 @@ mod tests {
             ) -> Result<Timeline, CoreError> {
                 import_committed_with_rollback(self, meta, events)
             }
-
         }
 
         let export = TimelineExport {
             timeline: Timeline::new(TimelineMeta::root("wanted")),
             events: vec![],
-                    parent_fork_hash: None,
+            parent_fork_hash: None,
         };
         let err = import_timeline_with_id(&mut LieStore, export).unwrap_err();
         assert!(
@@ -1175,7 +1211,7 @@ mod tests {
         let export = TimelineExport {
             timeline: Timeline::new(meta),
             events: vec![],
-                    parent_fork_hash: None,
+            parent_fork_hash: None,
         };
         let mut store = TrivialStore::new();
         let err = import_timeline_with_id(&mut store, export).unwrap_err();
@@ -1200,22 +1236,15 @@ mod tests {
             payload_hash: Hash::zero(),
         };
         let id = crate::ids::EventId::new();
-        let err = validate_committed_batch(
-            Seq::ZERO,
-            &[mk(2, id)],
-            &mut |_| false,
-            &|_| true,
-        )
-        .unwrap_err();
+        let err = validate_committed_batch(Seq::ZERO, &[mk(2, id)], &mut |_| false, &|_| true)
+            .unwrap_err();
         assert!(matches!(err, CoreError::Storage(ref m) if m.contains("contiguous")));
 
-        let err = validate_committed_batch(
-            Seq::ZERO,
-            &[mk(1, id), mk(2, id)],
-            &mut |_| false,
-            &|_| true,
-        )
-        .unwrap_err();
+        let err =
+            validate_committed_batch(Seq::ZERO, &[mk(1, id), mk(2, id)], &mut |_| false, &|_| {
+                true
+            })
+            .unwrap_err();
         assert!(matches!(err, CoreError::Storage(ref m) if m.contains("duplicate")));
 
         let err = validate_committed_batch(
@@ -1279,7 +1308,11 @@ mod tests {
             fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
                 Ok(Vec::new())
             }
-            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            fn read_own(
+                &self,
+                timeline: TimelineId,
+                range: SeqRange,
+            ) -> Result<Vec<Event>, CoreError> {
                 self.read(timeline, range)
             }
             fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
@@ -1326,6 +1359,77 @@ mod tests {
         assert!(matches!(err, CoreError::Storage(ref m) if m.contains("hash boom")));
     }
 
+    // Prefer export_timeline_own in new code; own/cow wrap raw (legacy name).
+    #[test]
+    fn export_timeline_own_matches_raw_alias() {
+        struct RootStore {
+            id: TimelineId,
+        }
+        impl EventStore for RootStore {
+            fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn read_own(
+                &self,
+                timeline: TimelineId,
+                range: SeqRange,
+            ) -> Result<Vec<Event>, CoreError> {
+                self.read(timeline, range)
+            }
+            fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+                Ok(Vec::new())
+            }
+            fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+                if id != self.id {
+                    return Ok(None);
+                }
+                let mut meta = TimelineMeta::root("root");
+                meta.id = self.id;
+                Ok(Some(Timeline::new(meta)))
+            }
+            fn create_timeline_with_meta(
+                &mut self,
+                _: TimelineMeta,
+            ) -> Result<Timeline, CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn append_committed(&mut self, _: TimelineId, _: &[Event]) -> Result<(), CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
+                Err(CoreError::Storage("unused".to_owned()))
+            }
+            fn chain_hash_at(&self, _: TimelineId, _: Seq) -> Result<Hash, CoreError> {
+                Ok(Hash::zero())
+            }
+            fn import_committed(
+                &mut self,
+                meta: TimelineMeta,
+                events: &[Event],
+            ) -> Result<Timeline, CoreError> {
+                import_committed_with_rollback(self, meta, events)
+            }
+        }
+
+        let id = TimelineId::new();
+        let store = RootStore { id };
+        let own = export_timeline_own(&store, id).unwrap();
+        let cow = export_timeline_cow(&store, id).unwrap();
+        let raw = export_timeline_raw(&store, id).unwrap();
+        assert_eq!(own.timeline.id(), raw.timeline.id());
+        assert_eq!(cow.timeline.id(), raw.timeline.id());
+        assert!(own.parent_fork_hash.is_none());
+    }
+
     // Counted under llvm-cov: root raw export takes the None fork_point arm.
     #[test]
     fn export_timeline_raw_root_clears_parent_fork_hash_arm() {
@@ -1342,7 +1446,11 @@ mod tests {
             fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
                 Ok(Vec::new())
             }
-            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            fn read_own(
+                &self,
+                timeline: TimelineId,
+                range: SeqRange,
+            ) -> Result<Vec<Event>, CoreError> {
                 self.read(timeline, range)
             }
             fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
@@ -1405,7 +1513,11 @@ mod tests {
             fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
                 Ok(Vec::new())
             }
-            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            fn read_own(
+                &self,
+                timeline: TimelineId,
+                range: SeqRange,
+            ) -> Result<Vec<Event>, CoreError> {
                 self.read(timeline, range)
             }
             fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
@@ -1468,7 +1580,11 @@ mod tests {
             fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
                 Ok(Vec::new())
             }
-            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            fn read_own(
+                &self,
+                timeline: TimelineId,
+                range: SeqRange,
+            ) -> Result<Vec<Event>, CoreError> {
                 self.read(timeline, range)
             }
             fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
@@ -1534,7 +1650,11 @@ mod tests {
             fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
                 Ok(Vec::new())
             }
-            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            fn read_own(
+                &self,
+                timeline: TimelineId,
+                range: SeqRange,
+            ) -> Result<Vec<Event>, CoreError> {
                 self.read(timeline, range)
             }
             fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
@@ -1564,11 +1684,7 @@ mod tests {
             fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
                 Err(CoreError::Storage("unused".to_owned()))
             }
-            fn chain_hash_at(
-                &self,
-                _: TimelineId,
-                _: Seq,
-            ) -> Result<Hash, CoreError> {
+            fn chain_hash_at(&self, _: TimelineId, _: Seq) -> Result<Hash, CoreError> {
                 Ok(Hash::zero())
             }
 
@@ -1607,7 +1723,11 @@ mod tests {
             fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
                 Ok(Vec::new())
             }
-            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            fn read_own(
+                &self,
+                timeline: TimelineId,
+                range: SeqRange,
+            ) -> Result<Vec<Event>, CoreError> {
                 self.read(timeline, range)
             }
             fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
@@ -1745,7 +1865,11 @@ mod tests {
             fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
                 Ok(Vec::new())
             }
-            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            fn read_own(
+                &self,
+                timeline: TimelineId,
+                range: SeqRange,
+            ) -> Result<Vec<Event>, CoreError> {
                 self.read(timeline, range)
             }
             fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
@@ -1815,7 +1939,11 @@ mod tests {
             fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
                 Ok(vec![self.event.clone()])
             }
-            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            fn read_own(
+                &self,
+                timeline: TimelineId,
+                range: SeqRange,
+            ) -> Result<Vec<Event>, CoreError> {
                 self.read(timeline, range)
             }
             fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
@@ -1847,11 +1975,7 @@ mod tests {
             fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
                 Err(CoreError::Storage("unused".to_owned()))
             }
-            fn chain_hash_at(
-                &self,
-                _: TimelineId,
-                _: Seq,
-            ) -> Result<Hash, CoreError> {
+            fn chain_hash_at(&self, _: TimelineId, _: Seq) -> Result<Hash, CoreError> {
                 Err(CoreError::Storage(
                     "chain_hash_at not supported by this store".to_owned(),
                 ))
@@ -1864,7 +1988,6 @@ mod tests {
             ) -> Result<Timeline, CoreError> {
                 import_committed_with_rollback(self, meta, events)
             }
-
         }
 
         let id = TimelineId::new();
@@ -1910,7 +2033,11 @@ mod tests {
             fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
                 Ok(self.events.clone())
             }
-            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            fn read_own(
+                &self,
+                timeline: TimelineId,
+                range: SeqRange,
+            ) -> Result<Vec<Event>, CoreError> {
                 self.read(timeline, range)
             }
             fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
@@ -2004,7 +2131,11 @@ mod tests {
             fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
                 Ok(self.events.clone())
             }
-            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            fn read_own(
+                &self,
+                timeline: TimelineId,
+                range: SeqRange,
+            ) -> Result<Vec<Event>, CoreError> {
                 self.read(timeline, range)
             }
             fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
@@ -2034,11 +2165,7 @@ mod tests {
             fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
                 Err(CoreError::Storage("unused".to_owned()))
             }
-            fn chain_hash_at(
-                &self,
-                _: TimelineId,
-                _: Seq,
-            ) -> Result<Hash, CoreError> {
+            fn chain_hash_at(&self, _: TimelineId, _: Seq) -> Result<Hash, CoreError> {
                 Err(CoreError::Storage(
                     "chain_hash_at not supported by this store".to_owned(),
                 ))
@@ -2051,7 +2178,6 @@ mod tests {
             ) -> Result<Timeline, CoreError> {
                 import_committed_with_rollback(self, meta, events)
             }
-
         }
 
         let id = TimelineId::new();
@@ -2103,7 +2229,11 @@ mod tests {
             fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
                 Ok(Vec::new())
             }
-            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            fn read_own(
+                &self,
+                timeline: TimelineId,
+                range: SeqRange,
+            ) -> Result<Vec<Event>, CoreError> {
                 self.read(timeline, range)
             }
 
@@ -2128,11 +2258,7 @@ mod tests {
             fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
                 Ok(())
             }
-            fn chain_hash_at(
-                &self,
-                _: TimelineId,
-                _: Seq,
-            ) -> Result<Hash, CoreError> {
+            fn chain_hash_at(&self, _: TimelineId, _: Seq) -> Result<Hash, CoreError> {
                 Err(CoreError::Storage(
                     "chain_hash_at not supported by this store".to_owned(),
                 ))
@@ -2145,13 +2271,12 @@ mod tests {
             ) -> Result<Timeline, CoreError> {
                 import_committed_with_rollback(self, meta, events)
             }
-
         }
 
         let export = TimelineExport {
             timeline: Timeline::new(TimelineMeta::root("x")),
             events: vec![],
-                    parent_fork_hash: None,
+            parent_fork_hash: None,
         };
         let err = import_timeline_with_id(&mut GetFailStore, export).unwrap_err();
         assert!(matches!(err, CoreError::Storage(_)));
@@ -2171,7 +2296,11 @@ mod tests {
             fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
                 Ok(Vec::new())
             }
-            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            fn read_own(
+                &self,
+                timeline: TimelineId,
+                range: SeqRange,
+            ) -> Result<Vec<Event>, CoreError> {
                 self.read(timeline, range)
             }
 
@@ -2196,11 +2325,7 @@ mod tests {
             fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
                 Ok(())
             }
-            fn chain_hash_at(
-                &self,
-                _: TimelineId,
-                _: Seq,
-            ) -> Result<Hash, CoreError> {
+            fn chain_hash_at(&self, _: TimelineId, _: Seq) -> Result<Hash, CoreError> {
                 Err(CoreError::Storage(
                     "chain_hash_at not supported by this store".to_owned(),
                 ))
@@ -2213,13 +2338,12 @@ mod tests {
             ) -> Result<Timeline, CoreError> {
                 import_committed_with_rollback(self, meta, events)
             }
-
         }
 
         let export = TimelineExport {
             timeline: Timeline::new(TimelineMeta::root("x")),
             events: vec![],
-                    parent_fork_hash: None,
+            parent_fork_hash: None,
         };
         let err = import_timeline_with_id(&mut VanishStore, export).unwrap_err();
         assert!(matches!(err, CoreError::TimelineNotFound(_)));
@@ -2324,7 +2448,7 @@ mod tests {
         let export = TimelineExport {
             timeline: FlakyStore::healthy_timeline(),
             events: vec![],
-                    parent_fork_hash: None,
+            parent_fork_hash: None,
         };
         let err = import_timeline(&mut store, export).unwrap_err();
         assert!(matches!(err, CoreError::Storage(_)));
@@ -2350,7 +2474,7 @@ mod tests {
         let export = TimelineExport {
             timeline: FlakyStore::healthy_timeline(),
             events: vec![dummy_event],
-                    parent_fork_hash: None,
+            parent_fork_hash: None,
         };
         let mut store = FlakyStore::new(FlakyMode::AppendErr);
         let err = import_timeline(&mut store, export).unwrap_err();
@@ -2386,11 +2510,10 @@ mod tests {
         let export = TimelineExport {
             timeline: FlakyStore::healthy_timeline(),
             events: vec![dummy_event],
-                    parent_fork_hash: None,
+            parent_fork_hash: None,
         };
         let mut store = FlakyStore::new(FlakyMode::Healthy);
         let imported = import_timeline(&mut store, export).unwrap();
         let _ = imported.id();
     }
-
 }

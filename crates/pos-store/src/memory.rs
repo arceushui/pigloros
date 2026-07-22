@@ -176,12 +176,13 @@ impl EventStore for MemoryStore {
         if !self.timelines.contains_key(&timeline) {
             return Err(CoreError::TimelineNotFound(timeline));
         }
-        let events = self.events.get(&timeline).map_or(&[] as &[Event], Vec::as_slice);
+        let events = self
+            .events
+            .get(&timeline)
+            .map_or(&[] as &[Event], Vec::as_slice);
         let filtered: Vec<Event> = events
             .iter()
-            .filter(|e| {
-                e.seq >= range.from && range.to.is_none_or(|to| e.seq <= to)
-            })
+            .filter(|e| e.seq >= range.from && range.to.is_none_or(|to| e.seq <= to))
             .cloned()
             .collect();
         Ok(filtered)
@@ -830,16 +831,17 @@ mod tests {
         later.payload = CanonicalBytes::from_vec(b"later".to_vec());
         later.payload_hash = pos_crypto::chain::hash_payload(&later.payload);
 
-        let err = store
-            .append_committed(tl.id(), &[bad, later])
-            .unwrap_err();
+        let err = store.append_committed(tl.id(), &[bad, later]).unwrap_err();
         assert!(matches!(err, CoreError::Storage(_)));
 
         // No partial apply: still only the originally appended event.
         let events = store.read(tl.id(), SeqRange::all()).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].payload.as_slice(), b"ok");
-        assert_eq!(store.get_timeline(tl.id()).unwrap().unwrap().head, Seq::from_u64(1));
+        assert_eq!(
+            store.get_timeline(tl.id()).unwrap().unwrap().head,
+            Seq::from_u64(1)
+        );
     }
 
     #[test]
@@ -851,9 +853,7 @@ mod tests {
         store
             .append(root.id(), &[make_draft(entity, b"r1")])
             .unwrap();
-        let child = store
-            .fork(root.id(), Seq::from_u64(1), "child")
-            .unwrap();
+        let child = store.fork(root.id(), Seq::from_u64(1), "child").unwrap();
 
         let err = store.delete_timeline(root.id()).unwrap_err();
         assert!(matches!(err, CoreError::Storage(_)));
@@ -873,9 +873,7 @@ mod tests {
         let mut src = MemoryStore::new();
         let tl = src.create_timeline("shared").unwrap();
         let entity = EntityId::new();
-        let mut committed = src
-            .append(tl.id(), &[make_draft(entity, b"one")])
-            .unwrap();
+        let mut committed = src.append(tl.id(), &[make_draft(entity, b"one")]).unwrap();
         let export = export_timeline(&src, tl.id()).unwrap();
         // Corrupt payload hash so append_committed fails after create.
         let mut bad_export = export;
@@ -925,7 +923,9 @@ mod tests {
         // Seq gap rejected.
         good.seq = Seq::from_u64(3);
         good.payload_hash = pos_crypto::chain::hash_payload(&good.payload);
-        let err = store.append_committed(tl.id(), &[good.clone()]).unwrap_err();
+        let err = store
+            .append_committed(tl.id(), &[good.clone()])
+            .unwrap_err();
         assert!(matches!(err, CoreError::Storage(ref m) if m.contains("contiguous")));
 
         // Seq 0 rejected.
@@ -991,8 +991,11 @@ mod tests {
         let mut src = MemoryStore::new();
         let root = src.create_timeline("root").unwrap();
         let entity = EntityId::new();
-        src.append(root.id(), &[make_draft(entity, b"p1"), make_draft(entity, b"p2")])
-            .unwrap();
+        src.append(
+            root.id(),
+            &[make_draft(entity, b"p1"), make_draft(entity, b"p2")],
+        )
+        .unwrap();
         let child = src.fork(root.id(), Seq::from_u64(1), "child").unwrap();
         src.append(child.id(), &[make_draft(entity, b"c1")])
             .unwrap();
@@ -1004,7 +1007,10 @@ mod tests {
 
         // Raw export keeps CoW shape.
         let raw = export_timeline_raw(&src, child.id()).unwrap();
-        assert_eq!(raw.timeline.meta.fork_point, Some((root.id(), Seq::from_u64(1))));
+        assert_eq!(
+            raw.timeline.meta.fork_point,
+            Some((root.id(), Seq::from_u64(1)))
+        );
         assert_eq!(raw.events.len(), 1);
         assert_eq!(raw.events[0].payload.as_slice(), b"c1");
 
@@ -1036,11 +1042,16 @@ mod tests {
         let own = store.read_own(child.id(), SeqRange::all()).unwrap();
         assert_eq!(own.len(), 1);
         assert_eq!(own[0].payload.as_slice(), b"c1");
-        let missing = store.read_own(TimelineId::new(), SeqRange::all()).unwrap_err();
+        let missing = store
+            .read_own(TimelineId::new(), SeqRange::all())
+            .unwrap_err();
         assert!(matches!(missing, CoreError::TimelineNotFound(_)));
 
         let bounded = store
-            .read_own(child.id(), SeqRange::bounded(Seq::from_u64(1), Seq::from_u64(1)))
+            .read_own(
+                child.id(),
+                SeqRange::bounded(Seq::from_u64(1), Seq::from_u64(1)),
+            )
             .unwrap();
         assert_eq!(bounded.len(), 1);
     }
@@ -1118,8 +1129,11 @@ mod tests {
         let mut src = MemoryStore::new();
         let root = src.create_timeline("root").unwrap();
         let entity = EntityId::new();
-        src.append(root.id(), &[make_draft(entity, b"p1"), make_draft(entity, b"p2")])
-            .unwrap();
+        src.append(
+            root.id(),
+            &[make_draft(entity, b"p1"), make_draft(entity, b"p2")],
+        )
+        .unwrap();
         let child = src.fork(root.id(), Seq::from_u64(1), "child").unwrap();
         src.append(child.id(), &[make_draft(entity, b"c1")])
             .unwrap();
@@ -1172,8 +1186,7 @@ mod tests {
         let mut src = MemoryStore::new();
         let root = src.create_timeline("root").unwrap();
         let entity = EntityId::new();
-        src.append(root.id(), &[make_draft(entity, b"p1")])
-            .unwrap();
+        src.append(root.id(), &[make_draft(entity, b"p1")]).unwrap();
         let child = src.fork(root.id(), Seq::from_u64(1), "child").unwrap();
 
         let mut dst = MemoryStore::new();

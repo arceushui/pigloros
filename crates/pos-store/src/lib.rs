@@ -11,6 +11,20 @@
 //! ([`open_store`]) so callers hold `Box<dyn EventStore>` and never import
 //! a concrete backend type.
 //!
+//! # Consumer import path
+//!
+//! Prefer importing export/import helpers from **this crate** together with
+//! [`open_store`]:
+//!
+//! | Intent | Export | Import |
+//! |--------|--------|--------|
+//! | Independent clone | [`export_timeline`] | [`import_timeline`] |
+//! | Identity `CoW` | [`export_timeline_own`] | [`import_timeline_with_id`] |
+//! | Verified identity | [`export_timeline_own`] | [`import_timeline_with_verified_signatures`] |
+//!
+//! Signatures cover **payload bytes only** (not metadata). See
+//! [`import_timeline_with_verified_signatures`].
+//!
 //! # Backend features
 //!
 //! | Feature | Default | Dependency |
@@ -26,8 +40,12 @@ pub mod stitch;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 
-// Re-export the port so callers only need one import.
-pub use pos_core::store::{EventStore, SeqRange, TimelineExport};
+// Re-export the port and Wave 6 export/import helpers so hosts need one crate.
+pub use pos_core::store::{
+    export_timeline, export_timeline_cow, export_timeline_own, export_timeline_raw,
+    import_committed_with_rollback, import_timeline, import_timeline_with_id, EventStore, SeqRange,
+    TimelineExport,
+};
 pub use pos_core::CoreError;
 
 /// Selects which backend [`open_store`] constructs.
@@ -76,10 +94,35 @@ pub enum StoreConfig {
 /// # Examples
 ///
 /// ```rust
-/// use pos_store::{open_store, StoreConfig};
+/// use pos_core::{
+///     clock::Seq,
+///     event::{CanonicalBytes, EventDraft, Kind},
+///     ids::EntityId,
+///     store::SeqRange,
+/// };
+/// use pos_store::{
+///     export_timeline_own, import_timeline_with_id, open_store, StoreConfig,
+/// };
 ///
-/// let mut store = open_store(StoreConfig::Memory).unwrap();
-/// let tl = store.create_timeline("my-world").unwrap();
+/// // Parent-then-child CoW sync (identity-preserving).
+/// let mut src = open_store(StoreConfig::Memory).unwrap();
+/// let root = src.create_timeline("root").unwrap();
+/// let entity = EntityId::new();
+/// src.append(
+///     root.id(),
+///     &[EventDraft::new(
+///         entity,
+///         Kind::new("demo"),
+///         CanonicalBytes::from_vec(b"p1".to_vec()),
+///     )],
+/// )
+/// .unwrap();
+/// let child = src.fork(root.id(), Seq::from_u64(1), "child").unwrap();
+///
+/// let mut dst = open_store(StoreConfig::Memory).unwrap();
+/// import_timeline_with_id(&mut *dst, export_timeline_own(&*src, root.id()).unwrap()).unwrap();
+/// import_timeline_with_id(&mut *dst, export_timeline_own(&*src, child.id()).unwrap()).unwrap();
+/// assert_eq!(dst.read(child.id(), SeqRange::all()).unwrap().len(), 1);
 /// ```
 pub fn open_store(config: StoreConfig) -> Result<Box<dyn EventStore>, CoreError> {
     match config {
@@ -100,11 +143,15 @@ pub fn open_store(config: StoreConfig) -> Result<Box<dyn EventStore>, CoreError>
 /// Cryptographically verify signed events in `export`, then identity-import.
 ///
 /// Every event must carry a signature that verifies under `public_key` against its
-/// **payload** (metadata is not covered by the signature). An empty event list is allowed.
+/// **payload bytes only** (event metadata is not covered). An empty event list is allowed.
+///
+/// Use this when the export is uniformly signed by one key. For mixed unsigned events
+/// or multiple signers, call [`pos_crypto::signing::verify_events`] (or filter) yourself,
+/// then [`import_timeline_with_id`].
 ///
 /// # Errors
 /// Returns [`CoreError::SignatureVerificationFailed`] if any event is unsigned or fails
-/// verify, or any error from [`pos_core::store::import_timeline_with_id`].
+/// verify, or any error from [`import_timeline_with_id`].
 pub fn import_timeline_with_verified_signatures(
     store: &mut dyn EventStore,
     export: TimelineExport,
@@ -112,7 +159,7 @@ pub fn import_timeline_with_verified_signatures(
 ) -> Result<pos_core::Timeline, CoreError> {
     let vk = pos_crypto::signing::verifying_key_from_public_key(public_key)?;
     pos_crypto::signing::verify_events_all_signed(&vk, &export.events)?;
-    pos_core::store::import_timeline_with_id(store, export)
+    import_timeline_with_id(store, export)
 }
 
 #[cfg(test)]
@@ -260,7 +307,7 @@ mod tests {
         let export = TimelineExport {
             timeline: Timeline::new(TimelineMeta::root("signed")),
             events: vec![event.clone()],
-                    parent_fork_hash: None,
+            parent_fork_hash: None,
         };
 
         let mut ok_store = open_store(StoreConfig::Memory).unwrap();
@@ -269,9 +316,8 @@ mod tests {
         let (_, reject_vk) = generate_keypair();
         let reject_key = public_key_from_verifying_key(&reject_vk);
         let mut bad_store = open_store(StoreConfig::Memory).unwrap();
-        let err =
-            import_timeline_with_verified_signatures(bad_store.as_mut(), export, &reject_key)
-                .unwrap_err();
+        let err = import_timeline_with_verified_signatures(bad_store.as_mut(), export, &reject_key)
+            .unwrap_err();
         assert!(matches!(err, CoreError::SignatureVerificationFailed));
     }
 
@@ -287,13 +333,14 @@ mod tests {
         let export = TimelineExport {
             timeline: Timeline::new(TimelineMeta::root("x")),
             events: vec![],
-                    parent_fork_hash: None,
+            parent_fork_hash: None,
         };
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let mut bytes = [0u8; 32];
         bytes[31] = 0xff;
         let bad = PublicKey::from_bytes(bytes);
-        let err = import_timeline_with_verified_signatures(store.as_mut(), export, &bad).unwrap_err();
+        let err =
+            import_timeline_with_verified_signatures(store.as_mut(), export, &bad).unwrap_err();
         assert!(matches!(err, CoreError::SignatureVerificationFailed));
     }
 

@@ -2,7 +2,7 @@
 
 A simulation world you join to preview your decisions.
 
-> **Current stage:** Pre-product. Wave 5 MVP closed; Wave 6 shared-world foundation in progress (`export_timeline_raw` / `import_timeline_with_id`, `plugins/society`). LLM bridges, H3/rapier, gateway, and distributed store remain later slices.
+> **Current stage:** Pre-product. Wave 5 MVP closed; Wave 6 shared-world foundation in progress (`export_timeline_own` / `import_timeline_with_id`, `plugins/society`). LLM bridges, H3/rapier, gateway, and distributed store remain later slices.
 
 ## Getting started
 

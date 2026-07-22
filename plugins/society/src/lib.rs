@@ -7,6 +7,43 @@
 //! Owns event type `"society.signal"` and entity kind `"society-aggregate"`.
 //! Thin reducer tracks running means for trust / opinion / economy / culture /
 //! polarisation dimensions. No driver — signals are appended by hosts or gateway.
+//!
+//! # Host wiring
+//!
+//! Register the plugin with a [`SocietyReducer`] (no driver), append
+//! [`draft_signal`] drafts onto a timeline, then fold with the reducer.
+//! State keys: `mean.trust`, `mean.opinion`, `count.economy`, `last.culture`,
+//! `sum.*`, and global `signals`.
+//!
+//! ```rust
+//! use pos_core::{ids::EntityId, state::Reducer};
+//! use pos_plugin_society::{
+//!     draft_signal, SocietyDimension, SocietyPlugin, SocietyReducer, SocietySignal,
+//! };
+//! use pos_runtime::registry::PluginRegistry;
+//!
+//! let mut registry = PluginRegistry::new();
+//! let plugin = SocietyPlugin::new();
+//! registry
+//!     .register(&plugin, Some(Box::new(SocietyReducer)), None)
+//!     .unwrap();
+//!
+//! let draft = draft_signal(
+//!     EntityId::new(),
+//!     &SocietySignal {
+//!         dimension: SocietyDimension::Trust,
+//!         value: 0.8,
+//!         subject: None,
+//!         object: None,
+//!     },
+//! );
+//! assert_eq!(draft.event_type.as_str(), "society.signal");
+//!
+//! // Hosts: store.append(timeline, &[draft]) then reducer.apply on committed events.
+//! let state = SocietyReducer.initial();
+//! assert!(state.get("mean.trust").is_some());
+//! assert!(state.get("signals").is_some());
+//! ```
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use pos_core::{
@@ -179,10 +216,7 @@ impl Reducer for SocietyReducer {
             .get("signals")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
-        state.set(
-            "signals",
-            serde_json::Value::Number((signals + 1).into()),
-        );
+        state.set("signals", serde_json::Value::Number((signals + 1).into()));
 
         let Ok(signal) = ciborium::from_reader::<SocietySignal, _>(event.payload.as_slice()) else {
             return;
@@ -335,9 +369,7 @@ mod tests {
             Some(2)
         );
         assert_eq!(
-            state
-                .get("count.trust")
-                .and_then(serde_json::Value::as_u64),
+            state.get("count.trust").and_then(serde_json::Value::as_u64),
             Some(2)
         );
         assert_eq!(
@@ -382,7 +414,6 @@ mod tests {
         );
     }
 
-
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_skips_non_finite_value() {
@@ -406,9 +437,7 @@ mod tests {
             Some(1)
         );
         assert_eq!(
-            state
-                .get("count.trust")
-                .and_then(serde_json::Value::as_u64),
+            state.get("count.trust").and_then(serde_json::Value::as_u64),
             Some(0)
         );
     }
@@ -481,9 +510,7 @@ mod tests {
             Some(1)
         );
         assert_eq!(
-            state
-                .get("count.trust")
-                .and_then(serde_json::Value::as_u64),
+            state.get("count.trust").and_then(serde_json::Value::as_u64),
             Some(0)
         );
     }

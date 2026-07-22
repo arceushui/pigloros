@@ -2115,12 +2115,13 @@ mod fault_injection_tests {
                 self.base.read(timeline, range)
             }
 
-            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
-
+            fn read_own(
+                &self,
+                timeline: TimelineId,
+                range: SeqRange,
+            ) -> Result<Vec<Event>, CoreError> {
                 self.read(timeline, range)
-
             }
-
 
             fn create_timeline_with_meta(
                 &mut self,
@@ -2240,12 +2241,13 @@ mod fault_injection_tests {
                 self.base.read(timeline, range)
             }
 
-            fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
-
+            fn read_own(
+                &self,
+                timeline: TimelineId,
+                range: SeqRange,
+            ) -> Result<Vec<Event>, CoreError> {
                 self.read(timeline, range)
-
             }
-
 
             fn create_timeline_with_meta(
                 &mut self,

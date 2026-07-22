@@ -72,11 +72,8 @@ mod tests {
         }
 
         fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
-
             self.read(timeline, range)
-
         }
-
 
         fn fork(
             &mut self,
@@ -113,10 +110,7 @@ mod tests {
             ))
         }
 
-        fn delete_timeline(
-            &mut self,
-            _: pos_core::TimelineId,
-        ) -> Result<(), pos_core::CoreError> {
+        fn delete_timeline(&mut self, _: pos_core::TimelineId) -> Result<(), pos_core::CoreError> {
             Err(pos_core::CoreError::Storage(
                 "delete_timeline not supported by this store".to_owned(),
             ))

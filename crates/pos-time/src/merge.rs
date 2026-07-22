@@ -316,11 +316,8 @@ mod tests {
         }
 
         fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
-
             self.read(timeline, range)
-
         }
-
 
         fn fork(
             &mut self,
@@ -381,11 +378,7 @@ mod tests {
                 "delete_timeline not supported by this store".to_owned(),
             ))
         }
-        fn chain_hash_at(
-            &self,
-            _: TimelineId,
-            _: Seq,
-        ) -> Result<pos_core::Hash, CoreError> {
+        fn chain_hash_at(&self, _: TimelineId, _: Seq) -> Result<pos_core::Hash, CoreError> {
             Err(CoreError::Storage(
                 "chain_hash_at not supported by this store".to_owned(),
             ))
