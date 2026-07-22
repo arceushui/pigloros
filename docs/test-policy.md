@@ -1,6 +1,6 @@
 # Test & coverage policy
 
-Shared reference for humans and agents. Cursor rule `.cursor/rules/test-policy.mdc` mirrors this but is gitignored.
+Shared reference for humans and agents. `.cursor/rules/test-policy.mdc` mirrors this in-repo.
 
 ## Rules
 
@@ -16,6 +16,7 @@ Shared reference for humans and agents. Cursor rule `.cursor/rules/test-policy.m
 | Attrs / doctests | Trunk `rust-test-policy` | `coverage(off)` test-only; bans ` ```ignore ` |
 | Git hooks | Trunk pre-commit / pre-push | Run once per clone: `trunk git-hooks sync` |
 | Runtime | `cargo test -- --include-ignored` | Ignored tests still execute |
+| Summary check | `scripts/assert-no-ignored-in-test-summary.sh` | Matches `test result:` line only (no log prose FP) |
 | Coverage | `cargo llvm-cov` with `--include-ignored` | 100% lines + regions |
 | Dependencies | **cargo-deny** | Crates/licenses/advisories/sources only |
 

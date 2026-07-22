@@ -26,6 +26,9 @@ use thiserror::Error;
 use tokio::sync::{broadcast, Mutex};
 use ulid::Ulid;
 
+/// Maximum JSON request body size for HTTP handlers (1 MiB).
+pub const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024;
+
 /// Default broadcast channel capacity for live event fan-out.
 pub const EVENT_BUS_CAPACITY: usize = 256;
 
@@ -55,9 +58,6 @@ pub enum GatewayError {
     /// Unsupported action event type.
     #[error("unsupported action type: {0}")]
     UnsupportedAction(String),
-    /// JSON→CBOR / body encode failure.
-    #[error("encode error: {0}")]
-    Encode(String),
     /// Underlying store failure.
     #[error(transparent)]
     Store(#[from] CoreError),
@@ -75,6 +75,9 @@ impl Gateway {
     }
 
     /// Subscribe to live append notices (WebSocket / tests).
+    ///
+    /// Slow subscribers can see [`broadcast::error::RecvError::Lagged`]; resync via
+    /// [`Self::read_events_from`] or HTTP poll — the store is authoritative.
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<EventNotice> {
         self.bus.subscribe()
@@ -131,7 +134,7 @@ impl Gateway {
     /// Append one `society.signal` (fan-out convenience for #71).
     ///
     /// # Errors
-    /// Returns encode / store / id errors.
+    /// Returns store / id errors.
     pub async fn append_signal(
         &self,
         timeline_id: &str,
@@ -166,8 +169,17 @@ impl Gateway {
             event_type: event.event_type.as_str().to_owned(),
             seq: event.seq.as_u64(),
         };
+        // `send` is infallible when receivers lag; lagged clients must resync from the store.
         let _ = self.bus.send(notice);
         Ok(event)
+    }
+
+    #[cfg(test)]
+    fn with_bus_capacity(store: Box<dyn EventStore>, capacity: usize) -> Self {
+        Self {
+            store: Arc::new(Mutex::new(store)),
+            bus: broadcast::channel(capacity).0,
+        }
     }
 }
 
@@ -600,12 +612,33 @@ mod tests {
         assert!((signal.value - 0.5).abs() < f64::EPSILON);
     }
 
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn subscribe_lag_signals_resync() {
+        use tokio::sync::broadcast::error::TryRecvError;
+
+        let gw = Gateway::with_bus_capacity(open_store(StoreConfig::Memory).unwrap(), 2);
+        let mut rx = gw.subscribe();
+        let tl = gw.create_timeline("lag").await.unwrap();
+        let entity = EntityId::new().to_string();
+        let id = tl.id().to_string();
+        for _ in 0..3 {
+            gw.append_action(&id, &entity, EVENT_TYPE_ACTION, &serde_json::json!({}))
+                .await
+                .unwrap();
+        }
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(_) | Err(TryRecvError::Lagged(_))
+        ));
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn gateway_error_display() {
-        let e = GatewayError::Encode("boom".into());
-        assert!(e.to_string().contains("encode"));
         let e = GatewayError::UnsupportedAction("x".into());
         assert!(e.to_string().contains("unsupported"));
+        let e = GatewayError::InvalidId("bad".into());
+        assert!(e.to_string().contains("invalid"));
     }
 }

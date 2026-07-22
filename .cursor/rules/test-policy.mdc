@@ -1,0 +1,24 @@
+---
+description: coverage(off) test-only; CI runs ignored tests — all Rust repos
+alwaysApply: true
+---
+
+# Test / coverage policy (all codebases)
+
+See also `docs/test-policy.md` in each repo.
+
+## Rules
+
+1. Prefer not adding `#[ignore]`. If present, CI still runs it via `--include-ignored`.
+2. **Never** put `coverage(off)` on production code — only on `#[test]` / `#[tokio::test]` or inside `#[cfg(test)]`.
+3. Prefer deleting/simplifying unhittable branches over exemptions.
+4. Do not use rustdoc ` ```ignore ` fences — use ` ```text ` or a real doctest.
+
+## Enforcement
+
+| Layer | Tool | Notes |
+|---|---|---|
+| Attrs / doctests | Trunk `rust-test-policy` | `coverage(off)` test-only; bans ` ```ignore ` |
+| Git hooks | Trunk pre-commit / pre-push | `trunk git-hooks sync` |
+| Runtime | `cargo test -- --include-ignored` | Ignored tests still execute |
+| Dependencies | **cargo-deny** | Crates/licenses/advisories/sources only |

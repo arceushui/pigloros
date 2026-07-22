@@ -55,6 +55,7 @@ JSON request bodies; CBOR payloads in `EventStore`. Responses use `EventView` (`
 ## Implementation
 
 - Code: `apps/piglor-gateway/`
+- **Status:** HTTP poll MVP complete on `main` (Redmine #69 — update tracker manually)
 - Tests: lib + HTTP integration; 100% coverage in CI
 - CI: same gates as workspace (`--include-ignored`, llvm-cov 100%)
 

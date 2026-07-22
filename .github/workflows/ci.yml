@@ -66,10 +66,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --workspace --locked -- --include-ignored 2>&1 | tee /tmp/cargo-test.log
-          if grep -E '[1-9][0-9]* ignored' /tmp/cargo-test.log; then
-            echo "ERROR: cargo test still reported ignored/skipped tests" >&2
-            exit 1
-          fi
+          bash scripts/assert-no-ignored-in-test-summary.sh /tmp/cargo-test.log
 
   clippy:
     name: clippy

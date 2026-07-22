@@ -2,10 +2,10 @@
 
 use crate::{
     ActionRequest, CreateTimelineRequest, EventView, EventsQuery, Gateway, GatewayError,
-    SignalRequest,
+    SignalRequest, MAX_HTTP_BODY_BYTES,
 };
 use axum::{
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -22,12 +22,17 @@ pub struct AppState {
 
 /// Build the MVP router (ADR-014 route table; WS deferred to follow-up).
 pub fn router(state: AppState) -> Router {
+    build_router(state, MAX_HTTP_BODY_BYTES)
+}
+
+fn build_router(state: AppState, max_body_bytes: usize) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v1/timelines", post(create_timeline))
         .route("/v1/timelines/{id}/events", get(list_events))
         .route("/v1/timelines/{id}/actions", post(post_action))
         .route("/v1/timelines/{id}/signals", post(post_signal))
+        .layer(DefaultBodyLimit::max(max_body_bytes))
         .with_state(state)
 }
 
@@ -91,7 +96,6 @@ impl IntoResponse for GatewayError {
             GatewayError::InvalidId(_) | GatewayError::UnsupportedAction(_) => {
                 StatusCode::BAD_REQUEST
             }
-            GatewayError::Encode(_) => StatusCode::UNPROCESSABLE_ENTITY,
             GatewayError::Store(CoreError::TimelineNotFound(_)) => StatusCode::NOT_FOUND,
             GatewayError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -116,6 +120,11 @@ mod tests {
     fn test_app() -> Router {
         let gw = Gateway::new(open_store(StoreConfig::Memory).unwrap());
         router(AppState { gateway: gw })
+    }
+
+    fn test_app_with_body_limit(max_body_bytes: usize) -> Router {
+        let gw = Gateway::new(open_store(StoreConfig::Memory).unwrap());
+        build_router(AppState { gateway: gw }, max_body_bytes)
     }
 
     async fn json_request(
@@ -393,10 +402,26 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn oversized_body_returns_payload_too_large() {
+        let app = test_app_with_body_limit(32);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/timelines")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"name":"this name is way too long for the limit"}"#,
+            ))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn into_response_status_mapping() {
         use axum::response::IntoResponse;
-        let r = GatewayError::Encode("x".into()).into_response();
-        assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let r = GatewayError::InvalidId("x".into()).into_response();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
         let r = GatewayError::Store(CoreError::Storage("boom".into())).into_response();
         assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }

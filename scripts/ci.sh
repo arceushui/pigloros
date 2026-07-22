@@ -28,10 +28,7 @@ echo "==> test (--include-ignored)"
 test_log="$(mktemp)"
 trap 'rm -f "$test_log"' EXIT
 cargo test --workspace --locked -- --include-ignored 2>&1 | tee "$test_log"
-if grep -E '[1-9][0-9]* ignored' "$test_log"; then
-  echo "ERROR: cargo test still reported ignored/skipped tests." >&2
-  exit 1
-fi
+bash "$ROOT/scripts/assert-no-ignored-in-test-summary.sh" "$test_log"
 
 echo "==> clippy"
 cargo clippy --workspace --all-targets --locked -- -D warnings -W clippy::pedantic

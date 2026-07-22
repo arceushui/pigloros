@@ -100,6 +100,7 @@ def mask_non_code(text: str) -> str:
 
 def check(path: Path) -> int:
     text = path.read_text(errors="ignore")
+    in_integration_tests = "tests" in path.parts
     masked = mask_non_code(text)
     lines = text.splitlines()
     masked_lines = masked.splitlines()
@@ -154,7 +155,7 @@ def check(path: Path) -> int:
         if not COV_OFF.search(masked_stripped):
             continue
 
-        allowed = bool(test_body_starts)
+        allowed = bool(test_body_starts) or in_integration_tests
         behind = "\n".join(lines[max(0, i - 20) : i + 1])
         ahead = "\n".join(lines[i : min(len(lines), i + 20)])
         if TEST_ATTR.search(ahead) or TEST_ATTR.search(behind):

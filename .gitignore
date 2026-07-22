@@ -4,5 +4,7 @@
 *.key
 SQLCipher.db
 *.db
-.cursor/
+.cursor/*
+!.cursor/rules/
+!.cursor/rules/**
 **/__pycache__/

@@ -28,7 +28,8 @@ Binding non-loopback addresses prints a warning — there is no auth in this sli
 
 - **Actions:** `event_type` must be `world.action` (default). `payload` is arbitrary JSON → CBOR in the store.
 - **Signals:** convenience wrapper for `society.signal` (see `plugins/society`).
-- **Errors:** JSON `{ "error": "..." }` with `400` (bad id/type), `404` (unknown timeline), `422` (encode), `500` (store).
+- **Errors:** JSON `{ "error": "..." }` with `400` (bad id/type), `404` (unknown timeline), `413` (body too large), `500` (store).
+- **Body limit:** 1 MiB (`MAX_HTTP_BODY_BYTES`); returns `413` when exceeded.
 
 ### EventView
 
@@ -56,6 +57,8 @@ HTTP (axum) → Gateway → EventStore (Memory | SQLite)
 ```
 
 This crate is a **store façade**, not a full `pos-runtime` host. Poll only returns events appended to that store (by this process or another writer sharing SQLite).
+
+**Live bus:** `subscribe()` may return `Lagged` if a client falls behind; resync via event poll — the store is authoritative.
 
 ## Deferred (ADR-014)
 

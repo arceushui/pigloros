@@ -116,7 +116,7 @@ See **[docs/test-policy.md](docs/test-policy.md)** for the full policy (also mir
 |---|---|---|
 | `coverage(off)` + doctest ` ```ignore ` | Trunk **`rust-test-policy`** | `coverage(off)` test-only; no rustdoc ignore fences |
 | Local git hooks | Trunk **`trunk-check-pre-commit`** + **`trunk-check-pre-push`** | Blocks commit/push if `rust-test-policy` fails (`trunk git-hooks sync`) |
-| Runtime `#[ignore]` | `cargo test -- --include-ignored` | Ignored tests still execute (source ban is redundant) |
+| Runtime `#[ignore]` | `cargo test -- --include-ignored` + `scripts/assert-no-ignored-in-test-summary.sh` | Summary must report `0 ignored` |
 | Dependencies | **cargo-deny** (`deny.toml`) | Crates / licenses / advisories / sources |
 
 #### Git hooks (local)
