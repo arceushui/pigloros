@@ -1,0 +1,29 @@
+[package]
+name = "piglor-gateway"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Wave 6 local-first HTTP gateway (ADR-014 / #69; WS follow-up)"
+
+[[bin]]
+name = "piglor-gateway"
+path = "src/main.rs"
+
+[dependencies]
+pos-core = { path = "../../crates/pos-core" }
+pos-store = { path = "../../crates/pos-store" }
+pos-plugin-society = { path = "../../plugins/society" }
+pos-plugin-world = { path = "../../plugins/world" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ciborium = { workspace = true }
+thiserror = { workspace = true }
+ulid = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+
+[lints]
+workspace = true

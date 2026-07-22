@@ -40,6 +40,7 @@ pigloros/
     pos-experiment/       # Wave 4 ✅ — experiment host: tick loop, StopCondition, branch, backtest
     pos-cli/              # Wave 4/5 ✅ — pos binary: store, timeline, experiment, merge
     pos-mvp/              # Wave 5 ✅ — decision preview MVP (pluggable scenarios + CalibrationReport)
+    piglor-gateway/       # Wave 6 🚧 — local-first HTTP gateway (ADR-014 / #69)
   plugins/
     entities/rule-agent/  # Wave 4 ✅ — deterministic rule-based agent plugin
     observations/synthetic/ # Wave 4 ✅ — synthetic sin-wave observation plugin
@@ -64,7 +65,7 @@ Wave 6 will add `bindings/piglor-py` (PyO3); that directory is not in-tree yet.
 | Wave 3 | Plugin Runtime (pos-runtime) | ✅ Complete |
 | Wave 4 | Experiment Framework + CLI (pos-experiment, pos-cli) | ✅ Complete |
 | Wave 5 | Moat Plugins + Single-User MVP | ✅ Complete |
-| Wave 6 | Shared World & Social Layer (+ PyO3 bindings) | 🚧 In progress — ADR-011; #87 done; #71 society scaffold |
+| Wave 6 | Shared World & Social Layer (+ PyO3 bindings) | 🚧 In progress — ADR-011/014; #87 done; #71 society; #69 gateway HTTP MVP |
 | Wave 7 | Contextual Decision Preview | Planned |
 
 ## Development
@@ -76,17 +77,19 @@ Toolchain is pinned in `rust-toolchain.toml` (**1.94.1** + clippy / rustfmt / ll
 ./scripts/ci.sh
 
 # Or individually:
-trunk check --all          # Trunk Code Quality (rustfmt + actionlint + …)
+trunk check --all          # rustfmt + rust-test-policy + actionlint + …
+cargo deny check           # dependency bans/licenses/advisories/sources (not #[ignore])
+# Semgrep AST ban (CI uses semgrep/semgrep image): semgrep scan --config .semgrep.yml --error
 cargo fmt --all -- --check
-cargo test --workspace --locked
+cargo test --workspace --locked -- --include-ignored
 cargo clippy --workspace --all-targets --locked -- -D warnings -W clippy::pedantic
 # `#[coverage(off)]` is ONLY ever applied to #[test] functions / #[cfg(test)] modules —
 # it is never used to exempt production code. Needs bootstrap for the unstable attribute:
 RUSTC_BOOTSTRAP=1 cargo llvm-cov --workspace --locked --summary-only \
-  --fail-under-lines 100 --fail-under-regions 100
+  --fail-under-lines 100 --fail-under-regions 100 -- --include-ignored
 ```
 
-CI (GitHub Actions): every PR and `main` run **Trunk Check**, **fmt**, **test**, **clippy pedantic**, and **llvm-cov** with 100% coverage requirement. See `.github/workflows/ci.yml` and `.github/workflows/trunk-check.yml`.
+CI (GitHub Actions): **Trunk Check** (`rust-test-policy`), **Semgrep**, **cargo-deny**, **fmt**, **test** (`--include-ignored`), **clippy pedantic**, and **llvm-cov**. See `.github/workflows/`.
 
 Wave 1 stats: **193 tests · 0 failures · 100% line coverage · clippy clean**
 
@@ -98,10 +101,30 @@ Wave 4 stats: **359 tests · 0 failures · 100% line coverage · clippy pedantic
 
 Wave 5 stats: **717+ tests · 0 failures · 100% line / 100% region coverage · clippy pedantic clean**
 
-### Coverage honesty
+### Test & coverage policy
+
+| Gate | Tool | What it bans / enforces |
+|---|---|---|
+| Source `#[ignore]` / `cfg_attr(..., ignore)` | Trunk **`rust-test-policy`** + **Semgrep** CI (`.semgrep.yml`) | No ignored unit/async tests (comments/strings ignored); no production `coverage(off)` |
+| Local git hooks | Trunk **`trunk-check-pre-commit`** + **`trunk-check-pre-push`** | Blocks commit/push if `rust-test-policy` fails (`trunk git-hooks sync`) |
+| Runtime skip | `cargo test -- --include-ignored` | Ignored tests still execute if somehow present |
+| Dependencies | **cargo-deny** (`deny.toml`) | Crates / licenses / advisories / sources — **not** `#[ignore]` |
+
+#### Git hooks (local)
+
+Trunk manages hooks via `core.hooksPath` (not files under `.git/hooks/`):
+
+```bash
+trunk git-hooks sync   # once per clone / after enabling actions
+```
+
+Enabled actions (see `.trunk/trunk.yaml`):
+
+- **pre-commit:** `trunk-fmt-pre-commit` + `trunk-check-pre-commit` (runs `rust-test-policy` → no `#[ignore]`)
+- **pre-push:** `trunk-check-pre-push`
 
 `#[cfg_attr(coverage_nightly, coverage(off))]` is applied **only** to `#[test]` functions
-and code inside `#[cfg(test)]` modules — it is never used to exempt production code from
-coverage. CI requires **100% lines and regions** (`./scripts/ci.sh` / GitHub Actions).
+and code inside `#[cfg(test)]` modules. CI requires **100% lines and regions**.
 Unnecessary or unhittable branches are deleted or simplified rather than suppressed.
-Run `RUSTC_BOOTSTRAP=1 cargo llvm-cov --workspace --locked --summary-only --fail-under-lines 100 --fail-under-regions 100` to reproduce.
+`scripts/check-test-policy.sh` is a whole-repo fallback when Trunk is unavailable.
+Run `RUSTC_BOOTSTRAP=1 cargo llvm-cov --workspace --locked --summary-only --fail-under-lines 100 --fail-under-regions 100 -- --include-ignored` to reproduce.

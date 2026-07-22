@@ -19,6 +19,7 @@ members = [
   "apps/pos-experiment",
   "apps/pos-cli",
   "apps/pos-mvp",
+  "apps/piglor-gateway",
 ]
 resolver = "2"
 
@@ -59,6 +60,18 @@ rusqlite = { version = "0.36", features = ["bundled", "hooks"] }
 
 # Testing
 proptest = "1"
+
+# Gateway (Wave 6 / ADR-014)
+tokio = { version = "1", features = [
+  "macros",
+  "rt-multi-thread",
+  "sync",
+  "net",
+  "time",
+  "signal",
+] }
+axum = { version = "0.8" }
+tower = { version = "0.5", features = ["util"] }
 
 [profile.release]
 lto = true
