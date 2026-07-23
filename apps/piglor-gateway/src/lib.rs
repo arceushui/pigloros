@@ -26,6 +26,21 @@ use thiserror::Error;
 use tokio::sync::{broadcast, Mutex};
 use ulid::Ulid;
 
+/// Pre-registered Prediction Ledger entry view (Redmine #58 / OKR KR4.6).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LedgerEntryView {
+    pub id: String,
+    pub scenario: String,
+    pub title: String,
+    pub predicted_outcome: String,
+    pub confidence: f64,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brier_score: Option<f64>,
+    pub verification_hash: String,
+    pub timestamp: String,
+}
+
 /// Maximum JSON request body size for HTTP handlers (1 MiB).
 pub const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024;
 
