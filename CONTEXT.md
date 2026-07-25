@@ -89,7 +89,7 @@ A shared language for humans and agents working on PiglorOS. Use these terms exa
 |---|---|
 | **Wave** | A named delivery increment. Waves 1–7 shipped on `main`. Wave 8+ planned. |
 | **ADR** | Architecture Decision Record. Canonical on Redmine wiki (`redmine.piglor.com/projects/pigloros/wiki`). |
-| **Thin MVP** | Minimal vertical slice — just enough to validate the concept without deferred features. |
+| **Thin MVP** | Minimal vertical slice *of the final architecture* — just enough to validate the concept, built on the seams the full vision requires. Never a throwaway shortcut. |
 | **Deferred** | Explicitly out-of-scope for the current wave; tracked in Redmine or ADR non-goals. |
 
 ---

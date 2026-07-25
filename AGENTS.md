@@ -45,3 +45,4 @@ RUSTC_BOOTSTRAP=1 cargo llvm-cov --workspace --locked --summary-only \
 
 - **0 → 1** (new crate, plugin, or binary): architecture-first, ADR required
 - **0 → many** (test expansion): keep tests focused on public interfaces (seams), not internals
+- **MVP ≠ simplest** — cut the thinnest slice *of the final architecture*, built on the seams the full vision requires (ports, schema versions, documented extension points). Never ship a shortcut that must be thrown away when the future arrives

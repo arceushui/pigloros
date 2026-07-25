@@ -16,6 +16,7 @@ members = [
   "plugins/geo",
   "plugins/world",
   "plugins/society",
+  "plugins/ledger",
   "apps/pos-experiment",
   "apps/pos-cli",
   "apps/pos-mvp",
@@ -60,6 +61,10 @@ rusqlite = { version = "0.36", features = ["bundled", "hooks"] }
 
 # Testing
 proptest = "1"
+tempfile = "3"
+
+# Data files
+toml = "0.8"
 
 # Gateway (Wave 6 / ADR-014)
 tokio = { version = "1", features = [

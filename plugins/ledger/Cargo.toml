@@ -1,0 +1,23 @@
+[package]
+name = "pos-plugin-ledger"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+pos-core = { path = "../../crates/pos-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+ciborium = { workspace = true }
+ulid = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+pos-runtime = { path = "../../crates/pos-runtime" }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
