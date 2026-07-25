@@ -127,7 +127,7 @@ pub trait EventStore: Send {
     /// [`SchemaVersionMap`], the registered upcasters are applied to transform the
     /// payload. The event's `schema_version` is updated to the target version.
     ///
-    /// Default: reads via [`Self::read`], then applies upcasters.
+    /// Uses [`Self::read`] internally, then applies upcasters.
     ///
     /// # Errors
     /// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist.
@@ -139,21 +139,7 @@ pub trait EventStore: Send {
         schema_versions: &SchemaVersionMap,
     ) -> Result<Vec<Event>, CoreError> {
         let mut events = self.read(timeline, range)?;
-        let mut i = 0;
-        while i < events.len() {
-            let event = &mut events[i];
-            let target = schema_versions.current(event.event_type.as_str());
-            if event.schema_version < target {
-                event.payload = upcasters.upcast(
-                    &event.event_type,
-                    event.schema_version,
-                    target,
-                    event.payload.clone(),
-                );
-                event.schema_version = target;
-            }
-            i += 1;
-        }
+        upcast_events_in_place(&mut events, upcasters, schema_versions);
         Ok(events)
     }
 
@@ -171,21 +157,7 @@ pub trait EventStore: Send {
         schema_versions: &SchemaVersionMap,
     ) -> Result<Vec<Event>, CoreError> {
         let mut events = self.read_own(timeline, range)?;
-        let mut i = 0;
-        while i < events.len() {
-            let event = &mut events[i];
-            let target = schema_versions.current(event.event_type.as_str());
-            if event.schema_version < target {
-                event.payload = upcasters.upcast(
-                    &event.event_type,
-                    event.schema_version,
-                    target,
-                    event.payload.clone(),
-                );
-                event.schema_version = target;
-            }
-            i += 1;
-        }
+        upcast_events_in_place(&mut events, upcasters, schema_versions);
         Ok(events)
     }
 
@@ -529,6 +501,26 @@ fn materialize_fork_export_as_root(export: &mut TimelineExport) {
             event.causation_id = id_map.get(&cid).copied();
         }
         event.signature = None;
+    }
+}
+
+/// Apply upcasters to event payloads in-place where schema versions are stale.
+pub fn upcast_events_in_place(
+    events: &mut [Event],
+    upcasters: &UpcasterRegistry,
+    schema_versions: &SchemaVersionMap,
+) {
+    for event in events {
+        let target = schema_versions.current(event.event_type.as_str());
+        if event.schema_version < target {
+            event.payload = upcasters.upcast(
+                &event.event_type,
+                event.schema_version,
+                target,
+                event.payload.clone(),
+            );
+            event.schema_version = target;
+        }
     }
 }
 

@@ -96,7 +96,8 @@ impl Recorder {
     /// Load replay events from the store for a given timeline.
     ///
     /// Reads all `runtime.recorded_output` events from `entity` and
-    /// prepares the Recorder for replay.
+    /// prepares the Recorder for replay. When `upcasters` is `Some`,
+    /// reads through [`EventStore::read_upcast`] to apply schema migrations.
     ///
     /// # Errors
     /// Returns [`RuntimeError::Store`] on store read failure.
@@ -104,35 +105,13 @@ impl Recorder {
         entity: EntityId,
         store: &dyn EventStore,
         timeline: TimelineId,
+        upcasters: Option<(&pos_core::UpcasterRegistry, &pos_core::SchemaVersionMap)>,
     ) -> Result<Self, RuntimeError> {
         use pos_core::store::SeqRange;
-        let all_events = store.read(timeline, SeqRange::all())?;
-        let recorded: Vec<Vec<u8>> = all_events
-            .into_iter()
-            .filter(|e| e.entity == entity && e.event_type.as_str() == RECORDER_EVENT_TYPE)
-            .map(|e| e.payload.as_slice().to_vec())
-            .collect();
-        Ok(Self::new_replay(entity, recorded))
-    }
-
-    /// Load replay events from the store with schema upcasting applied.
-    ///
-    /// Like [`Self::prepare_replay`] but reads events through
-    /// [`EventStore::read_upcast`] so stored payloads are migrated to the current
-    /// schema versions before replay.
-    ///
-    /// # Errors
-    /// Returns [`RuntimeError::Store`] on store read failure.
-    pub fn prepare_replay_upcast(
-        entity: EntityId,
-        store: &dyn EventStore,
-        timeline: TimelineId,
-        upcasters: &pos_core::UpcasterRegistry,
-        schema_versions: &pos_core::SchemaVersionMap,
-    ) -> Result<Self, RuntimeError> {
-        use pos_core::store::SeqRange;
-        let all_events =
-            store.read_upcast(timeline, SeqRange::all(), upcasters, schema_versions)?;
+        let all_events = match upcasters {
+            Some((uc, sv)) => store.read_upcast(timeline, SeqRange::all(), uc, sv)?,
+            None => store.read(timeline, SeqRange::all())?,
+        };
         let recorded: Vec<Vec<u8>> = all_events
             .into_iter()
             .filter(|e| e.entity == entity && e.event_type.as_str() == RECORDER_EVENT_TYPE)
@@ -289,7 +268,7 @@ mod tests {
         ];
         store.append(tl.id(), &drafts).unwrap();
 
-        let mut rec = Recorder::prepare_replay(entity, store.as_ref(), tl.id()).unwrap();
+        let mut rec = Recorder::prepare_replay(entity, store.as_ref(), tl.id(), None).unwrap();
         assert_eq!(rec.remaining(), 2);
         assert_eq!(rec.record(vec![]).unwrap().bytes, b"r1");
         assert_eq!(rec.record(vec![]).unwrap().bytes, b"r2");
@@ -362,7 +341,8 @@ mod tests {
         }
 
         let store = ReadFailStore;
-        let result = Recorder::prepare_replay(EntityId::new(), &store, pos_core::TimelineId::new());
+        let result =
+            Recorder::prepare_replay(EntityId::new(), &store, pos_core::TimelineId::new(), None);
         assert!(matches!(result, Err(RuntimeError::Store(_))));
     }
 
@@ -406,12 +386,11 @@ mod tests {
         let upcasters = pos_core::UpcasterRegistry::new();
         let schema_versions = pos_core::SchemaVersionMap::new();
 
-        let mut rec = Recorder::prepare_replay_upcast(
+        let mut rec = Recorder::prepare_replay(
             entity,
             store.as_ref(),
             tl.id(),
-            &upcasters,
-            &schema_versions,
+            Some((&upcasters, &schema_versions)),
         )
         .unwrap();
         assert_eq!(rec.remaining(), 1);
@@ -427,12 +406,11 @@ mod tests {
         let upcasters = pos_core::UpcasterRegistry::new();
         let schema_versions = pos_core::SchemaVersionMap::new();
         let bad_timeline = TimelineId::new();
-        let result = Recorder::prepare_replay_upcast(
+        let result = Recorder::prepare_replay(
             entity,
             store.as_ref(),
             bad_timeline,
-            &upcasters,
-            &schema_versions,
+            Some((&upcasters, &schema_versions)),
         );
         assert!(matches!(
             result,

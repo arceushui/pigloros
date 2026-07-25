@@ -125,16 +125,27 @@ pub enum StoreConfig {
 /// assert_eq!(dst.read(child.id(), SeqRange::all()).unwrap().len(), 1);
 /// ```
 pub fn open_store(config: StoreConfig) -> Result<Box<dyn EventStore>, CoreError> {
+    open_store_with_hasher(config, Box::new(pos_crypto::chain::Blake3Hasher))
+}
+
+/// Like [`open_store`] but with a custom [`Hasher`] for hash-chain computation.
+///
+/// # Errors
+/// Returns [`CoreError::Storage`] if the backend cannot be initialised.
+pub fn open_store_with_hasher(
+    config: StoreConfig,
+    hasher: Box<dyn pos_core::Hasher>,
+) -> Result<Box<dyn EventStore>, CoreError> {
     match config {
-        StoreConfig::Memory => Ok(Box::new(memory::MemoryStore::new())),
+        StoreConfig::Memory => Ok(Box::new(memory::MemoryStore::with_hasher(hasher))),
         #[cfg(feature = "sqlite")]
         StoreConfig::Sqlite { path } => {
-            let store = sqlite::SqliteStore::open(&path)?;
+            let store = sqlite::SqliteStore::open_with_hasher(&path, hasher)?;
             Ok(Box::new(store))
         }
         #[cfg(feature = "sqlite")]
         StoreConfig::SqliteInMemory => {
-            let store = sqlite::SqliteStore::open_in_memory()?;
+            let store = sqlite::SqliteStore::open_in_memory_with_hasher(hasher)?;
             Ok(Box::new(store))
         }
     }
