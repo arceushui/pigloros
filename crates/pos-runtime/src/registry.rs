@@ -160,6 +160,7 @@ impl PluginRegistry {
     }
 
     /// Return registered plugin versions as a map of name → version.
+    #[must_use]
     pub fn plugin_versions(&self) -> std::collections::HashMap<String, String> {
         self.plugins
             .values()
