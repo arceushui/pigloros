@@ -40,6 +40,9 @@ pub enum LedgerError {
     /// CBOR payload could not be decoded.
     #[error("payload decode error: {0}")]
     Decode(String),
+    /// Event store backend error.
+    #[error("store error: {0}")]
+    Store(String),
 }
 
 /// Input for registering a new prediction (everything but the generated id).
@@ -434,5 +437,7 @@ mod tests {
             reason: "r".into(),
         };
         assert!(toml.to_string().contains("toml parse error"));
+        let store = LedgerError::Store("disk full".into());
+        assert!(store.to_string().contains("store error"));
     }
 }

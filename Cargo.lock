@@ -999,8 +999,11 @@ name = "pos-plugin-ledger"
 version = "0.1.0"
 dependencies = [
  "ciborium",
+ "ed25519-dalek",
  "pos-core",
+ "pos-crypto",
  "pos-runtime",
+ "pos-store",
  "serde",
  "serde_json",
  "tempfile",
