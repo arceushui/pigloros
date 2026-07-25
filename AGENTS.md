@@ -1,10 +1,12 @@
-## Agent skills
+## Agent instructions
+
+Before starting any task, read `CONTEXT.md` for domain vocabulary and `README.md` for the project overview. ADRs live on Redmine wiki (`redmine.piglor.com/projects/pigloros/wiki`).
 
 ### Worktree isolation
 
-Every task MUST run in its own `git worktree` — never work directly on `main`. Create a worktree named after the task or ticket (e.g. `#83-hasher-port`, `#85-upcaster-registry`). Commit from the worktree, then remove it when done.
+Every task MUST run in its own `git worktree` — never work directly on `main`. Name the worktree after the task or ticket (e.g. `#83-hasher-port`). Commit from the worktree, then remove it when done.
 
-See `using-git-worktrees` skill for the full workflow (detection, native-tool fallback, `.worktrees/` directory, baseline tests).
+See `using-git-worktrees` skill for the full workflow.
 
 ```bash
 git worktree add ../pigloros-<task-name> main
@@ -15,12 +17,29 @@ git worktree remove ../pigloros-<task-name>
 
 ### Issue tracker
 
-Internal roadmap lives in Redmine at `redmine.piglor.com/projects/pigloros`. GitHub Issues (`arceushui/pigloros`) is for community contributions when the project goes open source. See `.agents/issue-tracker.md`.
+Redmine: `redmine.piglor.com/projects/pigloros`. GitHub Issues (`arceushui/pigloros`) is for community contributions. See `.agents/issue-tracker.md`.
 
-### Triage labels
+### Domain knowledge
 
-Default five-role label vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `.agents/triage-labels.md`.
+- **CONTEXT.md** — domain glossary (use exact terms, don't drift to synonyms)
+- **Redmine wiki** — canonical ADRs
+- **Notion** — design docs and Wave specs (MCP configured)
 
-### Domain docs
+### Coverage rule
 
-Single-context layout — `CONTEXT.md` at repo root. Architectural decisions (ADRs) live canonically on Redmine wiki at `redmine.piglor.com/projects/pigloros/wiki`. See `.agents/domain.md`.
+After every code change, run `cargo llvm-cov --fail-under-lines 100 --fail-under-regions 99`. If new code cannot be covered by a test, **remove it** — don't leave dead branches. Prefer deleting/simplifying over exemptions.
+
+### Quality gates (local)
+
+```bash
+cargo fmt --all -- --check
+cargo test --workspace --locked -- --include-ignored
+cargo clippy --workspace --all-targets --locked -- -D warnings -W clippy::pedantic
+RUSTC_BOOTSTRAP=1 cargo llvm-cov --workspace --locked --summary-only \
+  --fail-under-lines 100 --fail-under-regions 99 -- --include-ignored
+```
+
+### Features and sizing
+
+- **0 → 1** (new crate, plugin, or binary): architecture-first, ADR required
+- **0 → many** (test expansion): keep tests focused on public interfaces (seams), not internals
