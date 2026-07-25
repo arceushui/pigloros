@@ -4,6 +4,8 @@
 
 Every task MUST run in its own `git worktree` — never work directly on `main`. Create a worktree named after the task or ticket (e.g. `#83-hasher-port`, `#85-upcaster-registry`). Commit from the worktree, then remove it when done.
 
+See `using-git-worktrees` skill for the full workflow (detection, native-tool fallback, `.worktrees/` directory, baseline tests).
+
 ```bash
 git worktree add ../pigloros-<task-name> main
 cd ../pigloros-<task-name>
