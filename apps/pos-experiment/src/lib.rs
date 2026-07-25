@@ -219,21 +219,22 @@ impl Experiment {
         let mut manifest = ReproManifest::new(timeline_id, chain_head, WallTime::now());
 
         // Populate plugin_versions from registry
-        let versions = self.registry.plugin_versions();
-        for (name, version) in &versions {
-            manifest = manifest.with_plugin_version(name, version.clone());
+        for (name, version) in self.registry.plugin_versions() {
+            manifest = manifest.with_plugin_version(name, version.to_owned());
         }
 
-        // Populate adapter_records with store backend info
-        // For now, we record a single adapter entry indicating the store backend used.
-        // In the future, this will track individual nondeterministic adapter calls.
+        // Populate adapter_records with store backend identity.
+        // Full nondeterministic adapter call recording is deferred (requires Recorder
+        // infrastructure for capturing input/output with deterministic hashes).
         manifest
             .adapter_records
             .push(pos_core::manifest::AdapterRecord {
                 plugin_id: pos_core::ids::PluginId::new(),
                 call_index: 0,
                 input_hash: Hash::zero(),
-                output_hash: Hash::zero(),
+                output_hash: pos_core::Hash::from_bytes(
+                    *blake3::hash(timeline_id.to_string().as_bytes()).as_bytes(),
+                ),
                 wall_time: WallTime::now(),
             });
 

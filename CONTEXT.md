@@ -61,7 +61,9 @@ A shared language for humans and agents working on PiglorOS. Use these terms exa
 | **Brier Score** | `plugins/eval` | Mean squared error of probabilistic predictions. Lower = better; 0 = perfect; 0.25 ≈ coin-flip. |
 | **ECE** | `plugins/eval` | Expected Calibration Error across 10 equal-width probability bins. |
 | **Lift** | `plugins/eval` | Brier improvement over a naive baseline predictor. Positive = model beats base rate. |
-| **Calibration Report** | `plugins/eval` | Output of `compute_report`: Brier + ECE + Lift + reliability bins. |
+| **Lift vs Personal Base Rate** | `plugins/eval` | Per-entity Brier improvement. Each entity's predictions are scored against its own historical outcome rate (leave-one-out). |
+| **CRPS** | `plugins/eval` | Continuous Ranked Probability Score. For binary outcomes equals Brier; for continuous distributions it may diverge in future. |
+| **Calibration Report** | `plugins/eval` | Output of `compute_report`: Brier + CRPS + ECE + Lift + Personal Base Rate + reliability bins. |
 | **Reliability Bin** | `plugins/eval` | One of 10 equal-width buckets mapping predicted probability to observed frequency. |
 | **Backtest** | `apps/pos-experiment` | Running a `BacktestRunner` over train + eval ticks to produce a `CalibrationReport`. |
 

@@ -452,10 +452,11 @@ pub fn compute_report(
     let lift_vs_population_avg = brier_constant(population_avg, &outcomes_vec) - brier_score;
     let lift_vs_persistence = brier_constant(fraction_positive, &outcomes_vec) - brier_score;
 
-    // CRPS — for binary outcomes, CRPS = Brier. Placeholder for continuous expansion.
+    // CRPS — for binary outcomes, CRPS equals Brier score analytically.
     let crps = brier_score;
 
     // Lift vs personal base rate: per-entity historical outcome rate as baseline.
+    // Uses leave-one-out: each prediction is scored against the entity's other outcomes.
     let mut entity_outcomes: std::collections::HashMap<String, Vec<f64>> =
         std::collections::HashMap::new();
     for r in &resolved {
@@ -468,8 +469,13 @@ pub fn compute_report(
         .iter()
         .map(|r| {
             let outcomes = &entity_outcomes[&r.entity_id];
-            let base_rate: f64 = outcomes.iter().sum::<f64>()
-                / f64::from(u32::try_from(outcomes.len()).unwrap_or(u32::MAX));
+            #[allow(clippy::cast_precision_loss)]
+            let n = outcomes.len() as f64;
+            let base_rate = if n > 1.0 {
+                (outcomes.iter().sum::<f64>() - r.outcome) / (n - 1.0)
+            } else {
+                0.0
+            };
             (base_rate - r.outcome) * (base_rate - r.outcome)
         })
         .sum::<f64>()
@@ -1268,6 +1274,8 @@ mod tests {
         let report = compute_report(store.as_ref(), tl.id()).unwrap();
         assert_eq!(report.n_resolved, 3);
         assert!((report.crps - report.brier_score).abs() < 1e-10);
+        // personal base rate with leave-one-out: entity e1 (2 preds) gives
+        // base rates excluding self; entity e2 (1 pred) gives base_rate=0
         assert!(report.lift_vs_personal_base_rate.is_finite());
     }
 }

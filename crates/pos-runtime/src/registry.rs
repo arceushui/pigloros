@@ -159,13 +159,11 @@ impl PluginRegistry {
         self.plugins.values().map(|e| e.name.as_str())
     }
 
-    /// Return registered plugin versions as a map of name → version.
-    #[must_use]
-    pub fn plugin_versions(&self) -> std::collections::HashMap<String, String> {
+    /// Iterate over registered plugin (name, version) pairs in registration order.
+    pub fn plugin_versions(&self) -> impl Iterator<Item = (&str, &str)> {
         self.plugins
             .values()
-            .map(|e| (e.name.clone(), e.version.clone()))
-            .collect()
+            .map(|e| (e.name.as_str(), e.version.as_str()))
     }
 
     /// Step all plugins that have a driver, collecting their event drafts.
