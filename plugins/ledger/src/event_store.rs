@@ -6,6 +6,7 @@ use pos_core::{
     hasher::Hasher,
     ids::{EntityId, EventId},
     store::{EventStore, SeqRange},
+    CoreError,
 };
 use pos_crypto::signing::sign;
 
@@ -15,9 +16,10 @@ use crate::{
     Ledger, LedgerError, LedgerOutcome, LedgerPrediction,
 };
 
-#[allow(clippy::needless_pass_by_value)]
-fn store_err(e: pos_core::CoreError) -> LedgerError {
-    LedgerError::Store(e.to_string())
+impl From<CoreError> for LedgerError {
+    fn from(e: CoreError) -> Self {
+        Self::Store(e.to_string())
+    }
 }
 
 pub struct EventLedgerStore {
@@ -80,7 +82,7 @@ impl EventLedgerStore {
 
         self.store
             .append_committed(self.timeline_id, &[event])
-            .map_err(store_err)
+            .map_err(LedgerError::from)
     }
 }
 
@@ -89,7 +91,7 @@ impl LedgerStore for EventLedgerStore {
         let events = self
             .store
             .read(self.timeline_id, SeqRange::all())
-            .map_err(store_err)?;
+            .map_err(LedgerError::from)?;
 
         let mut pairs: Vec<(LedgerPrediction, Option<LedgerOutcome>)> = Vec::new();
 
@@ -146,7 +148,7 @@ impl LedgerStore for EventLedgerStore {
         let events = self
             .store
             .read(self.timeline_id, SeqRange::all())
-            .map_err(store_err)?;
+            .map_err(LedgerError::from)?;
 
         let found_prediction = events
             .iter()
@@ -517,7 +519,7 @@ mod tests {
     #[test]
     fn store_err_converts_core_error() {
         let core_err = pos_core::CoreError::Storage("test".into());
-        let result = store_err(core_err);
+        let result: LedgerError = core_err.into();
         assert!(matches!(result, LedgerError::Store(_)));
         assert!(result.to_string().contains("store error"));
     }
