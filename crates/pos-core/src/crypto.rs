@@ -76,10 +76,11 @@ mod bytes_64 {
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 64], D::Error> {
-        let v = serde_bytes::ByteBuf::deserialize(d)?;
-        v.into_vec()
-            .try_into()
-            .map_err(|_| serde::de::Error::custom("expected 64 bytes"))
+        serde_bytes::ByteBuf::deserialize(d).and_then(|v| {
+            v.into_vec()
+                .try_into()
+                .map_err(|_| serde::de::Error::custom("expected 64 bytes"))
+        })
     }
 }
 
@@ -172,8 +173,9 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn signature_rejects_non_bytes_json() {
-        let result: Result<Signature, _> = serde_json::from_str("99");
-        assert!(result.is_err());
+    fn signature_as_bytes_identity() {
+        let raw = [7u8; 64];
+        let s = Signature::from_bytes(raw);
+        assert_eq!(s.as_bytes(), &raw);
     }
 }

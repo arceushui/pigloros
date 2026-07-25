@@ -91,6 +91,7 @@ mod tests {
         assert_eq!(p.capability().owned_event_types.len(), 1);
         assert_eq!(p.capability().owned_entity_kinds[0], "test.entity");
         assert!(p.capability().has_driver);
+        assert_eq!(p.version(), "0.1.0");
     }
 
     #[test]

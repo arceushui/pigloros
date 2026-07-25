@@ -122,5 +122,5 @@ jobs:
         run: >
           cargo llvm-cov --workspace --locked --summary-only
           --fail-under-lines 100
-          --fail-under-regions 99
+          --fail-under-regions 100
           -- --include-ignored

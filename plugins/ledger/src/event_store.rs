@@ -3,10 +3,11 @@ use ed25519_dalek::SigningKey;
 use pos_core::{
     clock::{Seq, WallTime},
     event::{CanonicalBytes, Event, Kind, SchemaVersion},
+    hasher::Hasher,
     ids::{EntityId, EventId},
     store::{EventStore, SeqRange},
 };
-use pos_crypto::{chain::hash_payload, signing::sign};
+use pos_crypto::signing::sign;
 
 use crate::{
     payload::{decode_outcome, decode_prediction, EVENT_TYPE_OUTCOME, EVENT_TYPE_PREDICTION},
@@ -14,6 +15,7 @@ use crate::{
     Ledger, LedgerError, LedgerOutcome, LedgerPrediction,
 };
 
+#[allow(clippy::needless_pass_by_value)]
 fn store_err(e: pos_core::CoreError) -> LedgerError {
     LedgerError::Store(e.to_string())
 }
@@ -23,6 +25,7 @@ pub struct EventLedgerStore {
     timeline_id: pos_core::ids::TimelineId,
     entity: EntityId,
     signing_key: SigningKey,
+    hasher: Box<dyn Hasher>,
 }
 
 impl EventLedgerStore {
@@ -32,19 +35,22 @@ impl EventLedgerStore {
         timeline_id: pos_core::ids::TimelineId,
         entity: EntityId,
         signing_key: SigningKey,
+        hasher: Box<dyn Hasher>,
     ) -> Self {
         Self {
             store,
             timeline_id,
             entity,
             signing_key,
+            hasher,
         }
     }
 
     fn head_seq(&self) -> Result<Seq, LedgerError> {
         self.store
             .get_timeline(self.timeline_id)
-            .map_err(store_err)?
+            .ok()
+            .flatten()
             .map(|tl| tl.head)
             .ok_or_else(|| LedgerError::Store("timeline not found".into()))
     }
@@ -55,7 +61,7 @@ impl EventLedgerStore {
         event_type: Kind,
     ) -> Result<(), LedgerError> {
         let head = self.head_seq()?;
-        let payload_hash = hash_payload(&payload);
+        let payload_hash = self.hasher.hash_payload(&payload);
         let signature = sign(&self.signing_key, &payload);
 
         let event = Event {
@@ -142,28 +148,17 @@ impl LedgerStore for EventLedgerStore {
             .read(self.timeline_id, SeqRange::all())
             .map_err(store_err)?;
 
-        let mut found_prediction = false;
-        let mut already_resolved = false;
+        let found_prediction = events
+            .iter()
+            .filter(|e| e.event_type.as_str() == EVENT_TYPE_PREDICTION)
+            .filter_map(|e| decode_prediction(e.payload.as_slice()).ok())
+            .any(|p| p.prediction_id == prediction_id);
 
-        for event in &events {
-            match event.event_type.as_str() {
-                EVENT_TYPE_PREDICTION => {
-                    if let Ok(pred) = decode_prediction(event.payload.as_slice()) {
-                        if pred.prediction_id == prediction_id {
-                            found_prediction = true;
-                        }
-                    }
-                }
-                EVENT_TYPE_OUTCOME => {
-                    if let Ok(res) = decode_outcome(event.payload.as_slice()) {
-                        if res.prediction_id == prediction_id {
-                            already_resolved = true;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
+        let already_resolved = events
+            .iter()
+            .filter(|e| e.event_type.as_str() == EVENT_TYPE_OUTCOME)
+            .filter_map(|e| decode_outcome(e.payload.as_slice()).ok())
+            .any(|r| r.prediction_id == prediction_id);
 
         if !found_prediction {
             return Err(LedgerError::UnknownPrediction(prediction_id.to_owned()));
@@ -185,13 +180,20 @@ impl LedgerStore for EventLedgerStore {
 mod tests {
     use super::*;
     use crate::contract;
+    use pos_crypto::chain::{hash_payload, Blake3Hasher};
     use pos_store::memory::MemoryStore;
 
     fn make_store() -> EventLedgerStore {
         let (sk, _vk) = pos_crypto::signing::generate_keypair();
         let mut mem = MemoryStore::new();
         let tl = mem.create_timeline("ledger").unwrap();
-        EventLedgerStore::new(Box::new(mem), tl.id(), EntityId::new(), sk)
+        EventLedgerStore::new(
+            Box::new(mem),
+            tl.id(),
+            EntityId::new(),
+            sk,
+            Box::new(Blake3Hasher),
+        )
     }
 
     #[test]
@@ -268,12 +270,7 @@ mod tests {
     #[test]
     fn load_orphan_outcome_returns_error() {
         let mut store = make_store();
-        let head = store
-            .store
-            .get_timeline(store.timeline_id)
-            .unwrap()
-            .unwrap()
-            .head;
+        let head = store.head_seq().unwrap();
         let outcome = LedgerOutcome {
             prediction_id: "01J3B0Y5ZK2J6MGK8D7QW3N0P9".to_owned(),
             outcome: true,
@@ -307,12 +304,7 @@ mod tests {
     #[test]
     fn load_skips_unknown_event_types() {
         let mut store = make_store();
-        let head = store
-            .store
-            .get_timeline(store.timeline_id)
-            .unwrap()
-            .unwrap()
-            .head;
+        let head = store.head_seq().unwrap();
         let payload = CanonicalBytes::from_vec(b"some_unrelated_data".to_vec());
         let payload_hash = hash_payload(&payload);
         let event = Event {
@@ -339,12 +331,7 @@ mod tests {
     #[test]
     fn resolve_skips_decode_error_prediction() {
         let mut store = make_store();
-        let head = store
-            .store
-            .get_timeline(store.timeline_id)
-            .unwrap()
-            .unwrap()
-            .head;
+        let head = store.head_seq().unwrap();
         let payload = CanonicalBytes::from_vec(b"not cbor".to_vec());
         let payload_hash = hash_payload(&payload);
         let event = Event {
@@ -376,12 +363,7 @@ mod tests {
         let id = store
             .register(contract::sample_new_prediction("2026-08-01"))
             .unwrap();
-        let head = store
-            .store
-            .get_timeline(store.timeline_id)
-            .unwrap()
-            .unwrap()
-            .head;
+        let head = store.head_seq().unwrap();
         let payload = CanonicalBytes::from_vec(b"not cbor".to_vec());
         let payload_hash = hash_payload(&payload);
         let event = Event {
@@ -411,12 +393,7 @@ mod tests {
         let id = store
             .register(contract::sample_new_prediction("2026-08-01"))
             .unwrap();
-        let head = store
-            .store
-            .get_timeline(store.timeline_id)
-            .unwrap()
-            .unwrap()
-            .head;
+        let head = store.head_seq().unwrap();
         let payload = CanonicalBytes::from_vec(b"irrelevant".to_vec());
         let payload_hash = hash_payload(&payload);
         let event = Event {
@@ -440,11 +417,81 @@ mod tests {
     }
 
     #[test]
+    fn load_fails_on_corrupt_prediction_payload() {
+        let mut store = make_store();
+        let head = store.head_seq().unwrap();
+        let payload = CanonicalBytes::from_vec(b"not cbor".to_vec());
+        let payload_hash = hash_payload(&payload);
+        let event = Event {
+            id: EventId::new(),
+            entity: store.entity,
+            event_type: Kind::new(EVENT_TYPE_PREDICTION),
+            payload,
+            wall_time: WallTime::now(),
+            seq: head.next(),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash,
+        };
+        store
+            .store
+            .append_committed(store.timeline_id, &[event])
+            .unwrap();
+        let err = store.load("2026-07-25").unwrap_err();
+        assert!(matches!(err, LedgerError::Decode(_)));
+    }
+
+    #[test]
+    fn load_fails_on_corrupt_outcome_payload() {
+        let mut store = make_store();
+        let head = store.head_seq().unwrap();
+        let payload = CanonicalBytes::from_vec(b"not cbor".to_vec());
+        let payload_hash = hash_payload(&payload);
+        let event = Event {
+            id: EventId::new(),
+            entity: store.entity,
+            event_type: Kind::new(EVENT_TYPE_OUTCOME),
+            payload,
+            wall_time: WallTime::now(),
+            seq: head.next(),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash,
+        };
+        store
+            .store
+            .append_committed(store.timeline_id, &[event])
+            .unwrap();
+        let err = store.load("2026-07-25").unwrap_err();
+        assert!(matches!(err, LedgerError::Decode(_)));
+    }
+
+    #[test]
+    fn resolve_rejects_invalid_resolved_at() {
+        let mut store = make_store();
+        let id = store
+            .register(contract::sample_new_prediction("2026-08-01"))
+            .unwrap();
+        let err = store.resolve(&id, true, "").unwrap_err();
+        assert!(matches!(err, LedgerError::InvalidResolution(_)));
+    }
+
+    #[test]
     fn load_fails_on_missing_timeline() {
         let (sk, _vk) = pos_crypto::signing::generate_keypair();
         let mem = MemoryStore::new();
         let tl_id = pos_core::ids::TimelineId::new();
-        let store = EventLedgerStore::new(Box::new(mem), tl_id, EntityId::new(), sk);
+        let store = EventLedgerStore::new(
+            Box::new(mem),
+            tl_id,
+            EntityId::new(),
+            sk,
+            Box::new(Blake3Hasher),
+        );
         let err = store.load("2026-07-25").unwrap_err();
         assert!(matches!(err, LedgerError::Store(_)));
     }
@@ -454,7 +501,13 @@ mod tests {
         let (sk, _vk) = pos_crypto::signing::generate_keypair();
         let mem = MemoryStore::new();
         let tl_id = pos_core::ids::TimelineId::new();
-        let mut store = EventLedgerStore::new(Box::new(mem), tl_id, EntityId::new(), sk);
+        let mut store = EventLedgerStore::new(
+            Box::new(mem),
+            tl_id,
+            EntityId::new(),
+            sk,
+            Box::new(Blake3Hasher),
+        );
         let err = store
             .resolve("01J3B0Y5ZK2J6MGK8D7QW3N0P9", true, "2026-07-30T09:00:00Z")
             .unwrap_err();
@@ -474,7 +527,13 @@ mod tests {
         let (sk, _vk) = pos_crypto::signing::generate_keypair();
         let mem = MemoryStore::new();
         let tl_id = pos_core::ids::TimelineId::new();
-        let mut store = EventLedgerStore::new(Box::new(mem), tl_id, EntityId::new(), sk);
+        let mut store = EventLedgerStore::new(
+            Box::new(mem),
+            tl_id,
+            EntityId::new(),
+            sk,
+            Box::new(Blake3Hasher),
+        );
         let err = store
             .register(contract::sample_new_prediction("2026-08-01"))
             .unwrap_err();

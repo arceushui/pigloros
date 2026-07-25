@@ -16,7 +16,7 @@ After every change — including after code review fixes — run the full suite:
 cargo test --workspace --locked -- --include-ignored    # all tests, 0 failures
 cargo clippy --workspace --all-targets --locked -- -D warnings -W clippy::pedantic
 RUSTC_BOOTSTRAP=1 cargo llvm-cov --workspace --locked --summary-only \
-  --fail-under-lines 100 --fail-under-regions 99 -- --include-ignored
+  --fail-under-lines 100 --fail-under-regions 100 -- --include-ignored
 ```
 
 If any gate fails, fix it before moving on. Do NOT skip gates — not even for "trivial" changes or after code review.

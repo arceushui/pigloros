@@ -274,4 +274,11 @@ mod tests {
             assert_eq!(u8::from(lt) + u8::from(eq) + u8::from(gt), 1);
         }
     }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn wall_time_as_micros_roundtrip() {
+        let t = WallTime::from_micros(42);
+        assert_eq!(t.as_micros(), 42);
+    }
 }

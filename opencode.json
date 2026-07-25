@@ -126,6 +126,10 @@
       "template": "Load the `teach` skill. $ARGUMENTS",
       "description": "Teach the user a new skill or concept."
     },
+    "technical-documentation-pipeline": {
+      "template": "Load the `technical-documentation-pipeline` skill and generate the appropriate documentation. $ARGUMENTS",
+      "description": "Generate ADRs (Redmine) and Design Docs (Notion) based on the engineering lifecycle phase."
+    },
     "to-questionnaire": {
       "template": "Load the `to-questionnaire` skill. $ARGUMENTS",
       "description": "Turn a decision into a questionnaire for someone else."

@@ -138,9 +138,10 @@ pub trait EventStore: Send {
         upcasters: &UpcasterRegistry,
         schema_versions: &SchemaVersionMap,
     ) -> Result<Vec<Event>, CoreError> {
-        let mut events = self.read(timeline, range)?;
-        upcast_events_in_place(&mut events, upcasters, schema_versions);
-        Ok(events)
+        self.read(timeline, range).map(|mut events| {
+            upcast_events_in_place(&mut events, upcasters, schema_versions);
+            events
+        })
     }
 
     /// Read own events and apply schema migrations.
@@ -156,9 +157,10 @@ pub trait EventStore: Send {
         upcasters: &UpcasterRegistry,
         schema_versions: &SchemaVersionMap,
     ) -> Result<Vec<Event>, CoreError> {
-        let mut events = self.read_own(timeline, range)?;
-        upcast_events_in_place(&mut events, upcasters, schema_versions);
-        Ok(events)
+        self.read_own(timeline, range).map(|mut events| {
+            upcast_events_in_place(&mut events, upcasters, schema_versions);
+            events
+        })
     }
 
     /// Create a forked child timeline at `at_seq`.
@@ -1332,6 +1334,7 @@ mod tests {
 
     // Counted under llvm-cov: exercises `chain_hash_at` Err through the `?` on raw export.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn export_timeline_raw_chain_hash_err_arm_counted() {
         struct HashFail {
             id: TimelineId,
@@ -1387,7 +1390,10 @@ mod tests {
 
         let id = TimelineId::new();
         let err = export_timeline_raw(&HashFail { id }, id).unwrap_err();
-        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("hash boom")));
+        assert!(
+            err.to_string().contains("hash boom"),
+            "expected hash boom error, got {err:?}"
+        );
     }
 
     // Prefer export_timeline_own in new code; own/cow wrap raw (legacy name).

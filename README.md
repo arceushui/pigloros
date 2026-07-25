@@ -95,7 +95,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings -W clippy::pedant
 # `#[coverage(off)]` is ONLY ever applied to #[test] functions / #[cfg(test)] modules —
 # it is never used to exempt production code. Needs bootstrap for the unstable attribute:
 RUSTC_BOOTSTRAP=1 cargo llvm-cov --workspace --locked --summary-only \
-  --fail-under-lines 100 --fail-under-regions 99 -- --include-ignored
+  --fail-under-lines 100 --fail-under-regions 100 -- --include-ignored
 ```
 
 CI (GitHub Actions): **Trunk Check** (`rust-test-policy`), **cargo-deny**, **fmt**, **test** (`--include-ignored`), **clippy pedantic**, and **llvm-cov**. See `.github/workflows/`.

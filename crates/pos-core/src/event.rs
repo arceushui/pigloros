@@ -360,7 +360,20 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn event_draft_rejects_non_bytes_payload_json() {
+    fn event_draft_with_wall_time_preserves_timestamp() {
+        let t = WallTime::from_micros(42);
+        let draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new("x"),
+            CanonicalBytes::from_vec(vec![]),
+        )
+        .with_wall_time(t);
+        assert_eq!(draft.wall_time, Some(t));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn event_draft_json_decode_rejects_bad_payload() {
         let draft = EventDraft::new(
             EntityId::new(),
             Kind::new("test"),

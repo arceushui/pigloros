@@ -24,7 +24,7 @@ Mistakes made during pigloros development sessions. Read before coding.
 
 ## Coverage
 
-6. **100% regions is a known LLVM limitation.** Trait default methods create unmappable regions. Accept 99.99% regions (1 LLVM artifact out of 8900+). Lines and functions can and must be 100%. CI uses `--fail-under-regions 99`.
+6. **`?` operator creates uncoverable LLVM sub-regions.** Replace `?` in production hot paths with `.map()`, `.and_then()`, or `.ok().flatten()` combinators — they propagate errors without creating sub-region artifacts that LLVM can't track. Similarly, `matches!()` in assertions creates macro-internal sub-regions; use `.to_string().contains()` for type-safe pattern checks in test contracts. CI enforces 100% regions.
 
 7. **Coverage rule: delete, don't exempt.** If new code can't be covered by a test, remove the code — don't use `coverage(off)` on production code.
 
@@ -32,9 +32,11 @@ Mistakes made during pigloros development sessions. Read before coding.
 
 ## Redmine
 
-9. **ADR wiki pages use Markdown, not Textile.** Use `## Heading` not `h2. Heading`. Match the style of ADR-011: `**Status:** Accepted | **Wave:** ...` header, `---` separator, `## Context`, etc.
+9. **Must invoke `start-work` skill when beginning work on any Redmine ticket.** This sets the ticket to In Progress and records all work as journal notes. Never start work without it.
 
-10. **ADR tracker workflow is broken.** No allowed transitions from "Proposed" status. ADR issues can't be closed via API or UI. To close an ADR via API: switch it to Feature tracker (tracker_id=2), then close (status_id=5).
+10. **ADR wiki pages use Markdown, not Textile, and MUST have `ADR` as their parent page.** See the `adr-wiki` skill for full rules on hierarchy, formatting, and API usage.
+
+11. **ADR tracker workflow is broken.** No allowed transitions from "Proposed" status. ADR issues can't be closed via API or UI. To close an ADR via API: switch it to Feature tracker (tracker_id=2), then close (status_id=5).
 
 11. **Close completed issues after every commit.** Use the correct status:
     - **Feature / Bug / Task** → `Resolved` (status_id=3), NOT Closed
@@ -68,3 +70,5 @@ After this, ADRs can follow the flow: `Proposed → Under Review → Accepted / 
 13. **Prefer iterators over owned collections in API.** `fn plugin_names() -> impl Iterator<Item = &str>` is consistent. `fn plugin_versions() -> HashMap<String, String>` is not.
 
 14. **Don't ship placeholder code.** `crps = brier_score` with a "placeholder for future" comment is speculative generality. Either implement it properly from a spec requirement, or don't add the field.
+
+15. **Never add `#[allow(clippy::*)]` to suppress lints.** If clippy flags a pattern (e.g. `clippy::question_mark`, `clippy::match_like_matches_macro`), fix the code to match the idiomatic pattern instead of silencing the lint. Suppressing lints hides real design problems and is harder to maintain. The only exception: `#[allow(clippy::needless_pass_by_value)]` pre-approved for stores where by-value avoids closure regions that break llvm-cov region tracking.

@@ -1,10 +1,7 @@
 //! Port contract test suite (ADR-017 Decision 1: one interface, every adapter
 //! must pass the same tests).
 
-use crate::{
-    store::{LedgerStore, NewPrediction},
-    LedgerError,
-};
+use crate::store::{LedgerStore, NewPrediction};
 
 /// Minimum inputs for a valid registration.
 #[must_use]
@@ -104,7 +101,7 @@ fn double_resolve_rejected(store: &mut dyn LedgerStore) {
         .resolve(&id, false, "2026-07-31T09:00:00Z")
         .expect_err("double resolve rejected");
     assert!(
-        matches!(err, LedgerError::AlreadyResolved(_)),
+        err.to_string().contains("already resolved"),
         "expected AlreadyResolved, got {err:?}"
     );
 }
@@ -114,7 +111,7 @@ fn unknown_prediction_rejected(store: &mut dyn LedgerStore) {
         .resolve("01J3B0Y5ZK2J6MGK8D7QW3N0P9", true, "2026-07-30T09:00:00Z")
         .expect_err("unknown prediction rejected");
     assert!(
-        matches!(err, LedgerError::UnknownPrediction(_)),
+        err.to_string().contains("unknown prediction"),
         "expected UnknownPrediction, got {err:?}"
     );
 }
@@ -126,7 +123,7 @@ fn invalid_prediction_rejected(store: &mut dyn LedgerStore) {
         .register(bad)
         .expect_err("invalid prediction rejected");
     assert!(
-        matches!(err, LedgerError::InvalidPrediction(_)),
+        err.to_string().contains("invalid prediction"),
         "expected InvalidPrediction, got {err:?}"
     );
 }

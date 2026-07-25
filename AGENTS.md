@@ -29,7 +29,7 @@ Redmine: `redmine.piglor.com/projects/pigloros`. GitHub Issues (`arceushui/piglo
 
 ### Coverage rule
 
-After every code change, run `cargo llvm-cov --fail-under-lines 100 --fail-under-regions 99`. If new code cannot be covered by a test, **remove it** — don't leave dead branches. Prefer deleting/simplifying over exemptions.
+After every code change, run `cargo llvm-cov --fail-under-lines 100 --fail-under-regions 100`. If new code cannot be covered by a test, **remove it** — don't leave dead branches. Prefer deleting/simplifying over exemptions.
 
 ### Quality gates (local)
 
@@ -38,7 +38,7 @@ cargo fmt --all -- --check
 cargo test --workspace --locked -- --include-ignored
 cargo clippy --workspace --all-targets --locked -- -D warnings -W clippy::pedantic
 RUSTC_BOOTSTRAP=1 cargo llvm-cov --workspace --locked --summary-only \
-  --fail-under-lines 100 --fail-under-regions 99 -- --include-ignored
+  --fail-under-lines 100 --fail-under-regions 100 -- --include-ignored
 ```
 
 ### Features and sizing
