@@ -16,9 +16,6 @@ pub enum LedgerError {
         /// Parser diagnostic.
         reason: String,
     },
-    /// A TOML value could not be serialized.
-    #[error("toml write error: {0}")]
-    TomlWrite(String),
     /// A prediction failed validation.
     #[error("invalid prediction: {0}")]
     InvalidPrediction(String),
@@ -406,7 +403,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn error_display_variants() {
         let cases: Vec<(LedgerError, &str)> = vec![
-            (LedgerError::TomlWrite("w".into()), "toml write error"),
             (
                 LedgerError::InvalidPrediction("p".into()),
                 "invalid prediction",

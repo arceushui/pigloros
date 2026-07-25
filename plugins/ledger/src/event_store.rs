@@ -22,6 +22,12 @@ impl From<CoreError> for LedgerError {
     }
 }
 
+fn to_canonical(value: &impl serde::Serialize) -> CanonicalBytes {
+    let mut buf = Vec::new();
+    ciborium::into_writer(value, &mut buf).expect("ciborium write to Vec<u8> is infallible");
+    CanonicalBytes::from_vec(buf)
+}
+
 pub struct EventLedgerStore {
     store: Box<dyn EventStore>,
     timeline_id: pos_core::ids::TimelineId,
@@ -122,11 +128,7 @@ impl LedgerStore for EventLedgerStore {
     fn register(&mut self, new: NewPrediction) -> Result<String, LedgerError> {
         new.validate()?;
         let prediction = new.into_prediction(ulid::Ulid::gen().to_string());
-
-        let mut buf = Vec::new();
-        ciborium::into_writer(&prediction, &mut buf)
-            .expect("ciborium write to Vec<u8> is infallible");
-        let payload = CanonicalBytes::from_vec(buf);
+        let payload = to_canonical(&prediction);
 
         self.append_signed(payload, Kind::new(EVENT_TYPE_PREDICTION))?;
         Ok(prediction.prediction_id)
@@ -169,11 +171,7 @@ impl LedgerStore for EventLedgerStore {
             return Err(LedgerError::AlreadyResolved(prediction_id.to_owned()));
         }
 
-        let mut buf = Vec::new();
-        ciborium::into_writer(&resolution, &mut buf)
-            .expect("ciborium write to Vec<u8> is infallible");
-
-        self.append_signed(CanonicalBytes::from_vec(buf), Kind::new(EVENT_TYPE_OUTCOME))
+        self.append_signed(to_canonical(&resolution), Kind::new(EVENT_TYPE_OUTCOME))
     }
 }
 
@@ -278,9 +276,7 @@ mod tests {
             outcome: true,
             resolved_at: "2026-07-30T09:00:00Z".to_owned(),
         };
-        let mut buf = Vec::new();
-        ciborium::into_writer(&outcome, &mut buf).unwrap();
-        let payload = CanonicalBytes::from_vec(buf);
+        let payload = to_canonical(&outcome);
         let payload_hash = hash_payload(&payload);
         let event = Event {
             id: EventId::new(),
