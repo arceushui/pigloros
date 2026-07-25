@@ -8,3 +8,4 @@ SQLCipher.db
 !.cursor/rules/
 !.cursor/rules/**
 **/__pycache__/
+.mcp.json

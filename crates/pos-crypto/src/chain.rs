@@ -3,14 +3,37 @@
 //! Each event's hash covers: `previous_hash` || `event_id` || `payload_bytes`
 //! A tampered payload causes its hash to differ, which then invalidates all subsequent hashes.
 
-use blake3::Hasher;
+use blake3::Hasher as Blake3;
 use pos_core::{CanonicalBytes, Hash};
+
+/// Default BLAKE3-256 hasher implementing [`pos_core::Hasher`].
+#[derive(Clone, Copy, Default)]
+pub struct Blake3Hasher;
+
+impl pos_core::Hasher for Blake3Hasher {
+    fn genesis_hash(&self) -> Hash {
+        Hash::zero()
+    }
+
+    fn hash_payload(&self, payload: &CanonicalBytes) -> Hash {
+        hash_payload(payload)
+    }
+
+    fn hash_event(
+        &self,
+        previous_hash: &Hash,
+        event_id_bytes: &[u8],
+        payload: &CanonicalBytes,
+    ) -> Hash {
+        hash_event(previous_hash, event_id_bytes, payload)
+    }
+}
 
 /// Compute the BLAKE3 hash for a single event's entry in the chain.
 ///
 /// Input: `previous_hash || event_id_bytes || payload_bytes`
 pub fn hash_event(previous_hash: &Hash, event_id_bytes: &[u8], payload: &CanonicalBytes) -> Hash {
-    let mut hasher = Hasher::new();
+    let mut hasher = Blake3::new();
     hasher.update(previous_hash.as_bytes());
     hasher.update(event_id_bytes);
     hasher.update(payload.as_slice());

@@ -10,12 +10,12 @@ use rusqlite::{params, Connection, OpenFlags};
 use pos_core::{
     clock::{Seq, WallTime},
     event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
+    hasher::Hasher,
     ids::{EntityId, EventId, TimelineId},
     store::{EventStore, SeqRange},
     timeline::{Timeline, TimelineMeta, TimelineMode},
     CoreError,
 };
-use pos_crypto::chain::{genesis_hash, hash_event, hash_payload};
 
 #[cfg(test)]
 thread_local! {
@@ -35,6 +35,7 @@ thread_local! {
 
 pub struct SqliteStore {
     conn: Connection,
+    hasher: Box<dyn Hasher>,
 }
 
 impl SqliteStore {
@@ -43,6 +44,14 @@ impl SqliteStore {
     /// # Errors
     /// Returns `CoreError::Storage` if the database cannot be opened or schema initialisation fails.
     pub fn open(path: &str) -> Result<Self, CoreError> {
+        Self::open_with_hasher(path, Box::new(pos_crypto::chain::Blake3Hasher))
+    }
+
+    /// Open a `SQLite` WAL store with a custom hasher.
+    ///
+    /// # Errors
+    /// Returns `CoreError::Storage` if the database cannot be opened or schema initialisation fails.
+    pub fn open_with_hasher(path: &str, hasher: Box<dyn Hasher>) -> Result<Self, CoreError> {
         let conn = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -51,7 +60,7 @@ impl SqliteStore {
         )
         .map_err(storage_err)?;
 
-        let store = Self { conn };
+        let store = Self { conn, hasher };
         store.init_schema()?;
         Ok(store)
     }
@@ -69,6 +78,20 @@ impl SqliteStore {
         }
         // Delegate to `open` so connection/schema errors share the same hittable paths.
         Self::open(":memory:")
+    }
+
+    /// Open an in-memory `SQLite` store with a custom hasher.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] if the connection or schema initialisation fails.
+    pub fn open_in_memory_with_hasher(hasher: Box<dyn Hasher>) -> Result<Self, CoreError> {
+        #[cfg(test)]
+        if FAIL_OPEN_IN_MEMORY.with(std::cell::Cell::get) {
+            return Err(CoreError::Storage(
+                "injected open_in_memory failure".to_owned(),
+            ));
+        }
+        Self::open_with_hasher(":memory:", hasher)
     }
 
     fn query_prepared<'conn>(
@@ -388,7 +411,7 @@ impl EventStore for SqliteStore {
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
         let meta = TimelineMeta::root(name);
         let timeline = Timeline::new(meta);
-        let chain_head = genesis_hash();
+        let chain_head = self.hasher.genesis_hash();
         self.conn
             .execute(
                 "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
@@ -442,8 +465,10 @@ impl EventStore for SqliteStore {
             seq = seq.next();
             let event_id = EventId::new();
             let id_str = event_id.to_string();
-            let payload_hash = hash_payload(&draft.payload);
-            let chain_hash = hash_event(&prev_hash, id_str.as_bytes(), &draft.payload);
+            let payload_hash = self.hasher.hash_payload(&draft.payload);
+            let chain_hash = self
+                .hasher
+                .hash_event(&prev_hash, id_str.as_bytes(), &draft.payload);
             let wall_time = draft.wall_time.unwrap_or_else(WallTime::now);
 
             tx.execute(
@@ -639,7 +664,7 @@ impl EventStore for SqliteStore {
                 }
                 self.compute_chain_hash_at(parent, at_seq)?
             }
-            None => genesis_hash(),
+            None => self.hasher.genesis_hash(),
         };
         if self.get_timeline(id)?.is_some() {
             return Err(CoreError::Storage(format!("timeline already exists: {id}")));
@@ -712,10 +737,9 @@ impl EventStore for SqliteStore {
                         |_| Ok(()),
                     )
                     .optional()
-                    .map(|row| row.is_some())
-                    .unwrap_or(true) // treat lookup failure as taken to fail closed
+                    .map_or(true, |row| row.is_some()) // treat lookup failure as taken to fail closed
             },
-            &|event| hash_payload(&event.payload) == event.payload_hash,
+            &*self.hasher,
         )?;
 
         // Join an outer import transaction when present; otherwise own the txn.
@@ -827,7 +851,9 @@ impl SqliteStore {
         let mut new_head = head_seq;
         for event in ordered {
             let id_str = event.id.to_string();
-            prev_hash = hash_event(&prev_hash, id_str.as_bytes(), &event.payload);
+            prev_hash = self
+                .hasher
+                .hash_event(&prev_hash, id_str.as_bytes(), &event.payload);
             let sig_bytes = event.signature.as_ref().map(|s| s.as_bytes().as_slice());
             self.conn
                 .execute(
@@ -872,7 +898,7 @@ impl SqliteStore {
         at_seq: Seq,
     ) -> Result<pos_core::Hash, CoreError> {
         let chain = self.fork_chain(timeline)?;
-        let mut hash = genesis_hash();
+        let mut hash = self.hasher.genesis_hash();
 
         for (i, &(tid, _)) in chain.iter().enumerate() {
             // For non-target ancestors: limit = child's fork_seq (always has next element).
@@ -887,7 +913,9 @@ impl SqliteStore {
             let events = self.read_own_events(tid, Seq::ZERO, Some(limit))?;
             for event in events {
                 let id_str = event.id.to_string();
-                hash = hash_event(&hash, id_str.as_bytes(), &event.payload);
+                hash = self
+                    .hasher
+                    .hash_event(&hash, id_str.as_bytes(), &event.payload);
             }
             if tid == timeline {
                 break;
@@ -976,6 +1004,7 @@ mod tests {
         store::SeqRange,
         CoreError,
     };
+    use pos_crypto::chain::hash_payload;
 
     fn make_draft(entity: EntityId, payload: &[u8]) -> EventDraft {
         EventDraft::new(
@@ -2086,6 +2115,16 @@ mod tests {
     fn open_in_memory_respects_fault_injection() {
         FAIL_OPEN_IN_MEMORY.with(|f| f.set(true));
         let result = SqliteStore::open_in_memory();
+        FAIL_OPEN_IN_MEMORY.with(|f| f.set(false));
+        assert!(matches!(result, Err(CoreError::Storage(_))));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn open_in_memory_with_hasher_respects_fault_injection() {
+        FAIL_OPEN_IN_MEMORY.with(|f| f.set(true));
+        let result =
+            SqliteStore::open_in_memory_with_hasher(Box::new(pos_crypto::chain::Blake3Hasher));
         FAIL_OPEN_IN_MEMORY.with(|f| f.set(false));
         assert!(matches!(result, Err(CoreError::Storage(_))));
     }
@@ -3560,5 +3599,38 @@ mod tests {
             .unwrap();
         let err = store.append_committed(tl.id(), &[ev]).unwrap_err();
         assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn open_in_memory_with_hasher_uses_custom_hasher() {
+        let mut store =
+            SqliteStore::open_in_memory_with_hasher(Box::new(pos_crypto::chain::Blake3Hasher))
+                .unwrap();
+        let tl = store.create_timeline("hasher-test").unwrap();
+        let drafts = [make_draft(EntityId::new(), b"payload")];
+        let events = store.append(tl.id(), &drafts).unwrap();
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn read_upcast_on_sqlite_default_noop() {
+        let mut store = new_store();
+        let tl = store.create_timeline("upcast-test").unwrap();
+        let drafts = [make_draft(EntityId::new(), b"payload")];
+        store.append(tl.id(), &drafts).unwrap();
+        let upcasters = pos_core::UpcasterRegistry::new();
+        let schema_versions = pos_core::SchemaVersionMap::new();
+        let store_ref: &dyn pos_core::EventStore = &store;
+        let result = store_ref
+            .read_upcast(
+                tl.id(),
+                pos_core::store::SeqRange::all(),
+                &upcasters,
+                &schema_versions,
+            )
+            .unwrap();
+        assert!(!result.is_empty());
     }
 }

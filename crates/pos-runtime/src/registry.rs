@@ -7,7 +7,7 @@
 
 use indexmap::IndexMap;
 
-use pos_core::{ids::PluginId, Plugin, Reducer};
+use pos_core::{ids::PluginId, Plugin, Reducer, SchemaVersionMap, Upcaster, UpcasterRegistry};
 use pos_state::ProjectionRegistry;
 
 use crate::{
@@ -33,6 +33,8 @@ pub struct PluginRegistry {
     plugins: IndexMap<PluginId, PluginEntry>,
     pub schemas: SchemaRegistry,
     pub projections: ProjectionRegistry,
+    pub upcasters: UpcasterRegistry,
+    pub schema_versions: SchemaVersionMap,
 }
 
 impl PluginRegistry {
@@ -50,7 +52,19 @@ impl PluginRegistry {
             plugins: IndexMap::new(),
             schemas,
             projections: ProjectionRegistry::new(),
+            upcasters: UpcasterRegistry::new(),
+            schema_versions: SchemaVersionMap::new(),
         }
+    }
+
+    /// Register an upcaster for schema evolution of event payloads.
+    pub fn register_upcaster(&mut self, upcaster: Box<dyn Upcaster>) {
+        self.upcasters.register(upcaster);
+    }
+
+    /// Record the current schema version for an event type.
+    pub fn set_schema_version(&mut self, event_type: impl Into<String>, version: u32) {
+        self.schema_versions.set(event_type, version);
     }
 
     /// Register a plugin.
@@ -445,5 +459,36 @@ mod tests {
         );
         let err = reg.register(&p4, None, Some(Box::new(noop))).unwrap_err();
         assert!(matches!(err, RuntimeError::CapabilityMismatch { .. }));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn register_upcaster_and_set_schema_version() {
+        use pos_core::event::{CanonicalBytes, Kind, SchemaVersion};
+
+        struct TestUpcaster(Kind);
+        impl pos_core::Upcaster for TestUpcaster {
+            fn event_type(&self) -> &Kind {
+                &self.0
+            }
+            fn source_version(&self) -> SchemaVersion {
+                SchemaVersion::V1
+            }
+            fn target_version(&self) -> SchemaVersion {
+                SchemaVersion::new(2)
+            }
+            fn upcast(&self, payload: CanonicalBytes) -> CanonicalBytes {
+                payload
+            }
+        }
+
+        let mut reg = PluginRegistry::new();
+        assert!(reg.schema_versions.versions.is_empty());
+
+        let kind = Kind::new("test.upcast");
+        reg.register_upcaster(Box::new(TestUpcaster(kind)));
+
+        reg.set_schema_version("test.upcast", 2);
+        assert!(!reg.schema_versions.versions.is_empty());
     }
 }

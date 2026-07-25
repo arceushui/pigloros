@@ -11,11 +11,11 @@ use pos_core::{
     crypto::Hash,
     error::CoreError,
     event::{Event, EventDraft},
+    hasher::Hasher,
     ids::{EventId, TimelineId},
     store::{EventStore, SeqRange},
     timeline::{Timeline, TimelineMeta},
 };
-use pos_crypto::chain::{genesis_hash, hash_event};
 
 /// In-memory event store. Thread-unsafe — intended for single-threaded tests and benchmarks.
 pub struct MemoryStore {
@@ -27,6 +27,7 @@ pub struct MemoryStore {
     chain_heads: HashMap<TimelineId, Hash>,
     /// Global `EventId` index for O(1) uniqueness checks.
     event_ids: HashSet<EventId>,
+    hasher: Box<dyn Hasher>,
 }
 
 impl MemoryStore {
@@ -37,6 +38,18 @@ impl MemoryStore {
             timelines: HashMap::new(),
             chain_heads: HashMap::new(),
             event_ids: HashSet::new(),
+            hasher: Box::new(pos_crypto::chain::Blake3Hasher),
+        }
+    }
+
+    #[must_use]
+    pub fn with_hasher(hasher: Box<dyn Hasher>) -> Self {
+        Self {
+            events: HashMap::new(),
+            timelines: HashMap::new(),
+            chain_heads: HashMap::new(),
+            event_ids: HashSet::new(),
+            hasher,
         }
     }
 
@@ -111,7 +124,8 @@ impl EventStore for MemoryStore {
         let timeline = Timeline::new(meta);
         self.timelines.insert(timeline.id(), timeline.clone());
         self.events.insert(timeline.id(), Vec::new());
-        self.chain_heads.insert(timeline.id(), genesis_hash());
+        self.chain_heads
+            .insert(timeline.id(), self.hasher.genesis_hash());
         Ok(timeline)
     }
 
@@ -126,7 +140,10 @@ impl EventStore for MemoryStore {
             .ok_or(CoreError::TimelineNotFound(timeline))?;
 
         let mut seq = tl.head;
-        let mut prev_hash = *self.chain_heads.get(&timeline).unwrap_or(&genesis_hash());
+        let mut prev_hash = *self
+            .chain_heads
+            .get(&timeline)
+            .unwrap_or(&self.hasher.genesis_hash());
 
         let events_vec = self.events.entry(timeline).or_default();
         let mut committed = Vec::with_capacity(drafts.len());
@@ -135,8 +152,10 @@ impl EventStore for MemoryStore {
             seq = seq.next();
             let event_id = EventId::new();
             let id_bytes = event_id.to_string();
-            let payload_hash = pos_crypto::chain::hash_payload(&draft.payload);
-            let chain_hash = hash_event(&prev_hash, id_bytes.as_bytes(), &draft.payload);
+            let payload_hash = self.hasher.hash_payload(&draft.payload);
+            let chain_hash =
+                self.hasher
+                    .hash_event(&prev_hash, id_bytes.as_bytes(), &draft.payload);
 
             let event = Event {
                 id: event_id,
@@ -236,7 +255,7 @@ impl EventStore for MemoryStore {
             }
             self.compute_chain_hash_at(parent, at_seq)?
         } else {
-            genesis_hash()
+            self.hasher.genesis_hash()
         };
         if self.timelines.contains_key(&meta.id) {
             return Err(CoreError::Storage(format!(
@@ -269,14 +288,19 @@ impl EventStore for MemoryStore {
             head,
             events,
             &mut |id| self.event_ids.contains(id),
-            &|event| pos_crypto::chain::hash_payload(&event.payload) == event.payload_hash,
+            &*self.hasher,
         )?;
 
-        let mut prev_hash = *self.chain_heads.get(&timeline).unwrap_or(&genesis_hash());
+        let mut prev_hash = *self
+            .chain_heads
+            .get(&timeline)
+            .unwrap_or(&self.hasher.genesis_hash());
         let mut new_head = head;
         for event in &ordered {
             let id_str = event.id.to_string();
-            prev_hash = hash_event(&prev_hash, id_str.as_bytes(), &event.payload);
+            prev_hash = self
+                .hasher
+                .hash_event(&prev_hash, id_str.as_bytes(), &event.payload);
             new_head = event.seq;
             self.event_ids.insert(event.id);
         }
@@ -326,7 +350,7 @@ impl MemoryStore {
     /// Compute the hash chain value at a specific seq in a timeline.
     fn compute_chain_hash_at(&self, timeline: TimelineId, at_seq: Seq) -> Result<Hash, CoreError> {
         let chain = self.fork_chain(timeline)?;
-        let mut hash = genesis_hash();
+        let mut hash = self.hasher.genesis_hash();
 
         for (i, tid) in chain.iter().enumerate() {
             let events = self.events.get(tid).map_or(&[] as &[Event], Vec::as_slice);
@@ -345,7 +369,9 @@ impl MemoryStore {
 
             for event in events.iter().filter(|e| e.seq <= limit) {
                 let id_str = event.id.to_string();
-                hash = hash_event(&hash, id_str.as_bytes(), &event.payload);
+                hash = self
+                    .hasher
+                    .hash_event(&hash, id_str.as_bytes(), &event.payload);
             }
 
             if *tid == timeline {
@@ -1293,5 +1319,40 @@ mod tests {
         };
         let err = import_timeline_with_id(&mut store, export).unwrap_err();
         assert!(matches!(err, CoreError::Storage(ref m) if m.contains("chain lookup")));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn with_hasher_uses_custom_hasher() {
+        let mut store = MemoryStore::with_hasher(Box::new(pos_crypto::chain::Blake3Hasher));
+        let tl = store.create_timeline("hasher-test").unwrap();
+        let entity = EntityId::new();
+        let drafts = [make_draft(entity, b"payload")];
+        let events = store.append(tl.id(), &drafts).unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(!events[0].payload_hash.as_bytes().iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn read_upcast_on_memory_store_default_noop() {
+        let mut store = MemoryStore::new();
+        let tl = store.create_timeline("upcast-test").unwrap();
+        let entity = EntityId::new();
+        store
+            .append(tl.id(), &[make_draft(entity, b"payload")])
+            .unwrap();
+        let upcasters = pos_core::UpcasterRegistry::new();
+        let schema_versions = pos_core::SchemaVersionMap::new();
+        let store_ref: &dyn pos_core::EventStore = &store;
+        let result = store_ref
+            .read_upcast(
+                tl.id(),
+                pos_core::store::SeqRange::all(),
+                &upcasters,
+                &schema_versions,
+            )
+            .unwrap();
+        assert!(!result.is_empty());
     }
 }

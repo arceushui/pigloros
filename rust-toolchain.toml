@@ -1,5 +1,5 @@
 # Pinned for local + CI parity. Bump intentionally when upgrading the quality bar.
 [toolchain]
-channel = "1.94.1"
+channel = "1.97.1"
 components = ["clippy", "rustfmt", "llvm-tools-preview"]
 profile = "minimal"
