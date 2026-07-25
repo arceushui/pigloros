@@ -2,6 +2,8 @@
 
 Before starting any task, read `CONTEXT.md` for domain vocabulary and `README.md` for the project overview. ADRs live on Redmine wiki (`redmine.piglor.com/projects/pigloros/wiki`).
 
+Before writing code, read the `lessons-learned` skill — it documents every mistake made in prior sessions so you don't repeat them.
+
 ### Worktree isolation
 
 Every task MUST run in its own `git worktree` — never work directly on `main`. Name the worktree after the task or ticket (e.g. `#83-hasher-port`). Commit from the worktree, then remove it when done.
