@@ -1521,11 +1521,12 @@ mod fault_injection_tests {
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         ids::{EntityId, PluginId},
-        Capability, Plugin,
+        Capability, CoreError, Plugin,
     };
     use pos_runtime::{Driver, RuntimeError, StepOutput};
     use pos_store::{open_store, StoreConfig};
     use rusqlite::Connection;
+    use std::cell::Cell;
 
     fn drop_table(path: &str, table: &str) {
         let conn = Connection::open(path).expect("open sqlite for corruption");
@@ -2145,90 +2146,7 @@ mod fault_injection_tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    #[allow(clippy::too_many_lines)]
     fn backtest_runner_compute_report_error_propagates() {
-        use pos_core::{
-            clock::Seq,
-            event::Event,
-            ids::TimelineId,
-            store::{EventStore, SeqRange},
-            timeline::Timeline,
-            CoreError,
-        };
-        use std::cell::Cell;
-
-        // `run_experiment_on_store` reads once per phase for chain_head; allow those
-        // two reads, then fail the `compute_report` read.
-        struct FailReadAfterStore {
-            base: pos_store::memory::MemoryStore,
-            ok_reads_left: Cell<u32>,
-        }
-
-        impl EventStore for FailReadAfterStore {
-            fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
-                self.base.create_timeline(name)
-            }
-
-            fn append(
-                &mut self,
-                timeline: TimelineId,
-                drafts: &[pos_core::event::EventDraft],
-            ) -> Result<Vec<Event>, CoreError> {
-                self.base.append(timeline, drafts)
-            }
-
-            fn fork(
-                &mut self,
-                parent: TimelineId,
-                at_seq: Seq,
-                name: &str,
-            ) -> Result<Timeline, CoreError> {
-                self.base.fork(parent, at_seq, name)
-            }
-
-            fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
-                self.base.list_timelines()
-            }
-
-            fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
-                self.base.get_timeline(id)
-            }
-
-            fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
-                let left = self.ok_reads_left.get();
-                if left == 0 {
-                    return Err(CoreError::Storage(
-                        "read failed for compute_report".to_owned(),
-                    ));
-                }
-                self.ok_reads_left.set(left - 1);
-                self.base.read(timeline, range)
-            }
-
-            fn create_timeline_with_meta(
-                &mut self,
-                meta: pos_core::timeline::TimelineMeta,
-            ) -> Result<Timeline, CoreError> {
-                self.base.create_timeline_with_meta(meta)
-            }
-
-            fn append_committed(
-                &mut self,
-                timeline: TimelineId,
-                events: &[Event],
-            ) -> Result<(), CoreError> {
-                self.base.append_committed(timeline, events)
-            }
-
-            fn import_committed(
-                &mut self,
-                meta: pos_core::timeline::TimelineMeta,
-                events: &[pos_core::Event],
-            ) -> Result<pos_core::Timeline, pos_core::CoreError> {
-                pos_core::store::import_committed_with_rollback(self, meta, events)
-            }
-        }
-
         let mut store = FailReadAfterStore {
             base: pos_store::memory::MemoryStore::new(),
             ok_reads_left: Cell::new(2),
@@ -2245,5 +2163,87 @@ mod fault_injection_tests {
             result,
             Err(ExperimentError::Store(CoreError::Storage(_)))
         ));
+    }
+
+    // `run_experiment_on_store` reads once per phase for chain_head; allow those
+    // two reads, then fail the `compute_report` read.
+    struct FailReadAfterStore {
+        base: pos_store::memory::MemoryStore,
+        ok_reads_left: Cell<u32>,
+    }
+
+    impl pos_core::store::EventStore for FailReadAfterStore {
+        fn create_timeline(
+            &mut self,
+            name: &str,
+        ) -> Result<pos_core::timeline::Timeline, CoreError> {
+            self.base.create_timeline(name)
+        }
+
+        fn append(
+            &mut self,
+            timeline: pos_core::ids::TimelineId,
+            drafts: &[pos_core::event::EventDraft],
+        ) -> Result<Vec<pos_core::event::Event>, CoreError> {
+            self.base.append(timeline, drafts)
+        }
+
+        fn fork(
+            &mut self,
+            parent: pos_core::ids::TimelineId,
+            at_seq: pos_core::clock::Seq,
+            name: &str,
+        ) -> Result<pos_core::timeline::Timeline, CoreError> {
+            self.base.fork(parent, at_seq, name)
+        }
+
+        fn list_timelines(&self) -> Result<Vec<pos_core::timeline::Timeline>, CoreError> {
+            self.base.list_timelines()
+        }
+
+        fn get_timeline(
+            &self,
+            id: pos_core::ids::TimelineId,
+        ) -> Result<Option<pos_core::timeline::Timeline>, CoreError> {
+            self.base.get_timeline(id)
+        }
+
+        fn read(
+            &self,
+            timeline: pos_core::ids::TimelineId,
+            range: pos_core::store::SeqRange,
+        ) -> Result<Vec<pos_core::event::Event>, CoreError> {
+            let left = self.ok_reads_left.get();
+            if left == 0 {
+                return Err(CoreError::Storage(
+                    "read failed for compute_report".to_owned(),
+                ));
+            }
+            self.ok_reads_left.set(left - 1);
+            self.base.read(timeline, range)
+        }
+
+        fn create_timeline_with_meta(
+            &mut self,
+            meta: pos_core::timeline::TimelineMeta,
+        ) -> Result<pos_core::timeline::Timeline, CoreError> {
+            self.base.create_timeline_with_meta(meta)
+        }
+
+        fn append_committed(
+            &mut self,
+            timeline: pos_core::ids::TimelineId,
+            events: &[pos_core::event::Event],
+        ) -> Result<(), CoreError> {
+            self.base.append_committed(timeline, events)
+        }
+
+        fn import_committed(
+            &mut self,
+            meta: pos_core::timeline::TimelineMeta,
+            events: &[pos_core::Event],
+        ) -> Result<pos_core::Timeline, CoreError> {
+            pos_core::store::import_committed_with_rollback(self, meta, events)
+        }
     }
 }
