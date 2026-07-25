@@ -1,0 +1,174 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["superpowers@git+https://github.com/obra/superpowers.git"],
+  "command": {
+    "ask-matt": {
+      "template": "Load the `ask-matt` skill. $ARGUMENTS",
+      "description": "Ask which skill or flow fits your situation. A router over the skills in this repo."
+    },
+    "batch-grill-me": {
+      "template": "Load the `batch-grill-me` skill. $ARGUMENTS",
+      "description": "A relentless interview that asks every frontier question at once, round by round."
+    },
+    "claude-handoff": {
+      "template": "Load the `claude-handoff` skill. $ARGUMENTS",
+      "description": "Hand the current conversation off to a fresh background agent that picks up the work immediately."
+    },
+    "code-review": {
+      "template": "Load the `code-review` skill. $ARGUMENTS",
+      "description": "Review the changes since a fixed point along two axes — Standards and Spec."
+    },
+    "codebase-design": {
+      "template": "Load the `codebase-design` skill. $ARGUMENTS",
+      "description": "Shared vocabulary for designing deep modules."
+    },
+    "design-an-interface": {
+      "template": "Load the `design-an-interface` skill. $ARGUMENTS",
+      "description": "Generate multiple radically different interface designs for a module."
+    },
+    "diagnosing-bugs": {
+      "template": "Load the `diagnosing-bugs` skill. $ARGUMENTS",
+      "description": "Diagnosis loop for hard bugs and performance regressions."
+    },
+    "domain-modeling": {
+      "template": "Load the `domain-modeling` skill. $ARGUMENTS",
+      "description": "Build and sharpen a project's domain model."
+    },
+    "edit-article": {
+      "template": "Load the `edit-article` skill. $ARGUMENTS",
+      "description": "Edit and improve articles by restructuring sections, improving clarity, and tightening prose."
+    },
+    "git-guardrails-claude-code": {
+      "template": "Load the `git-guardrails-claude-code` skill. $ARGUMENTS",
+      "description": "Set up Claude Code hooks to block dangerous git commands."
+    },
+    "grill-me": {
+      "template": "Load the `grill-me` skill and run a grilling session. $ARGUMENTS",
+      "description": "A relentless interview to sharpen a plan or design."
+    },
+    "grill-with-docs": {
+      "template": "Load the `grill-with-docs` skill. $ARGUMENTS",
+      "description": "A relentless interview that also creates docs (ADRs and glossary) as we go."
+    },
+    "grilling": {
+      "template": "Load the `grilling` skill. $ARGUMENTS",
+      "description": "Grill the user relentlessly about a plan, decision, or idea."
+    },
+    "handoff": {
+      "template": "Load the `handoff` skill. $ARGUMENTS",
+      "description": "Compact the current conversation into a handoff document for another agent."
+    },
+    "implement": {
+      "template": "Load the `implement` skill. $ARGUMENTS",
+      "description": "Implement a piece of work based on a spec or set of tickets."
+    },
+    "improve-codebase-architecture": {
+      "template": "Load the `improve-codebase-architecture` skill. $ARGUMENTS",
+      "description": "Scan a codebase for deepening opportunities and present a visual HTML report."
+    },
+    "loop-me": {
+      "template": "Load the `loop-me` skill. $ARGUMENTS",
+      "description": "Grill me about specs for the workflows I want to build."
+    },
+    "migrate-to-shoehorn": {
+      "template": "Load the `migrate-to-shoehorn` skill. $ARGUMENTS",
+      "description": "Migrate test files from `as` type assertions to @total-typescript/shoehorn."
+    },
+    "obsidian-vault": {
+      "template": "Load the `obsidian-vault` skill. $ARGUMENTS",
+      "description": "Search, create, and manage notes in the Obsidian vault."
+    },
+    "prototype": {
+      "template": "Load the `prototype` skill. $ARGUMENTS",
+      "description": "Build a throwaway prototype to answer a design question."
+    },
+    "qa": {
+      "template": "Load the `qa` skill. $ARGUMENTS",
+      "description": "Interactive QA session where user reports bugs or issues conversationally."
+    },
+    "request-refactor-plan": {
+      "template": "Load the `request-refactor-plan` skill. $ARGUMENTS",
+      "description": "Create a detailed refactor plan with tiny commits via user interview."
+    },
+    "research": {
+      "template": "Load the `research` skill. $ARGUMENTS",
+      "description": "Investigate a question against high-trust primary sources."
+    },
+    "resolving-merge-conflicts": {
+      "template": "Load the `resolving-merge-conflicts` skill. $ARGUMENTS",
+      "description": "Resolve an in-progress git merge/rebase conflict."
+    },
+    "scaffold-exercises": {
+      "template": "Load the `scaffold-exercises` skill. $ARGUMENTS",
+      "description": "Create exercise directory structures with sections, problems, and solutions."
+    },
+    "setup-matt-pocock-skills": {
+      "template": "Load the `setup-matt-pocock-skills` skill. $ARGUMENTS",
+      "description": "Configure this repo for the engineering skills."
+    },
+    "setup-pre-commit": {
+      "template": "Load the `setup-pre-commit` skill. $ARGUMENTS",
+      "description": "Set up Husky pre-commit hooks with lint-staged."
+    },
+    "setup-ts-deep-modules": {
+      "template": "Load the `setup-ts-deep-modules` skill. $ARGUMENTS",
+      "description": "Wire dependency-cruiser into a TypeScript repo for deep modules."
+    },
+    "tdd": {
+      "template": "Load the `tdd` skill. $ARGUMENTS",
+      "description": "Test-driven development — red-green-refactor or integration tests."
+    },
+    "task-observer": {
+      "template": "Load the `task-observer` skill and follow its instructions to monitor this session for skill improvement opportunities. $ARGUMENTS",
+      "description": "Monitors task execution for skill improvement opportunities — the meta-skill that improves all your skills."
+    },
+    "teach": {
+      "template": "Load the `teach` skill. $ARGUMENTS",
+      "description": "Teach the user a new skill or concept."
+    },
+    "to-questionnaire": {
+      "template": "Load the `to-questionnaire` skill. $ARGUMENTS",
+      "description": "Turn a decision into a questionnaire for someone else."
+    },
+    "to-spec": {
+      "template": "Load the `to-spec` skill. $ARGUMENTS",
+      "description": "Turn the current conversation into a spec and publish it."
+    },
+    "to-tickets": {
+      "template": "Load the `to-tickets` skill. $ARGUMENTS",
+      "description": "Break a plan or spec into tracer-bullet tickets with blocking edges."
+    },
+    "triage": {
+      "template": "Load the `triage` skill. $ARGUMENTS",
+      "description": "Move issues and PRs through a state machine of triage roles."
+    },
+    "ubiquitous-language": {
+      "template": "Load the `ubiquitous-language` skill. $ARGUMENTS",
+      "description": "Extract a DDD-style ubiquitous language glossary from the conversation."
+    },
+    "wayfinder": {
+      "template": "Load the `wayfinder` skill. $ARGUMENTS",
+      "description": "Plan a huge chunk of work as a shared map of decision tickets."
+    },
+    "wizard": {
+      "template": "Load the `wizard` skill. $ARGUMENTS",
+      "description": "Generate an interactive bash wizard for a manual procedure."
+    },
+    "writing-beats": {
+      "template": "Load the `writing-beats` skill. $ARGUMENTS",
+      "description": "Assemble raw material into a journey of beats."
+    },
+    "writing-fragments": {
+      "template": "Load the `writing-fragments` skill. $ARGUMENTS",
+      "description": "Mine raw fragments, no structure yet."
+    },
+    "writing-great-skills": {
+      "template": "Load the `writing-great-skills` skill. $ARGUMENTS",
+      "description": "Reference for writing and editing skills well."
+    },
+    "writing-shape": {
+      "template": "Load the `writing-shape` skill. $ARGUMENTS",
+      "description": "Shape raw material into an article, paragraph by paragraph."
+    }
+  }
+}
