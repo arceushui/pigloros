@@ -58,7 +58,7 @@ impl SqliteStore {
                 | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_URI,
         )
-        .map_err(storage_err)?;
+        .map_err(|e| CoreError::Storage(e.to_string()))?;
 
         let store = Self { conn, hasher };
         store.init_schema()?;
@@ -111,7 +111,7 @@ impl SqliteStore {
                 stmt.query([])
             }
         };
-        raw.map_err(storage_err)
+        raw.map_err(|e| CoreError::Storage(e.to_string()))
     }
 
     fn init_schema(&self) -> Result<(), CoreError> {
@@ -148,7 +148,7 @@ impl SqliteStore {
              );
              CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id);",
             )
-            .map_err(storage_err)?;
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
         self.run_migrations()
     }
 
@@ -161,7 +161,7 @@ impl SqliteStore {
                 [],
                 |row| row.get(0),
             )
-            .map_err(storage_err)?;
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
 
         // Always ensure v2 columns/indexes exist before stamping the version.
         // Covers: fresh DBs (CREATE TABLE already has them — ALTER is no-op-ish),
@@ -172,11 +172,11 @@ impl SqliteStore {
             if version == 0 {
                 self.conn
                     .execute("INSERT INTO schema_version (version) VALUES (2)", [])
-                    .map_err(storage_err)?;
+                    .map_err(|e| CoreError::Storage(e.to_string()))?;
             } else {
                 self.conn
                     .execute("UPDATE schema_version SET version = 2", [])
-                    .map_err(storage_err)?;
+                    .map_err(|e| CoreError::Storage(e.to_string()))?;
             }
         }
 
@@ -193,7 +193,7 @@ impl SqliteStore {
         if !has_signature {
             self.conn
                 .execute("ALTER TABLE events ADD COLUMN signature BLOB", [])
-                .map_err(storage_err)?;
+                .map_err(|e| CoreError::Storage(e.to_string()))?;
         }
         self.conn
             .execute(
@@ -221,7 +221,7 @@ impl SqliteStore {
                 params![timeline_id.to_string()],
                 |row| row.get(0),
             )
-            .map_err(storage_err)?;
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
         Ok(Seq::from_u64(u64::try_from(n).unwrap_or(0)))
     }
 
@@ -256,7 +256,10 @@ impl SqliteStore {
             },
         );
 
-        let mut stmt = self.conn.prepare(&sql).map_err(storage_err)?;
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
         let mut rows = Self::query_prepared(&mut stmt)?;
         let mut events = Vec::new();
         loop {
@@ -274,22 +277,25 @@ impl SqliteStore {
                     rows.next()
                 }
             };
-            let row = match next.map_err(storage_err) {
+            let row = match next.map_err(|e| CoreError::Storage(e.to_string())) {
                 Ok(Some(row)) => row,
                 Ok(None) => break,
                 Err(e) => return Err(e),
             };
-            let seq: i64 = row.get(0).map_err(storage_err)?;
-            let event_id: String = row.get(1).map_err(storage_err)?;
-            let entity_id: String = row.get(2).map_err(storage_err)?;
-            let event_type: String = row.get(3).map_err(storage_err)?;
-            let payload: Vec<u8> = row.get(4).map_err(storage_err)?;
-            let wall_time: i64 = row.get(5).map_err(storage_err)?;
-            let causation_id: Option<String> = row.get(6).map_err(storage_err)?;
-            let correlation_id: Option<String> = row.get(7).map_err(storage_err)?;
-            let schema_version: i64 = row.get(8).map_err(storage_err)?;
-            let ph_bytes: Vec<u8> = row.get(9).map_err(storage_err)?;
-            let sig_bytes: Option<Vec<u8>> = row.get(10).map_err(storage_err)?;
+            let seq: i64 = row.get(0).map_err(|e| CoreError::Storage(e.to_string()))?;
+            let event_id: String = row.get(1).map_err(|e| CoreError::Storage(e.to_string()))?;
+            let entity_id: String = row.get(2).map_err(|e| CoreError::Storage(e.to_string()))?;
+            let event_type: String = row.get(3).map_err(|e| CoreError::Storage(e.to_string()))?;
+            let payload: Vec<u8> = row.get(4).map_err(|e| CoreError::Storage(e.to_string()))?;
+            let wall_time: i64 = row.get(5).map_err(|e| CoreError::Storage(e.to_string()))?;
+            let causation_id: Option<String> =
+                row.get(6).map_err(|e| CoreError::Storage(e.to_string()))?;
+            let correlation_id: Option<String> =
+                row.get(7).map_err(|e| CoreError::Storage(e.to_string()))?;
+            let schema_version: i64 = row.get(8).map_err(|e| CoreError::Storage(e.to_string()))?;
+            let ph_bytes: Vec<u8> = row.get(9).map_err(|e| CoreError::Storage(e.to_string()))?;
+            let sig_bytes: Option<Vec<u8>> =
+                row.get(10).map_err(|e| CoreError::Storage(e.to_string()))?;
             let ph_arr: [u8; 32] = ph_bytes
                 .try_into()
                 .map_err(|_| CoreError::Serialization("bad hash".to_owned()))?;
@@ -339,7 +345,7 @@ impl SqliteStore {
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()
-                .map_err(storage_err)?;
+                .map_err(|e| CoreError::Storage(e.to_string()))?;
 
             match row {
                 None => return Err(CoreError::TimelineNotFound(current)),
@@ -423,7 +429,7 @@ impl EventStore for SqliteStore {
                     chain_head.as_bytes().as_slice(),
                 ],
             )
-            .map_err(storage_err)?;
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
         Ok(timeline)
     }
 
@@ -455,11 +461,14 @@ impl EventStore for SqliteStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => {
                 return Err(CoreError::TimelineNotFound(timeline));
             }
-            Err(e) => return Err(storage_err(e)),
+            Err(e) => return Err(CoreError::Storage(e.to_string())),
         };
         let mut committed = Vec::with_capacity(drafts.len());
 
-        let tx = self.conn.transaction().map_err(storage_err)?;
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
 
         for draft in drafts {
             seq = seq.next();
@@ -491,7 +500,7 @@ impl EventStore for SqliteStore {
                     Option::<&[u8]>::None,
                 ],
             )
-            .map_err(storage_err)?;
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
 
             committed.push(Event {
                 id: event_id,
@@ -519,9 +528,9 @@ impl EventStore for SqliteStore {
                 timeline.to_string(),
             ],
         )
-        .map_err(storage_err)?;
+        .map_err(|e| CoreError::Storage(e.to_string()))?;
 
-        tx.commit().map_err(storage_err)?;
+        tx.commit().map_err(|e| CoreError::Storage(e.to_string()))?;
 
         Ok(committed)
     }
@@ -585,7 +594,7 @@ impl EventStore for SqliteStore {
                     fork_hash.as_bytes().as_slice(),
                 ],
             )
-            .map_err(storage_err)?;
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
 
         Ok(child)
     }
@@ -594,7 +603,7 @@ impl EventStore for SqliteStore {
         let mut stmt = self
             .conn
             .prepare("SELECT id, name, mode, parent_id, fork_seq, head_seq FROM timelines")
-            .map_err(storage_err)?;
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
 
         let mut rows = Self::query_prepared(&mut stmt)?;
         let mut timelines = Vec::new();
@@ -613,13 +622,13 @@ impl EventStore for SqliteStore {
                     rows.next()
                 }
             };
-            let row = match next.map_err(storage_err) {
+            let row = match next.map_err(|e| CoreError::Storage(e.to_string())) {
                 Ok(Some(row)) => row,
                 Ok(None) => break,
                 Err(e) => return Err(e),
             };
             let (id_str, name, mode_s, parent_id, fork_seq, head_seq) =
-                read_timeline_row(row).map_err(storage_err)?;
+                read_timeline_row(row).map_err(|e| CoreError::Storage(e.to_string()))?;
             timelines.push(timeline_fields_to_timeline(
                 &id_str, name, &mode_s, parent_id, fork_seq, head_seq,
             )?);
@@ -637,7 +646,7 @@ impl EventStore for SqliteStore {
                 read_timeline_row,
             )
             .optional()
-            .map_err(storage_err)?;
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
 
         match row {
             None => Ok(None),
@@ -687,7 +696,7 @@ impl EventStore for SqliteStore {
                     chain_head.as_bytes().as_slice(),
                 ],
             )
-            .map_err(storage_err)?;
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
         Ok(timeline)
     }
 
@@ -723,7 +732,7 @@ impl EventStore for SqliteStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => {
                 return Err(CoreError::TimelineNotFound(timeline));
             }
-            Err(e) => return Err(storage_err(e)),
+            Err(e) => return Err(CoreError::Storage(e.to_string())),
         };
 
         let ordered = pos_core::store::validate_committed_batch(
@@ -747,12 +756,15 @@ impl EventStore for SqliteStore {
         if own_tx {
             self.conn
                 .execute_batch(begin_immediate_sql())
-                .map_err(storage_err)?;
+                .map_err(|e| CoreError::Storage(e.to_string()))?;
         }
         let applied = self.write_committed_rows(timeline, head_seq, prev_hash, &ordered);
         if own_tx {
             match &applied {
-                Ok(()) => self.conn.execute_batch("COMMIT").map_err(storage_err)?,
+                Ok(()) => self
+                    .conn
+                    .execute_batch("COMMIT")
+                    .map_err(|e| CoreError::Storage(e.to_string()))?,
                 Err(_) => {
                     let _ = self.conn.execute_batch("ROLLBACK");
                 }
@@ -771,23 +783,26 @@ impl EventStore for SqliteStore {
                 params![id_str],
                 |row| row.get(0),
             )
-            .map_err(storage_err)?;
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
         if child_count > 0 {
             return Err(CoreError::Storage(
                 "cannot delete timeline that still has forks".to_owned(),
             ));
         }
 
-        let tx = self.conn.transaction().map_err(storage_err)?;
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
         tx.execute("DELETE FROM events WHERE timeline_id = ?1", params![id_str])
-            .map_err(storage_err)?;
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
         let deleted = tx
             .execute("DELETE FROM timelines WHERE id = ?1", params![id_str])
-            .map_err(storage_err)?;
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
         if deleted == 0 {
             return Err(CoreError::TimelineNotFound(id));
         }
-        tx.commit().map_err(storage_err)?;
+        tx.commit().map_err(|e| CoreError::Storage(e.to_string()))?;
         Ok(())
     }
 
@@ -807,7 +822,7 @@ impl EventStore for SqliteStore {
         // Single transaction so create+append is all-or-nothing for concurrent readers.
         self.conn
             .execute_batch(begin_immediate_sql())
-            .map_err(storage_err)?;
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
         let expected_id = meta.id;
         let result = (|| {
             self.create_timeline_with_meta(meta)?;
@@ -829,7 +844,9 @@ impl EventStore for SqliteStore {
         })();
         match result {
             Ok(tl) => {
-                self.conn.execute_batch("COMMIT").map_err(storage_err)?;
+                self.conn
+                    .execute_batch("COMMIT")
+                    .map_err(|e| CoreError::Storage(e.to_string()))?;
                 Ok(tl)
             }
             Err(err) => {
@@ -876,7 +893,7 @@ impl SqliteStore {
                         sig_bytes,
                     ],
                 )
-                .map_err(storage_err)?;
+                .map_err(|e| CoreError::Storage(e.to_string()))?;
             new_head = event.seq;
         }
         self.conn
@@ -888,7 +905,7 @@ impl SqliteStore {
                     timeline.to_string(),
                 ],
             )
-            .map_err(storage_err)?;
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
         Ok(())
     }
 
@@ -923,12 +940,6 @@ impl SqliteStore {
         }
         Ok(hash)
     }
-}
-
-// Owned `Error` so this can be used as a `map_err` function item.
-#[allow(clippy::needless_pass_by_value)]
-fn storage_err(e: rusqlite::Error) -> CoreError {
-    CoreError::Storage(e.to_string())
 }
 
 fn begin_immediate_sql() -> &'static str {
