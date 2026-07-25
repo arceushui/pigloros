@@ -20,6 +20,7 @@ use crate::{
 /// A registered plugin entry.
 struct PluginEntry {
     name: String,
+    version: String,
     driver: Option<Box<dyn Driver>>,
 }
 
@@ -124,7 +125,14 @@ impl PluginRegistry {
             self.projections.register(&name, r);
         }
 
-        self.plugins.insert(id, PluginEntry { name, driver });
+        self.plugins.insert(
+            id,
+            PluginEntry {
+                name,
+                version: plugin.version().to_owned(),
+                driver,
+            },
+        );
         Ok(())
     }
 
@@ -149,6 +157,14 @@ impl PluginRegistry {
     /// Iterate over plugin names in registration order.
     pub fn plugin_names(&self) -> impl Iterator<Item = &str> {
         self.plugins.values().map(|e| e.name.as_str())
+    }
+
+    /// Return registered plugin versions as a map of name → version.
+    pub fn plugin_versions(&self) -> std::collections::HashMap<String, String> {
+        self.plugins
+            .values()
+            .map(|e| (e.name.clone(), e.version.clone()))
+            .collect()
     }
 
     /// Step all plugins that have a driver, collecting their event drafts.

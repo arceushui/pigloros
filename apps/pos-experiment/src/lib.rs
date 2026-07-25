@@ -219,8 +219,9 @@ impl Experiment {
         let mut manifest = ReproManifest::new(timeline_id, chain_head, WallTime::now());
 
         // Populate plugin_versions from registry
-        for plugin_name in self.registry.plugin_names() {
-            manifest = manifest.with_plugin_version(plugin_name, "0.1.0");
+        let versions = self.registry.plugin_versions();
+        for (name, version) in &versions {
+            manifest = manifest.with_plugin_version(name, version.clone());
         }
 
         // Populate adapter_records with store backend info

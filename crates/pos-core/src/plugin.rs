@@ -22,6 +22,10 @@ pub trait Plugin: Send + Sync {
     fn id(&self) -> PluginId;
     fn name(&self) -> &'static str;
     fn capability(&self) -> Capability;
+    /// Crate version string (e.g. "0.1.0"). Defaults to "0.1.0".
+    fn version(&self) -> &'static str {
+        "0.1.0"
+    }
 }
 
 #[cfg(test)]

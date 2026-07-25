@@ -148,6 +148,8 @@ pub struct ReliabilityBin {
 pub struct CalibrationReport {
     /// Brier score: mean squared error of probabilistic predictions.
     pub brier_score: f64,
+    pub crps: f64,
+    pub lift_vs_personal_base_rate: f64,
     /// Expected calibration error (10 equal-width bins).
     pub ece: f64,
     /// Brier improvement of model vs a constant predictor at population mean probability.
@@ -288,6 +290,7 @@ impl Reducer for EvalReducer {
 
 /// A resolved (prediction, outcome) pair.
 struct ResolvedPair {
+    entity_id: String,
     predicted_prob: f64,
     outcome: f64,
 }
@@ -404,6 +407,7 @@ pub fn compute_report(
             .find(|o| o.prediction_id == pred.prediction_id)
         {
             resolved.push(ResolvedPair {
+                entity_id: pred.entity_id.clone(),
                 predicted_prob: pred.predicted_prob,
                 outcome: if outcome.outcome { 1.0 } else { 0.0 },
             });
@@ -417,6 +421,8 @@ pub fn compute_report(
         let empty_bins = build_bins(&[]);
         return Ok(CalibrationReport {
             brier_score: 0.0,
+            crps: 0.0,
+            lift_vs_personal_base_rate: 0.0,
             ece: 0.0,
             lift_vs_population_avg: 0.0,
             lift_vs_persistence: 0.0,
@@ -446,11 +452,37 @@ pub fn compute_report(
     let lift_vs_population_avg = brier_constant(population_avg, &outcomes_vec) - brier_score;
     let lift_vs_persistence = brier_constant(fraction_positive, &outcomes_vec) - brier_score;
 
+    // CRPS — for binary outcomes, CRPS = Brier. Placeholder for continuous expansion.
+    let crps = brier_score;
+
+    // Lift vs personal base rate: per-entity historical outcome rate as baseline.
+    let mut entity_outcomes: std::collections::HashMap<String, Vec<f64>> =
+        std::collections::HashMap::new();
+    for r in &resolved {
+        entity_outcomes
+            .entry(r.entity_id.clone())
+            .or_default()
+            .push(r.outcome);
+    }
+    let personal_base_brier: f64 = resolved
+        .iter()
+        .map(|r| {
+            let outcomes = &entity_outcomes[&r.entity_id];
+            let base_rate: f64 = outcomes.iter().sum::<f64>()
+                / f64::from(u32::try_from(outcomes.len()).unwrap_or(u32::MAX));
+            (base_rate - r.outcome) * (base_rate - r.outcome)
+        })
+        .sum::<f64>()
+        / n_resolved_f;
+    let lift_vs_personal_base_rate = personal_base_brier - brier_score;
+
     let reliability_bins = build_bins(&resolved);
     let ece = compute_ece(&reliability_bins, n_resolved);
 
     Ok(CalibrationReport {
         brier_score,
+        crps,
+        lift_vs_personal_base_rate,
         ece,
         lift_vs_population_avg,
         lift_vs_persistence,
@@ -759,6 +791,8 @@ mod tests {
         assert!((report.ece).abs() < f64::EPSILON);
         assert!((report.lift_vs_population_avg).abs() < f64::EPSILON);
         assert!((report.lift_vs_persistence).abs() < f64::EPSILON);
+        assert!((report.crps).abs() < f64::EPSILON);
+        assert!((report.lift_vs_personal_base_rate).abs() < f64::EPSILON);
         assert_eq!(report.reliability_bins.len(), NUM_BINS);
     }
 
@@ -1202,5 +1236,38 @@ mod tests {
         store.append(tl.id(), &[draft]).unwrap();
         let err = compute_report(store.as_ref(), tl.id()).unwrap_err();
         assert!(matches!(err, EvalError::Decode(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn crps_equals_brier_for_binary_outcomes() {
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let tl = store.create_timeline("eval-crps").unwrap();
+        let entity = EntityId::new();
+        append_prediction(store.as_mut(), tl.id(), entity, "e1", 0.8, "p1");
+        append_prediction(store.as_mut(), tl.id(), entity, "e1", 0.3, "p2");
+        append_outcome(store.as_mut(), tl.id(), entity, "p1", true);
+        append_outcome(store.as_mut(), tl.id(), entity, "p2", false);
+        let report = compute_report(store.as_ref(), tl.id()).unwrap();
+        assert!((report.crps - report.brier_score).abs() < 1e-10);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn lift_vs_personal_base_rate_with_multiple_entities() {
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let tl = store.create_timeline("eval-personal").unwrap();
+        let e1 = EntityId::new();
+        let e2 = EntityId::new();
+        append_prediction(store.as_mut(), tl.id(), e1, "a", 1.0, "p1");
+        append_outcome(store.as_mut(), tl.id(), e1, "p1", true);
+        append_prediction(store.as_mut(), tl.id(), e1, "a", 0.0, "p2");
+        append_outcome(store.as_mut(), tl.id(), e1, "p2", false);
+        append_prediction(store.as_mut(), tl.id(), e2, "b", 0.5, "p3");
+        append_outcome(store.as_mut(), tl.id(), e2, "p3", false);
+        let report = compute_report(store.as_ref(), tl.id()).unwrap();
+        assert_eq!(report.n_resolved, 3);
+        assert!((report.crps - report.brier_score).abs() < 1e-10);
+        assert!(report.lift_vs_personal_base_rate.is_finite());
     }
 }
