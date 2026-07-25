@@ -4,7 +4,7 @@
 //! `piglor-gateway` — Wave 6 local-first HTTP/WebSocket gateway (ADR-014 / #69).
 //!
 //! JSON HTTP envelope; CBOR payloads into [`EventStore`]. No auth in this slice.
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 mod http;
 

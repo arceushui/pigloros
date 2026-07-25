@@ -7,7 +7,7 @@
 //! Owns event type `"agent.action"` and entity kind `"ai-agent"`.
 //! On each driver step it invokes the policy's `decide()` method and emits
 //! one `agent.action` event with a CBOR payload.
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use pos_core::{
     event::{CanonicalBytes, Event, Kind},

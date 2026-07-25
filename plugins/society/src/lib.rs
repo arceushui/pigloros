@@ -46,7 +46,7 @@
 //! assert!(state.get("mean.trust").is_some());
 //! assert!(state.get("signals").is_some());
 //! ```
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use pos_core::{
     event::{CanonicalBytes, Event, EventDraft, Kind},

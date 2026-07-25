@@ -7,7 +7,7 @@
 //! Owns event type `"obs.synthetic"` and entity kind `"synthetic-source"`.
 //! On each driver step it produces one observation event with a sinusoidal
 //! value derived purely from the tick counter — no external entropy.
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use pos_core::{
     event::{CanonicalBytes, Event, Kind},

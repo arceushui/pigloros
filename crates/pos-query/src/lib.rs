@@ -10,7 +10,7 @@
 //!
 //! - [`EventQuery`]: a fluent builder for filtering events from a timeline.
 //! - Traversal helpers in [`traversal`]: relationship tracing and causal-chain walking.
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 pub mod query;
 pub mod traversal;

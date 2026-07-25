@@ -7,7 +7,7 @@
 //! Owns event types `"eval.prediction"` and `"eval.outcome"`.
 //! Tracks predictions and outcomes in State, and provides
 //! [`compute_report`] to produce a [`CalibrationReport`] from a timeline.
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use pos_core::{
     event::{Event, Kind},

@@ -10,7 +10,7 @@
 //! Wave 5 uses a pure-Rust degree-grid snap ([`SpatialCloaker`]); H3/S2 are deferred.
 //! Privacy property: exact coordinates are snapped to a configurable grid resolution
 //! (e.g., 0.1 degree cells), preventing exact location tracking.
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use pos_core::{
     event::{CanonicalBytes, Event, Kind},

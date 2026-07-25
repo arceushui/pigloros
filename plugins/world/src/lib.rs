@@ -7,7 +7,7 @@
 //! Owns event types `"world.observation"`, `"world.action"` and entity kind `"world-body"`.
 //! For Wave 5 we build the interface and a simple 2D position model (no rapier dependency —
 //! rapier is deferred to Wave 6 when we need 3D physics).
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use pos_core::{
     event::{CanonicalBytes, Event, Kind},

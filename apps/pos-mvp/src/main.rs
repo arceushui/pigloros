@@ -11,7 +11,7 @@
 //! cargo run -p pos-mvp -- --scenario places
 //! cargo run -p pos-mvp -- --scenario work --prefer autonomy=1.0
 //! ```
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 mod ai_influence;
 mod fork_compare;

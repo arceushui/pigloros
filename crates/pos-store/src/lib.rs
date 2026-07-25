@@ -32,7 +32,7 @@
 //! | `sqlite` | ✅ on | `rusqlite` (WAL; encryption / `SQLCipher` deferred) |
 //!
 //! Disable `SQLite` entirely: `--no-default-features`
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 pub mod memory;
 pub mod stitch;

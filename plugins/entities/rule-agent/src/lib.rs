@@ -7,7 +7,7 @@
 //! Owns event type `"agent.decision"` and entity kind `"rule-agent"`.
 //! On each driver step it cycles through a fixed action list and emits
 //! one `agent.decision` event with a CBOR payload.
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use pos_core::{
     event::{CanonicalBytes, Event, Kind},

@@ -10,7 +10,7 @@
 //!   pos events log …
 //!   pos experiment run|verify|backtest …
 //!   pos version
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use pos_core::{clock::Seq, ids::TimelineId, store::SeqRange};
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition};

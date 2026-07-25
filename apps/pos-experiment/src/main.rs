@@ -1,4 +1,4 @@
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 fn main() {
     println!("pos-experiment: use as a library via pos_experiment crate");
 }

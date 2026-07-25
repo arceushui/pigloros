@@ -2,7 +2,7 @@
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 //! `piglor-gateway` binary — bind local HTTP/WS listener (ADR-014 / #69).
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use piglor_gateway::{router, AppState, Gateway};
 use pos_store::{open_store, StoreConfig};

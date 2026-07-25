@@ -23,7 +23,7 @@
 //! let draft = ingestor.ingest("owntracks", json_value, timestamp_micros);
 //! store.append(timeline_id, &[draft])?;
 //! ```
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use pos_core::{
     event::{CanonicalBytes, Event, EventDraft, Kind},

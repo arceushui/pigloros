@@ -10,7 +10,7 @@
 //! - [`RelationshipIndex`]: an adjacency index for directed [`Relationship`] values.
 //!
 //! No I/O, no async.
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use std::collections::HashMap;
 

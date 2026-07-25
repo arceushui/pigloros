@@ -7,7 +7,7 @@
 //! An [`Experiment`] composes plugins and runs them through a closed tick loop,
 //! driving drivers, validating event types, appending to the store, and folding
 //! projections on each tick until a [`StopCondition`] is met.
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use pos_core::{clock::WallTime, crypto::Hash, ReproManifest, Timeline};
 use pos_runtime::PluginRegistry;
