@@ -36,7 +36,10 @@ Mistakes made during pigloros development sessions. Read before coding.
 
 10. **ADR tracker workflow is broken.** No allowed transitions from "Proposed" status. ADR issues can't be closed via API or UI. To close an ADR via API: switch it to Feature tracker (tracker_id=2), then close (status_id=5).
 
-11. **Close completed issues after every commit.** Redmine statuses: 1=New, 2=In Progress, 5=Closed, 9=Accepted (ADR only). Feature/Bug/Task use 5, ADRs use 9.
+11. **Close completed issues after every commit.** Use the correct status:
+    - **Feature / Bug / Task** → `Resolved` (status_id=3), NOT Closed
+    - **ADR** → `Accepted` (status_id=9), flow: Proposed→Under Review→Accepted
+    - Only use Closed (status_id=5) for rejected or superseded issues
 
 ## Redmine ADR workflow setup (one-time admin fix)
 
