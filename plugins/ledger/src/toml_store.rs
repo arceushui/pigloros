@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::{
-    store::{LedgerStore, NewPrediction},
+    store::{LedgerStore, NewPrediction, ResolveStatus},
     Ledger, LedgerError, LedgerOutcome, LedgerPrediction,
 };
 
@@ -122,10 +122,13 @@ impl LedgerStore for TomlLedgerStore {
         Ok(prediction.prediction_id)
     }
 
-    fn find_resolve_status(&self, prediction_id: &str) -> Result<(bool, bool), LedgerError> {
+    fn find_resolve_status(&self, prediction_id: &str) -> Result<ResolveStatus, LedgerError> {
         let prediction_path = self.predictions_dir().join(format!("{prediction_id}.toml"));
         let resolution_path = self.resolutions_dir().join(format!("{prediction_id}.toml"));
-        Ok((prediction_path.exists(), resolution_path.exists()))
+        Ok(ResolveStatus {
+            found_prediction: prediction_path.exists(),
+            already_resolved: resolution_path.exists(),
+        })
     }
 
     fn persist_resolve(&mut self, outcome: LedgerOutcome) -> Result<(), LedgerError> {
@@ -141,7 +144,7 @@ impl LedgerStore for TomlLedgerStore {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::{contract, LedgerOutcome};
+    use crate::contract;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
@@ -227,11 +230,9 @@ mod tests {
             .register(contract::sample_new_prediction("2026-08-01"))
             .unwrap();
         store
-            .resolve(LedgerOutcome {
-                prediction_id: id.clone(),
-                outcome: true,
-                resolved_at: "2026-07-30T09:00:00Z".to_owned(),
-            })
+            .resolve(
+                LedgerOutcome::new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned()).unwrap(),
+            )
             .unwrap();
         let dir = tmp.path().join("resolutions");
         std::fs::rename(
@@ -299,11 +300,9 @@ mod tests {
             .unwrap();
         std::fs::write(tmp.path().join("resolutions"), "a file").unwrap();
         let err = store
-            .resolve(LedgerOutcome {
-                prediction_id: id.clone(),
-                outcome: true,
-                resolved_at: "2026-07-30T09:00:00Z".to_owned(),
-            })
+            .resolve(
+                LedgerOutcome::new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned()).unwrap(),
+            )
             .unwrap_err();
         assert!(matches!(err, LedgerError::Io(_)));
     }
@@ -322,11 +321,9 @@ mod tests {
         )
         .unwrap();
         let err = store
-            .resolve(LedgerOutcome {
-                prediction_id: id.clone(),
-                outcome: true,
-                resolved_at: "2026-07-30T09:00:00Z".to_owned(),
-            })
+            .resolve(
+                LedgerOutcome::new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned()).unwrap(),
+            )
             .unwrap_err();
         assert!(matches!(err, LedgerError::Io(_)));
         // Restore permissions so TempDir cleanup doesn't fail.
@@ -361,18 +358,13 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn resolve_rejects_invalid_outcome_format() {
-        let (mut store, _tmp) = make_store();
-        let id = store
-            .register(contract::sample_new_prediction("2026-08-01"))
-            .unwrap();
-        let err = store
-            .resolve(LedgerOutcome {
-                prediction_id: id.clone(),
-                outcome: true,
-                resolved_at: "not-a-datetime".to_owned(),
-            })
-            .unwrap_err();
+    fn ledger_outcome_new_rejects_invalid_resolved_at() {
+        let err = LedgerOutcome::new(
+            "01J3B0Y5ZK2J6MGK8D7QW3N0P4".to_owned(),
+            true,
+            "not-a-datetime".to_owned(),
+        )
+        .unwrap_err();
         assert!(matches!(err, LedgerError::InvalidResolution(_)));
     }
 

@@ -55,6 +55,29 @@ pub struct LedgerOutcome {
     pub resolved_at: String,
 }
 
+impl LedgerOutcome {
+    /// Validate and construct a new [`LedgerOutcome`].
+    ///
+    /// # Errors
+    /// Returns [`LedgerError::InvalidResolution`] if the `prediction_id` is
+    /// not a ULID or `resolved_at` is not an RFC-3339 UTC datetime.
+    pub fn new(
+        prediction_id: String,
+        outcome: bool,
+        resolved_at: String,
+    ) -> Result<Self, LedgerError> {
+        let this = Self {
+            prediction_id,
+            outcome,
+            resolved_at,
+        };
+        match crate::store::validate_outcome(&this) {
+            Err(e) => Err(e),
+            Ok(()) => Ok(this),
+        }
+    }
+}
+
 /// Build a `ledger.prediction` [`EventDraft`].
 ///
 /// # Panics

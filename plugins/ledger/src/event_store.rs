@@ -12,7 +12,7 @@ use pos_crypto::signing::sign;
 
 use crate::{
     payload::{decode_outcome, decode_prediction, EVENT_TYPE_OUTCOME, EVENT_TYPE_PREDICTION},
-    store::{LedgerStore, NewPrediction},
+    store::{LedgerStore, NewPrediction, ResolveStatus},
     Ledger, LedgerError, LedgerOutcome, LedgerPrediction,
 };
 
@@ -134,7 +134,7 @@ impl LedgerStore for EventLedgerStore {
         Ok(prediction.prediction_id)
     }
 
-    fn find_resolve_status(&self, prediction_id: &str) -> Result<(bool, bool), LedgerError> {
+    fn find_resolve_status(&self, prediction_id: &str) -> Result<ResolveStatus, LedgerError> {
         let events = self
             .store
             .read(self.timeline_id, SeqRange::all())
@@ -152,7 +152,10 @@ impl LedgerStore for EventLedgerStore {
             .filter_map(|e| decode_outcome(e.payload.as_slice()).ok())
             .any(|r| r.prediction_id == prediction_id);
 
-        Ok((found_prediction, already_resolved))
+        Ok(ResolveStatus {
+            found_prediction,
+            already_resolved,
+        })
     }
 
     fn persist_resolve(&mut self, outcome: LedgerOutcome) -> Result<(), LedgerError> {
@@ -211,11 +214,9 @@ mod tests {
             .register(contract::sample_new_prediction("2026-08-01"))
             .unwrap();
         store
-            .resolve(LedgerOutcome {
-                prediction_id: id.clone(),
-                outcome: true,
-                resolved_at: "2026-07-30T09:00:00Z".to_owned(),
-            })
+            .resolve(
+                LedgerOutcome::new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned()).unwrap(),
+            )
             .unwrap();
         let ledger = store.load("2026-07-25").unwrap();
         assert_eq!(ledger.entries().len(), 1);
@@ -229,18 +230,14 @@ mod tests {
             .register(contract::sample_new_prediction("2026-08-01"))
             .unwrap();
         store
-            .resolve(LedgerOutcome {
-                prediction_id: id.clone(),
-                outcome: true,
-                resolved_at: "2026-07-30T09:00:00Z".to_owned(),
-            })
+            .resolve(
+                LedgerOutcome::new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned()).unwrap(),
+            )
             .unwrap();
         let err = store
-            .resolve(LedgerOutcome {
-                prediction_id: id.clone(),
-                outcome: false,
-                resolved_at: "2026-07-31T09:00:00Z".to_owned(),
-            })
+            .resolve(
+                LedgerOutcome::new(id.clone(), false, "2026-07-31T09:00:00Z".to_owned()).unwrap(),
+            )
             .unwrap_err();
         assert!(matches!(err, LedgerError::AlreadyResolved(_)));
     }
@@ -276,11 +273,12 @@ mod tests {
     fn load_orphan_outcome_returns_error() {
         let mut store = make_store();
         let head = store.head_seq().unwrap();
-        let outcome = LedgerOutcome {
-            prediction_id: "01J3B0Y5ZK2J6MGK8D7QW3N0P9".to_owned(),
-            outcome: true,
-            resolved_at: "2026-07-30T09:00:00Z".to_owned(),
-        };
+        let outcome = LedgerOutcome::new(
+            "01J3B0Y5ZK2J6MGK8D7QW3N0P9".to_owned(),
+            true,
+            "2026-07-30T09:00:00Z".to_owned(),
+        )
+        .unwrap();
         let payload = to_canonical(&outcome);
         let payload_hash = hash_payload(&payload);
         let event = Event {
@@ -355,11 +353,14 @@ mod tests {
             .append_committed(store.timeline_id, &[event])
             .unwrap();
         let err = store
-            .resolve(LedgerOutcome {
-                prediction_id: "01J3B0Y5ZK2J6MGK8D7QW3N0P9".to_owned(),
-                outcome: true,
-                resolved_at: "2026-07-30T09:00:00Z".to_owned(),
-            })
+            .resolve(
+                LedgerOutcome::new(
+                    "01J3B0Y5ZK2J6MGK8D7QW3N0P9".to_owned(),
+                    true,
+                    "2026-07-30T09:00:00Z".to_owned(),
+                )
+                .unwrap(),
+            )
             .unwrap_err();
         assert!(matches!(err, LedgerError::UnknownPrediction(_)));
     }
@@ -390,11 +391,9 @@ mod tests {
             .store
             .append_committed(store.timeline_id, &[event])
             .unwrap();
-        let result = store.resolve(LedgerOutcome {
-            prediction_id: id.clone(),
-            outcome: true,
-            resolved_at: "2026-07-30T09:00:00Z".to_owned(),
-        });
+        let result = store.resolve(
+            LedgerOutcome::new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned()).unwrap(),
+        );
         assert!(result.is_ok(), "resolve should succeed: {result:?}");
     }
 
@@ -425,11 +424,9 @@ mod tests {
             .append_committed(store.timeline_id, &[event])
             .unwrap();
         store
-            .resolve(LedgerOutcome {
-                prediction_id: id.clone(),
-                outcome: true,
-                resolved_at: "2026-07-30T09:00:00Z".to_owned(),
-            })
+            .resolve(
+                LedgerOutcome::new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned()).unwrap(),
+            )
             .unwrap();
     }
 
@@ -488,17 +485,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_rejects_invalid_resolved_at() {
-        let mut store = make_store();
-        let id = store
-            .register(contract::sample_new_prediction("2026-08-01"))
-            .unwrap();
-        let err = store
-            .resolve(LedgerOutcome {
-                prediction_id: id.clone(),
-                outcome: true,
-                resolved_at: String::new(),
-            })
+    fn ledger_outcome_new_rejects_invalid_resolved_at() {
+        let err = LedgerOutcome::new("01J3B0Y5ZK2J6MGK8D7QW3N0P4".to_owned(), true, String::new())
             .unwrap_err();
         assert!(matches!(err, LedgerError::InvalidResolution(_)));
     }
@@ -532,11 +520,14 @@ mod tests {
             Box::new(Blake3Hasher),
         );
         let err = store
-            .resolve(LedgerOutcome {
-                prediction_id: "01J3B0Y5ZK2J6MGK8D7QW3N0P9".to_owned(),
-                outcome: true,
-                resolved_at: "2026-07-30T09:00:00Z".to_owned(),
-            })
+            .resolve(
+                LedgerOutcome::new(
+                    "01J3B0Y5ZK2J6MGK8D7QW3N0P9".to_owned(),
+                    true,
+                    "2026-07-30T09:00:00Z".to_owned(),
+                )
+                .unwrap(),
+            )
             .unwrap_err();
         assert!(matches!(err, LedgerError::Store(_)));
     }

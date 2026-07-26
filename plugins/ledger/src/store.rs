@@ -233,6 +233,15 @@ pub(crate) fn is_valid_datetime(s: &str) -> bool {
 /// The ledger port: one interface, two first-class adapters
 /// (ADR-017 Decision 1). Implementations: [`crate::TomlLedgerStore`]
 /// (curated tier) and, from #109, an `EventStore` adapter (live tier).
+/// Result of checking a prediction's resolve preconditions.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ResolveStatus {
+    /// Whether a prediction with the given id exists.
+    pub found_prediction: bool,
+    /// Whether the prediction already has a resolution.
+    pub already_resolved: bool,
+}
+
 pub trait LedgerStore {
     /// Fold all predictions and resolutions into a [`Ledger`].
     ///
@@ -252,38 +261,32 @@ pub trait LedgerStore {
 
     /// Resolve an existing prediction with its observed outcome.
     ///
-    /// Default implementation validates the [`LedgerOutcome`], checks resolve
-    /// preconditions via [`Self::find_resolve_status`], then delegates
-    /// persistence to [`Self::persist_resolve`].
+    /// Default implementation checks resolve preconditions via
+    /// [`Self::find_resolve_status`], then delegates persistence to
+    /// [`Self::persist_resolve`]. The [`LedgerOutcome`] is expected to be
+    /// validated before being passed in (see [`LedgerOutcome::new`]).
     ///
     /// # Errors
     /// Returns [`LedgerError::UnknownPrediction`],
-    /// [`LedgerError::AlreadyResolved`], [`LedgerError::InvalidResolution`],
+    /// [`LedgerError::AlreadyResolved`],
     /// or an adapter error on write failure.
     fn resolve(&mut self, outcome: LedgerOutcome) -> Result<(), LedgerError> {
-        validate_outcome(&outcome)?;
-        let (found_prediction, already_resolved) =
-            self.find_resolve_status(&outcome.prediction_id)?;
-        if !found_prediction {
-            return Err(LedgerError::UnknownPrediction(
-                outcome.prediction_id.clone(),
-            ));
+        let status = self.find_resolve_status(&outcome.prediction_id)?;
+        if !status.found_prediction {
+            return Err(LedgerError::UnknownPrediction(outcome.prediction_id));
         }
-        if already_resolved {
-            return Err(LedgerError::AlreadyResolved(outcome.prediction_id.clone()));
+        if status.already_resolved {
+            return Err(LedgerError::AlreadyResolved(outcome.prediction_id));
         }
         self.persist_resolve(outcome)
     }
 
-    /// Check whether `prediction_id` exists and whether it already has a
-    /// resolution. Adapter-specific — the lookup mechanism differs per
-    /// backend.
-    ///
-    /// Returns `(found_prediction, already_resolved)`.
+    /// Check resolve preconditions for `prediction_id`. Adapter-specific —
+    /// the lookup mechanism differs per backend.
     ///
     /// # Errors
     /// Returns an adapter-specific error on lookup failure.
-    fn find_resolve_status(&self, prediction_id: &str) -> Result<(bool, bool), LedgerError>;
+    fn find_resolve_status(&self, prediction_id: &str) -> Result<ResolveStatus, LedgerError>;
 
     /// Persist a validated [`LedgerOutcome`] to the backend.
     ///
