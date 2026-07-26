@@ -12,7 +12,7 @@ use pos_crypto::signing::sign;
 
 use crate::{
     payload::{decode_outcome, decode_prediction, EVENT_TYPE_OUTCOME, EVENT_TYPE_PREDICTION},
-    store::{validate_outcome, LedgerStore, NewPrediction},
+    store::{LedgerStore, NewPrediction},
     Ledger, LedgerError, LedgerOutcome, LedgerPrediction,
 };
 
@@ -134,19 +134,7 @@ impl LedgerStore for EventLedgerStore {
         Ok(prediction.prediction_id)
     }
 
-    fn resolve(
-        &mut self,
-        prediction_id: &str,
-        outcome: bool,
-        resolved_at: &str,
-    ) -> Result<(), LedgerError> {
-        let resolution = LedgerOutcome {
-            prediction_id: prediction_id.to_owned(),
-            outcome,
-            resolved_at: resolved_at.to_owned(),
-        };
-        validate_outcome(&resolution)?;
-
+    fn find_resolve_status(&self, prediction_id: &str) -> Result<(bool, bool), LedgerError> {
         let events = self
             .store
             .read(self.timeline_id, SeqRange::all())
@@ -164,14 +152,11 @@ impl LedgerStore for EventLedgerStore {
             .filter_map(|e| decode_outcome(e.payload.as_slice()).ok())
             .any(|r| r.prediction_id == prediction_id);
 
-        if !found_prediction {
-            return Err(LedgerError::UnknownPrediction(prediction_id.to_owned()));
-        }
-        if already_resolved {
-            return Err(LedgerError::AlreadyResolved(prediction_id.to_owned()));
-        }
+        Ok((found_prediction, already_resolved))
+    }
 
-        self.append_signed(to_canonical(&resolution), Kind::new(EVENT_TYPE_OUTCOME))
+    fn persist_resolve(&mut self, outcome: LedgerOutcome) -> Result<(), LedgerError> {
+        self.append_signed(to_canonical(&outcome), Kind::new(EVENT_TYPE_OUTCOME))
     }
 }
 

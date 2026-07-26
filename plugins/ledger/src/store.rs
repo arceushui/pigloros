@@ -1,6 +1,9 @@
 //! The [`LedgerStore`] port (ADR-017 Decision 1) and its error type.
 
-use crate::{payload::LedgerPrediction, Ledger, LedgerOutcome};
+use crate::{
+    payload::{LedgerOutcome, LedgerPrediction},
+    Ledger,
+};
 
 /// Errors from ledger domain operations and adapters.
 #[derive(Debug, thiserror::Error)]
@@ -186,6 +189,23 @@ pub(crate) fn validate_outcome(outcome: &LedgerOutcome) -> Result<(), LedgerErro
     Ok(())
 }
 
+/// Check resolve preconditions and return the right error if violated.
+/// Adapters call this after their own lookup — the lookup mechanism
+/// differs per backend, but the error conditions are port-level rules.
+pub(crate) fn check_resolve_status(
+    found: bool,
+    already_resolved: bool,
+    prediction_id: &str,
+) -> Result<(), LedgerError> {
+    if !found {
+        return Err(LedgerError::UnknownPrediction(prediction_id.to_owned()));
+    }
+    if already_resolved {
+        return Err(LedgerError::AlreadyResolved(prediction_id.to_owned()));
+    }
+    Ok(())
+}
+
 /// Days per month (index 1-based; Feb always 28 — leap years ignored for
 /// the ledger's domain, which doesn't need perfect calendar accuracy).
 const DAYS_IN_MONTH: [u8; 13] = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
@@ -249,6 +269,10 @@ pub trait LedgerStore {
 
     /// Resolve an existing prediction with its observed outcome.
     ///
+    /// Default implementation constructs a [`LedgerOutcome`], validates it,
+    /// checks resolve preconditions via [`Self::find_resolve_status`], then
+    /// delegates persistence to [`Self::persist_resolve`].
+    ///
     /// # Errors
     /// Returns [`LedgerError::UnknownPrediction`],
     /// [`LedgerError::AlreadyResolved`], [`LedgerError::InvalidResolution`],
@@ -258,7 +282,33 @@ pub trait LedgerStore {
         prediction_id: &str,
         outcome: bool,
         resolved_at: &str,
-    ) -> Result<(), LedgerError>;
+    ) -> Result<(), LedgerError> {
+        let resolution = LedgerOutcome {
+            prediction_id: prediction_id.to_owned(),
+            outcome,
+            resolved_at: resolved_at.to_owned(),
+        };
+        validate_outcome(&resolution)?;
+        let (found_prediction, already_resolved) = self.find_resolve_status(prediction_id)?;
+        check_resolve_status(found_prediction, already_resolved, prediction_id)?;
+        self.persist_resolve(resolution)
+    }
+
+    /// Check whether `prediction_id` exists and whether it already has a
+    /// resolution. Adapter-specific — the lookup mechanism differs per
+    /// backend.
+    ///
+    /// Returns `(found_prediction, already_resolved)`.
+    ///
+    /// # Errors
+    /// Returns an adapter-specific error on lookup failure.
+    fn find_resolve_status(&self, prediction_id: &str) -> Result<(bool, bool), LedgerError>;
+
+    /// Persist a validated [`LedgerOutcome`] to the backend.
+    ///
+    /// # Errors
+    /// Returns an adapter-specific error on write failure.
+    fn persist_resolve(&mut self, outcome: LedgerOutcome) -> Result<(), LedgerError>;
 }
 
 #[cfg(test)]

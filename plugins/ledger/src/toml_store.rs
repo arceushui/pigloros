@@ -122,28 +122,18 @@ impl LedgerStore for TomlLedgerStore {
         Ok(prediction.prediction_id)
     }
 
-    fn resolve(
-        &mut self,
-        prediction_id: &str,
-        outcome: bool,
-        resolved_at: &str,
-    ) -> Result<(), LedgerError> {
-        let resolution = LedgerOutcome {
-            prediction_id: prediction_id.to_owned(),
-            outcome,
-            resolved_at: resolved_at.to_owned(),
-        };
-        crate::store::validate_outcome(&resolution)?;
+    fn find_resolve_status(&self, prediction_id: &str) -> Result<(bool, bool), LedgerError> {
         let prediction_path = self.predictions_dir().join(format!("{prediction_id}.toml"));
-        if !prediction_path.exists() {
-            return Err(LedgerError::UnknownPrediction(prediction_id.to_owned()));
-        }
         let resolution_path = self.resolutions_dir().join(format!("{prediction_id}.toml"));
-        if resolution_path.exists() {
-            return Err(LedgerError::AlreadyResolved(prediction_id.to_owned()));
-        }
+        Ok((prediction_path.exists(), resolution_path.exists()))
+    }
+
+    fn persist_resolve(&mut self, outcome: LedgerOutcome) -> Result<(), LedgerError> {
+        let resolution_path = self
+            .resolutions_dir()
+            .join(format!("{}.toml", outcome.prediction_id));
         std::fs::create_dir_all(self.resolutions_dir())?;
-        Self::write_toml(&resolution_path, &resolution)
+        Self::write_toml(&resolution_path, &outcome)
     }
 }
 
