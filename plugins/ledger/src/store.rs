@@ -189,23 +189,6 @@ pub(crate) fn validate_outcome(outcome: &LedgerOutcome) -> Result<(), LedgerErro
     Ok(())
 }
 
-/// Check resolve preconditions and return the right error if violated.
-/// Adapters call this after their own lookup — the lookup mechanism
-/// differs per backend, but the error conditions are port-level rules.
-pub(crate) fn check_resolve_status(
-    found: bool,
-    already_resolved: bool,
-    prediction_id: &str,
-) -> Result<(), LedgerError> {
-    if !found {
-        return Err(LedgerError::UnknownPrediction(prediction_id.to_owned()));
-    }
-    if already_resolved {
-        return Err(LedgerError::AlreadyResolved(prediction_id.to_owned()));
-    }
-    Ok(())
-}
-
 /// Days per month (index 1-based; Feb always 28 — leap years ignored for
 /// the ledger's domain, which doesn't need perfect calendar accuracy).
 const DAYS_IN_MONTH: [u8; 13] = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
@@ -281,7 +264,14 @@ pub trait LedgerStore {
         validate_outcome(&outcome)?;
         let (found_prediction, already_resolved) =
             self.find_resolve_status(&outcome.prediction_id)?;
-        check_resolve_status(found_prediction, already_resolved, &outcome.prediction_id)?;
+        if !found_prediction {
+            return Err(LedgerError::UnknownPrediction(
+                outcome.prediction_id.clone(),
+            ));
+        }
+        if already_resolved {
+            return Err(LedgerError::AlreadyResolved(outcome.prediction_id.clone()));
+        }
         self.persist_resolve(outcome)
     }
 
