@@ -1,7 +1,10 @@
 //! Port contract test suite (ADR-017 Decision 1: one interface, every adapter
 //! must pass the same tests).
 
-use crate::store::{LedgerStore, NewPrediction};
+use crate::{
+    store::{LedgerStore, NewPrediction},
+    LedgerOutcome,
+};
 
 /// Minimum inputs for a valid registration.
 #[must_use]
@@ -75,7 +78,11 @@ fn resolve_and_load(store: &mut dyn LedgerStore) {
         .register(sample_new_prediction("2026-08-01"))
         .expect("register");
     store
-        .resolve(&id, true, "2026-07-30T09:00:00Z")
+        .resolve(LedgerOutcome {
+            prediction_id: id.clone(),
+            outcome: true,
+            resolved_at: "2026-07-30T09:00:00Z".to_owned(),
+        })
         .expect("resolve");
     let ledger = store.load("2026-07-25").expect("load after resolve");
     assert_eq!(ledger.entries().len(), 1);
@@ -95,10 +102,18 @@ fn double_resolve_rejected(store: &mut dyn LedgerStore) {
         .register(sample_new_prediction("2026-08-01"))
         .expect("register");
     store
-        .resolve(&id, true, "2026-07-30T09:00:00Z")
+        .resolve(LedgerOutcome {
+            prediction_id: id.clone(),
+            outcome: true,
+            resolved_at: "2026-07-30T09:00:00Z".to_owned(),
+        })
         .expect("first resolve");
     let err = store
-        .resolve(&id, false, "2026-07-31T09:00:00Z")
+        .resolve(LedgerOutcome {
+            prediction_id: id.clone(),
+            outcome: false,
+            resolved_at: "2026-07-31T09:00:00Z".to_owned(),
+        })
         .expect_err("double resolve rejected");
     assert!(
         err.to_string().contains("already resolved"),
@@ -108,7 +123,11 @@ fn double_resolve_rejected(store: &mut dyn LedgerStore) {
 
 fn unknown_prediction_rejected(store: &mut dyn LedgerStore) {
     let err = store
-        .resolve("01J3B0Y5ZK2J6MGK8D7QW3N0P9", true, "2026-07-30T09:00:00Z")
+        .resolve(LedgerOutcome {
+            prediction_id: "01J3B0Y5ZK2J6MGK8D7QW3N0P9".to_owned(),
+            outcome: true,
+            resolved_at: "2026-07-30T09:00:00Z".to_owned(),
+        })
         .expect_err("unknown prediction rejected");
     assert!(
         err.to_string().contains("unknown prediction"),

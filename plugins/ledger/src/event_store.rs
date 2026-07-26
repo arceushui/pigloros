@@ -210,7 +210,13 @@ mod tests {
         let id = store
             .register(contract::sample_new_prediction("2026-08-01"))
             .unwrap();
-        store.resolve(&id, true, "2026-07-30T09:00:00Z").unwrap();
+        store
+            .resolve(LedgerOutcome {
+                prediction_id: id.clone(),
+                outcome: true,
+                resolved_at: "2026-07-30T09:00:00Z".to_owned(),
+            })
+            .unwrap();
         let ledger = store.load("2026-07-25").unwrap();
         assert_eq!(ledger.entries().len(), 1);
         assert_eq!(ledger.entries()[0].status.as_str(), "resolved");
@@ -222,9 +228,19 @@ mod tests {
         let id = store
             .register(contract::sample_new_prediction("2026-08-01"))
             .unwrap();
-        store.resolve(&id, true, "2026-07-30T09:00:00Z").unwrap();
+        store
+            .resolve(LedgerOutcome {
+                prediction_id: id.clone(),
+                outcome: true,
+                resolved_at: "2026-07-30T09:00:00Z".to_owned(),
+            })
+            .unwrap();
         let err = store
-            .resolve(&id, false, "2026-07-31T09:00:00Z")
+            .resolve(LedgerOutcome {
+                prediction_id: id.clone(),
+                outcome: false,
+                resolved_at: "2026-07-31T09:00:00Z".to_owned(),
+            })
             .unwrap_err();
         assert!(matches!(err, LedgerError::AlreadyResolved(_)));
     }
@@ -233,7 +249,11 @@ mod tests {
     fn unknown_prediction_rejected() {
         let mut store = make_store();
         let err = store
-            .resolve("01J3B0Y5ZK2J6MGK8D7QW3N0P9", true, "2026-07-30T09:00:00Z")
+            .resolve(LedgerOutcome {
+                prediction_id: "01J3B0Y5ZK2J6MGK8D7QW3N0P9".to_owned(),
+                outcome: true,
+                resolved_at: "2026-07-30T09:00:00Z".to_owned(),
+            })
             .unwrap_err();
         assert!(matches!(err, LedgerError::UnknownPrediction(_)));
     }
@@ -335,7 +355,11 @@ mod tests {
             .append_committed(store.timeline_id, &[event])
             .unwrap();
         let err = store
-            .resolve("01J3B0Y5ZK2J6MGK8D7QW3N0P9", true, "2026-07-30T09:00:00Z")
+            .resolve(LedgerOutcome {
+                prediction_id: "01J3B0Y5ZK2J6MGK8D7QW3N0P9".to_owned(),
+                outcome: true,
+                resolved_at: "2026-07-30T09:00:00Z".to_owned(),
+            })
             .unwrap_err();
         assert!(matches!(err, LedgerError::UnknownPrediction(_)));
     }
@@ -366,7 +390,11 @@ mod tests {
             .store
             .append_committed(store.timeline_id, &[event])
             .unwrap();
-        let result = store.resolve(&id, true, "2026-07-30T09:00:00Z");
+        let result = store.resolve(LedgerOutcome {
+            prediction_id: id.clone(),
+            outcome: true,
+            resolved_at: "2026-07-30T09:00:00Z".to_owned(),
+        });
         assert!(result.is_ok(), "resolve should succeed: {result:?}");
     }
 
@@ -396,7 +424,13 @@ mod tests {
             .store
             .append_committed(store.timeline_id, &[event])
             .unwrap();
-        store.resolve(&id, true, "2026-07-30T09:00:00Z").unwrap();
+        store
+            .resolve(LedgerOutcome {
+                prediction_id: id.clone(),
+                outcome: true,
+                resolved_at: "2026-07-30T09:00:00Z".to_owned(),
+            })
+            .unwrap();
     }
 
     #[test]
@@ -459,7 +493,13 @@ mod tests {
         let id = store
             .register(contract::sample_new_prediction("2026-08-01"))
             .unwrap();
-        let err = store.resolve(&id, true, "").unwrap_err();
+        let err = store
+            .resolve(LedgerOutcome {
+                prediction_id: id.clone(),
+                outcome: true,
+                resolved_at: String::new(),
+            })
+            .unwrap_err();
         assert!(matches!(err, LedgerError::InvalidResolution(_)));
     }
 
@@ -492,7 +532,11 @@ mod tests {
             Box::new(Blake3Hasher),
         );
         let err = store
-            .resolve("01J3B0Y5ZK2J6MGK8D7QW3N0P9", true, "2026-07-30T09:00:00Z")
+            .resolve(LedgerOutcome {
+                prediction_id: "01J3B0Y5ZK2J6MGK8D7QW3N0P9".to_owned(),
+                outcome: true,
+                resolved_at: "2026-07-30T09:00:00Z".to_owned(),
+            })
             .unwrap_err();
         assert!(matches!(err, LedgerError::Store(_)));
     }

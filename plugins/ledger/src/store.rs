@@ -269,29 +269,20 @@ pub trait LedgerStore {
 
     /// Resolve an existing prediction with its observed outcome.
     ///
-    /// Default implementation constructs a [`LedgerOutcome`], validates it,
-    /// checks resolve preconditions via [`Self::find_resolve_status`], then
-    /// delegates persistence to [`Self::persist_resolve`].
+    /// Default implementation validates the [`LedgerOutcome`], checks resolve
+    /// preconditions via [`Self::find_resolve_status`], then delegates
+    /// persistence to [`Self::persist_resolve`].
     ///
     /// # Errors
     /// Returns [`LedgerError::UnknownPrediction`],
     /// [`LedgerError::AlreadyResolved`], [`LedgerError::InvalidResolution`],
     /// or an adapter error on write failure.
-    fn resolve(
-        &mut self,
-        prediction_id: &str,
-        outcome: bool,
-        resolved_at: &str,
-    ) -> Result<(), LedgerError> {
-        let resolution = LedgerOutcome {
-            prediction_id: prediction_id.to_owned(),
-            outcome,
-            resolved_at: resolved_at.to_owned(),
-        };
-        validate_outcome(&resolution)?;
-        let (found_prediction, already_resolved) = self.find_resolve_status(prediction_id)?;
-        check_resolve_status(found_prediction, already_resolved, prediction_id)?;
-        self.persist_resolve(resolution)
+    fn resolve(&mut self, outcome: LedgerOutcome) -> Result<(), LedgerError> {
+        validate_outcome(&outcome)?;
+        let (found_prediction, already_resolved) =
+            self.find_resolve_status(&outcome.prediction_id)?;
+        check_resolve_status(found_prediction, already_resolved, &outcome.prediction_id)?;
+        self.persist_resolve(outcome)
     }
 
     /// Check whether `prediction_id` exists and whether it already has a

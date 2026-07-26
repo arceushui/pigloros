@@ -141,7 +141,7 @@ impl LedgerStore for TomlLedgerStore {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::contract;
+    use crate::{contract, LedgerOutcome};
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
@@ -226,7 +226,13 @@ mod tests {
         let id = store
             .register(contract::sample_new_prediction("2026-08-01"))
             .unwrap();
-        store.resolve(&id, true, "2026-07-30T09:00:00Z").unwrap();
+        store
+            .resolve(LedgerOutcome {
+                prediction_id: id.clone(),
+                outcome: true,
+                resolved_at: "2026-07-30T09:00:00Z".to_owned(),
+            })
+            .unwrap();
         let dir = tmp.path().join("resolutions");
         std::fs::rename(
             dir.join(format!("{id}.toml")),
@@ -293,13 +299,16 @@ mod tests {
             .unwrap();
         std::fs::write(tmp.path().join("resolutions"), "a file").unwrap();
         let err = store
-            .resolve(&id, true, "2026-07-30T09:00:00Z")
+            .resolve(LedgerOutcome {
+                prediction_id: id.clone(),
+                outcome: true,
+                resolved_at: "2026-07-30T09:00:00Z".to_owned(),
+            })
             .unwrap_err();
         assert!(matches!(err, LedgerError::Io(_)));
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn resolve_write_failure_is_io_error() {
         let (mut store, tmp) = make_store();
         let id = store
@@ -313,7 +322,11 @@ mod tests {
         )
         .unwrap();
         let err = store
-            .resolve(&id, true, "2026-07-30T09:00:00Z")
+            .resolve(LedgerOutcome {
+                prediction_id: id.clone(),
+                outcome: true,
+                resolved_at: "2026-07-30T09:00:00Z".to_owned(),
+            })
             .unwrap_err();
         assert!(matches!(err, LedgerError::Io(_)));
         // Restore permissions so TempDir cleanup doesn't fail.
@@ -353,7 +366,13 @@ mod tests {
         let id = store
             .register(contract::sample_new_prediction("2026-08-01"))
             .unwrap();
-        let err = store.resolve(&id, true, "not-a-datetime").unwrap_err();
+        let err = store
+            .resolve(LedgerOutcome {
+                prediction_id: id.clone(),
+                outcome: true,
+                resolved_at: "not-a-datetime".to_owned(),
+            })
+            .unwrap_err();
         assert!(matches!(err, LedgerError::InvalidResolution(_)));
     }
 
