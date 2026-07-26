@@ -215,7 +215,8 @@ mod tests {
             .unwrap();
         store
             .resolve(
-                LedgerOutcome::new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned()).unwrap(),
+                LedgerOutcome::try_new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned())
+                    .unwrap(),
             )
             .unwrap();
         let ledger = store.load("2026-07-25").unwrap();
@@ -231,12 +232,14 @@ mod tests {
             .unwrap();
         store
             .resolve(
-                LedgerOutcome::new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned()).unwrap(),
+                LedgerOutcome::try_new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned())
+                    .unwrap(),
             )
             .unwrap();
         let err = store
             .resolve(
-                LedgerOutcome::new(id.clone(), false, "2026-07-31T09:00:00Z".to_owned()).unwrap(),
+                LedgerOutcome::try_new(id.clone(), false, "2026-07-31T09:00:00Z".to_owned())
+                    .unwrap(),
             )
             .unwrap_err();
         assert!(matches!(err, LedgerError::AlreadyResolved(_)));
@@ -273,7 +276,7 @@ mod tests {
     fn load_orphan_outcome_returns_error() {
         let mut store = make_store();
         let head = store.head_seq().unwrap();
-        let outcome = LedgerOutcome::new(
+        let outcome = LedgerOutcome::try_new(
             "01J3B0Y5ZK2J6MGK8D7QW3N0P9".to_owned(),
             true,
             "2026-07-30T09:00:00Z".to_owned(),
@@ -354,7 +357,7 @@ mod tests {
             .unwrap();
         let err = store
             .resolve(
-                LedgerOutcome::new(
+                LedgerOutcome::try_new(
                     "01J3B0Y5ZK2J6MGK8D7QW3N0P9".to_owned(),
                     true,
                     "2026-07-30T09:00:00Z".to_owned(),
@@ -392,7 +395,7 @@ mod tests {
             .append_committed(store.timeline_id, &[event])
             .unwrap();
         let result = store.resolve(
-            LedgerOutcome::new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned()).unwrap(),
+            LedgerOutcome::try_new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned()).unwrap(),
         );
         assert!(result.is_ok(), "resolve should succeed: {result:?}");
     }
@@ -425,7 +428,8 @@ mod tests {
             .unwrap();
         store
             .resolve(
-                LedgerOutcome::new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned()).unwrap(),
+                LedgerOutcome::try_new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned())
+                    .unwrap(),
             )
             .unwrap();
     }
@@ -485,13 +489,6 @@ mod tests {
     }
 
     #[test]
-    fn ledger_outcome_new_rejects_invalid_resolved_at() {
-        let err = LedgerOutcome::new("01J3B0Y5ZK2J6MGK8D7QW3N0P4".to_owned(), true, String::new())
-            .unwrap_err();
-        assert!(matches!(err, LedgerError::InvalidResolution(_)));
-    }
-
-    #[test]
     fn load_fails_on_missing_timeline() {
         let (sk, _vk) = pos_crypto::signing::generate_keypair();
         let mem = MemoryStore::new();
@@ -521,7 +518,7 @@ mod tests {
         );
         let err = store
             .resolve(
-                LedgerOutcome::new(
+                LedgerOutcome::try_new(
                     "01J3B0Y5ZK2J6MGK8D7QW3N0P9".to_owned(),
                     true,
                     "2026-07-30T09:00:00Z".to_owned(),

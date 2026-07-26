@@ -43,6 +43,8 @@ pub fn run(make: &mut dyn FnMut(&std::path::Path) -> Box<dyn LedgerStore>) {
     invalid_prediction_rejected(make(tmp.path()).as_mut());
     let tmp = tempfile::TempDir::new().expect("contract tempdir");
     multiple_predictions_preserve_order(make(tmp.path()).as_mut());
+    let tmp = tempfile::TempDir::new().expect("contract tempdir");
+    invalid_outcome_rejected(make(tmp.path()).as_mut());
 }
 
 fn load_empty_ledger(store: &mut dyn LedgerStore) {
@@ -79,8 +81,7 @@ fn resolve_and_load(store: &mut dyn LedgerStore) {
         .expect("register");
     store
         .resolve(
-            LedgerOutcome::new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned())
-                .expect("LedgerOutcome::new"),
+            LedgerOutcome::try_new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned()).unwrap(),
         )
         .expect("resolve");
     let ledger = store.load("2026-07-25").expect("load after resolve");
@@ -102,14 +103,12 @@ fn double_resolve_rejected(store: &mut dyn LedgerStore) {
         .expect("register");
     store
         .resolve(
-            LedgerOutcome::new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned())
-                .expect("LedgerOutcome::new"),
+            LedgerOutcome::try_new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned()).unwrap(),
         )
         .expect("first resolve");
     let err = store
         .resolve(
-            LedgerOutcome::new(id.clone(), false, "2026-07-31T09:00:00Z".to_owned())
-                .expect("LedgerOutcome::new"),
+            LedgerOutcome::try_new(id.clone(), false, "2026-07-31T09:00:00Z".to_owned()).unwrap(),
         )
         .expect_err("double resolve rejected");
     assert!(
@@ -121,12 +120,12 @@ fn double_resolve_rejected(store: &mut dyn LedgerStore) {
 fn unknown_prediction_rejected(store: &mut dyn LedgerStore) {
     let err = store
         .resolve(
-            LedgerOutcome::new(
+            LedgerOutcome::try_new(
                 "01J3B0Y5ZK2J6MGK8D7QW3N0P9".to_owned(),
                 true,
                 "2026-07-30T09:00:00Z".to_owned(),
             )
-            .expect("LedgerOutcome::new"),
+            .unwrap(),
         )
         .expect_err("unknown prediction rejected");
     assert!(
@@ -144,6 +143,20 @@ fn invalid_prediction_rejected(store: &mut dyn LedgerStore) {
     assert!(
         err.to_string().contains("invalid prediction"),
         "expected InvalidPrediction, got {err:?}"
+    );
+}
+
+fn invalid_outcome_rejected(store: &mut dyn LedgerStore) {
+    let err = store
+        .resolve(LedgerOutcome {
+            prediction_id: "not-a-ulid".to_owned(),
+            outcome: true,
+            resolved_at: "2026-07-30T09:00:00Z".to_owned(),
+        })
+        .expect_err("resolve rejects invalid outcome");
+    assert!(
+        err.to_string().contains("invalid resolution"),
+        "expected InvalidResolution, got {err:?}"
     );
 }
 

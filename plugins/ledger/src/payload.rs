@@ -55,13 +55,54 @@ pub struct LedgerOutcome {
     pub resolved_at: String,
 }
 
+/// Days per month (index 1-based; Feb always 28 — leap years ignored for
+/// the ledger's domain, which doesn't need perfect calendar accuracy).
+const DAYS_IN_MONTH: [u8; 13] = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/// `YYYY-MM-DD` with real month/day ranges. Hand-rolled on purpose:
+/// canonical UTC strings sort lexicographically, so no date crate is
+/// needed (ADR-017).
+pub(crate) fn is_valid_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return false;
+    }
+    if !s[0..4].bytes().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    let (Ok(month), Ok(day)) = (s[5..7].parse::<u8>(), s[8..10].parse::<u8>()) else {
+        return false;
+    };
+    (1..=12).contains(&month) && day >= 1 && day <= DAYS_IN_MONTH[usize::from(month)]
+}
+
+/// `YYYY-MM-DDTHH:MM:SSZ` (UTC only — offsets are rejected so strings
+/// stay canonically sortable).
+pub(crate) fn is_valid_datetime(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 20 || b[10] != b'T' || b[13] != b':' || b[16] != b':' || b[19] != b'Z' {
+        return false;
+    }
+    if !is_valid_date(&s[0..10]) {
+        return false;
+    }
+    let (Ok(hour), Ok(minute), Ok(second)) = (
+        s[11..13].parse::<u8>(),
+        s[14..16].parse::<u8>(),
+        s[17..19].parse::<u8>(),
+    ) else {
+        return false;
+    };
+    hour < 24 && minute < 60 && second < 60
+}
+
 impl LedgerOutcome {
     /// Validate and construct a new [`LedgerOutcome`].
     ///
     /// # Errors
     /// Returns [`LedgerError::InvalidResolution`] if the `prediction_id` is
     /// not a ULID or `resolved_at` is not an RFC-3339 UTC datetime.
-    pub fn new(
+    pub fn try_new(
         prediction_id: String,
         outcome: bool,
         resolved_at: String,
@@ -71,11 +112,37 @@ impl LedgerOutcome {
             outcome,
             resolved_at,
         };
-        match crate::store::validate_outcome(&this) {
+        match validate_outcome(&this) {
             Err(e) => Err(e),
             Ok(()) => Ok(this),
         }
     }
+}
+
+/// Validate a [`LedgerOutcome`].
+pub(crate) fn validate_outcome(outcome: &LedgerOutcome) -> Result<(), LedgerError> {
+    if ulid::Ulid::from_string(&outcome.prediction_id).is_err() {
+        return Err(LedgerError::InvalidResolution(format!(
+            "prediction_id must be a ULID, got {:?}",
+            outcome.prediction_id
+        )));
+    }
+    if !is_valid_datetime(&outcome.resolved_at) {
+        return Err(LedgerError::InvalidResolution(format!(
+            "resolved_at must be an RFC-3339 UTC datetime (YYYY-MM-DDTHH:MM:SSZ), got {:?}",
+            outcome.resolved_at
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn expect_invalid(result: Result<(), LedgerError>, needle: &str) {
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains(needle),
+        "expected {needle:?} in {err:?}"
+    );
 }
 
 /// Build a `ledger.prediction` [`EventDraft`].
@@ -179,5 +246,91 @@ pub(crate) mod tests {
     fn decode_rejects_bad_bytes() {
         assert!(decode_prediction(&[0xff]).is_err());
         assert!(decode_outcome(&[0xff]).is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn date_shape_checks() {
+        assert!(is_valid_date("2026-07-25"));
+        assert!(!is_valid_date("2026-7-25"));
+        assert!(!is_valid_date("2026/07/25"));
+        assert!(!is_valid_date("abcd-07-25"));
+        assert!(!is_valid_date("2026-13-01"));
+        assert!(!is_valid_date("2026-00-01"));
+        assert!(!is_valid_date("2026-01-00"));
+        assert!(!is_valid_date("2026-01-32"));
+        assert!(!is_valid_date("2026-xx-01"));
+        assert!(!is_valid_date("2026-01-xx"));
+
+        assert!(is_valid_datetime("2026-07-25T12:00:00Z"));
+        assert!(!is_valid_datetime("2026-07-25T12:00:00+02:00"));
+        assert!(!is_valid_datetime("2026-07-25 12:00:00Z"));
+        assert!(!is_valid_datetime("2026-02-30T12:00:00Z"));
+        assert!(!is_valid_datetime("2026-07-25T24:00:00Z"));
+        assert!(!is_valid_datetime("2026-07-25T12:60:00Z"));
+        assert!(!is_valid_datetime("2026-07-25T12:00:60Z"));
+        assert!(!is_valid_datetime("2026-07-25T12:00:00"));
+        assert!(!is_valid_datetime("2026-07-25T12:00:0Z"));
+        assert!(!is_valid_datetime("2026-07-25Txx:00:00Z"));
+        assert!(!is_valid_datetime("2026-07-25T12:xx:00Z"));
+        assert!(!is_valid_datetime("2026-07-25T12:00:xxZ"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn validate_outcome_rules() {
+        let ok = LedgerOutcome {
+            prediction_id: "01J3B0Y5ZK2J6MGK8D7QW3N0P4".to_owned(),
+            outcome: false,
+            resolved_at: "2026-07-30T09:00:00Z".to_owned(),
+        };
+        assert!(validate_outcome(&ok).is_ok());
+        let mut bad = ok.clone();
+        bad.prediction_id = "nope".to_owned();
+        expect_invalid(validate_outcome(&bad), "ULID");
+        let mut bad = ok;
+        bad.resolved_at = "2026-07-30T25:00:00Z".to_owned();
+        expect_invalid(validate_outcome(&bad), "resolved_at");
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn try_new_accepts_valid_outcome() {
+        let outcome = LedgerOutcome::try_new(
+            "01J3B0Y5ZK2J6MGK8D7QW3N0P4".to_owned(),
+            true,
+            "2026-07-30T09:00:00Z".to_owned(),
+        )
+        .unwrap();
+        assert_eq!(outcome.prediction_id, "01J3B0Y5ZK2J6MGK8D7QW3N0P4");
+        assert!(outcome.outcome);
+        assert_eq!(outcome.resolved_at, "2026-07-30T09:00:00Z");
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn try_new_rejects_invalid_prediction_id() {
+        let err = LedgerOutcome::try_new(
+            "not-a-ulid".to_owned(),
+            true,
+            "2026-07-30T09:00:00Z".to_owned(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::store::LedgerError::InvalidResolution(_)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn try_new_rejects_invalid_resolved_at() {
+        let err =
+            LedgerOutcome::try_new("01J3B0Y5ZK2J6MGK8D7QW3N0P4".to_owned(), true, String::new())
+                .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::store::LedgerError::InvalidResolution(_)
+        ));
     }
 }

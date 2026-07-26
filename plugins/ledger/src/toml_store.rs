@@ -231,7 +231,8 @@ mod tests {
             .unwrap();
         store
             .resolve(
-                LedgerOutcome::new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned()).unwrap(),
+                LedgerOutcome::try_new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned())
+                    .unwrap(),
             )
             .unwrap();
         let dir = tmp.path().join("resolutions");
@@ -301,7 +302,8 @@ mod tests {
         std::fs::write(tmp.path().join("resolutions"), "a file").unwrap();
         let err = store
             .resolve(
-                LedgerOutcome::new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned()).unwrap(),
+                LedgerOutcome::try_new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned())
+                    .unwrap(),
             )
             .unwrap_err();
         assert!(matches!(err, LedgerError::Io(_)));
@@ -322,7 +324,8 @@ mod tests {
         .unwrap();
         let err = store
             .resolve(
-                LedgerOutcome::new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned()).unwrap(),
+                LedgerOutcome::try_new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned())
+                    .unwrap(),
             )
             .unwrap_err();
         assert!(matches!(err, LedgerError::Io(_)));
@@ -354,18 +357,6 @@ mod tests {
             std::fs::Permissions::from_mode(0o755),
         )
         .unwrap();
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn ledger_outcome_new_rejects_invalid_resolved_at() {
-        let err = LedgerOutcome::new(
-            "01J3B0Y5ZK2J6MGK8D7QW3N0P4".to_owned(),
-            true,
-            "not-a-datetime".to_owned(),
-        )
-        .unwrap_err();
-        assert!(matches!(err, LedgerError::InvalidResolution(_)));
     }
 
     #[test]

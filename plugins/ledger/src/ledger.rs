@@ -7,7 +7,8 @@ use std::fmt;
 
 use crate::{
     entry::Status,
-    store::{is_valid_date, validate_outcome, validate_prediction},
+    payload::{is_valid_date, validate_outcome},
+    store::validate_prediction,
     LedgerEntry, LedgerError, LedgerOutcome, LedgerPrediction,
 };
 
