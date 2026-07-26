@@ -1,0 +1,28 @@
+{
+  "mcpServers": {
+    "wikijs": {
+      "command": "npx",
+      "args": ["-y", "@cahaseler/wikijs-mcp"],
+      "env": {
+        "WIKIJS_URL": "https://doc.piglor.com/",
+        "WIKIJS_API_KEY": "<your wiki.js API key>"
+      }
+    },
+    "redmine": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["--from", "mcp-redmine", "mcp-redmine"],
+      "env": {
+        "REDMINE_URL": "https://redmine.piglor.com",
+        "REDMINE_API_KEY": "<your Redmine API key — get from /my/account on Redmine>"
+      }
+    },
+    "notion": {
+      "command": "npx",
+      "args": ["-y", "@notionhq/notion-mcp-server"],
+      "env": {
+        "NOTION_TOKEN": "<your Notion integration token — create at notion.so/my-integrations>"
+      }
+    }
+  }
+}
