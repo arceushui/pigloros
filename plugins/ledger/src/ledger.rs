@@ -137,7 +137,6 @@ impl Ledger {
     /// `None` until the first resolution — the page must never print a
     /// fake `0.0` on an empty record (ADR-017 Decision 7).
     #[must_use]
-    #[allow(clippy::cast_precision_loss)]
     pub fn mean_brier(&self) -> Option<f64> {
         let mut sum = 0.0;
         let mut n = 0usize;
@@ -150,7 +149,8 @@ impl Ledger {
         if n == 0 {
             None
         } else {
-            Some(sum / n as f64)
+            let count = u32::try_from(n).map_or(f64::MAX, f64::from);
+            Some(sum / count)
         }
     }
 }
