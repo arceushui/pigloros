@@ -1,6 +1,7 @@
-FROM rust:1-slim-bookworm AS builder
+FROM rust:1.97.1-slim-bookworm AS builder
 
 WORKDIR /src
+
 COPY Cargo.toml Cargo.lock ./
 COPY rust-toolchain.toml rustfmt.toml ./
 COPY crates/ crates/
@@ -8,11 +9,19 @@ COPY plugins/ plugins/
 COPY apps/ apps/
 
 ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
-RUN cargo build --release --bin piglor-gateway
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    cargo build --release --bin piglor-gateway
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:12-slim AS runtime
 
-RUN adduser --disabled-password --gecos "" appuser
+RUN <<EOF
+  set -eu
+  apt-get update -qq
+  apt-get install -y --no-install-recommends curl
+  apt-get clean
+  rm -rf /var/lib/apt/lists/*
+  adduser --disabled-password --gecos "" appuser
+EOF
 
 COPY --from=builder /src/target/release/piglor-gateway /usr/local/bin/piglor-gateway
 
@@ -22,4 +31,6 @@ ENV LEDGER_WRITE=0
 
 USER appuser
 EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -sf http://localhost:8080/health || exit 1
 ENTRYPOINT ["piglor-gateway", "serve", "0.0.0.0:8080"]
