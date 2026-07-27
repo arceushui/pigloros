@@ -146,7 +146,7 @@ fn build_store(db: &Path, today: &str, pubkey: Option<String>) -> Result<ExportM
     let ledger_store = pos_plugin_ledger::EventLedgerStore::new(
         store,
         timeline.id(),
-        pos_core::ids::EntityId::new(),
+        crate::cli::well_known_entity(),
         sk,
         Box::new(pos_crypto::chain::Blake3Hasher),
     );
@@ -170,6 +170,7 @@ fn build_store(db: &Path, today: &str, pubkey: Option<String>) -> Result<ExportM
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::cli::run;
@@ -221,6 +222,7 @@ mod tests {
         tmp
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_toml_produces_manifest_with_file_hashes_matching_b3sum() {
         let tmp = populated_toml_dir();
@@ -259,6 +261,7 @@ mod tests {
             .starts_with("resolutions/"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_toml_empty_dir_yields_empty_manifest() {
         let tmp = TempDir::new().unwrap();
@@ -272,6 +275,7 @@ mod tests {
         assert!(json.contains("\"files\": []"), "{json}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_store_without_ledger_timeline_errors() {
         let tmp = TempDir::new().unwrap();
@@ -287,6 +291,7 @@ mod tests {
         assert!(err.to_string().contains("ledger"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_store_with_signed_events_includes_signature_hex() {
         let tmp = TempDir::new().unwrap();
@@ -355,6 +360,7 @@ mod tests {
         crate::hex_encode(&vk.to_bytes())
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn collect_toml_hashes_skips_unreadable_subdirs() {
         // With the simplified collect_toml_hashes (any read_dir error → skip),
@@ -369,18 +375,21 @@ mod tests {
         assert!(json.contains("\"files\": []"), "{json}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn hex_decode_odd_length_is_error() {
         // Exercises the odd-length branch in hex_decode_local (line 358).
         assert!(hex_decode("a").is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn nib_rejects_invalid_hex_char() {
         // Exercises the `_` (error) arm of nib in this test module.
         assert!(nib('g').is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn nib_covers_uppercase() {
         // Exercises the 'A'..='F' arm of nib.
@@ -388,6 +397,7 @@ mod tests {
         assert_eq!(nib('F').unwrap(), 15);
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn manifest_serialises_as_pretty_tagged_json() {
         let manifest = ExportManifest::Toml {
@@ -412,6 +422,7 @@ mod tests {
         assert_eq!(back, manifest);
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_source_store_dispatches_to_build_store() {
         // Exercises the `Source::Store(db) => build_store(...)` arm (line 79)
@@ -457,6 +468,7 @@ mod tests {
         assert!(json.contains("\"tier\": \"store\""), "{json}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_store_with_invalid_sqlite_path_errors() {
         // Covers L133: `format!("open sqlite: {e}")` in build_store when the
@@ -468,6 +480,7 @@ mod tests {
         assert!(!err.to_string().is_empty(), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_store_with_corrupted_db_errors() {
         // Covers L136: `format!("list timelines: {e}")` in build_store when
@@ -480,18 +493,21 @@ mod tests {
         assert!(err.is_err(), "expected error for corrupted DB");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn hex_decode_second_nibble_error() {
         // Covers the `?` on nib(l) in hex_decode_local — second nibble invalid.
         assert!(hex_decode("0g").is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn hex_decode_first_nibble_error() {
         // Covers the `?` on nib(h) in hex_decode_local — first nibble invalid.
         assert!(hex_decode("g0").is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_toml_with_invalid_today_errors() {
         // Covers L86: `?` on store.load(today) in build_toml when today is invalid.
@@ -503,6 +519,7 @@ mod tests {
         assert!(err.to_string().contains("invalid today"), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_toml_unreadable_prediction_returns_error() {
         // When a prediction file is unreadable, store.load fails with an
@@ -526,6 +543,7 @@ mod tests {
         assert!(err.is_err(), "expected error for unreadable file");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_store_with_invalid_today_errors() {
         // Covers L152: `?` on ledger_store.load(today) in build_store.
@@ -566,6 +584,7 @@ mod tests {
         assert!(err.to_string().contains("invalid today"), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_store_list_timelines_fails_on_corrupt_db() {
         // Covers L136: `?` on list_timelines in build_store when timeline
@@ -588,6 +607,7 @@ mod tests {
         assert!(!err.to_string().is_empty(), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_store_read_fails_on_corrupt_events() {
         // Covers L141: `?` on store.read when the event seq column is corrupt.

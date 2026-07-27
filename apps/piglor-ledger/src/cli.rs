@@ -98,7 +98,66 @@ pub fn open_store(source: &Source, key: Option<&Path>) -> Result<Box<dyn LedgerS
 ///
 /// Value: `01J3B0Y5ZK2J6MGK8D7QW3N0A0` — reserved constant ULID for the
 /// ledger author entity. Committed in ADR-017 / Redmine #110.
-fn well_known_entity() -> pos_core::ids::EntityId {
+/// Return today's date as `YYYY-MM-DD` (UTC) without pulling in a date crate.
+///
+/// # Panics
+///
+/// Never panics: `duration_since(UNIX_EPOCH)` uses `unwrap_or_default`.
+#[must_use]
+fn today_utc() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    #[allow(clippy::cast_possible_truncation)]
+    days_since_epoch_to_date((secs / 86_400) as u32)
+}
+
+/// Convert a count of days since 1970-01-01 to `YYYY-MM-DD` (UTC).
+///
+/// Leap-year-correct proleptic Gregorian calendar; used by [`today_utc`] and
+/// unit-tested separately.
+fn days_since_epoch_to_date(mut days: u32) -> String {
+    let mut year = 1970u32;
+    loop {
+        let is_leap =
+            year.is_multiple_of(400) || (year.is_multiple_of(4) && !year.is_multiple_of(100));
+        let dy = if is_leap { 366 } else { 365 };
+        if days < dy {
+            break;
+        }
+        days -= dy;
+        year += 1;
+    }
+    let leap = year.is_multiple_of(400) || (year.is_multiple_of(4) && !year.is_multiple_of(100));
+    let month_days: [u32; 12] = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut month = 1u32;
+    for &md in &month_days {
+        if days < md {
+            break;
+        }
+        days -= md;
+        month += 1;
+    }
+    let day = days + 1;
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+pub(crate) fn well_known_entity() -> pos_core::ids::EntityId {
     // Valid Crockford base32, 26 chars. Generated once and fixed permanently.
     const LEDGER_ENTITY_ULID: &str = "01J3B0Y5ZK2J6MGK8D7QW3N0A0";
     pos_core::ids::EntityId::from_ulid(
@@ -175,8 +234,7 @@ fn require<'a>(args: &'a [String], name: &str) -> Result<&'a str, CliError> {
 fn cmd_keygen(args: &[String]) -> Result<(), CliError> {
     let out = PathBuf::from(require(args, "--out")?);
     let (sk, vk) = generate_keypair();
-    std::fs::write(&out, hex_encode(&sk.to_bytes()))
-        .map_err(|e| CliError::BadKey(e.to_string()))?;
+    std::fs::write(&out, hex_encode(&sk.to_bytes())).map_err(CliError::Io)?;
     println!(
         "wrote secret key to {} (public key: {})",
         out.display(),
@@ -238,10 +296,10 @@ fn cmd_resolve(args: &[String]) -> Result<(), CliError> {
 
 fn cmd_export(args: &[String]) -> Result<(), CliError> {
     let source = Source::parse(require(args, "--source")?)?;
-    let today = flag(args, "--today").unwrap_or("2026-07-25");
+    let today = flag(args, "--today").map_or_else(today_utc, str::to_owned);
     let out_path = flag(args, "--out").map(PathBuf::from);
     let pubkey = flag(args, "--pubkey").map(str::to_owned);
-    let export = crate::export::build(&source, today, pubkey)?;
+    let export = crate::export::build(&source, &today, pubkey)?;
     let json =
         serde_json::to_string_pretty(&export).expect("ExportManifest serialisation is infallible");
     match out_path {
@@ -259,9 +317,9 @@ fn cmd_build(args: &[String]) -> Result<(), CliError> {
     let site = PathBuf::from(require(args, "--site")?);
     let pubkey = flag(args, "--pubkey").map(str::to_owned);
     let key = flag(args, "--key").map(PathBuf::from);
-    let today = flag(args, "--today").unwrap_or("2026-07-25");
+    let today = flag(args, "--today").map_or_else(today_utc, str::to_owned);
     let store = open_store(&source, key.as_deref())?;
-    let ledger = store.load(today)?;
+    let ledger = store.load(&today)?;
     let view = LedgerView::from(&ledger);
     let html = render_html(&view, pubkey.as_deref());
     let json = render_json(&view);
@@ -288,11 +346,34 @@ fn cmd_verify(args: &[String]) -> Result<(), CliError> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::hex::nib;
     use tempfile::TempDir;
 
+    #[test]
+    fn days_since_epoch_covers_leap_year_and_feb() {
+        // 1970-01-01 = day 0
+        assert_eq!(days_since_epoch_to_date(0), "1970-01-01");
+        // 2026-07-27 = known date (non-leap year)
+        // days from epoch: 56 years + leap adjustments + day-of-year
+        // Just test that output has correct format and known values.
+        let d2026 = days_since_epoch_to_date(20661); // 2026-07-27
+        assert!(d2026.starts_with("2026-"), "{d2026}");
+        // 2024 is a leap year — Feb 29 exists
+        // 2024-02-29 = day 19782 from epoch (2024 is 54 years after 1970)
+        let feb29 = days_since_epoch_to_date(19782);
+        assert_eq!(feb29, "2024-02-29", "leap Feb 29 must map correctly");
+        // 2024-03-01 = day 19783
+        let mar1 = days_since_epoch_to_date(19783);
+        assert_eq!(mar1, "2024-03-01");
+        // 2000 is a 400-year leap year — Feb 29
+        let y2000_feb29 = days_since_epoch_to_date(11016);
+        assert_eq!(y2000_feb29, "2000-02-29");
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn source_parses_toml_and_store() {
         assert_eq!(
@@ -307,6 +388,7 @@ mod tests {
         assert!(Source::parse("csv:/tmp/x").is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn hex_round_trip() {
         let bytes = [0u8, 1, 0xfe, 0xff];
@@ -317,6 +399,7 @@ mod tests {
         assert!(hex_decode("zz").is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn nib_covers_all_digits() {
         assert_eq!(nib('0').unwrap(), 0);
@@ -326,6 +409,7 @@ mod tests {
         assert!(nib('g').is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn flag_handles_space_and_equals_forms() {
         let args: Vec<String> = ["--a", "one", "--b=two"]
@@ -338,6 +422,7 @@ mod tests {
         assert_eq!(flag(&args, "--c"), None);
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn require_errors_on_missing() {
         let args: Vec<String> = vec!["--only".to_string(), "one".to_string()];
@@ -345,12 +430,14 @@ mod tests {
         assert_eq!(require(&args, "--only").unwrap(), "one");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn usage_includes_all_subcommands() {
         run(&["piglor-ledger".to_string()]).unwrap();
         run(&["piglor-ledger".to_string(), "version".to_string()]).unwrap();
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn keygen_writes_hex_secret_key_and_prints_pubkey() {
         let tmp = TempDir::new().unwrap();
@@ -367,6 +454,7 @@ mod tests {
         assert_eq!(bytes.len(), 32);
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn keygen_fails_when_output_path_is_unwritable() {
         // Covers L196: `e.to_string()` in cmd_keygen when fs::write fails.
@@ -377,9 +465,10 @@ mod tests {
             "/nonexistent/dir/key.sk".into(),
         ])
         .unwrap_err();
-        assert!(err.to_string().contains("invalid --key"));
+        assert!(err.to_string().contains("io error"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn keygen_missing_out_flag_errors() {
         // Covers L176: `?` on require(args, "--out") in cmd_keygen.
@@ -387,6 +476,7 @@ mod tests {
         assert!(err.to_string().contains("--out"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn predict_store_source_without_key_errors() {
         // Covers L211: `?` on open_store in cmd_predict for the store tier
@@ -416,6 +506,7 @@ mod tests {
         assert!(err.to_string().contains("--key"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn predict_resolve_build_round_trip_toml() {
         let tmp = TempDir::new().unwrap();
@@ -493,6 +584,7 @@ mod tests {
         .unwrap();
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn predict_rejects_missing_osf_in_toml() {
         let tmp = TempDir::new().unwrap();
@@ -521,6 +613,7 @@ mod tests {
         assert!(err.to_string().contains("--osf"), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_is_byte_identical_on_re_run() {
         let tmp = TempDir::new().unwrap();
@@ -567,6 +660,7 @@ mod tests {
         assert_eq!(a_json, b_json);
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn resolve_rejects_bad_outcome_value() {
         let tmp = TempDir::new().unwrap();
@@ -588,6 +682,7 @@ mod tests {
         assert!(err.to_string().contains("--outcome maybe"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn predict_missing_required_flag_errors() {
         let tmp = TempDir::new().unwrap();
@@ -601,6 +696,7 @@ mod tests {
         assert!(err.to_string().contains("--title"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn predict_missing_source_errors() {
         // Covers L205:57: `?` on require(args, "--source") in cmd_predict.
@@ -608,6 +704,7 @@ mod tests {
         assert!(err.to_string().contains("--source"), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn predict_invalid_confidence_in_store_register_errors() {
         // Covers L228: `?` on store.register(new) when confidence is out of range.
@@ -639,6 +736,7 @@ mod tests {
         assert!(err.to_string().contains("confidence"), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn resolve_bad_id_errors() {
         // Covers L248: `?` on LedgerOutcome::try_new when id is not a ULID.
@@ -661,6 +759,7 @@ mod tests {
         assert!(err.to_string().contains("invalid resolution"), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn resolve_store_open_error() {
         // Covers L249: `?` on open_store in cmd_resolve when key is missing.
@@ -682,6 +781,7 @@ mod tests {
         assert!(err.to_string().contains("--key"), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn resolve_store_resolve_error() {
         // Covers L250: `?` on store.resolve when prediction doesn't exist.
@@ -704,6 +804,7 @@ mod tests {
         assert!(err.to_string().contains("unknown prediction"), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn export_build_error_propagates() {
         // Covers L260: `?` on export::build when source has invalid date.
@@ -723,6 +824,7 @@ mod tests {
         assert!(err.to_string().contains("invalid today"), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn export_write_error_propagates() {
         // Covers L264: `?` on std::fs::write(&path, &json) in cmd_export.
@@ -741,6 +843,7 @@ mod tests {
         assert!(err.to_string().contains("io error"), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_open_store_error() {
         // Covers L277: `?` on open_store in cmd_build when source is invalid.
@@ -762,6 +865,7 @@ mod tests {
         assert!(err.to_string().contains("invalid today"), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_create_dir_fails() {
         // Covers L283: `?` on std::fs::create_dir_all in cmd_build.
@@ -785,6 +889,7 @@ mod tests {
         assert!(err.to_string().contains("io error"), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_run_error_propagates() {
         // Covers L299: `?` on verify::run in cmd_verify when pubkey is bad.
@@ -807,6 +912,7 @@ mod tests {
 
     // ── Coverage: bad source prefix in each subcommand ─────────────────────
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn resolve_bad_source_prefix_errors() {
         // Covers L234:59: `?` on Source::parse in cmd_resolve when prefix is bad.
@@ -826,6 +932,7 @@ mod tests {
         assert!(err.to_string().contains("csv"), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn export_bad_source_prefix_errors() {
         // Covers L256:59: `?` on Source::parse in cmd_export when prefix is bad.
@@ -839,6 +946,7 @@ mod tests {
         assert!(err.to_string().contains("csv"), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_bad_source_prefix_errors() {
         // Covers L273:59: `?` on Source::parse in cmd_build when prefix is bad.
@@ -854,6 +962,7 @@ mod tests {
         assert!(err.to_string().contains("csv"), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_bad_source_prefix_errors() {
         // Covers L296:59: `?` on Source::parse in cmd_verify when prefix is bad.
@@ -867,6 +976,7 @@ mod tests {
         assert!(err.to_string().contains("csv"), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_store_open_error() {
         // Covers L277: `?` on open_store in cmd_build — store needs key.
@@ -884,6 +994,7 @@ mod tests {
         assert!(!err.to_string().is_empty(), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_write_html_fails() {
         // Covers L284-L285: `?` on std::fs::write(index.html) in cmd_build.
@@ -909,6 +1020,7 @@ mod tests {
         assert!(err.is_err(), "expected write failure");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_write_ledger_json_fails() {
         // Covers L286: `?` on std::fs::write(ledger.json) in cmd_build.
@@ -936,6 +1048,7 @@ mod tests {
         assert!(err.is_err(), "expected write failure on ledger.json");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_write_root_index_fails() {
         // Covers L287: `?` on std::fs::write(site/index.html) in cmd_build.
@@ -964,6 +1077,7 @@ mod tests {
         assert!(err.is_err(), "expected write failure on site/index.html");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn predict_rejects_non_numeric_confidence() {
         // Covers L213: the `format!("--confidence: {e}")` closure in cmd_predict
@@ -994,6 +1108,7 @@ mod tests {
         assert!(err.to_string().contains("--confidence"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn bad_source_prefix_errors() {
         let err = run(&[
@@ -1008,6 +1123,7 @@ mod tests {
         assert!(err.to_string().contains("csv"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn load_signing_key_round_trip() {
         let tmp = TempDir::new().unwrap();
@@ -1018,6 +1134,7 @@ mod tests {
         assert_eq!(loaded.to_bytes(), sk.to_bytes());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn load_signing_key_rejects_garbage() {
         let tmp = TempDir::new().unwrap();
@@ -1030,6 +1147,7 @@ mod tests {
 
     // ── Coverage: open_store(Source::Store, …) ──────────────────────────────
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn open_store_store_requires_key() {
         let tmp = TempDir::new().unwrap();
@@ -1037,6 +1155,7 @@ mod tests {
         assert!(open_store(&Source::Store(db), None).is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn core_error_converts_to_bad_source_via_from() {
         // Covers the From<pos_core::CoreError> for CliError impl.
@@ -1047,6 +1166,7 @@ mod tests {
         assert!(cli_err.to_string().contains("store error"), "{cli_err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn open_store_store_with_bad_key_returns_error() {
         // Covers L99: the `?` on `load_signing_key(key_path)?` in open_store
@@ -1059,6 +1179,7 @@ mod tests {
         assert!(err.is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn open_store_sqlite_fails_on_invalid_path() {
         // Covers L103: `format!("open sqlite: {e}")` when the SQLite path is
@@ -1078,6 +1199,7 @@ mod tests {
         assert!(err.is_err(), "expected error for invalid path");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn open_store_sqlite_with_corrupted_db_fails() {
         // Targets L130: the `?` on list_timelines when the DB is corrupt.
@@ -1103,6 +1225,7 @@ mod tests {
         assert!(err.is_err(), "expected error for corrupted DB");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn open_store_readonly_db_fails_on_create_timeline() {
         // Covers L135: `?` on create_timeline when the DB is read-only.
@@ -1137,6 +1260,7 @@ mod tests {
         assert!(err.is_err(), "expected error from read-only DB");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn find_or_create_list_timelines_fails_on_corrupt_db() {
         // Covers L130: `?` on list_timelines when the DB has a corrupt
@@ -1169,6 +1293,7 @@ mod tests {
         assert!(err.is_err(), "expected error from corrupt DB");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn open_store_reuse_existing_ledger_timeline() {
         // Covers L133 (return Ok early when ledger timeline found) and
@@ -1189,6 +1314,7 @@ mod tests {
         open_store(&Source::Store(db), Some(&key_path)).unwrap();
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn load_signing_key_fails_when_file_missing() {
         // Covers L53: the `e.to_string()` closure and `?` in load_signing_key
@@ -1200,6 +1326,7 @@ mod tests {
         assert!(err.unwrap_err().to_string().contains("invalid --key"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn hex_decode_second_nibble_error() {
         // Covers L71: `nib(l)?` — the second nibble error sub-region.
@@ -1209,6 +1336,7 @@ mod tests {
         assert!(err.unwrap_err().contains("bad hex"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn cmd_resolve_false_outcome_sets_false() {
         // Covers L241: the "false" arm in cmd_resolve.
@@ -1225,6 +1353,7 @@ mod tests {
         assert!(!ledger.entries()[0].resolution.as_ref().unwrap().outcome);
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn open_store_store_with_key_succeeds_and_well_known_entity_covered() {
         // Exercises: well_known_entity(), the store: branch of open_store,
@@ -1252,6 +1381,7 @@ mod tests {
         assert!(store2.is_ok(), "second open (reuse branch) must succeed");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn find_or_create_skips_non_ledger_timelines_in_loop() {
         // Exercises line 134: the `}` closing the inner `if` in the `for` loop
@@ -1284,6 +1414,7 @@ mod tests {
 
     // ── Coverage: cmd_export --out ──────────────────────────────────────────
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn export_without_out_flag_prints_to_stdout() {
         // Exercises the `None => println!("{json}")` branch (line 268).
@@ -1301,6 +1432,7 @@ mod tests {
         .unwrap();
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn export_with_out_flag_writes_file() {
         let tmp = TempDir::new().unwrap();
@@ -1323,6 +1455,7 @@ mod tests {
 
     // ── Coverage: cmd_verify via run() ─────────────────────────────────────
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_via_run_toml_ok() {
         let tmp = TempDir::new().unwrap();
@@ -1338,6 +1471,7 @@ mod tests {
         .unwrap();
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_via_run_with_manifest() {
         let tmp = TempDir::new().unwrap();
@@ -1390,6 +1524,7 @@ mod tests {
         ]
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn predict_missing_statement_errors() {
         // Covers L208: `?` on require("--statement")
@@ -1402,6 +1537,7 @@ mod tests {
         assert!(run(&args).is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn predict_missing_predicted_outcome_errors() {
         // Covers L209: `?` on require("--predicted-outcome")
@@ -1416,6 +1552,7 @@ mod tests {
         assert!(run(&args).is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn predict_missing_confidence_errors() {
         // Covers L210: `?` on require("--confidence")
@@ -1427,6 +1564,7 @@ mod tests {
         assert!(run(&args).is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn predict_missing_made_at_errors() {
         // Covers L214: `?` on require("--made-at")
@@ -1438,6 +1576,7 @@ mod tests {
         assert!(run(&args).is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn predict_missing_resolve_by_errors() {
         // Covers L215: `?` on require("--resolve-by")
@@ -1464,6 +1603,7 @@ mod tests {
         ]
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn resolve_missing_source_errors() {
         // Covers L234: `?` on Source::parse(require("--source")?)
@@ -1475,6 +1615,7 @@ mod tests {
         assert!(run(&args).is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn resolve_missing_id_errors() {
         // Covers L236: `?` on require("--id")
@@ -1486,6 +1627,7 @@ mod tests {
         assert!(run(&args).is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn resolve_missing_outcome_errors() {
         // Covers L237: `?` on require("--outcome")
@@ -1497,6 +1639,7 @@ mod tests {
         assert!(run(&args).is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn resolve_missing_resolved_at_errors() {
         // Covers L247: `?` on require("--resolved-at")
@@ -1508,18 +1651,21 @@ mod tests {
         assert!(run(&args).is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn export_missing_source_errors() {
         // Covers L256: `?` in cmd_export Source::parse(require("--source")?)
         assert!(run(&["piglor-ledger".into(), "export".into()]).is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_missing_source_errors() {
         // Covers L273: `?` in cmd_build Source::parse(require("--source")?)
         assert!(run(&["piglor-ledger".into(), "build".into()]).is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_missing_site_errors() {
         // Covers L274: `?` on require("--site")
@@ -1535,6 +1681,7 @@ mod tests {
         .is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_missing_source_errors() {
         // Covers L296: `?` in cmd_verify Source::parse(require("--source")?)

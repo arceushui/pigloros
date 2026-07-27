@@ -123,6 +123,7 @@ pub struct LedgerView {
     /// resolution (ADR-017 Decision 7). Always present in JSON (`null`
     /// when no resolutions yet) so external consumers don't have to
     /// branch on key presence.
+    #[serde(default)]
     pub mean_brier: Option<f64>,
     /// Human-readable exclusion warnings (e.g. missing OSF links).
     /// Always present in JSON (`[]` when none) for the same reason.

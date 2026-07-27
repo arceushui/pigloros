@@ -71,7 +71,7 @@ mod tests {
         bin_keygen(&key_path);
         bin_predict_toml(&dir);
 
-        let id = first_prediction_id(&dir);
+        let id = piglor_ledger::test_helpers::first_prediction_id(&dir);
         bin_resolve_toml(&dir, &id, "false");
 
         run(&[
@@ -329,20 +329,6 @@ mod tests {
             "2026-07-30T09:00:00Z".into(),
         ])
         .unwrap();
-    }
-
-    fn first_prediction_id(dir: &std::path::Path) -> String {
-        std::fs::read_dir(dir.join("predictions"))
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path()
-            .file_stem()
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_owned()
     }
 
     fn derive_pubkey_hex(key_path: &std::path::Path) -> String {

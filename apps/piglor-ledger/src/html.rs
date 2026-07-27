@@ -192,6 +192,7 @@ pub fn render_redirect() -> String {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use pos_plugin_ledger::LedgerEntryView;
@@ -246,6 +247,7 @@ mod tests {
         e
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn escape_html_special_chars() {
         assert_eq!(esc("safe"), "safe");
@@ -253,6 +255,7 @@ mod tests {
         assert_eq!(esc("plain text 123"), "plain text 123");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn confidence_and_brier_format() {
         assert_eq!(fmt_confidence(0.8), "80.0%");
@@ -263,6 +266,7 @@ mod tests {
         assert_eq!(fmt_brier(1.0), "1.000");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn empty_state_says_no_brier_score_yet() {
         let v = view(vec![], 0, 0, 0, None);
@@ -274,6 +278,7 @@ mod tests {
         assert!(html.contains("Demo tier (TOML)"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn headline_shows_brier_when_resolved() {
         let v = view(vec![resolved_entry("id1", 0.04, true)], 0, 0, 1, Some(0.04));
@@ -285,6 +290,7 @@ mod tests {
         assert!(html.contains("Public key: <code>deadbeef</code>"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn overdue_badge_shown_in_headline_and_entry() {
         let v = view(vec![overdue_entry("id1")], 0, 1, 0, None);
@@ -297,6 +303,7 @@ mod tests {
         assert!(html.contains("<span class=\"badge overdue\">overdue</span>"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn resolved_entry_displays_outcome_brier_and_status() {
         let v = view(vec![resolved_entry("id1", 0.04, true)], 0, 0, 1, Some(0.04));
@@ -306,6 +313,7 @@ mod tests {
         assert!(html.contains("Status: resolved"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn negative_outcome_displays_did_not_occur() {
         let v = view(
@@ -320,6 +328,7 @@ mod tests {
         assert!(html.contains("Brier Score: 0.640"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn entries_are_html_escaped() {
         let mut e = pending_entry("id1", "<script>alert(1)</script>");
@@ -334,6 +343,7 @@ mod tests {
         assert!(!html.contains("<script>alert"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn osf_link_is_escaped_and_href_safe() {
         let mut e = pending_entry("id1", "T");
@@ -343,6 +353,7 @@ mod tests {
         assert!(html.contains("<a href=\"https://osf.io/x?a=1&amp;b=2\">OSF</a>"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn scenario_shown_when_present() {
         let v = view(vec![pending_entry("id1", "T")], 1, 0, 0, None);
@@ -350,6 +361,7 @@ mod tests {
         assert!(html.contains("scenario: places"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn scenario_omitted_when_absent() {
         let mut e = pending_entry("id1", "T");
@@ -359,6 +371,7 @@ mod tests {
         assert!(!html.contains("scenario:"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn redirect_page_targets_ledger_subdir() {
         let html = render_redirect();
@@ -366,6 +379,7 @@ mod tests {
         assert!(html.contains("<a href=\"ledger/\">"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn render_is_byte_identical_on_re_run() {
         let v = view(
@@ -383,6 +397,7 @@ mod tests {
         assert_eq!(a, b);
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn header_contains_doctype_and_viewport() {
         let v = view(vec![], 0, 0, 0, None);
@@ -391,6 +406,7 @@ mod tests {
         assert!(html.contains("viewport"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn resolved_entry_without_outcome_data_skips_brier_block() {
         // status == "resolved" but outcome/resolved_at/brier_score are None.

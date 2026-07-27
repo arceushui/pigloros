@@ -218,6 +218,7 @@ fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, Cli
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::{run, Source, VerifyOutcome, VerifyReport};
     use crate::cli::run as cli_run;
@@ -236,6 +237,7 @@ mod tests {
 
     /// Covers the `Ok` arm of `expect_mismatch` — verifies the helper panics
     /// when it receives `Ok` (so both match arms are instrumented and hit).
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn expect_mismatch_panics_on_ok() {
         let result = std::panic::catch_unwind(|| {
@@ -271,6 +273,7 @@ mod tests {
         dir
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_toml_no_manifest_returns_ok_after_predict() {
         let tmp = TempDir::new().unwrap();
@@ -281,6 +284,7 @@ mod tests {
         assert!(report.n >= 1);
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_toml_with_resolved_entry_covers_sort_closure() {
         // Covers L93: the sort closure `a.0.cmp(&b.0)` in verify_toml which
@@ -341,6 +345,7 @@ mod tests {
         assert_eq!(report.n, 2);
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_toml_with_manifest_round_trips_ok() {
         let tmp = TempDir::new().unwrap();
@@ -359,6 +364,7 @@ mod tests {
         assert_eq!(report.outcome, VerifyOutcome::Ok);
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_toml_detects_tampered_prediction_file() {
         let tmp = TempDir::new().unwrap();
@@ -386,6 +392,7 @@ mod tests {
         assert!(reason.contains("hash differs"), "{reason}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_toml_detects_removed_file() {
         let tmp = TempDir::new().unwrap();
@@ -415,6 +422,7 @@ mod tests {
         assert!(reason.contains("removed"), "{reason}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_toml_detects_added_file() {
         let tmp = TempDir::new().unwrap();
@@ -436,6 +444,7 @@ mod tests {
         assert!(reason.contains("added"), "{reason}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_with_signed_events_passes() {
         let tmp = TempDir::new().unwrap();
@@ -480,6 +489,7 @@ mod tests {
         assert!(report.n >= 1);
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_without_pubkey_returns_bad_source() {
         let tmp = TempDir::new().unwrap();
@@ -492,6 +502,7 @@ mod tests {
         assert!(err.to_string().contains("--pubkey"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_with_wrong_pubkey_reports_mismatch() {
         let tmp = TempDir::new().unwrap();
@@ -547,6 +558,7 @@ mod tests {
         );
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_handles_unreadable_pubkey_gracefully() {
         let tmp = TempDir::new().unwrap();
@@ -564,6 +576,7 @@ mod tests {
         assert!(err2.to_string().contains("--pubkey"), "{err2}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_wrong_length_pubkey_rejected() {
         // Covers L173: "--pubkey must be 32 bytes" when hex decodes to != 32 bytes.
@@ -578,6 +591,7 @@ mod tests {
         assert!(err.to_string().contains("--pubkey"), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_invalid_ed25519_key_rejected() {
         // Covers L175: `e.to_string()` in verifying_key_from_public_key error.
@@ -606,6 +620,7 @@ mod tests {
         assert!(err.to_string().contains("invalid --key"), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_handles_missing_ledger_timeline() {
         let tmp = TempDir::new().unwrap();
@@ -618,6 +633,7 @@ mod tests {
         assert!(err.to_string().contains("ledger"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_with_invalid_sqlite_path_errors() {
         // Covers L180: `format!("open sqlite: {e}")` in verify_store.
@@ -628,6 +644,7 @@ mod tests {
         assert!(!err.to_string().is_empty(), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_with_corrupted_db_errors() {
         // Covers L183: `format!("list timelines: {e}")` in verify_store.
@@ -640,6 +657,7 @@ mod tests {
         assert!(err.is_err(), "expected error for corrupted DB");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn report_display_covers_ok_and_mismatch() {
         let ok = VerifyReport {
@@ -670,6 +688,7 @@ mod tests {
 
     // ── Additional coverage tests ────────────────────────────────────────────
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_toml_with_store_tier_manifest_reports_mismatch() {
         // verify_toml() receives a Store-tier manifest → the `else` branch
@@ -705,6 +724,7 @@ mod tests {
         assert!(reason.contains("not a toml-tier export"), "{reason}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_toml_with_bad_json_manifest_is_error() {
         // Exercises the serde_json::from_str error path (line 240-241).
@@ -717,6 +737,7 @@ mod tests {
         assert!(err.to_string().contains("json error"), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn collect_hashes_skips_unreadable_predictions_dir() {
         // collect_hashes is now lenient — any read_dir error just skips that
@@ -731,6 +752,7 @@ mod tests {
         assert_eq!(report.outcome, VerifyOutcome::Ok);
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn collect_hashes_skips_non_toml_files() {
         // Exercises the `continue` on line 148: a non-.toml file is ignored.
@@ -743,6 +765,7 @@ mod tests {
         assert_eq!(report.outcome, VerifyOutcome::Ok);
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_unsigned_event_reports_mismatch() {
         // Exercises the `None => return Ok(VerifyReport { unsigned })` branch
@@ -813,6 +836,7 @@ mod tests {
         assert!(reason.contains("unsigned"), "{reason}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_skips_unknown_event_types() {
         // Exercises the `continue` on line 193 — event_type not in ledger types.
@@ -865,6 +889,7 @@ mod tests {
         assert_eq!(report.n, 1);
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn nib_rejects_invalid_hex_char() {
         // Exercises the `_` error arm in the test module's nib helper.
@@ -872,6 +897,7 @@ mod tests {
         assert!(nib('z').is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_toml_manifest_read_error() {
         // Covers L79: `?` on std::fs::read_to_string(path) in verify_toml
@@ -884,6 +910,7 @@ mod tests {
         assert!(err.to_string().contains("io error"), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn collect_hashes_readdir_entry_error() {
         // Covers L148: `entry?` in collect_hashes when a readdir entry fails.
@@ -901,6 +928,7 @@ mod tests {
         assert!(err.to_string().contains("io error"), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_corrupted_db_errors() {
         // Covers L182: `?` on list_timelines in verify_store when DB is corrupt.
@@ -917,6 +945,7 @@ mod tests {
         assert!(err.is_err(), "expected error for corrupted DB");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_list_timelines_fails_on_corrupt_db() {
         // Covers L181: `?` on list_timelines in verify_store when the timeline
@@ -949,6 +978,7 @@ mod tests {
         assert!(!err.to_string().is_empty(), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_read_fails_on_corrupt_events() {
         // Covers L186: `?` on store.read when event seq is corrupt.
@@ -998,6 +1028,7 @@ mod tests {
         assert!(!err.to_string().is_empty(), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn hex_decode_second_nibble_error_in_verify() {
         // Covers L230: `?` on nib(l) in hex_decode when second nibble is bad.
@@ -1014,6 +1045,7 @@ mod tests {
         assert!(err.to_string().contains("--pubkey"), "{err}");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn nib_covers_uppercase() {
         // Exercises 'A'..='F' arm in the test module's nib helper.
@@ -1021,12 +1053,14 @@ mod tests {
         assert_eq!(nib('F').unwrap(), 15);
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn hex_decode_first_nibble_error() {
         // Covers L697:28: `nib(h)?` first nibble error in test hex_decode_local.
         assert!(hex_decode("g0").is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn hex_decode_second_nibble_error_in_test_helper() {
         // Covers L697:44: `nib(l)?` second nibble error in test hex_decode_local.

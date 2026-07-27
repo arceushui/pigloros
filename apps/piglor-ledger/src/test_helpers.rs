@@ -1,6 +1,5 @@
-//! Shared test utilities used across test modules in this crate.
-//!
-//! Only compiled in `#[cfg(test)]` — no production code here.
+//! Shared test-support utilities exposed as a public module so the binary
+//! crate's test code can call them without duplicating the implementations.
 
 use std::path::Path;
 
@@ -9,7 +8,13 @@ use std::path::Path;
 ///
 /// Used in multiple test modules; lives here to avoid the 4-way duplication
 /// of the `read_dir().next().…file_stem().to_owned()` chain.
-pub(crate) fn first_prediction_id(dir: &Path) -> String {
+///
+/// # Panics
+///
+/// Panics if the `predictions/` directory is empty or the entry cannot be
+/// read — expected only in test fixtures that guarantee a prediction exists.
+#[must_use]
+pub fn first_prediction_id(dir: &Path) -> String {
     std::fs::read_dir(dir.join("predictions"))
         .unwrap()
         .next()

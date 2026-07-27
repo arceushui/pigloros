@@ -17,14 +17,15 @@ pub(crate) mod html;
 pub(crate) mod json;
 pub(crate) mod verify;
 
-#[cfg(test)]
-pub(crate) mod test_helpers;
+/// Test support utilities shared across crate boundaries.
+pub mod test_helpers;
 
 pub use cli::{open_store, run, Source};
-pub use export::ExportManifest;
+pub use export::{build as build_manifest, ExportManifest};
 pub use html::{render_html, render_redirect};
 pub use json::render_json;
 pub use pos_plugin_ledger::LedgerView;
+pub use verify::run as verify_source;
 
 /// Encode bytes as lowercase hex.
 pub(crate) fn hex_encode(bytes: &[u8]) -> String {

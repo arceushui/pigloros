@@ -31,9 +31,11 @@ pub fn nib(c: char) -> Result<u8, String> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn round_trip_lowercase() {
         let bytes = [0x00, 0xab, 0xff];
@@ -41,27 +43,32 @@ mod tests {
         assert_eq!(hex_decode(hex).unwrap(), bytes);
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn round_trip_uppercase() {
         assert_eq!(hex_decode("00ABFF").unwrap(), [0x00, 0xab, 0xff]);
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn round_trip_mixed_case() {
         assert_eq!(hex_decode("aAbB").unwrap(), [0xaa, 0xbb]);
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn odd_length_rejected() {
         assert!(hex_decode("abc").is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn bad_digit_rejected() {
         assert!(nib('g').is_err());
         assert!(hex_decode("zz").is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn nib_covers_all_ranges() {
         assert_eq!(nib('0').unwrap(), 0);

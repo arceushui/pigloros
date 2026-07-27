@@ -22,6 +22,7 @@ pub fn render_json(view: &LedgerView) -> String {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use pos_plugin_ledger::LedgerEntryView;
@@ -51,6 +52,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn json_contains_expected_keys_and_pretty_format() {
         let v = sample_view();
@@ -63,12 +65,14 @@ mod tests {
         assert!(s.contains("\n  "));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn json_is_deterministic_on_re_run() {
         let v = sample_view();
         assert_eq!(render_json(&v), render_json(&v));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn empty_view_serialises_with_null_mean_brier() {
         let v = LedgerView {
