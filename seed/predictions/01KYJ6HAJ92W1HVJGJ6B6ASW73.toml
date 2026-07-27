@@ -1,0 +1,9 @@
+prediction_id = "01KYJ6HAJ92W1HVJGJ6B6ASW73"
+title = "Return to Office Mandates"
+statement = "By end of 2026, at least 3 Fortune 500 companies that currently allow remote work will announce mandatory hybrid or full-time office policies"
+predicted_outcome = "Yes"
+confidence = 0.55
+scenario = "policy"
+made_at = "2026-07-27T10:05:00Z"
+resolve_by = "2027-01-01"
+osf_link = "https://osf.io/TODO-register-before-merge"

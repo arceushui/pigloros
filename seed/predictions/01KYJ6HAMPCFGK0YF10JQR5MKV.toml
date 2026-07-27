@@ -1,0 +1,9 @@
+prediction_id = "01KYJ6HAMPCFGK0YF10JQR5MKV"
+title = "Rust in Linux Kernel"
+statement = "By end of 2026, Rust for Linux will be merged into the mainline Linux kernel with at least one real driver written in Rust"
+predicted_outcome = "Yes"
+confidence = 0.7
+scenario = "tech"
+made_at = "2026-07-27T10:10:00Z"
+resolve_by = "2027-01-15"
+osf_link = "https://osf.io/TODO-register-before-merge"
