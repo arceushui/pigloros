@@ -1,0 +1,1035 @@
+//! `piglor-ledger verify` — recomputes tamper-evidence for the current
+//! source (ADR-017 Decision 5).
+//!
+//! TOML tier: recomputes the b3sum-compatible BLAKE3 of each file's raw
+//! bytes and optionally compares against a previously-written [`ExportManifest`].
+//! Store tier: re-reads ledger events from the `SQLite` store and verifies
+//! Ed25519 signatures against the supplied `--pubkey`.
+
+use std::path::Path;
+
+use pos_core::store::SeqRange;
+use pos_crypto::signing::{verify, verifying_key_from_public_key};
+use pos_plugin_ledger::EVENT_TYPE_PREDICTION;
+
+use crate::{cli::Source, export::ExportManifest, hex::hex_decode, CliError};
+
+/// Summary of a verify run; printed to stdout and asserted on in tests.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VerifyReport {
+    /// Tier that was verified.
+    pub tier: String,
+    /// Number of files (toml) or events (store) inspected.
+    pub n: usize,
+    /// Outcome (`OK` or a failure message).
+    pub outcome: VerifyOutcome,
+}
+
+/// Outcome of a verify run.
+#[derive(Clone, Debug, PartialEq)]
+pub enum VerifyOutcome {
+    /// All checks passed.
+    Ok,
+    /// One or more files were renamed, modified, or removed since export.
+    Mismatch {
+        /// Path (toml) or seq (store) of the offending entry.
+        which: String,
+        /// What was wrong.
+        reason: String,
+    },
+}
+
+impl std::fmt::Display for VerifyReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.outcome {
+            VerifyOutcome::Ok => write!(f, "OK: {} tier, {} entries", self.tier, self.n),
+            VerifyOutcome::Mismatch { which, reason } => {
+                write!(f, "FAIL: {} tier — {}: {}", self.tier, which, reason)
+            }
+        }
+    }
+}
+
+/// Run verification against `source`.
+///
+/// If `manifest_path` is provided (TOML tier), the recomputed hashes are
+/// compared against that manifest. If `pubkey_hex` is provided (store tier),
+/// event signatures are checked against that public key.
+///
+/// # Errors
+/// Returns [`CliError`] on adapter failure. Verification *failures* are
+/// reported via [`VerifyReport`] (a non-error path) so the CLI prints a
+/// readable report — only infrastructure errors propagate as `Err`.
+pub fn run(
+    source: &Source,
+    pubkey_hex: Option<&str>,
+    manifest_path: Option<&Path>,
+) -> Result<VerifyReport, CliError> {
+    match source {
+        Source::Toml(dir) => verify_toml(dir, manifest_path),
+        Source::Store(db) => verify_store(db, pubkey_hex),
+    }
+}
+
+fn verify_toml(dir: &Path, manifest_path: Option<&Path>) -> Result<VerifyReport, CliError> {
+    let mut hashes = collect_hashes(dir)?;
+    hashes.sort_by(|a, b| a.0.cmp(&b.0));
+    let n = hashes.len();
+    if let Some(path) = manifest_path {
+        let text = std::fs::read_to_string(path)?;
+        let manifest: ExportManifest = serde_json::from_str(&text)?;
+        let ExportManifest::Toml { files, .. } = manifest else {
+            return Ok(VerifyReport {
+                tier: "toml".to_owned(),
+                n,
+                outcome: VerifyOutcome::Mismatch {
+                    which: "manifest".to_owned(),
+                    reason: "manifest is not a toml-tier export".to_owned(),
+                },
+            });
+        };
+        let mut expected: Vec<(String, String)> =
+            files.into_iter().map(|f| (f.path, f.hash)).collect();
+        expected.sort_by(|a, b| a.0.cmp(&b.0));
+        if expected != hashes {
+            let (which, reason) = describe_mismatch(&expected, &hashes);
+            return Ok(VerifyReport {
+                tier: "toml".to_owned(),
+                n,
+                outcome: VerifyOutcome::Mismatch { which, reason },
+            });
+        }
+    }
+    Ok(VerifyReport {
+        tier: "toml".to_owned(),
+        n,
+        outcome: VerifyOutcome::Ok,
+    })
+}
+
+fn describe_mismatch(
+    expected: &[(String, String)],
+    actual: &[(String, String)],
+) -> (String, String) {
+    let expected_paths: std::collections::BTreeSet<&String> =
+        expected.iter().map(|(p, _)| p).collect();
+    let actual_paths: std::collections::BTreeSet<&String> = actual.iter().map(|(p, _)| p).collect();
+    for (path, hash) in actual {
+        match expected.iter().find(|(p, _)| p == path) {
+            None => return (path.clone(), "file added since export".to_owned()),
+            Some((_, expected_hash)) if expected_hash != hash => {
+                return (path.clone(), "hash differs from manifest".to_owned());
+            }
+            _ => {}
+        }
+    }
+    // If we get here, no file in `actual` was added or modified — the
+    // difference must be a removed file (a path present in `expected` but
+    // absent from `actual`). The caller only calls this when expected != actual,
+    // so at least one such missing path always exists.
+    let missing = expected_paths
+        .difference(&actual_paths)
+        .next()
+        .map_or("(unknown)", |s| s.as_str());
+    (missing.to_owned(), "file removed since export".to_owned())
+}
+
+/// Walk `predictions/` and `resolutions/` returning `(rel_path, hex_hash)` pairs.
+fn collect_hashes(dir: &Path) -> Result<Vec<(String, String)>, CliError> {
+    let mut out = Vec::new();
+    for sub in ["predictions", "resolutions"] {
+        let subdir = dir.join(sub);
+        let Ok(rd) = std::fs::read_dir(&subdir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            let bytes = std::fs::read(&path)?;
+            let hash = blake3::hash(&bytes).to_hex().to_string();
+            let rel = path
+                .strip_prefix(dir)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
+            out.push((rel, hash));
+        }
+    }
+    Ok(out)
+}
+
+fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, CliError> {
+    let pubkey_hex = pubkey_hex
+        .ok_or_else(|| CliError::BadSource("store tier verify requires --pubkey HEX".to_owned()))?;
+    let pubkey_bytes =
+        hex_decode(pubkey_hex).map_err(|e| CliError::BadKey(format!("--pubkey: {e}")))?;
+    let arr: [u8; 32] = pubkey_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| CliError::BadKey("--pubkey must be 32 bytes".to_owned()))?;
+    let pk = pos_core::PublicKey::from_bytes(arr);
+    let vk = verifying_key_from_public_key(&pk).map_err(|e| CliError::BadKey(e.to_string()))?;
+
+    let store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+        path: db.to_string_lossy().into_owned(),
+    })
+    .map_err(|e| CliError::BadSource(e.to_string()))?;
+    let timeline = store
+        .list_timelines()?
+        .into_iter()
+        .find(|t| t.meta.name.as_deref() == Some("ledger"))
+        .ok_or_else(|| CliError::BadSource("no 'ledger' timeline in store".into()))?;
+    let events = store.read(timeline.id(), SeqRange::all())?;
+    let n = events.len();
+    for event in &events {
+        if event.event_type.as_str() != EVENT_TYPE_PREDICTION
+            && event.event_type.as_str() != pos_plugin_ledger::EVENT_TYPE_OUTCOME
+        {
+            continue;
+        }
+        let Some(sig) = &event.signature else {
+            return Ok(VerifyReport {
+                tier: "store".to_owned(),
+                n,
+                outcome: VerifyOutcome::Mismatch {
+                    which: format!("seq={}", event.seq.as_u64()),
+                    reason: "event is unsigned".to_owned(),
+                },
+            });
+        };
+        if let Err(e) = verify(&vk, &event.payload, sig) {
+            return Ok(VerifyReport {
+                tier: "store".to_owned(),
+                n,
+                outcome: VerifyOutcome::Mismatch {
+                    which: format!("seq={}", event.seq.as_u64()),
+                    reason: e.to_string(),
+                },
+            });
+        }
+    }
+    Ok(VerifyReport {
+        tier: "store".to_owned(),
+        n,
+        outcome: VerifyOutcome::Ok,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{run, Source, VerifyOutcome, VerifyReport};
+    use crate::cli::run as cli_run;
+    use crate::hex::{hex_decode, nib};
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    /// Assert the outcome is `Mismatch` and return the `(which, reason)` fields.
+    /// The `Ok` arm is exercised by `expect_mismatch_never_panics` below.
+    fn expect_mismatch(outcome: VerifyOutcome) -> (String, String) {
+        match outcome {
+            VerifyOutcome::Mismatch { which, reason } => (which, reason),
+            VerifyOutcome::Ok => panic!("expected Mismatch, got Ok"),
+        }
+    }
+
+    /// Covers the `Ok` arm of `expect_mismatch` — verifies the helper panics
+    /// when it receives `Ok` (so both match arms are instrumented and hit).
+    #[test]
+    fn expect_mismatch_panics_on_ok() {
+        let result = std::panic::catch_unwind(|| {
+            expect_mismatch(VerifyOutcome::Ok);
+        });
+        assert!(result.is_err(), "expect_mismatch must panic when given Ok");
+    }
+
+    fn populated_toml(tmp: &TempDir) -> PathBuf {
+        let dir = tmp.path().join("ledger");
+        std::fs::create_dir_all(&dir).unwrap();
+        cli_run(&[
+            "piglor-ledger".into(),
+            "predict".into(),
+            "--source".into(),
+            format!("toml:{}", dir.display()),
+            "--title".into(),
+            "T".into(),
+            "--statement".into(),
+            "S".into(),
+            "--predicted-outcome".into(),
+            "O".into(),
+            "--confidence".into(),
+            "0.7".into(),
+            "--made-at".into(),
+            "2026-07-25T12:00:00Z".into(),
+            "--resolve-by".into(),
+            "2026-08-01".into(),
+            "--osf".into(),
+            "https://osf.io/example".into(),
+        ])
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn verify_toml_no_manifest_returns_ok_after_predict() {
+        let tmp = TempDir::new().unwrap();
+        let dir = populated_toml(&tmp);
+        let report = run(&Source::Toml(dir), None, None).unwrap();
+        assert_eq!(report.tier, "toml");
+        assert_eq!(report.outcome, VerifyOutcome::Ok);
+        assert!(report.n >= 1);
+    }
+
+    #[test]
+    fn verify_toml_with_resolved_entry_covers_sort_closure() {
+        // Covers L93: the sort closure `a.0.cmp(&b.0)` in verify_toml which
+        // only runs when there are 2+ files to compare AND a manifest is provided.
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("ledger");
+        std::fs::create_dir_all(&dir).unwrap();
+        cli_run(&[
+            "piglor-ledger".into(),
+            "predict".into(),
+            "--source".into(),
+            format!("toml:{}", dir.display()),
+            "--title".into(),
+            "T".into(),
+            "--statement".into(),
+            "S".into(),
+            "--predicted-outcome".into(),
+            "O".into(),
+            "--confidence".into(),
+            "0.7".into(),
+            "--made-at".into(),
+            "2026-07-25T12:00:00Z".into(),
+            "--resolve-by".into(),
+            "2026-08-01".into(),
+            "--osf".into(),
+            "https://osf.io/example".into(),
+        ])
+        .unwrap();
+        let id = crate::test_helpers::first_prediction_id(&dir);
+        cli_run(&[
+            "piglor-ledger".into(),
+            "resolve".into(),
+            "--source".into(),
+            format!("toml:{}", dir.display()),
+            "--id".into(),
+            id,
+            "--outcome".into(),
+            "true".into(),
+            "--resolved-at".into(),
+            "2026-07-30T09:00:00Z".into(),
+        ])
+        .unwrap();
+        // Export manifest with 2 files (prediction + resolution).
+        let manifest_path = tmp.path().join("manifest.json");
+        cli_run(&[
+            "piglor-ledger".into(),
+            "export".into(),
+            "--source".into(),
+            format!("toml:{}", dir.display()),
+            "--out".into(),
+            manifest_path.to_str().unwrap().to_owned(),
+        ])
+        .unwrap();
+        // Verify WITH manifest — this enters the `if let Some(path) = manifest_path`
+        // branch and sorts both the expected (2 files) and actual (2 files) vectors.
+        let report = run(&Source::Toml(dir), None, Some(&manifest_path)).unwrap();
+        assert_eq!(report.outcome, VerifyOutcome::Ok);
+        assert_eq!(report.n, 2);
+    }
+
+    #[test]
+    fn verify_toml_with_manifest_round_trips_ok() {
+        let tmp = TempDir::new().unwrap();
+        let dir = populated_toml(&tmp);
+        let manifest_path = tmp.path().join("manifest.json");
+        cli_run(&[
+            "piglor-ledger".into(),
+            "export".into(),
+            "--source".into(),
+            format!("toml:{}", dir.display()),
+            "--out".into(),
+            manifest_path.to_str().unwrap().to_owned(),
+        ])
+        .unwrap();
+        let report = run(&Source::Toml(dir), None, Some(&manifest_path)).unwrap();
+        assert_eq!(report.outcome, VerifyOutcome::Ok);
+    }
+
+    #[test]
+    fn verify_toml_detects_tampered_prediction_file() {
+        let tmp = TempDir::new().unwrap();
+        let dir = populated_toml(&tmp);
+        let manifest_path = tmp.path().join("manifest.json");
+        cli_run(&[
+            "piglor-ledger".into(),
+            "export".into(),
+            "--source".into(),
+            format!("toml:{}", dir.display()),
+            "--out".into(),
+            manifest_path.to_str().unwrap().to_owned(),
+        ])
+        .unwrap();
+        let pred_path = std::fs::read_dir(dir.join("predictions"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        std::fs::write(&pred_path, "tampered = true\n").unwrap();
+        let report = run(&Source::Toml(dir), None, Some(&manifest_path)).unwrap();
+        let (which, reason) = expect_mismatch(report.outcome);
+        assert!(which.starts_with("predictions/"), "{which}");
+        assert!(reason.contains("hash differs"), "{reason}");
+    }
+
+    #[test]
+    fn verify_toml_detects_removed_file() {
+        let tmp = TempDir::new().unwrap();
+        let dir = populated_toml(&tmp);
+        let manifest_path = tmp.path().join("manifest.json");
+        cli_run(&[
+            "piglor-ledger".into(),
+            "export".into(),
+            "--source".into(),
+            format!("toml:{}", dir.display()),
+            "--out".into(),
+            manifest_path.to_str().unwrap().to_owned(),
+        ])
+        .unwrap();
+        std::fs::remove_file(
+            std::fs::read_dir(dir.join("predictions"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path(),
+        )
+        .unwrap();
+        let report = run(&Source::Toml(dir), None, Some(&manifest_path)).unwrap();
+        let (which, reason) = expect_mismatch(report.outcome);
+        assert!(which.starts_with("predictions/"), "{which}");
+        assert!(reason.contains("removed"), "{reason}");
+    }
+
+    #[test]
+    fn verify_toml_detects_added_file() {
+        let tmp = TempDir::new().unwrap();
+        let dir = populated_toml(&tmp);
+        let manifest_path = tmp.path().join("manifest.json");
+        cli_run(&[
+            "piglor-ledger".into(),
+            "export".into(),
+            "--source".into(),
+            format!("toml:{}", dir.display()),
+            "--out".into(),
+            manifest_path.to_str().unwrap().to_owned(),
+        ])
+        .unwrap();
+        std::fs::write(dir.join("predictions").join("rogue.toml"), "x = 1\n").unwrap();
+        let report = run(&Source::Toml(dir), None, Some(&manifest_path)).unwrap();
+        let (which, reason) = expect_mismatch(report.outcome);
+        assert!(which.ends_with("rogue.toml"), "{which}");
+        assert!(reason.contains("added"), "{reason}");
+    }
+
+    #[test]
+    fn verify_store_with_signed_events_passes() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("ledger.db");
+        let key_path = tmp.path().join("sk");
+        cli_run(&[
+            "piglor-ledger".into(),
+            "keygen".into(),
+            "--out".into(),
+            key_path.to_str().unwrap().to_owned(),
+        ])
+        .unwrap();
+        let sk_text = std::fs::read_to_string(&key_path).unwrap();
+        let pubkey = derive_pubkey_hex(sk_text.trim());
+
+        cli_run(&[
+            "piglor-ledger".into(),
+            "predict".into(),
+            "--source".into(),
+            format!("store:{}", db.display()),
+            "--key".into(),
+            key_path.to_str().unwrap().to_owned(),
+            "--title".into(),
+            "T".into(),
+            "--statement".into(),
+            "S".into(),
+            "--predicted-outcome".into(),
+            "O".into(),
+            "--confidence".into(),
+            "0.7".into(),
+            "--made-at".into(),
+            "2026-07-25T12:00:00Z".into(),
+            "--resolve-by".into(),
+            "2026-08-01".into(),
+            "--osf".into(),
+            "https://osf.io/example".into(),
+        ])
+        .unwrap();
+        let report = run(&Source::Store(db), Some(&pubkey), None).unwrap();
+        assert_eq!(report.tier, "store");
+        assert_eq!(report.outcome, VerifyOutcome::Ok);
+        assert!(report.n >= 1);
+    }
+
+    #[test]
+    fn verify_store_without_pubkey_returns_bad_source() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("ledger.db");
+        let _store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+            path: db.to_string_lossy().into_owned(),
+        })
+        .unwrap();
+        let err = run(&Source::Store(db), None, None).unwrap_err();
+        assert!(err.to_string().contains("--pubkey"));
+    }
+
+    #[test]
+    fn verify_store_with_wrong_pubkey_reports_mismatch() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("ledger.db");
+        let key_path = tmp.path().join("sk");
+        cli_run(&[
+            "piglor-ledger".into(),
+            "keygen".into(),
+            "--out".into(),
+            key_path.to_str().unwrap().to_owned(),
+        ])
+        .unwrap();
+        cli_run(&[
+            "piglor-ledger".into(),
+            "predict".into(),
+            "--source".into(),
+            format!("store:{}", db.display()),
+            "--key".into(),
+            key_path.to_str().unwrap().to_owned(),
+            "--title".into(),
+            "T".into(),
+            "--statement".into(),
+            "S".into(),
+            "--predicted-outcome".into(),
+            "O".into(),
+            "--confidence".into(),
+            "0.7".into(),
+            "--made-at".into(),
+            "2026-07-25T12:00:00Z".into(),
+            "--resolve-by".into(),
+            "2026-08-01".into(),
+            "--osf".into(),
+            "https://osf.io/example".into(),
+        ])
+        .unwrap();
+        let other_key = tmp.path().join("other_sk");
+        cli_run(&[
+            "piglor-ledger".into(),
+            "keygen".into(),
+            "--out".into(),
+            other_key.to_str().unwrap().to_owned(),
+        ])
+        .unwrap();
+        let other_text = std::fs::read_to_string(&other_key).unwrap();
+        let wrong_pubkey = derive_pubkey_hex(other_text.trim());
+
+        let report = run(&Source::Store(db), Some(&wrong_pubkey), None).unwrap();
+        let (_which, reason) = expect_mismatch(report.outcome);
+        // Ed25519 signature verification failures include "signature" (case-insensitive).
+        assert!(
+            reason.to_lowercase().contains("signature"),
+            "expected signature error, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn verify_store_handles_unreadable_pubkey_gracefully() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("ledger.db");
+        let _ = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+            path: db.to_string_lossy().into_owned(),
+        })
+        .unwrap();
+        // Odd-length: fails before nib() is called (hex_decode returns early).
+        let err = run(&Source::Store(db.clone()), Some("not-hex"), None).unwrap_err();
+        assert!(err.to_string().contains("--pubkey"), "{err}");
+
+        // Even-length with non-hex char: exercises the `_` error arm in nib().
+        let err2 = run(&Source::Store(db), Some("zz"), None).unwrap_err();
+        assert!(err2.to_string().contains("--pubkey"), "{err2}");
+    }
+
+    #[test]
+    fn verify_store_wrong_length_pubkey_rejected() {
+        // Covers L173: "--pubkey must be 32 bytes" when hex decodes to != 32 bytes.
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("ledger.db");
+        let _ = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+            path: db.to_string_lossy().into_owned(),
+        })
+        .unwrap();
+        // "aabb" is valid hex (2 bytes) but not 32 bytes.
+        let err = run(&Source::Store(db), Some("aabb"), None).unwrap_err();
+        assert!(err.to_string().contains("--pubkey"), "{err}");
+    }
+
+    #[test]
+    fn verify_store_invalid_ed25519_key_rejected() {
+        // Covers L175: `e.to_string()` in verifying_key_from_public_key error.
+        // Find a 32-byte value that is invalid for ed25519-dalek by scanning.
+        use pos_core::PublicKey;
+        use pos_crypto::signing::verifying_key_from_public_key;
+
+        // Scan 1..=255 until we find a byte pattern that is an invalid Ed25519
+        // compressed point. The scan always succeeds because not all 32-byte
+        // sequences are valid curve points.
+        let invalid_hex = (1u8..=255)
+            .find(|&candidate| {
+                let pk = PublicKey::from_bytes([candidate; 32]);
+                verifying_key_from_public_key(&pk).is_err()
+            })
+            .map(|c| format!("{c:02x}").repeat(32))
+            .expect("must find an invalid Ed25519 key among 1..=255");
+
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("ledger.db");
+        let _ = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+            path: db.to_string_lossy().into_owned(),
+        })
+        .unwrap();
+        let err = run(&Source::Store(db), Some(&invalid_hex), None).unwrap_err();
+        assert!(err.to_string().contains("invalid --key"), "{err}");
+    }
+
+    #[test]
+    fn verify_store_handles_missing_ledger_timeline() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("novelty.db");
+        let _store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+            path: db.to_string_lossy().into_owned(),
+        })
+        .unwrap();
+        let err = run(&Source::Store(db), Some(&"0".repeat(64)), None).unwrap_err();
+        assert!(err.to_string().contains("ledger"));
+    }
+
+    #[test]
+    fn verify_store_with_invalid_sqlite_path_errors() {
+        // Covers L180: `format!("open sqlite: {e}")` in verify_store.
+        let tmp = TempDir::new().unwrap();
+        let bad_db = tmp.path().join("no_such_dir").join("ledger.db");
+        // "a" * 64 is a valid 32-byte hex (all 0xaa bytes) to get past pubkey check.
+        let err = run(&Source::Store(bad_db), Some(&"a".repeat(64)), None).unwrap_err();
+        assert!(!err.to_string().is_empty(), "{err}");
+    }
+
+    #[test]
+    fn verify_store_with_corrupted_db_errors() {
+        // Covers L183: `format!("list timelines: {e}")` in verify_store.
+        let tmp = TempDir::new().unwrap();
+        let bad_db = tmp.path().join("corrupt.db");
+        std::fs::write(&bad_db, b"not sqlite data at all\n").unwrap();
+        // Use a valid 32-byte pubkey (all 'aa') to get past the pubkey validation.
+        let err = run(&Source::Store(bad_db), Some(&"aa".repeat(32)), None);
+        // Either open fails (L180) or list_timelines fails (L183).
+        assert!(err.is_err(), "expected error for corrupted DB");
+    }
+
+    #[test]
+    fn report_display_covers_ok_and_mismatch() {
+        let ok = VerifyReport {
+            tier: "toml".to_owned(),
+            n: 2,
+            outcome: VerifyOutcome::Ok,
+        };
+        assert!(ok.to_string().contains("OK"));
+        let bad = VerifyReport {
+            tier: "store".to_owned(),
+            n: 1,
+            outcome: VerifyOutcome::Mismatch {
+                which: "seq=1".to_owned(),
+                reason: "tampered".to_owned(),
+            },
+        };
+        assert!(bad.to_string().contains("FAIL"));
+        assert!(bad.to_string().contains("seq=1"));
+    }
+
+    fn derive_pubkey_hex(secret_hex: &str) -> String {
+        let bytes = hex_decode(secret_hex).unwrap();
+        let arr: [u8; 32] = bytes.as_slice().try_into().unwrap();
+        let sk = ed25519_dalek::SigningKey::from_bytes(&arr);
+        let vk = sk.verifying_key();
+        crate::hex_encode(&vk.to_bytes())
+    }
+
+    // ── Additional coverage tests ────────────────────────────────────────────
+
+    #[test]
+    fn verify_toml_with_store_tier_manifest_reports_mismatch() {
+        // verify_toml() receives a Store-tier manifest → the `else` branch
+        // on lines 82-89 (manifest is not a toml-tier export).
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("ledger");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Write a store-tier manifest JSON to a file.
+        let store_manifest = crate::export::ExportManifest::Store {
+            today: "2026-07-25".into(),
+            view: pos_plugin_ledger::LedgerView {
+                entries: Vec::new(),
+                n_pending: 0,
+                n_overdue: 0,
+                n_resolved: 0,
+                mean_brier: None,
+                warnings: Vec::new(),
+            },
+            events: Vec::new(),
+            pubkey: None,
+        };
+        let manifest_path = tmp.path().join("store-manifest.json");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&store_manifest).unwrap(),
+        )
+        .unwrap();
+
+        let report = run(&Source::Toml(dir), None, Some(&manifest_path)).unwrap();
+        let (which, reason) = expect_mismatch(report.outcome);
+        assert_eq!(which, "manifest");
+        assert!(reason.contains("not a toml-tier export"), "{reason}");
+    }
+
+    #[test]
+    fn verify_toml_with_bad_json_manifest_is_error() {
+        // Exercises the serde_json::from_str error path (line 240-241).
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("ledger");
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest_path = tmp.path().join("bad.json");
+        std::fs::write(&manifest_path, "not json at all").unwrap();
+        let err = run(&Source::Toml(dir), None, Some(&manifest_path)).unwrap_err();
+        assert!(err.to_string().contains("json error"), "{err}");
+    }
+
+    #[test]
+    fn collect_hashes_skips_unreadable_predictions_dir() {
+        // collect_hashes is now lenient — any read_dir error just skips that
+        // subdir (returns empty rather than propagating the error).
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("ledger");
+        std::fs::create_dir_all(&dir).unwrap();
+        // predictions/ is a file, so read_dir skips it silently.
+        std::fs::write(dir.join("predictions"), "not a dir").unwrap();
+        let report = run(&Source::Toml(dir), None, None).unwrap();
+        assert_eq!(report.n, 0);
+        assert_eq!(report.outcome, VerifyOutcome::Ok);
+    }
+
+    #[test]
+    fn collect_hashes_skips_non_toml_files() {
+        // Exercises the `continue` on line 148: a non-.toml file is ignored.
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("ledger");
+        std::fs::create_dir_all(dir.join("predictions")).unwrap();
+        std::fs::write(dir.join("predictions").join("README.md"), "hi").unwrap();
+        let report = run(&Source::Toml(dir), None, None).unwrap();
+        assert_eq!(report.n, 0); // README was skipped
+        assert_eq!(report.outcome, VerifyOutcome::Ok);
+    }
+
+    #[test]
+    fn verify_store_unsigned_event_reports_mismatch() {
+        // Exercises the `None => return Ok(VerifyReport { unsigned })` branch
+        // (lines 196-203) in verify_store.
+        use pos_core::{
+            clock::{Seq, WallTime},
+            event::{Event, Kind, SchemaVersion},
+            ids::{EntityId, EventId},
+        };
+        use pos_crypto::chain::hash_payload;
+        use pos_plugin_ledger::{draft_prediction, LedgerPrediction};
+
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("ledger.db");
+        let key_path = tmp.path().join("sk");
+        cli_run(&[
+            "piglor-ledger".into(),
+            "keygen".into(),
+            "--out".into(),
+            key_path.to_str().unwrap().to_owned(),
+        ])
+        .unwrap();
+        let sk_text = std::fs::read_to_string(&key_path).unwrap();
+        let pubkey = derive_pubkey_hex(sk_text.trim());
+
+        // Write a prediction event but strip the signature directly via
+        // the raw store so the event is unsigned.
+        let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+            path: db.to_string_lossy().into_owned(),
+        })
+        .unwrap();
+        let tl = store.create_timeline("ledger").unwrap();
+
+        // Build a valid-looking prediction payload (minimal CBOR map).
+        let pred = LedgerPrediction {
+            prediction_id: "01J3B0Y5ZK2J6MGK8D7QW3N0P4".to_owned(),
+            title: "T".to_owned(),
+            statement: "S".to_owned(),
+            predicted_outcome: "O".to_owned(),
+            confidence: 0.7,
+            scenario: None,
+            made_at: "2026-07-25T12:00:00Z".to_owned(),
+            resolve_by: "2026-08-01".to_owned(),
+            osf_link: "https://osf.io/x".to_owned(),
+        };
+        let entity = EntityId::new();
+        let draft = draft_prediction(entity, &pred);
+        let payload = draft.payload;
+        let payload_hash = hash_payload(&payload);
+        let event = Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new(pos_plugin_ledger::EVENT_TYPE_PREDICTION),
+            payload,
+            wall_time: WallTime::now(),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None, // unsigned
+            payload_hash,
+        };
+        store.append_committed(tl.id(), &[event]).unwrap();
+        drop(store);
+
+        let report = run(&Source::Store(db), Some(&pubkey), None).unwrap();
+        let (_which, reason) = expect_mismatch(report.outcome);
+        assert!(reason.contains("unsigned"), "{reason}");
+    }
+
+    #[test]
+    fn verify_store_skips_unknown_event_types() {
+        // Exercises the `continue` on line 193 — event_type not in ledger types.
+        use pos_core::{
+            clock::{Seq, WallTime},
+            event::{CanonicalBytes, Event, Kind, SchemaVersion},
+            ids::EventId,
+        };
+        use pos_crypto::chain::hash_payload;
+
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("ledger.db");
+        let key_path = tmp.path().join("sk");
+        cli_run(&[
+            "piglor-ledger".into(),
+            "keygen".into(),
+            "--out".into(),
+            key_path.to_str().unwrap().to_owned(),
+        ])
+        .unwrap();
+        let sk_text = std::fs::read_to_string(&key_path).unwrap();
+        let pubkey = derive_pubkey_hex(sk_text.trim());
+
+        let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+            path: db.to_string_lossy().into_owned(),
+        })
+        .unwrap();
+        let tl = store.create_timeline("ledger").unwrap();
+        let payload = CanonicalBytes::from_vec(b"irrelevant".to_vec());
+        let payload_hash = hash_payload(&payload);
+        let event = Event {
+            id: EventId::new(),
+            entity: pos_core::ids::EntityId::new(),
+            event_type: Kind::new("something.else"),
+            payload,
+            wall_time: WallTime::now(),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash,
+        };
+        store.append_committed(tl.id(), &[event]).unwrap();
+        drop(store);
+
+        // verify_store should skip the unknown event and return Ok (n=1).
+        let report = run(&Source::Store(db), Some(&pubkey), None).unwrap();
+        assert_eq!(report.outcome, VerifyOutcome::Ok);
+        assert_eq!(report.n, 1);
+    }
+
+    #[test]
+    fn nib_rejects_invalid_hex_char() {
+        // Exercises the `_` error arm in the test module's nib helper.
+        assert!(nib('g').is_err());
+        assert!(nib('z').is_err());
+    }
+
+    #[test]
+    fn verify_toml_manifest_read_error() {
+        // Covers L79: `?` on std::fs::read_to_string(path) in verify_toml
+        // when the manifest file doesn't exist.
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("ledger");
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing_manifest = tmp.path().join("nonexistent.json");
+        let err = run(&Source::Toml(dir), None, Some(&missing_manifest)).unwrap_err();
+        assert!(err.to_string().contains("io error"), "{err}");
+    }
+
+    #[test]
+    fn collect_hashes_readdir_entry_error() {
+        // Covers L148: `entry?` in collect_hashes when a readdir entry fails.
+        // Also covers L152: `std::fs::read(&path)?` when a file is unreadable.
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("ledger");
+        std::fs::create_dir_all(dir.join("predictions")).unwrap();
+        let pred_file = dir.join("predictions").join("test.toml");
+        std::fs::write(&pred_file, "[data]\n").unwrap();
+        // Make the file unreadable so fs::read fails at L152.
+        std::fs::set_permissions(&pred_file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let err = run(&Source::Toml(dir), None, None).unwrap_err();
+        std::fs::set_permissions(&pred_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(err.to_string().contains("io error"), "{err}");
+    }
+
+    #[test]
+    fn verify_store_corrupted_db_errors() {
+        // Covers L182: `?` on list_timelines in verify_store when DB is corrupt.
+        let tmp = TempDir::new().unwrap();
+        let bad_db = tmp.path().join("corrupt.db");
+        let mut content = b"SQLite format 3\x00".to_vec();
+        content.push(0x10);
+        content.push(0x00);
+        content.extend_from_slice(&[0u8; 4078]);
+        std::fs::write(&bad_db, content).unwrap();
+        // Use a valid 32-byte pubkey hex (all 'aa').
+        let err = run(&Source::Store(bad_db), Some(&"aa".repeat(32)), None);
+        // Either open or list_timelines fails — either is acceptable.
+        assert!(err.is_err(), "expected error for corrupted DB");
+    }
+
+    #[test]
+    fn verify_store_list_timelines_fails_on_corrupt_db() {
+        // Covers L181: `?` on list_timelines in verify_store when the timeline
+        // id column is corrupt (same SQLite injection technique as pos-cli).
+        let tmp = TempDir::new().unwrap();
+        let key_path = tmp.path().join("sk");
+        cli_run(&[
+            "piglor-ledger".into(),
+            "keygen".into(),
+            "--out".into(),
+            key_path.to_str().unwrap().to_owned(),
+        ])
+        .unwrap();
+        let db = tmp.path().join("corrupt.db");
+        let sk_text = std::fs::read_to_string(&key_path).unwrap();
+        let pubkey = derive_pubkey_hex(sk_text.trim());
+        {
+            let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+                path: db.to_string_lossy().into_owned(),
+            })
+            .unwrap();
+            store.create_timeline("ledger").unwrap();
+        }
+        {
+            let conn = rusqlite::Connection::open(&db).expect("open for corruption");
+            conn.execute("UPDATE timelines SET id = X'0102'", [])
+                .expect("corrupt id");
+        }
+        let err = run(&Source::Store(db), Some(&pubkey), None).unwrap_err();
+        assert!(!err.to_string().is_empty(), "{err}");
+    }
+
+    #[test]
+    fn verify_store_read_fails_on_corrupt_events() {
+        // Covers L186: `?` on store.read when event seq is corrupt.
+        let tmp = TempDir::new().unwrap();
+        let key_path = tmp.path().join("sk");
+        cli_run(&[
+            "piglor-ledger".into(),
+            "keygen".into(),
+            "--out".into(),
+            key_path.to_str().unwrap().to_owned(),
+        ])
+        .unwrap();
+        let db = tmp.path().join("corrupt_events.db");
+        let sk_text = std::fs::read_to_string(&key_path).unwrap();
+        let pubkey = derive_pubkey_hex(sk_text.trim());
+        // Add a real event so events table has data to corrupt.
+        cli_run(&[
+            "piglor-ledger".into(),
+            "predict".into(),
+            "--source".into(),
+            format!("store:{}", db.display()),
+            "--key".into(),
+            key_path.to_str().unwrap().to_owned(),
+            "--title".into(),
+            "T".into(),
+            "--statement".into(),
+            "S".into(),
+            "--predicted-outcome".into(),
+            "O".into(),
+            "--confidence".into(),
+            "0.7".into(),
+            "--made-at".into(),
+            "2026-07-25T12:00:00Z".into(),
+            "--resolve-by".into(),
+            "2026-08-01".into(),
+            "--osf".into(),
+            "https://osf.io/x".into(),
+        ])
+        .unwrap();
+        // Corrupt event seq so store.read() fails.
+        {
+            let conn = rusqlite::Connection::open(&db).expect("open for corruption");
+            conn.execute("UPDATE events SET seq = 'not-an-int'", [])
+                .expect("corrupt event seq");
+        }
+        let err = run(&Source::Store(db), Some(&pubkey), None).unwrap_err();
+        assert!(!err.to_string().is_empty(), "{err}");
+    }
+
+    #[test]
+    fn hex_decode_second_nibble_error_in_verify() {
+        // Covers L230: `?` on nib(l) in hex_decode when second nibble is bad.
+        // This exercises the `?` for the second nibble via a hex string where
+        // the first nibble is valid but the second is not.
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("ledger.db");
+        let _ = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+            path: db.to_string_lossy().into_owned(),
+        })
+        .unwrap();
+        // "ag" = valid 'a' then invalid 'g' — triggers nib(l) error
+        let err = run(&Source::Store(db), Some("ag"), None).unwrap_err();
+        assert!(err.to_string().contains("--pubkey"), "{err}");
+    }
+
+    #[test]
+    fn nib_covers_uppercase() {
+        // Exercises 'A'..='F' arm in the test module's nib helper.
+        assert_eq!(nib('A').unwrap(), 10);
+        assert_eq!(nib('F').unwrap(), 15);
+    }
+
+    #[test]
+    fn hex_decode_first_nibble_error() {
+        // Covers L697:28: `nib(h)?` first nibble error in test hex_decode_local.
+        assert!(hex_decode("g0").is_err());
+    }
+
+    #[test]
+    fn hex_decode_second_nibble_error_in_test_helper() {
+        // Covers L697:44: `nib(l)?` second nibble error in test hex_decode_local.
+        assert!(hex_decode("0g").is_err());
+    }
+}

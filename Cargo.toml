@@ -21,6 +21,7 @@ members = [
   "apps/pos-cli",
   "apps/pos-mvp",
   "apps/piglor-gateway",
+  "apps/piglor-ledger",
 ]
 resolver = "2"
 

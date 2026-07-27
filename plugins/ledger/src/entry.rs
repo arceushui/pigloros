@@ -120,11 +120,13 @@ pub struct LedgerView {
     /// Resolved entries.
     pub n_resolved: usize,
     /// Mean Brier Score over resolved entries; `None` until the first
-    /// resolution (ADR-017 Decision 7).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// resolution (ADR-017 Decision 7). Always present in JSON (`null`
+    /// when no resolutions yet) so external consumers don't have to
+    /// branch on key presence.
     pub mean_brier: Option<f64>,
     /// Human-readable exclusion warnings (e.g. missing OSF links).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    /// Always present in JSON (`[]` when none) for the same reason.
+    #[serde(default)]
     pub warnings: Vec<String>,
 }
 

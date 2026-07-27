@@ -1,0 +1,35 @@
+[package]
+name = "piglor-ledger"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Prediction Ledger CLI + static HTML renderer (ADR-017 / #110)"
+
+[[bin]]
+name = "piglor-ledger"
+path = "src/main.rs"
+
+[lib]
+name = "piglor_ledger"
+path = "src/lib.rs"
+
+[dependencies]
+pos-core = { path = "../../crates/pos-core" }
+pos-crypto = { path = "../../crates/pos-crypto" }
+pos-store = { path = "../../crates/pos-store" }
+pos-plugin-ledger = { path = "../../plugins/ledger" }
+blake3 = { workspace = true }
+ed25519-dalek = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+ulid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+rusqlite = { workspace = true }
+
+[lints]
+workspace = true
