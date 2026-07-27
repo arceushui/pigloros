@@ -12,13 +12,21 @@ use axum::{
     Json, Router,
 };
 use pos_core::CoreError;
+use pos_plugin_ledger::{LedgerStore, NewPrediction};
 use serde_json::json;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 /// Shared axum state.
 #[derive(Clone)]
 pub struct AppState {
     pub gateway: Gateway,
+    pub ledger_write_enabled: bool,
+    pub ledger_store: Option<LedgerStoreHandle>,
 }
+
+/// Shared handle for the mutable ledger store (curated or live tier).
+pub type LedgerStoreHandle = Arc<Mutex<Box<dyn LedgerStore + Send>>>;
 
 /// Build the MVP router (ADR-014 route table; WS deferred to follow-up).
 pub fn router(state: AppState) -> Router {
@@ -29,6 +37,7 @@ fn build_router(state: AppState, max_body_bytes: usize) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v1/ledger", get(get_ledger))
+        .route("/v1/ledger/predictions", post(post_ledger_prediction))
         .route("/v1/timelines", post(create_timeline))
         .route("/v1/timelines/{id}/events", get(list_events))
         .route("/v1/timelines/{id}/actions", post(post_action))
@@ -137,6 +146,23 @@ async fn post_signal(
     Ok((StatusCode::CREATED, Json(EventView::from(&event))))
 }
 
+async fn post_ledger_prediction(
+    State(state): State<AppState>,
+    Json(body): Json<NewPrediction>,
+) -> Result<impl IntoResponse, GatewayError> {
+    if !state.ledger_write_enabled {
+        return Err(GatewayError::LedgerWriteDisabled);
+    }
+    let store = state.ledger_store.ok_or(GatewayError::LedgerUnavailable)?;
+    body.validate()?;
+    let mut guard = store.lock().await;
+    let prediction_id = guard.register(body)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "prediction_id": prediction_id })),
+    ))
+}
+
 impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
         let status = match &self {
@@ -145,6 +171,15 @@ impl IntoResponse for GatewayError {
             }
             GatewayError::Store(CoreError::TimelineNotFound(_)) => StatusCode::NOT_FOUND,
             GatewayError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            GatewayError::LedgerWriteDisabled => StatusCode::FORBIDDEN,
+            GatewayError::LedgerUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            GatewayError::Ledger(le) => match le {
+                pos_plugin_ledger::LedgerError::InvalidPrediction(_)
+                | pos_plugin_ledger::LedgerError::InvalidResolution(_) => {
+                    StatusCode::UNPROCESSABLE_ENTITY
+                }
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            },
         };
         let body = Json(json!({ "error": self.to_string() }));
         (status, body).into_response()
@@ -166,12 +201,23 @@ mod tests {
 
     fn test_app() -> Router {
         let gw = Gateway::new(open_store(StoreConfig::Memory).unwrap());
-        router(AppState { gateway: gw })
+        router(AppState {
+            gateway: gw,
+            ledger_write_enabled: false,
+            ledger_store: None,
+        })
     }
 
     fn test_app_with_body_limit(max_body_bytes: usize) -> Router {
         let gw = Gateway::new(open_store(StoreConfig::Memory).unwrap());
-        build_router(AppState { gateway: gw }, max_body_bytes)
+        build_router(
+            AppState {
+                gateway: gw,
+                ledger_write_enabled: false,
+                ledger_store: None,
+            },
+            max_body_bytes,
+        )
     }
 
     async fn json_request(
@@ -424,7 +470,11 @@ mod tests {
             store: Arc::new(Mutex::new(Box::new(FailCreate))),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
         };
-        let app = router(AppState { gateway: gw });
+        let app = router(AppState {
+            gateway: gw,
+            ledger_write_enabled: false,
+            ledger_store: None,
+        });
         let (status, _) =
             json_request(app, "POST", "/v1/timelines", Some(json!({"name": "x"}))).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
@@ -481,6 +531,25 @@ mod tests {
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
         let r = GatewayError::Store(CoreError::Storage("boom".into())).into_response();
         assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let r = GatewayError::LedgerWriteDisabled.into_response();
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let r = GatewayError::LedgerUnavailable.into_response();
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let r = GatewayError::Ledger(pos_plugin_ledger::LedgerError::InvalidPrediction(
+            "bad".into(),
+        ))
+        .into_response();
+        assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let r = GatewayError::Ledger(pos_plugin_ledger::LedgerError::InvalidResolution(
+            "bad".into(),
+        ))
+        .into_response();
+        assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let r = GatewayError::Ledger(pos_plugin_ledger::LedgerError::UnknownPrediction(
+            "x".into(),
+        ))
+        .into_response();
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]
@@ -489,5 +558,175 @@ mod tests {
         const {
             assert!(EVENT_BUS_CAPACITY >= 16);
         }
+    }
+
+    fn test_app_with_ledger(store: Box<dyn LedgerStore + Send>) -> Router {
+        let gw = Gateway::new(open_store(StoreConfig::Memory).unwrap());
+        router(AppState {
+            gateway: gw,
+            ledger_write_enabled: true,
+            ledger_store: Some(Arc::new(Mutex::new(store))),
+        })
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn post_ledger_prediction_gate_off_returns_403() {
+        let app = test_app();
+        let (status, _json) = json_request(
+            app,
+            "POST",
+            "/v1/ledger/predictions",
+            Some(json!({
+                "title": "Test",
+                "statement": "Something will happen",
+                "predicted_outcome": "Yes",
+                "confidence": 0.75,
+                "made_at": "2026-07-26T12:00:00Z",
+                "resolve_by": "2026-08-01",
+                "osf_link": "https://osf.io/test"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn post_ledger_prediction_gate_on_no_ledger_returns_503() {
+        let gw = Gateway::new(open_store(StoreConfig::Memory).unwrap());
+        let app = router(AppState {
+            gateway: gw,
+            ledger_write_enabled: true,
+            ledger_store: None,
+        });
+        let (status, json) = json_request(
+            app,
+            "POST",
+            "/v1/ledger/predictions",
+            Some(json!({
+                "title": "Test",
+                "statement": "Something will happen",
+                "predicted_outcome": "Yes",
+                "confidence": 0.75,
+                "made_at": "2026-07-26T12:00:00Z",
+                "resolve_by": "2026-08-01",
+                "osf_link": "https://osf.io/test"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(json["error"]
+            .as_str()
+            .unwrap()
+            .contains("ledger store not available"));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn post_ledger_prediction_validation_error_returns_422() {
+        let dir = std::env::temp_dir().join(format!("piglor-gw-ledger-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let store: Box<dyn LedgerStore + Send> =
+            Box::new(pos_plugin_ledger::TomlLedgerStore::new(dir.clone()));
+        let app = test_app_with_ledger(store);
+        let (status, _json) = json_request(
+            app,
+            "POST",
+            "/v1/ledger/predictions",
+            Some(json!({
+                "title": "",
+                "statement": "Something will happen",
+                "predicted_outcome": "Yes",
+                "confidence": 0.75,
+                "made_at": "2026-07-26T12:00:00Z",
+                "resolve_by": "2026-08-01",
+                "osf_link": "https://osf.io/test"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn post_ledger_prediction_success_returns_201() {
+        let dir = std::env::temp_dir().join(format!("piglor-gw-ledger-ok-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let store: Box<dyn LedgerStore + Send> =
+            Box::new(pos_plugin_ledger::TomlLedgerStore::new(dir.clone()));
+        let app = test_app_with_ledger(store);
+        let (status, json) = json_request(
+            app,
+            "POST",
+            "/v1/ledger/predictions",
+            Some(json!({
+                "title": "Test Prediction",
+                "statement": "Something will definitely happen",
+                "predicted_outcome": "Yes",
+                "confidence": 0.75,
+                "made_at": "2026-07-26T12:00:00Z",
+                "resolve_by": "2026-08-01",
+                "osf_link": "https://osf.io/test"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let prediction_id = json["prediction_id"].as_str().unwrap();
+        assert!(!prediction_id.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn post_ledger_prediction_register_fails_returns_500() {
+        struct FailRegister;
+        impl LedgerStore for FailRegister {
+            fn load(
+                &self,
+                _today: &str,
+            ) -> Result<pos_plugin_ledger::Ledger, pos_plugin_ledger::LedgerError> {
+                unimplemented!()
+            }
+            fn register(
+                &mut self,
+                _prediction: NewPrediction,
+            ) -> Result<String, pos_plugin_ledger::LedgerError> {
+                Err(pos_plugin_ledger::LedgerError::Store(
+                    "disk full".to_owned(),
+                ))
+            }
+            fn find_resolve_status(
+                &self,
+                _prediction_id: &str,
+            ) -> Result<pos_plugin_ledger::ResolveStatus, pos_plugin_ledger::LedgerError>
+            {
+                unimplemented!()
+            }
+            fn persist_resolve(
+                &mut self,
+                _outcome: pos_plugin_ledger::LedgerOutcome,
+            ) -> Result<(), pos_plugin_ledger::LedgerError> {
+                unimplemented!()
+            }
+        }
+        let app = test_app_with_ledger(Box::new(FailRegister));
+        let (status, _json) = json_request(
+            app,
+            "POST",
+            "/v1/ledger/predictions",
+            Some(json!({
+                "title": "Test",
+                "statement": "Something will happen",
+                "predicted_outcome": "Yes",
+                "confidence": 0.75,
+                "made_at": "2026-07-26T12:00:00Z",
+                "resolve_by": "2026-08-01",
+                "osf_link": "https://osf.io/test"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

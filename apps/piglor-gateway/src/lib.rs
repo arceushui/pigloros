@@ -8,7 +8,7 @@
 
 mod http;
 
-pub use http::{router, AppState};
+pub use http::{router, AppState, LedgerStoreHandle};
 
 use pos_core::{
     clock::Seq,
@@ -76,6 +76,15 @@ pub enum GatewayError {
     /// Underlying store failure.
     #[error(transparent)]
     Store(#[from] CoreError),
+    /// Ledger domain error.
+    #[error(transparent)]
+    Ledger(#[from] pos_plugin_ledger::LedgerError),
+    /// Ledger prediction write is disabled (feature gate off).
+    #[error("ledger write is disabled (set LEDGER_WRITE=1)")]
+    LedgerWriteDisabled,
+    /// Ledger store is not configured.
+    #[error("ledger store not available")]
+    LedgerUnavailable,
 }
 
 impl Gateway {

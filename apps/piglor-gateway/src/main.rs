@@ -90,7 +90,11 @@ async fn serve(
         None => StoreConfig::Memory,
     };
     let gateway = Gateway::new(open_store(config).map_err(|e| e.to_string())?);
-    let app = router(AppState { gateway });
+    let app = router(AppState {
+        gateway,
+        ledger_write_enabled: false,
+        ledger_store: None,
+    });
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| e.to_string())?;
