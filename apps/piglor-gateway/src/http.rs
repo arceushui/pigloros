@@ -17,16 +17,51 @@ use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Shared handle for the mutable ledger store (curated or live tier).
+pub(crate) type SharedLedgerStore = Arc<Mutex<Box<dyn LedgerStore + Send>>>;
+
+/// Wraps a [`LedgerStore`] behind a mutex, matching the pattern of [`Gateway`].
+#[derive(Clone)]
+pub struct LedgerGateway {
+    store: SharedLedgerStore,
+}
+
+impl LedgerGateway {
+    /// Wrap a boxed [`LedgerStore`] in a shared, locked handle.
+    #[must_use]
+    pub fn new(store: Box<dyn LedgerStore + Send>) -> Self {
+        Self {
+            store: Arc::new(Mutex::new(store)),
+        }
+    }
+
+    /// Register a new prediction through the store, under lock.
+    ///
+    /// # Errors
+    /// Returns [`GatewayError::Ledger`] on store failure.
+    pub async fn register(&self, prediction: NewPrediction) -> Result<String, GatewayError> {
+        let mut guard = self.store.lock().await;
+        Ok(guard.register(prediction)?)
+    }
+}
+
+/// Write-mode state machine — replaces the `bool`+`Option` pair.
+#[derive(Clone)]
+pub enum LedgerWriteMode {
+    /// Gate off — return 403.
+    Disabled,
+    /// Gate on but no adapter plugged in — return 503.
+    Unconfigured,
+    /// Gate on with a live adapter behind a mutex.
+    Ready(LedgerGateway),
+}
+
 /// Shared axum state.
 #[derive(Clone)]
 pub struct AppState {
     pub gateway: Gateway,
-    pub ledger_write_enabled: bool,
-    pub ledger_store: Option<LedgerStoreHandle>,
+    pub ledger_write: LedgerWriteMode,
 }
-
-/// Shared handle for the mutable ledger store (curated or live tier).
-pub type LedgerStoreHandle = Arc<Mutex<Box<dyn LedgerStore + Send>>>;
 
 /// Build the MVP router (ADR-014 route table; WS deferred to follow-up).
 pub fn router(state: AppState) -> Router {
@@ -150,13 +185,13 @@ async fn post_ledger_prediction(
     State(state): State<AppState>,
     Json(body): Json<NewPrediction>,
 ) -> Result<impl IntoResponse, GatewayError> {
-    if !state.ledger_write_enabled {
-        return Err(GatewayError::LedgerWriteDisabled);
-    }
-    let store = state.ledger_store.ok_or(GatewayError::LedgerUnavailable)?;
+    let ledger = match &state.ledger_write {
+        LedgerWriteMode::Disabled => return Err(GatewayError::LedgerWriteDisabled),
+        LedgerWriteMode::Unconfigured => return Err(GatewayError::LedgerUnavailable),
+        LedgerWriteMode::Ready(ledger) => ledger,
+    };
     body.validate()?;
-    let mut guard = store.lock().await;
-    let prediction_id = guard.register(body)?;
+    let prediction_id = ledger.register(body).await?;
     Ok((
         StatusCode::CREATED,
         Json(json!({ "prediction_id": prediction_id })),
@@ -174,8 +209,7 @@ impl IntoResponse for GatewayError {
             GatewayError::LedgerWriteDisabled => StatusCode::FORBIDDEN,
             GatewayError::LedgerUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             GatewayError::Ledger(le) => match le {
-                pos_plugin_ledger::LedgerError::InvalidPrediction(_)
-                | pos_plugin_ledger::LedgerError::InvalidResolution(_) => {
+                pos_plugin_ledger::LedgerError::InvalidPrediction(_) => {
                     StatusCode::UNPROCESSABLE_ENTITY
                 }
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -203,8 +237,7 @@ mod tests {
         let gw = Gateway::new(open_store(StoreConfig::Memory).unwrap());
         router(AppState {
             gateway: gw,
-            ledger_write_enabled: false,
-            ledger_store: None,
+            ledger_write: LedgerWriteMode::Disabled,
         })
     }
 
@@ -213,8 +246,7 @@ mod tests {
         build_router(
             AppState {
                 gateway: gw,
-                ledger_write_enabled: false,
-                ledger_store: None,
+                ledger_write: LedgerWriteMode::Disabled,
             },
             max_body_bytes,
         )
@@ -472,8 +504,7 @@ mod tests {
         };
         let app = router(AppState {
             gateway: gw,
-            ledger_write_enabled: false,
-            ledger_store: None,
+            ledger_write: LedgerWriteMode::Disabled,
         });
         let (status, _) =
             json_request(app, "POST", "/v1/timelines", Some(json!({"name": "x"}))).await;
@@ -544,7 +575,8 @@ mod tests {
             "bad".into(),
         ))
         .into_response();
-        assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
         let r = GatewayError::Ledger(pos_plugin_ledger::LedgerError::UnknownPrediction(
             "x".into(),
         ))
@@ -560,12 +592,22 @@ mod tests {
         }
     }
 
+    fn sample_prediction_body() -> serde_json::Value {
+        json!({
+            "title": "Test",
+            "statement": "Something will happen",
+            "predicted_outcome": "Yes",
+            "confidence": 0.75,
+            "made_at": "2026-07-26T12:00:00Z",
+            "resolve_by": "2026-08-01",
+            "osf_link": "https://osf.io/test"
+        })
+    }
+
     fn test_app_with_ledger(store: Box<dyn LedgerStore + Send>) -> Router {
-        let gw = Gateway::new(open_store(StoreConfig::Memory).unwrap());
         router(AppState {
-            gateway: gw,
-            ledger_write_enabled: true,
-            ledger_store: Some(Arc::new(Mutex::new(store))),
+            gateway: Gateway::new(open_store(StoreConfig::Memory).unwrap()),
+            ledger_write: LedgerWriteMode::Ready(LedgerGateway::new(store)),
         })
     }
 
@@ -577,15 +619,7 @@ mod tests {
             app,
             "POST",
             "/v1/ledger/predictions",
-            Some(json!({
-                "title": "Test",
-                "statement": "Something will happen",
-                "predicted_outcome": "Yes",
-                "confidence": 0.75,
-                "made_at": "2026-07-26T12:00:00Z",
-                "resolve_by": "2026-08-01",
-                "osf_link": "https://osf.io/test"
-            })),
+            Some(sample_prediction_body()),
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -594,25 +628,15 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn post_ledger_prediction_gate_on_no_ledger_returns_503() {
-        let gw = Gateway::new(open_store(StoreConfig::Memory).unwrap());
         let app = router(AppState {
-            gateway: gw,
-            ledger_write_enabled: true,
-            ledger_store: None,
+            gateway: Gateway::new(open_store(StoreConfig::Memory).unwrap()),
+            ledger_write: LedgerWriteMode::Unconfigured,
         });
         let (status, json) = json_request(
             app,
             "POST",
             "/v1/ledger/predictions",
-            Some(json!({
-                "title": "Test",
-                "statement": "Something will happen",
-                "predicted_outcome": "Yes",
-                "confidence": 0.75,
-                "made_at": "2026-07-26T12:00:00Z",
-                "resolve_by": "2026-08-01",
-                "osf_link": "https://osf.io/test"
-            })),
+            Some(sample_prediction_body()),
         )
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
@@ -630,21 +654,9 @@ mod tests {
         let store: Box<dyn LedgerStore + Send> =
             Box::new(pos_plugin_ledger::TomlLedgerStore::new(dir.clone()));
         let app = test_app_with_ledger(store);
-        let (status, _json) = json_request(
-            app,
-            "POST",
-            "/v1/ledger/predictions",
-            Some(json!({
-                "title": "",
-                "statement": "Something will happen",
-                "predicted_outcome": "Yes",
-                "confidence": 0.75,
-                "made_at": "2026-07-26T12:00:00Z",
-                "resolve_by": "2026-08-01",
-                "osf_link": "https://osf.io/test"
-            })),
-        )
-        .await;
+        let mut body = sample_prediction_body();
+        body["title"] = json!("");
+        let (status, _json) = json_request(app, "POST", "/v1/ledger/predictions", Some(body)).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -661,15 +673,7 @@ mod tests {
             app,
             "POST",
             "/v1/ledger/predictions",
-            Some(json!({
-                "title": "Test Prediction",
-                "statement": "Something will definitely happen",
-                "predicted_outcome": "Yes",
-                "confidence": 0.75,
-                "made_at": "2026-07-26T12:00:00Z",
-                "resolve_by": "2026-08-01",
-                "osf_link": "https://osf.io/test"
-            })),
+            Some(sample_prediction_body()),
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
@@ -687,7 +691,7 @@ mod tests {
                 &self,
                 _today: &str,
             ) -> Result<pos_plugin_ledger::Ledger, pos_plugin_ledger::LedgerError> {
-                unimplemented!()
+                Ok(pos_plugin_ledger::Ledger::default())
             }
             fn register(
                 &mut self,
@@ -702,13 +706,16 @@ mod tests {
                 _prediction_id: &str,
             ) -> Result<pos_plugin_ledger::ResolveStatus, pos_plugin_ledger::LedgerError>
             {
-                unimplemented!()
+                Ok(pos_plugin_ledger::ResolveStatus {
+                    found_prediction: false,
+                    already_resolved: false,
+                })
             }
             fn persist_resolve(
                 &mut self,
                 _outcome: pos_plugin_ledger::LedgerOutcome,
             ) -> Result<(), pos_plugin_ledger::LedgerError> {
-                unimplemented!()
+                Ok(())
             }
         }
         let app = test_app_with_ledger(Box::new(FailRegister));
@@ -716,17 +723,55 @@ mod tests {
             app,
             "POST",
             "/v1/ledger/predictions",
-            Some(json!({
-                "title": "Test",
-                "statement": "Something will happen",
-                "predicted_outcome": "Yes",
-                "confidence": 0.75,
-                "made_at": "2026-07-26T12:00:00Z",
-                "resolve_by": "2026-08-01",
-                "osf_link": "https://osf.io/test"
-            })),
+            Some(sample_prediction_body()),
         )
         .await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn post_ledger_prediction_unknown_field_rejected() {
+        let dir = std::env::temp_dir().join(format!("piglor-gw-ledger-uf-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let store: Box<dyn LedgerStore + Send> =
+            Box::new(pos_plugin_ledger::TomlLedgerStore::new(dir.clone()));
+        let app = test_app_with_ledger(store);
+        let mut body = sample_prediction_body();
+        body["unknown_field"] = json!("should be rejected");
+        let (status, _json) = json_request(app, "POST", "/v1/ledger/predictions", Some(body)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn post_ledger_prediction_deny_unknown_distinct_from_validation() {
+        let dir = std::env::temp_dir().join(format!("piglor-gw-ledger-du-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let store: Box<dyn LedgerStore + Send> =
+            Box::new(pos_plugin_ledger::TomlLedgerStore::new(dir.clone()));
+        let app = test_app_with_ledger(store);
+
+        let mut unknown_body = sample_prediction_body();
+        unknown_body["extra"] = json!("nope");
+        let (_status, _unknown_resp) = json_request(
+            app.clone(),
+            "POST",
+            "/v1/ledger/predictions",
+            Some(unknown_body),
+        )
+        .await;
+
+        let mut invalid_body = sample_prediction_body();
+        invalid_body["title"] = json!("");
+        let (_status, invalid_resp) =
+            json_request(app, "POST", "/v1/ledger/predictions", Some(invalid_body)).await;
+
+        assert!(
+            invalid_resp["error"].as_str().is_some(),
+            "domain validation should produce an error field, got: {invalid_resp:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

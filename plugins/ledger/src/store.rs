@@ -49,6 +49,7 @@ pub enum LedgerError {
 
 /// Input for registering a new prediction (everything but the generated id).
 #[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NewPrediction {
     /// Short human-readable title.
     pub title: String,
