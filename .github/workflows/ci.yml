@@ -11,7 +11,7 @@
 #   Unnecessary code is deleted/simplified rather than left as dead branches.
 # - Runners: ubuntu-latest only (rusqlite bundled; no macOS matrix yet)
 
-name: CI
+name: ci
 
 on:
   push:

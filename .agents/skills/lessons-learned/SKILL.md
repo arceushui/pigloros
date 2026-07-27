@@ -78,3 +78,9 @@ After this, ADRs can follow the flow: `Proposed → Under Review → Accepted / 
 ## Code review
 
 17. **Always request code review after completing code changes, before starting new work.** Use the `code-review` skill with the appropriate fixed point (e.g. `main..HEAD` or a prior commit). Address all findings as a separate round of fixes, then let the reviewer confirm before moving to the next task. Do not start new tickets until the current review cycle is closed.
+
+## CI / GitHub Actions
+
+18. **Every test type must run in CI — no local-only tests.** GitHub Actions (`.github/workflows/ci.yml`) is the single source of truth for what passes. When adding any test — unit test, integration test (`tests/` directory), doctest, or `#[ignore]`d test — verify that `cargo test --workspace --locked -- --include-ignored` in the `test` job actually executes it. The `--include-ignored` flag is mandatory so `#[ignore]` cannot silently skip. If you write an integration test that lives in `tests/`, it MUST be picked up by the workspace test job; if it isn't, the test is dead and the CI green light is a lie. Before claiming a ticket is done, name the CI job/steps that run your new test.
+
+19. **GitHub Actions workflow `name:` must be lowercase-with-hyphens.** All workflow YAML files under `.github/workflows/` must use the same naming convention: lowercase words separated by hyphens (e.g. `name: ci`, `name: cargo-deny`, `name: deploy`, `name: trunk-check`). No PascalCase (`Deploy`, `Trunk Check`), no ALLCAPS. This keeps the Actions sidebar predictable and sortable.

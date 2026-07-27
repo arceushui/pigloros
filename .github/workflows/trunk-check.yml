@@ -3,7 +3,7 @@
 # #[ignore] is enforced at runtime via cargo test -- --include-ignored (see ci.yml).
 # Deps: cargo-deny.yml. Local: `trunk check` / scripts/ci.sh.
 
-name: Trunk Check
+name: trunk-check
 
 on:
   push:
