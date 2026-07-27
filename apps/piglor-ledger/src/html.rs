@@ -116,8 +116,9 @@ pub fn render_html(view: &LedgerView, pubkey_hex: Option<&str>) -> String {
 }
 
 fn render_entry(s: &mut String, entry: &LedgerEntryView) {
+    let status = entry.status.as_str();
     s.push_str("<article class=\"entry ");
-    s.push_str(entry.status.as_str());
+    s.push_str(status);
     s.push_str("\">\n");
 
     s.push_str("<h2>");
@@ -147,14 +148,14 @@ fn render_entry(s: &mut String, entry: &LedgerEntryView) {
     s.push_str("\">OSF</a></p>\n");
 
     s.push_str("<p class=\"meta\">Status: ");
-    s.push_str(entry.status.as_str());
+    s.push_str(status);
     s.push_str("<span class=\"badge ");
-    s.push_str(entry.status.as_str());
+    s.push_str(status);
     s.push_str("\">");
-    s.push_str(entry.status.as_str());
+    s.push_str(status);
     s.push_str("</span></p>\n");
 
-    if entry.status == "resolved" {
+    if status == "resolved" {
         if let (Some(outcome), Some(at), Some(brier)) = (
             entry.outcome,
             entry.resolved_at.as_deref(),
@@ -181,11 +182,11 @@ pub fn render_redirect() -> String {
     s.push_str("<html lang=\"en\">\n");
     s.push_str("<head>\n");
     s.push_str("<meta charset=\"utf-8\">\n");
-    s.push_str("<meta http-equiv=\"refresh\" content=\"0; url=ledger/\">\n");
+    s.push_str("<meta http-equiv=\"refresh\" content=\"0; url=/ledger/\">\n");
     s.push_str("<title>Prediction Ledger</title>\n");
     s.push_str("</head>\n");
     s.push_str("<body>\n");
-    s.push_str("<p>Redirecting to <a href=\"ledger/\">Prediction Ledger</a>.</p>\n");
+    s.push_str("<p>Redirecting to <a href=\"/ledger/\">Prediction Ledger</a>.</p>\n");
     s.push_str("</body>\n");
     s.push_str("</html>\n");
     s
@@ -375,8 +376,8 @@ mod tests {
     #[test]
     fn redirect_page_targets_ledger_subdir() {
         let html = render_redirect();
-        assert!(html.contains("content=\"0; url=ledger/\""));
-        assert!(html.contains("<a href=\"ledger/\">"));
+        assert!(html.contains("content=\"0; url=/ledger/\""));
+        assert!(html.contains("<a href=\"/ledger/\">"));
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]

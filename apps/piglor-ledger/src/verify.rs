@@ -458,7 +458,7 @@ mod tests {
         ])
         .unwrap();
         let sk_text = std::fs::read_to_string(&key_path).unwrap();
-        let pubkey = derive_pubkey_hex(sk_text.trim());
+        let pubkey = crate::test_helpers::derive_pubkey_hex(sk_text.trim());
 
         cli_run(&[
             "piglor-ledger".into(),
@@ -547,7 +547,7 @@ mod tests {
         ])
         .unwrap();
         let other_text = std::fs::read_to_string(&other_key).unwrap();
-        let wrong_pubkey = derive_pubkey_hex(other_text.trim());
+        let wrong_pubkey = crate::test_helpers::derive_pubkey_hex(other_text.trim());
 
         let report = run(&Source::Store(db), Some(&wrong_pubkey), None).unwrap();
         let (_which, reason) = expect_mismatch(report.outcome);
@@ -678,14 +678,6 @@ mod tests {
         assert!(bad.to_string().contains("seq=1"));
     }
 
-    fn derive_pubkey_hex(secret_hex: &str) -> String {
-        let bytes = hex_decode(secret_hex).unwrap();
-        let arr: [u8; 32] = bytes.as_slice().try_into().unwrap();
-        let sk = ed25519_dalek::SigningKey::from_bytes(&arr);
-        let vk = sk.verifying_key();
-        crate::hex_encode(&vk.to_bytes())
-    }
-
     // ── Additional coverage tests ────────────────────────────────────────────
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -789,7 +781,7 @@ mod tests {
         ])
         .unwrap();
         let sk_text = std::fs::read_to_string(&key_path).unwrap();
-        let pubkey = derive_pubkey_hex(sk_text.trim());
+        let pubkey = crate::test_helpers::derive_pubkey_hex(sk_text.trim());
 
         // Write a prediction event but strip the signature directly via
         // the raw store so the event is unsigned.
@@ -858,7 +850,7 @@ mod tests {
         ])
         .unwrap();
         let sk_text = std::fs::read_to_string(&key_path).unwrap();
-        let pubkey = derive_pubkey_hex(sk_text.trim());
+        let pubkey = crate::test_helpers::derive_pubkey_hex(sk_text.trim());
 
         let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
             path: db.to_string_lossy().into_owned(),
@@ -961,7 +953,7 @@ mod tests {
         .unwrap();
         let db = tmp.path().join("corrupt.db");
         let sk_text = std::fs::read_to_string(&key_path).unwrap();
-        let pubkey = derive_pubkey_hex(sk_text.trim());
+        let pubkey = crate::test_helpers::derive_pubkey_hex(sk_text.trim());
         {
             let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
                 path: db.to_string_lossy().into_owned(),
@@ -993,7 +985,7 @@ mod tests {
         .unwrap();
         let db = tmp.path().join("corrupt_events.db");
         let sk_text = std::fs::read_to_string(&key_path).unwrap();
-        let pubkey = derive_pubkey_hex(sk_text.trim());
+        let pubkey = crate::test_helpers::derive_pubkey_hex(sk_text.trim());
         // Add a real event so events table has data to corrupt.
         cli_run(&[
             "piglor-ledger".into(),

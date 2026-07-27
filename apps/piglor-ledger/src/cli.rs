@@ -54,9 +54,7 @@ fn load_signing_key(path: &Path) -> Result<ed25519_dalek::SigningKey, CliError> 
     let text = std::fs::read_to_string(path).map_err(|e| CliError::BadKey(e.to_string()))?;
     let text = text.trim();
     let bytes = hex_decode(text).map_err(|e| CliError::BadKey(format!("hex decode: {e}")))?;
-    let arr: [u8; 32] = bytes
-        .as_slice()
-        .try_into()
+    let arr = <[u8; 32]>::try_from(bytes.as_slice())
         .map_err(|_| CliError::BadKey("expected 32 bytes".to_owned()))?;
     Ok(ed25519_dalek::SigningKey::from_bytes(&arr))
 }
@@ -106,12 +104,11 @@ pub fn open_store(source: &Source, key: Option<&Path>) -> Result<Box<dyn LedgerS
 #[must_use]
 fn today_utc() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
+    let dur = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    #[allow(clippy::cast_possible_truncation)]
-    days_since_epoch_to_date((secs / 86_400) as u32)
+        .unwrap_or_default();
+    let secs = dur.as_secs();
+    days_since_epoch_to_date(u32::try_from(secs / 86_400).unwrap_or(u32::MAX))
 }
 
 /// Convert a count of days since 1970-01-01 to `YYYY-MM-DD` (UTC).
@@ -204,7 +201,7 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
             eprintln!("  predict --source toml:DIR|store:DB [--key <path>] --title T --statement S --predicted-outcome O --confidence 0..1 --made-at TS --resolve-by DATE --osf URL [--scenario NAME]");
             eprintln!("  resolve --source toml:DIR|store:DB [--key <path>] --id ULID --outcome true|false --resolved-at TS");
             eprintln!("  export --source toml:DIR|store:DB [--out FILE] [--today YYYY-MM-DD] [--pubkey HEX]");
-            eprintln!("  build  --source toml:DIR|store:DB [--key <path>] --site DIR [--today YYYY-MM-DD] [--pubkey HEX]");
+            eprintln!("  build  --source toml:DIR|store:DB --site DIR [--today YYYY-MM-DD] [--pubkey HEX]");
             eprintln!("  verify --source toml:DIR|store:DB [--pubkey HEX (required for store:)] [--manifest FILE]");
             Ok(())
         }
@@ -316,10 +313,26 @@ fn cmd_build(args: &[String]) -> Result<(), CliError> {
     let source = Source::parse(require(args, "--source")?)?;
     let site = PathBuf::from(require(args, "--site")?);
     let pubkey = flag(args, "--pubkey").map(str::to_owned);
-    let key = flag(args, "--key").map(PathBuf::from);
     let today = flag(args, "--today").map_or_else(today_utc, str::to_owned);
-    let store = open_store(&source, key.as_deref())?;
-    let ledger = store.load(&today)?;
+    let ledger = match &source {
+        Source::Toml(dir) => TomlLedgerStore::new(dir).load(&today)?,
+        Source::Store(db) => {
+            let mut store = pos_store::open_store(StoreConfig::Sqlite {
+                path: db.to_string_lossy().into_owned(),
+            })
+            .map_err(|e| CliError::BadSource(e.to_string()))?;
+            let timeline_id = find_or_create_ledger_timeline(&mut *store)?;
+            let (sk, _) = pos_crypto::signing::generate_keypair();
+            let ledger_store = EventLedgerStore::new(
+                store,
+                timeline_id,
+                well_known_entity(),
+                sk,
+                Box::new(Blake3Hasher),
+            );
+            ledger_store.load(&today)?
+        }
+    };
     let view = LedgerView::from(&ledger);
     let html = render_html(&view, pubkey.as_deref());
     let json = render_json(&view);
@@ -541,7 +554,7 @@ mod tests {
         assert!(index_html.contains("Status: resolved"));
         assert!(ledger_json.contains("\"n_resolved\": 1"));
         assert!(ledger_json.contains("\"n_pending\": 0"));
-        assert!(root.contains("url=ledger/"));
+        assert!(root.contains("url=/ledger/"));
     }
 
     fn run_predict(dir: &Path, title: &str, statement: &str, confidence: f64) {
@@ -978,20 +991,26 @@ mod tests {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn build_store_open_error() {
-        // Covers L277: `?` on open_store in cmd_build — store needs key.
+    fn build_store_without_key_succeeds() {
+        // build --source store:DB no longer requires --key (uses throwaway key).
         let tmp = TempDir::new().unwrap();
-        let err = run(&[
+        let db_path = tmp.path().join("x.db");
+        run(&[
             "piglor-ledger".into(),
             "build".into(),
             "--source".into(),
-            format!("store:{}", tmp.path().join("x.db").display()),
+            format!("store:{}", db_path.display()),
             "--site".into(),
             tmp.path().join("site").to_str().unwrap().to_owned(),
         ])
-        .unwrap_err();
-        // build uses open_store(&source, None) — store source without key → error
-        assert!(!err.to_string().is_empty(), "{err}");
+        .unwrap();
+        assert!(tmp
+            .path()
+            .join("site")
+            .join("ledger")
+            .join("index.html")
+            .exists());
+        assert!(tmp.path().join("site").join("index.html").exists());
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -1686,5 +1705,73 @@ mod tests {
     fn verify_missing_source_errors() {
         // Covers L296: `?` in cmd_verify Source::parse(require("--source")?)
         assert!(run(&["piglor-ledger".into(), "verify".into()]).is_err());
+    }
+
+    // ── Coverage: cmd_build store-branch error paths ──────────────────────
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn build_store_invalid_path_errors() {
+        // Covers L321: `.map_err(|e| CliError::BadSource(e.to_string()))?`
+        // in cmd_build when pos_store::open_store fails for the store source.
+        let tmp = TempDir::new().unwrap();
+        let bad_db = tmp.path().join("no_such_dir").join("ledger.db");
+        let err = run(&[
+            "piglor-ledger".into(),
+            "build".into(),
+            "--source".into(),
+            format!("store:{}", bad_db.display()),
+            "--site".into(),
+            tmp.path().join("site").to_str().unwrap().to_owned(),
+        ]);
+        assert!(err.is_err(), "expected error for invalid store path");
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn build_store_create_timeline_fails() {
+        // Covers L322: `?` on find_or_create_ledger_timeline in cmd_build
+        // when create_timeline fails (read-only DB with non-ledger timeline).
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("ledger.db");
+        {
+            let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+                path: db.to_string_lossy().into_owned(),
+            })
+            .unwrap();
+            store.create_timeline("other").unwrap();
+        }
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let err = run(&[
+            "piglor-ledger".into(),
+            "build".into(),
+            "--source".into(),
+            format!("store:{}", db.display()),
+            "--site".into(),
+            tmp.path().join("site").to_str().unwrap().to_owned(),
+        ]);
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(err.is_err(), "expected error from read-only DB");
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn build_store_invalid_today_errors() {
+        // Covers L331: `?` on ledger_store.load(&today) in cmd_build
+        // when the today string is not a valid date.
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("ledger.db");
+        let err = run(&[
+            "piglor-ledger".into(),
+            "build".into(),
+            "--source".into(),
+            format!("store:{}", db.display()),
+            "--site".into(),
+            tmp.path().join("site").to_str().unwrap().to_owned(),
+            "--today".into(),
+            "bad-date".into(),
+        ]);
+        assert!(err.is_err(), "expected error for invalid today");
     }
 }

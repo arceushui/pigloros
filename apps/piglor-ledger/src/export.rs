@@ -93,12 +93,13 @@ fn build_toml(dir: &Path, today: &str) -> Result<ExportManifest, CliError> {
     })
 }
 
-/// Walk `predictions/` and `resolutions/` and hash each TOML file's raw bytes.
+/// Walk `predictions/` and `resolutions/` and hash each readable TOML file's
+/// raw bytes.  Unreadable sub-directories and unreadable individual files are
+/// silently skipped (same leniency as [`verify::collect_hashes`]).
 fn collect_toml_hashes(dir: &Path) -> Vec<FileHash> {
     let mut out = Vec::new();
     for sub in ["predictions", "resolutions"] {
-        let subdir = dir.join(sub);
-        let Ok(rd) = std::fs::read_dir(&subdir) else {
+        let Ok(rd) = std::fs::read_dir(dir.join(sub)) else {
             continue;
         };
         let mut paths: Vec<std::path::PathBuf> = rd
@@ -108,10 +109,9 @@ fn collect_toml_hashes(dir: &Path) -> Vec<FileHash> {
             .collect();
         paths.sort();
         for path in paths {
-            // `store.load` already read these files successfully, so a read
-            // failure here requires concurrent deletion — treat as unreachable.
-            let bytes = std::fs::read(&path)
-                .expect("file readable by store.load; concurrent deletion is unsupported");
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
             let hash = blake3::hash(&bytes);
             let rel = path
                 .strip_prefix(dir)
@@ -306,7 +306,7 @@ mod tests {
         ])
         .unwrap();
         let key_text = std::fs::read_to_string(&key_path).unwrap();
-        let _pk = derive_pubkey_hex(&key_text);
+        let _pk = crate::test_helpers::derive_pubkey_hex(&key_text);
 
         run(&[
             "piglor-ledger".into(),
@@ -332,7 +332,7 @@ mod tests {
         ])
         .unwrap();
         // Need a pubkey to verify; re-derive from the secret key for the manifest.
-        let pubkey = derive_pubkey_hex(&key_text);
+        let pubkey = crate::test_helpers::derive_pubkey_hex(&key_text);
         let manifest = build_store(&db, "2026-07-25", Some(pubkey.clone())).unwrap();
         let json = serde_json::to_string_pretty(&manifest).unwrap();
         assert!(json.contains("\"tier\": \"store\""), "{json}");
@@ -352,14 +352,6 @@ mod tests {
         );
     }
 
-    fn derive_pubkey_hex(secret_hex: &str) -> String {
-        let bytes = hex_decode(secret_hex.trim()).unwrap();
-        let arr: [u8; 32] = bytes.as_slice().try_into().unwrap();
-        let sk = ed25519_dalek::SigningKey::from_bytes(&arr);
-        let vk = sk.verifying_key();
-        crate::hex_encode(&vk.to_bytes())
-    }
-
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn collect_toml_hashes_skips_unreadable_subdirs() {
@@ -373,6 +365,23 @@ mod tests {
         let json = serde_json::to_string_pretty(&manifest).unwrap();
         assert!(json.contains("\"tier\": \"toml\""), "{json}");
         assert!(json.contains("\"files\": []"), "{json}");
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn collect_toml_hashes_skips_unreadable_file() {
+        // Exercises the `continue` on L113 in collect_toml_hashes when the
+        // file is listed by read_dir but unreadable (permissions removed).
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("ledger");
+        std::fs::create_dir_all(dir.join("predictions")).unwrap();
+        let pred_file = dir.join("predictions").join("test.toml");
+        std::fs::write(&pred_file, "key = \"value\"\n").unwrap();
+        std::fs::set_permissions(&pred_file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let hashes = collect_toml_hashes(&dir);
+        std::fs::set_permissions(&pred_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(hashes.is_empty(), "expected no hashes for unreadable file");
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -462,7 +471,7 @@ mod tests {
         .unwrap();
         // Derive pubkey for the manifest.
         let sk_text = std::fs::read_to_string(&key_path).unwrap();
-        let pubkey = derive_pubkey_hex(&sk_text);
+        let pubkey = crate::test_helpers::derive_pubkey_hex(&sk_text);
         let manifest = build(&Source::Store(db), "2026-07-25", Some(pubkey)).unwrap();
         let json = serde_json::to_string_pretty(&manifest).unwrap();
         assert!(json.contains("\"tier\": \"store\""), "{json}");

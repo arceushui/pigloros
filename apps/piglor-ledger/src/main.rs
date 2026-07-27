@@ -152,7 +152,34 @@ mod tests {
             "--source".into(),
             format!("store:{}", store_db.display()),
             "--pubkey".into(),
+            pubkey_hex.clone(),
+        ])
+        .unwrap();
+
+        // Also exercise build and export-with-pubkey on the store tier.
+        let site = tmp.path().join("site-store");
+        run(&[
+            "piglor-ledger".into(),
+            "build".into(),
+            "--source".into(),
+            format!("store:{}", store_db.display()),
+            "--site".into(),
+            site.to_str().unwrap().to_owned(),
+            "--today".into(),
+            "2026-07-25".into(),
+        ])
+        .unwrap();
+        // Export with --pubkey exercises the pubkey field in ExportManifest::Store.
+        let manifest2 = tmp.path().join("manifest2.json");
+        run(&[
+            "piglor-ledger".into(),
+            "export".into(),
+            "--source".into(),
+            format!("store:{}", store_db.display()),
+            "--pubkey".into(),
             pubkey_hex,
+            "--out".into(),
+            manifest2.to_str().unwrap().to_owned(),
         ])
         .unwrap();
     }
@@ -332,17 +359,8 @@ mod tests {
     }
 
     fn derive_pubkey_hex(key_path: &std::path::Path) -> String {
-        use piglor_ledger::hex::hex_decode;
         let sk_text = std::fs::read_to_string(key_path).unwrap();
-        let bytes = hex_decode(sk_text.trim()).unwrap();
-        let arr: [u8; 32] = bytes.try_into().unwrap();
-        let sk = ed25519_dalek::SigningKey::from_bytes(&arr);
-        let vk = sk.verifying_key();
-        vk.to_bytes().iter().fold(String::new(), |mut s, b| {
-            use std::fmt::Write as _;
-            let _ = write!(s, "{b:02x}");
-            s
-        })
+        piglor_ledger::test_helpers::derive_pubkey_hex(&sk_text)
     }
 
     #[test]
