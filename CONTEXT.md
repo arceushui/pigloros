@@ -50,7 +50,7 @@ A shared language for humans and agents working on PiglorOS. Use these terms exa
 | **Society Reducer** | `plugins/society` | Folds Society Signals into running means per dimension. |
 | **Context Nudge** | `apps/pos-mvp` (gateway_context.rs) | Adjusts Preferences using Society Signal means before scoring. Formula: `adjusted = clamp(pref + avg(nudges), -1, 1)` where `nudge = (mean - 0.5) × 0.25`. |
 | **AI Influence Index** | `apps/pos-mvp` (ai_influence.rs) | Fraction of Timeline events from AI agents (`agent.*`), broken down by archetype (`goal-seeking`, `rule-bound`). Always shown as a headline. |
-| **Prediction Ledger** | `apps/piglor-gateway` | `GET /v1/ledger` — tamper-evident log of predictions with confidence scores, Brier scores, and verification hashes (ADR-016). |
+| **Prediction Ledger** | `plugins/ledger`, `apps/piglor-ledger`, `apps/piglor-gateway` | Public pre-registered prediction log with Brier Scores, verification hashes, and OSF workflow. Curated TOML tier + signed EventStore tier (ADR-017). |
 
 ---
 

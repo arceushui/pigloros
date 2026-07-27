@@ -2,7 +2,7 @@
 
 A simulation world you join to preview your decisions.
 
-> **Current stage:** Pre-product. Wave 6 **foundation** delivered (#87 identity, #71 society, #69 gateway HTTP MVP) — auth/WS/client/PyO3/agents/distributed store still deferred. Wave 7 **thin MVP** delivered on `main` (ADR-015, #76 plain language, #75 local `--fork-compare`, #79 AI Influence Index); science tickets #77/#78 remain open.
+> **Current stage:** Pre-product. Wave 6 **foundation** delivered (#87 identity, #71 society, #69 gateway HTTP MVP) — auth/WS/client/PyO3/agents/distributed store still deferred. Wave 7 **thin MVP** delivered on `main` (ADR-015, #76 plain language, #75 local `--fork-compare`, #79 AI Influence Index); science tickets #77/#78 remain open. **Prediction Ledger** delivered on `main` (#58: public page, TOML curated tier + EventStore live tier, CLI, gateway write route, Docker/CI/CD).
 
 ## Getting started
 
@@ -22,6 +22,17 @@ cargo run -p pos-cli --locked -- --help
 
 # Wave 6: local HTTP gateway (ADR-014 / #69) — Memory store on loopback
 cargo run -p piglor-gateway --locked -- serve 127.0.0.1:8080
+
+# Prediction Ledger CLI (ADR-017 / #58) — create and verify predictions
+cargo run -p piglor-ledger --locked -- predict --source toml:./seed/predictions \
+  --title "My prediction" --statement "..." --predicted-outcome Yes \
+  --confidence 0.7 --made-at "2026-07-28T12:00:00Z" --resolve-by 2026-12-31 \
+  --osf https://osf.io/xxxxx
+
+# Docker deployment (gateway + seed predictions)
+docker compose up -d
+curl http://localhost:8080/health
+curl http://localhost:8080/v1/ledger
 ```
 
 Requires the pinned toolchain in `rust-toolchain.toml` (Rust **1.97.1**).
@@ -49,6 +60,7 @@ pigloros/
     pos-cli/              # Wave 4/5 ✅ — pos binary: store, timeline, experiment, merge
     pos-mvp/              # Wave 5/7 — decision preview (+ optional gateway context, ADR-015)
     piglor-gateway/       # Wave 6 ✅ — local-first HTTP gateway (ADR-014 / #69)
+    piglor-ledger/         # Wave 4 ✅ — Prediction Ledger CLI + static renderer (ADR-017 / #58)
   plugins/
     entities/rule-agent/  # Wave 4 ✅ — deterministic rule-based agent plugin
     observations/synthetic/ # Wave 4 ✅ — synthetic sin-wave observation plugin
@@ -59,6 +71,7 @@ pigloros/
     bridges/              # Wave 5 ✅ — BridgeIngestor draft API (no HTTP/Claude yet)
     eval/                 # Wave 5 ✅ — compute_report → CalibrationReport (Brier/ECE/lift)
     society/              # Wave 6 ✅ — SocietySignal + SocietyReducer (trust/opinion/… metrics)
+    ledger/               # Wave 4 ✅ — Prediction Ledger domain, port, adapters (ADR-017 / #58)
 ```
 
 Wave 6 will add `bindings/piglor-py` (PyO3); that directory is not in-tree yet.
@@ -73,7 +86,7 @@ Wave 6 will add `bindings/piglor-py` (PyO3); that directory is not in-tree yet.
 | Wave 3 | Plugin Runtime (pos-runtime) | ✅ Complete |
 | Wave 4 | Experiment Framework + CLI (pos-experiment, pos-cli) | ✅ Complete |
 | Wave 5 | Moat Plugins + Single-User MVP | ✅ Complete |
-| Wave 6 | Shared World & Social Layer (+ PyO3 bindings) | ✅ Foundation done — #87 #71 #69; WS/auth/PyO3/client/#72–74 deferred |
+| Wave 6 | Shared World & Social Layer (+ PyO3 bindings) | ✅ Foundation done — #87 #71 #69; Prediction Ledger delivered (#58); WS/auth/PyO3/client/#72–74 deferred |
 | Wave 7 | Contextual Decision Preview | ✅ Thin MVP done — ADR-015/#76/#75 thin/#79; #77/#78 science open |
 
 ## Development
@@ -98,9 +111,9 @@ RUSTC_BOOTSTRAP=1 cargo llvm-cov --workspace --locked --summary-only \
   --fail-under-lines 100 --fail-under-regions 100 -- --include-ignored
 ```
 
-CI (GitHub Actions): **Trunk Check** (`rust-test-policy`), **cargo-deny**, **fmt**, **test** (`--include-ignored`), **clippy pedantic**, and **llvm-cov**. See `.github/workflows/`.
+CI (GitHub Actions): **Trunk Check** (`rust-test-policy`), **cargo-deny**, **fmt**, **test** (`--include-ignored`), **clippy pedantic**, **llvm-cov**, **docker-build** (image + smoke test), **deploy** (workflow_dispatch: build → smoke → push to ghcr.io). See `.github/workflows/`.
 
-Current stats: **800+ tests · 0 failures · 100% line coverage · 99%+ region coverage · clippy pedantic clean**
+Current stats: **800+ tests · 0 failures · 100% line coverage · 100% region coverage · clippy pedantic clean**
 
 ### Test & coverage policy
 
@@ -127,6 +140,6 @@ Enabled actions (see `.trunk/trunk.yaml`):
 - **pre-push:** `trunk-check-pre-push`
 
 `#[cfg_attr(coverage_nightly, coverage(off))]` is applied **only** to `#[test]` functions
-and code inside `#[cfg(test)]` modules. CI requires **100% lines and ≥99% regions**.
+and code inside `#[cfg(test)]` modules. CI requires **100% lines and ≥100% regions**.
 Unnecessary or unhittable branches are deleted or simplified rather than suppressed.
-Run `RUSTC_BOOTSTRAP=1 cargo llvm-cov --workspace --locked --summary-only --fail-under-lines 100 --fail-under-regions 99 -- --include-ignored` to reproduce.
+Run `RUSTC_BOOTSTRAP=1 cargo llvm-cov --workspace --locked --summary-only --fail-under-lines 100 --fail-under-regions 100 -- --include-ignored` to reproduce.

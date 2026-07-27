@@ -136,6 +136,7 @@ jobs:
         with:
           context: .
           push: false
+          load: true
           tags: pigloros-gateway:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
