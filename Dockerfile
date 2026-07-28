@@ -1,4 +1,4 @@
-FROM rust:1.97.1-slim-bookworm AS builder
+FROM rust:1.97.1-slim-bookworm@sha256:99e09cb2284e2ddbb73a995deee3e91783fd04d177602ccf6eab326d778ee777 AS builder
 
 WORKDIR /src
 
@@ -10,9 +10,9 @@ COPY apps/ apps/
 
 ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    cargo build --release --bin piglor-gateway
+    cargo build --locked --release --bin piglor-gateway
 
-FROM debian:12-slim AS runtime
+FROM debian:12-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS runtime
 
 RUN <<EOF
   set -eu
