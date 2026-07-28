@@ -53,6 +53,11 @@ pub trait Driver: Send + Sync {
 
     /// Human-readable name for this driver (used in logs/diagnostics).
     fn name(&self) -> &'static str;
+
+    /// Minimum interval between ticks (default 100ms = 10 Hz).
+    fn tick_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(100)
+    }
 }
 
 #[cfg(test)]
@@ -141,6 +146,18 @@ mod tests {
         assert!(out.drafts.is_empty());
         let out2 = StepOutput::empty();
         assert!(out2.drafts.is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn default_tick_interval_is_100ms() {
+        let d = TickDriver {
+            entity: EntityId::new(),
+            ticks: 0,
+        };
+        assert_eq!(d.tick_interval(), std::time::Duration::from_millis(100));
+        let idle = IdleDriver;
+        assert_eq!(idle.tick_interval(), std::time::Duration::from_millis(100));
     }
 
     #[test]

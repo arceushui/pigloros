@@ -166,6 +166,30 @@ impl PluginRegistry {
             .map(|e| (e.name.as_str(), e.version.as_str()))
     }
 
+    /// Register a driver directly (for tests and late-bound agent registration).
+    pub fn register_driver(&mut self, driver: Box<dyn Driver>) {
+        let name = driver.name().to_owned();
+        self.plugins.insert(
+            pos_core::ids::PluginId::new(),
+            PluginEntry {
+                name,
+                version: "0.1.0".to_owned(),
+                driver: Some(driver),
+            },
+        );
+    }
+
+    /// Mutable iterator over all registered drivers.
+    pub fn drivers_mut(&mut self) -> impl Iterator<Item = &mut Box<dyn Driver>> {
+        self.plugins.values_mut().filter_map(|e| e.driver.as_mut())
+    }
+
+    /// Number of plugins that have a driver registered.
+    #[must_use]
+    pub fn plugin_count(&self) -> usize {
+        self.plugins.values().filter(|e| e.driver.is_some()).count()
+    }
+
     /// Step all plugins that have a driver, collecting their event drafts.
     ///
     /// Calls `driver.step(store, timeline)` on each plugin that registered a driver.
@@ -344,6 +368,7 @@ mod tests {
         let p = simple_plugin("p", &[]);
         reg.register(&p, None, None).unwrap();
         assert_eq!(reg.len(), 1);
+        assert_eq!(reg.plugin_count(), 0);
         assert!(reg.contains(&p.id));
         assert!(!reg.is_empty());
     }

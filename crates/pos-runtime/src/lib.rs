@@ -28,10 +28,12 @@ pub mod driver;
 pub mod error;
 pub mod recorder;
 pub mod registry;
+pub mod scheduler;
 pub mod schema;
 
 pub use driver::{Driver, StepOutput};
 pub use error::RuntimeError;
 pub use recorder::{RecordedOutput, Recorder, RunMode};
 pub use registry::PluginRegistry;
+pub use scheduler::TickScheduler;
 pub use schema::SchemaRegistry;
