@@ -23,6 +23,7 @@ struct PluginEntry {
     version: String,
     driver: Option<Box<dyn Driver>>,
     last_tick: Option<u128>,
+    last_obs_seq: Option<u64>,
 }
 
 /// The central plugin registry.
@@ -133,6 +134,7 @@ impl PluginRegistry {
                 version: plugin.version().to_owned(),
                 driver,
                 last_tick: None,
+                last_obs_seq: None,
             },
         );
         Ok(())
@@ -178,6 +180,7 @@ impl PluginRegistry {
                 version: "0.1.0".to_owned(),
                 driver: Some(driver),
                 last_tick: None,
+                last_obs_seq: None,
             },
         );
     }
@@ -205,6 +208,29 @@ impl PluginRegistry {
                     None => true,
                 };
                 if ready {
+                    let subscriptions = driver.subscriptions();
+                    if !subscriptions.is_empty() {
+                        use pos_core::store::SeqRange;
+                        let from_seq = entry.last_obs_seq.map_or(0, |s| s + 1);
+                        match store.read(
+                            timeline,
+                            SeqRange::from_seq(pos_core::clock::Seq::from_u64(from_seq)),
+                        ) {
+                            Ok(events) => {
+                                let matching: Vec<_> = events
+                                    .iter()
+                                    .filter(|e| subscriptions.iter().any(|k| *k == e.event_type))
+                                    .collect();
+                                if !matching.is_empty() {
+                                    driver.receive_observations(&matching);
+                                }
+                                if let Some(last) = events.last() {
+                                    entry.last_obs_seq = Some(last.seq.as_u64());
+                                }
+                            }
+                            Err(_) => {}
+                        }
+                    }
                     let output = driver.step(store, timeline)?;
                     entry.last_tick = Some(now_ns);
                     all_drafts.extend(output.drafts);

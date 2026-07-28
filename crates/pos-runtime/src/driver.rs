@@ -7,7 +7,11 @@
 //! - `Live` — the driver produces new events (nondeterministic sources go through the `Recorder`)
 //! - `Replay` — the driver reads events from the log (bit-exact)
 
-use pos_core::{event::EventDraft, ids::TimelineId, store::EventStore};
+use pos_core::{
+    event::{Event, EventDraft, Kind},
+    ids::TimelineId,
+    store::EventStore,
+};
 
 use crate::error::RuntimeError;
 
@@ -58,6 +62,16 @@ pub trait Driver: Send + Sync {
     fn tick_interval(&self) -> std::time::Duration {
         std::time::Duration::from_millis(100)
     }
+
+    /// Event types this driver observes (default empty).
+    fn subscriptions(&self) -> &[Kind] {
+        &[]
+    }
+
+    /// Receive observations matching [`Self::subscriptions`] since last tick.
+    ///
+    /// Called before [`Self::step`]. Default implementation ignores events.
+    fn receive_observations(&mut self, _events: &[&Event]) {}
 }
 
 #[cfg(test)]
