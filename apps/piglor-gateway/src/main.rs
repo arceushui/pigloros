@@ -372,6 +372,7 @@ mod tests {
         std::env::set_var("LEDGER_WRITE", "1");
         std::env::remove_var("LEDGER_SOURCE");
         let (view, mode) = super::load_ledger();
+        // Clean up env before asserting, so a panic here doesn't leak into other tests.
         std::env::remove_var("LEDGER_WRITE");
         assert!(matches!(mode, LedgerWriteMode::Unconfigured));
         assert!(view.entries.is_empty());
@@ -387,10 +388,11 @@ mod tests {
         std::env::set_var("LEDGER_WRITE", "1");
         std::env::set_var("LEDGER_SOURCE", &path);
         let (_view, mode) = super::load_ledger();
+        // Clean up env and temp dir before asserting, so a panic doesn't leak state.
         std::env::remove_var("LEDGER_WRITE");
         std::env::remove_var("LEDGER_SOURCE");
+        let _ = std::fs::remove_dir_all(&dir);
         assert!(matches!(mode, LedgerWriteMode::Ready(_)));
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
