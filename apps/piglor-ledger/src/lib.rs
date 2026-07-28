@@ -47,6 +47,9 @@ pub enum CliError {
     /// Bad `--key` argument (missing or unreadable).
     #[error("invalid --key: {0}")]
     BadKey(String),
+    /// Unsafe secret-key output target.
+    #[error("unsafe secret key output: {0}")]
+    KeyOutput(String),
     /// File I/O failure.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
