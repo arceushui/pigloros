@@ -10,3 +10,5 @@ SQLCipher.db
 **/__pycache__/
 .mcp.json
 .worktrees/
+skill-observations/
+skills-lock.json
