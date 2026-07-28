@@ -92,15 +92,20 @@ fn cmd_store_info(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     })?;
     let timelines = store.list_timelines()?;
     println!("Timelines: {}", timelines.len());
-    let total_events: usize = timelines
-        .iter()
-        .map(|t| {
-            store
-                .read(t.id(), SeqRange::all())
-                .unwrap_or_default()
-                .len()
-        })
-        .sum();
+    let mut total_events = 0_usize;
+    for timeline in &timelines {
+        let events = match store.read(timeline.id(), SeqRange::all()) {
+            Ok(events) => events,
+            Err(error) => {
+                return Err(std::io::Error::other(format!(
+                    "failed to read Timeline {} while calculating store information: {error}",
+                    timeline.id()
+                ))
+                .into());
+            }
+        };
+        total_events += events.len();
+    }
     println!("Total events: {total_events}");
     Ok(())
 }
@@ -1473,6 +1478,26 @@ mod coverage_tests {
 }
 
 #[cfg(test)]
+mod store_info_coverage {
+    use super::*;
+
+    #[test]
+    fn cmd_store_info_propagates_list_timeline_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("corrupt.db");
+        let path = path.to_str().unwrap();
+        cmd_store_init(path).unwrap();
+
+        let connection = rusqlite::Connection::open(path).unwrap();
+        connection
+            .execute("UPDATE timelines SET name = X'0102'", [])
+            .unwrap();
+
+        assert!(cmd_store_info(path).is_err());
+    }
+}
+
+#[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod main_coverage {
     use super::*;
@@ -1730,6 +1755,12 @@ mod fault_injection_tests {
             .expect("corrupt event seq");
     }
 
+    fn corrupt_event_payload_hash(path: &str) {
+        let conn = Connection::open(path).expect("open sqlite for corruption");
+        conn.execute("UPDATE events SET payload_hash = X'01'", [])
+            .expect("corrupt event payload hash");
+    }
+
     #[cfg(unix)]
     fn set_readonly(path: &std::path::Path) {
         use std::os::unix::fs::PermissionsExt;
@@ -1779,10 +1810,26 @@ mod fault_injection_tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_store_info_fails_when_timelines_corrupt() {
-        let (_dir, path, _) = seeded_db();
-        corrupt_timeline_names(&path);
-        assert!(cmd_store_info(&path).is_err());
+    fn cmd_store_info_reports_the_unreadable_timeline() {
+        let (_dir, path, timeline_id) = seeded_db();
+        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
+        store
+            .append(
+                TimelineId::from_ulid(timeline_id.parse().unwrap()),
+                &[EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("test.event"),
+                    CanonicalBytes::from_vec(vec![]),
+                )],
+            )
+            .unwrap();
+        drop(store);
+        corrupt_event_payload_hash(&path);
+
+        let error = cmd_store_info(&path).unwrap_err().to_string();
+        assert!(error.contains("failed to read Timeline"));
+        assert!(error.contains(&timeline_id));
+        assert!(error.contains("bad hash"), "unexpected error: {error}");
     }
 
     #[test]
