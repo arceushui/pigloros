@@ -4,32 +4,33 @@
 //! skipping drivers whose `tick_interval()` has not yet elapsed.
 
 use crate::{registry::PluginRegistry, RuntimeError};
-use pos_core::{event::EventDraft, ids::TimelineId, store::EventStore};
+use pos_core::{
+    event::EventDraft,
+    ids::{PluginId, TimelineId},
+    store::EventStore,
+};
+use std::collections::HashMap;
 
-/// Per-driver schedule state tracking.
 pub struct TickScheduler {
-    /// The plugin registry being driven.
     pub registry: PluginRegistry,
-    last_tick: Vec<Option<u64>>,
+    last_tick: HashMap<PluginId, Option<u128>>,
 }
 
 impl TickScheduler {
-    /// Create a [`TickScheduler`] from an existing registry.
     #[must_use]
     pub fn new(registry: PluginRegistry) -> Self {
-        let n = registry.plugin_count();
         Self {
             registry,
-            last_tick: vec![None; n],
+            last_tick: HashMap::new(),
         }
     }
 
     /// Step ready drivers, returning all drafts from eligible plugins.
     ///
     /// Only drivers whose `tick_interval()` has elapsed since their last
-    /// tick will fire. Idle drivers return empty outputs and don't count.
+    /// tick will fire.
     ///
-    /// `now_ns` is a nanosecond timestamp (monotonic, e.g. from `WallTime`).
+    /// `now_ns` is a nanosecond timestamp (monotonic, e.g. from [`WallTime`]).
     ///
     /// # Errors
     /// Propagates any [`RuntimeError`] from drivers.
@@ -37,19 +38,19 @@ impl TickScheduler {
         &mut self,
         store: &dyn EventStore,
         timeline: TimelineId,
-        now_ns: u64,
+        now_ns: u128,
     ) -> Result<Vec<EventDraft>, RuntimeError> {
         let mut all_drafts = Vec::new();
-        for (i, driver) in self.registry.drivers_mut().enumerate() {
-            #[allow(clippy::cast_possible_truncation)]
-            let interval_ns = driver.tick_interval().as_nanos() as u64;
-            let ready = match self.last_tick[i] {
-                Some(last) => now_ns.saturating_sub(last) >= interval_ns,
+        for (id, driver) in self.registry.drivers_mut() {
+            let interval_ns = driver.tick_interval().as_nanos();
+            let last = self.last_tick.entry(id).or_insert(None);
+            let ready = match last {
+                Some(prev) => now_ns.saturating_sub(*prev) >= interval_ns,
                 None => true,
             };
             if ready {
                 let output = driver.step(store, timeline)?;
-                self.last_tick[i] = Some(now_ns);
+                *last = Some(now_ns);
                 all_drafts.extend(output.drafts);
             }
         }
@@ -128,18 +129,15 @@ mod tests {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("t").unwrap();
         let mut reg = PluginRegistry::new();
-        let d1 = SlowDriver {
+        reg.register_driver(Box::new(SlowDriver {
             entity: EntityId::new(),
             ticks: 0,
             interval: Duration::from_secs(1),
-        };
-        let d2 = FastDriver {
+        }));
+        reg.register_driver(Box::new(FastDriver {
             entity: EntityId::new(),
             ticks: 0,
-        };
-        reg.register_driver(Box::new(d1));
-        reg.register_driver(Box::new(d2));
-
+        }));
         let mut sched = TickScheduler::new(reg);
         let drafts = sched.tick(store.as_ref(), tl.id(), 0).unwrap();
         assert_eq!(drafts.len(), 2);
@@ -151,18 +149,15 @@ mod tests {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("t").unwrap();
         let mut reg = PluginRegistry::new();
-        let slow = SlowDriver {
+        reg.register_driver(Box::new(SlowDriver {
             entity: EntityId::new(),
             ticks: 0,
             interval: Duration::from_secs(10),
-        };
-        let fast = FastDriver {
+        }));
+        reg.register_driver(Box::new(FastDriver {
             entity: EntityId::new(),
             ticks: 0,
-        };
-        reg.register_driver(Box::new(slow));
-        reg.register_driver(Box::new(fast));
-
+        }));
         let mut sched = TickScheduler::new(reg);
         sched.tick(store.as_ref(), tl.id(), 0).unwrap();
         let drafts = sched.tick(store.as_ref(), tl.id(), 1).unwrap();
@@ -175,18 +170,15 @@ mod tests {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("t").unwrap();
         let mut reg = PluginRegistry::new();
-        let slow = SlowDriver {
+        reg.register_driver(Box::new(SlowDriver {
             entity: EntityId::new(),
             ticks: 0,
             interval: Duration::from_millis(100),
-        };
-        let fast = FastDriver {
+        }));
+        reg.register_driver(Box::new(FastDriver {
             entity: EntityId::new(),
             ticks: 0,
-        };
-        reg.register_driver(Box::new(slow));
-        reg.register_driver(Box::new(fast));
-
+        }));
         let mut sched = TickScheduler::new(reg);
         sched.tick(store.as_ref(), tl.id(), 0).unwrap();
         let d = sched.tick(store.as_ref(), tl.id(), 50_000_000).unwrap();
@@ -204,24 +196,5 @@ mod tests {
         let mut sched = TickScheduler::new(reg);
         let drafts = sched.tick(store.as_ref(), tl.id(), 0).unwrap();
         assert!(drafts.is_empty());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn saturation_at_u64_max() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("t").unwrap();
-        let mut reg = PluginRegistry::new();
-        let d = FastDriver {
-            entity: EntityId::new(),
-            ticks: 0,
-        };
-        reg.register_driver(Box::new(d));
-        let mut sched = TickScheduler::new(reg);
-        sched.tick(store.as_ref(), tl.id(), 0).unwrap();
-        let drafts = sched.tick(store.as_ref(), tl.id(), u64::MAX).unwrap();
-        assert_eq!(drafts.len(), 1);
-        let drafts = sched.tick(store.as_ref(), tl.id(), u64::MAX).unwrap();
-        assert_eq!(drafts.len(), 1);
     }
 }

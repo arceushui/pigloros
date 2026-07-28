@@ -179,9 +179,11 @@ impl PluginRegistry {
         );
     }
 
-    /// Mutable iterator over all registered drivers.
-    pub fn drivers_mut(&mut self) -> impl Iterator<Item = &mut Box<dyn Driver>> {
-        self.plugins.values_mut().filter_map(|e| e.driver.as_mut())
+    /// Mutable iterator over all registered drivers, paired with their [`PluginId`].
+    pub fn drivers_mut(&mut self) -> impl Iterator<Item = (PluginId, &mut Box<dyn Driver>)> {
+        self.plugins
+            .iter_mut()
+            .filter_map(|(id, e)| e.driver.as_mut().map(|d| (*id, d)))
     }
 
     /// Number of plugins that have a driver registered.
