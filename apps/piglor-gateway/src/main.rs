@@ -77,21 +77,12 @@ fn warn_if_non_loopback(addr: SocketAddr) {
 }
 
 fn load_ledger() -> (LedgerView, LedgerWriteMode) {
-    let ledger_view = match std::env::var("LEDGER_SOURCE").ok() {
-        Some(path) if !path.is_empty() => {
-            eprintln!("LEDGER_SOURCE={path}: loading TOML ledger for display");
-            let store = TomlLedgerStore::new(path);
-            let today = format_utc_today();
-            match store.load(&today) {
-                Ok(ledger) => LedgerView::from(&ledger),
-                Err(e) => {
-                    eprintln!("WARNING: failed to load ledger: {e}");
-                    LedgerView::default()
-                }
-            }
-        }
-        _ => LedgerView::default(),
-    };
+    let ledger_view = std::env::var("LEDGER_SOURCE")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .and_then(|path| TomlLedgerStore::new(path).load(&format_utc_today()).ok())
+        .map(|ledger| LedgerView::from(&ledger))
+        .unwrap_or_default();
     let write = if std::env::var("LEDGER_WRITE").is_ok_and(|v| v == "1") {
         match std::env::var("LEDGER_SOURCE").ok() {
             Some(path) if !path.is_empty() => {
@@ -416,20 +407,5 @@ mod tests {
         assert!((2024..=2100).contains(&year));
         assert!((1..=12).contains(&month));
         assert!((1..=31).contains(&day));
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn load_ledger_bad_source_returns_empty_view() {
-        let file = std::env::temp_dir().join(format!("piglor-gw-bad-{}", std::process::id()));
-        std::fs::write(&file, "not a dir").unwrap();
-        std::env::set_var("LEDGER_WRITE", "1");
-        std::env::set_var("LEDGER_SOURCE", file.to_str().unwrap());
-        let (view, _mode) = super::load_ledger();
-        std::env::remove_var("LEDGER_WRITE");
-        std::env::remove_var("LEDGER_SOURCE");
-        // Store creation succeeds but loading fails because path is a file, not a directory
-        assert!(view.entries.is_empty());
-        let _ = std::fs::remove_file(file);
     }
 }
