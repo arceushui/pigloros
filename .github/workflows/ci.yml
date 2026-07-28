@@ -65,6 +65,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
+          toolchain: 1.97.1
           components: rustfmt
 
       - name: cargo fmt --check
@@ -79,6 +80,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: 1.97.1
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -101,6 +104,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
+          toolchain: 1.97.1
           components: clippy
 
       - name: Cache cargo
@@ -125,6 +129,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
+          toolchain: 1.97.1
           components: llvm-tools-preview
 
       - name: Install cargo-llvm-cov
@@ -197,6 +202,7 @@ jobs:
       - run: rm -f rust-toolchain.toml
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
+          toolchain: nightly
           components: rust-src
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -249,6 +255,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: 1.97.1
 
       - name: Install cargo-modules
         uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2
@@ -288,6 +296,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: 1.97.1
 
       - name: Install cargo-depgraph
         uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2
