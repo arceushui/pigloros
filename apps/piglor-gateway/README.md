@@ -29,11 +29,15 @@ Binding non-loopback addresses prints a warning — there is no auth in this sli
 - **Actions:** `event_type` must be `world.action` (default). `payload` is arbitrary JSON → CBOR in the store.
 - **Signals:** convenience wrapper for `society.signal` (see `plugins/society`).
 - **Polling:** `limit` defaults to and may not exceed 100. `from_seq` is inclusive. `next_from_seq` is `null` only when the Timeline is exhausted; otherwise it is the inclusive sequence of the first omitted Event and clients must request it to continue. The bundled `pos-mvp` consumer follows the cursor until exhaustion.
-- **Response budget:** each polling response is at most 1 MiB. The Gateway may return fewer than `limit` Events to stay within that budget. A single externally-written Event that cannot fit returns deterministic JSON `413`; Gateway-authored Event payloads are capped at 256 KiB so they remain retrievable.
+- **Response budget:** each polling response is at most 1 MiB. The Gateway may return fewer than `limit` Events to stay within that budget. Polling uses the store's bounded-read seam: the memory adapter checks payload length before cloning and SQLite checks `length(payload)` before materialising the BLOB. Stored payloads over 256 KiB return deterministic JSON `413`. For Gateway-authored Events, admission also serializes an exact `EventView`-equivalent envelope with worst-case sequence width, so accepted JSON/CBOR payloads are guaranteed to fit even when JSON escaping expands them.
 - **Timeline bound:** one Gateway process accepts at most 64 **root** Timelines. Forks and identity-preserving imported children do not consume root capacity.
 - **Event bound:** each Timeline accepts at most 10,000 **owned** Events. A Fork's inherited parent Events remain readable but do not consume its own ceiling. This bounds incremental storage per Timeline without discouraging Forks.
 - **Errors:** JSON `{ "error": "..." }` with `400` (bad id/type/query/page), `404` (unknown timeline), `413` (body/response too large), `429` (resource bound), `500` (store). Negative, overflowed, duplicate, unknown, or otherwise malformed polling parameters use this JSON `400` envelope.
 - **Body limit:** 1 MiB (`MAX_HTTP_BODY_BYTES`); returns `413` when exceeded.
+
+Rust callers should use public `Gateway::read_events_page` and follow
+`EventPage::next_from_seq`. The deprecated `read_events_from` compatibility
+method returns only the first bounded page; it never aggregates a Timeline.
 
 ### EventView
 
@@ -60,11 +64,16 @@ HTTP (axum) → Gateway → EventStore (Memory | SQLite)
                       → broadcast bus (WebSocket follow-up)
 ```
 
-This crate is a **store façade**, not a full `pos-runtime` host. Poll returns Events already appended to the store, including Events created by a shared SQLite writer; count and byte pagination apply after every read regardless of origin.
+This crate is a **store façade**, not a full `pos-runtime` host. Poll returns Events already appended to a bundled memory or SQLite store, including imported Events. Count, payload, and response bounds apply regardless of Event origin. Custom `EventStore` adapters must implement the bounded-read capability; the safe default refuses Gateway polling instead of falling back to an allocating read.
 
 ### Supported SQLite write boundary
 
-The local-first mutation boundary is one `Gateway` instance owning all writes to its SQLite file. Its async store mutex keeps each event-ceiling check and append in one critical section, including concurrent HTTP requests. Separate processes or direct `EventStore` writers may share the file for migration/import workflows, but concurrent out-of-process mutation is not a supported deployment and cannot claim the 10,000-Event enforcement guarantee. External Events remain safely bounded on read.
+The local-first mutation boundary is one `Gateway` instance owning all writes to its SQLite file. Its async store mutex keeps each event-ceiling check and append in one critical section, including concurrent HTTP requests. Offline migration/import workflows may place Events in the file before the Gateway opens it, but concurrent out-of-process mutation is not a supported deployment and cannot claim the 10,000-Event enforcement guarantee. Imported Events remain safely bounded on read.
+
+The bundled `pos-mvp` consumer does not reuse the 10,000-owned-Event ceiling as
+a logical read limit: Forks may expose inherited plus owned Events beyond that
+number. It follows monotonic cursors to exhaustion, caps every response at 1 MiB,
+and caps cumulative response bytes at 64 MiB.
 
 **Live bus:** `subscribe()` may return `Lagged` if a client falls behind; resync via event poll — the store is authoritative.
 

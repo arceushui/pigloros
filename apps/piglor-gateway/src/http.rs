@@ -562,16 +562,16 @@ mod tests {
         }
     }
 
-    fn app_with_preloaded_payloads(payload_lengths: &[usize]) -> (Router, String) {
+    fn app_with_preloaded_bytes(payloads: Vec<Vec<u8>>) -> (Router, String) {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let timeline = store.create_timeline("shared-writer").unwrap();
-        let drafts: Vec<EventDraft> = payload_lengths
-            .iter()
-            .map(|length| {
+        let drafts: Vec<EventDraft> = payloads
+            .into_iter()
+            .map(|payload| {
                 EventDraft::new(
                     EntityId::new(),
                     Kind::new("shared.event"),
-                    CanonicalBytes::from_vec(vec![0; *length]),
+                    CanonicalBytes::from_vec(payload),
                 )
             })
             .collect();
@@ -584,10 +584,19 @@ mod tests {
         (app, timeline.id().to_string())
     }
 
+    fn app_with_preloaded_payloads(payload_lengths: &[usize]) -> (Router, String) {
+        app_with_preloaded_bytes(
+            payload_lengths
+                .iter()
+                .map(|length| vec![0; *length])
+                .collect(),
+        )
+    }
+
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn response_byte_budget_paginates_events_from_shared_writers() {
-        let (app, id) = app_with_preloaded_payloads(&[400 * 1024, 400 * 1024]);
+        let (app, id) = app_with_preloaded_payloads(&[180 * 1024, 180 * 1024, 180 * 1024]);
         let (status, first) = json_request(
             app.clone(),
             "GET",
@@ -596,14 +605,14 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(first["events"].as_array().unwrap().len(), 1);
-        assert_eq!(first["next_from_seq"], 2);
+        assert_eq!(first["events"].as_array().unwrap().len(), 2);
+        assert_eq!(first["next_from_seq"], 3);
         assert!(serialized_len(&first) <= MAX_EVENTS_RESPONSE_BYTES);
 
         let (status, exhausted) = json_request(
             app,
             "GET",
-            &format!("/v1/timelines/{id}/events?from_seq=2"),
+            &format!("/v1/timelines/{id}/events?from_seq=3"),
             None,
         )
         .await;
@@ -617,6 +626,21 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn single_shared_event_over_response_budget_returns_json_413() {
         let (app, id) = app_with_preloaded_payloads(&[600 * 1024]);
+        let (status, body) =
+            json_request(app, "GET", &format!("/v1/timelines/{id}/events"), None).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(body["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("payload")));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn high_expansion_shared_event_under_payload_cap_returns_json_413() {
+        let mut payload = Vec::new();
+        ciborium::into_writer(&"\0".repeat(160 * 1024), &mut payload).unwrap();
+        assert!(payload.len() <= crate::MAX_EVENT_PAYLOAD_BYTES);
+        let (app, id) = app_with_preloaded_bytes(vec![payload]);
         let (status, body) =
             json_request(app, "GET", &format!("/v1/timelines/{id}/events"), None).await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);

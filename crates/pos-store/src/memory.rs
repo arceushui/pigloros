@@ -92,6 +92,51 @@ impl MemoryStore {
         Ok(crate::stitch::renumber_and_filter(all, range))
     }
 
+    /// Select a logical page without cloning Events outside the requested range.
+    fn collect_events_in_range_bounded(
+        &self,
+        timeline_id: TimelineId,
+        range: SeqRange,
+        max_payload_bytes: usize,
+    ) -> Result<Vec<Event>, CoreError> {
+        let chain = self.fork_chain(timeline_id)?;
+        let mut logical_seq = 0_u64;
+        let from = range.from.as_u64().max(1);
+        let to = range.to.map_or(u64::MAX, Seq::as_u64);
+        let mut selected = Vec::new();
+
+        for (index, timeline) in chain.iter().enumerate() {
+            let events = self
+                .events
+                .get(timeline)
+                .map_or(&[] as &[Event], Vec::as_slice);
+            let fork_cap = chain
+                .get(index + 1)
+                .and_then(|child| self.timelines[child].meta.fork_point)
+                .map(|(_, seq)| seq);
+            for event in events
+                .iter()
+                .take_while(|event| fork_cap.is_none_or(|cap| event.seq <= cap))
+            {
+                logical_seq = logical_seq.saturating_add(1);
+                if logical_seq < from {
+                    continue;
+                }
+                if logical_seq > to {
+                    return Ok(selected);
+                }
+                let payload_size = event.payload.as_slice().len();
+                if payload_size > max_payload_bytes {
+                    return Err(CoreError::PayloadTooLarge { size: payload_size });
+                }
+                let mut event = event.clone();
+                event.seq = Seq::from_u64(logical_seq);
+                selected.push(event);
+            }
+        }
+        Ok(selected)
+    }
+
     /// Walk the fork chain from `timeline_id` back to the root, returning [root, ..., `timeline_id`].
     fn fork_chain(&self, timeline_id: TimelineId) -> Result<Vec<TimelineId>, CoreError> {
         let mut chain = Vec::new();
@@ -189,6 +234,15 @@ impl EventStore for MemoryStore {
             return Err(CoreError::TimelineNotFound(timeline));
         }
         self.collect_events_in_range(timeline, range)
+    }
+
+    fn read_bounded(
+        &self,
+        timeline: TimelineId,
+        range: SeqRange,
+        max_payload_bytes: usize,
+    ) -> Result<Vec<Event>, CoreError> {
+        self.collect_events_in_range_bounded(timeline, range, max_payload_bytes)
     }
 
     fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {

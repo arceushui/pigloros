@@ -108,6 +108,28 @@ pub trait EventStore: Send {
     /// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist.
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError>;
 
+    /// Read events while refusing any selected payload larger than `max_payload_bytes`.
+    ///
+    /// Implementations that support this capability must enforce the payload bound
+    /// before cloning or materialising payload bytes. The safe default refuses the
+    /// operation; it never falls back to [`Self::read`], because doing so could
+    /// allocate an attacker-controlled payload before checking its size.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::PayloadTooLarge`] when a selected Event exceeds the
+    /// bound, [`CoreError::Storage`] when the adapter does not implement bounded
+    /// reads, or the same errors as [`Self::read`].
+    fn read_bounded(
+        &self,
+        _timeline: TimelineId,
+        _range: SeqRange,
+        _max_payload_bytes: usize,
+    ) -> Result<Vec<Event>, CoreError> {
+        Err(CoreError::Storage(
+            "bounded event reads are unsupported by this EventStore".to_owned(),
+        ))
+    }
+
     /// Read events stored directly on this timeline (no fork stitching or renumbering).
     ///
     /// Used by [`export_timeline_own`] for identity-preserving fork sync.

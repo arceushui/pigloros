@@ -88,11 +88,14 @@ impl GatewayLimits {
     };
 }
 
-/// A bounded page of Timeline events.
+/// A bounded page of Timeline Events.
+///
+/// `next_from_seq` is the inclusive sequence of the first omitted Event, or
+/// `None` only when the requested Timeline is exhausted.
 #[derive(Debug, PartialEq)]
-pub(crate) struct EventPage {
-    pub(crate) events: Vec<Event>,
-    pub(crate) next_from_seq: Option<u64>,
+pub struct EventPage {
+    pub events: Vec<Event>,
+    pub next_from_seq: Option<u64>,
 }
 
 /// JSON notice pushed on the event bus / WebSocket.
@@ -196,7 +199,17 @@ impl Gateway {
     /// # Errors
     /// Returns [`GatewayError::InvalidId`], [`GatewayError::InvalidPageLimit`], or
     /// [`GatewayError::Store`].
-    pub(crate) async fn read_events_page(
+    ///
+    /// ```no_run
+    /// # async fn example(gateway: &piglor_gateway::Gateway, timeline: &str)
+    /// # -> Result<(), piglor_gateway::GatewayError> {
+    /// let page = gateway.read_events_page(timeline, 0, 100).await?;
+    /// let _events = page.events;
+    /// let _cursor = page.next_from_seq;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn read_events_page(
         &self,
         timeline_id: &str,
         from_seq: u64,
@@ -215,13 +228,42 @@ impl Gateway {
             to: Some(Seq::from_u64(last_seq)),
         };
         let guard = self.store.lock().await;
-        let mut events = guard.read(id, range)?;
+        let mut events = match guard.read_bounded(id, range, MAX_EVENT_PAYLOAD_BYTES) {
+            Ok(events) => events,
+            Err(CoreError::PayloadTooLarge { .. }) => {
+                return Err(GatewayError::EventPayloadTooLarge {
+                    maximum: MAX_EVENT_PAYLOAD_BYTES,
+                })
+            }
+            Err(error) => return Err(GatewayError::Store(error)),
+        };
         let next_from_seq = events.get(limit).map(event_seq);
         events.truncate(limit);
         Ok(EventPage {
             events,
             next_from_seq,
         })
+    }
+
+    /// Compatibility shim returning at most [`MAX_EVENTS_PER_POLL`] Events.
+    ///
+    /// This method no longer aggregates the Timeline to exhaustion. New callers
+    /// must use [`Self::read_events_page`] and follow `next_from_seq`.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`Self::read_events_page`].
+    #[deprecated(
+        since = "0.1.0",
+        note = "use read_events_page and follow EventPage::next_from_seq"
+    )]
+    pub async fn read_events_from(
+        &self,
+        timeline_id: &str,
+        from_seq: u64,
+    ) -> Result<Vec<Event>, GatewayError> {
+        self.read_events_page(timeline_id, from_seq, MAX_EVENTS_PER_POLL)
+            .await
+            .map(|page| page.events)
     }
 
     /// Append one `world.action` draft. `payload` is bounded JSON → CBOR.
@@ -272,6 +314,11 @@ impl Gateway {
         if draft.payload.as_slice().len() > MAX_EVENT_PAYLOAD_BYTES {
             return Err(GatewayError::EventPayloadTooLarge {
                 maximum: MAX_EVENT_PAYLOAD_BYTES,
+            });
+        }
+        if draft_event_response_len(&draft) > MAX_EVENTS_RESPONSE_BYTES {
+            return Err(GatewayError::EventResponseTooLarge {
+                maximum: MAX_EVENTS_RESPONSE_BYTES,
             });
         }
         // Release the store lock before bus fan-out so future WS handlers can
@@ -348,6 +395,26 @@ fn json_to_cbor(value: &serde_json::Value) -> CanonicalBytes {
     // Writing CBOR to Vec<u8> is infallible (same as plugins / pos-crypto).
     ciborium::into_writer(value, &mut buf).expect("ciborium write to Vec<u8> is infallible");
     CanonicalBytes::from_vec(buf)
+}
+
+/// Serialize the exact wire fields derived from a draft, using the longest
+/// possible sequence number and fixed-width ULID placeholders.
+fn draft_event_response_len(draft: &EventDraft) -> usize {
+    let payload = draft.payload.as_slice();
+    let view = EventView {
+        id: "0".repeat(26),
+        entity: draft.entity.to_string(),
+        event_type: draft.event_type.as_str().to_owned(),
+        seq: u64::MAX,
+        payload: decode_cbor_json(payload),
+        payload_hex: hex_encode(payload),
+    };
+    serde_json::to_vec(&serde_json::json!({
+        "events": [view],
+        "next_from_seq": null,
+    }))
+    .expect("EventView serialization is infallible")
+    .len()
 }
 
 /// Request body for `POST /v1/timelines`.
@@ -746,6 +813,64 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn sqlite_bounded_reads_page_forks_and_reject_external_oversize() {
+        let mut store = open_store(StoreConfig::Sqlite {
+            path: ":memory:".to_owned(),
+        })
+        .unwrap();
+        let root = store.create_timeline("root").unwrap();
+        let small = EventDraft::new(
+            EntityId::new(),
+            Kind::new(EVENT_TYPE_ACTION),
+            json_to_cbor(&serde_json::json!({})),
+        );
+        store
+            .append(root.id(), std::slice::from_ref(&small))
+            .unwrap();
+        let child = store.fork(root.id(), Seq::from_u64(1), "child").unwrap();
+        store
+            .append(child.id(), std::slice::from_ref(&small))
+            .unwrap();
+        let gateway = Gateway::new(store);
+
+        let first = gateway
+            .read_events_page(&child.id().to_string(), 1, 1)
+            .await
+            .unwrap();
+        assert_eq!(first.events.len(), 1);
+        assert_eq!(first.events[0].seq.as_u64(), 1);
+        assert_eq!(first.next_from_seq, Some(2));
+        let beyond_head = gateway
+            .read_events_page(&child.id().to_string(), 3, 1)
+            .await
+            .unwrap();
+        assert!(beyond_head.events.is_empty());
+
+        let mut external = open_store(StoreConfig::Sqlite {
+            path: ":memory:".to_owned(),
+        })
+        .unwrap();
+        let timeline = external.create_timeline("external").unwrap();
+        let oversized = EventDraft::new(
+            EntityId::new(),
+            Kind::new("external.event"),
+            CanonicalBytes::from_vec(vec![0; MAX_EVENT_PAYLOAD_BYTES + 1]),
+        );
+        external.append(timeline.id(), &[oversized]).unwrap();
+        let error = Gateway::new(external)
+            .read_events_page(&timeline.id().to_string(), 0, 1)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            GatewayError::EventPayloadTooLarge {
+                maximum: MAX_EVENT_PAYLOAD_BYTES
+            }
+        ));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn gateway_rejects_payloads_that_cannot_fit_bounded_responses() {
         let gateway = memory_gw();
         let timeline = gateway.create_timeline("payload").await.unwrap();
@@ -765,6 +890,43 @@ mod tests {
                 maximum: MAX_EVENT_PAYLOAD_BYTES
             }
         ));
+
+        let high_expansion = serde_json::json!({"data": "\0".repeat(160 * 1024)});
+        let error = gateway
+            .append_action(
+                &timeline.id().to_string(),
+                &EntityId::new().to_string(),
+                EVENT_TYPE_ACTION,
+                &high_expansion,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            GatewayError::EventResponseTooLarge {
+                maximum: MAX_EVENTS_RESPONSE_BYTES
+            }
+        ));
+
+        let retrievable = serde_json::json!({"data": "x".repeat(240 * 1024)});
+        gateway
+            .append_action(
+                &timeline.id().to_string(),
+                &EntityId::new().to_string(),
+                EVENT_TYPE_ACTION,
+                &retrievable,
+            )
+            .await
+            .unwrap();
+        let page = gateway
+            .read_events_page(&timeline.id().to_string(), 0, 1)
+            .await
+            .unwrap();
+        let response = serde_json::json!({
+            "events": page.events.iter().map(EventView::from).collect::<Vec<_>>(),
+            "next_from_seq": page.next_from_seq,
+        });
+        assert!(serde_json::to_vec(&response).unwrap().len() <= MAX_EVENTS_RESPONSE_BYTES);
     }
 
     #[tokio::test]
@@ -821,6 +983,83 @@ mod tests {
         let exhausted = gateway.read_events_page(&timeline_id, 2, 1).await.unwrap();
         assert_eq!(exhausted.events.len(), 1);
         assert_eq!(exhausted.next_from_seq, None);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[allow(deprecated)]
+    async fn public_page_api_and_compatibility_shim_remain_bounded() {
+        let gateway = memory_gw();
+        let timeline = gateway.create_timeline("public-api").await.unwrap();
+        let drafts: Vec<_> = (0..=MAX_EVENTS_PER_POLL)
+            .map(|_| {
+                EventDraft::new(
+                    EntityId::new(),
+                    Kind::new(EVENT_TYPE_ACTION),
+                    json_to_cbor(&serde_json::json!({})),
+                )
+            })
+            .collect();
+        {
+            let mut store = gateway.store.lock().await;
+            store.append(timeline.id(), &drafts).unwrap();
+        }
+        let page: EventPage = gateway
+            .read_events_page(&timeline.id().to_string(), 0, MAX_EVENTS_PER_POLL)
+            .await
+            .unwrap();
+        assert_eq!(page.events.len(), MAX_EVENTS_PER_POLL);
+        assert_eq!(page.next_from_seq, Some(101));
+        let shim = gateway
+            .read_events_from(&timeline.id().to_string(), 0)
+            .await
+            .unwrap();
+        assert_eq!(shim.len(), MAX_EVENTS_PER_POLL);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn fork_with_more_than_ten_thousand_logical_events_pages_to_exhaustion() {
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let root = store.create_timeline("root").unwrap();
+        let drafts: Vec<_> = (0..MAX_EVENTS_PER_TIMELINE)
+            .map(|_| {
+                EventDraft::new(
+                    EntityId::new(),
+                    Kind::new(EVENT_TYPE_ACTION),
+                    json_to_cbor(&serde_json::json!({})),
+                )
+            })
+            .collect();
+        store.append(root.id(), &drafts).unwrap();
+        let child = store
+            .fork(root.id(), Seq::from_u64(10_000), "child")
+            .unwrap();
+        let gateway = Gateway::new(store);
+        gateway
+            .append_action(
+                &child.id().to_string(),
+                &EntityId::new().to_string(),
+                EVENT_TYPE_ACTION,
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+
+        let mut from_seq = 0;
+        let mut count = 0;
+        loop {
+            let page = gateway
+                .read_events_page(&child.id().to_string(), from_seq, MAX_EVENTS_PER_POLL)
+                .await
+                .unwrap();
+            count += page.events.len();
+            match page.next_from_seq {
+                Some(next) => from_seq = next,
+                None => break,
+            }
+        }
+        assert_eq!(count, 10_001);
     }
 
     #[tokio::test]

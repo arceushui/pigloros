@@ -12,10 +12,9 @@ const NUDGE_SCALE: f64 = 0.25;
 const GATEWAY_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Cap response body size (matches gateway write limit).
 const MAX_GATEWAY_BODY_BYTES: u64 = 1024 * 1024;
-/// Gateway-owned Event ceiling; also bounds aggregate context memory.
-const MAX_GATEWAY_EVENTS: usize = 10_000;
-/// Explicit page size supported by the Gateway polling contract.
-const GATEWAY_EVENT_PAGE_SIZE: usize = 100;
+/// Cap cumulative response bytes across cursor pages without assuming a logical
+/// Timeline Event ceiling (Forks can inherit Events from multiple Timelines).
+const MAX_GATEWAY_AGGREGATE_BYTES: u64 = 64 * 1024 * 1024;
 const HEX: &[u8; 16] = b"0123456789ABCDEF";
 
 /// Map society dimensions onto default scenario preference keys so ADR demos
@@ -226,6 +225,14 @@ fn fetch_gateway_events(
     gateway: &str,
     timeline_id: &str,
 ) -> Result<Vec<serde_json::Value>, String> {
+    fetch_gateway_events_with_aggregate_limit(gateway, timeline_id, MAX_GATEWAY_AGGREGATE_BYTES)
+}
+
+fn fetch_gateway_events_with_aggregate_limit(
+    gateway: &str,
+    timeline_id: &str,
+    max_aggregate_bytes: u64,
+) -> Result<Vec<serde_json::Value>, String> {
     validate_timeline_id(timeline_id)?;
     warn_if_non_loopback(gateway);
 
@@ -238,10 +245,9 @@ fn fetch_gateway_events(
         .build();
     let mut events = Vec::new();
     let mut from_seq = 0;
+    let mut aggregate_bytes = 0_u64;
     loop {
-        let url = format!(
-            "{base}/v1/timelines/{encoded}/events?from_seq={from_seq}&limit={GATEWAY_EVENT_PAGE_SIZE}"
-        );
+        let url = format!("{base}/v1/timelines/{encoded}/events?from_seq={from_seq}");
         let response = agent
             .get(&url)
             .call()
@@ -253,6 +259,8 @@ fn fetch_gateway_events(
 
         let mut reader = response.into_reader();
         let bytes = read_capped_body(&mut reader, MAX_GATEWAY_BODY_BYTES)?;
+        aggregate_bytes =
+            checked_gateway_aggregate(aggregate_bytes, bytes.len() as u64, max_aggregate_bytes)?;
         let body = String::from_utf8(bytes).map_err(|e| format!("gateway body not UTF-8: {e}"))?;
         let body: serde_json::Value =
             serde_json::from_str(&body).map_err(|e| format!("gateway JSON parse failed: {e}"))?;
@@ -262,16 +270,18 @@ fn fetch_gateway_events(
             .cloned()
             .unwrap_or_default();
         events.extend(page_events);
-        if events.len() > MAX_GATEWAY_EVENTS {
-            return Err(format!(
-                "gateway returned more than {MAX_GATEWAY_EVENTS} events"
-            ));
-        }
         match next_gateway_cursor(&body, from_seq)? {
             Some(next) => from_seq = next,
             None => return Ok(events),
         }
     }
+}
+
+fn checked_gateway_aggregate(current: u64, page: u64, maximum: u64) -> Result<u64, String> {
+    current
+        .checked_add(page)
+        .filter(|total| *total <= maximum)
+        .ok_or_else(|| format!("gateway aggregate body too large: exceeded {maximum} bytes"))
 }
 
 fn next_gateway_cursor(body: &serde_json::Value, current: u64) -> Result<Option<u64>, String> {
@@ -616,7 +626,6 @@ mod tests {
                     "from_seq=101"
                 };
                 assert!(request.contains(expected_cursor), "{request}");
-                assert!(request.contains("limit=100"), "{request}");
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
@@ -633,29 +642,90 @@ mod tests {
     }
 
     #[test]
-    fn fetch_gateway_events_rejects_aggregate_over_gateway_ceiling() {
+    fn fetch_gateway_events_follows_fork_protocol_past_ten_thousand_events() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let body = serde_json::json!({
-            "events": vec![serde_json::Value::Null; MAX_GATEWAY_EVENTS + 1],
-            "next_from_seq": null,
-        })
-        .to_string();
+        let server = std::thread::spawn(move || {
+            for page in 0_u64..=100 {
+                let first = page * 100 + 1;
+                let count = if page == 100 { 1 } else { 100 };
+                let events: Vec<_> = (first..first + count)
+                    .map(|seq| {
+                        serde_json::json!({
+                            "seq": seq,
+                            "event_type": "world.action",
+                            "payload": {
+                                "origin": if seq <= 10_000 { "inherited" } else { "owned" }
+                            }
+                        })
+                    })
+                    .collect();
+                let next = (page < 100).then_some(first + count);
+                let body = serde_json::json!({
+                    "events": events,
+                    "next_from_seq": next,
+                })
+                .to_string();
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 2048];
+                let read = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..read]);
+                let requested = if page == 0 { 0 } else { first };
+                assert!(
+                    request.contains(&format!("from_seq={requested}")),
+                    "{request}"
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        let events =
+            fetch_gateway_events(&format!("http://{addr}"), "01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        server.join().unwrap();
+        assert_eq!(events.len(), 10_001);
+        assert_eq!(events[9_999]["payload"]["origin"], "inherited");
+        assert_eq!(events[10_000]["payload"]["origin"], "owned");
+    }
+
+    #[test]
+    fn aggregate_byte_guard_handles_limit_and_overflow() {
+        assert_eq!(checked_gateway_aggregate(4, 5, 9).unwrap(), 9);
+        for (current, page, maximum) in [(4, 6, 9), (u64::MAX, 1, u64::MAX)] {
+            let error = checked_gateway_aggregate(current, page, maximum).unwrap_err();
+            assert!(error.contains("aggregate body too large"), "{error}");
+        }
+    }
+
+    #[test]
+    fn fetch_gateway_events_enforces_cumulative_byte_guard() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = r#"{"events":[],"next_from_seq":null}"#;
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let _ = stream.read(&mut [0u8; 1024]);
+            let _ = stream.read(&mut [0_u8; 1024]);
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             stream.write_all(response.as_bytes()).unwrap();
         });
-        let error = fetch_gateway_events(&format!("http://{addr}"), "01ARZ3NDEKTSV4RRFFQ69G5FAV")
-            .unwrap_err();
-        assert!(error.contains("more than"), "{error}");
+        let error = fetch_gateway_events_with_aggregate_limit(
+            &format!("http://{addr}"),
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            1,
+        )
+        .unwrap_err();
+        assert!(error.contains("aggregate body too large"), "{error}");
     }
 
     #[test]
