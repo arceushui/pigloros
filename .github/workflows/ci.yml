@@ -191,8 +191,8 @@ jobs:
         with:
           shared-key: miri
 
-      - name: cargo miri test
-        run: cargo +nightly miri test --workspace --tests
+      - name: cargo miri test (kernel crates — no C deps)
+        run: cargo +nightly miri test -p pos-core -p pos-crypto -p pos-state --tests
 
   geiger:
     name: cargo-geiger (unsafe code audit)
