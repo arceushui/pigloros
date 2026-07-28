@@ -40,7 +40,10 @@ fn run_with_args(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send
                 .parse::<SocketAddr>()?;
             warn_if_non_loopback(addr);
             let store_path = args.get(3).map(String::as_str);
-            let (ledger_view, ledger_write) = load_ledger();
+            let (ledger_view, ledger_write) = match load_ledger() {
+                Ok(ledger) => ledger,
+                Err(error) => return Err(Box::new(error)),
+            };
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -76,28 +79,38 @@ fn warn_if_non_loopback(addr: SocketAddr) {
     }
 }
 
-fn load_ledger() -> (LedgerView, LedgerWriteMode) {
-    let ledger_view = std::env::var("LEDGER_SOURCE")
-        .ok()
-        .filter(|p| !p.is_empty())
-        .and_then(|path| TomlLedgerStore::new(path).load(&format_utc_today()).ok())
-        .map(|ledger| LedgerView::from(&ledger))
-        .unwrap_or_default();
-    let write = if std::env::var("LEDGER_WRITE").is_ok_and(|v| v == "1") {
-        match std::env::var("LEDGER_SOURCE").ok() {
-            Some(path) if !path.is_empty() => {
-                let store = TomlLedgerStore::new(path);
-                LedgerWriteMode::Ready(LedgerGateway::new(Box::new(store)))
-            }
-            _ => {
-                eprintln!("LEDGER_WRITE=1 but LEDGER_SOURCE not set; store tier not yet available");
-                LedgerWriteMode::Unconfigured
-            }
+fn load_ledger() -> Result<(LedgerView, LedgerWriteMode), pos_plugin_ledger::LedgerError> {
+    load_ledger_from(
+        std::env::var("LEDGER_SOURCE").ok(),
+        std::env::var("LEDGER_WRITE").unwrap_or_default() == "1",
+    )
+}
+
+fn load_ledger_from(
+    source: Option<String>,
+    ledger_write_enabled: bool,
+) -> Result<(LedgerView, LedgerWriteMode), pos_plugin_ledger::LedgerError> {
+    let source = source.filter(|path| !path.is_empty());
+    let ledger_view = match source
+        .as_deref()
+        .map(|path| TomlLedgerStore::new(path).load(&format_utc_today()))
+    {
+        Some(Ok(ledger)) => LedgerView::from(&ledger),
+        None => LedgerView::default(),
+        Some(Err(error)) => return Err(error),
+    };
+    let write = if ledger_write_enabled {
+        if let Some(path) = source {
+            let store = TomlLedgerStore::new(path);
+            LedgerWriteMode::Ready(LedgerGateway::new(Box::new(store)))
+        } else {
+            eprintln!("LEDGER_WRITE=1 but LEDGER_SOURCE not set; store tier not yet available");
+            LedgerWriteMode::Unconfigured
         }
     } else {
         LedgerWriteMode::Disabled
     };
-    (ledger_view, write)
+    Ok((ledger_view, write))
 }
 
 #[cfg(not(test))]
@@ -168,6 +181,8 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn warn_if_non_loopback_covers_both_arms() {
@@ -201,6 +216,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_main_serve_memory_shuts_down() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
@@ -215,6 +231,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_main_serve_sqlite_shuts_down() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
@@ -288,6 +305,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_main_serve_open_store_error() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
@@ -307,6 +325,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_main_serve_bind_error() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = occupied.local_addr().unwrap();
         let err = run_with_args(&[
@@ -317,6 +336,27 @@ mod tests {
         .unwrap_err();
         assert!(!err.to_string().is_empty());
         drop(occupied);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn run_main_serve_invalid_ledger_returns_error() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir =
+            std::env::temp_dir().join(format!("piglor-gw-ledger-startup-{}", std::process::id()));
+        let predictions = dir.join("predictions");
+        std::fs::create_dir_all(&predictions).unwrap();
+        std::fs::write(predictions.join("invalid.toml"), "not valid = [").unwrap();
+        std::env::set_var("LEDGER_SOURCE", &dir);
+        let error = run_with_args(&[
+            String::from("piglor-gateway"),
+            String::from("serve"),
+            String::from("127.0.0.1:0"),
+        ])
+        .unwrap_err();
+        std::env::remove_var("LEDGER_SOURCE");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(error.to_string().contains("TOML"));
     }
 
     #[tokio::test]
@@ -370,13 +410,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn load_ledger_gate_on_no_source_returns_unconfigured() {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = LOCK.lock().unwrap();
-        // Start from a clean env state.
-        std::env::remove_var("LEDGER_SOURCE");
-        std::env::set_var("LEDGER_WRITE", "1");
-        let (view, mode) = super::load_ledger();
-        std::env::remove_var("LEDGER_WRITE");
+        let (view, mode) = super::load_ledger_from(None, true).unwrap();
         assert!(matches!(mode, LedgerWriteMode::Unconfigured));
         assert!(view.entries.is_empty());
     }
@@ -384,21 +418,50 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn load_ledger_gate_on_with_source_returns_ready() {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = LOCK.lock().unwrap();
-        // Start from a clean env state.
-        std::env::remove_var("LEDGER_SOURCE");
         let dir =
             std::env::temp_dir().join(format!("piglor-gw-ledger-load-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.to_str().unwrap().to_owned();
-        std::env::set_var("LEDGER_WRITE", "1");
-        std::env::set_var("LEDGER_SOURCE", &path);
-        let (_view, mode) = super::load_ledger();
-        std::env::remove_var("LEDGER_WRITE");
-        std::env::remove_var("LEDGER_SOURCE");
+        let (_view, mode) = super::load_ledger_from(Some(path), true).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(matches!(mode, LedgerWriteMode::Ready(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn load_ledger_returns_configured_entries() {
+        let dir = std::env::temp_dir().join(format!(
+            "piglor-gw-ledger-configured-{}",
+            std::process::id()
+        ));
+        let predictions = dir.join("predictions");
+        std::fs::create_dir_all(&predictions).unwrap();
+        std::fs::write(
+            predictions.join("01KYJ6HAFVPNM4VFBKG5BQ4QMT.toml"),
+            include_str!("../../../seed/predictions/01KYJ6HAFVPNM4VFBKG5BQ4QMT.toml"),
+        )
+        .unwrap();
+        let (view, _) =
+            super::load_ledger_from(Some(dir.to_string_lossy().into_owned()), false).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(view.entries.len(), 1);
+        assert_eq!(view.entries[0].title, "GitHub Copilot Dominance");
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn load_ledger_reports_invalid_configured_data() {
+        let dir =
+            std::env::temp_dir().join(format!("piglor-gw-ledger-invalid-{}", std::process::id()));
+        let predictions = dir.join("predictions");
+        std::fs::create_dir_all(&predictions).unwrap();
+        std::fs::write(predictions.join("invalid.toml"), "not valid = [").unwrap();
+        let Err(error) = super::load_ledger_from(Some(dir.to_string_lossy().into_owned()), false)
+        else {
+            panic!("invalid configured Ledger data must fail startup");
+        };
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(error.to_string().contains("TOML"));
     }
 
     #[test]
