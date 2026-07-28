@@ -276,8 +276,8 @@ jobs:
 
       - name: Generate dependency graph
         run: |
-          cargo depgraph --all-deps --dedup-transitive-deps \
-            --output artifacts/depgraph.svg
+          mkdir -p artifacts
+          cargo depgraph --all-deps --dedup-transitive-deps > artifacts/depgraph.svg
 
       - name: Upload dependency graph
         if: always()
