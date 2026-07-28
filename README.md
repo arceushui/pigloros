@@ -38,8 +38,8 @@ curl http://localhost:8080/v1/ledger
 Requires the pinned toolchain in `rust-toolchain.toml` (Rust **1.97.1**).
 
 ```bash
-# One-time per clone — enable Trunk git hooks (test policy on commit/push):
-trunk git-hooks sync
+# One-time per clone — enable git hooks (fmt + clippy on commit):
+git config core.hooksPath .githooks
 ```
 
 ## Repository Layout

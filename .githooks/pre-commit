@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# PiglorOS pre-commit hook — fast local gates before commit.
+# Install: git config core.hooksPath .githooks
+set -euo pipefail
+
+echo "pre-commit: cargo fmt --check"
+cargo fmt --all -- --check
+
+echo "pre-commit: cargo clippy (changed crates)"
+# Only lint changed crates to keep pre-commit fast
+changed=$(git diff --cached --name-only --diff-filter=ACM | grep '\.rs$' | sed 's|/.*||' | sort -u)
+crates=()
+for d in $changed; do
+    if [ -f "$d/Cargo.toml" ]; then
+        crates+=("$d")
+    fi
+done
+# Try to use --workspace if too many crates changed
+if [ ${#crates[@]} -gt 5 ] || [ ${#crates[@]} -eq 0 ]; then
+    crates=()
+fi
+if [ ${#crates[@]} -eq 0 ]; then
+    # Fall back to workspace-level clippy (only on relevant targets)
+    echo "  (workspace-level clippy — many or no crates changed)"
+    cargo clippy --all-targets -- -D warnings -W clippy::pedantic
+else
+    for crate in "${crates[@]}"; do
+        echo "  clippy: $crate"
+        cargo clippy -p "$crate" --all-targets -- -D warnings -W clippy::pedantic
+    done
+fi
+
+echo "pre-commit: OK"
