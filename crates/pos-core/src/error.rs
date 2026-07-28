@@ -25,6 +25,9 @@ pub enum CoreError {
     #[error("event metadata field {field} too large: {size} bytes")]
     EventMetadataTooLarge { field: &'static str, size: usize },
 
+    #[error("fork depth too large: {depth}")]
+    ForkDepthTooLarge { depth: usize },
+
     #[error("signature verification failed")]
     SignatureVerificationFailed,
 
@@ -96,6 +99,13 @@ mod tests {
         };
         assert!(e.to_string().contains("event_type"));
         assert!(e.to_string().contains("1024"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fork_depth_too_large_displays() {
+        let e = CoreError::ForkDepthTooLarge { depth: 65 };
+        assert!(e.to_string().contains("65"));
     }
 
     #[test]

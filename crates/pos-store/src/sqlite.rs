@@ -62,6 +62,7 @@ impl SqliteStore {
         )
         .map_err(|e| CoreError::Storage(e.to_string()))?;
 
+        Self::require_utf8_encoding(&conn)?;
         let store = Self { conn, hasher };
         store.init_schema()?;
         Ok(store)
@@ -114,6 +115,19 @@ impl SqliteStore {
             }
         };
         raw.map_err(|e| CoreError::Storage(e.to_string()))
+    }
+
+    fn require_utf8_encoding(conn: &Connection) -> Result<(), CoreError> {
+        let encoding: String = conn
+            .query_row("PRAGMA encoding", [], |row| row.get(0))
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        if encoding == "UTF-8" {
+            Ok(())
+        } else {
+            Err(CoreError::Storage(format!(
+                "unsupported SQLite encoding {encoding}; UTF-8 is required for bounded Event metadata"
+            )))
+        }
     }
 
     fn init_schema(&self) -> Result<(), CoreError> {
@@ -347,7 +361,8 @@ impl SqliteStore {
         bounds: EventReadBounds,
     ) -> Result<Vec<Event>, CoreError> {
         let sql = format!(
-            "SELECT length(payload), length(CAST(event_type AS BLOB))
+            "SELECT typeof(payload), length(CAST(payload AS BLOB)),
+                    length(CAST(event_type AS BLOB))
              FROM events WHERE timeline_id = '{}' AND seq >= {} AND seq <= {}
              ORDER BY seq ASC",
             timeline_id,
@@ -362,7 +377,7 @@ impl SqliteStore {
             }
         };
         let mut rows = stmt.raw_query();
-        let mut field_sizes = Vec::new();
+        let mut field_sizes: Vec<(String, i64, i64)> = Vec::new();
         loop {
             let next = {
                 #[cfg(test)]
@@ -381,8 +396,10 @@ impl SqliteStore {
             match next {
                 Ok(Some(row)) => field_sizes.push((
                     row.get(0)
-                        .expect("length(non-null SQLite BLOB) returns an integer"),
+                        .expect("typeof(non-null SQLite value) returns text"),
                     row.get(1)
+                        .expect("length(non-null SQLite BLOB) returns an integer"),
+                    row.get(2)
                         .expect("length(CAST(non-null SQLite TEXT AS BLOB)) returns an integer"),
                 )),
                 Ok(None) => break,
@@ -393,13 +410,18 @@ impl SqliteStore {
             }
         }
 
-        for (stored_payload_size, stored_event_type_size) in field_sizes {
+        for (payload_storage_class, stored_payload_size, stored_event_type_size) in field_sizes {
+            if payload_storage_class != "blob" {
+                return Err(CoreError::Storage(format!(
+                    "event payload has SQLite storage class {payload_storage_class}; BLOB is required for bounded reads"
+                )));
+            }
             let payload_size = sqlite_usize_or_max(stored_payload_size);
-            if payload_size > bounds.max_payload_bytes {
+            if payload_size > bounds.max_payload_bytes() {
                 return Err(CoreError::PayloadTooLarge { size: payload_size });
             }
             let event_type_size = sqlite_usize_or_max(stored_event_type_size);
-            if event_type_size > bounds.max_event_type_bytes {
+            if event_type_size > bounds.max_event_type_bytes() {
                 return Err(CoreError::EventMetadataTooLarge {
                     field: "event_type",
                     size: event_type_size,
@@ -449,7 +471,7 @@ impl SqliteStore {
             Ok(tx) => tx,
             Err(error) => return Err(CoreError::Storage(error.to_string())),
         };
-        let chain = Self::fork_chain_on(&tx, timeline_id)?;
+        let chain = Self::fork_chain_bounded_on(&tx, timeline_id, bounds.max_fork_depth())?;
         let from = range.from.as_u64().max(1);
         let to = range.to.map_or(u64::MAX, Seq::as_u64);
         let mut logical_offset = 0_u64;
@@ -514,6 +536,46 @@ impl SqliteStore {
                 Some((Some(parent_str), fork_seq)) => {
                     let fork = fork_seq.map(|s| Seq::from_u64(u64::try_from(s).unwrap_or(0)));
                     chain.push((current, fork));
+                    current = parse_timeline_id(&parent_str)?;
+                }
+            }
+        }
+        chain.reverse();
+        Ok(chain)
+    }
+
+    fn fork_chain_bounded_on(
+        conn: &Connection,
+        timeline_id: TimelineId,
+        max_depth: usize,
+    ) -> Result<Vec<(TimelineId, Option<Seq>)>, CoreError> {
+        let mut chain: Vec<(TimelineId, Option<Seq>)> = Vec::new();
+        let mut current = timeline_id;
+        let mut depth = 0_usize;
+        loop {
+            let row: Option<(Option<String>, Option<i64>)> = conn
+                .query_row(
+                    "SELECT parent_id, fork_seq FROM timelines WHERE id = ?1",
+                    params![current.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+
+            match row {
+                None => return Err(CoreError::TimelineNotFound(current)),
+                Some((None, _)) => {
+                    chain.push((current, None));
+                    break;
+                }
+                Some((Some(parent_str), fork_seq)) => {
+                    let next_depth = depth.saturating_add(1);
+                    if next_depth > max_depth {
+                        return Err(CoreError::ForkDepthTooLarge { depth: next_depth });
+                    }
+                    let fork = fork_seq.map(|seq| Seq::from_u64(u64::try_from(seq).unwrap_or(0)));
+                    chain.push((current, fork));
+                    depth = next_depth;
                     current = parse_timeline_id(&parent_str)?;
                 }
             }
@@ -1210,10 +1272,7 @@ mod tests {
     };
 
     fn read_bounds(max_payload_bytes: usize) -> EventReadBounds {
-        EventReadBounds {
-            max_payload_bytes,
-            max_event_type_bytes: usize::MAX,
-        }
+        EventReadBounds::new(max_payload_bytes, usize::MAX, usize::MAX)
     }
     use pos_crypto::chain::hash_payload;
 
@@ -1325,6 +1384,45 @@ mod tests {
         store.conn.execute("DROP TABLE events", []).unwrap();
         let error = store
             .read_bounded(timeline.id(), SeqRange::all(), read_bounds(1))
+            .unwrap_err();
+        assert!(matches!(error, CoreError::Storage(_)));
+
+        let mut chain_store = new_store();
+        let timeline = chain_store.create_timeline("missing-timelines").unwrap();
+        chain_store
+            .conn
+            .execute("DROP TABLE timelines", [])
+            .unwrap();
+        let error = chain_store
+            .read_bounded(timeline.id(), SeqRange::all(), read_bounds(1))
+            .unwrap_err();
+        assert!(matches!(error, CoreError::Storage(_)));
+
+        let invalid_type_store = new_store();
+        let timeline_id = TimelineId::new();
+        let genesis = pos_crypto::chain::genesis_hash();
+        invalid_type_store
+            .conn
+            .execute(
+                "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
+                 VALUES (?1, 'invalid-parent-type', 'live', X'0102', 0, 0, ?2)",
+                params![timeline_id.to_string(), genesis.as_bytes().as_slice()],
+            )
+            .unwrap();
+        let error = invalid_type_store
+            .read_bounded(timeline_id, SeqRange::all(), read_bounds(1))
+            .unwrap_err();
+        assert!(matches!(error, CoreError::Storage(_)));
+
+        invalid_type_store
+            .conn
+            .execute(
+                "UPDATE timelines SET parent_id = ?1, fork_seq = X'0102' WHERE id = ?2",
+                params![TimelineId::new().to_string(), timeline_id.to_string()],
+            )
+            .unwrap();
+        let error = invalid_type_store
+            .read_bounded(timeline_id, SeqRange::all(), read_bounds(1))
             .unwrap_err();
         assert!(matches!(error, CoreError::Storage(_)));
     }
@@ -1445,10 +1543,7 @@ mod tests {
             .read_bounded(
                 timeline.id(),
                 SeqRange::all(),
-                EventReadBounds {
-                    max_payload_bytes: 1,
-                    max_event_type_bytes: 4,
-                },
+                EventReadBounds::new(1, 4, usize::MAX),
             )
             .unwrap_err();
 
@@ -1460,6 +1555,87 @@ mod tests {
             }
         ));
         BOUNDED_EVENT_QUERIES.with(|queries| assert_eq!(queries.get(), 0));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bounded_read_rejects_text_payload_storage_before_full_event_query() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("text-payload").unwrap();
+        store
+            .append(timeline.id(), &[make_draft(EntityId::new(), b"x")])
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE events SET payload = CAST(?1 AS TEXT) WHERE timeline_id = ?2",
+                params!["ééé", timeline.id().to_string()],
+            )
+            .unwrap();
+        BOUNDED_EVENT_QUERIES.with(|queries| queries.set(0));
+
+        let error = store
+            .read_bounded(
+                timeline.id(),
+                SeqRange::all(),
+                EventReadBounds::new(4, usize::MAX, usize::MAX),
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("storage class text"));
+        assert!(error.to_string().contains("BLOB"));
+        BOUNDED_EVENT_QUERIES.with(|queries| assert_eq!(queries.get(), 0));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bounded_read_enforces_exact_fork_depth_and_stops_cycles() {
+        let mut store = new_store();
+        let root = store.create_timeline("root").unwrap();
+        let mut timelines = vec![root];
+        for depth in 1..=65 {
+            let parent = timelines.last().unwrap();
+            let child = store
+                .fork(parent.id(), Seq::ZERO, &format!("depth-{depth}"))
+                .unwrap();
+            timelines.push(child);
+        }
+        let bounds = EventReadBounds::new(1, 1, 64);
+
+        assert!(store
+            .read_bounded(timelines[64].id(), SeqRange::all(), bounds)
+            .unwrap()
+            .is_empty());
+        let error = store
+            .read_bounded(timelines[65].id(), SeqRange::all(), bounds)
+            .unwrap_err();
+        assert!(matches!(error, CoreError::ForkDepthTooLarge { depth: 65 }));
+
+        let cycle = timelines[1].id();
+        store
+            .conn
+            .execute(
+                "UPDATE timelines SET parent_id = ?1 WHERE id = ?1",
+                params![cycle.to_string()],
+            )
+            .unwrap();
+        let error = store
+            .read_bounded(cycle, SeqRange::all(), bounds)
+            .unwrap_err();
+        assert!(matches!(error, CoreError::ForkDepthTooLarge { depth: 65 }));
+
+        let invalid_parent = timelines[2].id();
+        store
+            .conn
+            .execute(
+                "UPDATE timelines SET parent_id = 'not-a-ulid' WHERE id = ?1",
+                params![invalid_parent.to_string()],
+            )
+            .unwrap();
+        let error = store
+            .read_bounded(invalid_parent, SeqRange::all(), bounds)
+            .unwrap_err();
+        assert!(matches!(error, CoreError::Serialization(_)));
     }
 
     #[test]
@@ -1807,6 +1983,53 @@ mod tests {
             matches!(result, Err(CoreError::Storage(_))),
             "expected Storage error opening a directory path"
         );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn open_rejects_objects_that_conflict_with_schema_initialization() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        {
+            let conn = Connection::open(file.path()).unwrap();
+            conn.execute("CREATE TABLE events (unexpected_column INTEGER)", [])
+                .unwrap();
+        }
+
+        let result = SqliteStore::open(file.path().to_str().unwrap());
+        assert!(matches!(result, Err(CoreError::Storage(_))));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn open_rejects_existing_utf16_databases_before_schema_use() {
+        for encoding in ["UTF-16le", "UTF-16be"] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            {
+                let conn = Connection::open(file.path()).unwrap();
+                conn.execute_batch(&format!(
+                    "PRAGMA encoding = '{encoding}';
+                     CREATE TABLE imported_marker (value TEXT);"
+                ))
+                .unwrap();
+            }
+
+            let Err(error) = SqliteStore::open(file.path().to_str().unwrap()) else {
+                panic!("UTF-16 database must be rejected");
+            };
+            assert!(error.to_string().contains("unsupported SQLite encoding"));
+            assert!(error.to_string().contains("UTF-8 is required"));
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn new_databases_are_utf8() {
+        let store = new_store();
+        let encoding: String = store
+            .conn
+            .query_row("PRAGMA encoding", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(encoding, "UTF-8");
     }
 
     #[test]

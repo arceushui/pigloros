@@ -55,6 +55,9 @@ pub const MAX_EVENT_PAYLOAD_BYTES: usize = 256 * 1024;
 /// The exact serialized-response check still governs decoded payload expansion.
 pub const MAX_EVENT_TYPE_BYTES: usize = 64 * 1024;
 
+/// Maximum number of parent links traversed by one bounded Event poll.
+pub const MAX_FORK_DEPTH: usize = 64;
+
 /// Maximum serialized JSON size for one Event polling response (1 MiB).
 pub const MAX_EVENTS_RESPONSE_BYTES: usize = 1024 * 1024;
 
@@ -140,6 +143,9 @@ pub enum GatewayError {
     /// Imported Event metadata exceeds the retrievable size budget.
     #[error("event metadata field {field} exceeds maximum of {maximum} bytes")]
     EventMetadataTooLarge { field: &'static str, maximum: usize },
+    /// An imported Fork chain exceeds the bounded polling traversal budget.
+    #[error("fork depth exceeds maximum of {maximum}")]
+    ForkDepthTooLarge { maximum: usize },
     /// Malformed event polling query.
     #[error("invalid events query: {0}")]
     InvalidEventsQuery(String),
@@ -238,10 +244,11 @@ impl Gateway {
             to: Some(Seq::from_u64(last_seq)),
         };
         let guard = self.store.lock().await;
-        let bounds = EventReadBounds {
-            max_payload_bytes: MAX_EVENT_PAYLOAD_BYTES,
-            max_event_type_bytes: MAX_EVENT_TYPE_BYTES,
-        };
+        let bounds = EventReadBounds::new(
+            MAX_EVENT_PAYLOAD_BYTES,
+            MAX_EVENT_TYPE_BYTES,
+            MAX_FORK_DEPTH,
+        );
         let mut events = match guard.read_bounded(id, range, bounds) {
             Ok(events) => events,
             Err(CoreError::PayloadTooLarge { .. }) => {
@@ -253,6 +260,11 @@ impl Gateway {
                 return Err(GatewayError::EventMetadataTooLarge {
                     field,
                     maximum: MAX_EVENT_TYPE_BYTES,
+                })
+            }
+            Err(CoreError::ForkDepthTooLarge { .. }) => {
+                return Err(GatewayError::ForkDepthTooLarge {
+                    maximum: MAX_FORK_DEPTH,
                 })
             }
             Err(error) => return Err(GatewayError::Store(error)),
@@ -957,6 +969,38 @@ mod tests {
                 }
             ));
         }
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn imported_deep_fork_returns_actionable_413() {
+        let mut source = open_store(StoreConfig::Memory).unwrap();
+        let root = source.create_timeline("root").unwrap();
+        let mut timelines = vec![root];
+        for depth in 1..=MAX_FORK_DEPTH + 1 {
+            let parent = timelines.last().unwrap();
+            let child = source
+                .fork(parent.id(), Seq::ZERO, &format!("depth-{depth}"))
+                .unwrap();
+            timelines.push(child);
+        }
+
+        let mut destination = open_store(StoreConfig::Memory).unwrap();
+        for timeline in &timelines {
+            let export = export_timeline_own(source.as_ref(), timeline.id()).unwrap();
+            import_timeline_with_id(destination.as_mut(), export).unwrap();
+        }
+        let deepest = timelines.last().unwrap();
+        let response = GatewayError::ForkDepthTooLarge {
+            maximum: MAX_FORK_DEPTH,
+        }
+        .to_string();
+        let error = Gateway::new(destination)
+            .read_events_page(&deepest.id().to_string(), 0, 1)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), response);
     }
 
     #[tokio::test]

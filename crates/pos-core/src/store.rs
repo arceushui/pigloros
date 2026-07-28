@@ -40,8 +40,39 @@ pub struct SeqRange {
 /// Per-field bounds applied before an Event is cloned or materialised.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EventReadBounds {
-    pub max_payload_bytes: usize,
-    pub max_event_type_bytes: usize,
+    payload_bytes: usize,
+    event_type_bytes: usize,
+    fork_depth: usize,
+}
+
+impl EventReadBounds {
+    #[must_use]
+    pub const fn new(
+        max_payload_bytes: usize,
+        max_event_type_bytes: usize,
+        max_fork_depth: usize,
+    ) -> Self {
+        Self {
+            payload_bytes: max_payload_bytes,
+            event_type_bytes: max_event_type_bytes,
+            fork_depth: max_fork_depth,
+        }
+    }
+
+    #[must_use]
+    pub const fn max_payload_bytes(self) -> usize {
+        self.payload_bytes
+    }
+
+    #[must_use]
+    pub const fn max_event_type_bytes(self) -> usize {
+        self.event_type_bytes
+    }
+
+    #[must_use]
+    pub const fn max_fork_depth(self) -> usize {
+        self.fork_depth
+    }
 }
 
 impl SeqRange {
@@ -117,17 +148,19 @@ pub trait EventStore: Send {
 
     /// Read events while refusing any selected variable field outside `bounds`.
     ///
-    /// Implementations that support this capability must enforce every bound
-    /// before cloning or materialising the corresponding variable field. The
-    /// safe default refuses the operation; it never falls back to [`Self::read`],
-    /// because doing so could allocate attacker-controlled data before checking
-    /// its size.
+    /// Implementations that support this capability must enforce every field
+    /// bound before cloning or materialising that field, and must enforce the
+    /// Fork-depth bound while walking ancestry rather than after collecting it.
+    /// The safe default refuses the operation; it never falls back to
+    /// [`Self::read`], because doing so could allocate attacker-controlled data
+    /// before checking its size.
     ///
     /// # Errors
-    /// Returns [`CoreError::PayloadTooLarge`] or
-    /// [`CoreError::EventMetadataTooLarge`] when a selected Event exceeds a
-    /// bound, [`CoreError::Storage`] when the adapter does not implement bounded
-    /// reads, or the same errors as [`Self::read`].
+    /// Returns [`CoreError::PayloadTooLarge`],
+    /// [`CoreError::EventMetadataTooLarge`], or
+    /// [`CoreError::ForkDepthTooLarge`] when a selected request exceeds a
+    /// bound; [`CoreError::Storage`] when the adapter does not implement bounded
+    /// reads; or the same errors as [`Self::read`].
     fn read_bounded(
         &self,
         _timeline: TimelineId,
@@ -2349,15 +2382,12 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_capability_defaults_fail_closed() {
         let store = TrivialStore::new();
+        let bounds = EventReadBounds::new(1, 2, 3);
+        assert_eq!(bounds.max_payload_bytes(), 1);
+        assert_eq!(bounds.max_event_type_bytes(), 2);
+        assert_eq!(bounds.max_fork_depth(), 3);
         let read_error = store
-            .read_bounded(
-                TimelineId::new(),
-                SeqRange::all(),
-                EventReadBounds {
-                    max_payload_bytes: 1,
-                    max_event_type_bytes: 1,
-                },
-            )
+            .read_bounded(TimelineId::new(), SeqRange::all(), bounds)
             .unwrap_err();
         assert!(read_error.to_string().contains("bounded event reads"));
         let count_error = store.root_timeline_count_bounded(1).unwrap_err();

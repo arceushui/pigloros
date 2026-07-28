@@ -99,7 +99,7 @@ impl MemoryStore {
         range: SeqRange,
         bounds: EventReadBounds,
     ) -> Result<Vec<Event>, CoreError> {
-        let chain = self.fork_chain(timeline_id)?;
+        let chain = self.fork_chain_bounded(timeline_id, bounds.max_fork_depth())?;
         let mut logical_seq = 0_u64;
         let from = range.from.as_u64().max(1);
         let to = range.to.map_or(u64::MAX, Seq::as_u64);
@@ -126,11 +126,11 @@ impl MemoryStore {
                     return Ok(selected);
                 }
                 let payload_size = event.payload.as_slice().len();
-                if payload_size > bounds.max_payload_bytes {
+                if payload_size > bounds.max_payload_bytes() {
                     return Err(CoreError::PayloadTooLarge { size: payload_size });
                 }
                 let event_type_size = event.event_type.as_str().len();
-                if event_type_size > bounds.max_event_type_bytes {
+                if event_type_size > bounds.max_event_type_bytes() {
                     return Err(CoreError::EventMetadataTooLarge {
                         field: "event_type",
                         size: event_type_size,
@@ -156,6 +156,37 @@ impl MemoryStore {
             chain.push(current);
             match meta.meta.fork_point {
                 Some((parent, _)) => current = parent,
+                None => break,
+            }
+        }
+        chain.reverse();
+        Ok(chain)
+    }
+
+    /// Walk at most `max_depth` parent links before returning the chain.
+    fn fork_chain_bounded(
+        &self,
+        timeline_id: TimelineId,
+        max_depth: usize,
+    ) -> Result<Vec<TimelineId>, CoreError> {
+        let mut chain = Vec::new();
+        let mut current = timeline_id;
+        let mut depth = 0_usize;
+        loop {
+            let meta = self
+                .timelines
+                .get(&current)
+                .ok_or(CoreError::TimelineNotFound(current))?;
+            chain.push(current);
+            match meta.meta.fork_point {
+                Some((parent, _)) => {
+                    let next_depth = depth.saturating_add(1);
+                    if next_depth > max_depth {
+                        return Err(CoreError::ForkDepthTooLarge { depth: next_depth });
+                    }
+                    depth = next_depth;
+                    current = parent;
+                }
                 None => break,
             }
         }
@@ -523,10 +554,7 @@ mod tests {
             .read_bounded(
                 child.id(),
                 SeqRange::all(),
-                EventReadBounds {
-                    max_payload_bytes: 1,
-                    max_event_type_bytes: 4,
-                },
+                EventReadBounds::new(1, 4, usize::MAX),
             )
             .unwrap_err();
 
@@ -541,13 +569,35 @@ mod tests {
             .read_bounded(
                 child.id(),
                 SeqRange::all(),
-                EventReadBounds {
-                    max_payload_bytes: 1,
-                    max_event_type_bytes: 5,
-                },
+                EventReadBounds::new(1, 5, usize::MAX),
             )
             .unwrap();
         assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bounded_read_enforces_exact_fork_depth_before_chain_growth() {
+        let mut store = MemoryStore::new();
+        let root = store.create_timeline("root").unwrap();
+        let mut timelines = vec![root];
+        for depth in 1..=65 {
+            let parent = timelines.last().unwrap();
+            let child = store
+                .fork(parent.id(), Seq::ZERO, &format!("depth-{depth}"))
+                .unwrap();
+            timelines.push(child);
+        }
+        let bounds = EventReadBounds::new(1, 1, 64);
+
+        assert!(store
+            .read_bounded(timelines[64].id(), SeqRange::all(), bounds)
+            .unwrap()
+            .is_empty());
+        let error = store
+            .read_bounded(timelines[65].id(), SeqRange::all(), bounds)
+            .unwrap_err();
+        assert!(matches!(error, CoreError::ForkDepthTooLarge { depth: 65 }));
     }
 
     #[test]
