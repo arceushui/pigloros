@@ -1724,10 +1724,10 @@ mod fault_injection_tests {
             .expect("corrupt timeline names");
     }
 
-    fn corrupt_event_seqs(path: &str) {
+    fn corrupt_event_ids(path: &str) {
         let conn = Connection::open(path).expect("open sqlite for corruption");
-        conn.execute("UPDATE events SET seq = 'not-an-int'", [])
-            .expect("corrupt event seq");
+        conn.execute("UPDATE events SET event_id = 'not-a-ulid'", [])
+            .expect("corrupt Event identifier");
     }
 
     #[cfg(unix)]
@@ -1835,7 +1835,7 @@ mod fault_injection_tests {
             )
             .unwrap();
         drop(store);
-        corrupt_event_seqs(&path);
+        corrupt_event_ids(&path);
         assert!(cmd_timeline_replay(&path, &tl_id).is_err());
     }
 
@@ -1864,7 +1864,7 @@ mod fault_injection_tests {
             )
             .unwrap();
         drop(store);
-        corrupt_event_seqs(&path);
+        corrupt_event_ids(&path);
         assert!(cmd_timeline_snapshot(&path, &tl_id).is_err());
     }
 
@@ -1918,7 +1918,7 @@ mod fault_injection_tests {
         let forked = store.fork(base.id(), base.head, "cmp-fork").unwrap();
         let fork_id = forked.id().to_string();
         drop(store);
-        corrupt_event_seqs(&path);
+        corrupt_event_ids(&path);
         assert!(cmd_timeline_compare(&path, &tl_id, &fork_id, "0").is_err());
     }
 
@@ -2023,7 +2023,7 @@ mod fault_injection_tests {
             )
             .unwrap();
         drop(store);
-        corrupt_event_seqs(&path);
+        corrupt_event_ids(&path);
         assert!(cmd_events_log(&path, &tl_id, None).is_err());
     }
 
@@ -2106,7 +2106,7 @@ mod fault_injection_tests {
         let manifest_path = path.replace(".db", "-manifest.json");
         std::fs::write(&manifest_path, serde_json::to_string(&manifest).unwrap()).unwrap();
         drop(store);
-        corrupt_event_seqs(&path);
+        corrupt_event_ids(&path);
         assert!(cmd_experiment_verify(&manifest_path).is_err());
     }
 

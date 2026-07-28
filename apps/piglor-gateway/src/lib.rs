@@ -248,6 +248,7 @@ impl Gateway {
             MAX_EVENT_PAYLOAD_BYTES,
             MAX_EVENT_TYPE_BYTES,
             MAX_FORK_DEPTH,
+            limit + 1,
         );
         let mut events = match guard.read_bounded(id, range, bounds) {
             Ok(events) => events,
