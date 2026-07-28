@@ -7,7 +7,9 @@
 
 use indexmap::IndexMap;
 
-use pos_core::{ids::PluginId, Plugin, Reducer, SchemaVersionMap, Upcaster, UpcasterRegistry};
+use pos_core::{
+    ids::PluginId, store::SeqRange, Plugin, Reducer, SchemaVersionMap, Upcaster, UpcasterRegistry,
+};
 use pos_state::ProjectionRegistry;
 
 use crate::{
@@ -23,7 +25,7 @@ struct PluginEntry {
     version: String,
     driver: Option<Box<dyn Driver>>,
     last_tick: Option<u128>,
-    last_obs_seq: Option<u64>,
+    last_delivered_seq: Option<u64>,
 }
 
 /// The central plugin registry.
@@ -134,7 +136,7 @@ impl PluginRegistry {
                 version: plugin.version().to_owned(),
                 driver,
                 last_tick: None,
-                last_obs_seq: None,
+                last_delivered_seq: None,
             },
         );
         Ok(())
@@ -180,7 +182,7 @@ impl PluginRegistry {
                 version: "0.1.0".to_owned(),
                 driver: Some(driver),
                 last_tick: None,
-                last_obs_seq: None,
+                last_delivered_seq: None,
             },
         );
     }
@@ -210,8 +212,7 @@ impl PluginRegistry {
                 if ready {
                     let subscriptions = driver.subscriptions();
                     if !subscriptions.is_empty() {
-                        use pos_core::store::SeqRange;
-                        let from_seq = entry.last_obs_seq.map_or(0, |s| s + 1);
+                        let from_seq = entry.last_delivered_seq.map_or(0, |s| s + 1);
                         if let Ok(events) = store.read(
                             timeline,
                             SeqRange::from_seq(pos_core::clock::Seq::from_u64(from_seq)),
@@ -224,7 +225,7 @@ impl PluginRegistry {
                                 driver.receive_observations(&matching);
                             }
                             if let Some(last) = events.last() {
-                                entry.last_obs_seq = Some(last.seq.as_u64());
+                                entry.last_delivered_seq = Some(last.seq.as_u64());
                             }
                         }
                     }
