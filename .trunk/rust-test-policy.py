@@ -167,15 +167,17 @@ def check(path: Path) -> int:
             allowed = True
         # #[cfg_attr(coverage_nightly, coverage(off))] on #[test] / mod tests { }
         if re.search(r"#\[\s*cfg_attr\s*\([^)]*coverage\s*\(\s*off", masked_stripped):
-            file_has_tests = bool(TEST_ATTR.search(text)) or in_integration_tests
             near_test = (
                 TEST_ATTR.search(around)
                 or CFG_TEST.search(around)
                 or bool(test_body_starts)
-                or file_has_tests
             )
             if near_test:
                 allowed = True
+            elif bool(TEST_ATTR.search(text)):
+                ahead_match = "\n".join(lines[i : min(len(lines), i + 5)])
+                if re.search(r"\bpub\s+fn\b", ahead_match):
+                    allowed = True
 
         if not allowed:
             emit(
