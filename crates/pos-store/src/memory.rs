@@ -13,9 +13,15 @@ use pos_core::{
     event::{Event, EventDraft},
     hasher::Hasher,
     ids::{EventId, TimelineId},
-    store::{EventStore, SeqRange},
+    store::{EventReadBounds, EventStore, SeqRange},
     timeline::{Timeline, TimelineMeta},
 };
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only evidence that bounded reads inspect only selected Event slots.
+    static BOUNDED_EVENTS_EXAMINED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// In-memory event store. Thread-unsafe — intended for single-threaded tests and benchmarks.
 pub struct MemoryStore {
@@ -27,6 +33,8 @@ pub struct MemoryStore {
     chain_heads: HashMap<TimelineId, Hash>,
     /// Global `EventId` index for O(1) uniqueness checks.
     event_ids: HashSet<EventId>,
+    /// Exact number of root Timelines, maintained with Timeline mutations.
+    root_timeline_count: usize,
     hasher: Box<dyn Hasher>,
 }
 
@@ -38,6 +46,7 @@ impl MemoryStore {
             timelines: HashMap::new(),
             chain_heads: HashMap::new(),
             event_ids: HashSet::new(),
+            root_timeline_count: 0,
             hasher: Box::new(pos_crypto::chain::Blake3Hasher),
         }
     }
@@ -49,6 +58,7 @@ impl MemoryStore {
             timelines: HashMap::new(),
             chain_heads: HashMap::new(),
             event_ids: HashSet::new(),
+            root_timeline_count: 0,
             hasher,
         }
     }
@@ -92,6 +102,99 @@ impl MemoryStore {
         Ok(crate::stitch::renumber_and_filter(all, range))
     }
 
+    /// Select a logical page without cloning Events outside the requested range.
+    fn collect_events_in_range_bounded(
+        &self,
+        timeline_id: TimelineId,
+        range: SeqRange,
+        bounds: EventReadBounds,
+    ) -> Result<Vec<Event>, CoreError> {
+        let chain = self.fork_chain_bounded(timeline_id, bounds.max_fork_depth())?;
+        let from = range.from.as_u64().max(1);
+        let to = range.to.map_or(u64::MAX, Seq::as_u64);
+        let mut logical_offset = 0_u64;
+        let mut remaining = bounds.max_events();
+        let mut selected = Vec::new();
+
+        for (index, timeline) in chain.iter().enumerate() {
+            let events = self
+                .events
+                .get(timeline)
+                .map_or(&[] as &[Event], Vec::as_slice);
+            let head = self.timelines[timeline].head.as_u64();
+            let event_count = u64::try_from(events.len()).unwrap_or(u64::MAX);
+            let boundary_is_valid = if events.is_empty() {
+                head == 0
+            } else {
+                head == event_count
+                    && events[0].seq == Seq::from_u64(1)
+                    && events[events.len() - 1].seq == Seq::from_u64(event_count)
+            };
+            if !boundary_is_valid {
+                return Err(CoreError::Storage(format!(
+                    "timeline {timeline} violates the contiguous Event sequence invariant"
+                )));
+            }
+            let fork_cap = chain
+                .get(index + 1)
+                .and_then(|child| self.timelines[child].meta.fork_point)
+                .map(|(_, seq)| seq);
+            if fork_cap.is_some_and(|cap| cap.as_u64() > event_count) {
+                return Err(CoreError::Storage(format!(
+                    "Fork point exceeds parent Event head for timeline {timeline}"
+                )));
+            }
+            let segment_len = fork_cap.map_or(event_count, Seq::as_u64);
+            let segment_start = logical_offset.saturating_add(1);
+            let segment_end = logical_offset.saturating_add(segment_len);
+            let selected_start = from.max(segment_start);
+            let selected_end = to.min(segment_end);
+
+            if remaining > 0 && selected_start <= selected_end {
+                let raw_start = selected_start - logical_offset;
+                let available = selected_end - selected_start + 1;
+                let take = usize::try_from(available)
+                    .unwrap_or(usize::MAX)
+                    .min(remaining);
+                let start_index = usize::try_from(raw_start - 1).unwrap_or(usize::MAX);
+                let end_index = start_index.saturating_add(take);
+                let slice = &events[start_index..end_index];
+
+                for (offset, event) in slice.iter().enumerate() {
+                    #[cfg(test)]
+                    BOUNDED_EVENTS_EXAMINED.with(|count| count.set(count.get().saturating_add(1)));
+                    let raw_seq =
+                        raw_start.saturating_add(u64::try_from(offset).unwrap_or(u64::MAX));
+                    if event.seq != Seq::from_u64(raw_seq) {
+                        return Err(CoreError::Storage(format!(
+                            "timeline {timeline} violates the contiguous Event sequence invariant"
+                        )));
+                    }
+                    let payload_size = event.payload.as_slice().len();
+                    if payload_size > bounds.max_payload_bytes() {
+                        return Err(CoreError::PayloadTooLarge { size: payload_size });
+                    }
+                    let event_type_size = event.event_type.as_str().len();
+                    if event_type_size > bounds.max_event_type_bytes() {
+                        return Err(CoreError::EventMetadataTooLarge {
+                            field: "event_type",
+                            size: event_type_size,
+                        });
+                    }
+                    let mut event = event.clone();
+                    event.seq = Seq::from_u64(logical_offset.saturating_add(raw_seq));
+                    selected.push(event);
+                }
+                remaining -= take;
+            }
+            logical_offset = segment_end;
+            if remaining == 0 || logical_offset >= to {
+                break;
+            }
+        }
+        Ok(selected)
+    }
+
     /// Walk the fork chain from `timeline_id` back to the root, returning [root, ..., `timeline_id`].
     fn fork_chain(&self, timeline_id: TimelineId) -> Result<Vec<TimelineId>, CoreError> {
         let mut chain = Vec::new();
@@ -104,6 +207,37 @@ impl MemoryStore {
             chain.push(current);
             match meta.meta.fork_point {
                 Some((parent, _)) => current = parent,
+                None => break,
+            }
+        }
+        chain.reverse();
+        Ok(chain)
+    }
+
+    /// Walk at most `max_depth` parent links before returning the chain.
+    fn fork_chain_bounded(
+        &self,
+        timeline_id: TimelineId,
+        max_depth: usize,
+    ) -> Result<Vec<TimelineId>, CoreError> {
+        let mut chain = Vec::new();
+        let mut current = timeline_id;
+        let mut depth = 0_usize;
+        loop {
+            let meta = self
+                .timelines
+                .get(&current)
+                .ok_or(CoreError::TimelineNotFound(current))?;
+            chain.push(current);
+            match meta.meta.fork_point {
+                Some((parent, _)) => {
+                    let next_depth = depth.saturating_add(1);
+                    if next_depth > max_depth {
+                        return Err(CoreError::ForkDepthTooLarge { depth: next_depth });
+                    }
+                    depth = next_depth;
+                    current = parent;
+                }
                 None => break,
             }
         }
@@ -126,6 +260,7 @@ impl EventStore for MemoryStore {
         self.events.insert(timeline.id(), Vec::new());
         self.chain_heads
             .insert(timeline.id(), self.hasher.genesis_hash());
+        self.root_timeline_count += 1;
         Ok(timeline)
     }
 
@@ -191,6 +326,15 @@ impl EventStore for MemoryStore {
         self.collect_events_in_range(timeline, range)
     }
 
+    fn read_bounded(
+        &self,
+        timeline: TimelineId,
+        range: SeqRange,
+        bounds: EventReadBounds,
+    ) -> Result<Vec<Event>, CoreError> {
+        self.collect_events_in_range_bounded(timeline, range, bounds)
+    }
+
     fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
         if !self.timelines.contains_key(&timeline) {
             return Err(CoreError::TimelineNotFound(timeline));
@@ -236,6 +380,10 @@ impl EventStore for MemoryStore {
         Ok(self.timelines.values().cloned().collect())
     }
 
+    fn root_timeline_count_bounded(&self, maximum: usize) -> Result<usize, CoreError> {
+        Ok(self.root_timeline_count.min(maximum.saturating_add(1)))
+    }
+
     fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
         Ok(self.timelines.get(&id).cloned())
     }
@@ -268,6 +416,9 @@ impl EventStore for MemoryStore {
         self.timelines.insert(id, timeline.clone());
         self.events.insert(id, Vec::new());
         self.chain_heads.insert(id, chain);
+        if timeline.meta.is_root() {
+            self.root_timeline_count += 1;
+        }
         Ok(timeline)
     }
 
@@ -324,7 +475,15 @@ impl EventStore for MemoryStore {
                 "cannot delete timeline that still has forks".to_owned(),
             ));
         }
-        self.timelines.remove(&id);
+        let was_root = self
+            .timelines
+            .remove(&id)
+            .expect("timeline exists")
+            .meta
+            .is_root();
+        if was_root {
+            self.root_timeline_count -= 1;
+        }
         // Always present: create/fork/import insert an events entry with the timeline.
         for event in self.events.remove(&id).expect("timeline events entry") {
             self.event_ids.remove(&event.id);
@@ -387,6 +546,16 @@ impl MemoryStore {
     pub(crate) fn test_remove_timeline(&mut self, id: TimelineId) {
         self.timelines.remove(&id);
     }
+
+    fn assert_root_timeline_count_invariant(&self) {
+        assert_eq!(
+            self.root_timeline_count,
+            self.timelines
+                .values()
+                .filter(|timeline| timeline.meta.is_root())
+                .count()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -434,6 +603,206 @@ mod tests {
         assert_eq!(events[0].payload.as_slice(), b"first");
         assert_eq!(events[1].payload.as_slice(), b"second");
         assert_eq!(events[2].payload.as_slice(), b"third");
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bounded_read_rejects_inherited_event_type_before_clone() {
+        let mut store = MemoryStore::new();
+        let root = store.create_timeline("root").unwrap();
+        let oversized = EventDraft::new(
+            EntityId::new(),
+            Kind::new("x".repeat(5)),
+            CanonicalBytes::from_static(b"x"),
+        );
+        store.append(root.id(), &[oversized]).unwrap();
+        let child = store.fork(root.id(), Seq::from_u64(1), "child").unwrap();
+        let payload_error = store
+            .read_bounded(
+                child.id(),
+                SeqRange::all(),
+                EventReadBounds::new(0, 5, usize::MAX, usize::MAX),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            payload_error,
+            CoreError::PayloadTooLarge { size: 1 }
+        ));
+        let error = store
+            .read_bounded(
+                child.id(),
+                SeqRange::all(),
+                EventReadBounds::new(1, 4, usize::MAX, usize::MAX),
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CoreError::EventMetadataTooLarge {
+                field: "event_type",
+                size: 5
+            }
+        ));
+        let events = store
+            .read_bounded(
+                child.id(),
+                SeqRange::all(),
+                EventReadBounds::new(1, 5, usize::MAX, usize::MAX),
+            )
+            .unwrap();
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bounded_read_enforces_exact_fork_depth_before_chain_growth() {
+        let mut store = MemoryStore::new();
+        let root = store.create_timeline("root").unwrap();
+        let mut timelines = vec![root];
+        for depth in 1..=65 {
+            let parent = timelines.last().unwrap();
+            let child = store
+                .fork(parent.id(), Seq::ZERO, &format!("depth-{depth}"))
+                .unwrap();
+            timelines.push(child);
+        }
+        let bounds = EventReadBounds::new(1, 1, 64, usize::MAX);
+
+        assert!(store
+            .read_bounded(timelines[64].id(), SeqRange::all(), bounds)
+            .unwrap()
+            .is_empty());
+        let error = store
+            .read_bounded(timelines[65].id(), SeqRange::all(), bounds)
+            .unwrap_err();
+        assert!(matches!(error, CoreError::ForkDepthTooLarge { depth: 65 }));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bounded_read_seeks_late_across_forks_and_fetches_only_the_page() {
+        let mut store = MemoryStore::new();
+        let root = store.create_timeline("root").unwrap();
+        let entity = EntityId::new();
+        let drafts: Vec<_> = (0..4_096).map(|_| make_draft(entity, b"x")).collect();
+        store.append(root.id(), &drafts).unwrap();
+        let child = store
+            .fork(root.id(), Seq::from_u64(4_096), "child")
+            .unwrap();
+        store
+            .append(
+                child.id(),
+                &[make_draft(entity, b"y"), make_draft(entity, b"z")],
+            )
+            .unwrap();
+        let bounds = EventReadBounds::new(1, usize::MAX, 1, 4);
+
+        BOUNDED_EVENTS_EXAMINED.with(|count| count.set(0));
+        let page = store
+            .read_bounded(child.id(), SeqRange::from_seq(Seq::from_u64(4_095)), bounds)
+            .unwrap();
+        assert_eq!(
+            page.iter()
+                .map(|event| event.seq.as_u64())
+                .collect::<Vec<_>>(),
+            vec![4_095, 4_096, 4_097, 4_098]
+        );
+        BOUNDED_EVENTS_EXAMINED.with(|count| assert_eq!(count.get(), 4));
+
+        BOUNDED_EVENTS_EXAMINED.with(|count| count.set(0));
+        let exhausted = store
+            .read_bounded(child.id(), SeqRange::from_seq(Seq::from_u64(4_098)), bounds)
+            .unwrap();
+        assert_eq!(exhausted.len(), 1);
+        assert_eq!(exhausted[0].seq.as_u64(), 4_098);
+        BOUNDED_EVENTS_EXAMINED.with(|count| assert_eq!(count.get(), 1));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bounded_read_fails_closed_when_memory_sequence_metadata_is_corrupt() {
+        let mut store = MemoryStore::new();
+        let timeline = store.create_timeline("corrupt").unwrap();
+        let entity = EntityId::new();
+        store
+            .append(
+                timeline.id(),
+                &[make_draft(entity, b"a"), make_draft(entity, b"b")],
+            )
+            .unwrap();
+        store.events.get_mut(&timeline.id()).unwrap().remove(0);
+
+        let error = store
+            .read_bounded(
+                timeline.id(),
+                SeqRange::from_seq(Seq::from_u64(2)),
+                EventReadBounds::new(1, usize::MAX, 0, 1),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("contiguous Event sequence"));
+
+        let mut interior_store = MemoryStore::new();
+        let timeline = interior_store.create_timeline("interior").unwrap();
+        interior_store
+            .append(
+                timeline.id(),
+                &[
+                    make_draft(entity, b"a"),
+                    make_draft(entity, b"b"),
+                    make_draft(entity, b"c"),
+                ],
+            )
+            .unwrap();
+        interior_store.events.get_mut(&timeline.id()).unwrap()[1].seq = Seq::from_u64(99);
+        let error = interior_store
+            .read_bounded(
+                timeline.id(),
+                SeqRange::from_seq(Seq::from_u64(2)),
+                EventReadBounds::new(1, usize::MAX, 0, 1),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("contiguous Event sequence"));
+
+        let mut fork_store = MemoryStore::new();
+        let root = fork_store.create_timeline("root").unwrap();
+        let child = fork_store.fork(root.id(), Seq::ZERO, "child").unwrap();
+        fork_store
+            .timelines
+            .get_mut(&child.id())
+            .unwrap()
+            .meta
+            .fork_point = Some((root.id(), Seq::from_u64(1)));
+        let error = fork_store
+            .read_bounded(
+                child.id(),
+                SeqRange::all(),
+                EventReadBounds::new(1, usize::MAX, 1, 1),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("Fork point exceeds"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bounded_root_count_ignores_many_children_and_caps_at_maximum_plus_one() {
+        let mut store = MemoryStore::new();
+        let first = store.create_timeline("first").unwrap();
+        for index in 0..4096 {
+            store
+                .fork(first.id(), Seq::ZERO, &format!("child-{index}"))
+                .unwrap();
+        }
+        let second = store.create_timeline("second").unwrap();
+
+        assert_eq!(store.root_timeline_count_bounded(0).unwrap(), 1);
+        assert_eq!(store.root_timeline_count_bounded(1).unwrap(), 2);
+        assert_eq!(store.root_timeline_count_bounded(10).unwrap(), 2);
+        assert_eq!(store.root_timeline_count_bounded(usize::MAX).unwrap(), 2);
+        store.assert_root_timeline_count_invariant();
+
+        store.delete_timeline(second.id()).unwrap();
+        assert_eq!(store.root_timeline_count_bounded(10).unwrap(), 1);
+        store.assert_root_timeline_count_invariant();
     }
 
     #[test]

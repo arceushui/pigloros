@@ -979,7 +979,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_read_fails_on_corrupt_events() {
-        // Covers L186: `?` on store.read when event seq is corrupt.
+        // Covers L186: `?` on store.read when an Event identifier is corrupt.
         let tmp = TempDir::new().unwrap();
         let key_path = tmp.path().join("sk");
         cli_run(&[
@@ -1019,8 +1019,8 @@ mod tests {
         // Corrupt event seq so store.read() fails.
         {
             let conn = rusqlite::Connection::open(&db).expect("open for corruption");
-            conn.execute("UPDATE events SET seq = 'not-an-int'", [])
-                .expect("corrupt event seq");
+            conn.execute("UPDATE events SET event_id = 'not-a-ulid'", [])
+                .expect("corrupt Event identifier");
         }
         let err = run(&Source::Store(db), Some(&pubkey), None).unwrap_err();
         assert!(!err.to_string().is_empty(), "{err}");

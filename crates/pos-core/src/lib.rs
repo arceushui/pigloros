@@ -37,6 +37,6 @@ pub use state::{Reducer, State, StateRegistry};
 pub use store::{
     export_timeline, export_timeline_cow, export_timeline_own, export_timeline_raw,
     import_committed_with_rollback, import_timeline, import_timeline_with_id,
-    validate_committed_batch, EventStore, SeqRange, TimelineExport,
+    validate_committed_batch, EventReadBounds, EventStore, SeqRange, TimelineExport,
 };
 pub use timeline::{Timeline, TimelineMeta, TimelineMode};

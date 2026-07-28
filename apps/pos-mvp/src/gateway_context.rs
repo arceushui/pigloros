@@ -10,8 +10,11 @@ use std::time::Duration;
 const NUDGE_SCALE: f64 = 0.25;
 /// Overall HTTP deadline for gateway poll (connect + read).
 const GATEWAY_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
-/// Cap response body size (matches gateway write limit).
+/// Cap each polling response body (matches the Gateway response budget).
 const MAX_GATEWAY_BODY_BYTES: u64 = 1024 * 1024;
+/// Cap cumulative response bytes across cursor pages without assuming a logical
+/// Timeline Event ceiling (Forks can inherit Events from multiple Timelines).
+const MAX_GATEWAY_AGGREGATE_BYTES: u64 = 64 * 1024 * 1024;
 const HEX: &[u8; 16] = b"0123456789ABCDEF";
 
 /// Map society dimensions onto default scenario preference keys so ADR demos
@@ -222,39 +225,77 @@ fn fetch_gateway_events(
     gateway: &str,
     timeline_id: &str,
 ) -> Result<Vec<serde_json::Value>, String> {
+    fetch_gateway_events_with_aggregate_limit(gateway, timeline_id, MAX_GATEWAY_AGGREGATE_BYTES)
+}
+
+fn fetch_gateway_events_with_aggregate_limit(
+    gateway: &str,
+    timeline_id: &str,
+    max_aggregate_bytes: u64,
+) -> Result<Vec<serde_json::Value>, String> {
     validate_timeline_id(timeline_id)?;
     warn_if_non_loopback(gateway);
 
     let base = gateway.trim_end_matches('/');
     // ULID charset is path-safe; still percent-encode for defense in depth.
     let encoded = urlencoding_path_segment(timeline_id);
-    let url = format!("{base}/v1/timelines/{encoded}/events?from_seq=0");
-
     let agent = ureq::AgentBuilder::new()
         .timeout(GATEWAY_HTTP_TIMEOUT)
         .redirects(0)
         .build();
-    let response = agent
-        .get(&url)
-        .call()
-        .map_err(|e| format!("gateway GET failed: {e}"))?;
-    let status = response.status();
-    if !(200..300).contains(&status) {
-        return Err(format!("gateway returned HTTP {status}"));
+    let mut events = Vec::new();
+    let mut from_seq = 0;
+    let mut aggregate_bytes = 0_u64;
+    loop {
+        let url = format!("{base}/v1/timelines/{encoded}/events?from_seq={from_seq}");
+        let response = agent
+            .get(&url)
+            .call()
+            .map_err(|e| format!("gateway GET failed: {e}"))?;
+        let status = response.status();
+        if !(200..300).contains(&status) {
+            return Err(format!("gateway returned HTTP {status}"));
+        }
+
+        let mut reader = response.into_reader();
+        let bytes = read_capped_body(&mut reader, MAX_GATEWAY_BODY_BYTES)?;
+        aggregate_bytes =
+            checked_gateway_aggregate(aggregate_bytes, bytes.len() as u64, max_aggregate_bytes)?;
+        let body = String::from_utf8(bytes).map_err(|e| format!("gateway body not UTF-8: {e}"))?;
+        let body: serde_json::Value =
+            serde_json::from_str(&body).map_err(|e| format!("gateway JSON parse failed: {e}"))?;
+        let page_events = body
+            .get("events")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        events.extend(page_events);
+        match next_gateway_cursor(&body, from_seq)? {
+            Some(next) => from_seq = next,
+            None => return Ok(events),
+        }
     }
+}
 
-    let mut reader = response.into_reader();
-    let bytes = read_capped_body(&mut reader, MAX_GATEWAY_BODY_BYTES)?;
-    let body = String::from_utf8(bytes).map_err(|e| format!("gateway body not UTF-8: {e}"))?;
+fn checked_gateway_aggregate(current: u64, page: u64, maximum: u64) -> Result<u64, String> {
+    current
+        .checked_add(page)
+        .filter(|total| *total <= maximum)
+        .ok_or_else(|| format!("gateway aggregate body too large: exceeded {maximum} bytes"))
+}
 
-    let body: serde_json::Value =
-        serde_json::from_str(&body).map_err(|e| format!("gateway JSON parse failed: {e}"))?;
-    let events = body
-        .get("events")
-        .and_then(serde_json::Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    Ok(events)
+fn next_gateway_cursor(body: &serde_json::Value, current: u64) -> Result<Option<u64>, String> {
+    let Some(cursor) = body.get("next_from_seq") else {
+        return Ok(None);
+    };
+    if cursor.is_null() {
+        return Ok(None);
+    }
+    cursor
+        .as_u64()
+        .filter(|next| *next > current)
+        .map(Some)
+        .ok_or_else(|| "gateway returned invalid next_from_seq cursor".to_owned())
 }
 
 fn read_capped_body(reader: &mut dyn Read, max_bytes: u64) -> Result<Vec<u8>, String> {
@@ -293,6 +334,33 @@ fn urlencoding_path_segment(s: &str) -> String {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    fn spawn_scripted_gateway(
+        responses: Vec<(String, Option<String>)>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for (body, expected_request) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 2048];
+                let read = stream.read(&mut request).unwrap();
+                if let Some(expected) = expected_request {
+                    let request = String::from_utf8_lossy(&request[..read]);
+                    assert!(request.contains(&expected), "{request}");
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        (format!("http://{addr}"), server)
+    }
     use std::collections::HashMap;
 
     fn fetch_society_means(
@@ -514,31 +582,164 @@ mod tests {
 
     #[test]
     fn fetch_timeline_context_includes_ai_influence() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
         let body = r#"{"events":[
             {"event_type":"society.signal","payload":{"dimension":"trust","value":0.9}},
             {"event_type":"agent.action","payload":{"action":"nudge"}},
             {"event_type":"world.action","payload":{}}
         ]}"#;
-        std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let _ = stream.read(&mut [0u8; 1024]);
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = stream.write_all(response.as_bytes());
-        });
-        let ctx = fetch_timeline_context(&format!("http://{addr}"), "01ARZ3NDEKTSV4RRFFQ69G5FAV")
-            .unwrap();
+        let (gateway, server) = spawn_scripted_gateway(vec![(body.to_owned(), None)]);
+        let ctx = fetch_timeline_context(&gateway, "01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        server.join().unwrap();
         assert!((ctx.society_means["trust"] - 0.9).abs() < f64::EPSILON);
         assert_eq!(ctx.ai_influence.total_events, 3);
         assert_eq!(ctx.ai_influence.ai_events, 1);
         assert!((ctx.ai_influence.index - (1.0 / 3.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fetch_gateway_events_follows_cursor_past_one_hundred_events() {
+        let first_events: Vec<serde_json::Value> = (1..=100)
+            .map(|seq| {
+                serde_json::json!({
+                    "event_type": "world.action",
+                    "seq": seq,
+                    "payload": {"value": seq},
+                })
+            })
+            .collect();
+        let responses = vec![
+            (
+                serde_json::json!({
+                    "events": first_events,
+                    "next_from_seq": 101,
+                })
+                .to_string(),
+                Some("from_seq=0".to_owned()),
+            ),
+            (
+                serde_json::json!({
+                    "events": [{
+                        "event_type": "world.action",
+                        "seq": 101,
+                        "payload": {"value": 101},
+                    }],
+                    "next_from_seq": null,
+                })
+                .to_string(),
+                Some("from_seq=101".to_owned()),
+            ),
+        ];
+        let (gateway, server) = spawn_scripted_gateway(responses);
+        let events = fetch_gateway_events(&gateway, "01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        server.join().unwrap();
+        assert_eq!(events.len(), 101);
+        assert_eq!(events[100]["payload"]["value"], 101);
+    }
+
+    #[test]
+    fn fetch_gateway_events_follows_fork_protocol_past_ten_thousand_events() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for page in 0_u64..=100 {
+                let first = page * 100 + 1;
+                let count = if page == 100 { 1 } else { 100 };
+                let events: Vec<_> = (first..first + count)
+                    .map(|seq| {
+                        serde_json::json!({
+                            "seq": seq,
+                            "event_type": "world.action",
+                            "payload": {
+                                "origin": if seq <= 10_000 { "inherited" } else { "owned" }
+                            }
+                        })
+                    })
+                    .collect();
+                let next = (page < 100).then_some(first + count);
+                let body = serde_json::json!({
+                    "events": events,
+                    "next_from_seq": next,
+                })
+                .to_string();
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 2048];
+                let read = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..read]);
+                let requested = if page == 0 { 0 } else { first };
+                assert!(
+                    request.contains(&format!("from_seq={requested}")),
+                    "{request}"
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        let events =
+            fetch_gateway_events(&format!("http://{addr}"), "01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        server.join().unwrap();
+        assert_eq!(events.len(), 10_001);
+        assert_eq!(events[9_999]["payload"]["origin"], "inherited");
+        assert_eq!(events[10_000]["payload"]["origin"], "owned");
+    }
+
+    #[test]
+    fn aggregate_byte_guard_handles_limit_and_overflow() {
+        assert_eq!(checked_gateway_aggregate(4, 5, 9).unwrap(), 9);
+        for (current, page, maximum) in [(4, 6, 9), (u64::MAX, 1, u64::MAX)] {
+            let error = checked_gateway_aggregate(current, page, maximum).unwrap_err();
+            assert!(error.contains("aggregate body too large"), "{error}");
+        }
+    }
+
+    #[test]
+    fn fetch_gateway_events_enforces_cumulative_byte_guard() {
+        let body = r#"{"events":[],"next_from_seq":null}"#;
+        let (gateway, server) = spawn_scripted_gateway(vec![(body.to_owned(), None)]);
+        let error =
+            fetch_gateway_events_with_aggregate_limit(&gateway, "01ARZ3NDEKTSV4RRFFQ69G5FAV", 1)
+                .unwrap_err();
+        server.join().unwrap();
+        assert!(error.contains("aggregate body too large"), "{error}");
+    }
+
+    #[test]
+    fn fetch_gateway_events_rejects_invalid_server_cursor() {
+        let body = r#"{"events":[],"next_from_seq":"bad"}"#;
+        let (gateway, server) = spawn_scripted_gateway(vec![(body.to_owned(), None)]);
+        let error = fetch_gateway_events(&gateway, "01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap_err();
+        server.join().unwrap();
+        assert!(error.contains("cursor"), "{error}");
+    }
+
+    #[test]
+    fn next_gateway_cursor_handles_legacy_exhaustion_and_rejects_stalls() {
+        assert_eq!(
+            next_gateway_cursor(&serde_json::json!({"events": []}), 0).unwrap(),
+            None
+        );
+        assert_eq!(
+            next_gateway_cursor(&serde_json::json!({"events": [], "next_from_seq": null}), 0)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            next_gateway_cursor(&serde_json::json!({"events": [], "next_from_seq": 101}), 0)
+                .unwrap(),
+            Some(101)
+        );
+        for body in [
+            serde_json::json!({"next_from_seq": 10}),
+            serde_json::json!({"next_from_seq": "11"}),
+        ] {
+            let error = next_gateway_cursor(&body, 10).unwrap_err();
+            assert!(error.contains("cursor"), "{error}");
+        }
     }
 
     #[test]
@@ -549,67 +750,29 @@ mod tests {
 
     #[test]
     fn fetch_society_means_trims_trailing_slash() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
         let body = r#"{"events":[{"event_type":"society.signal","payload":{"dimension":"trust","value":0.9}}]}"#;
-        std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let _ = stream.read(&mut [0u8; 1024]);
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = stream.write_all(response.as_bytes());
-        });
+        let (gateway, server) = spawn_scripted_gateway(vec![(body.to_owned(), None)]);
         let means =
-            fetch_society_means(&format!("http://{addr}/"), "01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+            fetch_society_means(&format!("{gateway}/"), "01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        server.join().unwrap();
         assert!((means["trust"] - 0.9).abs() < f64::EPSILON);
     }
 
     #[test]
     fn fetch_society_means_parses_mock_http() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
         let body = r#"{"events":[{"event_type":"society.signal","payload":{"dimension":"trust","value":0.9}}]}"#;
-        std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let _ = stream.read(&mut [0u8; 1024]);
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = stream.write_all(response.as_bytes());
-        });
-        let means =
-            fetch_society_means(&format!("http://{addr}"), "01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        let (gateway, server) = spawn_scripted_gateway(vec![(body.to_owned(), None)]);
+        let means = fetch_society_means(&gateway, "01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        server.join().unwrap();
         assert!((means["trust"] - 0.9).abs() < f64::EPSILON);
     }
 
     #[test]
     fn fetch_society_means_treats_missing_events_as_empty() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
         let body = r"{}";
-        std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let _ = stream.read(&mut [0u8; 1024]);
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = stream.write_all(response.as_bytes());
-        });
-        let means =
-            fetch_society_means(&format!("http://{addr}"), "01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        let (gateway, server) = spawn_scripted_gateway(vec![(body.to_owned(), None)]);
+        let means = fetch_society_means(&gateway, "01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        server.join().unwrap();
         assert!(means.is_empty());
     }
 

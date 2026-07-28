@@ -37,6 +37,52 @@ pub struct SeqRange {
     pub to: Option<Seq>,
 }
 
+/// Work and field bounds applied before Events are cloned or materialised.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EventReadBounds {
+    payload_bytes: usize,
+    event_type_bytes: usize,
+    fork_depth: usize,
+    events: usize,
+}
+
+impl EventReadBounds {
+    #[must_use]
+    pub const fn new(
+        max_payload_bytes: usize,
+        max_event_type_bytes: usize,
+        max_fork_depth: usize,
+        max_events: usize,
+    ) -> Self {
+        Self {
+            payload_bytes: max_payload_bytes,
+            event_type_bytes: max_event_type_bytes,
+            fork_depth: max_fork_depth,
+            events: max_events,
+        }
+    }
+
+    #[must_use]
+    pub const fn max_payload_bytes(self) -> usize {
+        self.payload_bytes
+    }
+
+    #[must_use]
+    pub const fn max_event_type_bytes(self) -> usize {
+        self.event_type_bytes
+    }
+
+    #[must_use]
+    pub const fn max_fork_depth(self) -> usize {
+        self.fork_depth
+    }
+
+    #[must_use]
+    pub const fn max_events(self) -> usize {
+        self.events
+    }
+}
+
 impl SeqRange {
     #[must_use]
     pub const fn from_seq(from: Seq) -> Self {
@@ -108,6 +154,33 @@ pub trait EventStore: Send {
     /// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist.
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError>;
 
+    /// Read events while refusing any selected variable field outside `bounds`.
+    ///
+    /// Implementations that support this capability must seek to `range.from`,
+    /// examine and materialise no more than [`EventReadBounds::max_events`],
+    /// enforce every field bound before materialising that field, and enforce
+    /// the Fork-depth bound while walking ancestry rather than after collecting
+    /// it. The safe default refuses the operation; it never falls back to
+    /// [`Self::read`], because doing so could allocate or scan
+    /// attacker-controlled data before checking its bounds.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::PayloadTooLarge`],
+    /// [`CoreError::EventMetadataTooLarge`], or
+    /// [`CoreError::ForkDepthTooLarge`] when a selected request exceeds a
+    /// bound; [`CoreError::Storage`] when the adapter does not implement bounded
+    /// reads; or the same errors as [`Self::read`].
+    fn read_bounded(
+        &self,
+        _timeline: TimelineId,
+        _range: SeqRange,
+        _bounds: EventReadBounds,
+    ) -> Result<Vec<Event>, CoreError> {
+        Err(CoreError::Storage(
+            "bounded event reads are unsupported by this EventStore".to_owned(),
+        ))
+    }
+
     /// Read events stored directly on this timeline (no fork stitching or renumbering).
     ///
     /// Used by [`export_timeline_own`] for identity-preserving fork sync.
@@ -177,6 +250,21 @@ pub trait EventStore: Send {
     /// # Errors
     /// Returns a [`CoreError::Storage`] error on I/O failure.
     fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError>;
+
+    /// Count root Timelines, stopping once `maximum + 1` roots are seen.
+    ///
+    /// Implementations must not clone or materialise Timeline metadata. The
+    /// safe default refuses the operation so quota enforcement cannot silently
+    /// fall back to [`Self::list_timelines`].
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] if the adapter does not implement the
+    /// bounded scalar count or its underlying query fails.
+    fn root_timeline_count_bounded(&self, _maximum: usize) -> Result<usize, CoreError> {
+        Err(CoreError::Storage(
+            "bounded root Timeline counts are unsupported by this EventStore".to_owned(),
+        ))
+    }
 
     /// Get a specific timeline's metadata.
     ///
@@ -2297,6 +2385,23 @@ mod tests {
         let id = crate::ids::TimelineId::new();
         let result = store.read(id, SeqRange::all()).unwrap();
         assert!(result.is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bounded_capability_defaults_fail_closed() {
+        let store = TrivialStore::new();
+        let bounds = EventReadBounds::new(1, 2, 3, 4);
+        assert_eq!(bounds.max_payload_bytes(), 1);
+        assert_eq!(bounds.max_event_type_bytes(), 2);
+        assert_eq!(bounds.max_fork_depth(), 3);
+        assert_eq!(bounds.max_events(), 4);
+        let read_error = store
+            .read_bounded(TimelineId::new(), SeqRange::all(), bounds)
+            .unwrap_err();
+        assert!(read_error.to_string().contains("bounded event reads"));
+        let count_error = store.root_timeline_count_bounded(1).unwrap_err();
+        assert!(count_error.to_string().contains("bounded root Timeline"));
     }
 
     #[test]

@@ -623,7 +623,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_store_read_fails_on_corrupt_events() {
-        // Covers L141: `?` on store.read when the event seq column is corrupt.
+        // Covers L141: `?` on store.read when an Event identifier is corrupt.
         let tmp = TempDir::new().unwrap();
         let key_path = tmp.path().join("sk");
         run(&[
@@ -658,11 +658,11 @@ mod tests {
             "https://osf.io/x".into(),
         ])
         .unwrap();
-        // Corrupt the event seq column so store.read() fails.
+        // Corrupt an Event identifier so store.read() fails after open succeeds.
         {
             let conn = rusqlite::Connection::open(&db).expect("open for corruption");
-            conn.execute("UPDATE events SET seq = 'not-an-int'", [])
-                .expect("corrupt event seq");
+            conn.execute("UPDATE events SET event_id = 'not-a-ulid'", [])
+                .expect("corrupt Event identifier");
         }
         let err = build_store(&db, "2026-07-25", None).unwrap_err();
         assert!(!err.to_string().is_empty(), "{err}");
