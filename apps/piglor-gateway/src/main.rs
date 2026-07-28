@@ -425,7 +425,7 @@ mod tests {
         std::fs::write(&file, "not a dir").unwrap();
         std::env::set_var("LEDGER_WRITE", "1");
         std::env::set_var("LEDGER_SOURCE", file.to_str().unwrap());
-        let (view, mode) = super::load_ledger();
+        let (view, _mode) = super::load_ledger();
         std::env::remove_var("LEDGER_WRITE");
         std::env::remove_var("LEDGER_SOURCE");
         // Store creation succeeds but loading fails because path is a file, not a directory
