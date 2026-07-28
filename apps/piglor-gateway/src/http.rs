@@ -70,9 +70,25 @@ pub fn router(state: AppState) -> Router {
     build_router(state, MAX_HTTP_BODY_BYTES)
 }
 
+/// Build the public spectator router for a non-loopback Gateway deployment.
+///
+/// Until #68 adds an authentication boundary, this exposes only the public
+/// Prediction Ledger surfaces from ADR-017 and ADR-020. Timeline and Ledger
+/// mutation routes remain available only on a loopback-bound Gateway.
+pub fn spectator_router(state: AppState) -> Router {
+    Router::new()
+        .route("/", get(root_page))
+        .route("/ledger", get(root_page))
+        .route("/health", get(health))
+        .route("/v1/ledger", get(get_ledger))
+        .layer(DefaultBodyLimit::max(MAX_HTTP_BODY_BYTES))
+        .with_state(state)
+}
+
 fn build_router(state: AppState, max_body_bytes: usize) -> Router {
     Router::new()
         .route("/", get(root_page))
+        .route("/ledger", get(root_page))
         .route("/health", get(health))
         .route("/v1/ledger", get(get_ledger))
         .route("/v1/ledger/predictions", post(post_ledger_prediction))
@@ -262,6 +278,15 @@ mod tests {
         )
     }
 
+    fn spectator_test_app() -> Router {
+        let gw = Gateway::new(open_store(StoreConfig::Memory).unwrap());
+        spectator_router(AppState {
+            gateway: gw,
+            ledger_view: LedgerView::default(),
+            ledger_write: LedgerWriteMode::Disabled,
+        })
+    }
+
     async fn json_request(
         app: Router,
         method: &str,
@@ -303,6 +328,60 @@ mod tests {
             html.contains("<!DOCTYPE html>"),
             "root page should return HTML: {html}"
         );
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn spectator_router_keeps_only_public_ledger_routes() {
+        let app = spectator_test_app();
+        for uri in ["/", "/ledger", "/health", "/v1/ledger"] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{uri} must stay public");
+        }
+
+        let (status, _) = json_request(
+            app.clone(),
+            "POST",
+            "/v1/timelines",
+            Some(json!({"name": "private"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, _) = json_request(
+            app.clone(),
+            "GET",
+            "/v1/timelines/01J38AE3E964B9281A2ADF6FDB/events",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, _) = json_request(
+            app.clone(),
+            "POST",
+            "/v1/timelines/01J38AE3E964B9281A2ADF6FDB/actions",
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, _) = json_request(
+            app.clone(),
+            "POST",
+            "/v1/timelines/01J38AE3E964B9281A2ADF6FDB/signals",
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, _) =
+            json_request(app, "POST", "/v1/ledger/predictions", Some(json!({}))).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

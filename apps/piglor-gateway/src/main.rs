@@ -4,7 +4,7 @@
 //! `piglor-gateway` binary — bind local HTTP/WS listener (ADR-014 / #69).
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-use piglor_gateway::{router, AppState, Gateway, LedgerGateway, LedgerWriteMode};
+use piglor_gateway::{router, spectator_router, AppState, Gateway, LedgerGateway, LedgerWriteMode};
 use piglor_ledger::LedgerView;
 use pos_plugin_ledger::{LedgerStore, TomlLedgerStore};
 use pos_store::{open_store, StoreConfig};
@@ -38,7 +38,6 @@ fn run_with_args(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send
                 .get(2)
                 .map_or("127.0.0.1:8080", String::as_str)
                 .parse::<SocketAddr>()?;
-            warn_if_non_loopback(addr);
             let store_path = args.get(3).map(String::as_str);
             let (ledger_view, ledger_write) = load_ledger();
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -68,12 +67,8 @@ fn run_with_args(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send
     }
 }
 
-fn warn_if_non_loopback(addr: SocketAddr) {
-    if !addr.ip().is_loopback() {
-        eprintln!(
-            "WARNING: binding {addr} (non-loopback) with no auth — anyone can append. Prefer 127.0.0.1 until #68."
-        );
-    }
+fn is_spectator_deployment(addr: SocketAddr) -> bool {
+    !addr.ip().is_loopback()
 }
 
 fn load_ledger() -> (LedgerView, LedgerWriteMode) {
@@ -144,11 +139,19 @@ async fn serve(
         None => StoreConfig::Memory,
     };
     let gateway = Gateway::new(open_store(config).map_err(|e| e.to_string())?);
-    let app = router(AppState {
+    let state = AppState {
         gateway,
         ledger_view,
         ledger_write,
-    });
+    };
+    let app = if is_spectator_deployment(addr) {
+        eprintln!(
+            "piglor-gateway serving public Prediction Ledger routes only at {addr}; Timeline and write routes require loopback until #68 authentication exists"
+        );
+        spectator_router(state)
+    } else {
+        router(state)
+    };
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| e.to_string())?;
@@ -170,9 +173,9 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn warn_if_non_loopback_covers_both_arms() {
-        warn_if_non_loopback("127.0.0.1:8080".parse().unwrap());
-        warn_if_non_loopback("0.0.0.0:8080".parse().unwrap());
+    fn spectator_deployment_is_limited_to_non_loopback_addresses() {
+        assert!(!is_spectator_deployment("127.0.0.1:8080".parse().unwrap()));
+        assert!(is_spectator_deployment("0.0.0.0:8080".parse().unwrap()));
     }
 
     #[test]
@@ -283,6 +286,30 @@ mod tests {
         let _ = tx.send(());
         serve_sql.await.unwrap().unwrap();
         let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn serve_non_loopback_spectator_shuts_down() {
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            serve(
+                addr,
+                None,
+                async move {
+                    let _ = rx.await;
+                },
+                LedgerView::default(),
+                LedgerWriteMode::Disabled,
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = tx.send(());
+        server.await.unwrap().unwrap();
     }
 
     #[test]
