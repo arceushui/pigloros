@@ -15,6 +15,7 @@ pub(crate) mod export;
 pub mod hex;
 pub(crate) mod html;
 pub(crate) mod json;
+pub(crate) mod key_output;
 pub(crate) mod verify;
 
 /// Test support utilities shared across crate boundaries.
@@ -47,9 +48,37 @@ pub enum CliError {
     /// Bad `--key` argument (missing or unreadable).
     #[error("invalid --key: {0}")]
     BadKey(String),
-    /// Unsafe secret-key output target.
-    #[error("unsafe secret key output: {0}")]
-    KeyOutput(String),
+    /// Secret-key output was structurally unsafe.
+    #[error("refusing secret-key output {path}: {reason}; {cleanup}")]
+    UnsafeKeyOutput {
+        /// Output path.
+        path: String,
+        /// Safety rule that was violated.
+        reason: String,
+        /// Cleanup state and retry guidance.
+        cleanup: String,
+    },
+    /// Secret-key output failed during an I/O operation.
+    #[error("failed to {action} secret-key output {path}: {source}; {cleanup}")]
+    KeyOutputIo {
+        /// Operation that failed.
+        action: &'static str,
+        /// Output path.
+        path: String,
+        /// Original I/O failure.
+        #[source]
+        source: std::io::Error,
+        /// Cleanup state and retry guidance.
+        cleanup: String,
+    },
+    /// The platform cannot enforce the required key-file protection.
+    #[error(
+        "secret-key output {path} is unsupported on this platform: keygen requires Unix owner-only file modes"
+    )]
+    UnsupportedKeyOutput {
+        /// Output path.
+        path: String,
+    },
     /// File I/O failure.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),

@@ -59,6 +59,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn binary_context_toml_subcommands() {
         let tmp = TempDir::new().unwrap();
@@ -125,6 +126,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn binary_context_store_subcommands() {
         let tmp = TempDir::new().unwrap();
@@ -185,6 +187,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn binary_context_error_paths() {
         let tmp = TempDir::new().unwrap();
@@ -282,6 +285,7 @@ mod tests {
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
+    #[cfg(unix)]
     fn bin_keygen(key_path: &std::path::Path) {
         run(&[
             "piglor-ledger".into(),

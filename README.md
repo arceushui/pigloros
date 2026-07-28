@@ -24,6 +24,8 @@ cargo run -p pos-cli --locked -- --help
 cargo run -p piglor-gateway --locked -- serve 127.0.0.1:8080
 
 # Prediction Ledger CLI (ADR-017 / #58) — create and verify predictions
+mkdir -m 700 .secrets
+cargo run -p piglor-ledger --locked -- keygen --out ./.secrets/ledger.key
 cargo run -p piglor-ledger --locked -- predict --source toml:./seed/predictions \
   --title "My prediction" --statement "..." --predicted-outcome Yes \
   --confidence 0.7 --made-at "2026-07-28T12:00:00Z" --resolve-by 2026-12-31 \
@@ -34,6 +36,18 @@ docker compose up -d
 curl http://localhost:8080/health
 curl http://localhost:8080/v1/ledger
 ```
+
+`piglor-ledger keygen` is supported on Unix platforms, where it creates a
+new owner-only key file and durably synchronizes both the file and containing
+directory. It refuses existing outputs, symlinks, unsafe directory permissions,
+and non-Unix platforms instead of weakening protection. Create the containing
+directory with private permissions first (for example, `mkdir -m 700 .secrets`).
+The command warns that the output must remain outside version control; verify
+the chosen path explicitly with `git check-ignore -- .secrets/ledger.key`.
+
+Ancestor checks and path-based file creation cannot be one atomic operation
+using safe standard-library APIs. Keep the key in a stable private directory;
+the final filename itself is protected atomically with create-new semantics.
 
 Requires the pinned toolchain in `rust-toolchain.toml` (Rust **1.97.1**).
 

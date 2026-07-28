@@ -197,7 +197,7 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
         }
         _ => {
             eprintln!("Usage: piglor-ledger <keygen|predict|resolve|export|build|verify>");
-            eprintln!("  keygen --out <path>");
+            eprintln!("  keygen --out <path>  (Unix only; path must be private and git-ignored)");
             eprintln!("  predict --source toml:DIR|store:DB [--key <path>] --title T --statement S --predicted-outcome O --confidence 0..1 --made-at TS --resolve-by DATE --osf URL [--scenario NAME]");
             eprintln!("  resolve --source toml:DIR|store:DB [--key <path>] --id ULID --outcome true|false --resolved-at TS");
             eprintln!("  export --source toml:DIR|store:DB [--out FILE] [--today YYYY-MM-DD] [--pubkey HEX]");
@@ -229,78 +229,24 @@ fn require<'a>(args: &'a [String], name: &str) -> Result<&'a str, CliError> {
 }
 
 fn cmd_keygen(args: &[String]) -> Result<(), CliError> {
-    let out = PathBuf::from(require(args, "--out")?);
-    let (sk, vk) = generate_keypair();
-    write_new_secret_key(&out, &hex_encode(&sk.to_bytes()))?;
-    println!(
-        "wrote secret key to {} (public key: {})",
-        out.display(),
-        hex_encode(&vk.to_bytes())
-    );
-    Ok(())
-}
-
-/// Create a new secret-key file without replacing or following an existing target.
-///
-/// Unix creation uses mode `0o600` at open time so the process umask can only make
-/// the key more restrictive. Other platforms are rejected explicitly rather than
-/// silently creating a secret key without an owner-only access guarantee.
-#[cfg(unix)]
-fn write_new_secret_key(out: &Path, key: &str) -> Result<(), CliError> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    if let Ok(metadata) = std::fs::symlink_metadata(out) {
-        let reason = if metadata.file_type().is_symlink() {
-            "refusing to write secret key through a symlink"
-        } else {
-            "output path already exists; choose a new path"
-        };
-        return Err(CliError::KeyOutput(format!("{}: {reason}", out.display())));
-    }
-
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(out)
-        .map_err(|e| CliError::KeyOutput(format!("could not create {}: {e}", out.display())))?;
-    persist_secret_key(&mut file, key)
-}
-
-#[cfg(not(unix))]
-fn write_new_secret_key(out: &Path, _key: &str) -> Result<(), CliError> {
-    Err(CliError::KeyOutput(format!(
-        "{}: this platform cannot create owner-only secret-key files safely",
-        out.display()
-    )))
-}
-
-trait SecretKeyOutput {
-    fn write_secret_key(&mut self, key: &[u8]) -> std::io::Result<()>;
-    fn sync_secret_key(&self) -> std::io::Result<()>;
-}
-
-impl SecretKeyOutput for std::fs::File {
-    fn write_secret_key(&mut self, key: &[u8]) -> std::io::Result<()> {
-        use std::io::Write;
-
-        self.write_all(key)
-    }
-
-    fn sync_secret_key(&self) -> std::io::Result<()> {
-        self.sync_all()
-    }
-}
-
-fn persist_secret_key(output: &mut impl SecretKeyOutput, key: &str) -> Result<(), CliError> {
-    output
-        .write_secret_key(key.as_bytes())
-        .map_err(|e| CliError::KeyOutput(format!("could not write secret key: {e}")))
-        .and_then(|()| {
-            output
-                .sync_secret_key()
-                .map_err(|e| CliError::KeyOutput(format!("could not sync secret key: {e}")))
-        })
+    require(args, "--out").map(PathBuf::from).and_then(|out| {
+        let (sk, vk) = generate_keypair();
+        crate::key_output::write_new_secret_key(&out, hex_encode(&sk.to_bytes()).as_bytes()).map(
+            |()| {
+                println!(
+                    "wrote secret key to {} (public key: {})",
+                    out.display(),
+                    hex_encode(&vk.to_bytes())
+                );
+                    eprintln!(
+                        "warning: {} contains a signing secret; keep it outside version control \
+                         and verify it is ignored before use (for Git, pass this path as a separate \
+                         argument to `git check-ignore --`)",
+                        out.display()
+                    );
+            },
+        )
+    })
 }
 
 fn cmd_predict(args: &[String]) -> Result<(), CliError> {
@@ -424,33 +370,15 @@ fn cmd_verify(args: &[String]) -> Result<(), CliError> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    #[cfg(unix)]
+    use std::error::Error;
+
     use super::*;
     use crate::hex::nib;
     use tempfile::TempDir;
 
-    struct WriteFailure;
-
-    impl SecretKeyOutput for WriteFailure {
-        fn write_secret_key(&mut self, _key: &[u8]) -> std::io::Result<()> {
-            Err(std::io::Error::other("write failed"))
-        }
-
-        fn sync_secret_key(&self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    struct SyncFailure;
-
-    impl SecretKeyOutput for SyncFailure {
-        fn write_secret_key(&mut self, _key: &[u8]) -> std::io::Result<()> {
-            Ok(())
-        }
-
-        fn sync_secret_key(&self) -> std::io::Result<()> {
-            Err(std::io::Error::other("sync failed"))
-        }
-    }
+    #[cfg(unix)]
+    static KEYGEN_FAULT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn days_since_epoch_covers_leap_year_and_feb() {
@@ -537,6 +465,7 @@ mod tests {
         run(&["piglor-ledger".to_string(), "version".to_string()]).unwrap();
     }
 
+    #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn keygen_writes_hex_secret_key_and_prints_pubkey() {
@@ -576,12 +505,37 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn keygen_accepts_relative_path_in_private_directory() {
+        let key_path = PathBuf::from(format!(".keygen-relative-{}.key", ulid::Ulid::gen()));
+
+        run_keygen(&key_path).unwrap();
+
+        assert!(key_path.exists());
+        std::fs::remove_file(key_path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn keygen_rejects_filesystem_root_without_writing() {
+        let err = run_keygen(Path::new("/")).unwrap_err();
+
+        assert!(err.to_string().contains("already exists"), "{err}");
+    }
+
+    #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn keygen_rejects_existing_output_file_without_overwriting_it() {
+        use std::os::unix::fs::PermissionsExt;
+
         let tmp = TempDir::new().unwrap();
         let key_path = tmp.path().join("secret.key");
         std::fs::write(&key_path, "keep this key material").unwrap();
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
         let err = run(&[
             "piglor-ledger".into(),
@@ -595,6 +549,26 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(key_path).unwrap(),
             "keep this key material"
+        );
+    }
+
+    #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn keygen_rejects_insecure_existing_output_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let key_path = tmp.path().join("secret.key");
+        std::fs::write(&key_path, "public key material").unwrap();
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let err = run_keygen(&key_path).unwrap_err();
+
+        assert!(err.to_string().contains("insecure mode 0644"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(key_path).unwrap(),
+            "public key material"
         );
     }
 
@@ -623,28 +597,182 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn persist_secret_key_reports_write_failure() {
-        let err = persist_secret_key(&mut WriteFailure, "key material").unwrap_err();
+    fn keygen_rejects_ancestor_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(real.join("private")).unwrap();
+        let link = tmp.path().join("linked");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let key_path = link.join("private").join("secret.key");
 
+        let err = run_keygen(&key_path).unwrap_err();
+
+        assert!(err.to_string().contains("ancestor"), "{err}");
+        assert!(err.to_string().contains("symlink"), "{err}");
+        assert!(!real.join("private").join("secret.key").exists());
+    }
+
+    #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn keygen_rejects_non_directory_ancestor() {
+        let tmp = TempDir::new().unwrap();
+        let parent = tmp.path().join("not-a-directory");
+        std::fs::write(&parent, "file").unwrap();
+        let key_path = parent.join("secret.key");
+
+        let err = run_keygen(&key_path).unwrap_err();
+
+        assert!(err.to_string().contains("not a directory"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn keygen_rejects_insecure_containing_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let parent = tmp.path().join("shared");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let key_path = parent.join("secret.key");
+
+        let err = run_keygen(&key_path).unwrap_err();
+
+        assert!(err.to_string().contains("insecure mode 0777"), "{err}");
+        assert!(!key_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn keygen_rejects_insecure_non_sticky_ancestor() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let shared = tmp.path().join("shared");
+        let private = shared.join("private");
+        std::fs::create_dir_all(&private).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let key_path = private.join("secret.key");
+
+        let err = run_keygen(&key_path).unwrap_err();
+
+        assert!(err.to_string().contains("insecure mode 0777"), "{err}");
+        assert!(!key_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn keygen_cleans_partial_outputs_and_retry_succeeds() {
+        use crate::key_output::{clear_faults, install_faults, FaultStage};
+
+        let _guard = KEYGEN_FAULT_TEST_LOCK.lock().unwrap();
+        for (name, stage) in [
+            ("inspect-created", FaultStage::InspectCreated),
+            ("insecure-mode", FaultStage::ForceInsecureMode),
+            ("write", FaultStage::Write),
+            ("file-sync", FaultStage::FileSync),
+            ("directory-sync", FaultStage::DirectorySync),
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let key_path = tmp.path().join(format!("{name}.key"));
+            install_faults(&key_path, &[stage]);
+            let err = run_keygen(&key_path).unwrap_err();
+            clear_faults();
+
+            assert!(err.to_string().contains("retry is safe"), "{name}: {err}");
+            assert!(!key_path.exists(), "{name}: partial output remained");
+            run_keygen(&key_path).unwrap();
+            assert!(key_path.exists(), "{name}: retry did not create key");
+        }
+    }
+
+    #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn keygen_reports_cleanup_remove_uncertainty() {
+        use crate::key_output::{clear_faults, install_faults, FaultStage};
+
+        let _guard = KEYGEN_FAULT_TEST_LOCK.lock().unwrap();
+        let tmp = TempDir::new().unwrap();
+        let key_path = tmp.path().join("secret.key");
+        install_faults(&key_path, &[FaultStage::Write, FaultStage::CleanupRemove]);
+        let err = run_keygen(&key_path).unwrap_err();
+        clear_faults();
+
+        assert!(err.to_string().contains("cleanup is uncertain"), "{err}");
         assert!(
-            err.to_string().contains("could not write secret key"),
-            "{err}"
+            key_path.exists(),
+            "injected removal failure should retain output"
         );
     }
 
+    #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn persist_secret_key_reports_sync_failure() {
-        let err = persist_secret_key(&mut SyncFailure, "key material").unwrap_err();
+    fn keygen_reports_cleanup_directory_sync_uncertainty() {
+        use crate::key_output::{clear_faults, install_faults, FaultStage};
+
+        let _guard = KEYGEN_FAULT_TEST_LOCK.lock().unwrap();
+        let tmp = TempDir::new().unwrap();
+        let key_path = tmp.path().join("secret.key");
+        install_faults(
+            &key_path,
+            &[FaultStage::Write, FaultStage::CleanupDirectorySync],
+        );
+        let err = run_keygen(&key_path).unwrap_err();
+        clear_faults();
 
         assert!(
-            err.to_string().contains("could not sync secret key"),
+            err.to_string().contains("cleanup durability is uncertain"),
             "{err}"
         );
+        assert!(!key_path.exists());
     }
 
+    #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn keygen_surfaces_precreation_io_failures_with_path() {
+        use crate::key_output::{clear_faults, install_faults, FaultStage};
+
+        let _guard = KEYGEN_FAULT_TEST_LOCK.lock().unwrap();
+        for (name, stage) in [
+            ("ancestor", FaultStage::InspectAncestor),
+            ("parent", FaultStage::OpenParent),
+            ("output", FaultStage::InspectOutput),
+            ("create", FaultStage::Create),
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let key_path = tmp.path().join(format!("{name}.key"));
+            install_faults(&key_path, &[stage]);
+            let err = run_keygen(&key_path).unwrap_err();
+            clear_faults();
+
+            assert!(
+                err.to_string().contains(&key_path.display().to_string()),
+                "{name}: {err}"
+            );
+            assert!(err.source().is_some(), "{name}: missing I/O source");
+            assert!(!key_path.exists());
+        }
+
+        let relative = PathBuf::from("relative-fault.key");
+        install_faults(&relative, &[FaultStage::ResolveRelative]);
+        let err = run_keygen(&relative).unwrap_err();
+        clear_faults();
+        assert!(err.to_string().contains("resolve relative path"), "{err}");
+        assert!(!relative.exists());
+    }
+
+    #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn keygen_fails_when_output_path_is_unwritable() {
@@ -656,7 +784,20 @@ mod tests {
             "/nonexistent/dir/key.sk".into(),
         ])
         .unwrap_err();
-        assert!(err.to_string().contains("could not create"), "{err}");
+        assert!(err.to_string().contains("inspect ancestor"), "{err}");
+    }
+
+    #[cfg(not(unix))]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn keygen_is_explicitly_unsupported() {
+        let tmp = TempDir::new().unwrap();
+        let key_path = tmp.path().join("secret.key");
+
+        let err = run_keygen(&key_path).unwrap_err();
+
+        assert!(err.to_string().contains("requires Unix"), "{err}");
+        assert!(!key_path.exists());
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -665,6 +806,15 @@ mod tests {
         // Covers L176: `?` on require(args, "--out") in cmd_keygen.
         let err = run(&["piglor-ledger".into(), "keygen".into()]).unwrap_err();
         assert!(err.to_string().contains("--out"));
+    }
+
+    fn run_keygen(key_path: &Path) -> Result<(), CliError> {
+        run(&[
+            "piglor-ledger".into(),
+            "keygen".into(),
+            "--out".into(),
+            key_path.to_str().unwrap().to_owned(),
+        ])
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -1376,6 +1526,7 @@ mod tests {
         assert!(err.is_err());
     }
 
+    #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn open_store_sqlite_fails_on_invalid_path() {
@@ -1396,6 +1547,7 @@ mod tests {
         assert!(err.is_err(), "expected error for invalid path");
     }
 
+    #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn open_store_sqlite_with_corrupted_db_fails() {
@@ -1422,6 +1574,7 @@ mod tests {
         assert!(err.is_err(), "expected error for corrupted DB");
     }
 
+    #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn open_store_readonly_db_fails_on_create_timeline() {
@@ -1457,6 +1610,7 @@ mod tests {
         assert!(err.is_err(), "expected error from read-only DB");
     }
 
+    #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn find_or_create_list_timelines_fails_on_corrupt_db() {
@@ -1490,6 +1644,7 @@ mod tests {
         assert!(err.is_err(), "expected error from corrupt DB");
     }
 
+    #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn open_store_reuse_existing_ledger_timeline() {
@@ -1550,6 +1705,7 @@ mod tests {
         assert!(!ledger.entries()[0].resolution.as_ref().unwrap().outcome);
     }
 
+    #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn open_store_store_with_key_succeeds_and_well_known_entity_covered() {
@@ -1578,6 +1734,7 @@ mod tests {
         assert!(store2.is_ok(), "second open (reuse branch) must succeed");
     }
 
+    #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn find_or_create_skips_non_ledger_timelines_in_loop() {
