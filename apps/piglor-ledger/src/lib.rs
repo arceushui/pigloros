@@ -23,7 +23,7 @@ pub mod test_helpers;
 
 pub use cli::{open_store, run, Source};
 pub use export::{build as build_manifest, ExportManifest};
-pub use html::{render_html, render_redirect};
+pub use html::{render_html, render_redirect, CONTENT_SECURITY_POLICY};
 pub use json::render_json;
 pub use pos_plugin_ledger::LedgerView;
 pub use verify::run as verify_source;

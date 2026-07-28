@@ -66,6 +66,7 @@ tempfile = "3"
 
 # Data files
 toml = "0.8"
+url = "2"
 
 # Gateway (Wave 6 / ADR-014)
 tokio = { version = "1", features = [
