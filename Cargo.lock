@@ -812,6 +812,7 @@ dependencies = [
  "axum",
  "ciborium",
  "pos-core",
+ "pos-plugin-ledger",
  "pos-plugin-society",
  "pos-plugin-world",
  "pos-store",
