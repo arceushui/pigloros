@@ -25,8 +25,8 @@ Run `GET /issues/<number>.json?include=journals` via the Redmine MCP.
 
 ## ADRs
 
-ADRs are wiki pages on Redmine, not issues. Create them at:
-`PUT /projects/pigloros/wiki/ADR-XXX_<Title>.json`
+ADRs are wiki pages on Redmine, not issues. Redmine wiki pages accept **Markdown** (not Textile). Create them at:
+`PUT /projects/pigloros/wiki/ADR-XXX_<Title>.json` with `{ "wiki_page": { "text": "<markdown content>", "comments": "..." } }`
 
 ## Wayfinding operations
 

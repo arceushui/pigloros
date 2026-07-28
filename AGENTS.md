@@ -21,11 +21,16 @@ git worktree remove ../pigloros-<task-name>
 
 Redmine: `redmine.piglor.com/projects/pigloros`. GitHub Issues (`arceushui/pigloros`) is for community contributions. See `.agents/issue-tracker.md`.
 
+### Triage labels
+
+Default five-label vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `.agents/triage-labels.md`.
+
 ### Domain knowledge
 
 - **CONTEXT.md** — domain glossary (use exact terms, don't drift to synonyms)
 - **Redmine wiki** — canonical ADRs
 - **Notion** — design docs and Wave specs (MCP configured)
+- See `.agents/domain.md` for consumer rules
 
 ### Coverage rule
 
