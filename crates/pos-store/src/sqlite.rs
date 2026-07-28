@@ -31,6 +31,8 @@ thread_local! {
     static FAIL_IMPORT_GET_STORAGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Test-only fault injection: force `Rows::next` to return Err.
     static FAIL_ROWS_NEXT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test-only evidence that bounded payload queries start only after metadata validation.
+    static BOUNDED_PAYLOAD_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 pub struct SqliteStore {
@@ -231,12 +233,20 @@ impl SqliteStore {
         timeline_id: TimelineId,
         from: Seq,
         to: Option<Seq>,
-        max_payload_bytes: Option<usize>,
+    ) -> Result<Vec<Event>, CoreError> {
+        Self::read_own_events_on(&self.conn, timeline_id, from, to)
+    }
+
+    fn read_own_events_on(
+        conn: &Connection,
+        timeline_id: TimelineId,
+        from: Seq,
+        to: Option<Seq>,
     ) -> Result<Vec<Event>, CoreError> {
         let sql = to.map_or_else(
             || {
                 format!(
-                    "SELECT seq, event_id, entity_id, event_type, length(payload), payload, wall_time,
+                    "SELECT seq, event_id, entity_id, event_type, payload, wall_time,
                         causation_id, correlation_id, schema_version, payload_hash, signature
                  FROM events WHERE timeline_id = '{}' AND seq >= {}
                  ORDER BY seq ASC",
@@ -246,7 +256,7 @@ impl SqliteStore {
             },
             |t| {
                 format!(
-                    "SELECT seq, event_id, entity_id, event_type, length(payload), payload, wall_time,
+                    "SELECT seq, event_id, entity_id, event_type, payload, wall_time,
                         causation_id, correlation_id, schema_version, payload_hash, signature
                  FROM events WHERE timeline_id = '{}' AND seq >= {} AND seq <= {}
                  ORDER BY seq ASC",
@@ -257,8 +267,7 @@ impl SqliteStore {
             },
         );
 
-        let mut stmt = self
-            .conn
+        let mut stmt = conn
             .prepare(&sql)
             .map_err(|e| CoreError::Storage(e.to_string()))?;
         let mut rows = Self::query_prepared(&mut stmt)?;
@@ -287,24 +296,16 @@ impl SqliteStore {
             let event_id: String = row.get(1).map_err(|e| CoreError::Storage(e.to_string()))?;
             let entity_id: String = row.get(2).map_err(|e| CoreError::Storage(e.to_string()))?;
             let event_type: String = row.get(3).map_err(|e| CoreError::Storage(e.to_string()))?;
-            let payload_size: i64 = row
-                .get(4)
-                .expect("length(non-null SQLite BLOB) returns an integer");
-            let payload_size = sqlite_usize_or_max(payload_size);
-            if max_payload_bytes.is_some_and(|maximum| payload_size > maximum) {
-                return Err(CoreError::PayloadTooLarge { size: payload_size });
-            }
-            // `length(payload)` is checked before `row.get` materialises the BLOB.
-            let payload: Vec<u8> = row.get(5).map_err(|e| CoreError::Storage(e.to_string()))?;
-            let wall_time: i64 = row.get(6).map_err(|e| CoreError::Storage(e.to_string()))?;
+            let payload: Vec<u8> = row.get(4).map_err(|e| CoreError::Storage(e.to_string()))?;
+            let wall_time: i64 = row.get(5).map_err(|e| CoreError::Storage(e.to_string()))?;
             let causation_id: Option<String> =
-                row.get(7).map_err(|e| CoreError::Storage(e.to_string()))?;
+                row.get(6).map_err(|e| CoreError::Storage(e.to_string()))?;
             let correlation_id: Option<String> =
-                row.get(8).map_err(|e| CoreError::Storage(e.to_string()))?;
-            let schema_version: i64 = row.get(9).map_err(|e| CoreError::Storage(e.to_string()))?;
-            let ph_bytes: Vec<u8> = row.get(10).map_err(|e| CoreError::Storage(e.to_string()))?;
+                row.get(7).map_err(|e| CoreError::Storage(e.to_string()))?;
+            let schema_version: i64 = row.get(8).map_err(|e| CoreError::Storage(e.to_string()))?;
+            let ph_bytes: Vec<u8> = row.get(9).map_err(|e| CoreError::Storage(e.to_string()))?;
             let sig_bytes: Option<Vec<u8>> =
-                row.get(11).map_err(|e| CoreError::Storage(e.to_string()))?;
+                row.get(10).map_err(|e| CoreError::Storage(e.to_string()))?;
             let ph_arr: [u8; 32] = ph_bytes
                 .try_into()
                 .map_err(|_| CoreError::Serialization("bad hash".to_owned()))?;
@@ -338,9 +339,77 @@ impl SqliteStore {
         Ok(events)
     }
 
-    fn own_event_count(&self, timeline_id: TimelineId, to: Option<Seq>) -> Result<u64, CoreError> {
+    fn read_own_events_bounded(
+        conn: &Connection,
+        timeline_id: TimelineId,
+        from: Seq,
+        to: Seq,
+        max_payload_bytes: usize,
+    ) -> Result<Vec<Event>, CoreError> {
+        let sql = format!(
+            "SELECT length(payload)
+             FROM events WHERE timeline_id = '{}' AND seq >= {} AND seq <= {}
+             ORDER BY seq ASC",
+            timeline_id,
+            from.as_u64(),
+            to.as_u64()
+        );
+        let mut stmt = match conn.prepare(&sql) {
+            Ok(stmt) => stmt,
+            Err(error) => {
+                let message = error.to_string();
+                return Err(CoreError::Storage(message));
+            }
+        };
+        let mut rows = stmt.raw_query();
+        let mut payload_sizes = Vec::new();
+        loop {
+            let next = {
+                #[cfg(test)]
+                {
+                    if FAIL_ROWS_NEXT.with(std::cell::Cell::get) {
+                        Err(rusqlite::Error::InvalidQuery)
+                    } else {
+                        rows.next()
+                    }
+                }
+                #[cfg(not(test))]
+                {
+                    rows.next()
+                }
+            };
+            match next {
+                Ok(Some(row)) => payload_sizes.push(
+                    row.get(0)
+                        .expect("length(non-null SQLite BLOB) returns an integer"),
+                ),
+                Ok(None) => break,
+                Err(error) => {
+                    let message = error.to_string();
+                    return Err(CoreError::Storage(message));
+                }
+            }
+        }
+
+        for stored_size in payload_sizes {
+            let payload_size = sqlite_usize_or_max(stored_size);
+            if payload_size > max_payload_bytes {
+                return Err(CoreError::PayloadTooLarge { size: payload_size });
+            }
+        }
+
+        #[cfg(test)]
+        BOUNDED_PAYLOAD_QUERIES.with(|queries| queries.set(queries.get() + 1));
+        Self::read_own_events_on(conn, timeline_id, from, Some(to))
+    }
+
+    fn own_event_count(
+        conn: &Connection,
+        timeline_id: TimelineId,
+        to: Option<Seq>,
+    ) -> Result<u64, CoreError> {
         let result = match to {
-            Some(to) => self.conn.query_row(
+            Some(to) => conn.query_row(
                 "SELECT count(*) FROM events WHERE timeline_id = ?1 AND seq <= ?2",
                 params![
                     timeline_id.to_string(),
@@ -348,7 +417,7 @@ impl SqliteStore {
                 ],
                 read_first_i64,
             ),
-            None => self.conn.query_row(
+            None => conn.query_row(
                 "SELECT count(*) FROM events WHERE timeline_id = ?1",
                 params![timeline_id.to_string()],
                 read_first_i64,
@@ -367,7 +436,11 @@ impl SqliteStore {
         range: SeqRange,
         max_payload_bytes: usize,
     ) -> Result<Vec<Event>, CoreError> {
-        let chain = self.fork_chain(timeline_id)?;
+        let tx = match self.conn.unchecked_transaction() {
+            Ok(tx) => tx,
+            Err(error) => return Err(CoreError::Storage(error.to_string())),
+        };
+        let chain = Self::fork_chain_on(&tx, timeline_id)?;
         let from = range.from.as_u64().max(1);
         let to = range.to.map_or(u64::MAX, Seq::as_u64);
         let mut logical_offset = 0_u64;
@@ -375,7 +448,7 @@ impl SqliteStore {
 
         for (index, &(segment_id, _)) in chain.iter().enumerate() {
             let segment_cap = chain.get(index + 1).and_then(|(_, fork)| *fork);
-            let segment_len = self.own_event_count(segment_id, segment_cap)?;
+            let segment_len = Self::own_event_count(&tx, segment_id, segment_cap)?;
             let segment_start = logical_offset.saturating_add(1);
             let segment_end = logical_offset.saturating_add(segment_len);
             let selected_start = from.max(segment_start);
@@ -384,11 +457,12 @@ impl SqliteStore {
             if selected_start <= selected_end {
                 let raw_from = Seq::from_u64(selected_start - logical_offset);
                 let raw_to = Seq::from_u64(selected_end - logical_offset);
-                let mut events = self.read_own_events(
+                let mut events = Self::read_own_events_bounded(
+                    &tx,
                     segment_id,
                     raw_from,
-                    Some(raw_to),
-                    Some(max_payload_bytes),
+                    raw_to,
+                    max_payload_bytes,
                 )?;
                 for event in &mut events {
                     event.seq = Seq::from_u64(logical_offset.saturating_add(event.seq.as_u64()));
@@ -408,11 +482,17 @@ impl SqliteStore {
         &self,
         timeline_id: TimelineId,
     ) -> Result<Vec<(TimelineId, Option<Seq>)>, CoreError> {
+        Self::fork_chain_on(&self.conn, timeline_id)
+    }
+
+    fn fork_chain_on(
+        conn: &Connection,
+        timeline_id: TimelineId,
+    ) -> Result<Vec<(TimelineId, Option<Seq>)>, CoreError> {
         let mut chain: Vec<(TimelineId, Option<Seq>)> = Vec::new();
         let mut current = timeline_id;
         loop {
-            let row: Option<(Option<String>, Option<i64>)> = self
-                .conn
+            let row: Option<(Option<String>, Option<i64>)> = conn
                 .query_row(
                     "SELECT parent_id, fork_seq FROM timelines WHERE id = ?1",
                     params![current.to_string()],
@@ -631,11 +711,11 @@ impl EventStore for SqliteStore {
                 let fork_seq = chain[i + 1]
                     .1
                     .expect("non-root chain entry always has fork_seq");
-                let events = self.read_own_events(tid, Seq::ZERO, Some(fork_seq), None)?;
+                let events = self.read_own_events(tid, Seq::ZERO, Some(fork_seq))?;
                 all.extend(events);
             } else {
                 // Leaf: all own events; range applied after logical renumber.
-                let events = self.read_own_events(tid, Seq::ZERO, None, None)?;
+                let events = self.read_own_events(tid, Seq::ZERO, None)?;
                 all.extend(events);
             }
         }
@@ -657,7 +737,7 @@ impl EventStore for SqliteStore {
         let _ = self
             .get_timeline(timeline)?
             .ok_or(CoreError::TimelineNotFound(timeline))?;
-        self.read_own_events(timeline, range.from, range.to, None)
+        self.read_own_events(timeline, range.from, range.to)
     }
 
     fn fork(&mut self, parent: TimelineId, at_seq: Seq, name: &str) -> Result<Timeline, CoreError> {
@@ -1021,7 +1101,7 @@ impl SqliteStore {
                     .1
                     .expect("ancestor always has a successor in chain")
             };
-            let events = self.read_own_events(tid, Seq::ZERO, Some(limit), None)?;
+            let events = self.read_own_events(tid, Seq::ZERO, Some(limit))?;
             for event in events {
                 let id_str = event.id.to_string();
                 hash = self
@@ -1225,6 +1305,45 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bounded_read_propagates_snapshot_and_metadata_query_errors() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("snapshot").unwrap();
+        store.conn.execute_batch("BEGIN").unwrap();
+        let error = store
+            .read_bounded(timeline.id(), SeqRange::all(), 1)
+            .unwrap_err();
+        store.conn.execute_batch("ROLLBACK").unwrap();
+        assert!(matches!(error, CoreError::Storage(_)));
+
+        let mut query_store = new_store();
+        let query_timeline = query_store.create_timeline("query").unwrap();
+        query_store
+            .append(query_timeline.id(), &[make_draft(EntityId::new(), b"x")])
+            .unwrap();
+        FAIL_ROWS_NEXT.with(|fail| fail.set(true));
+        let error = query_store
+            .read_bounded(query_timeline.id(), SeqRange::all(), 1)
+            .unwrap_err();
+        FAIL_ROWS_NEXT.with(|fail| fail.set(false));
+        assert!(matches!(error, CoreError::Storage(_)));
+
+        store.conn.execute("DROP TABLE events", []).unwrap();
+        store
+            .conn
+            .execute_batch(&format!(
+                "CREATE VIEW events AS
+                 SELECT '{}' AS timeline_id, 1 AS seq",
+                timeline.id()
+            ))
+            .unwrap();
+        let error = store
+            .read_bounded(timeline.id(), SeqRange::all(), 1)
+            .unwrap_err();
+        assert!(matches!(error, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_read_returns_selected_event() {
         let mut store = new_store();
         let timeline = store.create_timeline("bounded").unwrap();
@@ -1255,6 +1374,28 @@ mod tests {
             .read_bounded(child.id(), SeqRange::from_seq(Seq::from_u64(3)), usize::MAX)
             .unwrap();
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bounded_read_validates_metadata_before_querying_payloads() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("two-phase").unwrap();
+        store
+            .append(timeline.id(), &[make_draft(EntityId::new(), b"large")])
+            .unwrap();
+
+        BOUNDED_PAYLOAD_QUERIES.with(|queries| queries.set(0));
+        let error = store
+            .read_bounded(timeline.id(), SeqRange::all(), 4)
+            .unwrap_err();
+        assert!(matches!(error, CoreError::PayloadTooLarge { size: 5 }));
+        BOUNDED_PAYLOAD_QUERIES.with(|queries| assert_eq!(queries.get(), 0));
+
+        store
+            .read_bounded(timeline.id(), SeqRange::all(), 5)
+            .unwrap();
+        BOUNDED_PAYLOAD_QUERIES.with(|queries| assert_eq!(queries.get(), 1));
     }
 
     #[test]

@@ -305,6 +305,7 @@ impl IntoResponse for GatewayError {
             }
             GatewayError::EventPayloadTooLarge { .. }
             | GatewayError::EventResponseTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+            GatewayError::CompatibilityReadTruncated { .. } => StatusCode::CONFLICT,
             GatewayError::Store(CoreError::TimelineNotFound(_)) => StatusCode::NOT_FOUND,
             GatewayError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
             GatewayError::LedgerWriteDisabled => StatusCode::FORBIDDEN,
@@ -892,6 +893,8 @@ mod tests {
         assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
         let r = GatewayError::EventResponseTooLarge { maximum: 1 }.into_response();
         assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let r = GatewayError::CompatibilityReadTruncated { maximum: 1 }.into_response();
+        assert_eq!(r.status(), StatusCode::CONFLICT);
         let r = GatewayError::Store(CoreError::Storage("boom".into())).into_response();
         assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let r = GatewayError::LedgerWriteDisabled.into_response();

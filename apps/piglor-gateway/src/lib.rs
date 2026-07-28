@@ -135,6 +135,9 @@ pub enum GatewayError {
     /// A single stored Event cannot fit in a bounded response.
     #[error("event response exceeds maximum of {maximum} bytes")]
     EventResponseTooLarge { maximum: usize },
+    /// The deprecated aggregate-style read would silently truncate Events.
+    #[error("compatibility read exceeds its bounded page of {maximum} events")]
+    CompatibilityReadTruncated { maximum: usize },
     /// Underlying store failure.
     #[error(transparent)]
     Store(#[from] CoreError),
@@ -245,13 +248,15 @@ impl Gateway {
         })
     }
 
-    /// Compatibility shim returning at most [`MAX_EVENTS_PER_POLL`] Events.
+    /// Compatibility shim for Timelines that fit in one bounded page.
     ///
     /// This method no longer aggregates the Timeline to exhaustion. New callers
     /// must use [`Self::read_events_page`] and follow `next_from_seq`.
     ///
     /// # Errors
-    /// Returns the same errors as [`Self::read_events_page`].
+    /// Returns [`GatewayError::CompatibilityReadTruncated`] when more than one
+    /// bounded page is available, in addition to the errors from
+    /// [`Self::read_events_page`].
     #[deprecated(
         since = "0.1.0",
         note = "use read_events_page and follow EventPage::next_from_seq"
@@ -261,9 +266,15 @@ impl Gateway {
         timeline_id: &str,
         from_seq: u64,
     ) -> Result<Vec<Event>, GatewayError> {
-        self.read_events_page(timeline_id, from_seq, MAX_EVENTS_PER_POLL)
-            .await
-            .map(|page| page.events)
+        let page = self
+            .read_events_page(timeline_id, from_seq, MAX_EVENTS_PER_POLL)
+            .await?;
+        if page.next_from_seq.is_some() {
+            return Err(GatewayError::CompatibilityReadTruncated {
+                maximum: MAX_EVENTS_PER_POLL,
+            });
+        }
+        Ok(page.events)
     }
 
     /// Append one `world.action` draft. `payload` is bounded JSON → CBOR.
@@ -411,7 +422,7 @@ fn draft_event_response_len(draft: &EventDraft) -> usize {
     };
     serde_json::to_vec(&serde_json::json!({
         "events": [view],
-        "next_from_seq": null,
+        "next_from_seq": u64::MAX,
     }))
     .expect("EventView serialization is infallible")
     .len()
@@ -459,7 +470,7 @@ impl SignalRequest {
 }
 
 /// Validated query for `GET /v1/timelines/:id/events`.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Deserialize, PartialEq, Eq)]
 pub struct EventsQuery {
     pub from_seq: u64,
     pub limit: usize,
@@ -931,6 +942,71 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn admission_budgets_the_exact_worst_case_cursor_boundary() {
+        let entity = EntityId::new();
+        let mut boundary = None;
+        for length in (MAX_EVENTS_RESPONSE_BYTES / 8 - 128)..=(MAX_EVENTS_RESPONSE_BYTES / 8) {
+            let payload = serde_json::json!({"data": "\0".repeat(length)});
+            let draft =
+                EventDraft::new(entity, Kind::new(EVENT_TYPE_ACTION), json_to_cbor(&payload));
+            let view = EventView {
+                id: "0".repeat(26),
+                entity: entity.to_string(),
+                event_type: EVENT_TYPE_ACTION.to_owned(),
+                seq: u64::MAX,
+                payload: decode_cbor_json(draft.payload.as_slice()),
+                payload_hex: hex_encode(draft.payload.as_slice()),
+            };
+            let null_cursor_len = serde_json::to_vec(&serde_json::json!({
+                "events": [view],
+                "next_from_seq": null,
+            }))
+            .unwrap()
+            .len();
+            let worst_cursor_len = draft_event_response_len(&draft);
+            if null_cursor_len <= MAX_EVENTS_RESPONSE_BYTES
+                && worst_cursor_len > MAX_EVENTS_RESPONSE_BYTES
+            {
+                boundary = Some(payload);
+                break;
+            }
+        }
+        let payload = boundary.expect("cursor width must cross the exact response boundary");
+        let gateway = memory_gw();
+        let timeline = gateway.create_timeline("cursor-boundary").await.unwrap();
+        let error = gateway
+            .append_action(
+                &timeline.id().to_string(),
+                &entity.to_string(),
+                EVENT_TYPE_ACTION,
+                &payload,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            GatewayError::EventResponseTooLarge {
+                maximum: MAX_EVENTS_RESPONSE_BYTES
+            }
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn events_query_remains_deserializable_for_library_callers() {
+        let query: EventsQuery =
+            serde_json::from_value(serde_json::json!({"from_seq": 7, "limit": 8})).unwrap();
+        assert_eq!(
+            query,
+            EventsQuery {
+                from_seq: 7,
+                limit: 8
+            }
+        );
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn event_page_rejects_zero_limit() {
         let gw = memory_gw();
         let timeline = gw.create_timeline("zero").await.unwrap();
@@ -1010,11 +1086,23 @@ mod tests {
             .unwrap();
         assert_eq!(page.events.len(), MAX_EVENTS_PER_POLL);
         assert_eq!(page.next_from_seq, Some(101));
-        let shim = gateway
+        let error = gateway
             .read_events_from(&timeline.id().to_string(), 0)
             .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            GatewayError::CompatibilityReadTruncated {
+                maximum: MAX_EVENTS_PER_POLL
+            }
+        ));
+        let final_event = gateway
+            .read_events_from(&timeline.id().to_string(), 101)
+            .await
             .unwrap();
-        assert_eq!(shim.len(), MAX_EVENTS_PER_POLL);
+        assert_eq!(final_event.len(), 1);
+        let invalid = gateway.read_events_from("bad", 0).await.unwrap_err();
+        assert!(matches!(invalid, GatewayError::InvalidId(_)));
     }
 
     #[tokio::test]
@@ -1331,5 +1419,9 @@ mod tests {
             maximum: MAX_EVENTS_PER_POLL,
         };
         assert!(e.to_string().contains("between"));
+        let e = GatewayError::CompatibilityReadTruncated {
+            maximum: MAX_EVENTS_PER_POLL,
+        };
+        assert!(e.to_string().contains("compatibility"));
     }
 }
