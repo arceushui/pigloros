@@ -53,8 +53,9 @@ pub struct Ledger {
 impl Ledger {
     /// Fold `(prediction, resolution)` pairs into a sorted ledger.
     ///
-    /// Structural problems (invalid payloads, id mismatches) are hard
-    /// errors; entries lacking `osf_link` are excluded with a warning.
+    /// Structural problems (invalid payloads, id mismatches) are hard errors;
+    /// entries with missing or unsafe `osf_link` values are excluded with a
+    /// warning.
     ///
     /// # Errors
     /// Returns [`LedgerError::InvalidToday`] if `today` is not an RFC-3339

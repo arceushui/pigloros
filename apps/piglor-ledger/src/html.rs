@@ -210,7 +210,8 @@ pub fn render_redirect() -> String {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use pos_plugin_ledger::LedgerEntryView;
+    use pos_plugin_ledger::{LedgerEntryView, LedgerStore, TomlLedgerStore};
+    use std::path::Path;
 
     fn view(
         entries: Vec<LedgerEntryView>,
@@ -360,14 +361,13 @@ mod tests {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn osf_link_is_escaped_and_href_safe() {
+    fn osf_resource_link_is_rendered_with_navigation_protection() {
         let mut e = pending_entry("id1", "T");
-        e.osf_link = "https://osf.io/x?a=1&b=2".to_owned();
+        e.osf_link = "https://osf.io/abc12/".to_owned();
         let v = view(vec![e], 1, 0, 0, None);
         let html = render_html(&v, None);
-        assert!(html.contains(
-            "<a href=\"https://osf.io/x?a=1&amp;b=2\" referrerpolicy=\"no-referrer\">OSF</a>"
-        ));
+        assert!(html
+            .contains("<a href=\"https://osf.io/abc12/\" referrerpolicy=\"no-referrer\">OSF</a>"));
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -380,6 +380,23 @@ mod tests {
         assert!(!html.contains("href=\"javascript:"));
         assert!(!html.contains(">OSF</a>"));
         assert!(html.contains("OSF link unavailable"));
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn repository_seed_predictions_remain_included_and_renderable() {
+        let seed = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../seed");
+        let ledger = TomlLedgerStore::new(seed).load("2026-07-29").unwrap();
+
+        assert_eq!(ledger.entries().len(), 3);
+        assert!(ledger.warnings().is_empty());
+        let html = render_html(&LedgerView::from(&ledger), None);
+        assert_eq!(html.matches("<article class=\"entry ").count(), 3);
+        assert_eq!(
+            html.matches("href=\"https://osf.io/TODO-register-before-merge\"")
+                .count(),
+            3
+        );
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]

@@ -109,10 +109,14 @@ impl NewPrediction {
     }
 }
 
-/// Return whether `link` is a canonical HTTPS URL on the OSF host.
+/// Return whether `link` identifies a resource on the canonical OSF host.
 ///
-/// The Prediction Ledger uses this at every untrusted-data boundary before a
-/// link is persisted or rendered into an HTML navigation target.
+/// Accepted links have the exact form `https://osf.io/<resource>` or
+/// `https://osf.io/<resource>/`. The optional trailing slash preserves both
+/// forms emitted or copied from OSF. `<resource>` is one non-empty ASCII
+/// alphanumeric-or-hyphen path segment. Credentials, ports, queries,
+/// fragments, deeper paths, and other same-origin navigation are rejected.
+/// The Prediction Ledger applies this policy before persistence and rendering.
 #[must_use]
 pub fn is_valid_osf_link(link: &str) -> bool {
     let Ok(url) = Url::parse(link) else {
@@ -128,6 +132,20 @@ pub fn is_valid_osf_link(link: &str) -> bool {
         return false;
     }
     if url.port().is_some() {
+        return false;
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return false;
+    }
+    let resource_path = &url.path()[1..];
+    let resource = resource_path.strip_suffix('/').unwrap_or(resource_path);
+    if resource.is_empty() || resource.contains('/') {
+        return false;
+    }
+    if !resource
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
         return false;
     }
     url.as_str() == link
@@ -318,19 +336,40 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn new_prediction_validate_requires_a_canonical_osf_https_url() {
+    fn new_prediction_validate_accepts_osf_resource_paths_with_optional_trailing_slash() {
         let mut new = sample_new();
-        assert!(new.validate().is_ok());
+        for safe_link in [
+            "https://osf.io/abc12",
+            "https://osf.io/abc12/",
+            "https://osf.io/TODO-register-before-merge",
+        ] {
+            new.osf_link = safe_link.to_owned();
+            assert!(new.validate().is_ok(), "should accept {safe_link}");
+        }
+    }
 
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn new_prediction_validate_rejects_non_resource_osf_navigation() {
+        let mut new = sample_new();
         for unsafe_link in [
             "http://osf.io/example",
+            "HTTPS://osf.io/example",
             "https://example.com/osf",
             "https://osf.io.evil.example/example",
             "https://user@osf.io/example",
+            "https://user:password@osf.io/example",
+            "https://osf.io:443/example",
             "https://osf.io:8443/example",
             "javascript:alert(1)",
             "https://OSF.io/example",
             "https://osf.io",
+            "https://osf.io/",
+            "https://osf.io/abc12?view=registrations",
+            "https://osf.io/abc12#registration",
+            "https://osf.io/abc12/files",
+            "https://osf.io/abc12//",
+            "https://osf.io/abc.12",
         ] {
             new.osf_link = unsafe_link.to_owned();
             crate::payload::expect_invalid(new.validate(), "osf_link");
