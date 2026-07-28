@@ -4,7 +4,8 @@
 //! `piglor-gateway` binary — bind local HTTP/WS listener (ADR-014 / #69).
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-use piglor_gateway::{router, AppState, Gateway};
+use piglor_gateway::{router, AppState, Gateway, LedgerGateway, LedgerWriteMode};
+use pos_plugin_ledger::TomlLedgerStore;
 use pos_store::{open_store, StoreConfig};
 use std::net::SocketAddr;
 
@@ -38,11 +39,12 @@ fn run_with_args(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send
                 .parse::<SocketAddr>()?;
             warn_if_non_loopback(addr);
             let store_path = args.get(3).map(String::as_str);
+            let ledger_write = load_ledger();
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("tokio current-thread runtime");
-            rt.block_on(serve(addr, store_path, shutdown_signal()))
+            rt.block_on(serve(addr, store_path, shutdown_signal(), ledger_write))
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
             Ok(())
         }
@@ -67,6 +69,24 @@ fn warn_if_non_loopback(addr: SocketAddr) {
     }
 }
 
+fn load_ledger() -> LedgerWriteMode {
+    let enabled = std::env::var("LEDGER_WRITE").is_ok_and(|v| v == "1");
+    if !enabled {
+        return LedgerWriteMode::Disabled;
+    }
+    match std::env::var("LEDGER_SOURCE").ok() {
+        Some(path) if !path.is_empty() => {
+            eprintln!("LEDGER_SOURCE={path}: using TOML ledger store (curated tier)");
+            let store = TomlLedgerStore::new(path);
+            LedgerWriteMode::Ready(LedgerGateway::new(Box::new(store)))
+        }
+        _ => {
+            eprintln!("LEDGER_WRITE=1 but LEDGER_SOURCE not set; store tier not yet available");
+            LedgerWriteMode::Unconfigured
+        }
+    }
+}
+
 #[cfg(not(test))]
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
@@ -82,6 +102,7 @@ async fn serve(
     addr: SocketAddr,
     sqlite_path: Option<&str>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ledger_write: LedgerWriteMode,
 ) -> Result<(), String> {
     let config = match sqlite_path {
         Some(path) => StoreConfig::Sqlite {
@@ -90,7 +111,10 @@ async fn serve(
         None => StoreConfig::Memory,
     };
     let gateway = Gateway::new(open_store(config).map_err(|e| e.to_string())?);
-    let app = router(AppState { gateway });
+    let app = router(AppState {
+        gateway,
+        ledger_write,
+    });
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| e.to_string())?;
@@ -186,9 +210,14 @@ mod tests {
         drop(listener);
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let serve_mem = tokio::spawn(async move {
-            serve(addr, None, async move {
-                let _ = rx.await;
-            })
+            serve(
+                addr,
+                None,
+                async move {
+                    let _ = rx.await;
+                },
+                LedgerWriteMode::Disabled,
+            )
             .await
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -204,9 +233,14 @@ mod tests {
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let path_clone = path.clone();
         let serve_sql = tokio::spawn(async move {
-            serve(addr, Some(path_clone.as_str()), async move {
-                let _ = rx.await;
-            })
+            serve(
+                addr,
+                Some(path_clone.as_str()),
+                async move {
+                    let _ = rx.await;
+                },
+                LedgerWriteMode::Disabled,
+            )
             .await
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -254,7 +288,9 @@ mod tests {
     async fn serve_bind_error_direct() {
         let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = occupied.local_addr().unwrap();
-        let err = serve(addr, None, async {}).await.unwrap_err();
+        let err = serve(addr, None, async {}, LedgerWriteMode::Disabled)
+            .await
+            .unwrap_err();
         assert!(!err.is_empty());
         drop(occupied);
     }
@@ -267,9 +303,14 @@ mod tests {
         drop(listener);
         let dir = std::env::temp_dir().join(format!("piglor-gw-sql-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let err = serve(addr, Some(dir.to_str().unwrap()), async {})
-            .await
-            .unwrap_err();
+        let err = serve(
+            addr,
+            Some(dir.to_str().unwrap()),
+            async {},
+            LedgerWriteMode::Disabled,
+        )
+        .await
+        .unwrap_err();
         assert!(!err.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -282,4 +323,30 @@ mod tests {
         }
     }
     impl std::error::Error for GatewayProbe {}
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn load_ledger_gate_on_no_source_returns_unconfigured() {
+        std::env::set_var("LEDGER_WRITE", "1");
+        std::env::remove_var("LEDGER_SOURCE");
+        let mode = super::load_ledger();
+        std::env::remove_var("LEDGER_WRITE");
+        assert!(matches!(mode, LedgerWriteMode::Unconfigured));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn load_ledger_gate_on_with_source_returns_ready() {
+        let dir =
+            std::env::temp_dir().join(format!("piglor-gw-ledger-load-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.to_str().unwrap().to_owned();
+        std::env::set_var("LEDGER_WRITE", "1");
+        std::env::set_var("LEDGER_SOURCE", &path);
+        let mode = super::load_ledger();
+        std::env::remove_var("LEDGER_WRITE");
+        std::env::remove_var("LEDGER_SOURCE");
+        assert!(matches!(mode, LedgerWriteMode::Ready(_)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

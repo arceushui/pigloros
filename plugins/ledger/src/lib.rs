@@ -48,7 +48,7 @@ pub use payload::{
     LedgerPrediction, ENTITY_KIND, EVENT_TYPE_OUTCOME, EVENT_TYPE_PREDICTION,
 };
 pub use plugin::LedgerPlugin;
-pub use store::{LedgerError, LedgerStore, NewPrediction};
+pub use store::{LedgerError, LedgerStore, NewPrediction, ResolveStatus};
 pub use toml_store::TomlLedgerStore;
 
 #[cfg(test)]
