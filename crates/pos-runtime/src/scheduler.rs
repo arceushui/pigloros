@@ -12,7 +12,9 @@ use pos_core::{
 use std::collections::HashMap;
 
 pub struct TickScheduler {
-    pub registry: PluginRegistry,
+    /// The plugin registry being driven.
+    registry: PluginRegistry,
+    /// Per-driver last-tick timestamps in nanoseconds, keyed by [`PluginId`].
     last_tick: HashMap<PluginId, Option<u128>>,
 }
 
@@ -30,7 +32,7 @@ impl TickScheduler {
     /// Only drivers whose `tick_interval()` has elapsed since their last
     /// tick will fire.
     ///
-    /// `now_ns` is a nanosecond timestamp (monotonic, e.g. from [`WallTime`]).
+    /// `now_ns` is a nanosecond wall-clock timestamp (e.g. from [`WallTime`]).
     ///
     /// # Errors
     /// Propagates any [`RuntimeError`] from drivers.
@@ -76,6 +78,16 @@ mod tests {
         interval: Duration,
     }
 
+    impl SlowDriver {
+        fn new(interval: Duration) -> Self {
+            SlowDriver {
+                entity: EntityId::new(),
+                ticks: 0,
+                interval,
+            }
+        }
+    }
+
     impl Driver for SlowDriver {
         fn name(&self) -> &'static str {
             "slow"
@@ -100,6 +112,15 @@ mod tests {
     struct FastDriver {
         entity: EntityId,
         ticks: u32,
+    }
+
+    impl FastDriver {
+        fn new() -> Self {
+            FastDriver {
+                entity: EntityId::new(),
+                ticks: 0,
+            }
+        }
     }
 
     impl Driver for FastDriver {
@@ -129,15 +150,8 @@ mod tests {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("t").unwrap();
         let mut reg = PluginRegistry::new();
-        reg.register_driver(Box::new(SlowDriver {
-            entity: EntityId::new(),
-            ticks: 0,
-            interval: Duration::from_secs(1),
-        }));
-        reg.register_driver(Box::new(FastDriver {
-            entity: EntityId::new(),
-            ticks: 0,
-        }));
+        reg.register_driver(Box::new(SlowDriver::new(Duration::from_secs(1))));
+        reg.register_driver(Box::new(FastDriver::new()));
         let mut sched = TickScheduler::new(reg);
         let drafts = sched.tick(store.as_ref(), tl.id(), 0).unwrap();
         assert_eq!(drafts.len(), 2);
@@ -149,15 +163,8 @@ mod tests {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("t").unwrap();
         let mut reg = PluginRegistry::new();
-        reg.register_driver(Box::new(SlowDriver {
-            entity: EntityId::new(),
-            ticks: 0,
-            interval: Duration::from_secs(10),
-        }));
-        reg.register_driver(Box::new(FastDriver {
-            entity: EntityId::new(),
-            ticks: 0,
-        }));
+        reg.register_driver(Box::new(SlowDriver::new(Duration::from_secs(10))));
+        reg.register_driver(Box::new(FastDriver::new()));
         let mut sched = TickScheduler::new(reg);
         sched.tick(store.as_ref(), tl.id(), 0).unwrap();
         let drafts = sched.tick(store.as_ref(), tl.id(), 1).unwrap();
@@ -170,15 +177,8 @@ mod tests {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("t").unwrap();
         let mut reg = PluginRegistry::new();
-        reg.register_driver(Box::new(SlowDriver {
-            entity: EntityId::new(),
-            ticks: 0,
-            interval: Duration::from_millis(100),
-        }));
-        reg.register_driver(Box::new(FastDriver {
-            entity: EntityId::new(),
-            ticks: 0,
-        }));
+        reg.register_driver(Box::new(SlowDriver::new(Duration::from_millis(100))));
+        reg.register_driver(Box::new(FastDriver::new()));
         let mut sched = TickScheduler::new(reg);
         sched.tick(store.as_ref(), tl.id(), 0).unwrap();
         let d = sched.tick(store.as_ref(), tl.id(), 50_000_000).unwrap();

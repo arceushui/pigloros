@@ -188,7 +188,7 @@ impl PluginRegistry {
 
     /// Number of plugins that have a driver registered.
     #[must_use]
-    pub fn plugin_count(&self) -> usize {
+    pub fn driver_count(&self) -> usize {
         self.plugins.values().filter(|e| e.driver.is_some()).count()
     }
 
@@ -370,7 +370,7 @@ mod tests {
         let p = simple_plugin("p", &[]);
         reg.register(&p, None, None).unwrap();
         assert_eq!(reg.len(), 1);
-        assert_eq!(reg.plugin_count(), 0);
+        assert_eq!(reg.driver_count(), 0);
         assert!(reg.contains(&p.id));
         assert!(!reg.is_empty());
     }
