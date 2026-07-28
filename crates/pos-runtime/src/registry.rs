@@ -189,6 +189,7 @@ impl PluginRegistry {
     ///
     /// # Errors
     /// Propagates any [`RuntimeError`] from drivers.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn tick_cadenced(
         &mut self,
         store: &dyn pos_core::store::EventStore,
