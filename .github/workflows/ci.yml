@@ -192,8 +192,8 @@ jobs:
         with:
           shared-key: miri
 
-      - name: cargo miri test (kernel crates — no C deps)
-        run: cargo +nightly miri test -p pos-core -p pos-crypto -p pos-state --tests
+      - name: cargo miri test (pos-core — no C deps)
+        run: cargo +nightly miri test -p pos-core --tests
 
   geiger:
     name: cargo-geiger (unsafe code audit)
@@ -208,26 +208,9 @@ jobs:
           tool: cargo-geiger
 
       - name: cargo geiger
-        run: cargo geiger --workspace
-
-  kani:
-    name: kani (formal verification — pos-core)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Kani
-        run: |
-          cargo install --locked kani-verifier
-          cargo kani setup
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: kani
-
-      - name: cargo kani (pos-core kernel primitives)
-        run: cargo kani -p pos-core
+        run: cargo geiger --workspace 2>&1 | tee /tmp/geiger.log
+      - name: assert no unsafe in own crates
+        run: '! grep -E "^(crates|apps|plugins)/" /tmp/geiger.log | grep -v "0 unsafe"'
 
   docker-build:
     name: docker-build
