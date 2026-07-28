@@ -90,17 +90,30 @@ fn cmd_store_info(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let store = open_store(StoreConfig::Sqlite {
         path: path.to_owned(),
     })?;
-    let timelines = store.list_timelines()?;
+    let timelines = match store.list_timelines() {
+        Ok(timelines) => timelines,
+        Err(error) => {
+            return Err(std::io::Error::other(format!(
+                "failed to list Timelines while calculating store information: {error}"
+            ))
+            .into());
+        }
+    };
+    let mut total_events = 0_usize;
+    for timeline in &timelines {
+        let events = match store.read(timeline.id(), SeqRange::all()) {
+            Ok(events) => events,
+            Err(error) => {
+                return Err(std::io::Error::other(format!(
+                    "failed to read Timeline {} while calculating store information: {error}",
+                    timeline.id()
+                ))
+                .into());
+            }
+        };
+        total_events += events.len();
+    }
     println!("Timelines: {}", timelines.len());
-    let total_events: usize = timelines
-        .iter()
-        .map(|t| {
-            store
-                .read(t.id(), SeqRange::all())
-                .unwrap_or_default()
-                .len()
-        })
-        .sum();
     println!("Total events: {total_events}");
     Ok(())
 }
@@ -1473,6 +1486,62 @@ mod coverage_tests {
 }
 
 #[cfg(test)]
+mod store_info_coverage {
+    use super::*;
+
+    #[test]
+    fn list_failure_retains_operation_and_root_cause() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("corrupt.db");
+        let path = path.to_str().unwrap();
+        cmd_store_init(path).unwrap();
+
+        let connection = rusqlite::Connection::open(path).unwrap();
+        connection
+            .execute("UPDATE timelines SET name = X'0102'", [])
+            .unwrap();
+
+        let error = cmd_store_info(path).unwrap_err().to_string();
+        assert!(error.contains("failed to list Timelines"));
+        assert!(error.contains("Invalid column type"));
+    }
+
+    #[test]
+    fn read_failure_retains_timeline_and_root_cause() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("corrupt.db");
+        let path = path.to_str().unwrap();
+        cmd_store_init(path).unwrap();
+
+        let mut store = open_store(StoreConfig::Sqlite {
+            path: path.to_owned(),
+        })
+        .unwrap();
+        let timeline_id = store.list_timelines().unwrap()[0].id();
+        store
+            .append(
+                timeline_id,
+                &[pos_core::event::EventDraft::new(
+                    pos_core::ids::EntityId::new(),
+                    pos_core::event::Kind::new("test.event"),
+                    pos_core::event::CanonicalBytes::from_vec(vec![]),
+                )],
+            )
+            .unwrap();
+        drop(store);
+
+        let connection = rusqlite::Connection::open(path).unwrap();
+        connection
+            .execute("UPDATE events SET payload_hash = X'01'", [])
+            .unwrap();
+
+        let error = cmd_store_info(path).unwrap_err().to_string();
+        assert!(error.contains(&format!("failed to read Timeline {timeline_id}")));
+        assert!(error.contains("serialization error: bad hash"));
+    }
+}
+
+#[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod main_coverage {
     use super::*;
@@ -1775,14 +1844,6 @@ mod fault_injection_tests {
         let result = cmd_store_init(path.to_str().unwrap());
         set_writable(&path);
         assert!(result.is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_store_info_fails_when_timelines_corrupt() {
-        let (_dir, path, _) = seeded_db();
-        corrupt_timeline_names(&path);
-        assert!(cmd_store_info(&path).is_err());
     }
 
     #[test]
