@@ -86,6 +86,9 @@ fn corrupt_timeline_events_fail_without_partial_stdout() {
             ],
         )
         .expect("insert corrupt Event");
+    connection
+        .execute("UPDATE timelines SET head_seq = 1", [])
+        .expect("keep Timeline sequence invariant valid");
 
     let output = run_pos(&["store", "info", &path]);
     let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
