@@ -92,7 +92,7 @@ expect_fail "$case_root"
 
 make_case folded-action
 printf '%s\n' 'steps:' '  - uses: >-' "      owner/action@$sha" > "$case_root/.github/workflows/test.yml"
-expect_fail "$case_root"
+expect_pass "$case_root"
 
 make_case literal-action
 printf '%s\n' 'steps:' '  - uses: |' "      owner/action@$sha" > "$case_root/.github/workflows/test.yml"
@@ -100,35 +100,59 @@ expect_fail "$case_root"
 
 make_case multiline-action
 printf '%s\n' 'steps:' '  - uses:' "      owner/action@$sha" > "$case_root/.github/workflows/test.yml"
-expect_fail "$case_root"
+expect_pass "$case_root"
 
 make_case flow-style-action
 printf '%s\n' "steps: [{ uses: owner/action@$sha }]" > "$case_root/.github/workflows/test.yml"
-expect_fail "$case_root"
+expect_pass "$case_root"
 
 make_case compact-json-action
 printf '%s\n' '{"steps":[{"uses":"owner/action@main"}]}' > "$case_root/.github/workflows/test.yml"
-expect_fail "$case_root" 'compact, flow, and explicit-key uses syntax is forbidden'
+expect_fail "$case_root" 'external Action reference is not pinned'
 
 make_case compact-sequence-action
 printf '%s\n' "steps: [uses: owner/action@$sha]" > "$case_root/.github/workflows/test.yml"
-expect_fail "$case_root" 'compact, flow, and explicit-key uses syntax is forbidden'
+expect_pass "$case_root"
 
 make_case tagged-compact-action-key
 printf '%s\n' "steps: [{ ? !!str \"uses\" : owner/action@$sha }]" > "$case_root/.github/workflows/test.yml"
-expect_fail "$case_root" 'compact, flow, and explicit-key uses syntax is forbidden'
+expect_pass "$case_root"
 
 make_case sequence-explicit-action-key
 printf '%s\n' 'steps:' '  - ? uses' '    : owner/action@main' > "$case_root/.github/workflows/test.yml"
-expect_fail "$case_root" 'compact, flow, and explicit-key uses syntax is forbidden'
+expect_fail "$case_root" 'external Action reference is not pinned'
+
+make_case folded-explicit-action-key
+printf '%s\n' 'steps:' '  - ? >-' '      uses' '    : owner/action@main' > "$case_root/.github/workflows/test.yml"
+expect_fail "$case_root" 'external Action reference is not pinned'
+
+make_case tagged-explicit-action-key
+printf '%s\n' 'steps:' '  - ? !!str uses' '    : owner/action@main' > "$case_root/.github/workflows/test.yml"
+expect_fail "$case_root" 'external Action reference is not pinned'
+
+make_case aliased-action-key
+printf '%s\n' 'action-key: &action-key uses' 'steps:' '  - ? *action-key' '    : owner/action@main' > "$case_root/.github/workflows/test.yml"
+expect_fail "$case_root" 'external Action reference is not pinned'
 
 make_case escaped-json-action-key
 printf '%s\n' '{"steps":[{"\u0075ses":"owner/action@main"}]}' > "$case_root/.github/workflows/test.yml"
-expect_fail "$case_root" 'hexadecimal and Unicode escapes are forbidden in checked YAML'
+expect_fail "$case_root" 'external Action reference is not pinned'
 
 make_case escaped-yaml-action-key
 printf '%s\n' 'steps:' '  - "\x75ses": owner/action@main' > "$case_root/.github/workflows/test.yml"
-expect_fail "$case_root" 'hexadecimal and Unicode escapes are forbidden in checked YAML'
+expect_fail "$case_root" 'external Action reference is not pinned'
+
+make_case escaped-line-break-action-key
+printf '%s\n' 'steps:' '  - "u\' '      ses": owner/action@main' > "$case_root/.github/workflows/test.yml"
+expect_fail "$case_root"
+
+make_case duplicate-action-key
+printf '%s\n' 'step:' "  uses: owner/action@$sha" '  uses: owner/action@main' > "$case_root/.github/workflows/test.yml"
+expect_fail "$case_root" 'found duplicate key'
+
+make_case nonstring-action-reference
+printf '%s\n' 'step:' '  uses:' '    owner: action' > "$case_root/.github/workflows/test.yml"
+expect_fail "$case_root" 'uses must resolve to a string'
 
 make_case quoted-folded-action
 printf '%s\n' 'steps:' '  - "uses": >' "      owner/action@$sha" > "$case_root/.github/workflows/test.yml"

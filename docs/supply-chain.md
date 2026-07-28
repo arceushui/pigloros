@@ -15,13 +15,12 @@ rejects floating, multiline, and malformed Action and image references. The
 offline checker validates reference syntax; it cannot prove that a 40-hex
 Action revision exists or is a commit in the upstream repository.
 
-Action references must use a normal, single-line YAML `uses:` key. Compact or
-flow mappings, explicit YAML keys, and folded/literal/multiline values are
-rejected so line-oriented validation cannot be bypassed. Hexadecimal and
-Unicode scalar escapes (`\xNN`, `\uNNNN`, and `\UNNNNNNNN`) are also
-forbidden throughout checked workflow and Action metadata because they can
-decode into hidden key names. A local `./path` reference must stay inside the
-repository and resolve to one of:
+Workflow and Action metadata is safely parsed with PyYAML, then every mapping
+and sequence is traversed for semantic `uses` keys. This includes compact/flow
+maps, explicit or folded keys, tagged scalars, escaped key text, and anchor
+aliases. Duplicate mapping keys, unsafe tags, non-mapping documents, collection
+alias cycles, and non-string `uses` values fail closed. A local `./path`
+reference must stay inside the repository and resolve to one of:
 
 - a reusable workflow under `.github/workflows`;
 - a directory containing exactly one `action.yml` or `action.yaml`.
@@ -29,6 +28,14 @@ repository and resolve to one of:
 Local Action metadata is checked recursively wherever it lives in the
 repository. Missing metadata, ambiguous metadata, references outside the
 repository, and local-reference cycles fail the policy check.
+
+CI installs PyYAML 6.0.2 from
+`requirements-pinned-dependencies.txt` using `--require-hashes` and binary-only
+wheels under a commit-pinned Python setup Action and Python 3.12.11. The
+requirement records the SHA-256 hashes for the CPython 3.10 and 3.12 Linux
+x86-64 wheels. The checker also supports the repository host's distro-provided
+PyYAML 5.4.1; other versions fail closed until their behavior and artifact
+provenance are reviewed.
 
 ## Updating a pin intentionally
 
