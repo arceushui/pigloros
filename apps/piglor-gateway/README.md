@@ -27,7 +27,8 @@ non-loopback listener is spectator-only.
 | Method | Path | Body | Response |
 |--------|------|------|----------|
 | `GET` | `/health` | — | `{ "ok": true }` |
-| `GET` | `/` or `/ledger` | — | Public Prediction Ledger HTML |
+| `GET` | `/` | — | `302` redirect to `/ledger` |
+| `GET` | `/ledger` | — | Public Prediction Ledger HTML |
 | `GET` | `/v1/ledger` | — | Public Prediction Ledger JSON |
 | `POST` | `/v1/timelines` | `{ "name": "..." }` | `{ "id", "name", "head" }` |
 | `GET` | `/v1/timelines/:id/events?from_seq=0` | — | `{ "events": [EventView] }` |

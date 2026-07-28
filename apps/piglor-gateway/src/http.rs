@@ -6,7 +6,7 @@ use crate::{
 };
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -76,21 +76,13 @@ pub fn router(state: AppState) -> Router {
 /// Prediction Ledger surfaces from ADR-017 and ADR-020. Timeline and Ledger
 /// mutation routes remain available only on a loopback-bound Gateway.
 pub fn spectator_router(state: AppState) -> Router {
-    Router::new()
-        .route("/", get(root_page))
-        .route("/ledger", get(root_page))
-        .route("/health", get(health))
-        .route("/v1/ledger", get(get_ledger))
+    spectator_routes()
         .layer(DefaultBodyLimit::max(MAX_HTTP_BODY_BYTES))
         .with_state(state)
 }
 
 fn build_router(state: AppState, max_body_bytes: usize) -> Router {
-    Router::new()
-        .route("/", get(root_page))
-        .route("/ledger", get(root_page))
-        .route("/health", get(health))
-        .route("/v1/ledger", get(get_ledger))
+    spectator_routes()
         .route("/v1/ledger/predictions", post(post_ledger_prediction))
         .route("/v1/timelines", post(create_timeline))
         .route("/v1/timelines/{id}/events", get(list_events))
@@ -100,7 +92,19 @@ fn build_router(state: AppState, max_body_bytes: usize) -> Router {
         .with_state(state)
 }
 
-async fn root_page(State(state): State<AppState>) -> impl IntoResponse {
+fn spectator_routes() -> Router<AppState> {
+    Router::new()
+        .route("/", get(root_redirect))
+        .route("/ledger", get(ledger_page))
+        .route("/health", get(health))
+        .route("/v1/ledger", get(get_ledger))
+}
+
+async fn root_redirect() -> impl IntoResponse {
+    (StatusCode::FOUND, [(header::LOCATION, "/ledger")])
+}
+
+async fn ledger_page(State(state): State<AppState>) -> impl IntoResponse {
     let html = render_html(&state.ledger_view, None);
     Html(html)
 }
@@ -314,9 +318,25 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    async fn root_page_returns_html() {
+    async fn root_redirects_to_ledger_page() {
         let response = test_app()
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(response.headers()["location"], "/ledger");
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn ledger_page_returns_html() {
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/ledger")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -334,7 +354,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn spectator_router_keeps_only_public_ledger_routes() {
         let app = spectator_test_app();
-        for uri in ["/", "/ledger", "/health", "/v1/ledger"] {
+        for uri in ["/ledger", "/health", "/v1/ledger"] {
             let response = app
                 .clone()
                 .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
