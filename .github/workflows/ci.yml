@@ -165,6 +165,43 @@ jobs:
       - name: assert no unsafe in own crates
         run: '! grep -E "^(crates|apps|plugins)/" /tmp/geiger.log | grep -v "0 unsafe"'
 
+  asan:
+    name: asan (address sanitizer)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - run: rm -f rust-toolchain.toml
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: asan
+      - name: cargo test with ASan
+        env:
+          RUSTC_BOOTSTRAP: "1"
+          ASAN_OPTIONS: detect_leaks=1:detect_odr_violation=0
+        run: >
+          RUSTFLAGS="-Z sanitizer=address"
+          cargo +nightly test -Z build-std --workspace --tests
+
+  miri:
+    name: miri (UB detection)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - run: rm -f rust-toolchain.toml
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: miri
+      - name: cargo miri test
+        run: cargo +nightly miri test -p pos-core -p pos-crypto --tests
+
   docker-build:
     name: docker-build
     runs-on: ubuntu-latest
