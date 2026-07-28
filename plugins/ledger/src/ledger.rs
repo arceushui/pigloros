@@ -8,7 +8,7 @@ use std::fmt;
 use crate::{
     entry::Status,
     payload::{is_valid_date, validate_outcome},
-    store::validate_prediction,
+    store::{is_valid_osf_link, validate_prediction},
     LedgerEntry, LedgerError, LedgerOutcome, LedgerPrediction,
 };
 
@@ -21,6 +21,11 @@ pub enum LedgerWarning {
         /// Excluded prediction id.
         prediction_id: String,
     },
+    /// Entry excluded because its link is not safe to render as OSF navigation.
+    UnsafeOsfLink {
+        /// Excluded prediction id.
+        prediction_id: String,
+    },
 }
 
 impl fmt::Display for LedgerWarning {
@@ -29,6 +34,10 @@ impl fmt::Display for LedgerWarning {
             Self::MissingOsfLink { prediction_id } => write!(
                 f,
                 "excluded {prediction_id}: missing osf_link (pre-registration required, ADR-017)"
+            ),
+            Self::UnsafeOsfLink { prediction_id } => write!(
+                f,
+                "excluded {prediction_id}: unsafe osf_link (must be canonical HTTPS on osf.io)"
             ),
         }
     }
@@ -72,6 +81,12 @@ impl Ledger {
             }
             if prediction.osf_link.trim().is_empty() {
                 warnings.push(LedgerWarning::MissingOsfLink {
+                    prediction_id: prediction.prediction_id.clone(),
+                });
+                continue;
+            }
+            if !is_valid_osf_link(&prediction.osf_link) {
+                warnings.push(LedgerWarning::UnsafeOsfLink {
                     prediction_id: prediction.prediction_id.clone(),
                 });
                 continue;
@@ -249,6 +264,18 @@ mod tests {
         let warning = ledger.warnings()[0].to_string();
         assert!(warning.contains(ID1));
         assert!(warning.contains("osf_link"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn unsafe_osf_link_is_excluded_with_warning() {
+        let mut unsafe_prediction = sample_prediction(ID1);
+        unsafe_prediction.osf_link = "javascript:alert(1)".to_owned();
+        let ledger = Ledger::from_pairs(vec![(unsafe_prediction, None)], "2026-07-25").unwrap();
+
+        assert!(ledger.entries().is_empty());
+        assert_eq!(ledger.warnings().len(), 1);
+        assert!(ledger.warnings()[0].to_string().contains("unsafe osf_link"));
     }
 
     #[test]

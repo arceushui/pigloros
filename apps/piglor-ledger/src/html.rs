@@ -6,7 +6,11 @@
 
 use std::fmt::Write as _;
 
-use pos_plugin_ledger::{LedgerEntryView, LedgerView};
+use pos_plugin_ledger::{is_valid_osf_link, LedgerEntryView, LedgerView};
+
+/// Browser policy shared by the static Ledger page and Gateway response.
+pub const CONTENT_SECURITY_POLICY: &str =
+    "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'";
 
 /// HTML-escape a string. Covers the five XML special characters.
 fn esc(s: &str) -> String {
@@ -46,6 +50,10 @@ pub fn render_html(view: &LedgerView, pubkey_hex: Option<&str>) -> String {
     s.push_str("<head>\n");
     s.push_str("<meta charset=\"utf-8\">\n");
     s.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
+    let _ = writeln!(
+        s,
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"{CONTENT_SECURITY_POLICY}\">"
+    );
     s.push_str("<title>Prediction Ledger</title>\n");
     s.push_str("<style>\n");
     s.push_str("body{font:16px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;max-width:48rem;margin:2rem auto;padding:0 1rem;color:#222;}\n");
@@ -143,9 +151,15 @@ fn render_entry(s: &mut String, entry: &LedgerEntryView) {
     s.push_str(&esc(&entry.made_at));
     s.push_str(" · resolves by ");
     s.push_str(&esc(&entry.resolve_by));
-    s.push_str(" · <a href=\"");
-    s.push_str(&esc(&entry.osf_link));
-    s.push_str("\">OSF</a></p>\n");
+    s.push_str(" · ");
+    if is_valid_osf_link(&entry.osf_link) {
+        s.push_str("<a href=\"");
+        s.push_str(&esc(&entry.osf_link));
+        s.push_str("\" referrerpolicy=\"no-referrer\">OSF</a>");
+    } else {
+        s.push_str("OSF link unavailable");
+    }
+    s.push_str("</p>\n");
 
     s.push_str("<p class=\"meta\">Status: ");
     s.push_str(status);
@@ -351,7 +365,21 @@ mod tests {
         e.osf_link = "https://osf.io/x?a=1&b=2".to_owned();
         let v = view(vec![e], 1, 0, 0, None);
         let html = render_html(&v, None);
-        assert!(html.contains("<a href=\"https://osf.io/x?a=1&amp;b=2\">OSF</a>"));
+        assert!(html.contains(
+            "<a href=\"https://osf.io/x?a=1&amp;b=2\" referrerpolicy=\"no-referrer\">OSF</a>"
+        ));
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn unsafe_osf_link_never_becomes_a_navigation_target() {
+        let mut e = pending_entry("id1", "T");
+        e.osf_link = "javascript:alert(1)".to_owned();
+        let html = render_html(&view(vec![e], 1, 0, 0, None), None);
+
+        assert!(!html.contains("href=\"javascript:"));
+        assert!(!html.contains(">OSF</a>"));
+        assert!(html.contains("OSF link unavailable"));
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -405,6 +433,8 @@ mod tests {
         let html = render_html(&v, None);
         assert!(html.starts_with("<!DOCTYPE html>\n"));
         assert!(html.contains("viewport"));
+        assert!(html.contains("Content-Security-Policy"));
+        assert!(html.contains("default-src 'none'"));
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]

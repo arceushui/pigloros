@@ -6,7 +6,7 @@ use crate::{
 };
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::StatusCode,
+    http::{header::CONTENT_SECURITY_POLICY, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -84,9 +84,14 @@ fn build_router(state: AppState, max_body_bytes: usize) -> Router {
         .with_state(state)
 }
 
-async fn root_page(State(state): State<AppState>) -> impl IntoResponse {
+async fn root_page(State(state): State<AppState>) -> Response {
     let html = render_html(&state.ledger_view, None);
-    Html(html)
+    let mut response = Html(html).into_response();
+    response.headers_mut().insert(
+        CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(piglor_ledger::CONTENT_SECURITY_POLICY),
+    );
+    response
 }
 
 async fn health() -> impl IntoResponse {
@@ -295,6 +300,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("content-security-policy")
+                .and_then(|value| value.to_str().ok()),
+            Some(piglor_ledger::CONTENT_SECURITY_POLICY)
+        );
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
             .unwrap();

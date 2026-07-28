@@ -6,6 +6,7 @@ use crate::{
     },
     Ledger,
 };
+use url::Url;
 
 /// Errors from ledger domain operations and adapters.
 #[derive(Debug, thiserror::Error)]
@@ -83,9 +84,9 @@ impl NewPrediction {
             &self.made_at,
             &self.resolve_by,
         )?;
-        if self.osf_link.trim().is_empty() {
+        if !is_valid_osf_link(&self.osf_link) {
             return Err(LedgerError::InvalidPrediction(
-                "osf_link is required at registration (ADR-017)".to_owned(),
+                "osf_link must be a canonical HTTPS URL on osf.io (ADR-017)".to_owned(),
             ));
         }
         Ok(())
@@ -106,6 +107,30 @@ impl NewPrediction {
             osf_link: self.osf_link,
         }
     }
+}
+
+/// Return whether `link` is a canonical HTTPS URL on the OSF host.
+///
+/// The Prediction Ledger uses this at every untrusted-data boundary before a
+/// link is persisted or rendered into an HTML navigation target.
+#[must_use]
+pub fn is_valid_osf_link(link: &str) -> bool {
+    let Ok(url) = Url::parse(link) else {
+        return false;
+    };
+    if url.scheme() != "https" {
+        return false;
+    }
+    if url.host_str() != Some("osf.io") {
+        return false;
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    if url.port().is_some() {
+        return false;
+    }
+    url.as_str() == link
 }
 
 /// Field validation shared by [`NewPrediction`] and [`LedgerPrediction`]
@@ -289,6 +314,27 @@ mod tests {
         new.predicted_outcome = "o".to_owned();
         new.osf_link = " ".to_owned();
         crate::payload::expect_invalid(new.validate(), "osf_link");
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn new_prediction_validate_requires_a_canonical_osf_https_url() {
+        let mut new = sample_new();
+        assert!(new.validate().is_ok());
+
+        for unsafe_link in [
+            "http://osf.io/example",
+            "https://example.com/osf",
+            "https://osf.io.evil.example/example",
+            "https://user@osf.io/example",
+            "https://osf.io:8443/example",
+            "javascript:alert(1)",
+            "https://OSF.io/example",
+            "https://osf.io",
+        ] {
+            new.osf_link = unsafe_link.to_owned();
+            crate::payload::expect_invalid(new.validate(), "osf_link");
+        }
     }
 
     #[test]
