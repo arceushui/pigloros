@@ -2,8 +2,7 @@
 
 use crate::{
     ActionRequest, CreateTimelineRequest, EventPage, EventView, EventsQuery, Gateway, GatewayError,
-    LedgerEntryView, SignalRequest, MAX_EVENTS_PER_POLL, MAX_EVENTS_RESPONSE_BYTES,
-    MAX_HTTP_BODY_BYTES,
+    SignalRequest, MAX_EVENTS_PER_POLL, MAX_EVENTS_RESPONSE_BYTES, MAX_HTTP_BODY_BYTES,
 };
 use axum::{
     extract::{DefaultBodyLimit, Path, RawQuery, State},
@@ -173,49 +172,11 @@ async fn health() -> impl IntoResponse {
     Json(json!({ "ok": true }))
 }
 
-async fn get_ledger() -> impl IntoResponse {
-    let entries = vec![
-        LedgerEntryView {
-            id: "01J38AE3E964B9281A2ADF6FDB".to_owned(),
-            scenario: "places".to_owned(),
-            title: "Kyoto vs Osaka Weekend Decision Preview".to_owned(),
-            predicted_outcome: "Kyoto".to_owned(),
-            confidence: 0.875,
-            status: "Resolved".to_owned(),
-            brier_score: Some(0.30),
-            verification_hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-                .to_owned(),
-            timestamp: "2026-07-22T15:40:00Z".to_owned(),
-        },
-        LedgerEntryView {
-            id: "01J39CE3E964B92813CA8D8FC0".to_owned(),
-            scenario: "work".to_owned(),
-            title: "Remote-First vs Office-First Quarterly Work Structure".to_owned(),
-            predicted_outcome: "Remote-First".to_owned(),
-            confidence: 0.950,
-            status: "Resolved".to_owned(),
-            brier_score: Some(0.18),
-            verification_hash: "f686771a109d4b0596e0f04a55ed394c87f2f1815ec2a34cccdc616bf1694eac"
-                .to_owned(),
-            timestamp: "2026-07-22T18:20:00Z".to_owned(),
-        },
-        LedgerEntryView {
-            id: "01J3A4E3E964B92812FBB1CC9D".to_owned(),
-            scenario: "policy".to_owned(),
-            title: "Rapid Decentralized Pods vs Centralized Approval Shift".to_owned(),
-            predicted_outcome: "Rapid Decentralized Pods".to_owned(),
-            confidence: 0.880,
-            status: "Pending".to_owned(),
-            brier_score: None,
-            verification_hash: "3a4e3e964b92812fbb1cc9d5a16d451b38ae3e964b9281a2adf6fdb6c97554b5"
-                .to_owned(),
-            timestamp: "2026-07-23T08:00:00Z".to_owned(),
-        },
-    ];
+async fn get_ledger(State(state): State<AppState>) -> impl IntoResponse {
     Json(json!({
         "domain": "piglor.com",
         "path": "/ledger",
-        "ledger": entries,
+        "ledger": state.ledger_view.entries,
     }))
 }
 
@@ -718,7 +679,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["domain"], "piglor.com");
         assert_eq!(json["path"], "/ledger");
-        assert_eq!(json["ledger"].as_array().unwrap().len(), 3);
+        assert!(json["ledger"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]

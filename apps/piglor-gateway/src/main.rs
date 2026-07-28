@@ -261,7 +261,7 @@ mod tests {
         dir
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn non_loopback_server_is_public_read_only() {
         let responses = serve_http_requests(
