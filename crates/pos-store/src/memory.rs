@@ -33,6 +33,8 @@ pub struct MemoryStore {
     chain_heads: HashMap<TimelineId, Hash>,
     /// Global `EventId` index for O(1) uniqueness checks.
     event_ids: HashSet<EventId>,
+    /// Exact number of root Timelines, maintained with Timeline mutations.
+    root_timeline_count: usize,
     hasher: Box<dyn Hasher>,
 }
 
@@ -44,6 +46,7 @@ impl MemoryStore {
             timelines: HashMap::new(),
             chain_heads: HashMap::new(),
             event_ids: HashSet::new(),
+            root_timeline_count: 0,
             hasher: Box::new(pos_crypto::chain::Blake3Hasher),
         }
     }
@@ -55,6 +58,7 @@ impl MemoryStore {
             timelines: HashMap::new(),
             chain_heads: HashMap::new(),
             event_ids: HashSet::new(),
+            root_timeline_count: 0,
             hasher,
         }
     }
@@ -256,6 +260,7 @@ impl EventStore for MemoryStore {
         self.events.insert(timeline.id(), Vec::new());
         self.chain_heads
             .insert(timeline.id(), self.hasher.genesis_hash());
+        self.root_timeline_count += 1;
         Ok(timeline)
     }
 
@@ -376,13 +381,7 @@ impl EventStore for MemoryStore {
     }
 
     fn root_timeline_count_bounded(&self, maximum: usize) -> Result<usize, CoreError> {
-        let stop_after = maximum.saturating_add(1);
-        Ok(self
-            .timelines
-            .values()
-            .filter(|timeline| timeline.meta.is_root())
-            .take(stop_after)
-            .count())
+        Ok(self.root_timeline_count.min(maximum.saturating_add(1)))
     }
 
     fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
@@ -417,6 +416,9 @@ impl EventStore for MemoryStore {
         self.timelines.insert(id, timeline.clone());
         self.events.insert(id, Vec::new());
         self.chain_heads.insert(id, chain);
+        if timeline.meta.is_root() {
+            self.root_timeline_count += 1;
+        }
         Ok(timeline)
     }
 
@@ -473,7 +475,15 @@ impl EventStore for MemoryStore {
                 "cannot delete timeline that still has forks".to_owned(),
             ));
         }
-        self.timelines.remove(&id);
+        let was_root = self
+            .timelines
+            .remove(&id)
+            .expect("timeline exists")
+            .meta
+            .is_root();
+        if was_root {
+            self.root_timeline_count -= 1;
+        }
         // Always present: create/fork/import insert an events entry with the timeline.
         for event in self.events.remove(&id).expect("timeline events entry") {
             self.event_ids.remove(&event.id);
@@ -535,6 +545,16 @@ impl MemoryStore {
 impl MemoryStore {
     pub(crate) fn test_remove_timeline(&mut self, id: TimelineId) {
         self.timelines.remove(&id);
+    }
+
+    fn assert_root_timeline_count_invariant(&self) {
+        assert_eq!(
+            self.root_timeline_count,
+            self.timelines
+                .values()
+                .filter(|timeline| timeline.meta.is_root())
+                .count()
+        );
     }
 }
 
@@ -767,17 +787,22 @@ mod tests {
     fn bounded_root_count_ignores_many_children_and_caps_at_maximum_plus_one() {
         let mut store = MemoryStore::new();
         let first = store.create_timeline("first").unwrap();
-        for index in 0..256 {
+        for index in 0..4096 {
             store
                 .fork(first.id(), Seq::ZERO, &format!("child-{index}"))
                 .unwrap();
         }
-        store.create_timeline("second").unwrap();
+        let second = store.create_timeline("second").unwrap();
 
         assert_eq!(store.root_timeline_count_bounded(0).unwrap(), 1);
         assert_eq!(store.root_timeline_count_bounded(1).unwrap(), 2);
         assert_eq!(store.root_timeline_count_bounded(10).unwrap(), 2);
         assert_eq!(store.root_timeline_count_bounded(usize::MAX).unwrap(), 2);
+        store.assert_root_timeline_count_invariant();
+
+        store.delete_timeline(second.id()).unwrap();
+        assert_eq!(store.root_timeline_count_bounded(10).unwrap(), 1);
+        store.assert_root_timeline_count_invariant();
     }
 
     #[test]

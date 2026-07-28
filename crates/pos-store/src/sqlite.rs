@@ -37,6 +37,8 @@ thread_local! {
     static BOUNDED_METADATA_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Test-only count of full Event rows fetched by bounded reads.
     static BOUNDED_EVENT_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Test-only count of root Timeline IDs fetched by bounded quota checks.
+    static BOUNDED_ROOT_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Test-only fault injection for the open-time sequence validation query.
     static FAIL_SEQUENCE_VALIDATION_QUERY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -256,6 +258,13 @@ impl SqliteStore {
             }
         }
 
+        if version < 3 {
+            self.migrate_timelines_to_v3()?;
+            self.conn
+                .execute("UPDATE schema_version SET version = 3", [])
+                .map_err(|e| CoreError::Storage(e.to_string()))?;
+        }
+
         Ok(())
     }
 
@@ -281,6 +290,18 @@ impl SqliteStore {
                     "cannot enforce unique event_id index (duplicate EventIds in existing data?): {e}"
                 ))
             })?;
+        Ok(())
+    }
+
+    /// Add the covering index used by bounded root Timeline quota checks.
+    fn migrate_timelines_to_v3(&self) -> Result<(), CoreError> {
+        self.conn
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_timelines_parent_id_id
+                 ON timelines(parent_id, id)",
+                [],
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
         Ok(())
     }
 
@@ -986,16 +1007,55 @@ impl EventStore for SqliteStore {
     fn root_timeline_count_bounded(&self, maximum: usize) -> Result<usize, CoreError> {
         let stop_after = maximum.saturating_add(1);
         let limit = i64::try_from(stop_after).unwrap_or(i64::MAX);
-        self.conn
-            .query_row(
-                "SELECT count(*) FROM (
-                    SELECT 1 FROM timelines WHERE parent_id IS NULL LIMIT ?1
-                 )",
-                params![limit],
-                read_first_i64,
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT id
+                 FROM timelines INDEXED BY idx_timelines_parent_id_id
+                 WHERE parent_id IS NULL
+                 LIMIT ?1",
             )
-            .map(sqlite_usize_or_max)
-            .map_err(|error| CoreError::Storage(error.to_string()))
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let query = {
+            #[cfg(test)]
+            {
+                if FAIL_STMT_QUERY.with(std::cell::Cell::get) {
+                    Err(rusqlite::Error::InvalidQuery)
+                } else {
+                    statement.query(params![limit])
+                }
+            }
+            #[cfg(not(test))]
+            {
+                statement.query(params![limit])
+            }
+        };
+        let mut rows = query.map_err(|error| CoreError::Storage(error.to_string()))?;
+        let mut count = 0_usize;
+        loop {
+            let next = {
+                #[cfg(test)]
+                {
+                    if FAIL_ROWS_NEXT.with(std::cell::Cell::get) {
+                        Err(rusqlite::Error::InvalidQuery)
+                    } else {
+                        rows.next()
+                    }
+                }
+                #[cfg(not(test))]
+                {
+                    rows.next()
+                }
+            };
+            match next.map_err(|error| CoreError::Storage(error.to_string()))? {
+                Some(_) => {
+                    count += 1;
+                    #[cfg(test)]
+                    BOUNDED_ROOT_ROWS.with(|rows| rows.set(rows.get().saturating_add(1)));
+                }
+                None => return Ok(count),
+            }
+        }
     }
 
     fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
@@ -2049,17 +2109,45 @@ mod tests {
     fn bounded_root_count_ignores_children_and_caps_at_maximum_plus_one() {
         let mut store = new_store();
         let first = store.create_timeline("first").unwrap();
-        for index in 0..64 {
+        for index in 0..4096 {
             store
                 .fork(first.id(), Seq::ZERO, &format!("child-{index}"))
                 .unwrap();
         }
-        store.create_timeline("second").unwrap();
 
+        BOUNDED_ROOT_ROWS.with(|rows| rows.set(0));
         assert_eq!(store.root_timeline_count_bounded(0).unwrap(), 1);
-        assert_eq!(store.root_timeline_count_bounded(1).unwrap(), 2);
-        assert_eq!(store.root_timeline_count_bounded(10).unwrap(), 2);
-        assert_eq!(store.root_timeline_count_bounded(usize::MAX).unwrap(), 2);
+        BOUNDED_ROOT_ROWS.with(|rows| assert_eq!(rows.get(), 1));
+
+        for index in 0..100 {
+            store.create_timeline(&format!("root-{index}")).unwrap();
+        }
+        BOUNDED_ROOT_ROWS.with(|rows| rows.set(0));
+        assert_eq!(store.root_timeline_count_bounded(64).unwrap(), 65);
+        BOUNDED_ROOT_ROWS.with(|rows| assert_eq!(rows.get(), 65));
+        assert_eq!(store.root_timeline_count_bounded(usize::MAX).unwrap(), 101);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bounded_root_count_uses_parent_covering_index() {
+        let store = new_store();
+        let detail: String = store
+            .conn
+            .query_row(
+                "EXPLAIN QUERY PLAN
+                 SELECT id
+                 FROM timelines INDEXED BY idx_timelines_parent_id_id
+                 WHERE parent_id IS NULL
+                 LIMIT ?1",
+                params![65_i64],
+                |row| row.get(3),
+            )
+            .unwrap();
+
+        assert!(detail.contains("SEARCH timelines USING COVERING INDEX"));
+        assert!(detail.contains("idx_timelines_parent_id_id"));
+        assert!(!detail.starts_with("SCAN timelines"));
     }
 
     #[test]
@@ -2270,8 +2358,8 @@ mod tests {
             )
             .expect("schema_version query should succeed");
         assert!(
-            version >= 2,
-            "schema_version should be at least 2 after open, got {version}"
+            version >= 3,
+            "schema_version should be at least 3 after open, got {version}"
         );
     }
 
@@ -2284,11 +2372,11 @@ mod tests {
         let path = tmp.path().to_str().unwrap().to_owned();
         {
             let _store = SqliteStore::open(&path).unwrap();
-            // First open: inserts schema_version = 2
+            // First open: migrates through schema version 3.
         }
         {
             let store = SqliteStore::open(&path).unwrap();
-            // Second open: version already = 2, INSERT is skipped
+            // Second open: version already = 3, INSERT is skipped.
             let count: i64 = store
                 .conn
                 .query_row("SELECT COUNT(*) FROM schema_version", [], |row| row.get(0))
@@ -2302,7 +2390,7 @@ mod tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert_eq!(version, 2);
+            assert_eq!(version, 3);
         }
     }
 
@@ -3218,6 +3306,26 @@ mod tests {
         FAIL_ROWS_NEXT.with(|f| f.set(true));
         let result = store.list_timelines();
         FAIL_ROWS_NEXT.with(|f| f.set(false));
+        assert_storage_err(result.map(|_| ()));
+    }
+
+    #[test]
+    fn bounded_root_count_fails_when_rows_next_injected() {
+        let mut store = new_store();
+        store.create_timeline("main").unwrap();
+        FAIL_ROWS_NEXT.with(|fail| fail.set(true));
+        let result = store.root_timeline_count_bounded(64);
+        FAIL_ROWS_NEXT.with(|fail| fail.set(false));
+        assert_storage_err(result.map(|_| ()));
+    }
+
+    #[test]
+    fn bounded_root_count_fails_when_query_injected() {
+        let mut store = new_store();
+        store.create_timeline("main").unwrap();
+        FAIL_STMT_QUERY.with(|fail| fail.set(true));
+        let result = store.root_timeline_count_bounded(64);
+        FAIL_STMT_QUERY.with(|fail| fail.set(false));
         assert_storage_err(result.map(|_| ()));
     }
 
@@ -4199,7 +4307,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         // signature column must exist after migration
         store
             .conn
@@ -4418,7 +4526,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         store
             .conn
             .prepare("SELECT signature FROM events LIMIT 0")
@@ -4448,7 +4556,73 @@ mod tests {
             .conn
             .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn migrate_v3_recreates_root_timeline_index() {
+        let store = new_store();
+        store
+            .conn
+            .execute("UPDATE schema_version SET version = 2", [])
+            .unwrap();
+        store
+            .conn
+            .execute("DROP INDEX idx_timelines_parent_id_id", [])
+            .unwrap();
+
+        store.test_run_migrations().unwrap();
+
+        let version: i64 = store
+            .conn
+            .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+        store
+            .conn
+            .prepare(
+                "SELECT id FROM timelines INDEXED BY idx_timelines_parent_id_id
+                 WHERE parent_id IS NULL LIMIT 65",
+            )
+            .unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn migrate_v3_fails_when_root_timeline_index_cannot_be_created() {
+        let store = new_store();
+        store
+            .conn
+            .execute("UPDATE schema_version SET version = 2", [])
+            .unwrap();
+        store
+            .conn
+            .execute("DROP INDEX idx_timelines_parent_id_id", [])
+            .unwrap();
+        store.conn.execute("DROP TABLE timelines", []).unwrap();
+
+        assert_storage_err(store.test_run_migrations());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn migrate_v3_fails_when_version_update_aborts() {
+        let store = new_store();
+        store.conn.execute("DROP TABLE schema_version", []).unwrap();
+        store
+            .conn
+            .execute(
+                "CREATE TABLE schema_version (version INTEGER NOT NULL CHECK (version < 3))",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute("INSERT INTO schema_version (version) VALUES (2)", [])
+            .unwrap();
+
+        assert_storage_err(store.test_run_migrations());
     }
 
     #[test]
