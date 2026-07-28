@@ -1,30 +1,20 @@
 //! `TickScheduler` — cadence-aware step driver per `ADR-019` Decision 2.
 //!
-//! Wraps a [`PluginRegistry`] and drives `step_all()` on demand,
+//! Wraps a [`PluginRegistry`] and delegates to `tick_cadenced()`,
 //! skipping drivers whose `tick_interval()` has not yet elapsed.
 
 use crate::{registry::PluginRegistry, RuntimeError};
-use pos_core::{
-    event::EventDraft,
-    ids::{PluginId, TimelineId},
-    store::EventStore,
-};
-use std::collections::HashMap;
+use pos_core::{event::EventDraft, ids::TimelineId, store::EventStore};
 
 pub struct TickScheduler {
     /// The plugin registry being driven.
     registry: PluginRegistry,
-    /// Per-driver last-tick timestamps in nanoseconds, keyed by [`PluginId`].
-    last_tick: HashMap<PluginId, Option<u128>>,
 }
 
 impl TickScheduler {
     #[must_use]
     pub fn new(registry: PluginRegistry) -> Self {
-        Self {
-            registry,
-            last_tick: HashMap::new(),
-        }
+        Self { registry }
     }
 
     /// Step ready drivers, returning all drafts from eligible plugins.
@@ -42,21 +32,7 @@ impl TickScheduler {
         timeline: TimelineId,
         now_ns: u128,
     ) -> Result<Vec<EventDraft>, RuntimeError> {
-        let mut all_drafts = Vec::new();
-        for (id, driver) in self.registry.drivers_mut() {
-            let interval_ns = driver.tick_interval().as_nanos();
-            let last = self.last_tick.entry(id).or_insert(None);
-            let ready = match last {
-                Some(prev) => now_ns.saturating_sub(*prev) >= interval_ns,
-                None => true,
-            };
-            if ready {
-                let output = driver.step(store, timeline)?;
-                *last = Some(now_ns);
-                all_drafts.extend(output.drafts);
-            }
-        }
-        Ok(all_drafts)
+        self.registry.tick_cadenced(store, timeline, now_ns)
     }
 }
 

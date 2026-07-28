@@ -22,6 +22,7 @@ struct PluginEntry {
     name: String,
     version: String,
     driver: Option<Box<dyn Driver>>,
+    last_tick: Option<u128>,
 }
 
 /// The central plugin registry.
@@ -131,6 +132,7 @@ impl PluginRegistry {
                 name,
                 version: plugin.version().to_owned(),
                 driver,
+                last_tick: None,
             },
         );
         Ok(())
@@ -175,15 +177,40 @@ impl PluginRegistry {
                 name,
                 version: "0.1.0".to_owned(),
                 driver: Some(driver),
+                last_tick: None,
             },
         );
     }
 
-    /// Mutable iterator over all registered drivers, paired with their [`PluginId`].
-    pub fn drivers_mut(&mut self) -> impl Iterator<Item = (PluginId, &mut Box<dyn Driver>)> {
-        self.plugins
-            .iter_mut()
-            .filter_map(|(id, e)| e.driver.as_mut().map(|d| (*id, d)))
+    /// Step ready drivers on cadence, returning all drafts from eligible plugins.
+    ///
+    /// Only drivers whose `tick_interval()` has elapsed since their last tick
+    /// will fire. First-tick drivers always fire.
+    ///
+    /// # Errors
+    /// Propagates any [`RuntimeError`] from drivers.
+    pub fn tick_cadenced(
+        &mut self,
+        store: &dyn pos_core::store::EventStore,
+        timeline: pos_core::ids::TimelineId,
+        now_ns: u128,
+    ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
+        let mut all_drafts = Vec::new();
+        for entry in self.plugins.values_mut() {
+            if let Some(driver) = entry.driver.as_mut() {
+                let interval_ns = driver.tick_interval().as_nanos();
+                let ready = match entry.last_tick {
+                    Some(prev) => now_ns >= prev + interval_ns,
+                    None => true,
+                };
+                if ready {
+                    let output = driver.step(store, timeline)?;
+                    entry.last_tick = Some(now_ns);
+                    all_drafts.extend(output.drafts);
+                }
+            }
+        }
+        Ok(all_drafts)
     }
 
     /// Number of plugins that have a driver registered.
@@ -377,6 +404,18 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn tick_cadenced_skips_driverless_plugins() {
+        let mut store = pos_store::open_store(pos_store::StoreConfig::Memory).unwrap();
+        let tl = store.create_timeline("t").unwrap();
+        let mut reg = PluginRegistry::new();
+        let p = simple_plugin("p", &[]);
+        reg.register(&p, None, None).unwrap();
+        let drafts = reg.tick_cadenced(store.as_ref(), tl.id(), 0).unwrap();
+        assert!(drafts.is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_names_iterator() {
         let mut reg = PluginRegistry::new();
         let p1 = simple_plugin("alpha", &[]);
@@ -427,6 +466,7 @@ mod tests {
 
         let mut reg = PluginRegistry::new();
         reg.register(&p, None, Some(Box::new(driver))).unwrap();
+        assert_eq!(reg.driver_count(), 1);
 
         let drafts = reg.step_all(store.as_ref(), tl.id()).unwrap();
         assert_eq!(drafts.len(), 1);
