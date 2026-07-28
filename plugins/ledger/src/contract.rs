@@ -8,7 +8,7 @@ use crate::{
 
 /// Minimum inputs for a valid registration.
 #[must_use]
-pub fn sample_new_prediction(resolve_by: &str) -> NewPrediction {
+pub(crate) fn sample_new_prediction(resolve_by: &str) -> NewPrediction {
     NewPrediction {
         title: "Kyoto vs Osaka".to_owned(),
         statement: "Kyoto will be chosen".to_owned(),
@@ -28,7 +28,7 @@ pub fn sample_new_prediction(resolve_by: &str) -> NewPrediction {
 ///
 /// # Panics
 /// On any assertion failure.
-pub fn run(make: &mut dyn FnMut(&std::path::Path) -> Box<dyn LedgerStore>) {
+pub(crate) fn run(make: &mut dyn FnMut(&std::path::Path) -> Box<dyn LedgerStore>) {
     let tmp = tempfile::TempDir::new().expect("contract tempdir");
     load_empty_ledger(make(tmp.path()).as_mut());
     let tmp = tempfile::TempDir::new().expect("contract tempdir");

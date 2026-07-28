@@ -11,7 +11,7 @@ const MAX_LABEL_CHARS: usize = 64;
 
 /// How the index was obtained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AiInfluenceMode {
+pub(crate) enum AiInfluenceMode {
     /// Computed from gateway timeline poll.
     Live,
     /// No `--gateway`/`--timeline`; still show a headline (assumed 0%).
@@ -22,7 +22,7 @@ pub enum AiInfluenceMode {
 
 /// First-class AI Influence Index for the decision preview.
 #[derive(Debug, Clone, PartialEq)]
-pub struct AiInfluenceIndex {
+pub(crate) struct AiInfluenceIndex {
     /// Share of counted events from AI agents, in `[0, 1]`.
     pub index: f64,
     pub ai_events: u64,
@@ -34,7 +34,7 @@ pub struct AiInfluenceIndex {
 
 /// Local preview headline: no shared timeline observed.
 #[must_use]
-pub fn local_ai_influence() -> AiInfluenceIndex {
+pub(crate) fn local_ai_influence() -> AiInfluenceIndex {
     AiInfluenceIndex {
         index: 0.0,
         ai_events: 0,
@@ -46,7 +46,7 @@ pub fn local_ai_influence() -> AiInfluenceIndex {
 
 /// Headline when `--gateway`/`--timeline` were set but the poll failed.
 #[must_use]
-pub fn unavailable_ai_influence() -> AiInfluenceIndex {
+pub(crate) fn unavailable_ai_influence() -> AiInfluenceIndex {
     AiInfluenceIndex {
         index: 0.0,
         ai_events: 0,
@@ -58,7 +58,7 @@ pub fn unavailable_ai_influence() -> AiInfluenceIndex {
 
 /// Compute the index from gateway JSON event views.
 #[must_use]
-pub fn ai_influence_from_events(events: &[serde_json::Value]) -> AiInfluenceIndex {
+pub(crate) fn ai_influence_from_events(events: &[serde_json::Value]) -> AiInfluenceIndex {
     let mut ai_events = 0_u64;
     let mut total_events = 0_u64;
     let mut by_archetype: BTreeMap<String, u64> = BTreeMap::new();
@@ -153,7 +153,7 @@ fn archetype_for(event: &serde_json::Value, event_type: &str) -> String {
 
 /// Human-readable lines for the decision-preview headline (#79 / O12).
 #[must_use]
-pub fn format_ai_influence_lines(index: &AiInfluenceIndex) -> Vec<String> {
+pub(crate) fn format_ai_influence_lines(index: &AiInfluenceIndex) -> Vec<String> {
     let pct = format!("{:.0}", index.index * 100.0);
     match index.mode {
         AiInfluenceMode::LocalPreview => vec![

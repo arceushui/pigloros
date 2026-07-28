@@ -42,11 +42,11 @@ mod serde_bytes_wrapper {
     use bytes::Bytes;
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S: Serializer>(b: &Bytes, s: S) -> Result<S::Ok, S::Error> {
+    pub(crate) fn serialize<S: Serializer>(b: &Bytes, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_bytes(b)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Bytes, D::Error> {
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Bytes, D::Error> {
         let v = serde_bytes::ByteBuf::deserialize(d)?;
         Ok(Bytes::from(v.into_vec()))
     }

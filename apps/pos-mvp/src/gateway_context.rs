@@ -30,7 +30,7 @@ fn society_pref_aliases(dim: &str) -> &'static [&'static str] {
 /// Society dimension means extracted from gateway event poll (`dimension` → mean `value`).
 ///
 /// Sample values and resulting means are clamped to `[0, 1]` (society semantics).
-pub fn society_means_from_events(events: &[serde_json::Value]) -> HashMap<String, f64> {
+pub(crate) fn society_means_from_events(events: &[serde_json::Value]) -> HashMap<String, f64> {
     let mut sums: HashMap<String, f64> = HashMap::new();
     let mut counts: HashMap<String, u32> = HashMap::new();
 
@@ -70,7 +70,7 @@ pub fn society_means_from_events(events: &[serde_json::Value]) -> HashMap<String
 /// Each preference key is adjusted **once** by the average of all contributing
 /// society nudges (exact dim match + aliases), so overlapping aliases
 /// (`opinion`/`polarization` → `collaboration`) do not stack additively.
-pub fn apply_society_context(prefs: &mut [(String, f64)], means: &HashMap<String, f64>) {
+pub(crate) fn apply_society_context(prefs: &mut [(String, f64)], means: &HashMap<String, f64>) {
     let mut by_pref: HashMap<String, Vec<f64>> = HashMap::new();
     for (dim, mean) in means {
         let nudge = (*mean - 0.5) * NUDGE_SCALE;
@@ -113,7 +113,7 @@ fn average_f64(values: &[f64]) -> f64 {
 /// Covers society dimensions (`trust`, `opinion`, `economy`, `culture`,
 /// `polarization`) plus any other keys as generic preference-context hints.
 #[must_use]
-pub fn plain_language_context(means: &HashMap<String, f64>) -> Vec<String> {
+pub(crate) fn plain_language_context(means: &HashMap<String, f64>) -> Vec<String> {
     let mut dims: Vec<(&String, f64)> = means.iter().map(|(k, v)| (k, *v)).collect();
     dims.sort_by(|a, b| a.0.cmp(b.0));
     dims.into_iter()
@@ -160,7 +160,7 @@ fn intensity_word(mean: f64) -> &'static str {
 }
 
 /// Reject non-ULID timeline ids before interpolating into the URL path.
-pub fn validate_timeline_id(timeline_id: &str) -> Result<(), String> {
+pub(crate) fn validate_timeline_id(timeline_id: &str) -> Result<(), String> {
     ulid::Ulid::from_string(timeline_id)
         .map(|_| ())
         .map_err(|e| format!("invalid timeline id (expected ULID): {e}"))
@@ -198,7 +198,7 @@ fn warn_if_non_loopback(gateway: &str) {
 }
 
 /// Society means + AI Influence from one gateway poll.
-pub struct TimelineContext {
+pub(crate) struct TimelineContext {
     pub society_means: HashMap<String, f64>,
     pub ai_influence: AiInfluenceIndex,
 }
@@ -206,7 +206,10 @@ pub struct TimelineContext {
 /// One HTTP poll → society means and AI Influence Index (#79).
 ///
 /// Hardening: ULID path validation, 10s overall timeout, no redirects, 1 MiB body cap.
-pub fn fetch_timeline_context(gateway: &str, timeline_id: &str) -> Result<TimelineContext, String> {
+pub(crate) fn fetch_timeline_context(
+    gateway: &str,
+    timeline_id: &str,
+) -> Result<TimelineContext, String> {
     let events = fetch_gateway_events(gateway, timeline_id)?;
     Ok(TimelineContext {
         society_means: society_means_from_events(&events),

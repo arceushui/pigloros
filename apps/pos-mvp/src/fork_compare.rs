@@ -39,7 +39,7 @@ impl Reducer for DecisionChoiceProjection {
 
 /// Summary of a dual-future personal fork compare.
 #[derive(Debug, Clone)]
-pub struct ForkCompareSummary {
+pub(crate) struct ForkCompareSummary {
     pub fork_seq: u64,
     pub chosen_a: String,
     pub chosen_b: String,
@@ -54,7 +54,7 @@ pub struct ForkCompareSummary {
 ///
 /// Uses an in-memory store only (demo path); panics if the Memory backend fails.
 #[must_use]
-pub fn run_personal_fork_compare(
+pub(crate) fn run_personal_fork_compare(
     preferences: &[(String, f64)],
     option_a: &str,
     option_b: &str,
@@ -174,7 +174,7 @@ fn forced_decision(entity: EntityId, option_a: &str, option_b: &str, choose_a: b
 }
 
 /// Print side-by-side personal fork futures (#75).
-pub fn print_fork_compare(summary: &ForkCompareSummary, label_a: &str, label_b: &str) {
+pub(crate) fn print_fork_compare(summary: &ForkCompareSummary, label_a: &str, label_b: &str) {
     println!("Personal fork — two futures from shared-now (local `CoW`, #75)");
     println!("  Forked at seq {}", summary.fork_seq);
     println!();

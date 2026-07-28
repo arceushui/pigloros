@@ -217,3 +217,72 @@ jobs:
           curl -sf http://localhost:8080/v1/ledger | grep '"domain":"piglor.com"'
           docker stop pigloros-smoke
 
+  modules:
+    name: modules-structure (reports only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Install cargo-modules
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-modules
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: modules
+
+      - name: Module structure reports
+        if: always()
+        run: |
+          mkdir -p artifacts/modules
+          for pkg in pos-core pos-crypto pos-store pos-state pos-query pos-time pos-runtime \
+            pos-plugin-agent pos-plugin-bridges pos-plugin-eval pos-plugin-geo \
+            pos-plugin-ledger pos-plugin-persona pos-plugin-rule-agent \
+            pos-plugin-society pos-plugin-synthetic-obs pos-plugin-world \
+            piglor-gateway piglor-ledger pos-experiment pos-cli pos-mvp; do
+            cargo modules structure -p "$pkg" --lib > "artifacts/modules/${pkg}.txt" 2>/dev/null || true
+          done
+
+      - name: Upload module reports
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: module-structures
+          path: artifacts/modules/
+
+  depgraph:
+    name: depgraph
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Install cargo-depgraph
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-depgraph
+
+      - name: Install graphviz
+        run: sudo apt-get update && sudo apt-get install -y graphviz
+
+      - name: Generate dependency graph
+        run: |
+          cargo depgraph --all-deps --dedup-transitive-deps \
+            --output artifacts/depgraph.svg
+
+      - name: Upload dependency graph
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: depgraph
+          path: artifacts/depgraph.svg
+
