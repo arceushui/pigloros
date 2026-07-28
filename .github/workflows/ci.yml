@@ -71,7 +71,7 @@ jobs:
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: test
 
@@ -94,7 +94,7 @@ jobs:
           components: clippy
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: clippy
 
@@ -123,7 +123,7 @@ jobs:
           tool: cargo-llvm-cov
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: coverage
 
@@ -188,7 +188,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           components: rust-src
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: asan
       - name: cargo test with ASan
@@ -197,7 +197,7 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1:detect_odr_violation=0
         run: >
           RUSTFLAGS="-Z sanitizer=address"
-          cargo +nightly test -Z build-std --target x86_64-unknown-linux-gnu --workspace --tests
+          cargo +nightly test --locked -Z build-std --target x86_64-unknown-linux-gnu --workspace --tests
 
   docker-build:
     name: docker-build
@@ -246,7 +246,7 @@ jobs:
           tool: cargo-modules
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: modules
 
