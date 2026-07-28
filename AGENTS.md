@@ -21,6 +21,10 @@ git worktree remove ../pigloros-<task-name>
 
 Redmine: `redmine.piglor.com/projects/pigloros`. GitHub Issues (`arceushui/pigloros`) is for community contributions. See `.agents/issue-tracker.md`.
 
+### Multi-agent models
+
+Use the project model-selection policy in `.agents/model-policy.md` when delegating implementation and independent review work.
+
 ### Triage labels
 
 Default five-label vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `.agents/triage-labels.md`.
