@@ -6,16 +6,16 @@ use crate::{
 };
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use piglor_ledger::{render_html, LedgerView};
 use pos_core::CoreError;
-use pos_plugin_ledger::{LedgerStore, NewPrediction};
+use pos_plugin_ledger::{LedgerError, LedgerStore, NewPrediction, TomlLedgerStore};
 use serde_json::json;
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
 /// Shared handle for the mutable ledger store (curated or live tier).
@@ -57,6 +57,57 @@ pub enum LedgerWriteMode {
     Ready(LedgerGateway),
 }
 
+/// Startup configuration for the Gateway's curated Prediction Ledger source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LedgerConfig {
+    source: Option<PathBuf>,
+    write_enabled: bool,
+}
+
+impl LedgerConfig {
+    /// Configure an optional TOML source directory and write feature gate.
+    #[must_use]
+    pub const fn new(source: Option<PathBuf>, write_enabled: bool) -> Self {
+        Self {
+            source,
+            write_enabled,
+        }
+    }
+
+    /// Load the configured Ledger view and construct its write mode.
+    ///
+    /// An unset source produces the intentional empty/default Ledger. An
+    /// explicitly configured source must exist and be a readable directory;
+    /// load errors are returned so Gateway startup fails closed.
+    ///
+    /// # Errors
+    /// Returns [`LedgerError`] when the configured source is missing,
+    /// unreadable, or contains invalid Ledger data.
+    pub fn load(self, today: &str) -> Result<(LedgerView, LedgerWriteMode), LedgerError> {
+        let Some(source) = self.source else {
+            let write_mode = if self.write_enabled {
+                LedgerWriteMode::Unconfigured
+            } else {
+                LedgerWriteMode::Disabled
+            };
+            return Ok((LedgerView::default(), write_mode));
+        };
+
+        let store = TomlLedgerStore::new(&source);
+        std::fs::read_dir(&source)
+            .map_err(LedgerError::Io)
+            .and_then(|_| store.load(today))
+            .map(|ledger| {
+                let write_mode = if self.write_enabled {
+                    LedgerWriteMode::Ready(LedgerGateway::new(Box::new(store)))
+                } else {
+                    LedgerWriteMode::Disabled
+                };
+                (LedgerView::from(&ledger), write_mode)
+            })
+    }
+}
+
 /// Shared axum state.
 #[derive(Clone)]
 pub struct AppState {
@@ -73,6 +124,7 @@ pub fn router(state: AppState) -> Router {
 fn build_router(state: AppState, max_body_bytes: usize) -> Router {
     Router::new()
         .route("/", get(root_page))
+        .route("/ledger", get(ledger_page))
         .route("/health", get(health))
         .route("/v1/ledger", get(get_ledger))
         .route("/v1/ledger/predictions", post(post_ledger_prediction))
@@ -84,7 +136,11 @@ fn build_router(state: AppState, max_body_bytes: usize) -> Router {
         .with_state(state)
 }
 
-async fn root_page(State(state): State<AppState>) -> impl IntoResponse {
+async fn root_page() -> impl IntoResponse {
+    (StatusCode::FOUND, [(header::LOCATION, "ledger/")])
+}
+
+async fn ledger_page(State(state): State<AppState>) -> impl IntoResponse {
     let html = render_html(&state.ledger_view, None);
     Html(html)
 }
@@ -232,6 +288,33 @@ mod tests {
         })
     }
 
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn ledger_config_rejects_missing_source() {
+        let source = std::env::temp_dir().join(format!(
+            "piglor-gw-ledger-lib-missing-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&source);
+        let Err(error) = LedgerConfig::new(Some(source), false).load("2026-07-29") else {
+            panic!("a configured missing Ledger source must fail");
+        };
+        assert!(error.to_string().contains("No such file or directory"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn ledger_config_enables_writes_for_configured_source() {
+        let source =
+            std::env::temp_dir().join(format!("piglor-gw-ledger-lib-ready-{}", std::process::id()));
+        std::fs::create_dir_all(&source).unwrap();
+        let (_, write_mode) = LedgerConfig::new(Some(source.clone()), true)
+            .load("2026-07-29")
+            .unwrap();
+        let _ = std::fs::remove_dir_all(source);
+        assert!(matches!(write_mode, LedgerWriteMode::Ready(_)));
+    }
+
     async fn json_request(
         app: Router,
         method: &str,
@@ -259,20 +342,13 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    async fn root_page_returns_html() {
+    async fn root_redirects_relatively_to_ledger() {
         let response = test_app()
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
-        let html = String::from_utf8_lossy(&body);
-        assert!(
-            html.contains("<!DOCTYPE html>"),
-            "root page should return HTML: {html}"
-        );
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(response.headers()[axum::http::header::LOCATION], "ledger/");
     }
 
     #[tokio::test]
@@ -285,41 +361,46 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    async fn get_ledger_uses_configured_view() {
-        let ledger_view = LedgerView {
-            entries: vec![pos_plugin_ledger::LedgerEntryView {
-                id: "configured-id".to_owned(),
-                title: "Configured title".to_owned(),
-                statement: "Configured statement".to_owned(),
-                predicted_outcome: "Configured outcome".to_owned(),
-                confidence: 0.75,
-                scenario: Some("configured-scenario".to_owned()),
-                status: "pending".to_owned(),
-                brier_score: None,
-                made_at: "2026-07-29T00:00:00Z".to_owned(),
-                resolve_by: "2026-08-01".to_owned(),
-                resolved_at: None,
-                outcome: None,
-                osf_link: "https://osf.io/configured".to_owned(),
-            }],
-            n_pending: 1,
-            n_overdue: 0,
-            n_resolved: 0,
-            mean_brier: None,
-            warnings: Vec::new(),
-        };
-        let (status, json) = json_request(
-            test_app_with_ledger_view(ledger_view),
-            "GET",
-            "/v1/ledger",
-            None,
+    async fn configured_source_is_consistent_between_html_and_json() {
+        let dir = std::env::temp_dir().join(format!(
+            "piglor-gw-ledger-http-configured-{}",
+            std::process::id()
+        ));
+        let predictions = dir.join("predictions");
+        std::fs::create_dir_all(&predictions).unwrap();
+        std::fs::write(
+            predictions.join("01KYJ6HAFVPNM4VFBKG5BQ4QMT.toml"),
+            include_str!("../../../seed/predictions/01KYJ6HAFVPNM4VFBKG5BQ4QMT.toml"),
         )
-        .await;
+        .unwrap();
+        let (ledger_view, _) = LedgerConfig::new(Some(dir.clone()), false)
+            .load("2026-07-29")
+            .unwrap();
+        let app = test_app_with_ledger_view(ledger_view);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ledger")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("GitHub Copilot Dominance"));
+
+        let (status, json) = json_request(app, "GET", "/v1/ledger", None).await;
+        let _ = std::fs::remove_dir_all(dir);
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["domain"], "piglor.com");
         assert_eq!(json["path"], "/ledger");
-        assert_eq!(json["ledger"][0]["id"], "configured-id");
-        assert_eq!(json["ledger"][0]["title"], "Configured title");
+        assert_eq!(json["ledger"][0]["id"], "01KYJ6HAFVPNM4VFBKG5BQ4QMT");
+        assert_eq!(json["ledger"][0]["title"], "GitHub Copilot Dominance");
     }
 
     #[tokio::test]

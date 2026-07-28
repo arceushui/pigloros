@@ -8,7 +8,7 @@
 
 mod http;
 
-pub use http::{router, AppState, LedgerGateway, LedgerWriteMode};
+pub use http::{router, AppState, LedgerConfig, LedgerGateway, LedgerWriteMode};
 
 use pos_core::{
     clock::Seq,
