@@ -14,7 +14,7 @@ use pos_core::{
     clock::Seq,
     event::{CanonicalBytes, Event, EventDraft, Kind},
     ids::{EntityId, TimelineId},
-    store::{EventStore, SeqRange},
+    store::{EventReadBounds, EventStore, SeqRange},
     timeline::Timeline,
     CoreError,
 };
@@ -46,6 +46,14 @@ pub const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024;
 
 /// Maximum canonical payload accepted for one Gateway-authored Event (256 KiB).
 pub const MAX_EVENT_PAYLOAD_BYTES: usize = 256 * 1024;
+
+/// Maximum UTF-8 byte length accepted for imported Event type metadata (64 KiB).
+///
+/// At JSON's worst-case six-byte escaping expansion this occupies at most
+/// 384 KiB. Together with the maximum payload's 512 KiB hex representation
+/// and fixed Event fields, it remains below the 1 MiB response envelope.
+/// The exact serialized-response check still governs decoded payload expansion.
+pub const MAX_EVENT_TYPE_BYTES: usize = 64 * 1024;
 
 /// Maximum serialized JSON size for one Event polling response (1 MiB).
 pub const MAX_EVENTS_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -129,6 +137,9 @@ pub enum GatewayError {
     /// A Gateway-authored Event payload exceeds the retrievable size budget.
     #[error("event payload exceeds maximum of {maximum} bytes")]
     EventPayloadTooLarge { maximum: usize },
+    /// Imported Event metadata exceeds the retrievable size budget.
+    #[error("event metadata field {field} exceeds maximum of {maximum} bytes")]
+    EventMetadataTooLarge { field: &'static str, maximum: usize },
     /// Malformed event polling query.
     #[error("invalid events query: {0}")]
     InvalidEventsQuery(String),
@@ -181,11 +192,7 @@ impl Gateway {
     /// Returns [`GatewayError::Store`] on backend failure.
     pub async fn create_timeline(&self, name: &str) -> Result<Timeline, GatewayError> {
         let mut guard = self.store.lock().await;
-        let root_count = guard
-            .list_timelines()?
-            .into_iter()
-            .filter(|timeline| timeline.meta.is_root())
-            .count();
+        let root_count = guard.root_timeline_count_bounded(self.limits.max_timelines)?;
         if root_count >= self.limits.max_timelines {
             return Err(GatewayError::TimelineLimitReached {
                 maximum: self.limits.max_timelines,
@@ -231,11 +238,21 @@ impl Gateway {
             to: Some(Seq::from_u64(last_seq)),
         };
         let guard = self.store.lock().await;
-        let mut events = match guard.read_bounded(id, range, MAX_EVENT_PAYLOAD_BYTES) {
+        let bounds = EventReadBounds {
+            max_payload_bytes: MAX_EVENT_PAYLOAD_BYTES,
+            max_event_type_bytes: MAX_EVENT_TYPE_BYTES,
+        };
+        let mut events = match guard.read_bounded(id, range, bounds) {
             Ok(events) => events,
             Err(CoreError::PayloadTooLarge { .. }) => {
                 return Err(GatewayError::EventPayloadTooLarge {
                     maximum: MAX_EVENT_PAYLOAD_BYTES,
+                })
+            }
+            Err(CoreError::EventMetadataTooLarge { field, .. }) => {
+                return Err(GatewayError::EventMetadataTooLarge {
+                    field,
+                    maximum: MAX_EVENT_TYPE_BYTES,
                 })
             }
             Err(error) => return Err(GatewayError::Store(error)),
@@ -538,6 +555,7 @@ mod tests {
         clock::{Seq, WallTime},
         crypto::Hash,
         ids::EventId,
+        store::{export_timeline_own, import_timeline_with_id},
         timeline::TimelineMeta,
     };
     use pos_store::{open_store, StoreConfig};
@@ -556,6 +574,7 @@ mod tests {
         EmptyAppend,
         FailAppend,
         FailRead,
+        RejectListUse,
     }
 
     struct ScriptedStore {
@@ -617,10 +636,21 @@ mod tests {
         }
 
         fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+            assert!(
+                !matches!(self.mode, ScriptMode::RejectListUse),
+                "Gateway root quota must not materialise Timeline lists"
+            );
             if matches!(self.mode, ScriptMode::FailList) {
                 return Err(CoreError::Storage("list failed".into()));
             }
             Ok(Vec::new())
+        }
+
+        fn root_timeline_count_bounded(&self, _maximum: usize) -> Result<usize, CoreError> {
+            if matches!(self.mode, ScriptMode::FailList) {
+                return Err(CoreError::Storage("root count failed".into()));
+            }
+            Ok(0)
         }
 
         fn get_timeline(&self, _id: TimelineId) -> Result<Option<Timeline>, CoreError> {
@@ -729,6 +759,15 @@ mod tests {
             error,
             GatewayError::TimelineLimitReached { maximum: 2 }
         ));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn create_timeline_uses_bounded_root_count_without_listing() {
+        let gateway = Gateway::new(Box::new(ScriptedStore {
+            mode: ScriptMode::RejectListUse,
+        }));
+        gateway.create_timeline("root").await.unwrap();
     }
 
     #[tokio::test]
@@ -882,6 +921,46 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn imported_oversized_event_type_returns_actionable_413_on_bundled_stores() {
+        let mut source = open_store(StoreConfig::Memory).unwrap();
+        let timeline = source.create_timeline("import-source").unwrap();
+        source
+            .append(
+                timeline.id(),
+                &[EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("x".repeat(MAX_EVENT_TYPE_BYTES + 1)),
+                    CanonicalBytes::from_static(b"x"),
+                )],
+            )
+            .unwrap();
+        let export = export_timeline_own(source.as_ref(), timeline.id()).unwrap();
+
+        let destinations = [
+            open_store(StoreConfig::Memory).unwrap(),
+            open_store(StoreConfig::Sqlite {
+                path: ":memory:".to_owned(),
+            })
+            .unwrap(),
+        ];
+        for mut destination in destinations {
+            import_timeline_with_id(destination.as_mut(), export.clone()).unwrap();
+            let error = Gateway::new(destination)
+                .read_events_page(&timeline.id().to_string(), 0, 1)
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                GatewayError::EventMetadataTooLarge {
+                    field: "event_type",
+                    maximum: MAX_EVENT_TYPE_BYTES
+                }
+            ));
+        }
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn gateway_rejects_payloads_that_cannot_fit_bounded_responses() {
         let gateway = memory_gw();
         let timeline = gateway.create_timeline("payload").await.unwrap();
@@ -938,6 +1017,17 @@ mod tests {
             "next_from_seq": page.next_from_seq,
         });
         assert!(serde_json::to_vec(&response).unwrap().len() <= MAX_EVENTS_RESPONSE_BYTES);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn event_type_bound_reserves_space_for_maximum_payload_hex() {
+        let draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new("\0".repeat(MAX_EVENT_TYPE_BYTES)),
+            CanonicalBytes::from_vec(vec![0xff; MAX_EVENT_PAYLOAD_BYTES]),
+        );
+        assert!(draft_event_response_len(&draft) <= MAX_EVENTS_RESPONSE_BYTES);
     }
 
     #[tokio::test]

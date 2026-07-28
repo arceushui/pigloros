@@ -22,6 +22,9 @@ pub enum CoreError {
     #[error("payload too large: {size} bytes")]
     PayloadTooLarge { size: usize },
 
+    #[error("event metadata field {field} too large: {size} bytes")]
+    EventMetadataTooLarge { field: &'static str, size: usize },
+
     #[error("signature verification failed")]
     SignatureVerificationFailed,
 
@@ -81,6 +84,17 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn payload_too_large_displays() {
         let e = CoreError::PayloadTooLarge { size: 1024 };
+        assert!(e.to_string().contains("1024"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn event_metadata_too_large_displays() {
+        let e = CoreError::EventMetadataTooLarge {
+            field: "event_type",
+            size: 1024,
+        };
+        assert!(e.to_string().contains("event_type"));
         assert!(e.to_string().contains("1024"));
     }
 

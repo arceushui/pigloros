@@ -12,7 +12,7 @@ use pos_core::{
     event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
     hasher::Hasher,
     ids::{EntityId, EventId, TimelineId},
-    store::{EventStore, SeqRange},
+    store::{EventReadBounds, EventStore, SeqRange},
     timeline::{Timeline, TimelineMeta, TimelineMode},
     CoreError,
 };
@@ -31,8 +31,8 @@ thread_local! {
     static FAIL_IMPORT_GET_STORAGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Test-only fault injection: force `Rows::next` to return Err.
     static FAIL_ROWS_NEXT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Test-only evidence that bounded payload queries start only after metadata validation.
-    static BOUNDED_PAYLOAD_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Test-only evidence that full Event queries start only after metadata validation.
+    static BOUNDED_EVENT_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 pub struct SqliteStore {
@@ -344,10 +344,10 @@ impl SqliteStore {
         timeline_id: TimelineId,
         from: Seq,
         to: Seq,
-        max_payload_bytes: usize,
+        bounds: EventReadBounds,
     ) -> Result<Vec<Event>, CoreError> {
         let sql = format!(
-            "SELECT length(payload)
+            "SELECT length(payload), length(CAST(event_type AS BLOB))
              FROM events WHERE timeline_id = '{}' AND seq >= {} AND seq <= {}
              ORDER BY seq ASC",
             timeline_id,
@@ -362,7 +362,7 @@ impl SqliteStore {
             }
         };
         let mut rows = stmt.raw_query();
-        let mut payload_sizes = Vec::new();
+        let mut field_sizes = Vec::new();
         loop {
             let next = {
                 #[cfg(test)]
@@ -379,10 +379,12 @@ impl SqliteStore {
                 }
             };
             match next {
-                Ok(Some(row)) => payload_sizes.push(
+                Ok(Some(row)) => field_sizes.push((
                     row.get(0)
                         .expect("length(non-null SQLite BLOB) returns an integer"),
-                ),
+                    row.get(1)
+                        .expect("length(CAST(non-null SQLite TEXT AS BLOB)) returns an integer"),
+                )),
                 Ok(None) => break,
                 Err(error) => {
                     let message = error.to_string();
@@ -391,15 +393,22 @@ impl SqliteStore {
             }
         }
 
-        for stored_size in payload_sizes {
-            let payload_size = sqlite_usize_or_max(stored_size);
-            if payload_size > max_payload_bytes {
+        for (stored_payload_size, stored_event_type_size) in field_sizes {
+            let payload_size = sqlite_usize_or_max(stored_payload_size);
+            if payload_size > bounds.max_payload_bytes {
                 return Err(CoreError::PayloadTooLarge { size: payload_size });
+            }
+            let event_type_size = sqlite_usize_or_max(stored_event_type_size);
+            if event_type_size > bounds.max_event_type_bytes {
+                return Err(CoreError::EventMetadataTooLarge {
+                    field: "event_type",
+                    size: event_type_size,
+                });
             }
         }
 
         #[cfg(test)]
-        BOUNDED_PAYLOAD_QUERIES.with(|queries| queries.set(queries.get() + 1));
+        BOUNDED_EVENT_QUERIES.with(|queries| queries.set(queries.get() + 1));
         Self::read_own_events_on(conn, timeline_id, from, Some(to))
     }
 
@@ -434,7 +443,7 @@ impl SqliteStore {
         &self,
         timeline_id: TimelineId,
         range: SeqRange,
-        max_payload_bytes: usize,
+        bounds: EventReadBounds,
     ) -> Result<Vec<Event>, CoreError> {
         let tx = match self.conn.unchecked_transaction() {
             Ok(tx) => tx,
@@ -457,13 +466,8 @@ impl SqliteStore {
             if selected_start <= selected_end {
                 let raw_from = Seq::from_u64(selected_start - logical_offset);
                 let raw_to = Seq::from_u64(selected_end - logical_offset);
-                let mut events = Self::read_own_events_bounded(
-                    &tx,
-                    segment_id,
-                    raw_from,
-                    raw_to,
-                    max_payload_bytes,
-                )?;
+                let mut events =
+                    Self::read_own_events_bounded(&tx, segment_id, raw_from, raw_to, bounds)?;
                 for event in &mut events {
                     event.seq = Seq::from_u64(logical_offset.saturating_add(event.seq.as_u64()));
                 }
@@ -727,9 +731,9 @@ impl EventStore for SqliteStore {
         &self,
         timeline: TimelineId,
         range: SeqRange,
-        max_payload_bytes: usize,
+        bounds: EventReadBounds,
     ) -> Result<Vec<Event>, CoreError> {
-        self.read_logical_bounded(timeline, range, max_payload_bytes)
+        self.read_logical_bounded(timeline, range, bounds)
     }
 
     fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
@@ -809,6 +813,21 @@ impl EventStore for SqliteStore {
         }
 
         Ok(timelines)
+    }
+
+    fn root_timeline_count_bounded(&self, maximum: usize) -> Result<usize, CoreError> {
+        let stop_after = maximum.saturating_add(1);
+        let limit = i64::try_from(stop_after).unwrap_or(i64::MAX);
+        self.conn
+            .query_row(
+                "SELECT count(*) FROM (
+                    SELECT 1 FROM timelines WHERE parent_id IS NULL LIMIT ?1
+                 )",
+                params![limit],
+                read_first_i64,
+            )
+            .map(sqlite_usize_or_max)
+            .map_err(|error| CoreError::Storage(error.to_string()))
     }
 
     fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
@@ -1186,9 +1205,16 @@ mod tests {
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         ids::{EntityId, EventId},
-        store::SeqRange,
+        store::{EventReadBounds, SeqRange},
         CoreError,
     };
+
+    fn read_bounds(max_payload_bytes: usize) -> EventReadBounds {
+        EventReadBounds {
+            max_payload_bytes,
+            max_event_type_bytes: usize::MAX,
+        }
+    }
     use pos_crypto::chain::hash_payload;
 
     fn make_draft(entity: EntityId, payload: &[u8]) -> EventDraft {
@@ -1291,14 +1317,14 @@ mod tests {
     fn bounded_read_propagates_chain_and_count_errors() {
         let mut store = new_store();
         let error = store
-            .read_bounded(TimelineId::new(), SeqRange::all(), 1)
+            .read_bounded(TimelineId::new(), SeqRange::all(), read_bounds(1))
             .unwrap_err();
         assert!(matches!(error, CoreError::TimelineNotFound(_)));
 
         let timeline = store.create_timeline("missing-events").unwrap();
         store.conn.execute("DROP TABLE events", []).unwrap();
         let error = store
-            .read_bounded(timeline.id(), SeqRange::all(), 1)
+            .read_bounded(timeline.id(), SeqRange::all(), read_bounds(1))
             .unwrap_err();
         assert!(matches!(error, CoreError::Storage(_)));
     }
@@ -1310,7 +1336,7 @@ mod tests {
         let timeline = store.create_timeline("snapshot").unwrap();
         store.conn.execute_batch("BEGIN").unwrap();
         let error = store
-            .read_bounded(timeline.id(), SeqRange::all(), 1)
+            .read_bounded(timeline.id(), SeqRange::all(), read_bounds(1))
             .unwrap_err();
         store.conn.execute_batch("ROLLBACK").unwrap();
         assert!(matches!(error, CoreError::Storage(_)));
@@ -1322,7 +1348,7 @@ mod tests {
             .unwrap();
         FAIL_ROWS_NEXT.with(|fail| fail.set(true));
         let error = query_store
-            .read_bounded(query_timeline.id(), SeqRange::all(), 1)
+            .read_bounded(query_timeline.id(), SeqRange::all(), read_bounds(1))
             .unwrap_err();
         FAIL_ROWS_NEXT.with(|fail| fail.set(false));
         assert!(matches!(error, CoreError::Storage(_)));
@@ -1337,7 +1363,7 @@ mod tests {
             ))
             .unwrap();
         let error = store
-            .read_bounded(timeline.id(), SeqRange::all(), 1)
+            .read_bounded(timeline.id(), SeqRange::all(), read_bounds(1))
             .unwrap_err();
         assert!(matches!(error, CoreError::Storage(_)));
     }
@@ -1360,18 +1386,22 @@ mod tests {
             .read_bounded(
                 child.id(),
                 SeqRange::bounded(Seq::from_u64(1), Seq::from_u64(2)),
-                5,
+                read_bounds(5),
             )
             .unwrap();
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].payload.as_slice(), b"ok");
         assert_eq!(events[1].payload.as_slice(), b"child");
         let error = store
-            .read_bounded(child.id(), SeqRange::all(), 4)
+            .read_bounded(child.id(), SeqRange::all(), read_bounds(4))
             .unwrap_err();
         assert!(matches!(error, CoreError::PayloadTooLarge { size: 5 }));
         let empty = store
-            .read_bounded(child.id(), SeqRange::from_seq(Seq::from_u64(3)), usize::MAX)
+            .read_bounded(
+                child.id(),
+                SeqRange::from_seq(Seq::from_u64(3)),
+                read_bounds(usize::MAX),
+            )
             .unwrap();
         assert!(empty.is_empty());
     }
@@ -1385,17 +1415,69 @@ mod tests {
             .append(timeline.id(), &[make_draft(EntityId::new(), b"large")])
             .unwrap();
 
-        BOUNDED_PAYLOAD_QUERIES.with(|queries| queries.set(0));
+        BOUNDED_EVENT_QUERIES.with(|queries| queries.set(0));
         let error = store
-            .read_bounded(timeline.id(), SeqRange::all(), 4)
+            .read_bounded(timeline.id(), SeqRange::all(), read_bounds(4))
             .unwrap_err();
         assert!(matches!(error, CoreError::PayloadTooLarge { size: 5 }));
-        BOUNDED_PAYLOAD_QUERIES.with(|queries| assert_eq!(queries.get(), 0));
+        BOUNDED_EVENT_QUERIES.with(|queries| assert_eq!(queries.get(), 0));
 
         store
-            .read_bounded(timeline.id(), SeqRange::all(), 5)
+            .read_bounded(timeline.id(), SeqRange::all(), read_bounds(5))
             .unwrap();
-        BOUNDED_PAYLOAD_QUERIES.with(|queries| assert_eq!(queries.get(), 1));
+        BOUNDED_EVENT_QUERIES.with(|queries| assert_eq!(queries.get(), 1));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bounded_read_rejects_event_type_before_full_event_query() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("metadata").unwrap();
+        let oversized = EventDraft::new(
+            EntityId::new(),
+            Kind::new("x".repeat(5)),
+            CanonicalBytes::from_static(b"x"),
+        );
+        store.append(timeline.id(), &[oversized]).unwrap();
+        BOUNDED_EVENT_QUERIES.with(|queries| queries.set(0));
+
+        let error = store
+            .read_bounded(
+                timeline.id(),
+                SeqRange::all(),
+                EventReadBounds {
+                    max_payload_bytes: 1,
+                    max_event_type_bytes: 4,
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CoreError::EventMetadataTooLarge {
+                field: "event_type",
+                size: 5
+            }
+        ));
+        BOUNDED_EVENT_QUERIES.with(|queries| assert_eq!(queries.get(), 0));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bounded_root_count_ignores_children_and_caps_at_maximum_plus_one() {
+        let mut store = new_store();
+        let first = store.create_timeline("first").unwrap();
+        for index in 0..64 {
+            store
+                .fork(first.id(), Seq::ZERO, &format!("child-{index}"))
+                .unwrap();
+        }
+        store.create_timeline("second").unwrap();
+
+        assert_eq!(store.root_timeline_count_bounded(0).unwrap(), 1);
+        assert_eq!(store.root_timeline_count_bounded(1).unwrap(), 2);
+        assert_eq!(store.root_timeline_count_bounded(10).unwrap(), 2);
+        assert_eq!(store.root_timeline_count_bounded(usize::MAX).unwrap(), 2);
     }
 
     #[test]
@@ -1958,6 +2040,14 @@ mod tests {
         let store = new_store();
         store.conn.execute("DROP TABLE timelines", []).unwrap();
         assert_storage_err(store.list_timelines().map(|_| ()));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bounded_root_count_fails_when_timelines_table_dropped() {
+        let store = new_store();
+        store.conn.execute("DROP TABLE timelines", []).unwrap();
+        assert_storage_err(store.root_timeline_count_bounded(1).map(|_| ()));
     }
 
     #[test]

@@ -13,7 +13,7 @@ use pos_core::{
     event::{Event, EventDraft},
     hasher::Hasher,
     ids::{EventId, TimelineId},
-    store::{EventStore, SeqRange},
+    store::{EventReadBounds, EventStore, SeqRange},
     timeline::{Timeline, TimelineMeta},
 };
 
@@ -97,7 +97,7 @@ impl MemoryStore {
         &self,
         timeline_id: TimelineId,
         range: SeqRange,
-        max_payload_bytes: usize,
+        bounds: EventReadBounds,
     ) -> Result<Vec<Event>, CoreError> {
         let chain = self.fork_chain(timeline_id)?;
         let mut logical_seq = 0_u64;
@@ -126,8 +126,15 @@ impl MemoryStore {
                     return Ok(selected);
                 }
                 let payload_size = event.payload.as_slice().len();
-                if payload_size > max_payload_bytes {
+                if payload_size > bounds.max_payload_bytes {
                     return Err(CoreError::PayloadTooLarge { size: payload_size });
+                }
+                let event_type_size = event.event_type.as_str().len();
+                if event_type_size > bounds.max_event_type_bytes {
+                    return Err(CoreError::EventMetadataTooLarge {
+                        field: "event_type",
+                        size: event_type_size,
+                    });
                 }
                 let mut event = event.clone();
                 event.seq = Seq::from_u64(logical_seq);
@@ -240,9 +247,9 @@ impl EventStore for MemoryStore {
         &self,
         timeline: TimelineId,
         range: SeqRange,
-        max_payload_bytes: usize,
+        bounds: EventReadBounds,
     ) -> Result<Vec<Event>, CoreError> {
-        self.collect_events_in_range_bounded(timeline, range, max_payload_bytes)
+        self.collect_events_in_range_bounded(timeline, range, bounds)
     }
 
     fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
@@ -288,6 +295,16 @@ impl EventStore for MemoryStore {
 
     fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
         Ok(self.timelines.values().cloned().collect())
+    }
+
+    fn root_timeline_count_bounded(&self, maximum: usize) -> Result<usize, CoreError> {
+        let stop_after = maximum.saturating_add(1);
+        Ok(self
+            .timelines
+            .values()
+            .filter(|timeline| timeline.meta.is_root())
+            .take(stop_after)
+            .count())
     }
 
     fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
@@ -488,6 +505,67 @@ mod tests {
         assert_eq!(events[0].payload.as_slice(), b"first");
         assert_eq!(events[1].payload.as_slice(), b"second");
         assert_eq!(events[2].payload.as_slice(), b"third");
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bounded_read_rejects_inherited_event_type_before_clone() {
+        let mut store = MemoryStore::new();
+        let root = store.create_timeline("root").unwrap();
+        let oversized = EventDraft::new(
+            EntityId::new(),
+            Kind::new("x".repeat(5)),
+            CanonicalBytes::from_static(b"x"),
+        );
+        store.append(root.id(), &[oversized]).unwrap();
+        let child = store.fork(root.id(), Seq::from_u64(1), "child").unwrap();
+        let error = store
+            .read_bounded(
+                child.id(),
+                SeqRange::all(),
+                EventReadBounds {
+                    max_payload_bytes: 1,
+                    max_event_type_bytes: 4,
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CoreError::EventMetadataTooLarge {
+                field: "event_type",
+                size: 5
+            }
+        ));
+        let events = store
+            .read_bounded(
+                child.id(),
+                SeqRange::all(),
+                EventReadBounds {
+                    max_payload_bytes: 1,
+                    max_event_type_bytes: 5,
+                },
+            )
+            .unwrap();
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bounded_root_count_ignores_many_children_and_caps_at_maximum_plus_one() {
+        let mut store = MemoryStore::new();
+        let first = store.create_timeline("first").unwrap();
+        for index in 0..256 {
+            store
+                .fork(first.id(), Seq::ZERO, &format!("child-{index}"))
+                .unwrap();
+        }
+        store.create_timeline("second").unwrap();
+
+        assert_eq!(store.root_timeline_count_bounded(0).unwrap(), 1);
+        assert_eq!(store.root_timeline_count_bounded(1).unwrap(), 2);
+        assert_eq!(store.root_timeline_count_bounded(10).unwrap(), 2);
+        assert_eq!(store.root_timeline_count_bounded(usize::MAX).unwrap(), 2);
     }
 
     #[test]

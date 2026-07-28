@@ -304,6 +304,7 @@ impl IntoResponse for GatewayError {
                 StatusCode::TOO_MANY_REQUESTS
             }
             GatewayError::EventPayloadTooLarge { .. }
+            | GatewayError::EventMetadataTooLarge { .. }
             | GatewayError::EventResponseTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             GatewayError::CompatibilityReadTruncated { .. } => StatusCode::CONFLICT,
             GatewayError::Store(CoreError::TimelineNotFound(_)) => StatusCode::NOT_FOUND,
@@ -890,6 +891,12 @@ mod tests {
         let r = GatewayError::EventLimitReached { maximum: 1 }.into_response();
         assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
         let r = GatewayError::EventPayloadTooLarge { maximum: 1 }.into_response();
+        assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let r = GatewayError::EventMetadataTooLarge {
+            field: "event_type",
+            maximum: 1,
+        }
+        .into_response();
         assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
         let r = GatewayError::EventResponseTooLarge { maximum: 1 }.into_response();
         assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
