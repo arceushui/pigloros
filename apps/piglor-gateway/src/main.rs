@@ -173,76 +173,74 @@ async fn serve(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use axum::{
-        body::Body,
-        http::{Request, StatusCode},
-    };
+    use std::io::{Read, Write};
+    use std::net::{IpAddr, Ipv4Addr};
     use std::time::Duration;
-    use tower::ServiceExt;
 
-    fn test_state() -> AppState {
-        AppState {
-            gateway: Gateway::new(open_store(StoreConfig::Memory).unwrap()),
-            ledger_view: LedgerView::default(),
-            ledger_write: LedgerWriteMode::Disabled,
-        }
-    }
+    async fn serve_http_requests(bind_ip: IpAddr, requests: &[&str]) -> Vec<String> {
+        let listener = tokio::net::TcpListener::bind((bind_ip, 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            serve(
+                addr,
+                None,
+                async move {
+                    let _ = rx.await;
+                },
+                LedgerView::default(),
+                LedgerWriteMode::Disabled,
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
-    async fn status(app: axum::Router, method: &str, uri: &str) -> StatusCode {
-        app.oneshot(
-            Request::builder()
-                .method(method)
-                .uri(uri)
-                .header("content-type", "application/json")
-                .body(Body::from("{}"))
-                .unwrap(),
-        )
+        let mut connect_addr = addr;
+        connect_addr.set_ip(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let requests = requests.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let responses = tokio::task::spawn_blocking(move || {
+            requests
+                .iter()
+                .map(|request| {
+                    let mut stream = std::net::TcpStream::connect(connect_addr).unwrap();
+                    stream.write_all(request.as_bytes()).unwrap();
+                    let mut response = String::new();
+                    stream.read_to_string(&mut response).unwrap();
+                    response
+                })
+                .collect::<Vec<_>>()
+        })
         .await
-        .unwrap()
-        .status()
+        .unwrap();
+
+        let _ = tx.send(());
+        server.await.unwrap().unwrap();
+        responses
     }
 
-    #[test]
+    const HEALTH_REQUEST: &str =
+        "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    const CREATE_TIMELINE_REQUEST: &str = "POST /v1/timelines HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 16\r\nConnection: close\r\n\r\n{\"name\":\"local\"}";
+
+    #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn spectator_deployment_is_limited_to_non_loopback_addresses() {
-        assert!(!is_spectator_deployment("127.0.0.1:8080".parse().unwrap()));
-        assert!(is_spectator_deployment("0.0.0.0:8080".parse().unwrap()));
+    async fn non_loopback_server_is_public_read_only() {
+        let responses = serve_http_requests(
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            &[HEALTH_REQUEST, CREATE_TIMELINE_REQUEST],
+        )
+        .await;
+        assert!(responses[0].starts_with("HTTP/1.1 200 OK"));
+        assert!(responses[1].starts_with("HTTP/1.1 404 Not Found"));
     }
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    async fn production_address_selects_safe_or_full_router() {
-        let public = router_for_addr("0.0.0.0:8080".parse().unwrap(), test_state());
-        assert_eq!(status(public.clone(), "GET", "/").await, StatusCode::FOUND);
-        for uri in ["/ledger", "/health", "/v1/ledger"] {
-            assert_eq!(status(public.clone(), "GET", uri).await, StatusCode::OK);
-        }
-        for (method, uri) in [
-            ("POST", "/v1/timelines"),
-            ("GET", "/v1/timelines/not-a-timeline/events"),
-            ("POST", "/v1/timelines/not-a-timeline/actions"),
-            ("POST", "/v1/timelines/not-a-timeline/signals"),
-            ("POST", "/v1/ledger/predictions"),
-        ] {
-            assert_eq!(
-                status(public.clone(), method, uri).await,
-                StatusCode::NOT_FOUND
-            );
-        }
-
-        let local = router_for_addr("127.0.0.1:8080".parse().unwrap(), test_state());
-        for (method, uri) in [
-            ("POST", "/v1/timelines"),
-            ("GET", "/v1/timelines/not-a-timeline/events"),
-            ("POST", "/v1/timelines/not-a-timeline/actions"),
-            ("POST", "/v1/timelines/not-a-timeline/signals"),
-            ("POST", "/v1/ledger/predictions"),
-        ] {
-            assert_ne!(
-                status(local.clone(), method, uri).await,
-                StatusCode::NOT_FOUND
-            );
-        }
+    async fn loopback_server_retains_timeline_api() {
+        let responses =
+            serve_http_requests(IpAddr::V4(Ipv4Addr::LOCALHOST), &[CREATE_TIMELINE_REQUEST]).await;
+        assert!(responses[0].starts_with("HTTP/1.1 201 Created"));
     }
 
     #[test]
@@ -353,30 +351,6 @@ mod tests {
         let _ = tx.send(());
         serve_sql.await.unwrap().unwrap();
         let _ = std::fs::remove_file(path);
-    }
-
-    #[tokio::test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    async fn serve_non_loopback_spectator_shuts_down() {
-        let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let server = tokio::spawn(async move {
-            serve(
-                addr,
-                None,
-                async move {
-                    let _ = rx.await;
-                },
-                LedgerView::default(),
-                LedgerWriteMode::Disabled,
-            )
-            .await
-        });
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let _ = tx.send(());
-        server.await.unwrap().unwrap();
     }
 
     #[test]

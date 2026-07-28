@@ -346,7 +346,7 @@ mod tests {
         let html = String::from_utf8_lossy(&body);
         assert!(
             html.contains("<!DOCTYPE html>"),
-            "root page should return HTML: {html}"
+            "Ledger page should return HTML: {html}"
         );
     }
 
