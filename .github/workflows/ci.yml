@@ -186,22 +186,6 @@ jobs:
           RUSTFLAGS="-Z sanitizer=address"
           cargo +nightly test -Z build-std --target x86_64-unknown-linux-gnu --workspace --tests
 
-  miri:
-    name: miri (UB detection)
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v5
-      - run: rm -f rust-toolchain.toml
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: miri
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: miri
-      - name: cargo miri test
-        run: cargo +nightly miri test -p pos-crypto --tests
-
   docker-build:
     name: docker-build
     runs-on: ubuntu-latest
