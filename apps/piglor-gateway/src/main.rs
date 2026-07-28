@@ -4,11 +4,10 @@
 //! `piglor-gateway` binary — bind local HTTP/WS listener (ADR-014 / #69).
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-use piglor_gateway::{router, spectator_router, AppState, Gateway, LedgerGateway, LedgerWriteMode};
+use piglor_gateway::{router, spectator_router, AppState, Gateway, LedgerConfig, LedgerWriteMode};
 use piglor_ledger::LedgerView;
-use pos_plugin_ledger::{LedgerStore, TomlLedgerStore};
 use pos_store::{open_store, StoreConfig};
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::PathBuf};
 
 #[cfg(not(test))]
 fn handle_run_error(e: &dyn std::error::Error) -> ! {
@@ -39,7 +38,10 @@ fn run_with_args(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send
                 .map_or("127.0.0.1:8080", String::as_str)
                 .parse::<SocketAddr>()?;
             let store_path = args.get(3).map(String::as_str);
-            let (ledger_view, ledger_write) = load_ledger();
+            let (ledger_view, ledger_write) = match load_ledger() {
+                Ok(ledger) => ledger,
+                Err(error) => return Err(Box::new(error)),
+            };
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -82,28 +84,13 @@ fn router_for_addr(addr: SocketAddr, state: AppState) -> axum::Router {
     }
 }
 
-fn load_ledger() -> (LedgerView, LedgerWriteMode) {
-    let ledger_view = std::env::var("LEDGER_SOURCE")
-        .ok()
-        .filter(|p| !p.is_empty())
-        .and_then(|path| TomlLedgerStore::new(path).load(&format_utc_today()).ok())
-        .map(|ledger| LedgerView::from(&ledger))
-        .unwrap_or_default();
-    let write = if std::env::var("LEDGER_WRITE").is_ok_and(|v| v == "1") {
-        match std::env::var("LEDGER_SOURCE").ok() {
-            Some(path) if !path.is_empty() => {
-                let store = TomlLedgerStore::new(path);
-                LedgerWriteMode::Ready(LedgerGateway::new(Box::new(store)))
-            }
-            _ => {
-                eprintln!("LEDGER_WRITE=1 but LEDGER_SOURCE not set; store tier not yet available");
-                LedgerWriteMode::Unconfigured
-            }
-        }
-    } else {
-        LedgerWriteMode::Disabled
-    };
-    (ledger_view, write)
+fn load_ledger() -> Result<(LedgerView, LedgerWriteMode), pos_plugin_ledger::LedgerError> {
+    let source = std::env::var_os("LEDGER_SOURCE").map(PathBuf::from);
+    LedgerConfig::new(
+        source,
+        std::env::var("LEDGER_WRITE").unwrap_or_default() == "1",
+    )
+    .load(&format_utc_today())
 }
 
 #[cfg(not(test))]
@@ -173,6 +160,7 @@ async fn serve(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use std::ffi::{OsStr, OsString};
     use std::io::{Read, Write};
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::Duration;
@@ -223,7 +211,57 @@ mod tests {
         "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     const CREATE_TIMELINE_REQUEST: &str = "POST /v1/timelines HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 16\r\nConnection: close\r\n\r\n{\"name\":\"local\"}";
 
-    #[tokio::test]
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &OsStr) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    fn clean_ledger_environment() -> [EnvVarGuard; 2] {
+        [
+            EnvVarGuard::remove("LEDGER_SOURCE"),
+            EnvVarGuard::remove("LEDGER_WRITE"),
+        ]
+    }
+
+    fn ledger_temp_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("piglor-gw-ledger-{label}-{}", std::process::id()))
+    }
+
+    fn malformed_ledger_dir(label: &str) -> PathBuf {
+        let dir = ledger_temp_path(label);
+        let predictions = dir.join("predictions");
+        std::fs::create_dir_all(&predictions).unwrap();
+        std::fs::write(predictions.join("invalid.toml"), "not valid = [").unwrap();
+        dir
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn non_loopback_server_is_public_read_only() {
         let responses = serve_http_requests(
@@ -269,6 +307,8 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_main_serve_memory_shuts_down() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _environment = clean_ledger_environment();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
@@ -283,6 +323,8 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_main_serve_sqlite_shuts_down() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _environment = clean_ledger_environment();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
@@ -356,6 +398,8 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_main_serve_open_store_error() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _environment = clean_ledger_environment();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
@@ -375,6 +419,8 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_main_serve_bind_error() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _environment = clean_ledger_environment();
         let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = occupied.local_addr().unwrap();
         let err = run_with_args(&[
@@ -385,6 +431,23 @@ mod tests {
         .unwrap_err();
         assert!(!err.to_string().is_empty());
         drop(occupied);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn run_main_serve_invalid_ledger_returns_error() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _environment = clean_ledger_environment();
+        let dir = malformed_ledger_dir("startup");
+        let _source = EnvVarGuard::set("LEDGER_SOURCE", dir.as_os_str());
+        let error = run_with_args(&[
+            String::from("piglor-gateway"),
+            String::from("serve"),
+            String::from("127.0.0.1:0"),
+        ])
+        .unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(error.to_string().contains("TOML"));
     }
 
     #[tokio::test]
@@ -437,36 +500,80 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn load_ledger_gate_on_no_source_returns_unconfigured() {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = LOCK.lock().unwrap();
-        // Start from a clean env state.
-        std::env::remove_var("LEDGER_SOURCE");
-        std::env::set_var("LEDGER_WRITE", "1");
-        let (view, mode) = super::load_ledger();
-        std::env::remove_var("LEDGER_WRITE");
+    fn startup_without_source_marks_writes_unconfigured() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _environment = clean_ledger_environment();
+        let _write = EnvVarGuard::set("LEDGER_WRITE", OsStr::new("1"));
+        let (view, mode) = load_ledger().unwrap();
         assert!(matches!(mode, LedgerWriteMode::Unconfigured));
         assert!(view.entries.is_empty());
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn load_ledger_gate_on_with_source_returns_ready() {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = LOCK.lock().unwrap();
-        // Start from a clean env state.
-        std::env::remove_var("LEDGER_SOURCE");
-        let dir =
-            std::env::temp_dir().join(format!("piglor-gw-ledger-load-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.to_str().unwrap().to_owned();
-        std::env::set_var("LEDGER_WRITE", "1");
-        std::env::set_var("LEDGER_SOURCE", &path);
-        let (_view, mode) = super::load_ledger();
-        std::env::remove_var("LEDGER_WRITE");
-        std::env::remove_var("LEDGER_SOURCE");
+    fn startup_reads_configured_source_and_write_flag() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _environment = clean_ledger_environment();
+        let dir = ledger_temp_path("startup-ready");
+        std::fs::create_dir_all(&dir).unwrap();
+        let _source = EnvVarGuard::set("LEDGER_SOURCE", dir.as_os_str());
+        let (_, disabled) = load_ledger().unwrap();
+        assert!(matches!(disabled, LedgerWriteMode::Disabled));
+        {
+            let _write = EnvVarGuard::set("LEDGER_WRITE", OsStr::new("1"));
+            let (_, ready) = load_ledger().unwrap();
+            assert!(matches!(ready, LedgerWriteMode::Ready(_)));
+        }
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(matches!(mode, LedgerWriteMode::Ready(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn startup_rejects_explicitly_configured_empty_source() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _environment = clean_ledger_environment();
+        let _source = EnvVarGuard::set("LEDGER_SOURCE", OsStr::new(""));
+        let Err(error) = load_ledger() else {
+            panic!("an explicitly configured empty Ledger source must fail");
+        };
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn startup_rejects_configured_non_directory_source() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _environment = clean_ledger_environment();
+        let path = ledger_temp_path("startup-not-directory");
+        std::fs::write(&path, "not a directory").unwrap();
+        let _source = EnvVarGuard::set("LEDGER_SOURCE", path.as_os_str());
+        let Err(error) = load_ledger() else {
+            panic!("a configured non-directory Ledger source must fail");
+        };
+        let _ = std::fs::remove_file(path);
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn startup_preserves_non_unicode_ledger_source() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _environment = clean_ledger_environment();
+        let mut path =
+            format!("/tmp/piglor-gw-ledger-non-unicode-{}-", std::process::id()).into_bytes();
+        path.push(0xff);
+        let source = OsString::from_vec(path);
+        let _source = EnvVarGuard::set("LEDGER_SOURCE", &source);
+        let error = run_with_args(&[
+            String::from("piglor-gateway"),
+            String::from("serve"),
+            String::from("127.0.0.1:0"),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("No such file or directory"));
     }
 
     #[test]
