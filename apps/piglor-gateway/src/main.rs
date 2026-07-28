@@ -108,8 +108,7 @@ async fn shutdown_signal() {
 fn format_utc_today() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
     // days since 1970-01-01
     let days = u32::try_from(secs / 86_400).unwrap_or(0);
     let z = u64::from(days) + 719_468;
