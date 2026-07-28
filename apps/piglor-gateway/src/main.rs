@@ -4,7 +4,7 @@
 //! `piglor-gateway` binary — bind local HTTP/WS listener (ADR-014 / #69).
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-use piglor_gateway::{router, AppState, Gateway, LedgerGateway, LedgerWriteMode};
+use piglor_gateway::{router, spectator_router, AppState, Gateway, LedgerGateway, LedgerWriteMode};
 use piglor_ledger::LedgerView;
 use pos_plugin_ledger::{LedgerStore, TomlLedgerStore};
 use pos_store::{open_store, StoreConfig};
@@ -38,7 +38,6 @@ fn run_with_args(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send
                 .get(2)
                 .map_or("127.0.0.1:8080", String::as_str)
                 .parse::<SocketAddr>()?;
-            warn_if_non_loopback(addr);
             let store_path = args.get(3).map(String::as_str);
             let (ledger_view, ledger_write) = load_ledger();
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -68,11 +67,18 @@ fn run_with_args(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send
     }
 }
 
-fn warn_if_non_loopback(addr: SocketAddr) {
-    if !addr.ip().is_loopback() {
+fn is_spectator_deployment(addr: SocketAddr) -> bool {
+    !addr.ip().is_loopback()
+}
+
+fn router_for_addr(addr: SocketAddr, state: AppState) -> axum::Router {
+    if is_spectator_deployment(addr) {
         eprintln!(
-            "WARNING: binding {addr} (non-loopback) with no auth — anyone can append. Prefer 127.0.0.1 until #68."
+            "piglor-gateway serving public Prediction Ledger routes only at {addr}; Timeline and write routes require loopback until #68 authentication exists"
         );
+        spectator_router(state)
+    } else {
+        router(state)
     }
 }
 
@@ -144,11 +150,12 @@ async fn serve(
         None => StoreConfig::Memory,
     };
     let gateway = Gateway::new(open_store(config).map_err(|e| e.to_string())?);
-    let app = router(AppState {
+    let state = AppState {
         gateway,
         ledger_view,
         ledger_write,
-    });
+    };
+    let app = router_for_addr(addr, state);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| e.to_string())?;
@@ -166,13 +173,74 @@ async fn serve(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::{IpAddr, Ipv4Addr};
     use std::time::Duration;
 
-    #[test]
+    async fn serve_http_requests(bind_ip: IpAddr, requests: &[&str]) -> Vec<String> {
+        let listener = tokio::net::TcpListener::bind((bind_ip, 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            serve(
+                addr,
+                None,
+                async move {
+                    let _ = rx.await;
+                },
+                LedgerView::default(),
+                LedgerWriteMode::Disabled,
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut connect_addr = addr;
+        connect_addr.set_ip(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let requests = requests.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let responses = tokio::task::spawn_blocking(move || {
+            requests
+                .iter()
+                .map(|request| {
+                    let mut stream = std::net::TcpStream::connect(connect_addr).unwrap();
+                    stream.write_all(request.as_bytes()).unwrap();
+                    let mut response = String::new();
+                    stream.read_to_string(&mut response).unwrap();
+                    response
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap();
+
+        let _ = tx.send(());
+        server.await.unwrap().unwrap();
+        responses
+    }
+
+    const HEALTH_REQUEST: &str =
+        "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    const CREATE_TIMELINE_REQUEST: &str = "POST /v1/timelines HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 16\r\nConnection: close\r\n\r\n{\"name\":\"local\"}";
+
+    #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn warn_if_non_loopback_covers_both_arms() {
-        warn_if_non_loopback("127.0.0.1:8080".parse().unwrap());
-        warn_if_non_loopback("0.0.0.0:8080".parse().unwrap());
+    async fn non_loopback_server_is_public_read_only() {
+        let responses = serve_http_requests(
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            &[HEALTH_REQUEST, CREATE_TIMELINE_REQUEST],
+        )
+        .await;
+        assert!(responses[0].starts_with("HTTP/1.1 200 OK"));
+        assert!(responses[1].starts_with("HTTP/1.1 404 Not Found"));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn loopback_server_retains_timeline_api() {
+        let responses =
+            serve_http_requests(IpAddr::V4(Ipv4Addr::LOCALHOST), &[CREATE_TIMELINE_REQUEST]).await;
+        assert!(responses[0].starts_with("HTTP/1.1 201 Created"));
     }
 
     #[test]
