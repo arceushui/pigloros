@@ -7,10 +7,11 @@ use crate::{
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
-    response::{IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
+use piglor_ledger::{render_html, LedgerView};
 use pos_core::CoreError;
 use pos_plugin_ledger::{LedgerStore, NewPrediction};
 use serde_json::json;
@@ -60,6 +61,7 @@ pub enum LedgerWriteMode {
 #[derive(Clone)]
 pub struct AppState {
     pub gateway: Gateway,
+    pub ledger_view: LedgerView,
     pub ledger_write: LedgerWriteMode,
 }
 
@@ -70,7 +72,7 @@ pub fn router(state: AppState) -> Router {
 
 fn build_router(state: AppState, max_body_bytes: usize) -> Router {
     Router::new()
-        .route("/", get(root_redirect))
+        .route("/", get(root_page))
         .route("/health", get(health))
         .route("/v1/ledger", get(get_ledger))
         .route("/v1/ledger/predictions", post(post_ledger_prediction))
@@ -82,8 +84,9 @@ fn build_router(state: AppState, max_body_bytes: usize) -> Router {
         .with_state(state)
 }
 
-async fn root_redirect() -> impl IntoResponse {
-    Redirect::permanent("/v1/ledger")
+async fn root_page(State(state): State<AppState>) -> impl IntoResponse {
+    let html = render_html(&state.ledger_view, None);
+    Html(html)
 }
 
 async fn health() -> impl IntoResponse {
@@ -242,6 +245,7 @@ mod tests {
         let gw = Gateway::new(open_store(StoreConfig::Memory).unwrap());
         router(AppState {
             gateway: gw,
+            ledger_view: LedgerView::default(),
             ledger_write: LedgerWriteMode::Disabled,
         })
     }
@@ -251,6 +255,7 @@ mod tests {
         build_router(
             AppState {
                 gateway: gw,
+                ledger_view: LedgerView::default(),
                 ledger_write: LedgerWriteMode::Disabled,
             },
             max_body_bytes,
@@ -284,13 +289,20 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    async fn root_redirect_ok() {
+    async fn root_page_returns_html() {
         let response = test_app()
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
-        assert_eq!(response.headers()["location"], "/v1/ledger");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let html = String::from_utf8_lossy(&body);
+        assert!(
+            html.contains("<!DOCTYPE html>"),
+            "root page should return HTML: {html}"
+        );
     }
 
     #[tokio::test]
@@ -520,6 +532,7 @@ mod tests {
         };
         let app = router(AppState {
             gateway: gw,
+            ledger_view: LedgerView::default(),
             ledger_write: LedgerWriteMode::Disabled,
         });
         let (status, _) =
@@ -623,6 +636,7 @@ mod tests {
     fn test_app_with_ledger(store: Box<dyn LedgerStore + Send>) -> Router {
         router(AppState {
             gateway: Gateway::new(open_store(StoreConfig::Memory).unwrap()),
+            ledger_view: LedgerView::default(),
             ledger_write: LedgerWriteMode::Ready(LedgerGateway::new(store)),
         })
     }
@@ -646,6 +660,7 @@ mod tests {
     async fn post_ledger_prediction_gate_on_no_ledger_returns_503() {
         let app = router(AppState {
             gateway: Gateway::new(open_store(StoreConfig::Memory).unwrap()),
+            ledger_view: LedgerView::default(),
             ledger_write: LedgerWriteMode::Unconfigured,
         });
         let (status, json) = json_request(

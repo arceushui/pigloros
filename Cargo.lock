@@ -811,6 +811,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "ciborium",
+ "piglor-ledger",
  "pos-core",
  "pos-plugin-ledger",
  "pos-plugin-society",

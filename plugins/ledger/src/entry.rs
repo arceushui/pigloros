@@ -109,7 +109,7 @@ impl From<&LedgerEntry> for LedgerEntryView {
 }
 
 /// Unified JSON view of the whole ledger (headline + entries + warnings).
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct LedgerView {
     /// Folded, sorted entries.
     pub entries: Vec<LedgerEntryView>,

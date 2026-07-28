@@ -17,6 +17,7 @@ pos-store = { path = "../../crates/pos-store" }
 pos-plugin-ledger = { path = "../../plugins/ledger" }
 pos-plugin-society = { path = "../../plugins/society" }
 pos-plugin-world = { path = "../../plugins/world" }
+piglor-ledger = { path = "../piglor-ledger" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 ciborium = { workspace = true }
