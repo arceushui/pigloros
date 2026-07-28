@@ -565,39 +565,34 @@ impl SqliteStore {
         let mut remaining = bounds.max_events();
         let mut selected = Vec::new();
 
-        for (index, &(segment_id, _, segment_head)) in chain.iter().enumerate() {
-            let segment_cap = chain.get(index + 1).and_then(|(_, fork, _)| *fork);
-            if segment_cap.is_some_and(|cap| cap.as_u64() > segment_head) {
+        for (index, segment) in chain.iter().enumerate() {
+            let segment_cap = chain.get(index + 1).and_then(|next| next.fork);
+            if segment_cap.is_some_and(|cap| cap.as_u64() > segment.head) {
                 return Err(CoreError::Storage(format!(
-                    "Fork point exceeds parent Event head for timeline {segment_id}"
+                    "Fork point exceeds parent Event head for timeline {}",
+                    segment.id
                 )));
             }
-            let segment_len = segment_cap.map_or(segment_head, Seq::as_u64);
-            let segment_start = logical_offset.saturating_add(1);
-            let segment_end = logical_offset.saturating_add(segment_len);
-            let selected_start = from.max(segment_start);
-            let selected_end = to.min(segment_end);
-
-            if remaining > 0 && selected_start <= selected_end {
-                let raw_from = Seq::from_u64(selected_start - logical_offset);
-                let available = selected_end - selected_start + 1;
-                let take = usize::try_from(available)
-                    .unwrap_or(usize::MAX)
-                    .min(remaining);
+            let segment_len = segment_cap.map_or(segment.head, Seq::as_u64);
+            if let Some(plan) =
+                crate::stitch::plan_page(logical_offset, segment_len, from, to, remaining)
+            {
+                let raw_from = Seq::from_u64(plan.raw_start);
+                let take = plan.take;
                 let raw_to = Seq::from_u64(
                     raw_from
                         .as_u64()
                         .saturating_add(u64::try_from(take - 1).unwrap_or(u64::MAX)),
                 );
                 let mut events =
-                    Self::read_own_events_bounded(&tx, segment_id, raw_from, raw_to, take, bounds)?;
+                    Self::read_own_events_bounded(&tx, segment.id, raw_from, raw_to, take, bounds)?;
                 for event in &mut events {
                     event.seq = Seq::from_u64(logical_offset.saturating_add(event.seq.as_u64()));
                 }
                 selected.extend(events);
                 remaining -= take;
             }
-            logical_offset = segment_end;
+            logical_offset = logical_offset.saturating_add(segment_len);
             if remaining == 0 || logical_offset >= to {
                 break;
             }
@@ -650,8 +645,8 @@ impl SqliteStore {
         conn: &Connection,
         timeline_id: TimelineId,
         max_depth: usize,
-    ) -> Result<Vec<(TimelineId, Option<Seq>, u64)>, CoreError> {
-        let mut chain: Vec<(TimelineId, Option<Seq>, u64)> = Vec::new();
+    ) -> Result<Vec<BoundedForkSegment>, CoreError> {
+        let mut chain = Vec::new();
         let mut current = timeline_id;
         let mut depth = 0_usize;
         loop {
@@ -677,7 +672,11 @@ impl SqliteStore {
                             "timeline {current} has a negative Event head"
                         )));
                     };
-                    chain.push((current, None, head));
+                    chain.push(BoundedForkSegment {
+                        id: current,
+                        fork: None,
+                        head,
+                    });
                     break;
                 }
                 Some((Some(parent_str), fork_seq, head_seq)) => {
@@ -701,7 +700,11 @@ impl SqliteStore {
                         )));
                     };
                     let fork = Some(Seq::from_u64(fork_seq));
-                    chain.push((current, fork, head));
+                    chain.push(BoundedForkSegment {
+                        id: current,
+                        fork,
+                        head,
+                    });
                     depth = next_depth;
                     current = parse_timeline_id(&parent_str)?;
                 }
@@ -712,14 +715,22 @@ impl SqliteStore {
     }
 }
 
-type TimelineRow = (
-    String,
-    Option<String>,
-    String,
-    Option<String>,
-    Option<i64>,
-    i64,
-);
+#[derive(Debug)]
+struct BoundedForkSegment {
+    id: TimelineId,
+    fork: Option<Seq>,
+    head: u64,
+}
+
+#[derive(Debug)]
+struct TimelineRow {
+    id: String,
+    name: Option<String>,
+    mode: String,
+    parent_id: Option<String>,
+    fork_seq: Option<i64>,
+    head_seq: i64,
+}
 
 fn read_first_i64(row: &rusqlite::Row<'_>) -> rusqlite::Result<i64> {
     row.get(0)
@@ -733,14 +744,14 @@ fn sqlite_usize_or_max(value: i64) -> usize {
 }
 
 fn read_timeline_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TimelineRow> {
-    Ok((
-        row.get(0)?,
-        row.get(1)?,
-        row.get(2)?,
-        row.get(3)?,
-        row.get(4)?,
-        row.get(5)?,
-    ))
+    Ok(TimelineRow {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        mode: row.get(2)?,
+        parent_id: row.get(3)?,
+        fork_seq: row.get(4)?,
+        head_seq: row.get(5)?,
+    })
 }
 
 fn timeline_fields_to_timeline(
@@ -994,10 +1005,15 @@ impl EventStore for SqliteStore {
                 Ok(None) => break,
                 Err(e) => return Err(e),
             };
-            let (id_str, name, mode_s, parent_id, fork_seq, head_seq) =
+            let timeline_row =
                 read_timeline_row(row).map_err(|e| CoreError::Storage(e.to_string()))?;
             timelines.push(timeline_fields_to_timeline(
-                &id_str, name, &mode_s, parent_id, fork_seq, head_seq,
+                &timeline_row.id,
+                timeline_row.name,
+                &timeline_row.mode,
+                timeline_row.parent_id,
+                timeline_row.fork_seq,
+                timeline_row.head_seq,
             )?);
         }
 
@@ -1071,9 +1087,14 @@ impl EventStore for SqliteStore {
 
         match row {
             None => Ok(None),
-            Some((id_str, name, mode_s, parent_id, fork_seq, head_seq)) => Ok(Some(
-                timeline_fields_to_timeline(&id_str, name, &mode_s, parent_id, fork_seq, head_seq)?,
-            )),
+            Some(timeline_row) => Ok(Some(timeline_fields_to_timeline(
+                &timeline_row.id,
+                timeline_row.name,
+                &timeline_row.mode,
+                timeline_row.parent_id,
+                timeline_row.fork_seq,
+                timeline_row.head_seq,
+            )?)),
         }
     }
 

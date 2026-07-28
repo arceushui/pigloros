@@ -958,6 +958,7 @@ dependencies = [
  "pos-state",
  "pos-store",
  "pos-time",
+ "serde",
  "serde_json",
  "ulid",
  "ureq",

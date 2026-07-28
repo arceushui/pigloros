@@ -7,8 +7,10 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 mod http;
+mod ledger_config;
 
-pub use http::{router, spectator_router, AppState, LedgerConfig, LedgerGateway, LedgerWriteMode};
+pub use http::{router, spectator_router, AppState};
+pub use ledger_config::{LedgerConfig, LedgerGateway, LedgerWriteMode};
 
 use pos_core::{
     clock::Seq,
@@ -106,7 +108,7 @@ impl GatewayLimits {
 #[derive(Debug, PartialEq)]
 pub struct EventPage {
     pub events: Vec<Event>,
-    pub next_from_seq: Option<u64>,
+    pub next_from_seq: Option<Seq>,
 }
 
 /// JSON notice pushed on the event bus / WebSocket.
@@ -270,7 +272,9 @@ impl Gateway {
             }
             Err(error) => return Err(GatewayError::Store(error)),
         };
-        let next_from_seq = events.get(limit).map(event_seq);
+        let next_from_seq = events
+            .get(limit)
+            .map(|event| Seq::from_u64(event_seq(event)));
         events.truncate(limit);
         Ok(EventPage {
             events,
@@ -902,7 +906,7 @@ mod tests {
             .unwrap();
         assert_eq!(first.events.len(), 1);
         assert_eq!(first.events[0].seq.as_u64(), 1);
-        assert_eq!(first.next_from_seq, Some(2));
+        assert_eq!(first.next_from_seq, Some(Seq::from_u64(2)));
         let beyond_head = gateway
             .read_events_page(&child.id().to_string(), 3, 1)
             .await
@@ -1190,7 +1194,7 @@ mod tests {
         }
         let first = gateway.read_events_page(&timeline_id, 0, 1).await.unwrap();
         assert_eq!(first.events.len(), 1);
-        assert_eq!(first.next_from_seq, Some(2));
+        assert_eq!(first.next_from_seq, Some(Seq::from_u64(2)));
         let exhausted = gateway.read_events_page(&timeline_id, 2, 1).await.unwrap();
         assert_eq!(exhausted.events.len(), 1);
         assert_eq!(exhausted.next_from_seq, None);
@@ -1220,7 +1224,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(page.events.len(), MAX_EVENTS_PER_POLL);
-        assert_eq!(page.next_from_seq, Some(101));
+        assert_eq!(page.next_from_seq, Some(Seq::from_u64(101)));
         let error = gateway
             .read_events_from(&timeline.id().to_string(), 0)
             .await
@@ -1278,7 +1282,7 @@ mod tests {
                 .unwrap();
             count += page.events.len();
             match page.next_from_seq {
-                Some(next) => from_seq = next,
+                Some(next) => from_seq = next.as_u64(),
                 None => break,
             }
         }

@@ -2,7 +2,8 @@
 
 use crate::{
     ActionRequest, CreateTimelineRequest, EventPage, EventView, EventsQuery, Gateway, GatewayError,
-    SignalRequest, MAX_EVENTS_PER_POLL, MAX_EVENTS_RESPONSE_BYTES, MAX_HTTP_BODY_BYTES,
+    LedgerWriteMode, SignalRequest, MAX_EVENTS_PER_POLL, MAX_EVENTS_RESPONSE_BYTES,
+    MAX_HTTP_BODY_BYTES,
 };
 use axum::{
     extract::{DefaultBodyLimit, Path, RawQuery, State},
@@ -15,101 +16,9 @@ use axum::{
     Json, Router,
 };
 use piglor_ledger::{render_html, LedgerView};
-use pos_core::CoreError;
-use pos_plugin_ledger::{LedgerError, LedgerStore, NewPrediction, TomlLedgerStore};
+use pos_core::{clock::Seq, CoreError};
+use pos_plugin_ledger::NewPrediction;
 use serde_json::json;
-use std::{path::PathBuf, sync::Arc};
-use tokio::sync::Mutex;
-
-/// Shared handle for the mutable ledger store (curated or live tier).
-pub(crate) type SharedLedgerStore = Arc<Mutex<Box<dyn LedgerStore + Send>>>;
-
-/// Wraps a [`LedgerStore`] behind a mutex, matching the pattern of [`Gateway`].
-#[derive(Clone)]
-pub struct LedgerGateway {
-    store: SharedLedgerStore,
-}
-
-impl LedgerGateway {
-    /// Wrap a boxed [`LedgerStore`] in a shared, locked handle.
-    #[must_use]
-    pub fn new(store: Box<dyn LedgerStore + Send>) -> Self {
-        Self {
-            store: Arc::new(Mutex::new(store)),
-        }
-    }
-
-    /// Register a new prediction through the store, under lock.
-    ///
-    /// # Errors
-    /// Returns [`GatewayError::Ledger`] on store failure.
-    pub async fn register(&self, prediction: NewPrediction) -> Result<String, GatewayError> {
-        let mut guard = self.store.lock().await;
-        Ok(guard.register(prediction)?)
-    }
-}
-
-/// Write-mode state machine — replaces the `bool`+`Option` pair.
-#[derive(Clone)]
-pub enum LedgerWriteMode {
-    /// Gate off — return 403.
-    Disabled,
-    /// Gate on but no adapter plugged in — return 503.
-    Unconfigured,
-    /// Gate on with a live adapter behind a mutex.
-    Ready(LedgerGateway),
-}
-
-/// Startup configuration for the Gateway's curated Prediction Ledger source.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LedgerConfig {
-    source: Option<PathBuf>,
-    write_enabled: bool,
-}
-
-impl LedgerConfig {
-    /// Configure an optional TOML source directory and write feature gate.
-    #[must_use]
-    pub const fn new(source: Option<PathBuf>, write_enabled: bool) -> Self {
-        Self {
-            source,
-            write_enabled,
-        }
-    }
-
-    /// Load the configured Ledger view and construct its write mode.
-    ///
-    /// An unset source produces the intentional empty/default Ledger. An
-    /// explicitly configured source must exist and be a readable directory;
-    /// load errors are returned so Gateway startup fails closed.
-    ///
-    /// # Errors
-    /// Returns [`LedgerError`] when the configured source is missing,
-    /// unreadable, or contains invalid Ledger data.
-    pub fn load(self, today: &str) -> Result<(LedgerView, LedgerWriteMode), LedgerError> {
-        let Some(source) = self.source else {
-            let write_mode = if self.write_enabled {
-                LedgerWriteMode::Unconfigured
-            } else {
-                LedgerWriteMode::Disabled
-            };
-            return Ok((LedgerView::default(), write_mode));
-        };
-
-        let store = TomlLedgerStore::new(&source);
-        std::fs::read_dir(&source)
-            .map_err(LedgerError::Io)
-            .and_then(|_| store.load(today))
-            .map(|ledger| {
-                let write_mode = if self.write_enabled {
-                    LedgerWriteMode::Ready(LedgerGateway::new(Box::new(store)))
-                } else {
-                    LedgerWriteMode::Disabled
-                };
-                (LedgerView::from(&ledger), write_mode)
-            })
-    }
-}
 
 /// Shared axum state.
 #[derive(Clone)]
@@ -260,7 +169,7 @@ fn bounded_events_response(
         );
         let next_from_seq = source
             .peek()
-            .map(|next| next.seq.as_u64())
+            .map(|next| Seq::from_u64(next.seq.as_u64()))
             .or(page.next_from_seq);
         let candidate = json!({
             "events": events,
@@ -275,7 +184,7 @@ fn bounded_events_response(
             }
             return Ok(json!({
                 "events": events,
-                "next_from_seq": event_seq,
+                "next_from_seq": Seq::from_u64(event_seq),
             }));
         }
     }
@@ -368,7 +277,7 @@ impl IntoResponse for GatewayError {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::EVENT_BUS_CAPACITY;
+    use crate::{LedgerConfig, LedgerGateway, EVENT_BUS_CAPACITY};
     use axum::{
         body::Body,
         http::{Request, StatusCode},
@@ -377,7 +286,9 @@ mod tests {
         event::{CanonicalBytes, EventDraft, Kind},
         ids::{EntityId, TimelineId},
     };
+    use pos_plugin_ledger::LedgerStore;
     use pos_store::{open_store, StoreConfig};
+    use std::path::PathBuf;
     use tower::ServiceExt;
 
     fn test_app() -> Router {

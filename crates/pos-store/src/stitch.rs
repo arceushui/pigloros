@@ -6,6 +6,35 @@
 
 use pos_core::{clock::Seq, event::Event, store::SeqRange};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PagePlan {
+    pub(crate) raw_start: u64,
+    pub(crate) take: usize,
+}
+
+pub(crate) fn plan_page(
+    logical_offset: u64,
+    segment_len: u64,
+    from: u64,
+    to: u64,
+    remaining: usize,
+) -> Option<PagePlan> {
+    let segment_start = logical_offset.saturating_add(1);
+    let segment_end = logical_offset.saturating_add(segment_len);
+    let selected_start = from.max(segment_start);
+    let selected_end = to.min(segment_end);
+    if remaining == 0 || selected_start > selected_end {
+        return None;
+    }
+    let available = selected_end - selected_start + 1;
+    Some(PagePlan {
+        raw_start: selected_start - logical_offset,
+        take: usize::try_from(available)
+            .unwrap_or(usize::MAX)
+            .min(remaining),
+    })
+}
+
 /// Assign logical seqs (`1..n` in chain order) and apply `range`.
 ///
 /// `segments` must already be in root→leaf order, each segment containing only

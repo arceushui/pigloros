@@ -20,6 +20,7 @@ pos-runtime = { path = "../../crates/pos-runtime" }
 pos-state = { path = "../../crates/pos-state" }
 pos-time = { path = "../../crates/pos-time" }
 serde_json = { workspace = true }
+serde = { workspace = true }
 ciborium = { workspace = true }
 ulid = { workspace = true }
 ureq = { version = "2", default-features = false, features = ["json"] }

@@ -21,7 +21,7 @@ pub(crate) mod verify;
 /// Test support utilities shared across crate boundaries.
 pub mod test_helpers;
 
-pub use cli::{open_store, run, Source};
+pub use cli::{open_store, run, today_utc, Source};
 pub use export::{build as build_manifest, ExportManifest};
 pub use html::{render_html, render_redirect, CONTENT_SECURITY_POLICY};
 pub use json::render_json;

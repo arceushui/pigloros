@@ -145,17 +145,11 @@ impl MemoryStore {
                 )));
             }
             let segment_len = fork_cap.map_or(event_count, Seq::as_u64);
-            let segment_start = logical_offset.saturating_add(1);
-            let segment_end = logical_offset.saturating_add(segment_len);
-            let selected_start = from.max(segment_start);
-            let selected_end = to.min(segment_end);
-
-            if remaining > 0 && selected_start <= selected_end {
-                let raw_start = selected_start - logical_offset;
-                let available = selected_end - selected_start + 1;
-                let take = usize::try_from(available)
-                    .unwrap_or(usize::MAX)
-                    .min(remaining);
+            if let Some(plan) =
+                crate::stitch::plan_page(logical_offset, segment_len, from, to, remaining)
+            {
+                let raw_start = plan.raw_start;
+                let take = plan.take;
                 let start_index = usize::try_from(raw_start - 1).unwrap_or(usize::MAX);
                 let end_index = start_index.saturating_add(take);
                 let slice = &events[start_index..end_index];
@@ -187,7 +181,7 @@ impl MemoryStore {
                 }
                 remaining -= take;
             }
-            logical_offset = segment_end;
+            logical_offset = logical_offset.saturating_add(segment_len);
             if remaining == 0 || logical_offset >= to {
                 break;
             }

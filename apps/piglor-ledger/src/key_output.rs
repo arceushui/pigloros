@@ -247,47 +247,41 @@ fn create_and_persist(validated: ValidatedOutput, key: &[u8]) -> Result<(), CliE
             return Err(key_io("create", &path, source, NO_OUTPUT));
         }
     };
+    let cleanup = || cleanup_output(&path, &validated.parent);
 
     let metadata = match fault!(&path, FaultStage::InspectCreated).and_then(|()| file.metadata()) {
         Ok(metadata) => metadata,
         Err(source) => {
             drop(file);
-            let cleanup = cleanup_output(&path, &validated.parent);
-            return Err(key_io("verify created file", &path, source, cleanup));
+            return Err(key_io("verify created file", &path, source, cleanup()));
         }
     };
     let forced_insecure = fault!(&path, FaultStage::ForceInsecureMode).is_err();
     if forced_insecure || metadata.mode() & 0o077 != 0 {
         drop(file);
-        let cleanup = cleanup_output(&path, &validated.parent);
         return Err(unsafe_key(
             &path,
             format!(
                 "created file has non-owner permission bits {:04o}",
                 metadata.mode() & 0o7777
             ),
-            cleanup,
+            cleanup(),
         ));
     }
 
     if let Err(source) = fault!(&path, FaultStage::Write).and_then(|()| file.write_all(key)) {
         drop(file);
-        let cleanup = cleanup_output(&path, &validated.parent);
-        return Err(key_io("write", &path, source, cleanup));
+        return Err(key_io("write", &path, source, cleanup()));
     }
     if let Err(source) = fault!(&path, FaultStage::FileSync).and_then(|()| file.sync_all()) {
         drop(file);
-        let cleanup = cleanup_output(&path, &validated.parent);
-        return Err(key_io("synchronize file", &path, source, cleanup));
+        return Err(key_io("synchronize file", &path, source, cleanup()));
     }
     drop(file);
 
     fault!(&path, FaultStage::DirectorySync)
         .and_then(|()| validated.parent.sync_all())
-        .map_err(|source| {
-            let cleanup = cleanup_output(&path, &validated.parent);
-            key_io("synchronize containing directory", &path, source, cleanup)
-        })
+        .map_err(|source| key_io("synchronize containing directory", &path, source, cleanup()))
 }
 
 #[cfg(unix)]

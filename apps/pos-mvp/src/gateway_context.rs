@@ -3,6 +3,8 @@
 //! Polls `piglor-gateway` for timeline events: society means + AI Influence Index (#79).
 
 use crate::ai_influence::{ai_influence_from_events, AiInfluenceIndex};
+use pos_core::clock::Seq;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::Read;
 use std::time::Duration;
@@ -244,10 +246,13 @@ fn fetch_gateway_events_with_aggregate_limit(
         .redirects(0)
         .build();
     let mut events = Vec::new();
-    let mut from_seq = 0;
+    let mut from_seq = Seq::ZERO;
     let mut aggregate_bytes = 0_u64;
     loop {
-        let url = format!("{base}/v1/timelines/{encoded}/events?from_seq={from_seq}");
+        let url = format!(
+            "{base}/v1/timelines/{encoded}/events?from_seq={}",
+            from_seq.as_u64()
+        );
         let response = agent
             .get(&url)
             .call()
@@ -262,19 +267,24 @@ fn fetch_gateway_events_with_aggregate_limit(
         aggregate_bytes =
             checked_gateway_aggregate(aggregate_bytes, bytes.len() as u64, max_aggregate_bytes)?;
         let body = String::from_utf8(bytes).map_err(|e| format!("gateway body not UTF-8: {e}"))?;
-        let body: serde_json::Value =
-            serde_json::from_str(&body).map_err(|e| format!("gateway JSON parse failed: {e}"))?;
-        let page_events = body
-            .get("events")
-            .and_then(serde_json::Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        events.extend(page_events);
-        match next_gateway_cursor(&body, from_seq)? {
-            Some(next) => from_seq = next,
-            None => return Ok(events),
+        let body: GatewayEventPage = serde_json::from_str(&body)
+            .map_err(|e| format!("gateway JSON/cursor parse failed: {e}"))?;
+        let next = next_gateway_cursor(&body, from_seq)?;
+        events.extend(body.events);
+        if let Some(next) = next {
+            from_seq = next;
+        } else {
+            return Ok(events);
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct GatewayEventPage {
+    #[serde(default)]
+    events: Vec<serde_json::Value>,
+    #[serde(default)]
+    next_from_seq: Option<Seq>,
 }
 
 fn checked_gateway_aggregate(current: u64, page: u64, maximum: u64) -> Result<u64, String> {
@@ -284,18 +294,12 @@ fn checked_gateway_aggregate(current: u64, page: u64, maximum: u64) -> Result<u6
         .ok_or_else(|| format!("gateway aggregate body too large: exceeded {maximum} bytes"))
 }
 
-fn next_gateway_cursor(body: &serde_json::Value, current: u64) -> Result<Option<u64>, String> {
-    let Some(cursor) = body.get("next_from_seq") else {
-        return Ok(None);
-    };
-    if cursor.is_null() {
-        return Ok(None);
+fn next_gateway_cursor(body: &GatewayEventPage, current: Seq) -> Result<Option<Seq>, String> {
+    match body.next_from_seq {
+        None => Ok(None),
+        Some(next) if next > current => Ok(Some(next)),
+        Some(_) => Err("gateway returned invalid next_from_seq cursor".to_owned()),
     }
-    cursor
-        .as_u64()
-        .filter(|next| *next > current)
-        .map(Some)
-        .ok_or_else(|| "gateway returned invalid next_from_seq cursor".to_owned())
 }
 
 fn read_capped_body(reader: &mut dyn Read, max_bytes: u64) -> Result<Vec<u8>, String> {
@@ -719,27 +723,36 @@ mod tests {
 
     #[test]
     fn next_gateway_cursor_handles_legacy_exhaustion_and_rejects_stalls() {
+        let page = |value| serde_json::from_value::<GatewayEventPage>(value).unwrap();
         assert_eq!(
-            next_gateway_cursor(&serde_json::json!({"events": []}), 0).unwrap(),
+            next_gateway_cursor(&page(serde_json::json!({"events": []})), Seq::ZERO).unwrap(),
             None
         );
         assert_eq!(
-            next_gateway_cursor(&serde_json::json!({"events": [], "next_from_seq": null}), 0)
-                .unwrap(),
+            next_gateway_cursor(
+                &page(serde_json::json!({"events": [], "next_from_seq": null})),
+                Seq::ZERO,
+            )
+            .unwrap(),
             None
         );
         assert_eq!(
-            next_gateway_cursor(&serde_json::json!({"events": [], "next_from_seq": 101}), 0)
-                .unwrap(),
-            Some(101)
+            next_gateway_cursor(
+                &page(serde_json::json!({"events": [], "next_from_seq": 101})),
+                Seq::ZERO,
+            )
+            .unwrap(),
+            Some(Seq::from_u64(101))
         );
-        for body in [
-            serde_json::json!({"next_from_seq": 10}),
-            serde_json::json!({"next_from_seq": "11"}),
-        ] {
-            let error = next_gateway_cursor(&body, 10).unwrap_err();
-            assert!(error.contains("cursor"), "{error}");
-        }
+        assert!(next_gateway_cursor(
+            &page(serde_json::json!({"next_from_seq": 10})),
+            Seq::from_u64(10),
+        )
+        .is_err());
+        assert!(serde_json::from_value::<GatewayEventPage>(
+            serde_json::json!({"next_from_seq": "11"})
+        )
+        .is_err());
     }
 
     #[test]

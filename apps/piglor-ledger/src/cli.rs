@@ -102,7 +102,7 @@ pub fn open_store(source: &Source, key: Option<&Path>) -> Result<Box<dyn LedgerS
 ///
 /// Never panics: `duration_since(UNIX_EPOCH)` uses `unwrap_or_default`.
 #[must_use]
-fn today_utc() -> String {
+pub fn today_utc() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let dur = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -115,6 +115,7 @@ fn today_utc() -> String {
 ///
 /// Leap-year-correct proleptic Gregorian calendar; used by [`today_utc`] and
 /// unit-tested separately.
+#[must_use]
 fn days_since_epoch_to_date(mut days: u32) -> String {
     let mut year = 1970u32;
     loop {
