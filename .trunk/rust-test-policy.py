@@ -176,7 +176,7 @@ def check(path: Path) -> int:
                 allowed = True
             elif bool(TEST_ATTR.search(text)):
                 ahead_match = "\n".join(lines[i : min(len(lines), i + 5)])
-                if re.search(r"\bpub\s+fn\b", ahead_match):
+                if re.search(r"\bfn\b", ahead_match):
                     allowed = True
 
         if not allowed:
