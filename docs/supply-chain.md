@@ -15,6 +15,18 @@ rejects floating, multiline, and malformed Action and image references. The
 offline checker validates reference syntax; it cannot prove that a 40-hex
 Action revision exists or is a commit in the upstream repository.
 
+Action references must use a normal, single-line YAML `uses:` key. Compact or
+flow mappings, explicit YAML keys, and folded/literal/multiline values are
+rejected so line-oriented validation cannot be bypassed. A local `./path`
+reference must stay inside the repository and resolve to one of:
+
+- a reusable workflow under `.github/workflows`;
+- a directory containing exactly one `action.yml` or `action.yaml`.
+
+Local Action metadata is checked recursively wherever it lives in the
+repository. Missing metadata, ambiguous metadata, references outside the
+repository, and local-reference cycles fail the policy check.
+
 ## Updating a pin intentionally
 
 Use a reviewed dependency update rather than editing a tag in place.
