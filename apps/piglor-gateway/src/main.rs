@@ -105,17 +105,16 @@ async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn format_utc_today() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock set before Unix epoch")
-        .as_secs();
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     // days since 1970-01-01
-    let days = u32::try_from(secs / 86_400).expect("overflow");
+    let days = u32::try_from(secs / 86_400).unwrap_or(0);
     let z = u64::from(days) + 719_468;
     let era = z / 146_097;
-    let doe = u64::from(u32::try_from(z - era * 146_097).expect("overflow"));
+    let doe = u64::from(u32::try_from(z - era * 146_097).unwrap_or(0));
     let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);

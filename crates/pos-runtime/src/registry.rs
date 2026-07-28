@@ -229,7 +229,10 @@ impl PluginRegistry {
                             }
                         }
                     }
-                    let output = driver.step(store, timeline)?;
+                    let output = match driver.step(store, timeline) {
+                        Ok(o) => o,
+                        Err(e) => return Err(e),
+                    };
                     entry.last_tick = Some(now_ns);
                     all_drafts.extend(output.drafts);
                 }
