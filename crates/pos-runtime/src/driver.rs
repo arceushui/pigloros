@@ -176,6 +176,28 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn default_subscriptions_is_empty() {
+        let d = TickDriver {
+            entity: EntityId::new(),
+            ticks: 0,
+        };
+        assert!(d.subscriptions().is_empty());
+        let idle = IdleDriver;
+        assert!(idle.subscriptions().is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn default_receive_observations_is_noop() {
+        let mut d = TickDriver {
+            entity: EntityId::new(),
+            ticks: 0,
+        };
+        d.receive_observations(&[]);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_name() {
         let d = TickDriver {
             entity: EntityId::new(),

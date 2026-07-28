@@ -212,23 +212,20 @@ impl PluginRegistry {
                     if !subscriptions.is_empty() {
                         use pos_core::store::SeqRange;
                         let from_seq = entry.last_obs_seq.map_or(0, |s| s + 1);
-                        match store.read(
+                        if let Ok(events) = store.read(
                             timeline,
                             SeqRange::from_seq(pos_core::clock::Seq::from_u64(from_seq)),
                         ) {
-                            Ok(events) => {
-                                let matching: Vec<_> = events
-                                    .iter()
-                                    .filter(|e| subscriptions.iter().any(|k| *k == e.event_type))
-                                    .collect();
-                                if !matching.is_empty() {
-                                    driver.receive_observations(&matching);
-                                }
-                                if let Some(last) = events.last() {
-                                    entry.last_obs_seq = Some(last.seq.as_u64());
-                                }
+                            let matching: Vec<_> = events
+                                .iter()
+                                .filter(|e| subscriptions.contains(&e.event_type))
+                                .collect();
+                            if !matching.is_empty() {
+                                driver.receive_observations(&matching);
                             }
-                            Err(_) => {}
+                            if let Some(last) = events.last() {
+                                entry.last_obs_seq = Some(last.seq.as_u64());
+                            }
                         }
                     }
                     let output = driver.step(store, timeline)?;
