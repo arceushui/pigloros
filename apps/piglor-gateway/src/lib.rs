@@ -44,19 +44,29 @@ pub struct LedgerEntryView {
 /// Maximum JSON request body size for HTTP handlers (1 MiB).
 pub const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024;
 
+/// Maximum canonical payload accepted for one Gateway-authored Event (256 KiB).
+pub const MAX_EVENT_PAYLOAD_BYTES: usize = 256 * 1024;
+
+/// Maximum serialized JSON size for one Event polling response (1 MiB).
+pub const MAX_EVENTS_RESPONSE_BYTES: usize = 1024 * 1024;
+
 /// Maximum number of Timeline events returned by one poll.
 pub const MAX_EVENTS_PER_POLL: usize = 100;
 
 /// Maximum number of root Timelines managed by one local Gateway process.
 pub const MAX_TIMELINES: usize = 64;
 
-/// Maximum number of events accepted for one Timeline by one local Gateway process.
+/// Maximum number of owned events accepted for one Timeline by one Gateway process.
 pub const MAX_EVENTS_PER_TIMELINE: u64 = 10_000;
 
 /// Default broadcast channel capacity for live event fan-out.
 pub const EVENT_BUS_CAPACITY: usize = 256;
 
-/// Shared gateway handle (async store mutex + live event bus).
+/// Shared Gateway handle (async store mutex + live Event bus).
+///
+/// The supported local-first write boundary is one `Gateway` instance per store:
+/// its mutex makes each owned-Event ceiling check and append one critical section.
+/// Concurrent mutation through another process is outside this contract.
 #[derive(Clone)]
 pub struct Gateway {
     store: Arc<Mutex<Box<dyn EventStore>>>,
@@ -66,13 +76,13 @@ pub struct Gateway {
 
 /// Resource bounds applied by the local-first Gateway process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct GatewayLimits {
+struct GatewayLimits {
     max_timelines: usize,
     max_events_per_timeline: u64,
 }
 
 impl GatewayLimits {
-    pub const LOCAL_DEFAULT: Self = Self {
+    const LOCAL_DEFAULT: Self = Self {
         max_timelines: MAX_TIMELINES,
         max_events_per_timeline: MAX_EVENTS_PER_TIMELINE,
     };
@@ -80,9 +90,9 @@ impl GatewayLimits {
 
 /// A bounded page of Timeline events.
 #[derive(Debug, PartialEq)]
-pub struct EventPage {
-    pub events: Vec<Event>,
-    pub next_from_seq: Option<u64>,
+pub(crate) struct EventPage {
+    pub(crate) events: Vec<Event>,
+    pub(crate) next_from_seq: Option<u64>,
 }
 
 /// JSON notice pushed on the event bus / WebSocket.
@@ -113,6 +123,15 @@ pub enum GatewayError {
     /// The Timeline has reached its event bound.
     #[error("event limit of {maximum} reached")]
     EventLimitReached { maximum: u64 },
+    /// A Gateway-authored Event payload exceeds the retrievable size budget.
+    #[error("event payload exceeds maximum of {maximum} bytes")]
+    EventPayloadTooLarge { maximum: usize },
+    /// Malformed event polling query.
+    #[error("invalid events query: {0}")]
+    InvalidEventsQuery(String),
+    /// A single stored Event cannot fit in a bounded response.
+    #[error("event response exceeds maximum of {maximum} bytes")]
+    EventResponseTooLarge { maximum: usize },
     /// Underlying store failure.
     #[error(transparent)]
     Store(#[from] CoreError),
@@ -142,19 +161,26 @@ impl Gateway {
     /// Subscribe to live append notices (WebSocket / tests).
     ///
     /// Slow subscribers can see [`broadcast::error::RecvError::Lagged`]; resync via
-    /// [`Self::read_events_from`] or HTTP poll — the store is authoritative.
+    /// the bounded HTTP poll — the store is authoritative.
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<EventNotice> {
         self.bus.subscribe()
     }
 
-    /// Create a root timeline.
+    /// Create a root Timeline.
+    ///
+    /// Forks and imported child Timelines do not consume the root-Timeline ceiling.
     ///
     /// # Errors
     /// Returns [`GatewayError::Store`] on backend failure.
     pub async fn create_timeline(&self, name: &str) -> Result<Timeline, GatewayError> {
         let mut guard = self.store.lock().await;
-        if guard.list_timelines()?.len() >= self.limits.max_timelines {
+        let root_count = guard
+            .list_timelines()?
+            .into_iter()
+            .filter(|timeline| timeline.meta.is_root())
+            .count();
+        if root_count >= self.limits.max_timelines {
             return Err(GatewayError::TimelineLimitReached {
                 maximum: self.limits.max_timelines,
             });
@@ -162,29 +188,15 @@ impl Gateway {
         Ok(guard.create_timeline(name)?)
     }
 
-    /// Poll events on a timeline starting at `from_seq` (inclusive).
-    ///
-    /// # Errors
-    /// Returns [`GatewayError::InvalidId`] or [`GatewayError::Store`].
-    pub async fn read_events_from(
-        &self,
-        timeline_id: &str,
-        from_seq: u64,
-    ) -> Result<Vec<Event>, GatewayError> {
-        Ok(self
-            .read_events_page(timeline_id, from_seq, MAX_EVENTS_PER_POLL)
-            .await?
-            .events)
-    }
-
     /// Poll one bounded page of Timeline events, starting at `from_seq` (inclusive).
     ///
-    /// `next_from_seq` is the exclusive cursor after the final returned event.
+    /// The store is read for `limit + 1` Events. `next_from_seq` is `None` when
+    /// exhausted; otherwise it is the inclusive sequence of the first omitted Event.
     ///
     /// # Errors
     /// Returns [`GatewayError::InvalidId`], [`GatewayError::InvalidPageLimit`], or
     /// [`GatewayError::Store`].
-    pub async fn read_events_page(
+    pub(crate) async fn read_events_page(
         &self,
         timeline_id: &str,
         from_seq: u64,
@@ -197,21 +209,22 @@ impl Gateway {
         }
         let id = parse_timeline_id(timeline_id)?;
         let first_seq = from_seq.max(1);
-        let last_seq = first_seq.saturating_add((limit - 1) as u64);
+        let last_seq = first_seq.saturating_add(limit as u64);
         let range = SeqRange {
             from: Seq::from_u64(first_seq),
             to: Some(Seq::from_u64(last_seq)),
         };
         let guard = self.store.lock().await;
-        let events = guard.read(id, range)?;
-        let next_from_seq = events.last().map(next_from_event);
+        let mut events = guard.read(id, range)?;
+        let next_from_seq = events.get(limit).map(event_seq);
+        events.truncate(limit);
         Ok(EventPage {
             events,
             next_from_seq,
         })
     }
 
-    /// Append one `world.action` draft. `payload` is arbitrary JSON → CBOR.
+    /// Append one `world.action` draft. `payload` is bounded JSON → CBOR.
     ///
     /// # Errors
     /// Returns store / id / unsupported-type errors.
@@ -249,11 +262,18 @@ impl Gateway {
         self.append_draft(timeline, draft).await
     }
 
+    /// The owned-Event ceiling uses this Timeline's store head. Logical Events
+    /// inherited by a Fork are readable but do not consume the Fork's ceiling.
     async fn append_draft(
         &self,
         timeline: TimelineId,
         draft: EventDraft,
     ) -> Result<Event, GatewayError> {
+        if draft.payload.as_slice().len() > MAX_EVENT_PAYLOAD_BYTES {
+            return Err(GatewayError::EventPayloadTooLarge {
+                maximum: MAX_EVENT_PAYLOAD_BYTES,
+            });
+        }
         // Release the store lock before bus fan-out so future WS handlers can
         // re-enter the store without deadlocking on the same task.
         let event = {
@@ -307,8 +327,8 @@ impl Gateway {
     }
 }
 
-fn next_from_event(event: &Event) -> u64 {
-    event.seq.as_u64().saturating_add(1)
+fn event_seq(event: &Event) -> u64 {
+    event.seq.as_u64()
 }
 
 fn parse_timeline_id(s: &str) -> Result<TimelineId, GatewayError> {
@@ -371,17 +391,20 @@ impl SignalRequest {
     }
 }
 
-/// Query for `GET /v1/timelines/:id/events`.
-#[derive(Debug, Deserialize)]
+/// Validated query for `GET /v1/timelines/:id/events`.
+#[derive(Debug, PartialEq, Eq)]
 pub struct EventsQuery {
-    #[serde(default)]
     pub from_seq: u64,
-    #[serde(default = "default_events_limit")]
     pub limit: usize,
 }
 
-fn default_events_limit() -> usize {
-    MAX_EVENTS_PER_POLL
+impl Default for EventsQuery {
+    fn default() -> Self {
+        Self {
+            from_seq: 0,
+            limit: MAX_EVENTS_PER_POLL,
+        }
+    }
 }
 
 /// JSON view of a committed event.
@@ -546,9 +569,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(event.event_type.as_str(), EVENT_TYPE_ACTION);
-        let events = gw.read_events_from(&tl.id().to_string(), 0).await.unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].id, event.id);
+        let page = gw
+            .read_events_page(&tl.id().to_string(), 0, MAX_EVENTS_PER_POLL)
+            .await
+            .unwrap();
+        assert_eq!(page.events.len(), 1);
+        assert_eq!(page.events[0].id, event.id);
+        assert_eq!(page.next_from_seq, None);
     }
 
     #[tokio::test]
@@ -604,6 +631,144 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn root_limit_excludes_forks_and_imported_children() {
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let root = store.create_timeline("root").unwrap();
+        store.fork(root.id(), Seq::ZERO, "fork").unwrap();
+        let imported_child = TimelineMeta::forked_from(root.id(), Seq::ZERO, "imported-child");
+        store.create_timeline_with_meta(imported_child).unwrap();
+
+        let gateway = Gateway::with_limits(
+            store,
+            GatewayLimits {
+                max_timelines: 2,
+                max_events_per_timeline: 1,
+            },
+        );
+        gateway.create_timeline("second-root").await.unwrap();
+        let error = gateway.create_timeline("third-root").await.unwrap_err();
+        assert!(matches!(
+            error,
+            GatewayError::TimelineLimitReached { maximum: 2 }
+        ));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn child_event_limit_counts_owned_not_inherited_events() {
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let root = store.create_timeline("root").unwrap();
+        let root_draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new(EVENT_TYPE_ACTION),
+            json_to_cbor(&serde_json::json!({})),
+        );
+        store.append(root.id(), &[root_draft]).unwrap();
+        let child = store.fork(root.id(), Seq::from_u64(1), "child").unwrap();
+        let gateway = Gateway::with_limits(
+            store,
+            GatewayLimits {
+                max_timelines: 1,
+                max_events_per_timeline: 1,
+            },
+        );
+        let child_id = child.id().to_string();
+        let entity_id = EntityId::new().to_string();
+        gateway
+            .append_action(
+                &child_id,
+                &entity_id,
+                EVENT_TYPE_ACTION,
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        let error = gateway
+            .append_action(
+                &child_id,
+                &entity_id,
+                EVENT_TYPE_ACTION,
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            GatewayError::EventLimitReached { maximum: 1 }
+        ));
+        let page = gateway
+            .read_events_page(&child_id, 0, MAX_EVENTS_PER_POLL)
+            .await
+            .unwrap();
+        assert_eq!(page.events.len(), 2);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn sqlite_gateway_serializes_concurrent_limit_checks_and_appends() {
+        let gateway = Gateway::with_limits(
+            open_store(StoreConfig::Sqlite {
+                path: ":memory:".to_owned(),
+            })
+            .unwrap(),
+            GatewayLimits {
+                max_timelines: 1,
+                max_events_per_timeline: 1,
+            },
+        );
+        let timeline = gateway.create_timeline("sqlite").await.unwrap();
+        let timeline_id = timeline.id().to_string();
+        let entity_id = EntityId::new().to_string();
+        let first = gateway.clone();
+        let second = gateway.clone();
+        let payload_a = serde_json::json!({"writer": "a"});
+        let payload_b = serde_json::json!({"writer": "b"});
+        let (a, b) = tokio::join!(
+            first.append_action(&timeline_id, &entity_id, EVENT_TYPE_ACTION, &payload_a,),
+            second.append_action(&timeline_id, &entity_id, EVENT_TYPE_ACTION, &payload_b,)
+        );
+        assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+        let rejected = if let Err(error) = a {
+            error
+        } else {
+            b.unwrap_err()
+        };
+        assert!(matches!(
+            rejected,
+            GatewayError::EventLimitReached { maximum: 1 }
+        ));
+        let page = gateway
+            .read_events_page(&timeline_id, 0, MAX_EVENTS_PER_POLL)
+            .await
+            .unwrap();
+        assert_eq!(page.events.len(), 1);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn gateway_rejects_payloads_that_cannot_fit_bounded_responses() {
+        let gateway = memory_gw();
+        let timeline = gateway.create_timeline("payload").await.unwrap();
+        let payload = serde_json::json!({"data": "x".repeat(MAX_EVENT_PAYLOAD_BYTES)});
+        let error = gateway
+            .append_action(
+                &timeline.id().to_string(),
+                &EntityId::new().to_string(),
+                EVENT_TYPE_ACTION,
+                &payload,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            GatewayError::EventPayloadTooLarge {
+                maximum: MAX_EVENT_PAYLOAD_BYTES
+            }
+        ));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn event_page_rejects_zero_limit() {
         let gw = memory_gw();
         let timeline = gw.create_timeline("zero").await.unwrap();
@@ -630,6 +795,32 @@ mod tests {
             .unwrap();
         assert!(page.events.is_empty());
         assert_eq!(page.next_from_seq, None);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn event_page_cursor_is_first_omitted_sequence_and_none_at_exhaustion() {
+        let gateway = memory_gw();
+        let timeline = gateway.create_timeline("cursor").await.unwrap();
+        let timeline_id = timeline.id().to_string();
+        let entity_id = EntityId::new().to_string();
+        for value in 0..2 {
+            gateway
+                .append_action(
+                    &timeline_id,
+                    &entity_id,
+                    EVENT_TYPE_ACTION,
+                    &serde_json::json!({ "value": value }),
+                )
+                .await
+                .unwrap();
+        }
+        let first = gateway.read_events_page(&timeline_id, 0, 1).await.unwrap();
+        assert_eq!(first.events.len(), 1);
+        assert_eq!(first.next_from_seq, Some(2));
+        let exhausted = gateway.read_events_page(&timeline_id, 2, 1).await.unwrap();
+        assert_eq!(exhausted.events.len(), 1);
+        assert_eq!(exhausted.next_from_seq, None);
     }
 
     #[tokio::test]
@@ -674,7 +865,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn invalid_ids_error() {
         let gw = memory_gw();
-        let err = gw.read_events_from("not-a-ulid", 0).await.unwrap_err();
+        let err = gw.read_events_page("not-a-ulid", 0, 1).await.unwrap_err();
         assert!(matches!(err, GatewayError::InvalidId(_)));
         let err = gw
             .append_action(
@@ -818,7 +1009,7 @@ mod tests {
             limits: GatewayLimits::LOCAL_DEFAULT,
         };
         let err = fail_read
-            .read_events_from(&TimelineId::new().to_string(), 0)
+            .read_events_page(&TimelineId::new().to_string(), 0, 1)
             .await
             .unwrap_err();
         assert!(matches!(err, GatewayError::Store(_)));

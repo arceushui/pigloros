@@ -1,11 +1,12 @@
 //! Axum HTTP surface for [`crate::Gateway`] (WebSocket stream deferred — HTTP poll is MVP).
 
 use crate::{
-    ActionRequest, CreateTimelineRequest, EventView, EventsQuery, Gateway, GatewayError,
-    LedgerEntryView, SignalRequest, MAX_HTTP_BODY_BYTES,
+    ActionRequest, CreateTimelineRequest, EventPage, EventView, EventsQuery, Gateway, GatewayError,
+    LedgerEntryView, SignalRequest, MAX_EVENTS_PER_POLL, MAX_EVENTS_RESPONSE_BYTES,
+    MAX_HTTP_BODY_BYTES,
 };
 use axum::{
-    extract::{DefaultBodyLimit, Path, Query, State},
+    extract::{DefaultBodyLimit, Path, RawQuery, State},
     http::StatusCode,
     response::{Html, IntoResponse, Response},
     routing::{get, post},
@@ -157,17 +158,97 @@ async fn create_timeline(
 async fn list_events(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Query(q): Query<EventsQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<impl IntoResponse, GatewayError> {
+    let q = parse_events_query(raw_query.as_deref())?;
     let page = state
         .gateway
         .read_events_page(&id, q.from_seq, q.limit)
         .await?;
-    let views: Vec<EventView> = page.events.iter().map(EventView::from).collect();
-    Ok(Json(json!({
-        "events": views,
+    Ok(Json(bounded_events_response(
+        page,
+        MAX_EVENTS_RESPONSE_BYTES,
+    )?))
+}
+
+fn parse_events_query(raw_query: Option<&str>) -> Result<EventsQuery, GatewayError> {
+    let Some(raw_query) = raw_query.filter(|query| !query.is_empty()) else {
+        return Ok(EventsQuery::default());
+    };
+    let mut query = EventsQuery::default();
+    let mut saw_from_seq = false;
+    let mut saw_limit = false;
+    for field in raw_query.split('&') {
+        let Some((name, value)) = field.split_once('=') else {
+            return Err(GatewayError::InvalidEventsQuery(field.to_owned()));
+        };
+        match name {
+            "from_seq" if !saw_from_seq => {
+                query.from_seq = value
+                    .parse()
+                    .map_err(|_| GatewayError::InvalidEventsQuery(field.to_owned()))?;
+                saw_from_seq = true;
+            }
+            "limit" if !saw_limit => {
+                query.limit = value
+                    .parse()
+                    .map_err(|_| GatewayError::InvalidEventsQuery(field.to_owned()))?;
+                saw_limit = true;
+            }
+            _ => return Err(GatewayError::InvalidEventsQuery(field.to_owned())),
+        }
+    }
+    if query.limit == 0 || query.limit > MAX_EVENTS_PER_POLL {
+        return Err(GatewayError::InvalidPageLimit {
+            maximum: MAX_EVENTS_PER_POLL,
+        });
+    }
+    Ok(query)
+}
+
+fn bounded_events_response(
+    page: EventPage,
+    maximum_bytes: usize,
+) -> Result<serde_json::Value, GatewayError> {
+    let mut events = Vec::with_capacity(page.events.len());
+    let mut source = page.events.into_iter().peekable();
+    while let Some(event) = source.next() {
+        let event_seq = event.seq.as_u64();
+        events.push(
+            serde_json::to_value(EventView::from(&event))
+                .expect("EventView serialization is infallible"),
+        );
+        let next_from_seq = source
+            .peek()
+            .map(|next| next.seq.as_u64())
+            .or(page.next_from_seq);
+        let candidate = json!({
+            "events": events,
+            "next_from_seq": next_from_seq,
+        });
+        if serialized_len(&candidate) > maximum_bytes {
+            events.pop();
+            if events.is_empty() {
+                return Err(GatewayError::EventResponseTooLarge {
+                    maximum: maximum_bytes,
+                });
+            }
+            return Ok(json!({
+                "events": events,
+                "next_from_seq": event_seq,
+            }));
+        }
+    }
+    Ok(json!({
+        "events": events,
         "next_from_seq": page.next_from_seq,
-    })))
+    }))
+}
+
+fn serialized_len(value: &serde_json::Value) -> usize {
+    serde_json::to_vec(value)
+        .expect("JSON Value serialization is infallible")
+        .len()
 }
 
 async fn post_action(
@@ -217,10 +298,13 @@ impl IntoResponse for GatewayError {
         let status = match &self {
             GatewayError::InvalidId(_)
             | GatewayError::UnsupportedAction(_)
-            | GatewayError::InvalidPageLimit { .. } => StatusCode::BAD_REQUEST,
+            | GatewayError::InvalidPageLimit { .. }
+            | GatewayError::InvalidEventsQuery(_) => StatusCode::BAD_REQUEST,
             GatewayError::TimelineLimitReached { .. } | GatewayError::EventLimitReached { .. } => {
                 StatusCode::TOO_MANY_REQUESTS
             }
+            GatewayError::EventPayloadTooLarge { .. }
+            | GatewayError::EventResponseTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             GatewayError::Store(CoreError::TimelineNotFound(_)) => StatusCode::NOT_FOUND,
             GatewayError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
             GatewayError::LedgerWriteDisabled => StatusCode::FORBIDDEN,
@@ -246,7 +330,10 @@ mod tests {
         body::Body,
         http::{Request, StatusCode},
     };
-    use pos_core::ids::{EntityId, TimelineId};
+    use pos_core::{
+        event::{CanonicalBytes, EventDraft, Kind},
+        ids::{EntityId, TimelineId},
+    };
     use pos_store::{open_store, StoreConfig};
     use tower::ServiceExt;
 
@@ -369,7 +456,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(listed["events"].as_array().unwrap().len(), 1);
         assert_eq!(listed["events"][0]["payload"]["dx"], 1);
-        assert_eq!(listed["next_from_seq"], 2);
+        assert!(listed["next_from_seq"].is_null());
     }
 
     #[tokio::test]
@@ -420,7 +507,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(second["events"].as_array().unwrap().len(), 1);
         assert_eq!(second["events"][0]["seq"], 3);
-        assert_eq!(second["next_from_seq"], 4);
+        assert!(second["next_from_seq"].is_null());
 
         let (status, _) = json_request(
             app,
@@ -442,6 +529,100 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn malformed_event_queries_return_json_bad_request_envelopes() {
+        let id = TimelineId::new();
+        for query in [
+            "from_seq=-1",
+            "from_seq=18446744073709551616",
+            "limit=-1",
+            "limit=18446744073709551616",
+            "limit=abc",
+            "from_seq",
+            "from_seq=0&from_seq=1",
+            "unknown=1",
+        ] {
+            let (status, body) = json_request(
+                test_app(),
+                "GET",
+                &format!("/v1/timelines/{id}/events?{query}"),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+            assert!(
+                body["error"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("query")),
+                "{query}: {body}"
+            );
+        }
+    }
+
+    fn app_with_preloaded_payloads(payload_lengths: &[usize]) -> (Router, String) {
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let timeline = store.create_timeline("shared-writer").unwrap();
+        let drafts: Vec<EventDraft> = payload_lengths
+            .iter()
+            .map(|length| {
+                EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("shared.event"),
+                    CanonicalBytes::from_vec(vec![0; *length]),
+                )
+            })
+            .collect();
+        store.append(timeline.id(), &drafts).unwrap();
+        let app = router(AppState {
+            gateway: Gateway::new(store),
+            ledger_view: LedgerView::default(),
+            ledger_write: LedgerWriteMode::Disabled,
+        });
+        (app, timeline.id().to_string())
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn response_byte_budget_paginates_events_from_shared_writers() {
+        let (app, id) = app_with_preloaded_payloads(&[400 * 1024, 400 * 1024]);
+        let (status, first) = json_request(
+            app.clone(),
+            "GET",
+            &format!("/v1/timelines/{id}/events"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first["events"].as_array().unwrap().len(), 1);
+        assert_eq!(first["next_from_seq"], 2);
+        assert!(serialized_len(&first) <= MAX_EVENTS_RESPONSE_BYTES);
+
+        let (status, exhausted) = json_request(
+            app,
+            "GET",
+            &format!("/v1/timelines/{id}/events?from_seq=2"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(exhausted["events"].as_array().unwrap().len(), 1);
+        assert!(exhausted["next_from_seq"].is_null());
+        assert!(serialized_len(&exhausted) <= MAX_EVENTS_RESPONSE_BYTES);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn single_shared_event_over_response_budget_returns_json_413() {
+        let (app, id) = app_with_preloaded_payloads(&[600 * 1024]);
+        let (status, body) =
+            json_request(app, "GET", &format!("/v1/timelines/{id}/events"), None).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(body["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("response")));
     }
 
     #[tokio::test]
@@ -677,10 +858,16 @@ mod tests {
         }
         .into_response();
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        let r = GatewayError::InvalidEventsQuery("bad".into()).into_response();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
         let r = GatewayError::TimelineLimitReached { maximum: 1 }.into_response();
         assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
         let r = GatewayError::EventLimitReached { maximum: 1 }.into_response();
         assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        let r = GatewayError::EventPayloadTooLarge { maximum: 1 }.into_response();
+        assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let r = GatewayError::EventResponseTooLarge { maximum: 1 }.into_response();
+        assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
         let r = GatewayError::Store(CoreError::Storage("boom".into())).into_response();
         assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let r = GatewayError::LedgerWriteDisabled.into_response();
