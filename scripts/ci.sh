@@ -13,6 +13,10 @@ else
   bash "$ROOT/scripts/check-test-policy.sh"
 fi
 
+echo "==> pinned dependency policy"
+bash "$ROOT/scripts/check-pinned-dependencies.sh"
+bash "$ROOT/scripts/test-check-pinned-dependencies.sh"
+
 echo "==> cargo deny (dependency policy)"
 if command -v cargo-deny >/dev/null 2>&1; then
   cargo deny check
