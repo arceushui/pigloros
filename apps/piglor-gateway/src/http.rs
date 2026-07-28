@@ -159,9 +159,15 @@ async fn list_events(
     Path(id): Path<String>,
     Query(q): Query<EventsQuery>,
 ) -> Result<impl IntoResponse, GatewayError> {
-    let events = state.gateway.read_events_from(&id, q.from_seq).await?;
-    let views: Vec<EventView> = events.iter().map(EventView::from).collect();
-    Ok(Json(json!({ "events": views })))
+    let page = state
+        .gateway
+        .read_events_page(&id, q.from_seq, q.limit)
+        .await?;
+    let views: Vec<EventView> = page.events.iter().map(EventView::from).collect();
+    Ok(Json(json!({
+        "events": views,
+        "next_from_seq": page.next_from_seq,
+    })))
 }
 
 async fn post_action(
@@ -209,8 +215,11 @@ async fn post_ledger_prediction(
 impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
         let status = match &self {
-            GatewayError::InvalidId(_) | GatewayError::UnsupportedAction(_) => {
-                StatusCode::BAD_REQUEST
+            GatewayError::InvalidId(_)
+            | GatewayError::UnsupportedAction(_)
+            | GatewayError::InvalidPageLimit { .. } => StatusCode::BAD_REQUEST,
+            GatewayError::TimelineLimitReached { .. } | GatewayError::EventLimitReached { .. } => {
+                StatusCode::TOO_MANY_REQUESTS
             }
             GatewayError::Store(CoreError::TimelineNotFound(_)) => StatusCode::NOT_FOUND,
             GatewayError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -360,6 +369,79 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(listed["events"].as_array().unwrap().len(), 1);
         assert_eq!(listed["events"][0]["payload"]["dx"], 1);
+        assert_eq!(listed["next_from_seq"], 2);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn poll_is_paginated_and_rejects_pages_larger_than_the_maximum() {
+        let app = test_app();
+        let (status, created) = json_request(
+            app.clone(),
+            "POST",
+            "/v1/timelines",
+            Some(json!({"name": "paged"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap();
+        let entity = EntityId::new().to_string();
+        for dx in 0..3 {
+            let (status, _) = json_request(
+                app.clone(),
+                "POST",
+                &format!("/v1/timelines/{id}/actions"),
+                Some(json!({"entity_id": entity, "payload": {"dx": dx}})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED);
+        }
+
+        let (status, first) = json_request(
+            app.clone(),
+            "GET",
+            &format!("/v1/timelines/{id}/events?from_seq=0&limit=2"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first["events"].as_array().unwrap().len(), 2);
+        assert_eq!(first["events"][0]["seq"], 1);
+        assert_eq!(first["events"][1]["seq"], 2);
+        assert_eq!(first["next_from_seq"], 3);
+
+        let (status, second) = json_request(
+            app.clone(),
+            "GET",
+            &format!("/v1/timelines/{id}/events?from_seq=3&limit=2"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(second["events"].as_array().unwrap().len(), 1);
+        assert_eq!(second["events"][0]["seq"], 3);
+        assert_eq!(second["next_from_seq"], 4);
+
+        let (status, _) = json_request(
+            app,
+            "GET",
+            &format!(
+                "/v1/timelines/{id}/events?from_seq=0&limit={}",
+                crate::MAX_EVENTS_PER_POLL + 1
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, _) = json_request(
+            test_app(),
+            "GET",
+            &format!("/v1/timelines/{id}/events?limit=0"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -529,6 +611,7 @@ mod tests {
         let gw = Gateway {
             store: Arc::new(Mutex::new(Box::new(FailCreate))),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
+            limits: crate::GatewayLimits::LOCAL_DEFAULT,
         };
         let app = router(AppState {
             gateway: gw,
@@ -589,6 +672,15 @@ mod tests {
         use axum::response::IntoResponse;
         let r = GatewayError::InvalidId("x".into()).into_response();
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        let r = GatewayError::InvalidPageLimit {
+            maximum: crate::MAX_EVENTS_PER_POLL,
+        }
+        .into_response();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        let r = GatewayError::TimelineLimitReached { maximum: 1 }.into_response();
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        let r = GatewayError::EventLimitReached { maximum: 1 }.into_response();
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
         let r = GatewayError::Store(CoreError::Storage("boom".into())).into_response();
         assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let r = GatewayError::LedgerWriteDisabled.into_response();

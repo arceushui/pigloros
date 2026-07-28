@@ -44,6 +44,15 @@ pub struct LedgerEntryView {
 /// Maximum JSON request body size for HTTP handlers (1 MiB).
 pub const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024;
 
+/// Maximum number of Timeline events returned by one poll.
+pub const MAX_EVENTS_PER_POLL: usize = 100;
+
+/// Maximum number of root Timelines managed by one local Gateway process.
+pub const MAX_TIMELINES: usize = 64;
+
+/// Maximum number of events accepted for one Timeline by one local Gateway process.
+pub const MAX_EVENTS_PER_TIMELINE: u64 = 10_000;
+
 /// Default broadcast channel capacity for live event fan-out.
 pub const EVENT_BUS_CAPACITY: usize = 256;
 
@@ -52,6 +61,28 @@ pub const EVENT_BUS_CAPACITY: usize = 256;
 pub struct Gateway {
     store: Arc<Mutex<Box<dyn EventStore>>>,
     bus: broadcast::Sender<EventNotice>,
+    limits: GatewayLimits,
+}
+
+/// Resource bounds applied by the local-first Gateway process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GatewayLimits {
+    max_timelines: usize,
+    max_events_per_timeline: u64,
+}
+
+impl GatewayLimits {
+    pub const LOCAL_DEFAULT: Self = Self {
+        max_timelines: MAX_TIMELINES,
+        max_events_per_timeline: MAX_EVENTS_PER_TIMELINE,
+    };
+}
+
+/// A bounded page of Timeline events.
+#[derive(Debug, PartialEq)]
+pub struct EventPage {
+    pub events: Vec<Event>,
+    pub next_from_seq: Option<u64>,
 }
 
 /// JSON notice pushed on the event bus / WebSocket.
@@ -73,6 +104,15 @@ pub enum GatewayError {
     /// Unsupported action event type.
     #[error("unsupported action type: {0}")]
     UnsupportedAction(String),
+    /// Requested poll page is outside the Gateway bounds.
+    #[error("event poll limit must be between 1 and {maximum}")]
+    InvalidPageLimit { maximum: usize },
+    /// This Gateway process has reached its Timeline bound.
+    #[error("timeline limit of {maximum} reached")]
+    TimelineLimitReached { maximum: usize },
+    /// The Timeline has reached its event bound.
+    #[error("event limit of {maximum} reached")]
+    EventLimitReached { maximum: u64 },
     /// Underlying store failure.
     #[error(transparent)]
     Store(#[from] CoreError),
@@ -95,6 +135,7 @@ impl Gateway {
         Self {
             store: Arc::new(Mutex::new(store)),
             bus,
+            limits: GatewayLimits::LOCAL_DEFAULT,
         }
     }
 
@@ -113,6 +154,11 @@ impl Gateway {
     /// Returns [`GatewayError::Store`] on backend failure.
     pub async fn create_timeline(&self, name: &str) -> Result<Timeline, GatewayError> {
         let mut guard = self.store.lock().await;
+        if guard.list_timelines()?.len() >= self.limits.max_timelines {
+            return Err(GatewayError::TimelineLimitReached {
+                maximum: self.limits.max_timelines,
+            });
+        }
         Ok(guard.create_timeline(name)?)
     }
 
@@ -125,13 +171,44 @@ impl Gateway {
         timeline_id: &str,
         from_seq: u64,
     ) -> Result<Vec<Event>, GatewayError> {
+        Ok(self
+            .read_events_page(timeline_id, from_seq, MAX_EVENTS_PER_POLL)
+            .await?
+            .events)
+    }
+
+    /// Poll one bounded page of Timeline events, starting at `from_seq` (inclusive).
+    ///
+    /// `next_from_seq` is the exclusive cursor after the final returned event.
+    ///
+    /// # Errors
+    /// Returns [`GatewayError::InvalidId`], [`GatewayError::InvalidPageLimit`], or
+    /// [`GatewayError::Store`].
+    pub async fn read_events_page(
+        &self,
+        timeline_id: &str,
+        from_seq: u64,
+        limit: usize,
+    ) -> Result<EventPage, GatewayError> {
+        if limit == 0 || limit > MAX_EVENTS_PER_POLL {
+            return Err(GatewayError::InvalidPageLimit {
+                maximum: MAX_EVENTS_PER_POLL,
+            });
+        }
         let id = parse_timeline_id(timeline_id)?;
+        let first_seq = from_seq.max(1);
+        let last_seq = first_seq.saturating_add((limit - 1) as u64);
         let range = SeqRange {
-            from: Seq::from_u64(from_seq),
-            to: None,
+            from: Seq::from_u64(first_seq),
+            to: Some(Seq::from_u64(last_seq)),
         };
         let guard = self.store.lock().await;
-        Ok(guard.read(id, range)?)
+        let events = guard.read(id, range)?;
+        let next_from_seq = events.last().map(next_from_event);
+        Ok(EventPage {
+            events,
+            next_from_seq,
+        })
     }
 
     /// Append one `world.action` draft. `payload` is arbitrary JSON → CBOR.
@@ -181,10 +258,23 @@ impl Gateway {
         // re-enter the store without deadlocking on the same task.
         let event = {
             let mut guard = self.store.lock().await;
+            let timeline_meta = guard
+                .get_timeline(timeline)?
+                .ok_or(GatewayError::Store(CoreError::TimelineNotFound(timeline)))?;
+            if timeline_meta.head.as_u64() >= self.limits.max_events_per_timeline {
+                return Err(GatewayError::EventLimitReached {
+                    maximum: self.limits.max_events_per_timeline,
+                });
+            }
             let mut committed = guard.append(timeline, &[draft])?;
-            committed
-                .pop()
-                .ok_or_else(|| GatewayError::Store(CoreError::Storage("empty append".to_owned())))?
+            match committed.pop() {
+                Some(event) => event,
+                None => {
+                    return Err(GatewayError::Store(CoreError::Storage(
+                        "empty append".to_owned(),
+                    )))
+                }
+            }
         };
         let notice = EventNotice {
             timeline_id: timeline.to_string(),
@@ -203,8 +293,22 @@ impl Gateway {
         Self {
             store: Arc::new(Mutex::new(store)),
             bus: broadcast::channel(capacity).0,
+            limits: GatewayLimits::LOCAL_DEFAULT,
         }
     }
+
+    #[cfg(test)]
+    fn with_limits(store: Box<dyn EventStore>, limits: GatewayLimits) -> Self {
+        Self {
+            store: Arc::new(Mutex::new(store)),
+            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
+            limits,
+        }
+    }
+}
+
+fn next_from_event(event: &Event) -> u64 {
+    event.seq.as_u64().saturating_add(1)
 }
 
 fn parse_timeline_id(s: &str) -> Result<TimelineId, GatewayError> {
@@ -272,6 +376,12 @@ impl SignalRequest {
 pub struct EventsQuery {
     #[serde(default)]
     pub from_seq: u64,
+    #[serde(default = "default_events_limit")]
+    pub limit: usize,
+}
+
+fn default_events_limit() -> usize {
+    MAX_EVENTS_PER_POLL
 }
 
 /// JSON view of a committed event.
@@ -340,6 +450,8 @@ mod tests {
     #[derive(Clone, Copy)]
     enum ScriptMode {
         FailCreate,
+        FailList,
+        FailGetTimeline,
         EmptyAppend,
         FailAppend,
         FailRead,
@@ -404,11 +516,17 @@ mod tests {
         }
 
         fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+            if matches!(self.mode, ScriptMode::FailList) {
+                return Err(CoreError::Storage("list failed".into()));
+            }
             Ok(Vec::new())
         }
 
         fn get_timeline(&self, _id: TimelineId) -> Result<Option<Timeline>, CoreError> {
-            Ok(None)
+            if matches!(self.mode, ScriptMode::FailGetTimeline) {
+                return Err(CoreError::Storage("get timeline failed".into()));
+            }
+            Ok(Some(Timeline::new(TimelineMeta::root("scripted"))))
         }
     }
 
@@ -431,6 +549,87 @@ mod tests {
         let events = gw.read_events_from(&tl.id().to_string(), 0).await.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].id, event.id);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn gateway_enforces_timeline_and_event_bounds() {
+        let timeline_limited = Gateway::with_limits(
+            open_store(StoreConfig::Memory).unwrap(),
+            GatewayLimits {
+                max_timelines: 1,
+                max_events_per_timeline: 2,
+            },
+        );
+        timeline_limited.create_timeline("one").await.unwrap();
+        let err = timeline_limited.create_timeline("two").await.unwrap_err();
+        assert!(matches!(
+            err,
+            GatewayError::TimelineLimitReached { maximum: 1 }
+        ));
+
+        let event_limited = Gateway::with_limits(
+            open_store(StoreConfig::Memory).unwrap(),
+            GatewayLimits {
+                max_timelines: 1,
+                max_events_per_timeline: 1,
+            },
+        );
+        let timeline = event_limited.create_timeline("events").await.unwrap();
+        let timeline_id = timeline.id().to_string();
+        let entity_id = EntityId::new().to_string();
+        event_limited
+            .append_action(
+                &timeline_id,
+                &entity_id,
+                EVENT_TYPE_ACTION,
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        let err = event_limited
+            .append_action(
+                &timeline_id,
+                &entity_id,
+                EVENT_TYPE_ACTION,
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            GatewayError::EventLimitReached { maximum: 1 }
+        ));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn event_page_rejects_zero_limit() {
+        let gw = memory_gw();
+        let timeline = gw.create_timeline("zero").await.unwrap();
+        let err = gw
+            .read_events_page(&timeline.id().to_string(), 0, 0)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            GatewayError::InvalidPageLimit {
+                maximum: MAX_EVENTS_PER_POLL
+            }
+        ));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn empty_event_page_has_no_cursor() {
+        let gw = memory_gw();
+        let timeline = gw.create_timeline("empty").await.unwrap();
+        let page = gw
+            .read_events_page(&timeline.id().to_string(), 0, 1)
+            .await
+            .unwrap();
+        assert!(page.events.is_empty());
+        assert_eq!(page.next_from_seq, None);
     }
 
     #[tokio::test]
@@ -536,9 +735,22 @@ mod tests {
                 mode: ScriptMode::FailCreate,
             }))),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
+            limits: GatewayLimits::LOCAL_DEFAULT,
         };
         assert!(matches!(
             fail_create.create_timeline("x").await,
+            Err(GatewayError::Store(_))
+        ));
+
+        let fail_list = Gateway {
+            store: Arc::new(Mutex::new(Box::new(ScriptedStore {
+                mode: ScriptMode::FailList,
+            }))),
+            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
+            limits: GatewayLimits::LOCAL_DEFAULT,
+        };
+        assert!(matches!(
+            fail_list.create_timeline("x").await,
             Err(GatewayError::Store(_))
         ));
 
@@ -547,6 +759,7 @@ mod tests {
                 mode: ScriptMode::EmptyAppend,
             }))),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
+            limits: GatewayLimits::LOCAL_DEFAULT,
         };
         let tl = empty_append.create_timeline("e").await.unwrap();
         let err = empty_append
@@ -560,11 +773,30 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, GatewayError::Store(_)));
 
+        let fail_get_timeline = Gateway {
+            store: Arc::new(Mutex::new(Box::new(ScriptedStore {
+                mode: ScriptMode::FailGetTimeline,
+            }))),
+            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
+            limits: GatewayLimits::LOCAL_DEFAULT,
+        };
+        let err = fail_get_timeline
+            .append_action(
+                &TimelineId::new().to_string(),
+                &EntityId::new().to_string(),
+                EVENT_TYPE_ACTION,
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GatewayError::Store(_)));
+
         let fail_append = Gateway {
             store: Arc::new(Mutex::new(Box::new(ScriptedStore {
                 mode: ScriptMode::FailAppend,
             }))),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
+            limits: GatewayLimits::LOCAL_DEFAULT,
         };
         let tl = fail_append.create_timeline("a").await.unwrap();
         let err = fail_append
@@ -583,6 +815,7 @@ mod tests {
                 mode: ScriptMode::FailRead,
             }))),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
+            limits: GatewayLimits::LOCAL_DEFAULT,
         };
         let err = fail_read
             .read_events_from(&TimelineId::new().to_string(), 0)
@@ -664,5 +897,9 @@ mod tests {
         assert!(e.to_string().contains("unsupported"));
         let e = GatewayError::InvalidId("bad".into());
         assert!(e.to_string().contains("invalid"));
+        let e = GatewayError::InvalidPageLimit {
+            maximum: MAX_EVENTS_PER_POLL,
+        };
+        assert!(e.to_string().contains("between"));
     }
 }

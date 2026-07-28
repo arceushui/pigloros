@@ -22,13 +22,15 @@ Binding non-loopback addresses prints a warning — there is no auth in this sli
 |--------|------|------|----------|
 | `GET` | `/health` | — | `{ "ok": true }` |
 | `POST` | `/v1/timelines` | `{ "name": "..." }` | `{ "id", "name", "head" }` |
-| `GET` | `/v1/timelines/:id/events?from_seq=0` | — | `{ "events": [EventView] }` |
+| `GET` | `/v1/timelines/:id/events?from_seq=0&limit=100` | — | `{ "events": [EventView], "next_from_seq" }` |
 | `POST` | `/v1/timelines/:id/actions` | `{ "entity_id", "payload", "event_type"? }` | `EventView` |
 | `POST` | `/v1/timelines/:id/signals` | `{ "entity_id", "dimension", "value", ... }` | `EventView` |
 
 - **Actions:** `event_type` must be `world.action` (default). `payload` is arbitrary JSON → CBOR in the store.
 - **Signals:** convenience wrapper for `society.signal` (see `plugins/society`).
-- **Errors:** JSON `{ "error": "..." }` with `400` (bad id/type), `404` (unknown timeline), `413` (body too large), `500` (store).
+- **Polling:** `limit` defaults to and may not exceed 100. `from_seq` is inclusive; use `next_from_seq` for the next page. Existing clients that only read `events` remain compatible.
+- **Resource bounds:** one Gateway process accepts at most 64 root Timelines and 10,000 events per Timeline. It returns `429` after either bound is reached.
+- **Errors:** JSON `{ "error": "..." }` with `400` (bad id/type/page), `404` (unknown timeline), `413` (body too large), `429` (resource bound), `500` (store).
 - **Body limit:** 1 MiB (`MAX_HTTP_BODY_BYTES`); returns `413` when exceeded.
 
 ### EventView
