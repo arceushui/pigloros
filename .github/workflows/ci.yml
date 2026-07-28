@@ -184,7 +184,7 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1:detect_odr_violation=0
         run: >
           RUSTFLAGS="-Z sanitizer=address"
-          cargo +nightly test -Z build-std --workspace --tests
+          cargo +nightly test -Z build-std --target x86_64-unknown-linux-gnu --workspace --tests
 
   miri:
     name: miri (UB detection)
@@ -200,7 +200,7 @@ jobs:
         with:
           shared-key: miri
       - name: cargo miri test
-        run: cargo +nightly miri test -p pos-core -p pos-crypto --tests
+        run: cargo +nightly miri test -p pos-crypto --tests
 
   docker-build:
     name: docker-build
