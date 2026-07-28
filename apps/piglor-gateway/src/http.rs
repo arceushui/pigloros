@@ -137,7 +137,7 @@ fn build_router(state: AppState, max_body_bytes: usize) -> Router {
 }
 
 async fn root_page() -> impl IntoResponse {
-    (StatusCode::FOUND, [(header::LOCATION, "ledger/")])
+    (StatusCode::FOUND, [(header::LOCATION, "/ledger")])
 }
 
 async fn ledger_page(State(state): State<AppState>) -> impl IntoResponse {
@@ -288,6 +288,24 @@ mod tests {
         })
     }
 
+    fn ledger_source_dir(label: &str, prediction: Option<&str>) -> PathBuf {
+        let source = std::env::temp_dir().join(format!(
+            "piglor-gw-ledger-lib-{label}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&source).unwrap();
+        if let Some(prediction) = prediction {
+            let predictions = source.join("predictions");
+            std::fs::create_dir_all(&predictions).unwrap();
+            std::fs::write(
+                predictions.join("01KYJ6HAFVPNM4VFBKG5BQ4QMT.toml"),
+                prediction,
+            )
+            .unwrap();
+        }
+        source
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn ledger_config_rejects_missing_source() {
@@ -305,14 +323,33 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn ledger_config_enables_writes_for_configured_source() {
-        let source =
-            std::env::temp_dir().join(format!("piglor-gw-ledger-lib-ready-{}", std::process::id()));
-        std::fs::create_dir_all(&source).unwrap();
+        let source = ledger_source_dir("ready", None);
         let (_, write_mode) = LedgerConfig::new(Some(source.clone()), true)
             .load("2026-07-29")
             .unwrap();
         let _ = std::fs::remove_dir_all(source);
         assert!(matches!(write_mode, LedgerWriteMode::Ready(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn ledger_config_distinguishes_unset_source_write_mode() {
+        let (view, disabled) = LedgerConfig::new(None, false).load("2026-07-29").unwrap();
+        let (_, unconfigured) = LedgerConfig::new(None, true).load("2026-07-29").unwrap();
+        assert!(view.entries.is_empty());
+        assert!(matches!(disabled, LedgerWriteMode::Disabled));
+        assert!(matches!(unconfigured, LedgerWriteMode::Unconfigured));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn ledger_config_rejects_invalid_source_data() {
+        let source = ledger_source_dir("invalid", Some("not valid = ["));
+        let Err(error) = LedgerConfig::new(Some(source.clone()), false).load("2026-07-29") else {
+            panic!("invalid configured Ledger data must fail");
+        };
+        let _ = std::fs::remove_dir_all(source);
+        assert!(error.to_string().contains("TOML"));
     }
 
     async fn json_request(
@@ -343,12 +380,24 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn root_redirects_relatively_to_ledger() {
-        let response = test_app()
+        let app = test_app();
+        let response = app
+            .clone()
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FOUND);
-        assert_eq!(response.headers()[axum::http::header::LOCATION], "ledger/");
+        assert_eq!(response.headers()[axum::http::header::LOCATION], "/ledger");
+        let target = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ledger")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(target.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -362,17 +411,12 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn configured_source_is_consistent_between_html_and_json() {
-        let dir = std::env::temp_dir().join(format!(
-            "piglor-gw-ledger-http-configured-{}",
-            std::process::id()
-        ));
-        let predictions = dir.join("predictions");
-        std::fs::create_dir_all(&predictions).unwrap();
-        std::fs::write(
-            predictions.join("01KYJ6HAFVPNM4VFBKG5BQ4QMT.toml"),
-            include_str!("../../../seed/predictions/01KYJ6HAFVPNM4VFBKG5BQ4QMT.toml"),
-        )
-        .unwrap();
+        let dir = ledger_source_dir(
+            "http-configured",
+            Some(include_str!(
+                "../../../seed/predictions/01KYJ6HAFVPNM4VFBKG5BQ4QMT.toml"
+            )),
+        );
         let (ledger_view, _) = LedgerConfig::new(Some(dir.clone()), false)
             .load("2026-07-29")
             .unwrap();

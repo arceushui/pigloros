@@ -79,7 +79,7 @@ fn warn_if_non_loopback(addr: SocketAddr) {
 }
 
 fn load_ledger() -> Result<(LedgerView, LedgerWriteMode), pos_plugin_ledger::LedgerError> {
-    let source = std::env::var("LEDGER_SOURCE").ok().map(PathBuf::from);
+    let source = std::env::var_os("LEDGER_SOURCE").map(PathBuf::from);
     LedgerConfig::new(
         source,
         std::env::var("LEDGER_WRITE").unwrap_or_default() == "1",
@@ -432,66 +432,80 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn load_ledger_gate_on_no_source_returns_unconfigured() {
-        let (view, mode) = LedgerConfig::new(None, true).load("2026-07-29").unwrap();
+    fn startup_without_source_marks_writes_unconfigured() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _environment = clean_ledger_environment();
+        let _write = EnvVarGuard::set("LEDGER_WRITE", OsStr::new("1"));
+        let (view, mode) = load_ledger().unwrap();
         assert!(matches!(mode, LedgerWriteMode::Unconfigured));
         assert!(view.entries.is_empty());
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn load_ledger_gate_on_with_source_returns_ready() {
-        let dir =
-            std::env::temp_dir().join(format!("piglor-gw-ledger-load-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let (_view, mode) = LedgerConfig::new(Some(dir.clone()), true)
-            .load("2026-07-29")
-            .unwrap();
+    fn startup_reads_configured_source_and_write_flag() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _environment = clean_ledger_environment();
+        let dir = ledger_temp_path("startup-ready");
+        std::fs::create_dir_all(&dir).unwrap();
+        let _source = EnvVarGuard::set("LEDGER_SOURCE", dir.as_os_str());
+        let (_, disabled) = load_ledger().unwrap();
+        assert!(matches!(disabled, LedgerWriteMode::Disabled));
+        {
+            let _write = EnvVarGuard::set("LEDGER_WRITE", OsStr::new("1"));
+            let (_, ready) = load_ledger().unwrap();
+            assert!(matches!(ready, LedgerWriteMode::Ready(_)));
+        }
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(matches!(mode, LedgerWriteMode::Ready(_)));
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn load_ledger_reports_invalid_configured_data() {
-        let dir = malformed_ledger_dir("invalid");
-        let Err(error) = LedgerConfig::new(Some(dir.clone()), false).load("2026-07-29") else {
-            panic!("invalid configured Ledger data must fail startup");
-        };
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(error.to_string().contains("TOML"));
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn load_ledger_rejects_configured_missing_source() {
-        let dir = ledger_temp_path("missing");
-        let _ = std::fs::remove_dir_all(&dir);
-        let Err(error) = LedgerConfig::new(Some(dir), false).load("2026-07-29") else {
-            panic!("a configured missing Ledger source must fail startup");
-        };
-        assert!(error.to_string().contains("No such file or directory"));
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn load_ledger_rejects_configured_empty_source() {
-        let Err(error) = LedgerConfig::new(Some(PathBuf::new()), false).load("2026-07-29") else {
-            panic!("an explicitly configured empty Ledger source must fail startup");
+    fn startup_rejects_explicitly_configured_empty_source() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _environment = clean_ledger_environment();
+        let _source = EnvVarGuard::set("LEDGER_SOURCE", OsStr::new(""));
+        let Err(error) = load_ledger() else {
+            panic!("an explicitly configured empty Ledger source must fail");
         };
         assert!(!error.to_string().is_empty());
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn load_ledger_rejects_configured_non_directory_source() {
-        let path = ledger_temp_path("not-directory");
+    fn startup_rejects_configured_non_directory_source() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _environment = clean_ledger_environment();
+        let path = ledger_temp_path("startup-not-directory");
         std::fs::write(&path, "not a directory").unwrap();
-        let Err(error) = LedgerConfig::new(Some(path.clone()), false).load("2026-07-29") else {
-            panic!("a configured unreadable Ledger source must fail startup");
+        let _source = EnvVarGuard::set("LEDGER_SOURCE", path.as_os_str());
+        let Err(error) = load_ledger() else {
+            panic!("a configured non-directory Ledger source must fail");
         };
         let _ = std::fs::remove_file(path);
         assert!(!error.to_string().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn startup_preserves_non_unicode_ledger_source() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _environment = clean_ledger_environment();
+        let mut path =
+            format!("/tmp/piglor-gw-ledger-non-unicode-{}-", std::process::id()).into_bytes();
+        path.push(0xff);
+        let source = OsString::from_vec(path);
+        let _source = EnvVarGuard::set("LEDGER_SOURCE", &source);
+        let error = run_with_args(&[
+            String::from("piglor-gateway"),
+            String::from("serve"),
+            String::from("127.0.0.1:0"),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("No such file or directory"));
     }
 
     #[test]
