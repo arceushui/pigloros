@@ -291,6 +291,7 @@ mod tests {
         assert!(err.to_string().contains("ledger"));
     }
 
+    #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_store_with_signed_events_includes_signature_hex() {
@@ -431,6 +432,7 @@ mod tests {
         assert_eq!(back, manifest);
     }
 
+    #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_source_store_dispatches_to_build_store() {
@@ -552,6 +554,7 @@ mod tests {
         assert!(err.is_err(), "expected error for unreadable file");
     }
 
+    #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_store_with_invalid_today_errors() {
@@ -616,6 +619,7 @@ mod tests {
         assert!(!err.to_string().is_empty(), "{err}");
     }
 
+    #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_store_read_fails_on_corrupt_events() {

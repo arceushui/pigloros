@@ -444,6 +444,7 @@ mod tests {
         assert!(reason.contains("added"), "{reason}");
     }
 
+    #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_with_signed_events_passes() {
@@ -502,6 +503,7 @@ mod tests {
         assert!(err.to_string().contains("--pubkey"));
     }
 
+    #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_with_wrong_pubkey_reports_mismatch() {
@@ -757,6 +759,7 @@ mod tests {
         assert_eq!(report.outcome, VerifyOutcome::Ok);
     }
 
+    #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_unsigned_event_reports_mismatch() {
@@ -828,6 +831,7 @@ mod tests {
         assert!(reason.contains("unsigned"), "{reason}");
     }
 
+    #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_skips_unknown_event_types() {
@@ -937,6 +941,7 @@ mod tests {
         assert!(err.is_err(), "expected error for corrupted DB");
     }
 
+    #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_list_timelines_fails_on_corrupt_db() {
@@ -970,6 +975,7 @@ mod tests {
         assert!(!err.to_string().is_empty(), "{err}");
     }
 
+    #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_read_fails_on_corrupt_events() {
