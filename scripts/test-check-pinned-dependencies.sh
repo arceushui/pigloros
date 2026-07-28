@@ -118,6 +118,18 @@ make_case tagged-compact-action-key
 printf '%s\n' "steps: [{ ? !!str \"uses\" : owner/action@$sha }]" > "$case_root/.github/workflows/test.yml"
 expect_fail "$case_root" 'compact, flow, and explicit-key uses syntax is forbidden'
 
+make_case sequence-explicit-action-key
+printf '%s\n' 'steps:' '  - ? uses' '    : owner/action@main' > "$case_root/.github/workflows/test.yml"
+expect_fail "$case_root" 'compact, flow, and explicit-key uses syntax is forbidden'
+
+make_case escaped-json-action-key
+printf '%s\n' '{"steps":[{"\u0075ses":"owner/action@main"}]}' > "$case_root/.github/workflows/test.yml"
+expect_fail "$case_root" 'hexadecimal and Unicode escapes are forbidden in checked YAML'
+
+make_case escaped-yaml-action-key
+printf '%s\n' 'steps:' '  - "\x75ses": owner/action@main' > "$case_root/.github/workflows/test.yml"
+expect_fail "$case_root" 'hexadecimal and Unicode escapes are forbidden in checked YAML'
+
 make_case quoted-folded-action
 printf '%s\n' 'steps:' '  - "uses": >' "      owner/action@$sha" > "$case_root/.github/workflows/test.yml"
 expect_fail "$case_root"
@@ -141,6 +153,28 @@ make_case missing-local-action-metadata
 mkdir -p "$case_root/tools/actions/missing"
 printf '%s\n' 'steps:' '  - uses: ./tools/actions/missing' > "$case_root/.github/workflows/test.yml"
 expect_fail "$case_root" 'local Action is missing action.yml or action.yaml'
+
+make_case missing-local-reusable-workflow
+printf '%s\n' 'jobs:' '  call:' '    uses: ./.github/workflows/missing.yml' > "$case_root/.github/workflows/test.yml"
+expect_fail "$case_root" 'referenced YAML file does not exist'
+
+make_case ambiguous-local-action-metadata
+mkdir -p "$case_root/tools/actions/ambiguous"
+printf '%s\n' 'steps:' '  - uses: ./tools/actions/ambiguous' > "$case_root/.github/workflows/test.yml"
+printf '%s\n' 'runs:' '  steps: []' > "$case_root/tools/actions/ambiguous/action.yml"
+printf '%s\n' 'runs:' '  steps: []' > "$case_root/tools/actions/ambiguous/action.yaml"
+expect_fail "$case_root" 'local Action has ambiguous metadata'
+
+make_case lexical-root-escape
+printf '%s\n' 'steps:' '  - uses: ./../outside-action' > "$case_root/.github/workflows/test.yml"
+expect_fail "$case_root" 'local uses reference escapes repository root'
+
+make_case symlink-root-escape
+mkdir -p "$fixture/outside-action" "$case_root/tools/actions"
+printf '%s\n' 'runs:' '  steps: []' > "$fixture/outside-action/action.yml"
+ln -s "$fixture/outside-action" "$case_root/tools/actions/escape"
+printf '%s\n' 'steps:' '  - uses: ./tools/actions/escape' > "$case_root/.github/workflows/test.yml"
+expect_fail "$case_root" 'local uses reference escapes repository root'
 
 make_case local-action-cycle
 mkdir -p "$case_root/tools/actions/first" "$case_root/tools/actions/second"

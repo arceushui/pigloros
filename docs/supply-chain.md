@@ -17,8 +17,11 @@ Action revision exists or is a commit in the upstream repository.
 
 Action references must use a normal, single-line YAML `uses:` key. Compact or
 flow mappings, explicit YAML keys, and folded/literal/multiline values are
-rejected so line-oriented validation cannot be bypassed. A local `./path`
-reference must stay inside the repository and resolve to one of:
+rejected so line-oriented validation cannot be bypassed. Hexadecimal and
+Unicode scalar escapes (`\xNN`, `\uNNNN`, and `\UNNNNNNNN`) are also
+forbidden throughout checked workflow and Action metadata because they can
+decode into hidden key names. A local `./path` reference must stay inside the
+repository and resolve to one of:
 
 - a reusable workflow under `.github/workflows`;
 - a directory containing exactly one `action.yml` or `action.yaml`.

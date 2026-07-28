@@ -162,7 +162,7 @@ jobs:
           tool: cargo-deny
 
       - name: cargo deny check
-        run: cargo deny check
+        run: cargo deny --locked check
 
   geiger:
     name: cargo-geiger (unsafe code audit)
@@ -174,7 +174,7 @@ jobs:
         with:
           tool: cargo-geiger
       - name: cargo geiger
-        run: cargo geiger --workspace 2>&1 | tee /tmp/geiger.log
+        run: cargo geiger --locked --workspace 2>&1 | tee /tmp/geiger.log
       - name: assert no unsafe in own crates
         run: '! grep -E "^(crates|apps|plugins)/" /tmp/geiger.log | grep -v "0 unsafe"'
 
@@ -290,7 +290,7 @@ jobs:
       - name: Generate dependency graph
         run: |
           mkdir -p artifacts
-          cargo depgraph --all-deps --dedup-transitive-deps > artifacts/depgraph.svg
+          cargo depgraph --locked --all-deps --dedup-transitive-deps > artifacts/depgraph.svg
 
       - name: Upload dependency graph
         if: always()

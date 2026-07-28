@@ -19,7 +19,7 @@ bash "$ROOT/scripts/test-check-pinned-dependencies.sh"
 
 echo "==> cargo deny (dependency policy)"
 if command -v cargo-deny >/dev/null 2>&1; then
-  cargo deny check
+  cargo deny --locked check
 else
   echo "WARNING: cargo-deny not on PATH; skipping (install: cargo install cargo-deny)"
 fi

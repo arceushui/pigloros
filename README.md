@@ -101,7 +101,7 @@ For agent-based development, see **[AGENTS.md](AGENTS.md)** and **[CONTEXT.md](C
 
 # Or individually:
 trunk check --all          # rustfmt + rust-test-policy + actionlint + …
-cargo deny check           # dependency bans/licenses/advisories/sources
+cargo deny --locked check  # dependency bans/licenses/advisories/sources
 cargo fmt --all -- --check
 cargo test --workspace --locked -- --include-ignored
 cargo clippy --workspace --all-targets --locked -- -D warnings -W clippy::pedantic

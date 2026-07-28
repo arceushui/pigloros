@@ -6,6 +6,7 @@ set -euo pipefail
 root="$(cd "${1:-.}" && pwd)"
 failed=0
 uses_line_re="^[[:space:]]*(-[[:space:]]*)?(uses|\"uses\"|'uses')[[:space:]]*:[[:space:]]*(.*)$"
+encoded_scalar_escape_re='\\(x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})'
 declare -A inspection_state=()
 
 report_error() {
@@ -46,10 +47,14 @@ inspect_config() {
   line_number=0
   while IFS= read -r line || [[ -n "$line" ]]; do
     line_number=$((line_number + 1))
+    if [[ "$line" =~ $encoded_scalar_escape_re ]]; then
+      report_error "hexadecimal and Unicode escapes are forbidden in checked YAML: ${canonical#"$root"/}:$line_number"
+      continue
+    fi
     if [[ ! "$line" =~ $uses_line_re ]]; then
       if [[ "$line" =~ (^|[\{\[,])[[:space:]]*(uses|\"uses\"|\'uses\')[[:space:]]*: ]] || \
         [[ "$line" =~ [\{\[].*(uses|\"uses\"|\'uses\')[[:space:]]*: ]] || \
-        [[ "$line" =~ ^[[:space:]]*\?[[:space:]]*(uses|\"uses\"|\'uses\')[[:space:]]*$ ]]; then
+        [[ "$line" =~ ^[[:space:]]*(-[[:space:]]*)?\?[[:space:]]*(uses|\"uses\"|\'uses\')[[:space:]]*(:.*)?$ ]]; then
         report_error "compact, flow, and explicit-key uses syntax is forbidden: ${canonical#"$root"/}:$line_number"
       fi
       continue
