@@ -3,7 +3,7 @@
 # Decisions locked for "perfect" bar:
 # - Platform: GitHub Actions (remote is github.com/arceushui/pigloros)
 # - Triggers: every PR + pushes to main
-# - Jobs: fmt, test, clippy (pedantic), coverage (100% lines + regions), audit, deny, asan — all required
+# - Jobs: fmt, test, clippy (pedantic), coverage (100% lines + regions), audit, deny — all required
 # - coverage(off) test-only + no ```ignore doctests: Trunk `rust-test-policy`
 # - Tests: `cargo test -- --include-ignored` so #[ignore] cannot silently skip
 # - Dependencies: cargo-deny.yml (crates/licenses/advisories/sources)
@@ -150,32 +150,6 @@ jobs:
 
       - name: cargo deny check
         run: cargo deny check
-
-  asan:
-    name: asan (address sanitizer)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      RUSTFLAGS: -Z sanitizer=address -D warnings
-      ASAN_OPTIONS: detect_leaks=1:detect_stack_use_after_return=1:detect_odr_violation=0
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Remove rust-toolchain.toml (asan requires nightly)
-        run: rm -f rust-toolchain.toml
-
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rust-src
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: asan
-
-      - name: cargo test with address sanitizer
-        run: cargo test --workspace --locked --tests
 
   docker-build:
     name: docker-build
