@@ -370,10 +370,12 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn load_ledger_gate_on_no_source_returns_unconfigured() {
-        std::env::set_var("LEDGER_WRITE", "1");
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = LOCK.lock().unwrap();
+        // Start from a clean env state.
         std::env::remove_var("LEDGER_SOURCE");
+        std::env::set_var("LEDGER_WRITE", "1");
         let (view, mode) = super::load_ledger();
-        // Clean up env before asserting, so a panic here doesn't leak into other tests.
         std::env::remove_var("LEDGER_WRITE");
         assert!(matches!(mode, LedgerWriteMode::Unconfigured));
         assert!(view.entries.is_empty());
@@ -382,6 +384,10 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn load_ledger_gate_on_with_source_returns_ready() {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = LOCK.lock().unwrap();
+        // Start from a clean env state.
+        std::env::remove_var("LEDGER_SOURCE");
         let dir =
             std::env::temp_dir().join(format!("piglor-gw-ledger-load-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
@@ -389,7 +395,6 @@ mod tests {
         std::env::set_var("LEDGER_WRITE", "1");
         std::env::set_var("LEDGER_SOURCE", &path);
         let (_view, mode) = super::load_ledger();
-        // Clean up env and temp dir before asserting, so a panic doesn't leak state.
         std::env::remove_var("LEDGER_WRITE");
         std::env::remove_var("LEDGER_SOURCE");
         let _ = std::fs::remove_dir_all(&dir);
