@@ -12,13 +12,9 @@ use pos_plugin_ledger::LedgerView;
 /// error branch is unreachable. Returns `String` directly to avoid a
 /// spurious `Result` wrapping an unreachable error variant.
 ///
-/// # Panics
-///
-/// Never panics in practice: `LedgerView` serialisation via `serde_json`
-/// is infallible for all valid field values.
 #[must_use]
 pub fn render_json(view: &LedgerView) -> String {
-    serde_json::to_string_pretty(view).expect("LedgerView serialisation is infallible")
+    serde_json::to_string_pretty(view).unwrap_or_default()
 }
 
 #[cfg(test)]

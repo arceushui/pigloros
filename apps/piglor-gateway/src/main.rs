@@ -44,8 +44,7 @@ fn run_with_args(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send
             };
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
-                .build()
-                .expect("tokio current-thread runtime");
+                .build()?;
             rt.block_on(serve(
                 addr,
                 store_path,
@@ -128,12 +127,10 @@ async fn serve(
         .await
         .map_err(|e| e.to_string())?;
     eprintln!("piglor-gateway listening on http://{addr}");
-    // After graceful shutdown the accept-loop I/O error path is not practical to
-    // force in unit tests; treat unexpected accept-loop failure as fatal.
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await
-        .expect("gateway HTTP accept loop failed");
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 

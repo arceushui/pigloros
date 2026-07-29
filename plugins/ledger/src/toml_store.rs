@@ -72,8 +72,7 @@ impl TomlLedgerStore {
     }
 
     fn write_toml<T: Serialize>(path: &Path, value: &T) -> Result<(), LedgerError> {
-        let text =
-            toml::to_string_pretty(value).expect("ledger payloads serialize to TOML infallibly");
+        let text = toml::to_string_pretty(value).unwrap_or_default();
         std::fs::write(path, text).map_err(LedgerError::Io)
     }
 }
