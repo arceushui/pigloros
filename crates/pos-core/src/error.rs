@@ -16,6 +16,15 @@ pub enum CoreError {
     #[error("serialization error: {0}")]
     Serialization(String),
 
+    #[error("monotonic ULID generator overflow")]
+    IdGenerationOverflow,
+
+    #[error("canonical CBOR numeric conversion failed")]
+    CanonicalCborNumericConversion,
+
+    #[error("canonical CBOR serialization error: {0}")]
+    CanonicalCborSerialization(String),
+
     #[error("storage error: {0}")]
     Storage(String),
 
@@ -81,6 +90,25 @@ mod tests {
     fn serialization_error_displays() {
         let e = CoreError::Serialization("bad cbor".to_owned());
         assert!(e.to_string().contains("bad cbor"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn id_generation_overflow_displays() {
+        assert!(CoreError::IdGenerationOverflow.to_string().contains("ULID"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn canonical_cbor_errors_display() {
+        assert!(CoreError::CanonicalCborNumericConversion
+            .to_string()
+            .contains("numeric"));
+        assert!(
+            CoreError::CanonicalCborSerialization("writer failed".to_owned())
+                .to_string()
+                .contains("writer failed")
+        );
     }
 
     #[test]

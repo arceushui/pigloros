@@ -5,18 +5,32 @@ use std::cell::RefCell;
 use std::fmt;
 use ulid::{Generator, Ulid};
 
+use crate::CoreError;
+
 thread_local! {
     static ULID_GEN: RefCell<Generator> = const { RefCell::new(Generator::new()) };
 }
 
 /// Generate a monotonically increasing ULID using the thread-local generator.
-fn gen_ulid() -> Ulid {
-    ULID_GEN.with(|g| {
-        // Overflow / clock-regression is not realistically inducible in unit tests.
-        g.borrow_mut()
+fn try_gen_ulid() -> Result<Ulid, CoreError> {
+    ULID_GEN.with(|generator| {
+        generator
+            .borrow_mut()
             .generate()
-            .expect("ULID monotonic generator overflow or clock regression")
+            .map_err(|_| CoreError::IdGenerationOverflow)
     })
+}
+
+/// Preserve the infallible ID API while avoiding a process-wide panic on the
+/// generator's extremely rare random-field overflow. Normal generation remains
+/// monotonic; the fallback deliberately starts a fresh ULID when that invariant
+/// can no longer be maintained by the current generator state.
+fn gen_ulid() -> Ulid {
+    generated_or_fallback(try_gen_ulid())
+}
+
+fn generated_or_fallback(generated: Result<Ulid, CoreError>) -> Ulid {
+    generated.unwrap_or_else(|_| Ulid::gen())
 }
 
 macro_rules! ulid_newtype {
@@ -27,6 +41,24 @@ macro_rules! ulid_newtype {
         pub struct $name(Ulid);
 
         impl $name {
+            /// Generate an ID while surfacing a monotonic-generator overflow.
+            ///
+            /// Prefer this method when the caller must know whether strict
+            /// within-thread monotonicity was preserved.
+            ///
+            /// # Errors
+            /// Returns [`CoreError::IdGenerationOverflow`] when the generator's
+            /// random field cannot be incremented further in its current state.
+            pub fn try_new() -> Result<Self, CoreError> {
+                try_gen_ulid().map(Self)
+            }
+
+            /// Generate an ID.
+            ///
+            /// This keeps the longstanding infallible API. On a monotonic
+            /// generator overflow it uses a fresh ULID rather than panicking;
+            /// callers that require the overflow signal should use
+            /// [`Self::try_new`].
             pub fn new() -> Self {
                 Self(gen_ulid())
             }
@@ -80,6 +112,19 @@ mod tests {
         let a = EntityId::new();
         let b = EntityId::new();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn try_new_produces_an_id() {
+        assert_ne!(EntityId::try_new().unwrap().inner(), Ulid::nil());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn overflow_fallback_remains_infallible() {
+        let id = generated_or_fallback(Err(CoreError::IdGenerationOverflow));
+        assert_ne!(id, Ulid::nil());
     }
 
     #[test]
