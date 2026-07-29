@@ -44,9 +44,11 @@ impl ProjectionKey {
 
 /// Read-only projection states materialized for one driver tick.
 ///
-/// This view contains exactly the keys declared by a driver's subscriptions.
-/// Missing projection state is represented by `None`, allowing a driver to
-/// distinguish a subscribed-but-unseen entity from an undeclared dependency.
+/// This view contains the distinct keys declared by a driver's subscriptions.
+/// Repeated subscription keys are coalesced because lookup is keyed by
+/// [`ProjectionKey`]. Missing projection state is represented by `None`, allowing
+/// a driver to distinguish a subscribed-but-unseen entity from an undeclared
+/// dependency.
 pub struct ObservationView<'a> {
     states: std::collections::HashMap<ProjectionKey, Option<&'a State>>,
 }
@@ -278,6 +280,19 @@ mod tests {
         assert!(!view.is_empty());
         assert_eq!(view.state_for(&seen), Some(&state));
         assert_eq!(view.state_for(&absent), None);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn observation_view_coalesces_duplicate_subscription_keys() {
+        let key = ProjectionKey::new(EntityId::new());
+        let mut state = State::new();
+        state.set("ticks", serde_json::json!(3));
+        let subscriptions = [key.clone(), key.clone()];
+        let view = ObservationView::from_subscriptions(&subscriptions, |_| Some(&state));
+
+        assert_eq!(view.len(), 1);
+        assert_eq!(view.state_for(&key), Some(&state));
     }
 
     #[test]

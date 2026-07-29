@@ -509,7 +509,6 @@ mod tests {
         use pos_store::{open_store, StoreConfig};
 
         struct ObservingDriver {
-            keys: Vec<ProjectionKey>,
             target: ProjectionKey,
             entity: EntityId,
         }
@@ -520,7 +519,7 @@ mod tests {
             }
 
             fn subscriptions(&self) -> &[ProjectionKey] {
-                self.keys.as_slice()
+                std::slice::from_ref(&self.target)
             }
 
             fn step(
@@ -568,7 +567,6 @@ mod tests {
         reg.projections.register("counter", Box::new(CountReducer));
         reg.projections.apply_event(&event);
         reg.register_driver(Box::new(ObservingDriver {
-            keys: vec![ProjectionKey::new(observed_entity)],
             target: ProjectionKey::new(observed_entity),
             entity: EntityId::new(),
         }));
