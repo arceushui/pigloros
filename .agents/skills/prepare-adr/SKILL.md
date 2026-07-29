@@ -74,6 +74,38 @@ inference). Specify:
 Reject alternatives with concrete reasons. Do not write vague conclusions such
 as “more flexible” or “industry standard.”
 
+### Show the decision, do not only describe it
+
+Add one compact, decision-relevant diagram whenever the ADR changes a boundary,
+message/data flow, lifecycle, state transition, ownership relationship, or
+rollout sequence. Prefer a Markdown-safe text diagram because it renders in the
+canonical Redmine wiki without a plugin. Keep it adjacent to the section it
+explains, label it, and use the project's exact vocabulary. Do not add a
+decorative diagram or repeat prose in picture form.
+
+For example:
+
+```text
+Adapter -> keyed ingress identity -> EventStore transaction -> Timeline Event
+                                      | duplicate/conflict
+                                      v
+                               bounded identity retention
+```
+
+Use a table instead when comparing two or more options, and a short timeline
+when the decision changes ordering or rollout. A diagram is required when such
+a relationship would otherwise need several sentences to make the affected
+boundaries or ordering clear.
+
+### Cite claims where the reader needs them
+
+Assign each source a stable label (`[S1]`, `[S2]`, ...) in the evidence table.
+Place that label immediately after every material factual claim, including
+claims in diagrams, tables, risks, and alternatives. The Sources section must
+then provide the full title, direct URL, publisher/version, publication date
+when available, access date, and the claim(s) each source supports. Do not make
+readers infer which source supports a claim from an undifferentiated link list.
+
 ## 4. Publish a Proposed ADR, then pause
 
 Create a Markdown Redmine wiki page with `ADR` as its parent. Use the next
@@ -111,6 +143,11 @@ Before presenting the ADR, re-read it and verify:
       reason this was impossible.
 - [ ] Every important fact has a source; every recommendation is labelled as
       an inference.
+- [ ] Every material source has a stable label, and each material factual claim
+      cites that label where it appears.
+- [ ] A compact Markdown-safe diagram, table, or timeline makes every changed
+      boundary, lifecycle, or ordering relationship easier to audit; no
+      decorative visual was added.
 - [ ] Replay, security/privacy, compatibility/migration, operational, and
       licence/supply-chain effects are addressed or declared out of scope.
 - [ ] Risks include a mitigation or an explicit acceptance decision.
