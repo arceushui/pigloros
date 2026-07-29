@@ -72,7 +72,7 @@ mod tests {
             &mut self,
             _store: &dyn EventStore,
             _timeline: TimelineId,
-            _observations: crate::driver::ObservationView,
+            _observations: crate::driver::ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
             self.ticks += 1;
             Ok(StepOutput::new(vec![EventDraft::new(
@@ -111,7 +111,7 @@ mod tests {
             &mut self,
             _store: &dyn EventStore,
             _timeline: TimelineId,
-            _observations: crate::driver::ObservationView,
+            _observations: crate::driver::ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
             self.ticks += 1;
             Ok(StepOutput::new(vec![EventDraft::new(

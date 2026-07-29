@@ -17,7 +17,18 @@ use crate::{
     schema::{EventTypeSchema, SchemaRegistry},
 };
 use std::collections::HashSet;
-use std::sync::Arc;
+
+fn extend_unique_subscriptions(
+    subscriptions: &mut Vec<ProjectionKey>,
+    seen: &mut HashSet<ProjectionKey>,
+    keys: &[ProjectionKey],
+) {
+    for key in keys {
+        if seen.insert(key.clone()) {
+            subscriptions.push(key.clone());
+        }
+    }
+}
 
 /// A registered plugin entry.
 struct PluginEntry {
@@ -47,9 +58,7 @@ impl PluginRegistry {
         subscriptions: impl IntoIterator<Item = &'a ProjectionKey>,
     ) -> ObservationSnapshot {
         ObservationSnapshot::from_subscriptions(subscriptions, |key| {
-            self.projections
-                .state_for(key.entity_id())
-                .map(|state| Arc::new(state.clone()))
+            self.projections.state_for(key.entity_id()).cloned()
         })
     }
 
@@ -62,11 +71,7 @@ impl PluginRegistry {
             .values()
             .filter_map(|entry| entry.driver.as_deref())
         {
-            for key in entry.subscriptions() {
-                if seen.insert(key.clone()) {
-                    subscriptions.push(key.clone());
-                }
-            }
+            extend_unique_subscriptions(&mut subscriptions, &mut seen, entry.subscriptions());
         }
 
         self.snapshot_for_subscriptions(subscriptions.iter())
@@ -233,7 +238,7 @@ impl PluginRegistry {
         let mut seen_subscriptions = HashSet::new();
         let mut due_subscriptions = Vec::new();
 
-        for (id, entry) in self.plugins.iter() {
+        for (id, entry) in &self.plugins {
             if let Some(driver) = entry.driver.as_deref() {
                 let interval_ns = driver.tick_interval().as_nanos();
                 let ready = match entry.last_tick {
@@ -241,12 +246,12 @@ impl PluginRegistry {
                     None => true,
                 };
                 if ready {
-                    due_driver_ids.push(id.clone());
-                    for key in driver.subscriptions() {
-                        if seen_subscriptions.insert(key.clone()) {
-                            due_subscriptions.push(key.clone());
-                        }
-                    }
+                    due_driver_ids.push(*id);
+                    extend_unique_subscriptions(
+                        &mut due_subscriptions,
+                        &mut seen_subscriptions,
+                        driver.subscriptions(),
+                    );
                 }
             }
         }
@@ -380,7 +385,7 @@ mod tests {
             &mut self,
             _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
-            _: ObservationView,
+            _: ObservationView<'_>,
         ) -> Result<crate::driver::StepOutput, RuntimeError> {
             Ok(crate::driver::StepOutput::empty())
         }
@@ -504,7 +509,7 @@ mod tests {
                 &mut self,
                 _: &dyn pos_core::store::EventStore,
                 _: pos_core::ids::TimelineId,
-                _: ObservationView,
+                _: ObservationView<'_>,
             ) -> Result<StepOutput, RuntimeError> {
                 self.calls += 1;
                 let draft = EventDraft::new(
@@ -560,7 +565,7 @@ mod tests {
                 &mut self,
                 _: &dyn pos_core::store::EventStore,
                 _: TimelineId,
-                _: ObservationView,
+                _: ObservationView<'_>,
             ) -> Result<StepOutput, RuntimeError> {
                 Err(RuntimeError::NoDriver {
                     name: "failing".to_owned(),
@@ -601,7 +606,7 @@ mod tests {
                 &mut self,
                 _: &dyn pos_core::store::EventStore,
                 _: pos_core::ids::TimelineId,
-                observations: ObservationView,
+                observations: ObservationView<'_>,
             ) -> Result<crate::driver::StepOutput, RuntimeError> {
                 let observed = observations
                     .state_for(&self.target)
@@ -653,6 +658,156 @@ mod tests {
         let drafts = reg.step_all(store.as_ref(), timeline.id()).unwrap();
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].event_type.as_str(), "driver.observed");
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn tick_cadenced_deduplicates_snapshot_subscriptions() {
+        use crate::driver::ProjectionKey;
+        use pos_store::{open_store, StoreConfig};
+
+        struct DuplicateKeyDriver {
+            keys: Vec<ProjectionKey>,
+        }
+
+        impl Driver for DuplicateKeyDriver {
+            fn name(&self) -> &'static str {
+                "dup-key-driver"
+            }
+
+            fn subscriptions(&self) -> &[ProjectionKey] {
+                &self.keys
+            }
+
+            fn step(
+                &mut self,
+                _: &dyn pos_core::store::EventStore,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                Ok(StepOutput::empty())
+            }
+        }
+
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let timeline = store.create_timeline("t").unwrap();
+        let key = ProjectionKey::new(EntityId::new());
+        let driver = DuplicateKeyDriver {
+            keys: vec![key.clone(), key],
+        };
+        let plugin = plugin_with_caps("dup-key-plugin", &[], true, false);
+        let mut reg = PluginRegistry::new();
+        reg.register(&plugin, None, Some(Box::new(driver))).unwrap();
+
+        let drafts = reg.tick_cadenced(store.as_ref(), timeline.id(), 0).unwrap();
+        assert!(drafts.is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn tick_cadenced_respects_driver_interval() {
+        use pos_store::{open_store, StoreConfig};
+
+        struct IntervalDriver;
+        impl Driver for IntervalDriver {
+            fn name(&self) -> &'static str {
+                "interval-driver"
+            }
+
+            fn step(
+                &mut self,
+                _: &dyn pos_core::store::EventStore,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                let event = EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("interval.tick"),
+                    CanonicalBytes::from_vec(vec![]),
+                );
+                Ok(StepOutput::new(vec![event]))
+            }
+        }
+
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let timeline = store.create_timeline("t").unwrap();
+        let plugin = plugin_with_caps("interval-plugin", &[], true, false);
+        let mut reg = PluginRegistry::new();
+        reg.register(&plugin, None, Some(Box::new(IntervalDriver)))
+            .unwrap();
+
+        let first = reg.tick_cadenced(store.as_ref(), timeline.id(), 0).unwrap();
+        assert_eq!(first.len(), 1);
+
+        let too_early = reg
+            .tick_cadenced(store.as_ref(), timeline.id(), 50_000_000)
+            .unwrap();
+        assert!(
+            too_early.is_empty(),
+            "interval gate should suppress a second tick"
+        );
+
+        let ready = reg
+            .tick_cadenced(store.as_ref(), timeline.id(), 100_000_000)
+            .unwrap();
+        assert_eq!(
+            ready.len(),
+            1,
+            "interval gate should allow next eligible tick"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn step_all_deduplicates_snapshot_subscriptions_across_drivers() {
+        use crate::driver::ProjectionKey;
+        use pos_store::{open_store, StoreConfig};
+        use std::sync::{Arc, Mutex};
+
+        struct SnapshotDriver {
+            key: ProjectionKey,
+            observed: Arc<Mutex<Vec<usize>>>,
+        }
+
+        impl Driver for SnapshotDriver {
+            fn name(&self) -> &'static str {
+                "snapshot-driver"
+            }
+
+            fn subscriptions(&self) -> &[ProjectionKey] {
+                std::slice::from_ref(&self.key)
+            }
+
+            fn step(
+                &mut self,
+                _: &dyn pos_core::store::EventStore,
+                _: TimelineId,
+                observations: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                self.observed.lock().unwrap().push(observations.len());
+                Ok(StepOutput::empty())
+            }
+        }
+
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let timeline = store.create_timeline("t").unwrap();
+        let shared_key = ProjectionKey::new(EntityId::new());
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let mut reg = PluginRegistry::new();
+
+        reg.register_driver(Box::new(SnapshotDriver {
+            key: shared_key.clone(),
+            observed: observed.clone(),
+        }));
+        reg.register_driver(Box::new(SnapshotDriver {
+            key: shared_key,
+            observed: observed.clone(),
+        }));
+
+        let drafts = reg.step_all(store.as_ref(), timeline.id()).unwrap();
+        assert_eq!(drafts.len(), 0);
+
+        assert_eq!(observed.lock().unwrap().as_slice(), [1, 1]);
     }
 
     #[test]

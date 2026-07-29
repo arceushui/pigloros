@@ -183,7 +183,7 @@ impl Driver for WorldDriver {
         &mut self,
         _store: &dyn EventStore,
         _timeline: TimelineId,
-        _observations: ObservationView,
+        _observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
         let observations = self.backend.step(&self.entities);
 

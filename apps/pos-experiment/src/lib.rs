@@ -547,7 +547,7 @@ mod tests {
             &mut self,
             _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
-            _: ObservationView,
+            _: ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
             if let Some(remaining) = self.ticks_remaining.as_mut() {
                 if *remaining == 0 {
@@ -635,7 +635,7 @@ mod tests {
                 &mut self,
                 _: &dyn pos_core::store::EventStore,
                 _: pos_core::ids::TimelineId,
-                _: ObservationView,
+                _: ObservationView<'_>,
             ) -> Result<StepOutput, RuntimeError> {
                 Ok(StepOutput::empty())
             }
@@ -671,7 +671,7 @@ mod tests {
                 &mut self,
                 _: &dyn pos_core::store::EventStore,
                 _: pos_core::ids::TimelineId,
-                _: ObservationView,
+                _: ObservationView<'_>,
             ) -> Result<StepOutput, RuntimeError> {
                 let draft = EventDraft::new(
                     self.entity,
@@ -794,7 +794,7 @@ mod tests {
                 &mut self,
                 _: &dyn pos_core::store::EventStore,
                 _: pos_core::ids::TimelineId,
-                _: ObservationView,
+                _: ObservationView<'_>,
             ) -> Result<StepOutput, RuntimeError> {
                 Ok(StepOutput::empty())
             }
@@ -824,7 +824,7 @@ mod tests {
                 &mut self,
                 _: &dyn pos_core::store::EventStore,
                 _: pos_core::ids::TimelineId,
-                _: ObservationView,
+                _: ObservationView<'_>,
             ) -> Result<StepOutput, RuntimeError> {
                 let draft = EventDraft::new(
                     self.entity,
@@ -1222,7 +1222,7 @@ mod backtest_tests {
             &mut self,
             _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
-            _: pos_runtime::ObservationView,
+            _: pos_runtime::ObservationView<'_>,
         ) -> Result<pos_runtime::StepOutput, pos_runtime::RuntimeError> {
             let draft = pos_core::event::EventDraft::new(
                 self.entity,
@@ -1391,7 +1391,7 @@ mod backtest_tests {
             &mut self,
             _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
-            _: pos_runtime::ObservationView,
+            _: pos_runtime::ObservationView<'_>,
         ) -> Result<pos_runtime::StepOutput, pos_runtime::RuntimeError> {
             use pos_core::event::{CanonicalBytes, EventDraft, Kind};
             let draft = EventDraft::new(
@@ -1412,7 +1412,7 @@ mod backtest_tests {
             &mut self,
             _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
-            _: pos_runtime::ObservationView,
+            _: pos_runtime::ObservationView<'_>,
         ) -> Result<pos_runtime::StepOutput, pos_runtime::RuntimeError> {
             Ok(pos_runtime::StepOutput::empty())
         }
@@ -1429,7 +1429,7 @@ mod backtest_tests {
             &mut self,
             _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
-            _: pos_runtime::ObservationView,
+            _: pos_runtime::ObservationView<'_>,
         ) -> Result<pos_runtime::StepOutput, pos_runtime::RuntimeError> {
             use pos_core::event::{CanonicalBytes, EventDraft, Kind};
             let draft = EventDraft::new(
@@ -1611,7 +1611,7 @@ mod fault_injection_tests {
             &mut self,
             _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
-            _: ObservationView,
+            _: ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
             let draft = EventDraft::new(
                 self.entity,
@@ -1636,7 +1636,7 @@ mod fault_injection_tests {
             &mut self,
             _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
-            _: ObservationView,
+            _: ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
             Err(RuntimeError::UnknownEventType(
                 "driver.step.failed".to_owned(),
@@ -1684,7 +1684,7 @@ mod fault_injection_tests {
             &mut self,
             _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
-            _: ObservationView,
+            _: ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
             let draft = EventDraft::new(
                 self.entity,

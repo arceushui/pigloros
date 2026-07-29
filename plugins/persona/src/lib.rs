@@ -330,7 +330,7 @@ impl Driver for PersonaEvalDriver {
         &mut self,
         _store: &dyn EventStore,
         _timeline: TimelineId,
-        _observations: ObservationView,
+        _observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
         let idx =
             usize::try_from(self.tick % u64::try_from(self.pairs.len()).unwrap_or(1)).unwrap_or(0);

@@ -16,7 +16,6 @@ use pos_core::{
 
 use crate::error::RuntimeError;
 use std::collections::hash_map::Entry;
-use std::sync::Arc;
 
 /// The output of a single driver step.
 #[derive(Debug, Default)]
@@ -50,7 +49,7 @@ impl ProjectionKey {
 /// cloned state, so every driver observes the same committed projection state
 /// even if later tick work changes the live registry.
 pub struct ObservationSnapshot {
-    states: std::collections::HashMap<ProjectionKey, Option<Arc<State>>>,
+    states: std::collections::HashMap<ProjectionKey, Option<State>>,
 }
 
 impl ObservationSnapshot {
@@ -64,7 +63,7 @@ impl ObservationSnapshot {
     #[must_use]
     pub(crate) fn from_subscriptions<'a>(
         subscriptions: impl IntoIterator<Item = &'a ProjectionKey>,
-        state_for: impl Fn(&ProjectionKey) -> Option<Arc<State>>,
+        state_for: impl Fn(&ProjectionKey) -> Option<State>,
     ) -> Self {
         let mut states = std::collections::HashMap::new();
         for key in subscriptions {
@@ -76,11 +75,11 @@ impl ObservationSnapshot {
     }
 
     #[must_use]
-    pub(crate) fn view_for(&self, subscriptions: &[ProjectionKey]) -> ObservationView {
+    pub(crate) fn view_for<'a>(&'a self, subscriptions: &[ProjectionKey]) -> ObservationView<'a> {
         let mut states = std::collections::HashMap::with_capacity(subscriptions.len());
         for key in subscriptions {
             if let Entry::Vacant(entry) = states.entry(key.clone()) {
-                entry.insert(self.states.get(key).cloned().flatten());
+                entry.insert(self.states.get(key).and_then(Option::as_ref));
             }
         }
         ObservationView { states }
@@ -94,22 +93,21 @@ impl ObservationSnapshot {
 /// [`ProjectionKey`]. Missing projection state is represented by `None`, allowing
 /// a driver to distinguish a subscribed-but-unseen entity from an undeclared
 /// dependency.
-pub struct ObservationView {
-    states: std::collections::HashMap<ProjectionKey, Option<Arc<State>>>,
+pub struct ObservationView<'a> {
+    states: std::collections::HashMap<ProjectionKey, Option<&'a State>>,
 }
 
-impl ObservationView {
+impl ObservationView<'_> {
     #[must_use]
     pub fn empty() -> Self {
-        ObservationSnapshot::empty().view_for(&[])
+        Self {
+            states: std::collections::HashMap::new(),
+        }
     }
 
     #[must_use]
     pub fn state_for(&self, key: &ProjectionKey) -> Option<&State> {
-        self.states
-            .get(key)
-            .and_then(Option::as_ref)
-            .map(Arc::as_ref)
+        self.states.get(key).and_then(Option::as_ref).copied()
     }
 
     #[must_use]
@@ -154,7 +152,7 @@ pub trait Driver: Send + Sync {
         &mut self,
         store: &dyn EventStore,
         timeline: TimelineId,
-        observations: ObservationView,
+        observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError>;
 
     /// Human-readable name for this driver (used in logs/diagnostics).
@@ -193,7 +191,7 @@ mod tests {
             &mut self,
             _store: &dyn EventStore,
             _timeline: TimelineId,
-            _observations: ObservationView,
+            _observations: ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
             self.ticks += 1;
             let draft = EventDraft::new(
@@ -214,7 +212,7 @@ mod tests {
             &mut self,
             _: &dyn EventStore,
             _: TimelineId,
-            _: ObservationView,
+            _: ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
             Ok(StepOutput::empty())
         }
@@ -277,6 +275,13 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn empty_snapshot_views_are_empty() {
+        let snapshot = ObservationSnapshot::empty();
+        assert!(snapshot.view_for(&[]).is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn default_tick_interval_is_100ms() {
         let d = TickDriver {
             entity: EntityId::new(),
@@ -308,7 +313,7 @@ mod tests {
         state.set("ticks", serde_json::json!(3));
         let subscriptions = [seen.clone(), absent.clone()];
         let snapshot = ObservationSnapshot::from_subscriptions(&subscriptions, |key| {
-            (key == &seen).then(|| Arc::new(state.clone()))
+            (key == &seen).then(|| state.clone())
         });
         let view = snapshot.view_for(&subscriptions);
         assert_eq!(view.len(), 2);
@@ -324,9 +329,8 @@ mod tests {
         let mut state = State::new();
         state.set("ticks", serde_json::json!(3));
         let subscriptions = [key.clone(), key.clone()];
-        let snapshot = ObservationSnapshot::from_subscriptions(&subscriptions, |_| {
-            Some(Arc::new(state.clone()))
-        });
+        let snapshot =
+            ObservationSnapshot::from_subscriptions(&subscriptions, |_| Some(state.clone()));
         let view = snapshot.view_for(&subscriptions);
 
         assert_eq!(view.len(), 1);
@@ -340,9 +344,8 @@ mod tests {
         let subscriptions = [key.clone()];
         let mut live_state = State::new();
         live_state.set("ticks", serde_json::json!(3));
-        let snapshot = ObservationSnapshot::from_subscriptions(&subscriptions, |_| {
-            Some(Arc::new(live_state.clone()))
-        });
+        let snapshot =
+            ObservationSnapshot::from_subscriptions(&subscriptions, |_| Some(live_state.clone()));
         live_state.set("ticks", serde_json::json!(4));
 
         let first_driver_view = snapshot.view_for(&subscriptions);
