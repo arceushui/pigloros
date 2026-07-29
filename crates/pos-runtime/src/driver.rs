@@ -326,6 +326,28 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn observation_view_state_for_none_when_empty() {
+        let view = ObservationView::empty();
+        let unknown = ProjectionKey::new(EntityId::new());
+
+        assert!(view.state_for(&unknown).is_none());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn observation_view_is_empty_uses_len_for_non_empty_view() {
+        let seen = ProjectionKey::new(EntityId::new());
+        let snapshot = ObservationSnapshot::from_subscriptions(std::slice::from_ref(&seen), |_| {
+            Some(State::new())
+        });
+        let view = snapshot.view_for(std::slice::from_ref(&seen));
+
+        assert_eq!(view.len(), 1);
+        assert!(!view.is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn observation_view_coalesces_duplicate_subscription_keys() {
         let key = ProjectionKey::new(EntityId::new());
         let mut state = State::new();

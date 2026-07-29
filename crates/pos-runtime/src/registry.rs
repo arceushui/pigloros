@@ -705,6 +705,46 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn snapshot_for_subscriptions_handles_duplicate_and_missing_projection_keys() {
+        use crate::driver::ProjectionKey;
+
+        let mut reg = PluginRegistry::new();
+        reg.projections.register("counter", Box::new(CountReducer));
+        let observed_entity = EntityId::new();
+        let missing_entity = EntityId::new();
+
+        let event = Event {
+            id: EventId::new(),
+            entity: observed_entity,
+            event_type: Kind::new("counter.tick"),
+            payload: CanonicalBytes::from_vec(vec![]),
+            wall_time: WallTime::from_micros(0),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        };
+        reg.projections.apply_event(&event);
+
+        let observed = ProjectionKey::new(observed_entity);
+        let missing = ProjectionKey::new(missing_entity);
+        let subscriptions = vec![observed.clone(), observed.clone(), missing.clone()];
+        let snapshot = reg.snapshot_for_subscriptions(subscriptions.iter());
+        let view = snapshot.view_for(&subscriptions);
+
+        assert_eq!(view.len(), 2);
+        assert_eq!(
+            view.state_for(&observed)
+                .and_then(|state| state.get("n").and_then(serde_json::Value::as_u64)),
+            Some(1)
+        );
+        assert_eq!(view.state_for(&missing), None);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn tick_cadenced_respects_driver_interval() {
         use pos_store::{open_store, StoreConfig};
 
