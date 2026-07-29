@@ -31,6 +31,7 @@ use pos_core::{
     plugin::{Capability, Plugin},
     state::{Reducer, State},
 };
+use pos_plugin_geo::{GeoError, SpatialCloaker, Wgs84Point};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -43,6 +44,21 @@ pub const ENTITY_KIND: &str = "bridge-source";
 /// Event type for bridge observations.
 pub const EVENT_TYPE: &str = "bridge.observation";
 
+/// The stable schema version of a minimized `OwnTracks` location observation.
+pub const OWNTRACKS_LOCATION_SCHEMA_VERSION: u8 = 1;
+
+/// The consent/minimization policy version implemented by this decoder.
+pub const OWNTRACKS_LOCATION_POLICY_VERSION: u8 = 1;
+
+/// The V1 coarse spatial resolution in decimal degrees.
+pub const OWNTRACKS_LOCATION_RESOLUTION_DEGREES: f64 = 0.1;
+
+/// The V1 source-time bucket size in seconds.
+pub const OWNTRACKS_SOURCE_TIME_BUCKET_SECONDS: u64 = 15 * 60;
+
+/// The largest `OwnTracks` JSON body accepted by this pure decoder.
+pub const MAX_OWNTRACKS_BODY_BYTES: usize = 64 * 1024;
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -53,6 +69,186 @@ pub enum BridgeError {
     /// Store read failed.
     #[error("store error: {0}")]
     Store(#[from] pos_core::CoreError),
+}
+
+/// Errors returned while decoding a transient `OwnTracks` V1 location body.
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+pub enum OwnTracksDecodeError {
+    /// The body exceeds the bounded V1 decoder input.
+    #[error("OwnTracks body exceeds the V1 size limit")]
+    BodyTooLarge,
+    /// The body is not valid JSON.
+    #[error("OwnTracks body must be valid JSON")]
+    MalformedJson,
+    /// The JSON value is not one object.
+    #[error("OwnTracks body must contain one JSON object")]
+    ExpectedObject,
+    /// The message is not an accepted V1 location message.
+    #[error("OwnTracks V1 accepts only _type location")]
+    UnsupportedMessageType,
+    /// A location message has no numeric latitude.
+    #[error("OwnTracks location requires a numeric lat")]
+    MissingLatitude,
+    /// A location message has no numeric longitude.
+    #[error("OwnTracks location requires a numeric lon")]
+    MissingLongitude,
+    /// A location message has no unsigned integer timestamp.
+    #[error("OwnTracks location requires an unsigned integer tst")]
+    MissingTimestamp,
+    /// The supplied WGS84 coordinate cannot be minimized safely.
+    #[error("OwnTracks location has an invalid WGS84 coordinate: {0}")]
+    InvalidCoordinate(GeoError),
+}
+
+/// Result of decoding one bounded `OwnTracks` request body.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OwnTracksDecoded {
+    /// A permitted zero-length `OwnTracks` no-op.
+    Noop,
+    /// A compact observation that contains no exact coordinate or raw telemetry.
+    Location(MinimizedOwnTracksLocation),
+}
+
+/// The durable, minimized representation derived from an `OwnTracks` location.
+///
+/// Exact latitude/longitude and every unallowlisted `OwnTracks` field are discarded
+/// before this type is returned. The only spatial values exposed are the coarse
+/// V1 cell coordinates.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MinimizedOwnTracksLocation {
+    cell_latitude: f64,
+    cell_longitude: f64,
+    source_time_bucket: u64,
+    schema_version: u8,
+    policy_version: u8,
+    quality_flags: u8,
+}
+
+impl MinimizedOwnTracksLocation {
+    /// Return the coarse V1 cell latitude in decimal degrees.
+    #[must_use]
+    pub fn cell_latitude(&self) -> f64 {
+        self.cell_latitude
+    }
+
+    /// Return the coarse V1 cell longitude in decimal degrees.
+    #[must_use]
+    pub fn cell_longitude(&self) -> f64 {
+        self.cell_longitude
+    }
+
+    /// Return the floor-rounded V1 source-time bucket index.
+    #[must_use]
+    pub fn source_time_bucket(&self) -> u64 {
+        self.source_time_bucket
+    }
+
+    /// Return the immutable compact-observation schema version.
+    #[must_use]
+    pub fn schema_version(&self) -> u8 {
+        self.schema_version
+    }
+
+    /// Return the consent/minimization policy version used for this observation.
+    #[must_use]
+    pub fn policy_version(&self) -> u8 {
+        self.policy_version
+    }
+
+    /// Return bounded interpretation flags; V1 currently emits no flags.
+    #[must_use]
+    pub fn quality_flags(&self) -> u8 {
+        self.quality_flags
+    }
+
+    /// Encode this compact observation into deterministic V1 CBOR bytes.
+    ///
+    /// # Panics
+    ///
+    /// Never panics in practice: writing this fixed payload to a `Vec<u8>` is
+    /// infallible.
+    #[must_use]
+    pub fn canonical_bytes(&self) -> CanonicalBytes {
+        let payload = CanonicalOwnTracksLocation {
+            schema_version: self.schema_version,
+            policy_version: self.policy_version,
+            cell_latitude: self.cell_latitude,
+            cell_longitude: self.cell_longitude,
+            source_time_bucket: self.source_time_bucket,
+            quality_flags: self.quality_flags,
+        };
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&payload, &mut bytes)
+            .expect("ciborium write to Vec<u8> is infallible");
+        CanonicalBytes::from_vec(bytes)
+    }
+}
+
+#[derive(Serialize)]
+struct CanonicalOwnTracksLocation {
+    schema_version: u8,
+    policy_version: u8,
+    cell_latitude: f64,
+    cell_longitude: f64,
+    source_time_bucket: u64,
+    quality_flags: u8,
+}
+
+/// Decode and immediately minimize one `OwnTracks` V1 request body.
+///
+/// This pure boundary accepts only a zero-length no-op or one JSON object whose
+/// `_type` is `location`. It retains no raw JSON, exact coordinate, timestamp,
+/// or unallowlisted telemetry in its result.
+///
+/// # Errors
+///
+/// Returns [`OwnTracksDecodeError`] for an oversized, malformed, unsupported,
+/// incomplete, or invalid location body.
+///
+/// # Panics
+///
+/// Never panics in practice: the fixed V1 degree-grid resolution is
+/// WGS84-aligned by construction.
+pub fn decode_owntracks_location(body: &[u8]) -> Result<OwnTracksDecoded, OwnTracksDecodeError> {
+    if body.is_empty() {
+        return Ok(OwnTracksDecoded::Noop);
+    }
+    if body.len() > MAX_OWNTRACKS_BODY_BYTES {
+        return Err(OwnTracksDecodeError::BodyTooLarge);
+    }
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Err(OwnTracksDecodeError::MalformedJson);
+    };
+    let Some(object) = value.as_object() else {
+        return Err(OwnTracksDecodeError::ExpectedObject);
+    };
+    if object.get("_type").and_then(serde_json::Value::as_str) != Some("location") {
+        return Err(OwnTracksDecodeError::UnsupportedMessageType);
+    }
+    let Some(latitude) = object.get("lat").and_then(serde_json::Value::as_f64) else {
+        return Err(OwnTracksDecodeError::MissingLatitude);
+    };
+    let Some(longitude) = object.get("lon").and_then(serde_json::Value::as_f64) else {
+        return Err(OwnTracksDecodeError::MissingLongitude);
+    };
+    let Some(source_time) = object.get("tst").and_then(serde_json::Value::as_u64) else {
+        return Err(OwnTracksDecodeError::MissingTimestamp);
+    };
+    let point = match Wgs84Point::new(latitude, longitude) {
+        Ok(point) => point,
+        Err(error) => return Err(OwnTracksDecodeError::InvalidCoordinate(error)),
+    };
+    let cloaker = SpatialCloaker::new(OWNTRACKS_LOCATION_RESOLUTION_DEGREES)
+        .expect("the fixed V1 resolution is WGS84-aligned");
+    let cell = cloaker.cloak(point);
+    Ok(OwnTracksDecoded::Location(MinimizedOwnTracksLocation {
+        cell_latitude: cell.latitude(),
+        cell_longitude: cell.longitude(),
+        source_time_bucket: source_time / OWNTRACKS_SOURCE_TIME_BUCKET_SECONDS,
+        schema_version: OWNTRACKS_LOCATION_SCHEMA_VERSION,
+        policy_version: OWNTRACKS_LOCATION_POLICY_VERSION,
+        quality_flags: 0,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -222,6 +418,105 @@ mod tests {
         event::SchemaVersion,
         ids::EventId,
     };
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn owntracks_empty_body_is_a_permitted_noop() {
+        assert_eq!(decode_owntracks_location(b""), Ok(OwnTracksDecoded::Noop));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn owntracks_location_is_minimized_before_it_is_returned() {
+        let decoded = decode_owntracks_location(
+            br#"{"_type":"location","lat":37.7749,"lon":-122.4194,"tst":1800,"acc":3,"batt":91,"ssid":"private","tid":"x"}"#,
+        );
+
+        let Ok(OwnTracksDecoded::Location(location)) = decoded else {
+            panic!("valid OwnTracks location must minimize");
+        };
+        assert!((location.cell_latitude() - 37.8).abs() < 1e-9);
+        assert!((location.cell_longitude() - (-122.4)).abs() < 1e-9);
+        assert_eq!(location.source_time_bucket(), 2);
+        assert_eq!(location.schema_version(), OWNTRACKS_LOCATION_SCHEMA_VERSION);
+        assert_eq!(location.policy_version(), OWNTRACKS_LOCATION_POLICY_VERSION);
+        assert_eq!(location.quality_flags(), 0);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn owntracks_minimized_bytes_are_deterministic_and_discard_telemetry() {
+        let first = decode_owntracks_location(
+            br#"{"_type":"location","lat":37.7749,"lon":-122.4194,"tst":1800,"batt":1}"#,
+        );
+        let second = decode_owntracks_location(
+            br#"{"lon":-122.4194,"tst":1800,"_type":"location","lat":37.7749,"batt":99,"wifi":"private"}"#,
+        );
+
+        let Ok(OwnTracksDecoded::Location(first)) = first else {
+            panic!("first location must minimize");
+        };
+        let Ok(OwnTracksDecoded::Location(second)) = second else {
+            panic!("second location must minimize");
+        };
+        assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn owntracks_decoder_rejects_invalid_envelopes() {
+        let oversized = vec![b'x'; MAX_OWNTRACKS_BODY_BYTES + 1];
+        assert_eq!(
+            decode_owntracks_location(&oversized),
+            Err(OwnTracksDecodeError::BodyTooLarge)
+        );
+        assert_eq!(
+            decode_owntracks_location(b"{"),
+            Err(OwnTracksDecodeError::MalformedJson)
+        );
+        assert_eq!(
+            decode_owntracks_location(b"[]"),
+            Err(OwnTracksDecodeError::ExpectedObject)
+        );
+        assert_eq!(
+            decode_owntracks_location(br#"{"_type":"encrypted"}"#),
+            Err(OwnTracksDecodeError::UnsupportedMessageType)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn owntracks_decoder_requires_each_location_field() {
+        assert_eq!(
+            decode_owntracks_location(br#"{"_type":"location","lon":1,"tst":1}"#),
+            Err(OwnTracksDecodeError::MissingLatitude)
+        );
+        assert_eq!(
+            decode_owntracks_location(br#"{"_type":"location","lat":1,"tst":1}"#),
+            Err(OwnTracksDecodeError::MissingLongitude)
+        );
+        assert_eq!(
+            decode_owntracks_location(br#"{"_type":"location","lat":1,"lon":1,"tst":1.5}"#),
+            Err(OwnTracksDecodeError::MissingTimestamp)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn owntracks_decoder_rejects_coordinates_outside_wgs84() {
+        assert_eq!(
+            decode_owntracks_location(br#"{"_type":"location","lat":91,"lon":0,"tst":1}"#),
+            Err(OwnTracksDecodeError::InvalidCoordinate(
+                GeoError::LatitudeOutOfRange
+            ))
+        );
+        assert_eq!(
+            decode_owntracks_location(br#"{"_type":"location","lat":0,"lon":181,"tst":1}"#),
+            Err(OwnTracksDecodeError::InvalidCoordinate(
+                GeoError::LongitudeOutOfRange
+            ))
+        );
+    }
 
     // ── BridgePlugin tests ────────────────────────────────────────────────
 

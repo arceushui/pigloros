@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 pos-core = { path = "../../crates/pos-core" }
 pos-runtime = { path = "../../crates/pos-runtime" }
+pos-plugin-geo = { path = "../geo" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
