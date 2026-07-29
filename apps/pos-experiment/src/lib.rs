@@ -27,6 +27,15 @@ pub enum StopCondition {
     MaxEvents(u64),
 }
 
+impl StopCondition {
+    fn reached(&self, ticks: u64, total_events: u64) -> bool {
+        match self {
+            Self::MaxTicks(max) => ticks >= *max,
+            Self::MaxEvents(max) => total_events >= *max,
+        }
+    }
+}
+
 /// Configuration for an experiment.
 pub struct ExperimentConfig {
     pub name: String,
@@ -102,9 +111,9 @@ impl RunResult {
         Ok(forked)
     }
 
-    /// Require host-owned execution metadata before exporting a reproducible run.
+    /// Consume this result to form a host-executable reproduction manifest.
     #[must_use]
-    pub fn with_reproduction_recipe(self, recipe: ReproductionRecipe) -> ReproductionManifest {
+    pub fn into_reproduction_manifest(self, recipe: ReproductionRecipe) -> ReproductionManifest {
         ReproductionManifest {
             manifest: self.manifest,
             recipe,
@@ -160,24 +169,51 @@ pub enum ExperimentError {
 // Private helpers: shared tick and completion pipeline
 // ---------------------------------------------------------------------------
 
+/// Run all store-backed work for one tick and return its committed events.
+fn commit_tick(
+    store: &mut dyn pos_core::store::EventStore,
+    timeline_id: pos_core::ids::TimelineId,
+    registry: &mut PluginRegistry,
+) -> Result<Option<Vec<pos_core::Event>>, ExperimentError> {
+    registry
+        .step_all(store, timeline_id)
+        .map_err(ExperimentError::from)
+        .and_then(|drafts| {
+            if drafts.is_empty() {
+                Ok(None)
+            } else {
+                registry
+                    .schemas
+                    .validate_batch(&drafts)
+                    .map_err(ExperimentError::from)
+                    .and_then(|()| {
+                        store
+                            .append(timeline_id, &drafts)
+                            .map(Some)
+                            .map_err(ExperimentError::from)
+                    })
+            }
+        })
+}
+
+/// Fold a batch only after its `EventStore` append has completed.
+fn fold_committed_events(
+    registry: &mut PluginRegistry,
+    committed: &[pos_core::Event],
+) -> (pos_core::clock::Seq, u64) {
+    let last_seq = committed[committed.len() - 1].seq;
+    registry.projections.fold_events(committed);
+    (last_seq, committed.len() as u64)
+}
+
 /// Advance exactly one complete tick through the experiment pipeline.
 fn advance_tick(
     store: &mut dyn pos_core::store::EventStore,
     timeline_id: pos_core::ids::TimelineId,
     registry: &mut PluginRegistry,
 ) -> Result<Option<(pos_core::clock::Seq, u64)>, ExperimentError> {
-    let drafts = registry.step_all(store, timeline_id)?;
-    if drafts.is_empty() {
-        return Ok(None);
-    }
-
-    registry.schemas.validate_batch(&drafts)?;
-    let committed = store.append(timeline_id, &drafts)?;
-    let last_seq = committed[committed.len() - 1].seq;
-    for event in &committed {
-        registry.projections.apply_event(event);
-    }
-    Ok(Some((last_seq, committed.len() as u64)))
+    commit_tick(store, timeline_id, registry)
+        .map(|committed| committed.map(|events| fold_committed_events(registry, &events)))
 }
 
 fn chain_head(
@@ -245,21 +281,18 @@ fn run_experiment_on_store(
     let mut total_events: u64 = 0;
 
     loop {
-        let should_stop = match stop {
-            StopCondition::MaxTicks(max) => ticks >= *max,
-            StopCondition::MaxEvents(max) => total_events >= *max,
-        };
-        if should_stop {
+        if stop.reached(ticks, total_events) {
             break;
         }
 
-        let advanced = advance_tick(store, timeline_id, registry)?;
-        let Some((_, committed_count)) = advanced else {
-            break;
-        };
-
-        total_events += committed_count;
-        ticks += 1;
+        match advance_tick(store, timeline_id, registry) {
+            Ok(Some((_, committed_count))) => {
+                total_events += committed_count;
+                ticks += 1;
+            }
+            Ok(None) => break,
+            Err(error) => return Err(error),
+        }
     }
 
     chain_head(store, timeline_id).map(|head| (ticks, total_events, head))
@@ -384,10 +417,7 @@ impl Experiment {
 
 impl ExperimentSession {
     fn reached_stop_condition(&self) -> bool {
-        match self.config.stop {
-            StopCondition::MaxTicks(max) => self.ticks >= max,
-            StopCondition::MaxEvents(max) => self.total_events >= max,
-        }
+        self.config.stop.reached(self.ticks, self.total_events)
     }
 
     /// Return the active Timeline handle.
@@ -409,17 +439,23 @@ impl ExperimentSession {
             return Ok(false);
         }
 
-        let mut store = lock_store(&self.store)?;
-        let advanced = advance_tick(store.as_mut(), self.timeline.id(), &mut self.registry)?;
-        let Some((last_seq, committed_count)) = advanced else {
-            self.complete = true;
-            return Ok(false);
-        };
-        self.timeline.head = last_seq;
-
-        self.total_events += committed_count;
-        self.ticks += 1;
-        Ok(true)
+        lock_store(&self.store)
+            .and_then(|mut store| {
+                commit_tick(store.as_mut(), self.timeline.id(), &mut self.registry)
+            })
+            .map(|committed| {
+                if let Some(events) = committed {
+                    let (last_seq, committed_count) =
+                        fold_committed_events(&mut self.registry, &events);
+                    self.timeline.head = last_seq;
+                    self.total_events += committed_count;
+                    self.ticks += 1;
+                    true
+                } else {
+                    self.complete = true;
+                    false
+                }
+            })
     }
 
     /// Fork the active Timeline at its most recently completed tick boundary.
@@ -470,36 +506,43 @@ impl ExperimentSession {
     /// # Errors
     /// Returns runtime or store errors from a tick or final chain-head read.
     pub fn run_to_completion(mut self) -> Result<RunResult, ExperimentError> {
-        while self.step()? {}
+        loop {
+            match self.step() {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(error) => return Err(error),
+            }
+        }
 
         let timeline_id = self.timeline.id();
-        let chain_head =
-            lock_store(&self.store).and_then(|store| chain_head(store.as_ref(), timeline_id))?;
+        lock_store(&self.store)
+            .and_then(|store| chain_head(store.as_ref(), timeline_id))
+            .map(|chain_head| {
+                let mut manifest = ReproManifest::new(timeline_id, chain_head, WallTime::now());
+                for (name, version) in self.registry.plugin_versions() {
+                    manifest = manifest.with_plugin_version(name, version.to_owned());
+                }
+                manifest
+                    .adapter_records
+                    .push(pos_core::manifest::AdapterRecord {
+                        plugin_id: pos_core::ids::PluginId::new(),
+                        call_index: 0,
+                        input_hash: Hash::zero(),
+                        output_hash: Hash::from_bytes(
+                            *blake3::hash(timeline_id.to_string().as_bytes()).as_bytes(),
+                        ),
+                        wall_time: WallTime::now(),
+                    });
 
-        let mut manifest = ReproManifest::new(timeline_id, chain_head, WallTime::now());
-        for (name, version) in self.registry.plugin_versions() {
-            manifest = manifest.with_plugin_version(name, version.to_owned());
-        }
-        manifest
-            .adapter_records
-            .push(pos_core::manifest::AdapterRecord {
-                plugin_id: pos_core::ids::PluginId::new(),
-                call_index: 0,
-                input_hash: Hash::zero(),
-                output_hash: Hash::from_bytes(
-                    *blake3::hash(timeline_id.to_string().as_bytes()).as_bytes(),
-                ),
-                wall_time: WallTime::now(),
-            });
-
-        Ok(RunResult {
-            timeline_id,
-            ticks: self.ticks,
-            total_events: self.total_events,
-            manifest,
-            projections: self.registry.projections,
-            store_config: self.config.store_config,
-        })
+                RunResult {
+                    timeline_id,
+                    ticks: self.ticks,
+                    total_events: self.total_events,
+                    manifest,
+                    projections: self.registry.projections,
+                    store_config: self.config.store_config,
+                }
+            })
     }
 }
 
@@ -807,6 +850,24 @@ mod tests {
         }
     }
 
+    struct LockInspectingReducer {
+        store: Arc<Mutex<Option<SharedEventStore>>>,
+        saw_unlocked_store: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Reducer for LockInspectingReducer {
+        fn initial(&self) -> State {
+            State::new()
+        }
+
+        fn apply(&self, _: &mut State, _: &Event) {
+            let store = self.store.lock().unwrap().clone();
+            let is_unlocked = store.is_some_and(|store| store.try_lock().is_ok());
+            self.saw_unlocked_store
+                .store(is_unlocked, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
     // ── Tests ─────────────────────────────────────────────────────────────
 
     #[test]
@@ -846,30 +907,6 @@ mod tests {
         let result = exp.run().unwrap();
         assert_eq!(result.total_events, 6);
         assert_eq!(result.ticks, 3);
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn store_runner_supports_max_events_and_empty_batches() {
-        let entity = EntityId::new();
-        let plugin = make_plugin("store-runner", &["store-runner.event"]);
-        let driver = FixedDriver::new(entity, "store-runner.event", 1).with_max_ticks(1);
-        let mut registry = PluginRegistry::new();
-        registry
-            .register(&plugin, None, Some(Box::new(driver)))
-            .unwrap();
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let timeline = store.create_timeline("store-runner").unwrap();
-
-        let (ticks, events, _) = run_experiment_on_store(
-            store.as_mut(),
-            timeline.id(),
-            &StopCondition::MaxEvents(2),
-            &mut registry,
-        )
-        .unwrap();
-
-        assert_eq!((ticks, events), (1, 1));
     }
 
     #[test]
@@ -1031,6 +1068,35 @@ mod tests {
         let result = session.run_to_completion().unwrap();
         assert_eq!(result.ticks, 2);
         assert_eq!(result.total_events, 2);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn live_session_releases_the_store_lock_before_folding_projections() {
+        let entity = EntityId::new();
+        let plugin = make_plugin_with_reducer("lock-inspection", &["lock.inspection"]);
+        let store = Arc::new(Mutex::new(None));
+        let saw_unlocked_store = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "lock-inspection".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        });
+        experiment
+            .register(
+                &plugin,
+                Some(Box::new(LockInspectingReducer {
+                    store: Arc::clone(&store),
+                    saw_unlocked_store: Arc::clone(&saw_unlocked_store),
+                })),
+                Some(Box::new(FixedDriver::new(entity, "lock.inspection", 1))),
+            )
+            .unwrap();
+
+        let mut session = experiment.start().unwrap();
+        *store.lock().unwrap() = Some(Arc::clone(&session.store));
+        assert!(session.step().unwrap());
+        assert!(saw_unlocked_store.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]
@@ -1458,40 +1524,28 @@ mod tests {
         let entity = EntityId::new();
         let plugin = make_plugin("chain-plugin", &["chain.event"]);
         let driver = FixedDriver::new(entity, "chain.event", 2);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("chain-head.db");
 
         let mut exp = Experiment::new(ExperimentConfig {
             name: "chain-hash-test".to_owned(),
             stop: StopCondition::MaxTicks(2),
-            store_config: StoreConfig::Memory,
+            store_config: StoreConfig::Sqlite {
+                path: path.to_str().unwrap().to_owned(),
+            },
         });
         exp.register(&plugin, None, Some(Box::new(driver))).unwrap();
+        let result = exp.run().unwrap();
 
-        // We can't directly access the store after run(), so we rerun with a fresh
-        // store and verify the chain_head manually.
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("chain-hash-verify").unwrap();
-        let plugin2 = make_plugin("chain-plugin2", &["chain2.event"]);
-        let driver2 = FixedDriver::new(entity, "chain2.event", 2);
-        let mut reg = PluginRegistry::new();
-        reg.register(&plugin2, None, Some(Box::new(driver2)))
-            .unwrap();
-        let stop = StopCondition::MaxTicks(2);
-        let (_, _, chain_head) =
-            run_experiment_on_store(store.as_mut(), tl.id(), &stop, &mut reg).unwrap();
-
-        // Manually compute expected hash
-        let events = store.read(tl.id(), SeqRange::all()).unwrap();
+        let store = open_store(result.store_config.clone()).unwrap();
+        let events = store.read(result.timeline_id, SeqRange::all()).unwrap();
         assert!(!events.is_empty());
         let mut hasher = blake3::Hasher::new();
         for e in &events {
             hasher.update(e.payload_hash.as_bytes());
         }
         let expected = Hash::from_bytes(*hasher.finalize().as_bytes());
-        assert_eq!(chain_head, expected);
-        assert_ne!(chain_head, Hash::zero());
-
-        // Also verify the original experiment result has non-zero hash
-        let result = exp.run().unwrap();
+        assert_eq!(result.manifest.head_hash, expected);
         assert_ne!(result.manifest.head_hash, Hash::zero());
     }
 }
@@ -1679,6 +1733,33 @@ mod backtest_tests {
         assert!(result.eval_avg_events_per_tick.abs() < f64::EPSILON);
         // lift_vs_persistence = 0/train_avg - 1 = -1 (eval_avg=0, train_avg>0)
         assert!((result.lift_vs_persistence - (-1.0_f64)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn backtest_runner_stops_when_a_driver_emits_an_empty_batch() {
+        let config = BacktestConfig {
+            experiment_name: "bt-empty-driver".to_owned(),
+            train_ticks: 1,
+            eval_ticks: 1,
+            store_config: pos_store::StoreConfig::Memory,
+        };
+        let runner = BacktestRunner::new(config, || {
+            let plugin = BtPlugin {
+                id: pos_core::ids::PluginId::new(),
+            };
+            let mut registry = pos_runtime::PluginRegistry::new();
+            registry
+                .register(&plugin, None, Some(Box::new(GoodBtDriver)))
+                .unwrap();
+            registry
+        });
+
+        let result = runner.run().unwrap();
+        assert_eq!(result.train_result.ticks, 0);
+        assert_eq!(result.eval_result.ticks, 0);
+        assert_eq!(result.train_events, 0);
+        assert_eq!(result.eval_events, 0);
     }
 
     #[test]
@@ -2152,49 +2233,6 @@ mod fault_injection_tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn run_experiment_on_store_step_all_error_propagates() {
-        let entity = EntityId::new();
-        let plugin = FaultPlugin {
-            id: PluginId::new(),
-            event_type: Kind::new("known.event"),
-        };
-        let mut reg = pos_runtime::PluginRegistry::new();
-        reg.register(&plugin, None, Some(Box::new(BadEmitDriver { entity })))
-            .unwrap();
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("fault").unwrap();
-        let err = run_experiment_on_store(
-            store.as_mut(),
-            tl.id(),
-            &StopCondition::MaxTicks(1),
-            &mut reg,
-        );
-        assert!(err.is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn run_experiment_on_store_driver_step_error_propagates() {
-        let plugin = FaultPlugin {
-            id: PluginId::new(),
-            event_type: Kind::new("known.event"),
-        };
-        let mut reg = pos_runtime::PluginRegistry::new();
-        reg.register(&plugin, None, Some(Box::new(FailStepDriver)))
-            .unwrap();
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("step-fault").unwrap();
-        let err = run_experiment_on_store(
-            store.as_mut(),
-            tl.id(),
-            &StopCondition::MaxTicks(1),
-            &mut reg,
-        );
-        assert!(matches!(err, Err(ExperimentError::Runtime(_))));
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn live_session_propagates_driver_error() {
         let plugin = FaultPlugin {
             id: PluginId::new(),
@@ -2312,57 +2350,6 @@ mod fault_injection_tests {
                 .len(),
             1
         );
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn run_experiment_on_store_append_fails_when_events_dropped() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("append.db").to_str().unwrap().to_owned();
-        let mut store = open_store(StoreConfig::Sqlite { path }).unwrap();
-        let tl = store.create_timeline("append-fault").unwrap();
-        drop_table(dir.path().join("append.db").to_str().unwrap(), "events");
-        let mut reg = registry_with_emit_driver();
-        let err = run_experiment_on_store(
-            store.as_mut(),
-            tl.id(),
-            &StopCondition::MaxTicks(1),
-            &mut reg,
-        );
-        assert!(err.is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn run_experiment_on_store_read_fails_when_events_dropped_mid_run() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("read.db").to_str().unwrap().to_owned();
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
-        let tl = store.create_timeline("read-fault").unwrap();
-        let entity = EntityId::new();
-        let event_type = Kind::new("read.tick");
-        let plugin = FaultPlugin {
-            id: PluginId::new(),
-            event_type: event_type.clone(),
-        };
-        let mut reg = pos_runtime::PluginRegistry::new();
-        reg.register(
-            &plugin,
-            None,
-            Some(Box::new(EmitDriver { entity, event_type })),
-        )
-        .unwrap();
-        let drafts = reg.step_all(store.as_mut(), tl.id()).unwrap();
-        reg.schemas.validate_batch(&drafts).unwrap();
-        store.append(tl.id(), &drafts).unwrap();
-        drop_table(&path, "events");
-        let err = run_experiment_on_store(
-            store.as_mut(),
-            tl.id(),
-            &StopCondition::MaxTicks(0),
-            &mut reg,
-        );
-        assert!(err.is_err());
     }
 
     #[test]

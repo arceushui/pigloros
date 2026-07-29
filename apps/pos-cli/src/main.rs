@@ -12,7 +12,13 @@
 //!   pos version
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-use pos_core::{clock::Seq, ids::TimelineId, store::SeqRange};
+use pos_core::{
+    clock::{Seq, WallTime},
+    crypto::Hash,
+    ids::{PluginId, TimelineId},
+    manifest::AdapterRecord,
+    store::SeqRange,
+};
 use pos_experiment::{
     Experiment, ExperimentConfig, ReproductionManifest, ReproductionRecipe, RunResult,
     StopCondition,
@@ -36,6 +42,75 @@ struct CliExperimentRecipe {
 #[serde(deny_unknown_fields)]
 struct BuiltinReferenceV1 {
     ticks: u64,
+}
+
+/// Strict host-side execution view of the kernel manifest. The kernel keeps
+/// its permissive serde compatibility for existing evidence and verification;
+/// reproduction rejects unrecognized evidence fields before it executes.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictReproductionManifest {
+    manifest: StrictReproManifest,
+    recipe: ReproductionRecipe,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictReproManifest {
+    timeline_id: TimelineId,
+    head_hash: Hash,
+    created_at: WallTime,
+    plugin_versions: std::collections::HashMap<String, String>,
+    adapter_records: Vec<StrictAdapterRecord>,
+    label: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictAdapterRecord {
+    plugin_id: PluginId,
+    call_index: u64,
+    input_hash: Hash,
+    output_hash: Hash,
+    wall_time: WallTime,
+}
+
+impl From<StrictAdapterRecord> for AdapterRecord {
+    fn from(record: StrictAdapterRecord) -> Self {
+        Self {
+            plugin_id: record.plugin_id,
+            call_index: record.call_index,
+            input_hash: record.input_hash,
+            output_hash: record.output_hash,
+            wall_time: record.wall_time,
+        }
+    }
+}
+
+impl From<StrictReproManifest> for pos_core::ReproManifest {
+    fn from(manifest: StrictReproManifest) -> Self {
+        Self {
+            timeline_id: manifest.timeline_id,
+            head_hash: manifest.head_hash,
+            created_at: manifest.created_at,
+            plugin_versions: manifest.plugin_versions,
+            adapter_records: manifest
+                .adapter_records
+                .into_iter()
+                .map(AdapterRecord::from)
+                .collect(),
+            label: manifest.label,
+        }
+    }
+}
+
+impl From<StrictReproductionManifest> for ReproductionManifest {
+    fn from(reproduction: StrictReproductionManifest) -> Self {
+        Self {
+            manifest: reproduction.manifest.into(),
+            recipe: reproduction.recipe,
+        }
+    }
 }
 
 #[cfg(not(test))]
@@ -493,7 +568,7 @@ fn cmd_experiment_run(path: &str, ticks: u64) -> Result<(), Box<dyn std::error::
             let completed_ticks = result.ticks;
             let total_events = result.total_events;
             let timeline_id = result.timeline_id;
-            let reproduction = result.with_reproduction_recipe(cli_reproduction_recipe(ticks));
+            let reproduction = result.into_reproduction_manifest(cli_reproduction_recipe(ticks));
             let manifest_path = path.replace(".db", "-manifest.json");
 
             save_run_manifest(&manifest_path, &reproduction).map(|()| {
@@ -516,7 +591,11 @@ fn cli_reproduction_recipe(ticks: u64) -> ReproductionRecipe {
 fn cmd_experiment_reproduce(manifest_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::read_to_string(manifest_path)
         .map_err(Into::into)
-        .and_then(|json| serde_json::from_str(&json).map_err(Into::into))
+        .and_then(|json| {
+            serde_json::from_str::<StrictReproductionManifest>(&json)
+                .map(ReproductionManifest::from)
+                .map_err(Into::into)
+        })
         .and_then(reproduce_manifest)
 }
 
@@ -1155,6 +1234,30 @@ mod tests {
             .insert("extra".to_owned(), serde_json::Value::Null);
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), serde_json::to_string(&json).unwrap()).unwrap();
+        assert!(cmd_experiment_reproduce(file.path().to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn cmd_experiment_reproduce_rejects_unknown_kernel_manifest_field_before_execution() {
+        let reproduction = ReproductionManifest {
+            manifest: pos_core::ReproManifest::new(
+                TimelineId::new(),
+                pos_core::Hash::zero(),
+                pos_core::clock::WallTime::from_micros(0),
+            ),
+            recipe: cli_reproduction_recipe(1),
+        };
+        let mut json = serde_json::to_value(reproduction).unwrap();
+        json.get_mut("manifest")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .insert(
+                "unexpected_kernel_field".to_owned(),
+                serde_json::Value::Null,
+            );
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), serde_json::to_string(&json).unwrap()).unwrap();
+
         assert!(cmd_experiment_reproduce(file.path().to_str().unwrap()).is_err());
     }
 
