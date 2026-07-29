@@ -5,7 +5,7 @@
 //! Fork is copy-on-write: only a metadata row is inserted at fork time (O(1)).
 //! Child reads stitch parent events up to `fork_seq` with child events.
 
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{params, Connection, OpenFlags, Params};
 
 use pos_core::{
     clock::{Seq, WallTime},
@@ -106,8 +106,9 @@ impl SqliteStore {
         Self::open_with_hasher(":memory:", hasher)
     }
 
-    fn query_prepared<'conn>(
+    fn query_prepared<'conn, P: Params>(
         stmt: &'conn mut rusqlite::Statement<'_>,
+        query_params: P,
     ) -> Result<rusqlite::Rows<'conn>, CoreError> {
         let raw = {
             #[cfg(test)]
@@ -115,12 +116,12 @@ impl SqliteStore {
                 if FAIL_STMT_QUERY.with(std::cell::Cell::get) {
                     Err(rusqlite::Error::InvalidQuery)
                 } else {
-                    stmt.query([])
+                    stmt.query(query_params)
                 }
             }
             #[cfg(not(test))]
             {
-                stmt.query([])
+                stmt.query(query_params)
             }
         };
         raw.map_err(|e| CoreError::Storage(e.to_string()))
@@ -348,37 +349,27 @@ impl SqliteStore {
         to: Option<Seq>,
         limit: Option<usize>,
     ) -> Result<Vec<Event>, CoreError> {
-        let limit_clause = limit.map_or_else(String::new, |value| format!(" LIMIT {value}"));
-        let sql = to.map_or_else(
-            || {
-                format!(
-                    "SELECT seq, event_id, entity_id, event_type, payload, wall_time,
-                        causation_id, correlation_id, schema_version, payload_hash, signature
-                 FROM events WHERE timeline_id = '{}' AND seq >= {}
-                 ORDER BY seq ASC{}",
-                    timeline_id,
-                    from.as_u64(),
-                    limit_clause
-                )
-            },
-            |t| {
-                format!(
-                    "SELECT seq, event_id, entity_id, event_type, payload, wall_time,
-                        causation_id, correlation_id, schema_version, payload_hash, signature
-                 FROM events WHERE timeline_id = '{}' AND seq >= {} AND seq <= {}
-                 ORDER BY seq ASC{}",
-                    timeline_id,
-                    from.as_u64(),
-                    t.as_u64(),
-                    limit_clause
-                )
-            },
-        );
-
+        const SQL: &str = "SELECT seq, event_id, entity_id, event_type, payload, wall_time,
+                                causation_id, correlation_id, schema_version, payload_hash, signature
+                         FROM events
+                         WHERE timeline_id = ?1
+                           AND seq >= ?2
+                           AND (?3 IS NULL OR seq <= ?3)
+                         ORDER BY seq ASC
+                         LIMIT ?4";
+        let sql_limit = limit.map_or(i64::MAX, |value| i64::try_from(value).unwrap_or(i64::MAX));
         let mut stmt = conn
-            .prepare(&sql)
+            .prepare(SQL)
             .map_err(|e| CoreError::Storage(e.to_string()))?;
-        let mut rows = Self::query_prepared(&mut stmt)?;
+        let mut rows = Self::query_prepared(
+            &mut stmt,
+            params![
+                timeline_id.to_string(),
+                seq_as_i64(from),
+                to.map(seq_as_i64),
+                sql_limit,
+            ],
+        )?;
         let mut events = Vec::new();
         loop {
             let next = {
@@ -459,24 +450,29 @@ impl SqliteStore {
         max_events: usize,
         bounds: EventReadBounds,
     ) -> Result<Vec<Event>, CoreError> {
-        let sql = format!(
-            "SELECT seq, typeof(payload), length(CAST(payload AS BLOB)),
-                    length(CAST(event_type AS BLOB))
-             FROM events WHERE timeline_id = '{}' AND seq >= {} AND seq <= {}
-             ORDER BY seq ASC LIMIT {}",
-            timeline_id,
-            from.as_u64(),
-            to.as_u64(),
-            max_events
-        );
-        let mut stmt = match conn.prepare(&sql) {
+        const SQL: &str = "SELECT seq, typeof(payload), length(CAST(payload AS BLOB)),
+                                length(CAST(event_type AS BLOB))
+                         FROM events
+                         WHERE timeline_id = ?1 AND seq >= ?2 AND seq <= ?3
+                         ORDER BY seq ASC
+                         LIMIT ?4";
+        let sql_limit = i64::try_from(max_events).unwrap_or(i64::MAX);
+        let mut stmt = match conn.prepare(SQL) {
             Ok(stmt) => stmt,
             Err(error) => {
                 let message = error.to_string();
                 return Err(CoreError::Storage(message));
             }
         };
-        let mut rows = stmt.raw_query();
+        let mut rows = Self::query_prepared(
+            &mut stmt,
+            params![
+                timeline_id.to_string(),
+                seq_as_i64(from),
+                seq_as_i64(to),
+                sql_limit
+            ],
+        )?;
         let mut field_sizes: Vec<(String, i64, i64)> = Vec::new();
         loop {
             let next = {
@@ -612,28 +608,31 @@ impl SqliteStore {
         conn: &Connection,
         timeline_id: TimelineId,
     ) -> Result<Vec<(TimelineId, Option<Seq>)>, CoreError> {
-        let mut chain: Vec<(TimelineId, Option<Seq>)> = Vec::new();
+        let mut chain = Vec::new();
         let mut current = timeline_id;
         loop {
-            let row: Option<(Option<String>, Option<i64>)> = conn
+            let row = conn
                 .query_row(
-                    "SELECT parent_id, fork_seq FROM timelines WHERE id = ?1",
+                    "SELECT parent_id, fork_seq, head_seq FROM timelines WHERE id = ?1",
                     params![current.to_string()],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    ForkChainRow::read,
                 )
                 .optional()
                 .map_err(|e| CoreError::Storage(e.to_string()))?;
+            let row = match row {
+                Some(row) => Some(row.decode(current)?),
+                None => None,
+            };
 
             match row {
                 None => return Err(CoreError::TimelineNotFound(current)),
-                Some((None, _)) => {
+                Some(DecodedForkChainRow::Root { .. }) => {
                     chain.push((current, None));
                     break;
                 }
-                Some((Some(parent_str), fork_seq)) => {
-                    let fork = fork_seq.map(|s| Seq::from_u64(u64::try_from(s).unwrap_or(0)));
-                    chain.push((current, fork));
-                    current = parse_timeline_id(&parent_str)?;
+                Some(DecodedForkChainRow::Fork { parent, fork, .. }) => {
+                    chain.push((current, Some(fork)));
+                    current = parent;
                 }
             }
         }
@@ -650,28 +649,22 @@ impl SqliteStore {
         let mut current = timeline_id;
         let mut depth = 0_usize;
         loop {
-            let row: Option<(Option<String>, Option<i64>, i64)> = conn
+            let row = conn
                 .query_row(
                     "SELECT parent_id, fork_seq, head_seq FROM timelines WHERE id = ?1",
                     params![current.to_string()],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    ForkChainRow::read,
                 )
                 .optional()
                 .map_err(|error| CoreError::Storage(error.to_string()))?;
+            let row = match row {
+                Some(row) => Some(row.decode(current)?),
+                None => None,
+            };
 
             match row {
                 None => return Err(CoreError::TimelineNotFound(current)),
-                Some((None, Some(_), _)) => {
-                    return Err(CoreError::Storage(format!(
-                        "root timeline {current} has Fork sequence metadata"
-                    )))
-                }
-                Some((None, None, head_seq)) => {
-                    let Ok(head) = u64::try_from(head_seq) else {
-                        return Err(CoreError::Storage(format!(
-                            "timeline {current} has a negative Event head"
-                        )));
-                    };
+                Some(DecodedForkChainRow::Root { head }) => {
                     chain.push(BoundedForkSegment {
                         id: current,
                         fork: None,
@@ -679,34 +672,18 @@ impl SqliteStore {
                     });
                     break;
                 }
-                Some((Some(parent_str), fork_seq, head_seq)) => {
+                Some(DecodedForkChainRow::Fork { parent, fork, head }) => {
                     let next_depth = depth.saturating_add(1);
                     if next_depth > max_depth {
                         return Err(CoreError::ForkDepthTooLarge { depth: next_depth });
                     }
-                    let Ok(head) = u64::try_from(head_seq) else {
-                        return Err(CoreError::Storage(format!(
-                            "timeline {current} has a negative Event head"
-                        )));
-                    };
-                    let Some(fork_seq) = fork_seq else {
-                        return Err(CoreError::Storage(format!(
-                            "Fork timeline {current} is missing its Fork sequence"
-                        )));
-                    };
-                    let Ok(fork_seq) = u64::try_from(fork_seq) else {
-                        return Err(CoreError::Storage(format!(
-                            "Fork timeline {current} has a negative Fork sequence"
-                        )));
-                    };
-                    let fork = Some(Seq::from_u64(fork_seq));
                     chain.push(BoundedForkSegment {
                         id: current,
-                        fork,
+                        fork: Some(fork),
                         head,
                     });
                     depth = next_depth;
-                    current = parse_timeline_id(&parent_str)?;
+                    current = parent;
                 }
             }
         }
@@ -720,6 +697,63 @@ struct BoundedForkSegment {
     id: TimelineId,
     fork: Option<Seq>,
     head: u64,
+}
+
+#[derive(Debug)]
+struct ForkChainRow {
+    parent_id: Option<String>,
+    fork_seq: Option<i64>,
+    head_seq: i64,
+}
+
+#[derive(Debug)]
+enum DecodedForkChainRow {
+    Root {
+        head: u64,
+    },
+    Fork {
+        parent: TimelineId,
+        fork: Seq,
+        head: u64,
+    },
+}
+
+impl ForkChainRow {
+    fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            parent_id: row.get(0)?,
+            fork_seq: row.get(1)?,
+            head_seq: row.get(2)?,
+        })
+    }
+
+    fn decode(self, current: TimelineId) -> Result<DecodedForkChainRow, CoreError> {
+        let head = u64::try_from(self.head_seq).map_err(|_| {
+            CoreError::Storage(format!("timeline {current} has a negative Event head"))
+        })?;
+        match (self.parent_id, self.fork_seq) {
+            (None, None) => Ok(DecodedForkChainRow::Root { head }),
+            (None, Some(_)) => Err(CoreError::Storage(format!(
+                "root timeline {current} has Fork sequence metadata"
+            ))),
+            (Some(parent), Some(fork_seq)) => {
+                let parent = parse_timeline_id(&parent)?;
+                let fork = u64::try_from(fork_seq).map_err(|_| {
+                    CoreError::Storage(format!(
+                        "Fork timeline {current} has a negative Fork sequence"
+                    ))
+                })?;
+                Ok(DecodedForkChainRow::Fork {
+                    parent,
+                    fork: Seq::from_u64(fork),
+                    head,
+                })
+            }
+            (Some(_), None) => Err(CoreError::Storage(format!(
+                "Fork timeline {current} is missing its Fork sequence"
+            ))),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -983,7 +1017,7 @@ impl EventStore for SqliteStore {
             .prepare("SELECT id, name, mode, parent_id, fork_seq, head_seq FROM timelines")
             .map_err(|e| CoreError::Storage(e.to_string()))?;
 
-        let mut rows = Self::query_prepared(&mut stmt)?;
+        let mut rows = Self::query_prepared(&mut stmt, [])?;
         let mut timelines = Vec::new();
         loop {
             let next = {
@@ -1614,6 +1648,18 @@ mod tests {
         let error = invalid_type_store
             .read_bounded(timeline_id, SeqRange::all(), read_bounds(1))
             .unwrap_err();
+        assert!(matches!(error, CoreError::Storage(_)));
+
+        let mut injected_store = new_store();
+        let timeline = injected_store.create_timeline("injected-query").unwrap();
+        injected_store
+            .append(timeline.id(), &[make_draft(EntityId::new(), b"x")])
+            .unwrap();
+        FAIL_STMT_QUERY.with(|fail| fail.set(true));
+        let error = injected_store
+            .read_bounded(timeline.id(), SeqRange::all(), read_bounds(1))
+            .unwrap_err();
+        FAIL_STMT_QUERY.with(|fail| fail.set(false));
         assert!(matches!(error, CoreError::Storage(_)));
     }
 
@@ -3163,6 +3209,37 @@ mod tests {
             )
             .unwrap();
         assert_storage_err(store.fork_chain(id).map(|_| ()));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn read_rejects_malformed_fork_chain_metadata() {
+        let mut root_store = new_store();
+        let root = root_store.create_timeline("root").unwrap();
+        root_store
+            .conn
+            .execute(
+                "UPDATE timelines SET fork_seq = 0 WHERE id = ?1",
+                params![root.id().to_string()],
+            )
+            .unwrap();
+        let root_error = root_store.read(root.id(), SeqRange::all()).unwrap_err();
+        assert!(root_error.to_string().contains("root timeline"));
+
+        let mut child_store = new_store();
+        let root = child_store.create_timeline("root").unwrap();
+        let child = child_store.fork(root.id(), Seq::ZERO, "child").unwrap();
+        child_store
+            .conn
+            .execute(
+                "UPDATE timelines SET fork_seq = NULL WHERE id = ?1",
+                params![child.id().to_string()],
+            )
+            .unwrap();
+        let child_error = child_store.read(child.id(), SeqRange::all()).unwrap_err();
+        assert!(child_error
+            .to_string()
+            .contains("missing its Fork sequence"));
     }
 
     #[test]
