@@ -579,19 +579,16 @@ fn cmd_experiment_verify(manifest_path: &str) -> Result<(), Box<dyn std::error::
     let manifest: pos_core::manifest::ReproManifest = serde_json::from_str(&json)?;
 
     // Convention: manifest stored at <base>-manifest.json → store at <base>.db
-    // Fallback: strip .json extension and try .db, or use in-memory (will be MISMATCH).
     let store_path = if manifest_path.ends_with("-manifest.json") {
         manifest_path.replace("-manifest.json", ".db")
     } else {
         manifest_path.replace(".json", ".db")
     };
 
-    let store = if std::path::Path::new(&store_path).exists() {
-        open_store(StoreConfig::Sqlite { path: store_path })?
-    } else {
-        // Fallback: Memory (will always be MISMATCH for non-empty manifests)
-        open_memory_store().expect("StoreConfig::Memory open is infallible")
-    };
+    if !std::path::Path::new(&store_path).exists() {
+        return Err(format!("companion EventStore not found: {store_path}").into());
+    }
+    let store = open_store(StoreConfig::Sqlite { path: store_path })?;
 
     verify_manifest_against_store(&manifest, store.as_ref())
 }
@@ -699,15 +696,12 @@ fn print_eval_report(report: &pos_plugin_eval::CalibrationReport) {
     println!("n_predictions: {}", report.n_predictions);
 }
 
-/// Open an in-memory store.
-///
-/// # Errors
-/// Returns [`pos_core::CoreError`] if the in-memory store cannot be opened.
+/// Parse a ULID string into a [`TimelineId`].
+#[cfg(test)]
 fn open_memory_store() -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
     open_store(StoreConfig::Memory)
 }
 
-/// Parse a ULID string into a [`TimelineId`].
 fn parse_timeline_id(s: &str) -> Result<TimelineId, Box<dyn std::error::Error>> {
     let ulid = Ulid::from_string(s).map_err(|e| format!("invalid ULID '{s}': {e}"))?;
     Ok(TimelineId::from_ulid(ulid))
