@@ -63,6 +63,73 @@ impl MemoryStore {
         }
     }
 
+    fn timeline(&self, id: TimelineId) -> Result<&Timeline, CoreError> {
+        match self.timelines.get(&id) {
+            Some(timeline) => Ok(timeline),
+            None => Err(CoreError::TimelineNotFound(id)),
+        }
+    }
+
+    fn timeline_mut(&mut self, id: TimelineId) -> Result<&mut Timeline, CoreError> {
+        match self.timelines.get_mut(&id) {
+            Some(timeline) => Ok(timeline),
+            None => Err(CoreError::TimelineNotFound(id)),
+        }
+    }
+
+    fn ensure_events(&self, id: TimelineId) -> Result<(), CoreError> {
+        if self.events.contains_key(&id) {
+            Ok(())
+        } else {
+            Err(Self::missing_timeline_state(id, "Event storage"))
+        }
+    }
+
+    fn chain_head(&self, id: TimelineId) -> Result<Hash, CoreError> {
+        match self.chain_heads.get(&id) {
+            Some(hash) => Ok(*hash),
+            None => Err(Self::missing_timeline_state(id, "hash-chain head")),
+        }
+    }
+
+    fn missing_timeline_state(id: TimelineId, state: &str) -> CoreError {
+        CoreError::Storage(format!("timeline {id} is missing its {state}"))
+    }
+
+    fn take_timeline(timeline: Option<Timeline>, id: TimelineId) -> Result<Timeline, CoreError> {
+        match timeline {
+            Some(timeline) => Ok(timeline),
+            None => Err(CoreError::TimelineNotFound(id)),
+        }
+    }
+
+    fn take_events(events: Option<Vec<Event>>, id: TimelineId) -> Result<Vec<Event>, CoreError> {
+        match events {
+            Some(events) => Ok(events),
+            None => Err(Self::missing_timeline_state(id, "Event storage")),
+        }
+    }
+
+    fn require_events(
+        events: Option<&mut Vec<Event>>,
+        id: TimelineId,
+    ) -> Result<&mut Vec<Event>, CoreError> {
+        match events {
+            Some(events) => Ok(events),
+            None => Err(Self::missing_timeline_state(id, "Event storage")),
+        }
+    }
+
+    fn child_fork_seq(&self, child: TimelineId) -> Result<Seq, CoreError> {
+        self.timeline(child)
+            .and_then(|child| match child.meta.fork_point {
+                Some((_, fork_seq)) => Ok(fork_seq),
+                None => Err(CoreError::Storage(
+                    "fork chain contains a root timeline after its first segment".to_owned(),
+                )),
+            })
+    }
+
     /// Collect all events for a timeline, walking the fork chain.
     /// Returns events sorted by seq, stitching parent[`0..fork_seq`] + child events.
     fn collect_events_in_range(
@@ -74,32 +141,24 @@ impl MemoryStore {
         let chain = self.fork_chain(timeline_id)?;
 
         // Build the full logical event sequence
-        let mut all: Vec<Event> = Vec::new();
-        let mut prev_fork_seq: Option<Seq> = None;
-
-        for (i, tid) in chain.iter().enumerate() {
-            let meta = &self.timelines[tid].meta;
-            let events = self.events.get(tid).map_or(&[] as &[Event], Vec::as_slice);
-
-            if i + 1 < chain.len() {
-                // This is a parent: include up to the fork point of its child
-                let child_meta = &self.timelines[&chain[i + 1]].meta;
-                let fork_seq = child_meta.fork_point.unwrap().1;
-                for e in events.iter().filter(|e| e.seq <= fork_seq) {
-                    all.push(e.clone());
-                }
-                prev_fork_seq = Some(fork_seq);
-            } else {
-                // This is the leaf timeline: include all its own events
-                for e in events {
-                    all.push(e.clone());
-                }
-            }
-            let _ = (meta, prev_fork_seq); // suppress unused warnings
-        }
-
-        // Child timelines restart local seq at 1 — renumber to a single logical view.
-        Ok(crate::stitch::renumber_and_filter(all, range))
+        chain
+            .iter()
+            .enumerate()
+            .try_fold(Vec::new(), |mut all, (i, tid)| {
+                self.timeline(*tid).and_then(|_| {
+                    let events = self.events.get(tid).map_or(&[] as &[Event], Vec::as_slice);
+                    if i + 1 < chain.len() {
+                        self.child_fork_seq(chain[i + 1]).map(|fork_seq| {
+                            all.extend(events.iter().filter(|e| e.seq <= fork_seq).cloned());
+                            all
+                        })
+                    } else {
+                        all.extend(events.iter().cloned());
+                        Ok(all)
+                    }
+                })
+            })
+            .map(|all| crate::stitch::renumber_and_filter(all, range))
     }
 
     /// Select a logical page without cloning Events outside the requested range.
@@ -121,7 +180,7 @@ impl MemoryStore {
                 .events
                 .get(timeline)
                 .map_or(&[] as &[Event], Vec::as_slice);
-            let head = self.timelines[timeline].head.as_u64();
+            let head = self.timeline(*timeline)?.head.as_u64();
             let event_count = u64::try_from(events.len()).unwrap_or(u64::MAX);
             let boundary_is_valid = if events.is_empty() {
                 head == 0
@@ -135,10 +194,10 @@ impl MemoryStore {
                     "timeline {timeline} violates the contiguous Event sequence invariant"
                 )));
             }
-            let fork_cap = chain
-                .get(index + 1)
-                .and_then(|child| self.timelines[child].meta.fork_point)
-                .map(|(_, seq)| seq);
+            let fork_cap = match chain.get(index + 1) {
+                Some(child) => Some(self.child_fork_seq(*child)?),
+                None => None,
+            };
             if fork_cap.is_some_and(|cap| cap.as_u64() > event_count) {
                 return Err(CoreError::Storage(format!(
                     "Fork point exceeds parent Event head for timeline {timeline}"
@@ -192,12 +251,15 @@ impl MemoryStore {
     /// Walk the fork chain from `timeline_id` back to the root, returning [root, ..., `timeline_id`].
     fn fork_chain(&self, timeline_id: TimelineId) -> Result<Vec<TimelineId>, CoreError> {
         let mut chain = Vec::new();
+        let mut visited = HashSet::new();
         let mut current = timeline_id;
         loop {
-            let meta = self
-                .timelines
-                .get(&current)
-                .ok_or(CoreError::TimelineNotFound(current))?;
+            if !visited.insert(current) {
+                return Err(CoreError::Storage(format!(
+                    "fork ancestry contains a cycle at timeline {current}"
+                )));
+            }
+            let meta = self.timeline(current)?;
             chain.push(current);
             match meta.meta.fork_point {
                 Some((parent, _)) => current = parent,
@@ -263,18 +325,10 @@ impl EventStore for MemoryStore {
         timeline: TimelineId,
         drafts: &[EventDraft],
     ) -> Result<Vec<Event>, CoreError> {
-        let tl = self
-            .timelines
-            .get_mut(&timeline)
-            .ok_or(CoreError::TimelineNotFound(timeline))?;
+        let mut seq = self.timeline(timeline)?.head;
+        let mut prev_hash = self.chain_head(timeline)?;
 
-        let mut seq = tl.head;
-        let mut prev_hash = *self
-            .chain_heads
-            .get(&timeline)
-            .unwrap_or(&self.hasher.genesis_hash());
-
-        let events_vec = self.events.entry(timeline).or_default();
+        self.ensure_events(timeline)?;
         let mut committed = Vec::with_capacity(drafts.len());
 
         for draft in drafts {
@@ -300,14 +354,18 @@ impl EventStore for MemoryStore {
                 payload_hash,
             };
 
-            events_vec.push(event.clone());
-            self.event_ids.insert(event.id);
             committed.push(event);
             prev_hash = chain_hash;
         }
 
+        let events = Self::require_events(self.events.get_mut(&timeline), timeline)?;
+        events.extend(committed.iter().cloned());
+        for event in &committed {
+            self.event_ids.insert(event.id);
+        }
+
         // Update head and chain hash
-        self.timelines.get_mut(&timeline).unwrap().head = seq;
+        self.timeline_mut(timeline)?.head = seq;
         self.chain_heads.insert(timeline, prev_hash);
 
         Ok(committed)
@@ -428,7 +486,7 @@ impl EventStore for MemoryStore {
             return Ok(());
         }
 
-        let head = self.timelines[&timeline].head;
+        let head = self.timeline(timeline)?.head;
         let ordered = pos_core::store::validate_committed_batch(
             head,
             events,
@@ -436,10 +494,8 @@ impl EventStore for MemoryStore {
             &*self.hasher,
         )?;
 
-        let mut prev_hash = *self
-            .chain_heads
-            .get(&timeline)
-            .unwrap_or(&self.hasher.genesis_hash());
+        let mut prev_hash = self.chain_head(timeline)?;
+        self.ensure_events(timeline)?;
         let mut new_head = head;
         for event in &ordered {
             let id_str = event.id.to_string();
@@ -450,8 +506,9 @@ impl EventStore for MemoryStore {
             self.event_ids.insert(event.id);
         }
 
-        self.events.entry(timeline).or_default().extend(ordered);
-        self.timelines.get_mut(&timeline).unwrap().head = new_head;
+        let events = Self::require_events(self.events.get_mut(&timeline), timeline)?;
+        events.extend(ordered);
+        self.timeline_mut(timeline)?.head = new_head;
         self.chain_heads.insert(timeline, prev_hash);
         Ok(())
     }
@@ -469,17 +526,19 @@ impl EventStore for MemoryStore {
                 "cannot delete timeline that still has forks".to_owned(),
             ));
         }
-        let was_root = self
-            .timelines
-            .remove(&id)
-            .expect("timeline exists")
-            .meta
-            .is_root();
+        let was_root = self.timeline(id)?.meta.is_root();
+        let _ = self.chain_head(id)?;
+        if was_root && self.root_timeline_count == 0 {
+            return Err(CoreError::Storage(
+                "root Timeline count underflow during deletion".to_owned(),
+            ));
+        }
+        let events = Self::take_events(self.events.remove(&id), id)?;
+        let _ = Self::take_timeline(self.timelines.remove(&id), id)?;
         if was_root {
             self.root_timeline_count -= 1;
         }
-        // Always present: create/fork/import insert an events entry with the timeline.
-        for event in self.events.remove(&id).expect("timeline events entry") {
+        for event in events {
             self.event_ids.remove(&event.id);
         }
         self.chain_heads.remove(&id);
@@ -513,11 +572,7 @@ impl MemoryStore {
             let limit = if *tid == timeline {
                 at_seq
             } else {
-                self.timelines[&chain[i + 1]]
-                    .meta
-                    .fork_point
-                    .expect("ancestor always has a successor in chain")
-                    .1
+                self.child_fork_seq(chain[i + 1])?
             };
 
             for event in events.iter().filter(|e| e.seq <= limit) {
@@ -1102,6 +1157,135 @@ mod tests {
         store.test_remove_timeline(root.id());
         let err = store.fork(child.id(), Seq::ZERO, "grandchild").unwrap_err();
         assert!(matches!(err, CoreError::TimelineNotFound(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn invariant_helpers_return_errors_for_missing_or_malformed_metadata() {
+        let mut store = MemoryStore::new();
+        let root = store.create_timeline("root").unwrap();
+        let missing = TimelineId::new();
+
+        let missing_error = store.timeline_mut(missing).unwrap_err();
+        assert!(missing_error.to_string().contains("timeline not found"));
+
+        let malformed_error = store.child_fork_seq(root.id()).unwrap_err();
+        assert!(malformed_error
+            .to_string()
+            .contains("root timeline after its first segment"));
+
+        let removed_timeline_error = MemoryStore::take_timeline(None, root.id()).unwrap_err();
+        assert!(removed_timeline_error
+            .to_string()
+            .contains("timeline not found"));
+        let removed_events_error = MemoryStore::take_events(None, root.id()).unwrap_err();
+        assert!(removed_events_error
+            .to_string()
+            .contains("missing its Event storage"));
+        let required_events_error = MemoryStore::require_events(None, root.id()).unwrap_err();
+        assert!(required_events_error
+            .to_string()
+            .contains("missing its Event storage"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn read_rejects_cyclic_fork_ancestry() {
+        let mut store = MemoryStore::new();
+        let timeline = store.create_timeline("cycle").unwrap();
+        store
+            .timelines
+            .get_mut(&timeline.id())
+            .unwrap()
+            .meta
+            .fork_point = Some((timeline.id(), Seq::ZERO));
+
+        let error = store.read(timeline.id(), SeqRange::all()).unwrap_err();
+        assert!(error.to_string().contains("fork ancestry contains a cycle"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn mutation_rejects_missing_internal_timeline_state_without_partial_delete() {
+        let mut store = MemoryStore::new();
+        let timeline = store.create_timeline("incomplete").unwrap();
+        store.chain_heads.remove(&timeline.id());
+
+        let append_error = store
+            .append(timeline.id(), &[make_draft(EntityId::new(), b"event")])
+            .unwrap_err();
+        assert!(append_error
+            .to_string()
+            .contains("missing its hash-chain head"));
+
+        store
+            .chain_heads
+            .insert(timeline.id(), pos_crypto::chain::genesis_hash());
+        store.events.remove(&timeline.id());
+        let missing_events_error = store
+            .append(timeline.id(), &[make_draft(EntityId::new(), b"event")])
+            .unwrap_err();
+        assert!(missing_events_error
+            .to_string()
+            .contains("missing its Event storage"));
+        let delete_error = store.delete_timeline(timeline.id()).unwrap_err();
+        assert!(delete_error
+            .to_string()
+            .contains("missing its Event storage"));
+        assert!(store.get_timeline(timeline.id()).unwrap().is_some());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn committed_append_and_bounded_read_reject_missing_timeline_state() {
+        let mut source = MemoryStore::new();
+        let source_timeline = source.create_timeline("source").unwrap();
+        let committed = source
+            .append(
+                source_timeline.id(),
+                &[make_draft(EntityId::new(), b"event")],
+            )
+            .unwrap();
+
+        let mut store = MemoryStore::new();
+        let timeline = store.create_timeline("incomplete").unwrap();
+        store.events.remove(&timeline.id());
+        let events_error = store
+            .append_committed(timeline.id(), &committed)
+            .unwrap_err();
+        assert!(events_error
+            .to_string()
+            .contains("missing its Event storage"));
+
+        store.events.insert(timeline.id(), Vec::new());
+        store.chain_heads.remove(&timeline.id());
+        let chain_error = store
+            .append_committed(timeline.id(), &committed)
+            .unwrap_err();
+        assert!(chain_error
+            .to_string()
+            .contains("missing its hash-chain head"));
+
+        let bounded_error = store
+            .read_bounded(
+                TimelineId::new(),
+                SeqRange::all(),
+                EventReadBounds::new(1, 1, 1, 1),
+            )
+            .unwrap_err();
+        assert!(bounded_error.to_string().contains("timeline not found"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn delete_rejects_a_corrupt_root_count() {
+        let mut store = MemoryStore::new();
+        let timeline = store.create_timeline("root").unwrap();
+        store.root_timeline_count = 0;
+
+        let error = store.delete_timeline(timeline.id()).unwrap_err();
+        assert!(error.to_string().contains("root Timeline count underflow"));
+        assert!(store.get_timeline(timeline.id()).unwrap().is_some());
     }
 
     #[test]
