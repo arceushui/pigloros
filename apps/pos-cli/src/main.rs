@@ -22,7 +22,8 @@ use ulid::Ulid;
 
 const POS_CLI_REPRODUCTION_HOST: &str = "pos-cli";
 const POS_CLI_REPRODUCTION_FORMAT: u32 = 1;
-const MAX_REPRODUCTION_TICKS: u64 = 1_000_000;
+const MAX_EXPERIMENT_TICKS: u64 = 1_000_000;
+const TICK_LIMIT_ERROR: &str = "experiment tick count exceeds the maximum of 1000000";
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -478,26 +479,30 @@ fn run_builtin_reference_experiment(
 }
 
 fn cmd_experiment_run(path: &str, ticks: u64) -> Result<(), Box<dyn std::error::Error>> {
-    let result = run_builtin_reference_experiment(
-        StoreConfig::Sqlite {
-            path: path.to_owned(),
-        },
-        ticks,
-    )?;
-    let completed_ticks = result.ticks;
-    let total_events = result.total_events;
-    let timeline_id = result.timeline_id;
-    let reproduction = result.with_reproduction_recipe(cli_reproduction_recipe(ticks));
+    validate_experiment_ticks(ticks)
+        .map_err(Into::into)
+        .and_then(|()| {
+            run_builtin_reference_experiment(
+                StoreConfig::Sqlite {
+                    path: path.to_owned(),
+                },
+                ticks,
+            )
+        })
+        .and_then(|result| {
+            let completed_ticks = result.ticks;
+            let total_events = result.total_events;
+            let timeline_id = result.timeline_id;
+            let reproduction = result.with_reproduction_recipe(cli_reproduction_recipe(ticks));
+            let manifest_path = path.replace(".db", "-manifest.json");
 
-    // Save manifest alongside the store for later verification
-    let manifest_path = path.replace(".db", "-manifest.json");
-    save_run_manifest(&manifest_path, &reproduction)?;
-
-    println!(
-        "Experiment complete: {completed_ticks} ticks, {total_events} events, \
-         timeline={timeline_id}, manifest={manifest_path}"
-    );
-    Ok(())
+            save_run_manifest(&manifest_path, &reproduction).map(|()| {
+                println!(
+                    "Experiment complete: {completed_ticks} ticks, {total_events} events, \
+                     timeline={timeline_id}, manifest={manifest_path}"
+                );
+            })
+        })
 }
 
 fn cli_reproduction_recipe(ticks: u64) -> ReproductionRecipe {
@@ -541,10 +546,15 @@ fn reproduce_cli_recipe(
         return Err("manifest recipe has an unsupported format version".into());
     }
     let decoded: CliExperimentRecipe = serde_json::from_value(recipe.configuration)?;
-    if decoded.builtin_reference_v1.ticks > MAX_REPRODUCTION_TICKS {
-        return Err("manifest recipe tick count exceeds the reproduction limit".into());
-    }
-    Ok(decoded)
+    validate_experiment_ticks(decoded.builtin_reference_v1.ticks)
+        .map(|()| decoded)
+        .map_err(Into::into)
+}
+
+fn validate_experiment_ticks(ticks: u64) -> Result<(), &'static str> {
+    (ticks <= MAX_EXPERIMENT_TICKS)
+        .then_some(())
+        .ok_or(TICK_LIMIT_ERROR)
 }
 
 fn cmd_experiment_backtest(
@@ -1098,8 +1108,35 @@ mod tests {
 
     #[test]
     fn reproduce_cli_recipe_rejects_excessive_tick_count() {
-        let recipe = cli_reproduction_recipe(MAX_REPRODUCTION_TICKS + 1);
-        assert!(reproduce_cli_recipe(recipe).is_err());
+        let recipe = cli_reproduction_recipe(MAX_EXPERIMENT_TICKS + 1);
+        let error = reproduce_cli_recipe(recipe)
+            .err()
+            .expect("excessive ticks fail");
+        assert_eq!(error.to_string(), TICK_LIMIT_ERROR);
+    }
+
+    #[test]
+    fn maximum_tick_count_is_accepted_for_export_and_reproduction() {
+        assert!(validate_experiment_ticks(MAX_EXPERIMENT_TICKS).is_ok());
+        let decoded = reproduce_cli_recipe(cli_reproduction_recipe(MAX_EXPERIMENT_TICKS)).unwrap();
+        assert_eq!(decoded.builtin_reference_v1.ticks, MAX_EXPERIMENT_TICKS);
+    }
+
+    #[test]
+    fn excessive_tick_count_is_rejected_before_run_or_reproduction() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("too-many-ticks.db");
+        let path = path.to_str().unwrap();
+
+        let run_error = cmd_experiment_run(path, MAX_EXPERIMENT_TICKS + 1).unwrap_err();
+        assert_eq!(run_error.to_string(), TICK_LIMIT_ERROR);
+        assert!(!std::path::Path::new(path).exists());
+
+        let reproduce_error =
+            reproduce_cli_recipe(cli_reproduction_recipe(MAX_EXPERIMENT_TICKS + 1))
+                .err()
+                .expect("excessive ticks fail");
+        assert_eq!(reproduce_error.to_string(), TICK_LIMIT_ERROR);
     }
 
     #[test]
