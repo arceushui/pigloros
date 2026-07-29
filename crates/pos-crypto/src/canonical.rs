@@ -8,6 +8,7 @@
 use ciborium::value::Value;
 use pos_core::{CanonicalBytes, CoreError};
 use serde::Serialize;
+use std::io::Write;
 
 /// Encode `value` as canonical (deterministic) CBOR bytes.
 ///
@@ -15,11 +16,10 @@ use serde::Serialize;
 /// This is required for the hash chain to be tamper-evident regardless of struct field order.
 ///
 /// # Errors
-/// Returns [`CoreError::Serialization`] if the value cannot be serialized to JSON.
-///
-/// # Panics
-/// Panics only if writing a `ciborium::Value` into an in-memory `Vec<u8>` fails, which
-/// is not expected for well-formed values.
+/// Returns [`CoreError::CanonicalCborSerialization`] if the value cannot be
+/// converted to JSON or written as CBOR, or
+/// [`CoreError::CanonicalCborNumericConversion`] if a JSON number cannot be
+/// represented as CBOR.
 pub fn encode<T: Serialize>(value: &T) -> Result<CanonicalBytes, CoreError> {
     // Branching lives in non-generic `encode_result` so each `T` monomorphization
     // does not leave an uncovered Ok/Err arm.
@@ -30,17 +30,19 @@ fn encode_result(
     json: Result<serde_json::Value, serde_json::Error>,
 ) -> Result<CanonicalBytes, CoreError> {
     match json {
-        Ok(value) => Ok(encode_json(value)),
-        Err(error) => Err(CoreError::Serialization(error.to_string())),
+        Ok(value) => encode_json(value),
+        Err(error) => Err(CoreError::CanonicalCborSerialization(error.to_string())),
     }
 }
 
 /// Non-generic encode path so map/array helpers are not re-monomorphized per `T`.
-fn encode_json(json: serde_json::Value) -> CanonicalBytes {
-    let sorted = sort_map_keys(json_value_to_cbor(json));
-    let mut buf = Vec::new();
-    ciborium::into_writer(&sorted, &mut buf).expect("CBOR encode to Vec is infallible");
-    CanonicalBytes::from_vec(buf)
+fn encode_json(json: serde_json::Value) -> Result<CanonicalBytes, CoreError> {
+    json_value_to_cbor(json)
+        .and_then(sort_map_keys)
+        .and_then(|sorted| {
+            let mut buf = Vec::new();
+            write_cbor(&sorted, &mut buf).map(|()| CanonicalBytes::from_vec(buf))
+        })
 }
 
 /// Decode canonical CBOR bytes back to `T`.
@@ -56,74 +58,87 @@ pub fn decode<T: serde::de::DeserializeOwned>(bytes: &CanonicalBytes) -> Result<
     }
 }
 
-/// Total conversion: every `serde_json::Value` maps to a CBOR `Value`.
-fn json_value_to_cbor(json: serde_json::Value) -> Value {
+/// Convert a JSON value into its CBOR representation.
+fn json_value_to_cbor(json: serde_json::Value) -> Result<Value, CoreError> {
     use serde_json::Value as J;
     match json {
-        J::Null => Value::Null,
-        J::Bool(b) => Value::Bool(b),
+        J::Null => Ok(Value::Null),
+        J::Bool(b) => Ok(Value::Bool(b)),
         J::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Value::Integer(i.into())
+                Ok(Value::Integer(i.into()))
+            } else if let Some(u) = n.as_u64() {
+                Ok(Value::Integer(u.into()))
             } else {
-                // serde_json::Number always has an f64 view when it is not an i64.
-                Value::Float(n.as_f64().unwrap())
+                cbor_float(n.as_f64())
             }
         }
-        J::String(s) => Value::Text(s),
-        J::Array(arr) => {
-            let mut out = Vec::with_capacity(arr.len());
-            for item in arr {
-                out.push(json_value_to_cbor(item));
-            }
-            Value::Array(out)
-        }
-        J::Object(map) => {
-            let mut pairs = Vec::with_capacity(map.len());
-            for (k, v) in map {
-                pairs.push((Value::Text(k), json_value_to_cbor(v)));
-            }
-            Value::Map(pairs)
-        }
+        J::String(s) => Ok(Value::Text(s)),
+        J::Array(items) => items
+            .into_iter()
+            .map(json_value_to_cbor)
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array),
+        J::Object(map) => map
+            .into_iter()
+            .map(|(key, value)| json_value_to_cbor(value).map(|value| (Value::Text(key), value)))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Map),
     }
+}
+
+fn cbor_float(value: Option<f64>) -> Result<Value, CoreError> {
+    value
+        .map(Value::Float)
+        .ok_or(CoreError::CanonicalCborNumericConversion)
 }
 
 /// Sort map keys recursively per RFC 8949 §4.2.1: sort by (`key_length`, `key_bytes`) ascending.
-fn sort_map_keys(value: Value) -> Value {
+fn sort_map_keys(value: Value) -> Result<Value, CoreError> {
     match value {
-        Value::Map(mut pairs) => {
-            pairs.sort_by(|(a, _), (b, _)| compare_cbor_keys(a, b));
-            let mut sorted = Vec::with_capacity(pairs.len());
-            for (k, v) in pairs {
-                sorted.push((k, sort_map_keys(v)));
-            }
-            Value::Map(sorted)
-        }
-        Value::Array(items) => {
-            let mut out = Vec::with_capacity(items.len());
-            for item in items {
-                out.push(sort_map_keys(item));
-            }
-            Value::Array(out)
-        }
-        other => other,
+        Value::Map(mut pairs) => pairs
+            .drain(..)
+            .map(|(key, value)| {
+                cbor_key_bytes(&key)
+                    .and_then(|key_bytes| sort_map_keys(value).map(|value| (key_bytes, key, value)))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(|mut sortable| {
+                sortable.sort_by(|(a_bytes, _, _), (b_bytes, _, _)| {
+                    compare_cbor_key_bytes(a_bytes, b_bytes)
+                });
+                Value::Map(
+                    sortable
+                        .into_iter()
+                        .map(|(_, key, value)| (key, value))
+                        .collect(),
+                )
+            }),
+        Value::Array(items) => items
+            .into_iter()
+            .map(sort_map_keys)
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array),
+        other => Ok(other),
     }
 }
 
-fn compare_cbor_keys(a: &Value, b: &Value) -> std::cmp::Ordering {
-    let a_bytes = cbor_key_bytes(a);
-    let b_bytes = cbor_key_bytes(b);
+fn compare_cbor_key_bytes(a_bytes: &[u8], b_bytes: &[u8]) -> std::cmp::Ordering {
     match a_bytes.len().cmp(&b_bytes.len()) {
-        std::cmp::Ordering::Equal => a_bytes.cmp(&b_bytes),
+        std::cmp::Ordering::Equal => a_bytes.cmp(b_bytes),
         other => other,
     }
 }
 
 /// Get the canonical CBOR encoding of a map key for sorting purposes.
-fn cbor_key_bytes(key: &Value) -> Vec<u8> {
+fn cbor_key_bytes(key: &Value) -> Result<Vec<u8>, CoreError> {
     let mut buf = Vec::new();
-    let _ = ciborium::into_writer(key, &mut buf);
-    buf
+    write_cbor(key, &mut buf).map(|()| buf)
+}
+
+fn write_cbor<W: Write>(value: &Value, writer: W) -> Result<(), CoreError> {
+    ciborium::into_writer(value, writer)
+        .map_err(|error| CoreError::CanonicalCborSerialization(error.to_string()))
 }
 
 #[cfg(test)]
@@ -387,7 +402,7 @@ mod tests {
             (Value::Text("apple".to_owned()), Value::Integer(2.into())),
             (Value::Text("a".to_owned()), Value::Integer(3.into())),
         ]);
-        let sorted = sort_map_keys(map);
+        let sorted = sort_map_keys(map).unwrap();
         let Value::Map(pairs) = sorted else {
             panic!("expected map");
         };
@@ -406,18 +421,17 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn compare_cbor_keys_covers_all_orderings() {
-        let short = Value::Text("a".to_owned());
-        let long = Value::Text("apple".to_owned());
-        let later = Value::Text("zebra".to_owned());
-        let earlier = Value::Text("apple".to_owned());
-        assert_eq!(compare_cbor_keys(&short, &long), std::cmp::Ordering::Less);
+    fn compare_cbor_key_bytes_covers_all_orderings() {
         assert_eq!(
-            compare_cbor_keys(&long, &short),
+            compare_cbor_key_bytes(b"a", b"apple"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_cbor_key_bytes(b"apple", b"a"),
             std::cmp::Ordering::Greater
         );
         assert_eq!(
-            compare_cbor_keys(&earlier, &later),
+            compare_cbor_key_bytes(b"apple", b"zebra"),
             std::cmp::Ordering::Less
         );
     }
@@ -432,6 +446,39 @@ mod tests {
             }
         }
         let err = encode(&Boom).unwrap_err();
-        assert!(err.to_string().contains("boom") || matches!(err, CoreError::Serialization(_)));
+        assert!(err.to_string().contains("boom"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn canonical_cbor_rejects_missing_float_conversion() {
+        let error = cbor_float(None).unwrap_err();
+        assert!(error.to_string().contains("numeric conversion"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn canonical_cbor_preserves_large_unsigned_integers() {
+        let converted = json_value_to_cbor(serde_json::json!(u64::MAX)).unwrap();
+        assert_eq!(converted, Value::Integer(u64::MAX.into()));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn canonical_cbor_surfaces_writer_failures() {
+        struct FailingWriter;
+
+        impl Write for FailingWriter {
+            fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("writer failed"))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let error = write_cbor(&Value::Null, FailingWriter).unwrap_err();
+        assert!(error.to_string().contains("writer failed"));
     }
 }
