@@ -11,11 +11,13 @@ use pos_core::{ids::PluginId, Plugin, Reducer, SchemaVersionMap, Upcaster, Upcas
 use pos_state::ProjectionRegistry;
 
 use crate::{
-    driver::{Driver, ObservationSnapshot},
+    driver::{Driver, ObservationSnapshot, ProjectionKey},
     error::RuntimeError,
     recorder::RECORDER_EVENT_TYPE,
     schema::{EventTypeSchema, SchemaRegistry},
 };
+use std::collections::HashSet;
+use std::sync::Arc;
 
 /// A registered plugin entry.
 struct PluginEntry {
@@ -40,14 +42,34 @@ pub struct PluginRegistry {
 }
 
 impl PluginRegistry {
+    fn snapshot_for_subscriptions<'a>(
+        &self,
+        subscriptions: impl IntoIterator<Item = &'a ProjectionKey>,
+    ) -> ObservationSnapshot {
+        ObservationSnapshot::from_subscriptions(subscriptions, |key| {
+            self.projections
+                .state_for(key.entity_id())
+                .map(|state| Arc::new(state.clone()))
+        })
+    }
+
     fn snapshot_for_tick(&self) -> ObservationSnapshot {
-        ObservationSnapshot::from_subscriptions(
-            self.plugins
-                .values()
-                .filter_map(|entry| entry.driver.as_deref())
-                .flat_map(|driver| driver.subscriptions().iter()),
-            |key| self.projections.state_for(key.entity_id()).cloned(),
-        )
+        let mut seen = HashSet::new();
+        let mut subscriptions = Vec::new();
+
+        for entry in self
+            .plugins
+            .values()
+            .filter_map(|entry| entry.driver.as_deref())
+        {
+            for key in entry.subscriptions() {
+                if seen.insert(key.clone()) {
+                    subscriptions.push(key.clone());
+                }
+            }
+        }
+
+        self.snapshot_for_subscriptions(subscriptions.iter())
     }
 
     #[must_use]
@@ -207,15 +229,32 @@ impl PluginRegistry {
         now_ns: u128,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         let mut all_drafts = Vec::new();
-        let snapshot = self.snapshot_for_tick();
-        for entry in self.plugins.values_mut() {
-            if let Some(driver) = entry.driver.as_mut() {
+        let mut due_driver_ids = Vec::new();
+        let mut seen_subscriptions = HashSet::new();
+        let mut due_subscriptions = Vec::new();
+
+        for (id, entry) in self.plugins.iter() {
+            if let Some(driver) = entry.driver.as_deref() {
                 let interval_ns = driver.tick_interval().as_nanos();
                 let ready = match entry.last_tick {
                     Some(prev) => now_ns >= prev + interval_ns,
                     None => true,
                 };
                 if ready {
+                    due_driver_ids.push(id.clone());
+                    for key in driver.subscriptions() {
+                        if seen_subscriptions.insert(key.clone()) {
+                            due_subscriptions.push(key.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        let snapshot = self.snapshot_for_subscriptions(due_subscriptions.iter());
+        for id in due_driver_ids {
+            if let Some(entry) = self.plugins.get_mut(&id) {
+                if let Some(driver) = entry.driver.as_mut() {
                     let observations = snapshot.view_for(driver.subscriptions());
                     let output = driver.step(store, timeline, observations)?;
                     entry.last_tick = Some(now_ns);

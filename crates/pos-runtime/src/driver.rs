@@ -15,6 +15,8 @@ use pos_core::{
 };
 
 use crate::error::RuntimeError;
+use std::collections::hash_map::Entry;
+use std::sync::Arc;
 
 /// The output of a single driver step.
 #[derive(Debug, Default)]
@@ -48,7 +50,7 @@ impl ProjectionKey {
 /// cloned state, so every driver observes the same committed projection state
 /// even if later tick work changes the live registry.
 pub struct ObservationSnapshot {
-    states: std::collections::HashMap<ProjectionKey, Option<State>>,
+    states: std::collections::HashMap<ProjectionKey, Option<Arc<State>>>,
 }
 
 impl ObservationSnapshot {
@@ -62,11 +64,13 @@ impl ObservationSnapshot {
     #[must_use]
     pub(crate) fn from_subscriptions<'a>(
         subscriptions: impl IntoIterator<Item = &'a ProjectionKey>,
-        state_for: impl Fn(&ProjectionKey) -> Option<State>,
+        state_for: impl Fn(&ProjectionKey) -> Option<Arc<State>>,
     ) -> Self {
         let mut states = std::collections::HashMap::new();
         for key in subscriptions {
-            states.insert(key.clone(), state_for(key));
+            if let Entry::Vacant(entry) = states.entry(key.clone()) {
+                entry.insert(state_for(key));
+            }
         }
         Self { states }
     }
@@ -75,7 +79,9 @@ impl ObservationSnapshot {
     pub(crate) fn view_for(&self, subscriptions: &[ProjectionKey]) -> ObservationView {
         let mut states = std::collections::HashMap::with_capacity(subscriptions.len());
         for key in subscriptions {
-            states.insert(key.clone(), self.states.get(key).cloned().flatten());
+            if let Entry::Vacant(entry) = states.entry(key.clone()) {
+                entry.insert(self.states.get(key).cloned().flatten());
+            }
         }
         ObservationView { states }
     }
@@ -89,7 +95,7 @@ impl ObservationSnapshot {
 /// a driver to distinguish a subscribed-but-unseen entity from an undeclared
 /// dependency.
 pub struct ObservationView {
-    states: std::collections::HashMap<ProjectionKey, Option<State>>,
+    states: std::collections::HashMap<ProjectionKey, Option<Arc<State>>>,
 }
 
 impl ObservationView {
@@ -100,7 +106,10 @@ impl ObservationView {
 
     #[must_use]
     pub fn state_for(&self, key: &ProjectionKey) -> Option<&State> {
-        self.states.get(key).and_then(Option::as_ref)
+        self.states
+            .get(key)
+            .and_then(Option::as_ref)
+            .map(Arc::as_ref)
     }
 
     #[must_use]
@@ -299,7 +308,7 @@ mod tests {
         state.set("ticks", serde_json::json!(3));
         let subscriptions = [seen.clone(), absent.clone()];
         let snapshot = ObservationSnapshot::from_subscriptions(&subscriptions, |key| {
-            (key == &seen).then(|| state.clone())
+            (key == &seen).then(|| Arc::new(state.clone()))
         });
         let view = snapshot.view_for(&subscriptions);
         assert_eq!(view.len(), 2);
@@ -315,8 +324,9 @@ mod tests {
         let mut state = State::new();
         state.set("ticks", serde_json::json!(3));
         let subscriptions = [key.clone(), key.clone()];
-        let snapshot =
-            ObservationSnapshot::from_subscriptions(&subscriptions, |_| Some(state.clone()));
+        let snapshot = ObservationSnapshot::from_subscriptions(&subscriptions, |_| {
+            Some(Arc::new(state.clone()))
+        });
         let view = snapshot.view_for(&subscriptions);
 
         assert_eq!(view.len(), 1);
@@ -330,8 +340,9 @@ mod tests {
         let subscriptions = [key.clone()];
         let mut live_state = State::new();
         live_state.set("ticks", serde_json::json!(3));
-        let snapshot =
-            ObservationSnapshot::from_subscriptions(&subscriptions, |_| Some(live_state.clone()));
+        let snapshot = ObservationSnapshot::from_subscriptions(&subscriptions, |_| {
+            Some(Arc::new(live_state.clone()))
+        });
         live_state.set("ticks", serde_json::json!(4));
 
         let first_driver_view = snapshot.view_for(&subscriptions);
