@@ -8,6 +8,13 @@ description: Prepare a decision-ready Architecture Decision Record for PiglorOS.
 This is an internal PiglorOS workflow. Use the canonical ADR wiki on Redmine;
 do not substitute repository documentation for the decision record.
 
+## Required model
+
+When ADR research or drafting is delegated, use `gpt-5.6-sol` explicitly. Do
+not silently substitute a cheaper model. If `gpt-5.6-sol` is unavailable,
+report the block and wait for direction before publishing or materially
+revising the ADR.
+
 ## 1. Establish the decision boundary
 
 1. Read `CONTEXT.md`, `README.md`, relevant ticket(s), related Redmine ADRs,
