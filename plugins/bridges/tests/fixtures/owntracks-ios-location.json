@@ -1,0 +1,12 @@
+{
+  "_type": "location",
+  "lat": 48.8566,
+  "lon": 2.3522,
+  "tst": 2700,
+  "acc": 8,
+  "alt": 35,
+  "batt": 63,
+  "bs": 1,
+  "ssid": "example-network",
+  "tid": "ios"
+}

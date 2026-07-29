@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 pos-core = { path = "../../crates/pos-core" }
+pos-crypto = { path = "../../crates/pos-crypto" }
 pos-runtime = { path = "../../crates/pos-runtime" }
 serde = { workspace = true }
 serde_json = { workspace = true }

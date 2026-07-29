@@ -1,0 +1,11 @@
+{
+  "_type": "location",
+  "lat": 1.3521,
+  "lon": 103.8198,
+  "tst": 1800,
+  "acc": 12,
+  "batt": 87,
+  "conn": "w",
+  "inregions": ["synthetic-zone"],
+  "tid": "test"
+}

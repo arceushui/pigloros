@@ -18,6 +18,7 @@ use pos_core::{
     plugin::{Capability, Plugin},
     state::{Reducer, State},
 };
+use pos_crypto::canonical;
 use serde::{Deserialize, Serialize};
 
 /// Errors returned when a spatial-cloaking input is not a valid WGS84 value.
@@ -88,6 +89,95 @@ impl Wgs84Point {
 pub struct CloakedPoint {
     latitude: f64,
     longitude: f64,
+}
+
+/// A durable, minimized coarse location observation.
+///
+/// This generic representation intentionally contains neither an exact point
+/// nor source-specific telemetry. Its payload is encoded with the workspace's
+/// RFC 8949 deterministic CBOR encoder.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CompactLocationObservation {
+    cell_latitude: f64,
+    cell_longitude: f64,
+    source_time_bucket: u64,
+    schema_version: u8,
+    policy_version: u8,
+    quality_flags: u8,
+}
+
+impl CompactLocationObservation {
+    /// Construct a compact observation after validating its coarse WGS84 cell.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GeoError`] when the supplied coarse cell is not a finite,
+    /// bounded WGS84 coordinate.
+    pub fn new(
+        cell_latitude: f64,
+        cell_longitude: f64,
+        source_time_bucket: u64,
+        schema_version: u8,
+        policy_version: u8,
+        quality_flags: u8,
+    ) -> Result<Self, GeoError> {
+        let cell = Wgs84Point::new(cell_latitude, cell_longitude)?;
+        Ok(Self {
+            cell_latitude: cell.latitude(),
+            cell_longitude: cell.longitude(),
+            source_time_bucket,
+            schema_version,
+            policy_version,
+            quality_flags,
+        })
+    }
+
+    /// Return the coarse cell latitude in decimal degrees.
+    #[must_use]
+    pub fn cell_latitude(&self) -> f64 {
+        self.cell_latitude
+    }
+
+    /// Return the coarse cell longitude in decimal degrees.
+    #[must_use]
+    pub fn cell_longitude(&self) -> f64 {
+        self.cell_longitude
+    }
+
+    /// Return the floor-rounded source-time bucket index.
+    #[must_use]
+    pub fn source_time_bucket(&self) -> u64 {
+        self.source_time_bucket
+    }
+
+    /// Return the immutable compact-observation schema version.
+    #[must_use]
+    pub fn schema_version(&self) -> u8 {
+        self.schema_version
+    }
+
+    /// Return the consent/minimization policy version used for this observation.
+    #[must_use]
+    pub fn policy_version(&self) -> u8 {
+        self.policy_version
+    }
+
+    /// Return bounded interpretation flags.
+    #[must_use]
+    pub fn quality_flags(&self) -> u8 {
+        self.quality_flags
+    }
+
+    /// Encode this compact observation as RFC 8949 deterministic CBOR bytes.
+    ///
+    /// # Panics
+    ///
+    /// The fields are all serializable scalar values, so canonical encoding can
+    /// only fail if the serialization implementation changes unexpectedly.
+    #[must_use]
+    pub fn canonical_bytes(&self) -> CanonicalBytes {
+        canonical::encode(self).expect("compact location values always encode canonically")
+    }
 }
 
 impl CloakedPoint {
@@ -476,6 +566,29 @@ mod tests {
         assert_eq!(
             Wgs84Point::new(0.0, -180.1),
             Err(GeoError::LongitudeOutOfRange)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn compact_location_validates_its_coarse_cell_and_has_golden_canonical_bytes() {
+        assert_eq!(
+            CompactLocationObservation::new(91.0, 0.0, 0, 1, 1, 0),
+            Err(GeoError::LatitudeOutOfRange)
+        );
+        let location = CompactLocationObservation::new(0.0, 0.0, 2, 1, 1, 0).unwrap();
+        assert_eq!(
+            location.canonical_bytes().as_slice(),
+            [
+                0xa6, 0x6d, b'c', b'e', b'l', b'l', b'_', b'l', b'a', b't', b'i', b't', b'u', b'd',
+                b'e', 0xf9, 0, 0, 0x6d, b'q', b'u', b'a', b'l', b'i', b't', b'y', b'_', b'f', b'l',
+                b'a', b'g', b's', 0, 0x6e, b'c', b'e', b'l', b'l', b'_', b'l', b'o', b'n', b'g',
+                b'i', b't', b'u', b'd', b'e', 0xf9, 0, 0, 0x6e, b'p', b'o', b'l', b'i', b'c', b'y',
+                b'_', b'v', b'e', b'r', b's', b'i', b'o', b'n', 1, 0x6e, b's', b'c', b'h', b'e',
+                b'm', b'a', b'_', b'v', b'e', b'r', b's', b'i', b'o', b'n', 1, 0x72, b's', b'o',
+                b'u', b'r', b'c', b'e', b'_', b't', b'i', b'm', b'e', b'_', b'b', b'u', b'c', b'k',
+                b'e', b't', 2,
+            ]
         );
     }
 

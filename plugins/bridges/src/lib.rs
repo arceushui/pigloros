@@ -31,7 +31,7 @@ use pos_core::{
     plugin::{Capability, Plugin},
     state::{Reducer, State},
 };
-use pos_plugin_geo::{GeoError, SpatialCloaker, Wgs84Point};
+use pos_plugin_geo::{CompactLocationObservation, GeoError, SpatialCloaker, Wgs84Point};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -106,92 +106,7 @@ pub enum OwnTracksDecoded {
     /// A permitted zero-length `OwnTracks` no-op.
     Noop,
     /// A compact observation that contains no exact coordinate or raw telemetry.
-    Location(MinimizedOwnTracksLocation),
-}
-
-/// The durable, minimized representation derived from an `OwnTracks` location.
-///
-/// Exact latitude/longitude and every unallowlisted `OwnTracks` field are discarded
-/// before this type is returned. The only spatial values exposed are the coarse
-/// V1 cell coordinates.
-#[derive(Debug, Clone, PartialEq)]
-pub struct MinimizedOwnTracksLocation {
-    cell_latitude: f64,
-    cell_longitude: f64,
-    source_time_bucket: u64,
-    schema_version: u8,
-    policy_version: u8,
-    quality_flags: u8,
-}
-
-impl MinimizedOwnTracksLocation {
-    /// Return the coarse V1 cell latitude in decimal degrees.
-    #[must_use]
-    pub fn cell_latitude(&self) -> f64 {
-        self.cell_latitude
-    }
-
-    /// Return the coarse V1 cell longitude in decimal degrees.
-    #[must_use]
-    pub fn cell_longitude(&self) -> f64 {
-        self.cell_longitude
-    }
-
-    /// Return the floor-rounded V1 source-time bucket index.
-    #[must_use]
-    pub fn source_time_bucket(&self) -> u64 {
-        self.source_time_bucket
-    }
-
-    /// Return the immutable compact-observation schema version.
-    #[must_use]
-    pub fn schema_version(&self) -> u8 {
-        self.schema_version
-    }
-
-    /// Return the consent/minimization policy version used for this observation.
-    #[must_use]
-    pub fn policy_version(&self) -> u8 {
-        self.policy_version
-    }
-
-    /// Return bounded interpretation flags; V1 currently emits no flags.
-    #[must_use]
-    pub fn quality_flags(&self) -> u8 {
-        self.quality_flags
-    }
-
-    /// Encode this compact observation into deterministic V1 CBOR bytes.
-    ///
-    /// # Panics
-    ///
-    /// Never panics in practice: writing this fixed payload to a `Vec<u8>` is
-    /// infallible.
-    #[must_use]
-    pub fn canonical_bytes(&self) -> CanonicalBytes {
-        let payload = CanonicalOwnTracksLocation {
-            schema_version: self.schema_version,
-            policy_version: self.policy_version,
-            cell_latitude: self.cell_latitude,
-            cell_longitude: self.cell_longitude,
-            source_time_bucket: self.source_time_bucket,
-            quality_flags: self.quality_flags,
-        };
-        let mut bytes = Vec::new();
-        ciborium::into_writer(&payload, &mut bytes)
-            .expect("ciborium write to Vec<u8> is infallible");
-        CanonicalBytes::from_vec(bytes)
-    }
-}
-
-#[derive(Serialize)]
-struct CanonicalOwnTracksLocation {
-    schema_version: u8,
-    policy_version: u8,
-    cell_latitude: f64,
-    cell_longitude: f64,
-    source_time_bucket: u64,
-    quality_flags: u8,
+    Location(CompactLocationObservation),
 }
 
 /// Decode and immediately minimize one `OwnTracks` V1 request body.
@@ -241,14 +156,16 @@ pub fn decode_owntracks_location(body: &[u8]) -> Result<OwnTracksDecoded, OwnTra
     let cloaker = SpatialCloaker::new(OWNTRACKS_LOCATION_RESOLUTION_DEGREES)
         .expect("the fixed V1 resolution is WGS84-aligned");
     let cell = cloaker.cloak(point);
-    Ok(OwnTracksDecoded::Location(MinimizedOwnTracksLocation {
-        cell_latitude: cell.latitude(),
-        cell_longitude: cell.longitude(),
-        source_time_bucket: source_time / OWNTRACKS_SOURCE_TIME_BUCKET_SECONDS,
-        schema_version: OWNTRACKS_LOCATION_SCHEMA_VERSION,
-        policy_version: OWNTRACKS_LOCATION_POLICY_VERSION,
-        quality_flags: 0,
-    }))
+    let compact = CompactLocationObservation::new(
+        cell.latitude(),
+        cell.longitude(),
+        source_time / OWNTRACKS_SOURCE_TIME_BUCKET_SECONDS,
+        OWNTRACKS_LOCATION_SCHEMA_VERSION,
+        OWNTRACKS_LOCATION_POLICY_VERSION,
+        0,
+    )
+    .expect("a cloaked WGS84 point remains a valid WGS84 cell");
+    Ok(OwnTracksDecoded::Location(compact))
 }
 
 // ---------------------------------------------------------------------------
@@ -445,12 +362,70 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn owntracks_minimized_bytes_are_deterministic_and_discard_telemetry() {
+    fn owntracks_platform_fixtures_are_minimized_and_discard_telemetry() {
+        let android = decode_owntracks_location(include_bytes!(
+            "../tests/fixtures/owntracks-android-location.json"
+        ));
+        let ios = decode_owntracks_location(include_bytes!(
+            "../tests/fixtures/owntracks-ios-location.json"
+        ));
+
+        let Ok(OwnTracksDecoded::Location(android)) = android else {
+            panic!("Android fixture must minimize");
+        };
+        let Ok(OwnTracksDecoded::Location(ios)) = ios else {
+            panic!("iOS fixture must minimize");
+        };
+        assert!((android.cell_latitude() - 1.4).abs() < 1e-9);
+        assert!((android.cell_longitude() - 103.8).abs() < 1e-9);
+        assert_eq!(android.source_time_bucket(), 2);
+        assert!((ios.cell_latitude() - 48.9).abs() < 1e-9);
+        assert!((ios.cell_longitude() - 2.4).abs() < 1e-9);
+        assert_eq!(ios.source_time_bucket(), 3);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn owntracks_durable_payload_has_only_the_allowed_fields() {
+        let decoded = decode_owntracks_location(include_bytes!(
+            "../tests/fixtures/owntracks-android-location.json"
+        ));
+        let Ok(OwnTracksDecoded::Location(location)) = decoded else {
+            panic!("Android fixture must minimize");
+        };
+        let decoded: ciborium::value::Value =
+            ciborium::from_reader(location.canonical_bytes().as_slice()).unwrap();
+        let ciborium::value::Value::Map(entries) = decoded else {
+            panic!("compact location must encode as a CBOR map");
+        };
+        let fields: Vec<&str> = entries
+            .iter()
+            .filter_map(|(key, _)| match key {
+                ciborium::value::Value::Text(name) => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            fields,
+            vec![
+                "cell_latitude",
+                "quality_flags",
+                "cell_longitude",
+                "policy_version",
+                "schema_version",
+                "source_time_bucket",
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn owntracks_precise_points_in_one_cell_and_bucket_have_identical_bytes() {
         let first = decode_owntracks_location(
-            br#"{"_type":"location","lat":37.7749,"lon":-122.4194,"tst":1800,"batt":1}"#,
+            br#"{"_type":"location","lat":37.76,"lon":-122.42,"tst":1800,"batt":1}"#,
         );
         let second = decode_owntracks_location(
-            br#"{"lon":-122.4194,"tst":1800,"_type":"location","lat":37.7749,"batt":99,"wifi":"private"}"#,
+            br#"{"_type":"location","lat":37.79,"lon":-122.44,"tst":2699,"batt":99,"wifi":"discarded"}"#,
         );
 
         let Ok(OwnTracksDecoded::Location(first)) = first else {
