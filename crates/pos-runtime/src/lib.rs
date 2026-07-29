@@ -31,7 +31,7 @@ pub mod registry;
 pub mod scheduler;
 pub mod schema;
 
-pub use driver::{Driver, StepOutput};
+pub use driver::{Driver, ObservationView, ProjectionKey, StepOutput};
 pub use error::RuntimeError;
 pub use recorder::{RecordedOutput, Recorder, RunMode};
 pub use registry::PluginRegistry;

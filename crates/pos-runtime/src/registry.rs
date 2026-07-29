@@ -7,13 +7,11 @@
 
 use indexmap::IndexMap;
 
-use pos_core::{
-    ids::PluginId, store::SeqRange, Plugin, Reducer, SchemaVersionMap, Upcaster, UpcasterRegistry,
-};
+use pos_core::{ids::PluginId, Plugin, Reducer, SchemaVersionMap, Upcaster, UpcasterRegistry};
 use pos_state::ProjectionRegistry;
 
 use crate::{
-    driver::Driver,
+    driver::{Driver, ObservationView},
     error::RuntimeError,
     recorder::RECORDER_EVENT_TYPE,
     schema::{EventTypeSchema, SchemaRegistry},
@@ -25,7 +23,6 @@ struct PluginEntry {
     version: String,
     driver: Option<Box<dyn Driver>>,
     last_tick: Option<u128>,
-    last_delivered_seq: Option<u64>,
 }
 
 /// The central plugin registry.
@@ -136,7 +133,6 @@ impl PluginRegistry {
                 version: plugin.version().to_owned(),
                 driver,
                 last_tick: None,
-                last_delivered_seq: None,
             },
         );
         Ok(())
@@ -182,7 +178,6 @@ impl PluginRegistry {
                 version: "0.1.0".to_owned(),
                 driver: Some(driver),
                 last_tick: None,
-                last_delivered_seq: None,
             },
         );
     }
@@ -202,6 +197,7 @@ impl PluginRegistry {
         now_ns: u128,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         let mut all_drafts = Vec::new();
+        let projections = &self.projections;
         for entry in self.plugins.values_mut() {
             if let Some(driver) = entry.driver.as_mut() {
                 let interval_ns = driver.tick_interval().as_nanos();
@@ -210,26 +206,11 @@ impl PluginRegistry {
                     None => true,
                 };
                 if ready {
-                    let subscriptions = driver.subscriptions();
-                    if !subscriptions.is_empty() {
-                        let from_seq = entry.last_delivered_seq.map_or(0, |s| s + 1);
-                        if let Ok(events) = store.read(
-                            timeline,
-                            SeqRange::from_seq(pos_core::clock::Seq::from_u64(from_seq)),
-                        ) {
-                            let matching: Vec<_> = events
-                                .iter()
-                                .filter(|e| subscriptions.contains(&e.event_type))
-                                .collect();
-                            if !matching.is_empty() {
-                                driver.receive_observations(&matching);
-                            }
-                            if let Some(last) = events.last() {
-                                entry.last_delivered_seq = Some(last.seq.as_u64());
-                            }
-                        }
-                    }
-                    let output = driver.step(store, timeline)?;
+                    let observations =
+                        ObservationView::from_subscriptions(driver.subscriptions(), |key| {
+                            projections.state_for(key.entity())
+                        });
+                    let output = driver.step_with_observations(store, timeline, observations)?;
                     entry.last_tick = Some(now_ns);
                     all_drafts.extend(output.drafts);
                 }
@@ -257,9 +238,14 @@ impl PluginRegistry {
         timeline: pos_core::ids::TimelineId,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         let mut all_drafts = Vec::new();
+        let projections = &self.projections;
         for entry in self.plugins.values_mut() {
             if let Some(driver) = entry.driver.as_mut() {
-                let output = driver.step(store, timeline)?;
+                let observations =
+                    ObservationView::from_subscriptions(driver.subscriptions(), |key| {
+                        projections.state_for(key.entity())
+                    });
+                let output = driver.step_with_observations(store, timeline, observations)?;
                 all_drafts.extend(output.drafts);
             }
         }
@@ -509,6 +495,92 @@ mod tests {
         reg.register(&p, None, None).unwrap();
         let drafts = reg.step_all(store.as_ref(), tl.id()).unwrap();
         assert!(drafts.is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn tick_cadenced_materializes_only_subscribed_projection_state() {
+        use crate::driver::ProjectionKey;
+        use pos_store::{open_store, StoreConfig};
+
+        struct ObservingDriver {
+            key: ProjectionKey,
+            entity: EntityId,
+        }
+
+        impl Driver for ObservingDriver {
+            fn name(&self) -> &'static str {
+                "observing"
+            }
+
+            fn step(
+                &mut self,
+                _: &dyn pos_core::store::EventStore,
+                _: pos_core::ids::TimelineId,
+            ) -> Result<crate::driver::StepOutput, RuntimeError> {
+                Ok(crate::driver::StepOutput::empty())
+            }
+
+            fn subscriptions(&self) -> Vec<ProjectionKey> {
+                vec![self.key.clone()]
+            }
+
+            fn step_with_observations(
+                &mut self,
+                _: &dyn pos_core::store::EventStore,
+                _: pos_core::ids::TimelineId,
+                observations: ObservationView<'_>,
+            ) -> Result<crate::driver::StepOutput, RuntimeError> {
+                let observed = observations
+                    .state_for(&self.key)
+                    .and_then(|state| state.get("n"))
+                    .and_then(serde_json::Value::as_u64);
+                let drafts = (observed == Some(1))
+                    .then(|| {
+                        EventDraft::new(
+                            self.entity,
+                            Kind::new("driver.observed"),
+                            CanonicalBytes::from_vec(vec![]),
+                        )
+                    })
+                    .into_iter()
+                    .collect();
+                Ok(crate::driver::StepOutput::new(drafts))
+            }
+        }
+
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let timeline = store.create_timeline("t").unwrap();
+        let observed_entity = EntityId::new();
+        let event = Event {
+            id: EventId::new(),
+            entity: observed_entity,
+            event_type: Kind::new("counter.tick"),
+            payload: CanonicalBytes::from_vec(vec![]),
+            wall_time: WallTime::from_micros(0),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        };
+
+        let mut reg = PluginRegistry::new();
+        reg.projections.register("counter", Box::new(CountReducer));
+        reg.projections.apply_event(&event);
+        reg.register_driver(Box::new(ObservingDriver {
+            key: ProjectionKey::new(observed_entity),
+            entity: EntityId::new(),
+        }));
+
+        let drafts = reg.tick_cadenced(store.as_ref(), timeline.id(), 0).unwrap();
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].event_type.as_str(), "driver.observed");
+
+        let drafts = reg.step_all(store.as_ref(), timeline.id()).unwrap();
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].event_type.as_str(), "driver.observed");
     }
 
     #[test]
