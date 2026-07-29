@@ -1,0 +1,4 @@
+interface:
+  display_name: Worktree Status
+  short_description: Report agent, worktree, review, and approval status
+  default_prompt: Show the status of all agents and worktrees, including actions requiring my approval.
