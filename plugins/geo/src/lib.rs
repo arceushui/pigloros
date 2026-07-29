@@ -100,36 +100,137 @@ pub struct CloakedPoint {
 pub struct CompactLocationObservation {
     cell_latitude: f64,
     cell_longitude: f64,
-    source_time_bucket: u64,
-    schema_version: u8,
-    policy_version: u8,
-    quality_flags: u8,
+    source_time_bucket: SourceTimeBucket,
+    schema_version: CompactLocationSchemaVersion,
+    policy_version: CompactLocationPolicyVersion,
+    quality_flags: CompactLocationQualityFlags,
 }
 
-impl CompactLocationObservation {
-    /// Construct a compact observation after validating its coarse WGS84 cell.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`GeoError`] when the supplied coarse cell is not a finite,
-    /// bounded WGS84 coordinate.
-    pub fn new(
-        cell_latitude: f64,
-        cell_longitude: f64,
-        source_time_bucket: u64,
-        schema_version: u8,
-        policy_version: u8,
-        quality_flags: u8,
-    ) -> Result<Self, GeoError> {
-        let cell = Wgs84Point::new(cell_latitude, cell_longitude)?;
-        Ok(Self {
-            cell_latitude: cell.latitude(),
-            cell_longitude: cell.longitude(),
+/// The floor-rounded index of a source-time bucket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct SourceTimeBucket(u64);
+
+impl SourceTimeBucket {
+    /// Create a source-time bucket index.
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Return the numeric bucket index.
+    #[must_use]
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
+/// The immutable compact-observation schema version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct CompactLocationSchemaVersion(u8);
+
+impl CompactLocationSchemaVersion {
+    /// The schema used by the ADR-026 V1 compact location payload.
+    pub const V1: Self = Self(1);
+
+    /// Return the encoded schema version.
+    #[must_use]
+    pub const fn value(self) -> u8 {
+        self.0
+    }
+}
+
+/// The consent/minimization policy version recorded with an observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct CompactLocationPolicyVersion(u8);
+
+impl CompactLocationPolicyVersion {
+    /// The ADR-026 V1 policy: 0.1-degree cells and 15-minute source-time buckets.
+    pub const V1: Self = Self(1);
+
+    /// Return the encoded policy version.
+    #[must_use]
+    pub const fn value(self) -> u8 {
+        self.0
+    }
+}
+
+/// Bounded flags that qualify how to interpret a compact observation.
+///
+/// ADR-026 V1 permits only [`Self::NONE`], encoded as zero, meaning that no
+/// additional condition qualifies the minimized observation. Nonzero values
+/// and telemetry-derived flags are not part of V1; later versions must add a
+/// specifically documented flag before they can be constructed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct CompactLocationQualityFlags(u8);
+
+impl CompactLocationQualityFlags {
+    /// The sole valid V1 value: no quality conditions are recorded.
+    pub const NONE: Self = Self(0);
+
+    /// Return the encoded flags value.
+    #[must_use]
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+}
+
+/// Versioned metadata for a compact location observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactLocationMetadata {
+    source_time_bucket: SourceTimeBucket,
+    schema_version: CompactLocationSchemaVersion,
+    policy_version: CompactLocationPolicyVersion,
+    quality_flags: CompactLocationQualityFlags,
+}
+
+impl CompactLocationMetadata {
+    /// Create metadata from explicit, non-interchangeable compact value types.
+    #[must_use]
+    pub const fn new(
+        source_time_bucket: SourceTimeBucket,
+        schema_version: CompactLocationSchemaVersion,
+        policy_version: CompactLocationPolicyVersion,
+        quality_flags: CompactLocationQualityFlags,
+    ) -> Self {
+        Self {
             source_time_bucket,
             schema_version,
             policy_version,
             quality_flags,
-        })
+        }
+    }
+
+    /// Create ADR-026 V1 metadata for one 15-minute source-time bucket.
+    #[must_use]
+    pub const fn v1(source_time_bucket: SourceTimeBucket) -> Self {
+        Self::new(
+            source_time_bucket,
+            CompactLocationSchemaVersion::V1,
+            CompactLocationPolicyVersion::V1,
+            CompactLocationQualityFlags::NONE,
+        )
+    }
+}
+
+impl CompactLocationObservation {
+    /// Construct a compact observation from a cloaked cell and typed metadata.
+    ///
+    /// The API accepts only a [`CloakedPoint`], so it cannot retain an exact
+    /// coordinate or construct an invalid coarse WGS84 cell.
+    #[must_use]
+    pub fn new(cell: CloakedPoint, metadata: CompactLocationMetadata) -> Self {
+        Self {
+            cell_latitude: cell.latitude(),
+            cell_longitude: cell.longitude(),
+            source_time_bucket: metadata.source_time_bucket,
+            schema_version: metadata.schema_version,
+            policy_version: metadata.policy_version,
+            quality_flags: metadata.quality_flags,
+        }
     }
 
     /// Return the coarse cell latitude in decimal degrees.
@@ -146,25 +247,25 @@ impl CompactLocationObservation {
 
     /// Return the floor-rounded source-time bucket index.
     #[must_use]
-    pub fn source_time_bucket(&self) -> u64 {
+    pub fn source_time_bucket(&self) -> SourceTimeBucket {
         self.source_time_bucket
     }
 
     /// Return the immutable compact-observation schema version.
     #[must_use]
-    pub fn schema_version(&self) -> u8 {
+    pub fn schema_version(&self) -> CompactLocationSchemaVersion {
         self.schema_version
     }
 
     /// Return the consent/minimization policy version used for this observation.
     #[must_use]
-    pub fn policy_version(&self) -> u8 {
+    pub fn policy_version(&self) -> CompactLocationPolicyVersion {
         self.policy_version
     }
 
     /// Return bounded interpretation flags.
     #[must_use]
-    pub fn quality_flags(&self) -> u8 {
+    pub fn quality_flags(&self) -> CompactLocationQualityFlags {
         self.quality_flags
     }
 
@@ -571,12 +672,16 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn compact_location_validates_its_coarse_cell_and_has_golden_canonical_bytes() {
-        assert_eq!(
-            CompactLocationObservation::new(91.0, 0.0, 0, 1, 1, 0),
-            Err(GeoError::LatitudeOutOfRange)
-        );
-        let location = CompactLocationObservation::new(0.0, 0.0, 2, 1, 1, 0).unwrap();
+    fn compact_location_uses_cloaked_cell_and_typed_v1_metadata() {
+        let cloaker = SpatialCloaker::new(0.1).unwrap();
+        let cell = cloaker.cloak(wgs84_point(0.0, 0.0));
+        let metadata = CompactLocationMetadata::v1(SourceTimeBucket::new(2));
+        let location = CompactLocationObservation::new(cell, metadata);
+        assert_eq!(location.source_time_bucket().value(), 2);
+        assert_eq!(location.schema_version(), CompactLocationSchemaVersion::V1);
+        assert_eq!(location.policy_version(), CompactLocationPolicyVersion::V1);
+        assert_eq!(location.quality_flags(), CompactLocationQualityFlags::NONE);
+        assert_eq!(location.quality_flags().bits(), 0);
         assert_eq!(
             location.canonical_bytes().as_slice(),
             [

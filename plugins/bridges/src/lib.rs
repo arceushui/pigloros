@@ -31,7 +31,10 @@ use pos_core::{
     plugin::{Capability, Plugin},
     state::{Reducer, State},
 };
-use pos_plugin_geo::{CompactLocationObservation, GeoError, SpatialCloaker, Wgs84Point};
+use pos_plugin_geo::{
+    CompactLocationMetadata, CompactLocationObservation, GeoError, SourceTimeBucket,
+    SpatialCloaker, Wgs84Point,
+};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -156,15 +159,10 @@ pub fn decode_owntracks_location(body: &[u8]) -> Result<OwnTracksDecoded, OwnTra
     let cloaker = SpatialCloaker::new(OWNTRACKS_LOCATION_RESOLUTION_DEGREES)
         .expect("the fixed V1 resolution is WGS84-aligned");
     let cell = cloaker.cloak(point);
-    let compact = CompactLocationObservation::new(
-        cell.latitude(),
-        cell.longitude(),
+    let metadata = CompactLocationMetadata::v1(SourceTimeBucket::new(
         source_time / OWNTRACKS_SOURCE_TIME_BUCKET_SECONDS,
-        OWNTRACKS_LOCATION_SCHEMA_VERSION,
-        OWNTRACKS_LOCATION_POLICY_VERSION,
-        0,
-    )
-    .expect("a cloaked WGS84 point remains a valid WGS84 cell");
+    ));
+    let compact = CompactLocationObservation::new(cell, metadata);
     Ok(OwnTracksDecoded::Location(compact))
 }
 
@@ -354,10 +352,16 @@ mod tests {
         };
         assert!((location.cell_latitude() - 37.8).abs() < 1e-9);
         assert!((location.cell_longitude() - (-122.4)).abs() < 1e-9);
-        assert_eq!(location.source_time_bucket(), 2);
-        assert_eq!(location.schema_version(), OWNTRACKS_LOCATION_SCHEMA_VERSION);
-        assert_eq!(location.policy_version(), OWNTRACKS_LOCATION_POLICY_VERSION);
-        assert_eq!(location.quality_flags(), 0);
+        assert_eq!(location.source_time_bucket().value(), 2);
+        assert_eq!(
+            location.schema_version().value(),
+            OWNTRACKS_LOCATION_SCHEMA_VERSION
+        );
+        assert_eq!(
+            location.policy_version().value(),
+            OWNTRACKS_LOCATION_POLICY_VERSION
+        );
+        assert_eq!(location.quality_flags().bits(), 0);
     }
 
     #[test]
@@ -378,10 +382,10 @@ mod tests {
         };
         assert!((android.cell_latitude() - 1.4).abs() < 1e-9);
         assert!((android.cell_longitude() - 103.8).abs() < 1e-9);
-        assert_eq!(android.source_time_bucket(), 2);
+        assert_eq!(android.source_time_bucket().value(), 2);
         assert!((ios.cell_latitude() - 48.9).abs() < 1e-9);
         assert!((ios.cell_longitude() - 2.4).abs() < 1e-9);
-        assert_eq!(ios.source_time_bucket(), 3);
+        assert_eq!(ios.source_time_bucket().value(), 3);
     }
 
     #[test]
