@@ -44,7 +44,8 @@ fn run_with_args(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send
             };
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
-                .build()?;
+                .build()
+                .expect("gateway Tokio runtime initialization failed");
             rt.block_on(serve(
                 addr,
                 store_path,
