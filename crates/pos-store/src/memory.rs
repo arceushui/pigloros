@@ -38,6 +38,11 @@ pub struct MemoryStore {
     hasher: Box<dyn Hasher>,
 }
 
+struct ForkChain {
+    timelines: Vec<TimelineId>,
+    fork_seqs: Vec<Seq>,
+}
+
 impl MemoryStore {
     #[must_use]
     pub fn new() -> Self {
@@ -81,16 +86,6 @@ impl MemoryStore {
         CoreError::Storage(format!("timeline {id} is missing its {state}"))
     }
 
-    fn child_fork_seq(&self, child: TimelineId) -> Result<Seq, CoreError> {
-        self.timeline(child)
-            .and_then(|child| match child.meta.fork_point {
-                Some((_, fork_seq)) => Ok(fork_seq),
-                None => Err(CoreError::Storage(
-                    "fork chain contains a root timeline after its first segment".to_owned(),
-                )),
-            })
-    }
-
     /// Collect all events for a timeline, walking the fork chain.
     /// Returns events sorted by seq, stitching parent[`0..fork_seq`] + child events.
     fn collect_events_in_range(
@@ -103,19 +98,18 @@ impl MemoryStore {
 
         // Build the full logical event sequence
         chain
+            .timelines
             .iter()
             .enumerate()
             .try_fold(Vec::new(), |mut all, (i, tid)| {
-                self.timeline(*tid).and_then(|_| {
+                self.timeline(*tid).map(|_| {
                     let events = self.events.get(tid).map_or(&[] as &[Event], Vec::as_slice);
-                    if i + 1 < chain.len() {
-                        self.child_fork_seq(chain[i + 1]).map(|fork_seq| {
-                            all.extend(events.iter().filter(|e| e.seq <= fork_seq).cloned());
-                            all
-                        })
+                    if let Some(&fork_seq) = chain.fork_seqs.get(i) {
+                        all.extend(events.iter().filter(|e| e.seq <= fork_seq).cloned());
+                        all
                     } else {
                         all.extend(events.iter().cloned());
-                        Ok(all)
+                        all
                     }
                 })
             })
@@ -213,8 +207,9 @@ impl MemoryStore {
     }
 
     /// Walk the fork chain from `timeline_id` back to the root, returning [root, ..., `timeline_id`].
-    fn fork_chain(&self, timeline_id: TimelineId) -> Result<Vec<TimelineId>, CoreError> {
+    fn fork_chain(&self, timeline_id: TimelineId) -> Result<ForkChain, CoreError> {
         let mut chain = Vec::new();
+        let mut fork_seqs = Vec::new();
         let mut visited = HashSet::new();
         let mut current = timeline_id;
         loop {
@@ -226,12 +221,19 @@ impl MemoryStore {
             let meta = self.timeline(current)?;
             chain.push(current);
             match meta.meta.fork_point {
-                Some((parent, _)) => current = parent,
+                Some((parent, fork_seq)) => {
+                    fork_seqs.push(fork_seq);
+                    current = parent;
+                }
                 None => break,
             }
         }
         chain.reverse();
-        Ok(chain)
+        fork_seqs.reverse();
+        Ok(ForkChain {
+            timelines: chain,
+            fork_seqs,
+        })
     }
 
     /// Walk at most `max_depth` parent links before returning the chain.
@@ -241,9 +243,15 @@ impl MemoryStore {
         max_depth: usize,
     ) -> Result<Vec<TimelineId>, CoreError> {
         let mut chain = Vec::new();
+        let mut visited = HashSet::new();
         let mut current = timeline_id;
         let mut depth = 0_usize;
         loop {
+            if !visited.insert(current) {
+                return Err(CoreError::Storage(format!(
+                    "fork ancestry contains a cycle at timeline {current}"
+                )));
+            }
             let meta = self
                 .timelines
                 .get(&current)
@@ -289,9 +297,13 @@ impl EventStore for MemoryStore {
         timeline: TimelineId,
         drafts: &[EventDraft],
     ) -> Result<Vec<Event>, CoreError> {
-        let mut timeline_state = self.timeline(timeline)?.clone();
+        let timeline_state = self.timeline(timeline).cloned();
+        let chain_head = self.chain_head(timeline);
+        let (mut timeline_state, mut prev_hash) = match (timeline_state, chain_head) {
+            (Ok(timeline_state), Ok(chain_head)) => (timeline_state, chain_head),
+            (Err(error), _) | (_, Err(error)) => return Err(error),
+        };
         let mut seq = timeline_state.head;
-        let mut prev_hash = self.chain_head(timeline)?;
 
         let mut committed = Vec::with_capacity(drafts.len());
 
@@ -467,7 +479,7 @@ impl EventStore for MemoryStore {
                     return Err(Self::missing_timeline_state(timeline, "Event storage"));
                 };
                 let mut new_head = head;
-                let mut hashes = Vec::with_capacity(ordered.len());
+                let mut event_ids_to_insert = Vec::with_capacity(ordered.len());
                 let mut previous_hash = prev_hash;
                 for event in &ordered {
                     let id_str = event.id.to_string();
@@ -475,11 +487,11 @@ impl EventStore for MemoryStore {
                         self.hasher
                             .hash_event(&previous_hash, id_str.as_bytes(), &event.payload);
                     new_head = event.seq;
-                    hashes.push(event.id);
+                    event_ids_to_insert.push(event.id);
                 }
 
                 stored_events.extend(ordered);
-                self.event_ids.extend(hashes);
+                self.event_ids.extend(event_ids_to_insert);
                 timeline_state.head = new_head;
                 self.timelines.insert(timeline, timeline_state);
                 self.chain_heads.insert(timeline, previous_hash);
@@ -546,7 +558,7 @@ impl MemoryStore {
         let chain = self.fork_chain(timeline)?;
         let mut hash = self.hasher.genesis_hash();
 
-        for (i, tid) in chain.iter().enumerate() {
+        for (i, tid) in chain.timelines.iter().enumerate() {
             let events = self.events.get(tid).map_or(&[] as &[Event], Vec::as_slice);
 
             // Ancestors: limit to the *child's* fork_seq onto this timeline (matches SQLite /
@@ -554,12 +566,7 @@ impl MemoryStore {
             let limit = if *tid == timeline {
                 at_seq
             } else {
-                // `fork_chain` only adds a successor after following its Fork
-                // metadata, so the fork point is present for every ancestor.
-                self.timelines[&chain[i + 1]]
-                    .meta
-                    .fork_point
-                    .map_or(at_seq, |(_, seq)| seq)
+                chain.fork_seqs[i]
             };
 
             for event in events.iter().filter(|e| e.seq <= limit) {
@@ -578,7 +585,45 @@ impl MemoryStore {
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy)]
+enum TestCorruption {
+    ForkParent {
+        timeline: TimelineId,
+        parent: TimelineId,
+        fork_seq: Seq,
+    },
+    MissingChainHead(TimelineId),
+    MissingEvents(TimelineId),
+    ZeroRootCount,
+}
+
+#[cfg(test)]
 impl MemoryStore {
+    fn test_corrupt(&mut self, corruption: TestCorruption) {
+        match corruption {
+            TestCorruption::ForkParent {
+                timeline,
+                parent,
+                fork_seq,
+            } => {
+                self.timelines
+                    .get_mut(&timeline)
+                    .expect("test corruption targets an existing Timeline")
+                    .meta
+                    .fork_point = Some((parent, fork_seq));
+            }
+            TestCorruption::MissingChainHead(timeline) => {
+                self.chain_heads.remove(&timeline);
+            }
+            TestCorruption::MissingEvents(timeline) => {
+                self.events.remove(&timeline);
+            }
+            TestCorruption::ZeroRootCount => {
+                self.root_timeline_count = 0;
+            }
+        }
+    }
+
     pub(crate) fn test_remove_timeline(&mut self, id: TimelineId) {
         self.timelines.remove(&id);
     }
@@ -1148,30 +1193,27 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn child_fork_seq_rejects_root_metadata() {
-        let mut store = MemoryStore::new();
-        let root = store.create_timeline("root").unwrap();
-
-        let malformed_error = store.child_fork_seq(root.id()).unwrap_err();
-        assert!(malformed_error
-            .to_string()
-            .contains("root timeline after its first segment"));
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn read_rejects_cyclic_fork_ancestry() {
         let mut store = MemoryStore::new();
         let timeline = store.create_timeline("cycle").unwrap();
-        store
-            .timelines
-            .get_mut(&timeline.id())
-            .unwrap()
-            .meta
-            .fork_point = Some((timeline.id(), Seq::ZERO));
+        store.test_corrupt(TestCorruption::ForkParent {
+            timeline: timeline.id(),
+            parent: timeline.id(),
+            fork_seq: Seq::ZERO,
+        });
 
         let error = store.read(timeline.id(), SeqRange::all()).unwrap_err();
         assert!(error.to_string().contains("fork ancestry contains a cycle"));
+        let bounded_error = store
+            .read_bounded(
+                timeline.id(),
+                SeqRange::all(),
+                EventReadBounds::new(1, 1, 1, 1),
+            )
+            .unwrap_err();
+        assert!(bounded_error
+            .to_string()
+            .contains("fork ancestry contains a cycle"));
     }
 
     #[test]
@@ -1179,7 +1221,7 @@ mod tests {
     fn mutation_rejects_missing_internal_timeline_state_without_partial_delete() {
         let mut store = MemoryStore::new();
         let timeline = store.create_timeline("incomplete").unwrap();
-        store.chain_heads.remove(&timeline.id());
+        store.test_corrupt(TestCorruption::MissingChainHead(timeline.id()));
 
         let append_error = store
             .append(timeline.id(), &[make_draft(EntityId::new(), b"event")])
@@ -1197,7 +1239,7 @@ mod tests {
         store
             .chain_heads
             .insert(timeline.id(), pos_crypto::chain::genesis_hash());
-        store.events.remove(&timeline.id());
+        store.test_corrupt(TestCorruption::MissingEvents(timeline.id()));
         let missing_events_error = store
             .append(timeline.id(), &[make_draft(EntityId::new(), b"event")])
             .unwrap_err();
@@ -1225,7 +1267,7 @@ mod tests {
 
         let mut store = MemoryStore::new();
         let timeline = store.create_timeline("incomplete").unwrap();
-        store.events.remove(&timeline.id());
+        store.test_corrupt(TestCorruption::MissingEvents(timeline.id()));
         let events_error = store
             .append_committed(timeline.id(), &committed)
             .unwrap_err();
@@ -1234,7 +1276,7 @@ mod tests {
             .contains("missing its Event storage"));
 
         store.events.insert(timeline.id(), Vec::new());
-        store.chain_heads.remove(&timeline.id());
+        store.test_corrupt(TestCorruption::MissingChainHead(timeline.id()));
         let chain_error = store
             .append_committed(timeline.id(), &committed)
             .unwrap_err();
@@ -1257,7 +1299,7 @@ mod tests {
     fn delete_rejects_a_corrupt_root_count() {
         let mut store = MemoryStore::new();
         let timeline = store.create_timeline("root").unwrap();
-        store.root_timeline_count = 0;
+        store.test_corrupt(TestCorruption::ZeroRootCount);
 
         let error = store.delete_timeline(timeline.id()).unwrap_err();
         assert!(error.to_string().contains("root Timeline count underflow"));
