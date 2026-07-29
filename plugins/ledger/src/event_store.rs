@@ -24,7 +24,7 @@ impl From<CoreError> for LedgerError {
 
 fn to_canonical(value: &impl serde::Serialize) -> CanonicalBytes {
     let mut buf = Vec::new();
-    ciborium::into_writer(value, &mut buf).expect("ciborium write to Vec<u8> is infallible");
+    let _ = ciborium::into_writer(value, &mut buf);
     CanonicalBytes::from_vec(buf)
 }
 
