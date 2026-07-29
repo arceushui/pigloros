@@ -4,7 +4,6 @@
 
 use crate::ai_influence::{ai_influence_from_events, AiInfluenceIndex};
 use pos_core::clock::Seq;
-use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::Read;
 use std::time::Duration;
@@ -29,6 +28,21 @@ fn society_pref_aliases(dim: &str) -> &'static [&'static str] {
         "culture" => &["nature", "autonomy"],
         "polarization" => &["collaboration", "energy"],
         _ => &[],
+    }
+}
+
+#[cfg(all(test, coverage_nightly))]
+mod coverage_tests {
+    use super::GatewayEventPage;
+
+    #[test]
+    fn gateway_page_parser_covers_shape_and_field_errors() {
+        assert!(GatewayEventPage::parse(r#"{"events":[],"next_from_seq":null}"#).is_ok());
+        assert!(GatewayEventPage::parse(r#"{}"#).is_ok());
+        assert!(GatewayEventPage::parse("not-json").is_err());
+        assert!(GatewayEventPage::parse("[]").is_err());
+        assert!(GatewayEventPage::parse(r#"{"events":"bad"}"#).is_err());
+        assert!(GatewayEventPage::parse(r#"{"next_from_seq":"bad"}"#).is_err());
     }
 }
 
@@ -267,7 +281,7 @@ fn fetch_gateway_events_with_aggregate_limit(
         aggregate_bytes =
             checked_gateway_aggregate(aggregate_bytes, bytes.len() as u64, max_aggregate_bytes)?;
         let body = String::from_utf8(bytes).map_err(|e| format!("gateway body not UTF-8: {e}"))?;
-        let body: GatewayEventPage = serde_json::from_str(&body)
+        let body = GatewayEventPage::parse(&body)
             .map_err(|e| format!("gateway JSON/cursor parse failed: {e}"))?;
         let next = next_gateway_cursor(&body, from_seq)?;
         events.extend(body.events);
@@ -279,12 +293,33 @@ fn fetch_gateway_events_with_aggregate_limit(
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 struct GatewayEventPage {
-    #[serde(default)]
     events: Vec<serde_json::Value>,
-    #[serde(default)]
     next_from_seq: Option<Seq>,
+}
+
+impl GatewayEventPage {
+    fn parse(body: &str) -> Result<Self, String> {
+        let value: serde_json::Value = serde_json::from_str(body).map_err(|e| e.to_string())?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| "gateway response must be a JSON object".to_owned())?;
+        let events = object
+            .get("events")
+            .map(|events| serde_json::from_value(events.clone()).map_err(|e| e.to_string()))
+            .transpose()?
+            .unwrap_or_default();
+        let next_from_seq = object
+            .get("next_from_seq")
+            .filter(|cursor| !cursor.is_null())
+            .map(|cursor| serde_json::from_value(cursor.clone()).map_err(|e| e.to_string()))
+            .transpose()?;
+        Ok(Self {
+            events,
+            next_from_seq,
+        })
+    }
 }
 
 fn checked_gateway_aggregate(current: u64, page: u64, maximum: u64) -> Result<u64, String> {
@@ -723,7 +758,7 @@ mod tests {
 
     #[test]
     fn next_gateway_cursor_handles_legacy_exhaustion_and_rejects_stalls() {
-        let page = |value| serde_json::from_value::<GatewayEventPage>(value).unwrap();
+        let page = |value: serde_json::Value| GatewayEventPage::parse(&value.to_string()).unwrap();
         assert_eq!(
             next_gateway_cursor(&page(serde_json::json!({"events": []})), Seq::ZERO).unwrap(),
             None
@@ -749,10 +784,13 @@ mod tests {
             Seq::from_u64(10),
         )
         .is_err());
-        assert!(serde_json::from_value::<GatewayEventPage>(
-            serde_json::json!({"next_from_seq": "11"})
-        )
-        .is_err());
+        assert!(
+            GatewayEventPage::parse(&serde_json::json!({"next_from_seq": "11"}).to_string())
+                .is_err()
+        );
+        assert!(GatewayEventPage::parse("not-json").is_err());
+        assert!(GatewayEventPage::parse("[]").is_err());
+        assert!(GatewayEventPage::parse(r#"{"events":"bad"}"#).is_err());
     }
 
     #[test]
