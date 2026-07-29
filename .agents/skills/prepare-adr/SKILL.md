@@ -10,10 +10,10 @@ do not substitute repository documentation for the decision record.
 
 ## Required model
 
-When ADR research or drafting is delegated, use `gpt-5.6-sol` explicitly. Do
-not silently substitute a cheaper model. If `gpt-5.6-sol` is unavailable,
-report the block and wait for direction before publishing or materially
-revising the ADR.
+When ADR research or drafting is delegated, use `gpt-5.6-sol` explicitly.
+If it is unavailable, `gpt-5.6-terra` is the only permitted fallback. Do not
+silently substitute a cheaper model; report which model was used before
+publishing or materially revising the ADR.
 
 ## 1. Establish the decision boundary
 
