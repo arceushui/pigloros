@@ -177,9 +177,12 @@ pub fn import_timeline_with_verified_signatures(
 mod tests {
     use super::*;
     use pos_core::{
+        clock::WallTime,
         event::{CanonicalBytes, EventDraft, Kind},
-        ids::EntityId,
-        store::SeqRange,
+        ids::{CorrelationId, EntityId, EventId},
+        store::{
+            IngressAppendOutcome, IngressContentKey, IngressDedupKey, IngressIdentity, SeqRange,
+        },
     };
 
     /// Helper: run a minimal contract against any backend via the port.
@@ -190,11 +193,84 @@ mod tests {
         assert!(events.is_empty());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn ingress_identity(key: u8, content: u8, expires_at: u64) -> IngressIdentity {
+        IngressIdentity::new(
+            IngressDedupKey::from_keyed_hash([key; 32]),
+            IngressContentKey::from_keyed_hash([content; 32]),
+            WallTime::from_micros(expires_at),
+        )
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn ingress_contract(store: &mut dyn EventStore) {
+        let timeline = store.create_timeline("ingress").unwrap();
+        let mut draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new("test.ingress"),
+            CanonicalBytes::from_vec(b"retained-canonical-content".to_vec()),
+        );
+        draft.causation_id = Some(EventId::new());
+        draft.correlation_id = Some(CorrelationId::new());
+        let first = store
+            .append_or_duplicate(timeline.id(), ingress_identity(1, 2, 20), draft.clone())
+            .unwrap();
+        let event_id = match first {
+            IngressAppendOutcome::Appended(event) => {
+                assert_eq!(event.causation_id, draft.causation_id);
+                assert_eq!(event.correlation_id, draft.correlation_id);
+                event.id
+            }
+            IngressAppendOutcome::Duplicate { .. } | IngressAppendOutcome::Conflict => {
+                panic!("first ingress admission must append")
+            }
+        };
+        let duplicate = store
+            .append_or_duplicate(timeline.id(), ingress_identity(1, 2, 20), draft.clone())
+            .unwrap();
+        assert_eq!(duplicate, IngressAppendOutcome::Duplicate { event_id });
+        let conflict = store
+            .append_or_duplicate(timeline.id(), ingress_identity(1, 3, 20), draft.clone())
+            .unwrap();
+        assert_eq!(conflict, IngressAppendOutcome::Conflict);
+        assert_eq!(store.read(timeline.id(), SeqRange::all()).unwrap().len(), 1);
+
+        assert_eq!(
+            store
+                .purge_expired_ingress_identities(WallTime::from_micros(19))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .purge_expired_ingress_identities(WallTime::from_micros(20))
+                .unwrap(),
+            1
+        );
+        match store
+            .append_or_duplicate(timeline.id(), ingress_identity(1, 2, 40), draft)
+            .unwrap()
+        {
+            IngressAppendOutcome::Appended(_) => {}
+            IngressAppendOutcome::Duplicate { .. } | IngressAppendOutcome::Conflict => {
+                panic!("expired identity must admit a new Event")
+            }
+        }
+        assert_eq!(store.read(timeline.id(), SeqRange::all()).unwrap().len(), 2);
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn factory_memory() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         contract(&mut *store);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn ingress_contract_memory() {
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        ingress_contract(&mut *store);
     }
 
     #[cfg(feature = "sqlite")]
@@ -203,6 +279,14 @@ mod tests {
     fn factory_sqlite_in_memory() {
         let mut store = open_store(StoreConfig::SqliteInMemory).unwrap();
         contract(&mut *store);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn ingress_contract_sqlite() {
+        let mut store = open_store(StoreConfig::SqliteInMemory).unwrap();
+        ingress_contract(&mut *store);
     }
 
     #[cfg(feature = "sqlite")]

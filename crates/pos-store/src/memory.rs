@@ -13,7 +13,10 @@ use pos_core::{
     event::{Event, EventDraft},
     hasher::Hasher,
     ids::{EventId, TimelineId},
-    store::{EventReadBounds, EventStore, SeqRange},
+    store::{
+        EventReadBounds, EventStore, IngressAppendOutcome, IngressContentKey, IngressDedupKey,
+        IngressIdentity, SeqRange,
+    },
     timeline::{Timeline, TimelineMeta},
 };
 
@@ -33,9 +36,18 @@ pub struct MemoryStore {
     chain_heads: HashMap<TimelineId, Hash>,
     /// Global `EventId` index for O(1) uniqueness checks.
     event_ids: HashSet<EventId>,
+    /// Opaque ingress identities retained only until their configured horizon.
+    ingress_identities: HashMap<IngressDedupKey, IngressIdentityRecord>,
     /// Exact number of root Timelines, maintained with Timeline mutations.
     root_timeline_count: usize,
     hasher: Box<dyn Hasher>,
+}
+
+#[derive(Clone, Copy)]
+struct IngressIdentityRecord {
+    content_key: IngressContentKey,
+    event_id: EventId,
+    expires_at: WallTime,
 }
 
 struct ForkChain {
@@ -51,6 +63,7 @@ impl MemoryStore {
             timelines: HashMap::new(),
             chain_heads: HashMap::new(),
             event_ids: HashSet::new(),
+            ingress_identities: HashMap::new(),
             root_timeline_count: 0,
             hasher: Box::new(pos_crypto::chain::Blake3Hasher),
         }
@@ -63,6 +76,7 @@ impl MemoryStore {
             timelines: HashMap::new(),
             chain_heads: HashMap::new(),
             event_ids: HashSet::new(),
+            ingress_identities: HashMap::new(),
             root_timeline_count: 0,
             hasher,
         }
@@ -348,6 +362,46 @@ impl EventStore for MemoryStore {
         self.chain_heads.insert(timeline, prev_hash);
 
         Ok(committed)
+    }
+
+    fn append_or_duplicate(
+        &mut self,
+        timeline: TimelineId,
+        identity: IngressIdentity,
+        draft: EventDraft,
+    ) -> Result<IngressAppendOutcome, CoreError> {
+        if let Some(record) = self.ingress_identities.get(&identity.dedup_key) {
+            return if record.content_key == identity.content_key {
+                Ok(IngressAppendOutcome::Duplicate {
+                    event_id: record.event_id,
+                })
+            } else {
+                Ok(IngressAppendOutcome::Conflict)
+            };
+        }
+
+        self.append(timeline, std::slice::from_ref(&draft))
+            .map(|mut events| {
+                let event = events
+                    .pop()
+                    .expect("one ingress draft must commit one Event");
+                self.ingress_identities.insert(
+                    identity.dedup_key,
+                    IngressIdentityRecord {
+                        content_key: identity.content_key,
+                        event_id: event.id,
+                        expires_at: identity.expires_at,
+                    },
+                );
+                IngressAppendOutcome::Appended(Box::new(event))
+            })
+    }
+
+    fn purge_expired_ingress_identities(&mut self, now: WallTime) -> Result<usize, CoreError> {
+        let before = self.ingress_identities.len();
+        self.ingress_identities
+            .retain(|_, record| record.expires_at > now);
+        Ok(before.saturating_sub(self.ingress_identities.len()))
     }
 
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {

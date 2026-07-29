@@ -19,15 +19,88 @@
 //! Importing a forked child before its parent fails (`TimelineNotFound`).
 
 use crate::{
-    clock::Seq,
+    clock::{Seq, WallTime},
     crypto::Hash,
     error::CoreError,
     event::{Event, EventDraft},
     hasher::Hasher,
-    ids::TimelineId,
+    ids::{EventId, TimelineId},
     schema::{SchemaVersionMap, UpcasterRegistry},
     timeline::{Timeline, TimelineMeta},
 };
+
+/// Opaque, fixed-size identity for a retried ingress message.
+///
+/// The ingress adapter derives this with a gateway-local keyed hash. The
+/// `EventStore` persists only these digest bytes; it never receives the raw
+/// message or the deduplication preimage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct IngressDedupKey([u8; 32]);
+
+impl IngressDedupKey {
+    #[must_use]
+    pub const fn from_keyed_hash(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub const fn as_bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
+
+/// Opaque, fixed-size digest of the retained canonical ingress content.
+///
+/// This distinguishes a retry from a conflicting re-use of the same
+/// [`IngressDedupKey`] without retaining the canonical content itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct IngressContentKey([u8; 32]);
+
+impl IngressContentKey {
+    #[must_use]
+    pub const fn from_keyed_hash(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub const fn as_bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
+
+/// Bounded-lifetime ingress identity supplied by an authenticated adapter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IngressIdentity {
+    pub dedup_key: IngressDedupKey,
+    pub content_key: IngressContentKey,
+    pub expires_at: WallTime,
+}
+
+impl IngressIdentity {
+    #[must_use]
+    pub const fn new(
+        dedup_key: IngressDedupKey,
+        content_key: IngressContentKey,
+        expires_at: WallTime,
+    ) -> Self {
+        Self {
+            dedup_key,
+            content_key,
+            expires_at,
+        }
+    }
+}
+
+/// Result of atomically admitting one ingress event.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IngressAppendOutcome {
+    /// The Event was durably appended for the first time.
+    Appended(Box<Event>),
+    /// The same identity and canonical content had already been appended.
+    Duplicate { event_id: EventId },
+    /// The identity was already used for different canonical content.
+    Conflict,
+}
 
 /// Range of sequence numbers to read.
 #[derive(Clone, Copy, Debug)]
@@ -145,6 +218,40 @@ pub trait EventStore: Send {
         timeline: TimelineId,
         drafts: &[EventDraft],
     ) -> Result<Vec<Event>, CoreError>;
+
+    /// Atomically append one ingress draft or report its prior admission.
+    ///
+    /// Implementations must persist the ingress identity and Event in the
+    /// same transaction. Call [`Self::purge_expired_ingress_identities`] from
+    /// asynchronous maintenance, never from this admission path.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the backend does not implement
+    /// ingress idempotency, or the same errors as [`Self::append`].
+    fn append_or_duplicate(
+        &mut self,
+        _timeline: TimelineId,
+        _identity: IngressIdentity,
+        _draft: EventDraft,
+    ) -> Result<IngressAppendOutcome, CoreError> {
+        Err(CoreError::Storage(
+            "atomic ingress idempotency is unsupported by this EventStore".to_owned(),
+        ))
+    }
+
+    /// Delete deduplication identities whose retention horizon has passed.
+    ///
+    /// This maintenance operation is intentionally separate from admission so
+    /// normal ingress remains one bounded lookup and one atomic write.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the backend does not implement
+    /// ingress identity cleanup.
+    fn purge_expired_ingress_identities(&mut self, _now: WallTime) -> Result<usize, CoreError> {
+        Err(CoreError::Storage(
+            "ingress identity cleanup is unsupported by this EventStore".to_owned(),
+        ))
+    }
 
     /// Read events from a timeline in a seq range.
     ///
@@ -880,6 +987,30 @@ mod tests {
         fn get_timeline(&self, _id: TimelineId) -> Result<Option<Timeline>, CoreError> {
             Ok(None)
         }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn ingress_defaults_fail_closed() {
+        let mut store = TrivialStore::new();
+        let identity = IngressIdentity::new(
+            IngressDedupKey::from_keyed_hash([1; 32]),
+            IngressContentKey::from_keyed_hash([2; 32]),
+            WallTime::from_micros(3),
+        );
+        let draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new("test.ingress"),
+            CanonicalBytes::from_vec(Vec::new()),
+        );
+        let append_error = store
+            .append_or_duplicate(TimelineId::new(), identity, draft)
+            .unwrap_err();
+        assert!(append_error.to_string().contains("idempotency"));
+        let cleanup_error = store
+            .purge_expired_ingress_identities(WallTime::from_micros(3))
+            .unwrap_err();
+        assert!(cleanup_error.to_string().contains("cleanup"));
     }
 
     #[test]

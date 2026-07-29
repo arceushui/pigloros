@@ -5,14 +5,14 @@
 //! Fork is copy-on-write: only a metadata row is inserted at fork time (O(1)).
 //! Child reads stitch parent events up to `fork_seq` with child events.
 
-use rusqlite::{params, Connection, OpenFlags, Params};
+use rusqlite::{params, Connection, OpenFlags, Params, TransactionBehavior};
 
 use pos_core::{
     clock::{Seq, WallTime},
     event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
     hasher::Hasher,
     ids::{EntityId, EventId, TimelineId},
-    store::{EventReadBounds, EventStore, SeqRange},
+    store::{EventReadBounds, EventStore, IngressAppendOutcome, IngressIdentity, SeqRange},
     timeline::{Timeline, TimelineMeta, TimelineMode},
     CoreError,
 };
@@ -49,6 +49,103 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
+    fn append_fresh_ingress(
+        tx: &rusqlite::Transaction<'_>,
+        hasher: &dyn Hasher,
+        timeline: TimelineId,
+        identity: IngressIdentity,
+        draft: EventDraft,
+    ) -> Result<Box<Event>, CoreError> {
+        let head = tx.query_row(
+            "SELECT head_seq, chain_head FROM timelines WHERE id = ?1",
+            params![timeline.to_string()],
+            |row| {
+                row.get::<_, i64>(0).and_then(|head_seq| {
+                    row.get::<_, Vec<u8>>(1)
+                        .map(|chain_head| (head_seq, chain_head))
+                })
+            },
+        );
+        let (head_seq, chain_head) = match head {
+            Ok(value) => value,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return Err(CoreError::TimelineNotFound(timeline));
+            }
+            Err(error) => return Err(CoreError::Storage(error.to_string())),
+        };
+        let hash_bytes: [u8; 32] = match chain_head.try_into() {
+            Ok(bytes) => bytes,
+            Err(_) => return Err(CoreError::Serialization("bad hash length".to_owned())),
+        };
+        let seq = Seq::from_u64(u64::try_from(head_seq).unwrap_or(0)).next();
+        let event_id = EventId::new();
+        let event_id_text = event_id.to_string();
+        let payload_hash = hasher.hash_payload(&draft.payload);
+        let next_chain_head = hasher.hash_event(
+            &pos_core::Hash::from_bytes(hash_bytes),
+            event_id_text.as_bytes(),
+            &draft.payload,
+        );
+        let wall_time = draft.wall_time.unwrap_or_else(WallTime::now);
+        if let Err(error) = tx.execute(
+            "INSERT INTO events
+             (timeline_id, seq, event_id, entity_id, event_type, payload, wall_time,
+              causation_id, correlation_id, schema_version, payload_hash, signature)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                timeline.to_string(),
+                i64::try_from(seq.as_u64()).unwrap_or(i64::MAX),
+                event_id_text,
+                draft.entity.to_string(),
+                draft.event_type.as_str(),
+                draft.payload.as_slice(),
+                i64::try_from(wall_time.as_micros()).unwrap_or(i64::MAX),
+                draft.causation_id.map(|id| id.to_string()),
+                draft.correlation_id.map(|id| id.to_string()),
+                i64::from(draft.schema_version.as_u32()),
+                payload_hash.as_bytes().as_slice(),
+                Option::<&[u8]>::None,
+            ],
+        ) {
+            return Err(CoreError::Storage(error.to_string()));
+        }
+        if let Err(error) = tx.execute(
+            "UPDATE timelines SET head_seq = ?1, chain_head = ?2 WHERE id = ?3",
+            params![
+                i64::try_from(seq.as_u64()).unwrap_or(i64::MAX),
+                next_chain_head.as_bytes().as_slice(),
+                timeline.to_string(),
+            ],
+        ) {
+            return Err(CoreError::Storage(error.to_string()));
+        }
+        if let Err(error) = tx.execute(
+            "INSERT INTO ingress_identities (dedup_key, content_key, event_id, expires_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                identity.dedup_key.as_bytes().as_slice(),
+                identity.content_key.as_bytes().as_slice(),
+                event_id.to_string(),
+                i64::try_from(identity.expires_at.as_micros()).unwrap_or(i64::MAX),
+            ],
+        ) {
+            return Err(CoreError::Storage(error.to_string()));
+        }
+        Ok(Box::new(Event {
+            id: event_id,
+            entity: draft.entity,
+            event_type: draft.event_type,
+            payload: draft.payload,
+            wall_time,
+            seq,
+            causation_id: draft.causation_id,
+            correlation_id: draft.correlation_id,
+            schema_version: draft.schema_version,
+            signature: None,
+            payload_hash,
+        }))
+    }
+
     /// Open a `SQLite` WAL store at the given path. Use `":memory:"` for in-memory.
     ///
     /// # Errors
@@ -266,6 +363,13 @@ impl SqliteStore {
                 .map_err(|e| CoreError::Storage(e.to_string()))?;
         }
 
+        if version < 4 {
+            self.migrate_ingress_identities_to_v4()?;
+            self.conn
+                .execute("UPDATE schema_version SET version = 4", [])
+                .map_err(|e| CoreError::Storage(e.to_string()))?;
+        }
+
         Ok(())
     }
 
@@ -304,6 +408,23 @@ impl SqliteStore {
             )
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         Ok(())
+    }
+
+    /// Add opaque, bounded-lifetime ingress identities. No raw ingress content
+    /// or deduplication preimage is stored in this table.
+    fn migrate_ingress_identities_to_v4(&self) -> Result<(), CoreError> {
+        self.conn
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS ingress_identities (
+                     dedup_key BLOB PRIMARY KEY CHECK (length(dedup_key) = 32),
+                     content_key BLOB NOT NULL CHECK (length(content_key) = 32),
+                     event_id TEXT NOT NULL,
+                     expires_at INTEGER NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_ingress_identities_expiry
+                 ON ingress_identities(expires_at);",
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))
     }
 
     #[cfg(test)]
@@ -938,6 +1059,63 @@ impl EventStore for SqliteStore {
         Ok(committed)
     }
 
+    fn append_or_duplicate(
+        &mut self,
+        timeline: TimelineId,
+        identity: IngressIdentity,
+        draft: EventDraft,
+    ) -> Result<IngressAppendOutcome, CoreError> {
+        let tx = match self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+        {
+            Ok(tx) => tx,
+            Err(error) => return Err(CoreError::Storage(error.to_string())),
+        };
+
+        let existing = tx.query_row(
+            "SELECT content_key, event_id FROM ingress_identities WHERE dedup_key = ?1",
+            params![identity.dedup_key.as_bytes().as_slice()],
+            |row| {
+                row.get::<_, Vec<u8>>(0).and_then(|content_key| {
+                    row.get::<_, String>(1)
+                        .map(|event_id| (content_key, event_id))
+                })
+            },
+        );
+        match existing {
+            Ok((content_key, event_id)) => {
+                if content_key.as_slice() == identity.content_key.as_bytes().as_slice() {
+                    return match parse_event_id(&event_id) {
+                        Ok(event_id) => Ok(IngressAppendOutcome::Duplicate { event_id }),
+                        Err(error) => Err(error),
+                    };
+                }
+                return Ok(IngressAppendOutcome::Conflict);
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => {}
+            Err(error) => return Err(CoreError::Storage(error.to_string())),
+        }
+
+        Self::append_fresh_ingress(&tx, self.hasher.as_ref(), timeline, identity, draft).and_then(
+            |event| {
+                tx.commit()
+                    .map_err(|error| CoreError::Storage(error.to_string()))
+                    .map(|()| IngressAppendOutcome::Appended(event))
+            },
+        )
+    }
+
+    fn purge_expired_ingress_identities(&mut self, now: WallTime) -> Result<usize, CoreError> {
+        match self.conn.execute(
+            "DELETE FROM ingress_identities WHERE expires_at <= ?1",
+            params![i64::try_from(now.as_micros()).unwrap_or(i64::MAX)],
+        ) {
+            Ok(deleted) => Ok(deleted),
+            Err(error) => Err(CoreError::Storage(error.to_string())),
+        }
+    }
+
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
         let chain = self.fork_chain(timeline)?;
         let mut all: Vec<Event> = Vec::new();
@@ -1507,6 +1685,164 @@ mod tests {
 
     fn new_store() -> SqliteStore {
         SqliteStore::open_in_memory().unwrap()
+    }
+
+    fn ingress_identity(key: u8, content: u8) -> IngressIdentity {
+        IngressIdentity::new(
+            pos_core::IngressDedupKey::from_keyed_hash([key; 32]),
+            pos_core::IngressContentKey::from_keyed_hash([content; 32]),
+            WallTime::from_micros(100),
+        )
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn ingress_append_surfaces_storage_failures_without_partial_events() {
+        let entity = EntityId::new();
+
+        let mut missing = new_store();
+        assert!(missing
+            .append_or_duplicate(
+                TimelineId::new(),
+                ingress_identity(1, 1),
+                make_draft(entity, b"x")
+            )
+            .is_err());
+
+        let mut bad_hash = new_store();
+        let timeline = bad_hash.create_timeline("bad-hash").unwrap();
+        bad_hash
+            .conn
+            .execute("UPDATE timelines SET chain_head = x'00'", [])
+            .unwrap();
+        assert!(bad_hash
+            .append_or_duplicate(
+                timeline.id(),
+                ingress_identity(2, 2),
+                make_draft(entity, b"x")
+            )
+            .is_err());
+
+        let mut events = new_store();
+        let timeline = events.create_timeline("events").unwrap();
+        events.conn.execute("DROP TABLE events", []).unwrap();
+        assert!(events
+            .append_or_duplicate(
+                timeline.id(),
+                ingress_identity(3, 3),
+                make_draft(entity, b"x")
+            )
+            .is_err());
+
+        let mut update = new_store();
+        let timeline = update.create_timeline("update").unwrap();
+        update.conn.execute_batch("CREATE TRIGGER deny_head BEFORE UPDATE ON timelines BEGIN SELECT RAISE(ABORT, 'deny'); END;").unwrap();
+        assert!(update
+            .append_or_duplicate(
+                timeline.id(),
+                ingress_identity(4, 4),
+                make_draft(entity, b"x")
+            )
+            .is_err());
+
+        let mut identity = new_store();
+        let timeline = identity.create_timeline("identity").unwrap();
+        identity.conn.execute_batch("CREATE TRIGGER deny_identity BEFORE INSERT ON ingress_identities BEGIN SELECT RAISE(ABORT, 'deny'); END;").unwrap();
+        assert!(identity
+            .append_or_duplicate(
+                timeline.id(),
+                ingress_identity(5, 5),
+                make_draft(entity, b"x")
+            )
+            .is_err());
+        assert!(identity
+            .read(timeline.id(), SeqRange::all())
+            .unwrap()
+            .is_empty());
+
+        let mut commit = new_store();
+        let timeline = commit.create_timeline("commit").unwrap();
+        commit.conn.commit_hook(Some(|| true));
+        assert!(commit
+            .append_or_duplicate(
+                timeline.id(),
+                ingress_identity(6, 6),
+                make_draft(entity, b"x")
+            )
+            .is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn ingress_append_rejects_corrupt_identity_rows_and_identity_table_errors() {
+        let entity = EntityId::new();
+        let mut corrupt = new_store();
+        let timeline = corrupt.create_timeline("corrupt").unwrap();
+        corrupt.conn.execute(
+            "INSERT INTO ingress_identities (dedup_key, content_key, event_id, expires_at) VALUES (?1, ?2, 'bad', 100)",
+            params![[7_u8; 32].as_slice(), [7_u8; 32].as_slice()],
+        ).unwrap();
+        assert!(corrupt
+            .append_or_duplicate(
+                timeline.id(),
+                ingress_identity(7, 7),
+                make_draft(entity, b"x")
+            )
+            .is_err());
+
+        let mut missing = new_store();
+        let timeline = missing.create_timeline("missing-table").unwrap();
+        missing
+            .conn
+            .execute("DROP TABLE ingress_identities", [])
+            .unwrap();
+        assert!(missing
+            .append_or_duplicate(
+                timeline.id(),
+                ingress_identity(8, 8),
+                make_draft(entity, b"x")
+            )
+            .is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn ingress_admission_and_cleanup_surface_transaction_and_query_failures() {
+        let entity = EntityId::new();
+
+        let mut transaction = new_store();
+        let timeline = transaction.create_timeline("transaction").unwrap();
+        transaction.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert!(transaction
+            .append_or_duplicate(
+                timeline.id(),
+                ingress_identity(9, 9),
+                make_draft(entity, b"x")
+            )
+            .is_err());
+        transaction.conn.execute_batch("ROLLBACK").unwrap();
+
+        let mut timeline_query = new_store();
+        timeline_query
+            .conn
+            .execute("DROP TABLE timelines", [])
+            .unwrap();
+        assert!(timeline_query
+            .append_or_duplicate(
+                TimelineId::new(),
+                ingress_identity(10, 10),
+                make_draft(entity, b"x")
+            )
+            .is_err());
+
+        let mut cleanup = new_store();
+        cleanup
+            .conn
+            .execute("DROP TABLE ingress_identities", [])
+            .unwrap();
+        assert!(cleanup
+            .purge_expired_ingress_identities(WallTime::from_micros(100))
+            .is_err());
     }
 
     #[test]
@@ -2439,11 +2775,11 @@ mod tests {
         let path = tmp.path().to_str().unwrap().to_owned();
         {
             let _store = SqliteStore::open(&path).unwrap();
-            // First open: migrates through schema version 3.
+            // First open: migrates through schema version 4.
         }
         {
             let store = SqliteStore::open(&path).unwrap();
-            // Second open: version already = 3, INSERT is skipped.
+            // Second open: version already = 4, INSERT is skipped.
             let count: i64 = store
                 .conn
                 .query_row("SELECT COUNT(*) FROM schema_version", [], |row| row.get(0))
@@ -2457,7 +2793,7 @@ mod tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert_eq!(version, 3);
+            assert_eq!(version, 4);
         }
     }
 
@@ -4405,7 +4741,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         // signature column must exist after migration
         store
             .conn
@@ -4624,7 +4960,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         store
             .conn
             .prepare("SELECT signature FROM events LIMIT 0")
@@ -4654,7 +4990,7 @@ mod tests {
             .conn
             .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
     }
 
     #[test]
@@ -4676,7 +5012,7 @@ mod tests {
             .conn
             .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         store
             .conn
             .prepare(
@@ -4718,6 +5054,49 @@ mod tests {
         store
             .conn
             .execute("INSERT INTO schema_version (version) VALUES (2)", [])
+            .unwrap();
+
+        assert_storage_err(store.test_run_migrations());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn migrate_v4_fails_when_identity_table_cannot_be_created() {
+        let store = new_store();
+        store
+            .conn
+            .execute("UPDATE schema_version SET version = 3", [])
+            .unwrap();
+        store
+            .conn
+            .execute("DROP TABLE ingress_identities", [])
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "CREATE VIEW ingress_identities AS SELECT 1 AS dedup_key",
+                [],
+            )
+            .unwrap();
+
+        assert_storage_err(store.test_run_migrations());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn migrate_v4_fails_when_version_update_aborts() {
+        let store = new_store();
+        store.conn.execute("DROP TABLE schema_version", []).unwrap();
+        store
+            .conn
+            .execute(
+                "CREATE TABLE schema_version (version INTEGER NOT NULL CHECK (version < 4))",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute("INSERT INTO schema_version (version) VALUES (3)", [])
             .unwrap();
 
         assert_storage_err(store.test_run_migrations());
