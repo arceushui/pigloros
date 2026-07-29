@@ -305,16 +305,16 @@ impl GatewayEventPage {
         let object = value
             .as_object()
             .ok_or_else(|| "gateway response must be a JSON object".to_owned())?;
-        let events = object
-            .get("events")
-            .map(|events| serde_json::from_value(events.clone()).map_err(|e| e.to_string()))
-            .transpose()?
-            .unwrap_or_default();
-        let next_from_seq = object
-            .get("next_from_seq")
-            .filter(|cursor| !cursor.is_null())
-            .map(|cursor| serde_json::from_value(cursor.clone()).map_err(|e| e.to_string()))
-            .transpose()?;
+        let events = match object.get("events") {
+            Some(events) => serde_json::from_value(events.clone()).map_err(|e| e.to_string())?,
+            None => Vec::new(),
+        };
+        let next_from_seq = match object.get("next_from_seq") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(cursor) => {
+                Some(serde_json::from_value(cursor.clone()).map_err(|e| e.to_string())?)
+            }
+        };
         Ok(Self {
             events,
             next_from_seq,
