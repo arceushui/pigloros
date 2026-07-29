@@ -23,7 +23,7 @@ use gateway_context::{apply_society_context, fetch_timeline_context, plain_langu
 use pos_core::ids::EntityId;
 use pos_experiment::{BacktestConfig, BacktestRunner};
 use pos_plugin_eval::{EvalPlugin, EvalReducer};
-use pos_plugin_geo::{GeoPlugin, GeoReducer, SpatialCloaker};
+use pos_plugin_geo::{GeoPlugin, GeoReducer, SpatialCloaker, Wgs84Point};
 use pos_plugin_persona::{
     PersonaEvalDriver, PersonaModel, PersonaPlugin, PersonaReducer, PreferencePair,
 };
@@ -423,7 +423,7 @@ fn explain_calibration(brier: f64, lift: f64, n_resolved: u64, n_predictions: u6
 }
 
 fn print_privacy(scenario: &Scenario) {
-    let cloaker = SpatialCloaker::new(0.1);
+    let cloaker = SpatialCloaker::new(0.1).expect("static privacy grid resolution is valid");
     let mut any = false;
     for opt in [&scenario.option_a, &scenario.option_b] {
         if let Some((lat, lng)) = opt.coords {
@@ -433,7 +433,9 @@ fn print_privacy(scenario: &Scenario) {
                 );
                 any = true;
             }
-            let (clat, clng) = cloaker.cloak(lat, lng);
+            let point =
+                Wgs84Point::new(lat, lng).expect("scenario coordinates must be valid WGS84 points");
+            let (clat, clng) = cloaker.cloak(point);
             println!("  {} ≈ ({clat:.1}, {clng:.1})", opt.label);
         }
     }

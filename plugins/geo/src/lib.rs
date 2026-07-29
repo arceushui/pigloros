@@ -20,6 +20,66 @@ use pos_core::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Errors returned when a spatial-cloaking input is not a valid WGS84 value.
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+pub enum GeoError {
+    /// The degree-grid cell size is zero, negative, or non-finite.
+    #[error("spatial-cloaking resolution must be finite and greater than zero")]
+    InvalidResolution,
+    /// A coordinate is not a finite floating-point number.
+    #[error("WGS84 coordinate must be finite")]
+    NonFiniteCoordinate,
+    /// A latitude is outside the WGS84 range `[-90, 90]`.
+    #[error("WGS84 latitude must be in [-90, 90]")]
+    LatitudeOutOfRange,
+    /// A longitude is outside the WGS84 range `[-180, 180]`.
+    #[error("WGS84 longitude must be in [-180, 180]")]
+    LongitudeOutOfRange,
+}
+
+/// A validated WGS84 latitude/longitude pair in degrees.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Wgs84Point {
+    latitude: f64,
+    longitude: f64,
+}
+
+impl Wgs84Point {
+    /// Construct a WGS84 point after validating finite latitude and longitude bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GeoError`] when either coordinate is non-finite or outside its
+    /// WGS84 latitude/longitude range.
+    pub fn new(latitude: f64, longitude: f64) -> Result<Self, GeoError> {
+        if !latitude.is_finite() || !longitude.is_finite() {
+            return Err(GeoError::NonFiniteCoordinate);
+        }
+        if !(-90.0..=90.0).contains(&latitude) {
+            return Err(GeoError::LatitudeOutOfRange);
+        }
+        if !(-180.0..=180.0).contains(&longitude) {
+            return Err(GeoError::LongitudeOutOfRange);
+        }
+        Ok(Self {
+            latitude,
+            longitude,
+        })
+    }
+
+    /// Return the latitude in decimal degrees.
+    #[must_use]
+    pub fn latitude(self) -> f64 {
+        self.latitude
+    }
+
+    /// Return the longitude in decimal degrees.
+    #[must_use]
+    pub fn longitude(self) -> f64 {
+        self.longitude
+    }
+}
+
 /// The entity kind string for geo entities.
 pub const ENTITY_KIND: &str = "geo-entity";
 
@@ -54,9 +114,16 @@ pub struct SpatialCloaker {
 
 impl SpatialCloaker {
     /// Create a new spatial cloaker with the given resolution.
-    #[must_use]
-    pub fn new(resolution: f64) -> Self {
-        Self { resolution }
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GeoError::InvalidResolution`] when the degree-grid resolution
+    /// is zero, negative, or non-finite.
+    pub fn new(resolution: f64) -> Result<Self, GeoError> {
+        if !resolution.is_finite() || resolution <= 0.0 {
+            return Err(GeoError::InvalidResolution);
+        }
+        Ok(Self { resolution })
     }
 
     /// Cloak exact coordinates to the nearest grid point.
@@ -64,9 +131,9 @@ impl SpatialCloaker {
     /// Snaps to `(lat / resolution).round() * resolution`.
     /// This ensures that all points within `resolution/2` map to the same cell.
     #[must_use]
-    pub fn cloak(&self, lat: f64, lng: f64) -> (f64, f64) {
-        let cell_lat = (lat / self.resolution).round() * self.resolution;
-        let cell_lng = (lng / self.resolution).round() * self.resolution;
+    pub fn cloak(&self, point: Wgs84Point) -> (f64, f64) {
+        let cell_lat = (point.latitude / self.resolution).round() * self.resolution;
+        let cell_lng = (point.longitude / self.resolution).round() * self.resolution;
         (cell_lat, cell_lng)
     }
 
@@ -76,8 +143,8 @@ impl SpatialCloaker {
     ///
     /// Never panics in practice — CBOR serialization to `Vec<u8>` is infallible.
     #[must_use]
-    pub fn to_draft(&self, entity: EntityId, lat: f64, lng: f64) -> pos_core::EventDraft {
-        let (cell_lat, cell_lng) = self.cloak(lat, lng);
+    pub fn to_draft(&self, entity: EntityId, point: Wgs84Point) -> pos_core::EventDraft {
+        let (cell_lat, cell_lng) = self.cloak(point);
         let payload = GeoLocationPayload {
             cell_lat,
             cell_lng,
@@ -199,6 +266,10 @@ mod tests {
         ids::{EntityId, EventId},
     };
 
+    fn point(lat: f64, lng: f64) -> Wgs84Point {
+        Wgs84Point::new(lat, lng).unwrap()
+    }
+
     fn make_geo_event(entity: EntityId, cell_lat: f64, cell_lng: f64, resolution: f64) -> Event {
         let payload = GeoLocationPayload {
             cell_lat,
@@ -280,20 +351,20 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn spatial_cloaker_snaps_to_grid() {
         const TOLERANCE: f64 = 1e-10;
-        let cloaker = SpatialCloaker::new(0.1);
+        let cloaker = SpatialCloaker::new(0.1).unwrap();
 
         // Test exact grid point
-        let (lat, lng) = cloaker.cloak(37.0, -122.0);
+        let (lat, lng) = cloaker.cloak(point(37.0, -122.0));
         assert!((lat - 37.0).abs() < TOLERANCE);
         assert!((lng - (-122.0)).abs() < TOLERANCE);
 
         // Test rounding down
-        let (lat, lng) = cloaker.cloak(37.03, -122.02);
+        let (lat, lng) = cloaker.cloak(point(37.03, -122.02));
         assert!((lat - 37.0).abs() < TOLERANCE);
         assert!((lng - (-122.0)).abs() < TOLERANCE);
 
         // Test rounding up
-        let (lat, lng) = cloaker.cloak(37.07, -122.08);
+        let (lat, lng) = cloaker.cloak(point(37.07, -122.08));
         assert!((lat - 37.1).abs() < TOLERANCE);
         assert!((lng - (-122.1)).abs() < TOLERANCE);
     }
@@ -301,25 +372,61 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn spatial_cloaker_resolution_half_degree() {
-        let cloaker = SpatialCloaker::new(0.5);
+        let cloaker = SpatialCloaker::new(0.5).unwrap();
 
-        let (lat, lng) = cloaker.cloak(37.2, -122.3);
+        let (lat, lng) = cloaker.cloak(point(37.2, -122.3));
         assert!((lat - 37.0).abs() < f64::EPSILON);
         assert!((lng - (-122.5)).abs() < f64::EPSILON);
 
-        let (lat, lng) = cloaker.cloak(37.3, -122.6);
+        let (lat, lng) = cloaker.cloak(point(37.3, -122.6));
         assert!((lat - 37.5).abs() < f64::EPSILON);
         assert!((lng - (-122.5)).abs() < f64::EPSILON);
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn spatial_cloaker_rejects_invalid_resolutions() {
+        for resolution in [0.0, -0.1, f64::INFINITY, f64::NAN] {
+            assert_eq!(
+                SpatialCloaker::new(resolution).unwrap_err(),
+                GeoError::InvalidResolution
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn wgs84_point_accepts_boundary_coordinates() {
+        let point = Wgs84Point::new(-90.0, 180.0).unwrap();
+        assert!((point.latitude() - (-90.0)).abs() < f64::EPSILON);
+        assert!((point.longitude() - 180.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn wgs84_point_rejects_invalid_coordinates() {
+        assert_eq!(
+            Wgs84Point::new(f64::NAN, 0.0),
+            Err(GeoError::NonFiniteCoordinate)
+        );
+        assert_eq!(
+            Wgs84Point::new(90.1, 0.0),
+            Err(GeoError::LatitudeOutOfRange)
+        );
+        assert_eq!(
+            Wgs84Point::new(0.0, -180.1),
+            Err(GeoError::LongitudeOutOfRange)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn spatial_cloaker_privacy_property() {
-        let cloaker = SpatialCloaker::new(0.1);
+        let cloaker = SpatialCloaker::new(0.1).unwrap();
 
         // Two points within resolution/2 should map to same cell
-        let (lat1, lng1) = cloaker.cloak(37.0, -122.0);
-        let (lat2, lng2) = cloaker.cloak(37.04, -122.03);
+        let (lat1, lng1) = cloaker.cloak(point(37.0, -122.0));
+        let (lat2, lng2) = cloaker.cloak(point(37.04, -122.03));
 
         assert!((lat1 - lat2).abs() < f64::EPSILON);
         assert!((lng1 - lng2).abs() < f64::EPSILON);
@@ -328,9 +435,9 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn spatial_cloaker_to_draft_produces_correct_event_type() {
-        let cloaker = SpatialCloaker::new(0.1);
+        let cloaker = SpatialCloaker::new(0.1).unwrap();
         let entity = EntityId::new();
-        let draft = cloaker.to_draft(entity, 37.0, -122.0);
+        let draft = cloaker.to_draft(entity, point(37.0, -122.0));
 
         assert_eq!(draft.event_type.as_str(), EVENT_TYPE_LOCATION);
         assert_eq!(draft.entity, entity);
@@ -339,9 +446,9 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn spatial_cloaker_to_draft_has_decodable_payload() {
-        let cloaker = SpatialCloaker::new(0.1);
+        let cloaker = SpatialCloaker::new(0.1).unwrap();
         let entity = EntityId::new();
-        let draft = cloaker.to_draft(entity, 37.07, -122.03);
+        let draft = cloaker.to_draft(entity, point(37.07, -122.03));
 
         let payload: GeoLocationPayload = ciborium::from_reader(draft.payload.as_slice()).unwrap();
 
@@ -534,9 +641,9 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn spatial_cloaker_negative_coordinates() {
-        let cloaker = SpatialCloaker::new(0.1);
+        let cloaker = SpatialCloaker::new(0.1).unwrap();
 
-        let (lat, lng) = cloaker.cloak(-37.07, 122.03);
+        let (lat, lng) = cloaker.cloak(point(-37.07, 122.03));
         assert!((lat - (-37.1)).abs() < f64::EPSILON);
         assert!((lng - 122.0).abs() < f64::EPSILON);
     }
@@ -544,9 +651,9 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn spatial_cloaker_zero_coordinates() {
-        let cloaker = SpatialCloaker::new(0.1);
+        let cloaker = SpatialCloaker::new(0.1).unwrap();
 
-        let (lat, lng) = cloaker.cloak(0.0, 0.0);
+        let (lat, lng) = cloaker.cloak(point(0.0, 0.0));
         assert!((lat - 0.0).abs() < f64::EPSILON);
         assert!((lng - 0.0).abs() < f64::EPSILON);
     }
@@ -554,11 +661,11 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn spatial_cloaker_clone() {
-        let cloaker1 = SpatialCloaker::new(0.1);
+        let cloaker1 = SpatialCloaker::new(0.1).unwrap();
         let cloaker2 = cloaker1;
 
-        let (lat1, lng1) = cloaker1.cloak(37.0, -122.0);
-        let (lat2, lng2) = cloaker2.cloak(37.0, -122.0);
+        let (lat1, lng1) = cloaker1.cloak(point(37.0, -122.0));
+        let (lat2, lng2) = cloaker2.cloak(point(37.0, -122.0));
 
         assert!((lat1 - lat2).abs() < f64::EPSILON);
         assert!((lng1 - lng2).abs() < f64::EPSILON);
@@ -616,9 +723,9 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn spatial_cloaker_extreme_coordinates() {
-        let cloaker = SpatialCloaker::new(0.1);
+        let cloaker = SpatialCloaker::new(0.1).unwrap();
 
-        let (lat, lng) = cloaker.cloak(89.99, -179.99);
+        let (lat, lng) = cloaker.cloak(point(89.99, -179.99));
         assert!((lat - 90.0).abs() < f64::EPSILON);
         assert!((lng - (-180.0)).abs() < f64::EPSILON);
     }
