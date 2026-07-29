@@ -48,36 +48,32 @@ impl ProjectionKey {
 /// Missing projection state is represented by `None`, allowing a driver to
 /// distinguish a subscribed-but-unseen entity from an undeclared dependency.
 pub struct ObservationView<'a> {
-    states: Vec<(ProjectionKey, Option<&'a State>)>,
+    states: std::collections::HashMap<ProjectionKey, Option<&'a State>>,
 }
 
 impl<'a> ObservationView<'a> {
     #[must_use]
     pub fn empty() -> Self {
-        Self { states: Vec::new() }
+        Self {
+            states: std::collections::HashMap::new(),
+        }
     }
 
     #[must_use]
     pub(crate) fn from_subscriptions(
-        subscriptions: Vec<ProjectionKey>,
+        subscriptions: &[ProjectionKey],
         state_for: impl Fn(&ProjectionKey) -> Option<&'a State>,
     ) -> Self {
-        let states = subscriptions
-            .into_iter()
-            .map(|key| {
-                let state = state_for(&key);
-                (key, state)
-            })
-            .collect();
+        let mut states = std::collections::HashMap::with_capacity(subscriptions.len());
+        for key in subscriptions {
+            states.insert(key.clone(), state_for(key));
+        }
         Self { states }
     }
 
     #[must_use]
     pub fn state_for(&self, key: &ProjectionKey) -> Option<&'a State> {
-        self.states
-            .iter()
-            .find(|(candidate, _)| candidate == key)
-            .and_then(|(_, state)| *state)
+        self.states.get(key).copied().flatten()
     }
 
     #[must_use]
@@ -134,8 +130,8 @@ pub trait Driver: Send + Sync {
     }
 
     /// Projection states this driver observes (default empty).
-    fn subscriptions(&self) -> Vec<ProjectionKey> {
-        Vec::new()
+    fn subscriptions(&self) -> &[ProjectionKey] {
+        &[]
     }
 }
 
@@ -274,7 +270,8 @@ mod tests {
         let absent = ProjectionKey::new(EntityId::new());
         let mut state = State::new();
         state.set("ticks", serde_json::json!(3));
-        let view = ObservationView::from_subscriptions(vec![seen.clone(), absent.clone()], |key| {
+        let subscriptions = [seen.clone(), absent.clone()];
+        let view = ObservationView::from_subscriptions(&subscriptions, |key| {
             (key == &seen).then_some(&state)
         });
         assert_eq!(view.len(), 2);

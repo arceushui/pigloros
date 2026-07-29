@@ -509,7 +509,8 @@ mod tests {
         use pos_store::{open_store, StoreConfig};
 
         struct ObservingDriver {
-            key: ProjectionKey,
+            keys: Vec<ProjectionKey>,
+            target: ProjectionKey,
             entity: EntityId,
         }
 
@@ -518,8 +519,8 @@ mod tests {
                 "observing"
             }
 
-            fn subscriptions(&self) -> Vec<ProjectionKey> {
-                vec![self.key.clone()]
+            fn subscriptions(&self) -> &[ProjectionKey] {
+                self.keys.as_slice()
             }
 
             fn step(
@@ -529,7 +530,7 @@ mod tests {
                 observations: ObservationView<'_>,
             ) -> Result<crate::driver::StepOutput, RuntimeError> {
                 let observed = observations
-                    .state_for(&self.key)
+                    .state_for(&self.target)
                     .and_then(|state| state.get("n"))
                     .and_then(serde_json::Value::as_u64);
                 let drafts = (observed == Some(1))
@@ -567,7 +568,8 @@ mod tests {
         reg.projections.register("counter", Box::new(CountReducer));
         reg.projections.apply_event(&event);
         reg.register_driver(Box::new(ObservingDriver {
-            key: ProjectionKey::new(observed_entity),
+            keys: vec![ProjectionKey::new(observed_entity)],
+            target: ProjectionKey::new(observed_entity),
             entity: EntityId::new(),
         }));
 
