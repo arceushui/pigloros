@@ -48,18 +48,12 @@ impl ProjectionKey {
 /// The scheduler creates one snapshot before it steps any driver. Its views own
 /// cloned state, so every driver observes the same committed projection state
 /// even if later tick work changes the live registry.
+#[derive(Default)]
 pub(crate) struct ObservationSnapshot {
     states: std::collections::HashMap<ProjectionKey, State>,
 }
 
 impl ObservationSnapshot {
-    #[must_use]
-    pub fn empty() -> Self {
-        Self {
-            states: std::collections::HashMap::new(),
-        }
-    }
-
     #[must_use]
     pub(crate) fn from_subscriptions<'a>(
         subscriptions: impl IntoIterator<Item = &'a ProjectionKey>,
@@ -284,7 +278,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn empty_snapshot_views_are_empty() {
-        let snapshot = ObservationSnapshot::empty();
+        let snapshot = ObservationSnapshot::default();
         assert!(snapshot.view_for(&[]).is_empty());
     }
 
