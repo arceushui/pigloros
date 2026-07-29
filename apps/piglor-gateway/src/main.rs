@@ -130,7 +130,7 @@ async fn serve(
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await
-        .map_err(|e| e.to_string())?;
+        .expect("gateway HTTP accept loop failed");
     Ok(())
 }
 
