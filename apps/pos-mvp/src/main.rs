@@ -29,6 +29,7 @@ use pos_plugin_persona::{
 };
 use pos_runtime::PluginRegistry;
 use pos_store::StoreConfig;
+use std::sync::LazyLock;
 
 /// One choice in a binary decision preview.
 struct OptionSpec {
@@ -39,7 +40,7 @@ struct OptionSpec {
     /// Short hint for why this option tends to win.
     lean: &'static str,
     /// Optional real-world coordinates (privacy-cloaked when present).
-    coords: Option<(f64, f64)>,
+    coordinates: Option<Wgs84Point>,
 }
 
 /// A domain-agnostic binary decision the MVP can preview.
@@ -55,20 +56,26 @@ struct Scenario {
     eval_pairs: &'static [(&'static str, &'static str, bool)],
 }
 
-const SCENARIO_PLACES: Scenario = Scenario {
+static SCENARIO_PLACES: LazyLock<Scenario> = LazyLock::new(|| Scenario {
     id: "places",
     blurb: "Where to spend a weekend — any two tagged options work the same way.",
     option_a: OptionSpec {
         label: "Kyoto",
         tags: "kyoto nature quiet temples",
         lean: "nature / quiet",
-        coords: Some((35.0116, 135.7681)),
+        coordinates: Some(
+            Wgs84Point::new(35.0116, 135.7681)
+                .expect("Kyoto scenario coordinates must be valid WGS84 points"),
+        ),
     },
     option_b: OptionSpec {
         label: "Osaka",
         tags: "osaka city food nightlife",
         lean: "city / food",
-        coords: Some((34.6937, 135.5023)),
+        coordinates: Some(
+            Wgs84Point::new(34.6937, 135.5023)
+                .expect("Osaka scenario coordinates must be valid WGS84 points"),
+        ),
     },
     default_prefs: &[
         ("nature", 0.8),
@@ -87,22 +94,22 @@ const SCENARIO_PLACES: Scenario = Scenario {
         ("kyoto quiet nature", "osaka food city", true),
         ("osaka food nightlife", "kyoto quiet temples", false),
     ],
-};
+});
 
-const SCENARIO_WORK: Scenario = Scenario {
+static SCENARIO_WORK: LazyLock<Scenario> = LazyLock::new(|| Scenario {
     id: "work",
     blurb: "How to structure next quarter — same preview loop, different domain.",
     option_a: OptionSpec {
         label: "Remote-first",
         tags: "remote autonomy focus deep-work",
         lean: "autonomy / focus",
-        coords: None,
+        coordinates: None,
     },
     option_b: OptionSpec {
         label: "Office-first",
         tags: "office collaboration energy hallway",
         lean: "collaboration / energy",
-        coords: None,
+        coordinates: None,
     },
     default_prefs: &[
         ("autonomy", 0.8),
@@ -133,12 +140,14 @@ const SCENARIO_WORK: Scenario = Scenario {
             false,
         ),
     ],
-};
+});
 
-const SCENARIOS: &[&Scenario] = &[&SCENARIO_PLACES, &SCENARIO_WORK];
+fn scenarios() -> [&'static Scenario; 2] {
+    [&SCENARIO_PLACES, &SCENARIO_WORK]
+}
 
 fn scenario_by_id(id: &str) -> Option<&'static Scenario> {
-    SCENARIOS.iter().copied().find(|s| s.id == id)
+    scenarios().into_iter().find(|scenario| scenario.id == id)
 }
 
 fn default_scenario() -> &'static Scenario {
@@ -178,7 +187,7 @@ fn parse_cli(args: &[String]) -> Result<CliAction, String> {
                 if let Some(s) = scenario_by_id(id) {
                     scenario = s;
                 } else {
-                    let known = SCENARIOS
+                    let known = scenarios()
                         .iter()
                         .map(|s| s.id)
                         .collect::<Vec<_>>()
@@ -297,7 +306,7 @@ fn print_help() {
     println!();
     println!("Options:");
     println!("  --scenario <id>      Example decision domain (default: places)");
-    for s in SCENARIOS {
+    for s in scenarios() {
         println!("                        {} — {}", s.id, s.blurb);
     }
     println!("  --prefer key=value   Override a preference score in [-1, 1]");
@@ -426,17 +435,18 @@ fn print_privacy(scenario: &Scenario) {
     let cloaker = SpatialCloaker::new(0.1).expect("static privacy grid resolution is valid");
     let mut any = false;
     for opt in [&scenario.option_a, &scenario.option_b] {
-        if let Some((lat, lng)) = opt.coords {
+        if let Some(point) = opt.coordinates {
             if !any {
                 println!(
                     "Privacy: location-bearing options are shown as coarse grid cells (exact pins stay private)"
                 );
                 any = true;
             }
-            let point =
-                Wgs84Point::new(lat, lng).expect("scenario coordinates must be valid WGS84 points");
-            let (clat, clng) = cloaker.cloak(point);
-            println!("  {} ≈ ({clat:.1}, {clng:.1})", opt.label);
+            let (cloaked_latitude, cloaked_longitude) = cloaker.cloak(point);
+            println!(
+                "  {} ≈ ({cloaked_latitude:.1}, {cloaked_longitude:.1})",
+                opt.label
+            );
         }
     }
     if any {

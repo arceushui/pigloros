@@ -109,7 +109,7 @@ pub struct GeoLocationPayload {
 #[derive(Debug, Clone, Copy)]
 pub struct SpatialCloaker {
     /// Grid resolution in degrees (e.g., 0.1).
-    pub resolution: f64,
+    resolution: f64,
 }
 
 impl SpatialCloaker {
@@ -124,6 +124,12 @@ impl SpatialCloaker {
             return Err(GeoError::InvalidResolution);
         }
         Ok(Self { resolution })
+    }
+
+    /// Return the validated degree-grid resolution.
+    #[must_use]
+    pub fn resolution(self) -> f64 {
+        self.resolution
     }
 
     /// Cloak exact coordinates to the nearest grid point.
@@ -373,6 +379,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn spatial_cloaker_resolution_half_degree() {
         let cloaker = SpatialCloaker::new(0.5).unwrap();
+
+        assert!((cloaker.resolution() - 0.5).abs() < f64::EPSILON);
 
         let (lat, lng) = cloaker.cloak(point(37.2, -122.3));
         assert!((lat - 37.0).abs() < f64::EPSILON);
