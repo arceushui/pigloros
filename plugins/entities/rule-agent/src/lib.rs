@@ -17,7 +17,7 @@ use pos_core::{
     state::{Reducer, State},
     store::EventStore,
 };
-use pos_runtime::{Driver, RuntimeError, StepOutput};
+use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 use serde::{Deserialize, Serialize};
 
 /// The entity kind string for rule agents.
@@ -136,6 +136,7 @@ impl Driver for RuleAgentDriver {
         &mut self,
         _store: &dyn EventStore,
         _timeline: TimelineId,
+        _observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
         let action = self.actions[self.tick as usize % self.actions.len()].clone();
         let payload = DecisionPayload {
@@ -250,7 +251,9 @@ mod tests {
 
         let expected = ["idle", "move", "interact", "observe"];
         for expected_action in &expected {
-            let out = driver.step(store.as_ref(), tl.id()).unwrap();
+            let out = driver
+                .step(store.as_ref(), tl.id(), ObservationView::empty())
+                .unwrap();
             assert_eq!(out.drafts.len(), 1);
             assert_eq!(out.drafts[0].event_type.as_str(), EVENT_TYPE_DECISION);
 
@@ -317,7 +320,9 @@ mod tests {
         let plugin = RuleAgentPlugin::new();
         let mut driver = RuleAgentDriver::new(entity, plugin.actions().to_vec());
 
-        let out = driver.step(store.as_ref(), tl.id()).unwrap();
+        let out = driver
+            .step(store.as_ref(), tl.id(), ObservationView::empty())
+            .unwrap();
         assert_eq!(out.drafts.len(), 1);
 
         let payload: DecisionPayload =

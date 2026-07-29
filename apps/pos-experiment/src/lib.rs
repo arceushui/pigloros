@@ -471,7 +471,7 @@ mod tests {
         ids::{EntityId, PluginId},
         Capability, Event, Plugin, Reducer, State,
     };
-    use pos_runtime::{Driver, RuntimeError, StepOutput};
+    use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
     use pos_store::StoreConfig;
 
     // ── Inline test helpers ───────────────────────────────────────────────
@@ -547,6 +547,7 @@ mod tests {
             &mut self,
             _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
+            _: ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
             if let Some(remaining) = self.ticks_remaining.as_mut() {
                 if *remaining == 0 {
@@ -634,6 +635,7 @@ mod tests {
                 &mut self,
                 _: &dyn pos_core::store::EventStore,
                 _: pos_core::ids::TimelineId,
+                _: ObservationView<'_>,
             ) -> Result<StepOutput, RuntimeError> {
                 Ok(StepOutput::empty())
             }
@@ -669,6 +671,7 @@ mod tests {
                 &mut self,
                 _: &dyn pos_core::store::EventStore,
                 _: pos_core::ids::TimelineId,
+                _: ObservationView<'_>,
             ) -> Result<StepOutput, RuntimeError> {
                 let draft = EventDraft::new(
                     self.entity,
@@ -791,6 +794,7 @@ mod tests {
                 &mut self,
                 _: &dyn pos_core::store::EventStore,
                 _: pos_core::ids::TimelineId,
+                _: ObservationView<'_>,
             ) -> Result<StepOutput, RuntimeError> {
                 Ok(StepOutput::empty())
             }
@@ -800,7 +804,9 @@ mod tests {
         let mut d = IdleDriver2;
         assert_eq!(d.name(), "idle2");
         // Also call step to cover those lines
-        let out = d.step(store.as_ref(), tl.id()).unwrap();
+        let out = d
+            .step(store.as_ref(), tl.id(), ObservationView::empty())
+            .unwrap();
         assert!(out.drafts.is_empty());
     }
 
@@ -818,6 +824,7 @@ mod tests {
                 &mut self,
                 _: &dyn pos_core::store::EventStore,
                 _: pos_core::ids::TimelineId,
+                _: ObservationView<'_>,
             ) -> Result<StepOutput, RuntimeError> {
                 let draft = EventDraft::new(
                     self.entity,
@@ -833,7 +840,9 @@ mod tests {
         let mut d = BadDriver2 { entity };
         assert_eq!(d.name(), "bad2");
         // Also call step to cover those lines
-        let out = d.step(store.as_ref(), tl.id()).unwrap();
+        let out = d
+            .step(store.as_ref(), tl.id(), ObservationView::empty())
+            .unwrap();
         assert_eq!(out.drafts.len(), 1);
     }
 
@@ -1213,6 +1222,7 @@ mod backtest_tests {
             &mut self,
             _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
+            _: pos_runtime::ObservationView<'_>,
         ) -> Result<pos_runtime::StepOutput, pos_runtime::RuntimeError> {
             let draft = pos_core::event::EventDraft::new(
                 self.entity,
@@ -1234,7 +1244,7 @@ mod backtest_tests {
         assert_eq!(driver.name(), "bt-driver"); // force coverage of fn name()
         let store = open_store(StoreConfig::Memory).unwrap();
         let tl_id = pos_core::ids::TimelineId::new();
-        let _ = driver.step(store.as_ref(), tl_id);
+        let _ = driver.step(store.as_ref(), tl_id, pos_runtime::ObservationView::empty());
         let mut reg = pos_runtime::PluginRegistry::new();
         reg.register(&plugin, None, Some(Box::new(driver))).unwrap();
         reg
@@ -1381,6 +1391,7 @@ mod backtest_tests {
             &mut self,
             _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
+            _: pos_runtime::ObservationView<'_>,
         ) -> Result<pos_runtime::StepOutput, pos_runtime::RuntimeError> {
             use pos_core::event::{CanonicalBytes, EventDraft, Kind};
             let draft = EventDraft::new(
@@ -1401,6 +1412,7 @@ mod backtest_tests {
             &mut self,
             _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
+            _: pos_runtime::ObservationView<'_>,
         ) -> Result<pos_runtime::StepOutput, pos_runtime::RuntimeError> {
             Ok(pos_runtime::StepOutput::empty())
         }
@@ -1417,6 +1429,7 @@ mod backtest_tests {
             &mut self,
             _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
+            _: pos_runtime::ObservationView<'_>,
         ) -> Result<pos_runtime::StepOutput, pos_runtime::RuntimeError> {
             use pos_core::event::{CanonicalBytes, EventDraft, Kind};
             let draft = EventDraft::new(
@@ -1443,7 +1456,13 @@ mod backtest_tests {
         // Also cover GoodBtDriver::step by calling it directly.
         let mut store = pos_store::open_store(pos_store::StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("good-step-test").unwrap();
-        let out = GoodBtDriver.step(store.as_ref(), tl.id()).unwrap();
+        let out = GoodBtDriver
+            .step(
+                store.as_ref(),
+                tl.id(),
+                pos_runtime::ObservationView::empty(),
+            )
+            .unwrap();
         assert!(out.drafts.is_empty());
     }
 
@@ -1523,7 +1542,7 @@ mod fault_injection_tests {
         ids::{EntityId, PluginId},
         Capability, CoreError, Plugin,
     };
-    use pos_runtime::{Driver, RuntimeError, StepOutput};
+    use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
     use pos_store::{open_store, StoreConfig};
     use rusqlite::Connection;
     use std::cell::Cell;
@@ -1592,6 +1611,7 @@ mod fault_injection_tests {
             &mut self,
             _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
+            _: ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
             let draft = EventDraft::new(
                 self.entity,
@@ -1616,6 +1636,7 @@ mod fault_injection_tests {
             &mut self,
             _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
+            _: ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
             Err(RuntimeError::UnknownEventType(
                 "driver.step.failed".to_owned(),
@@ -1641,12 +1662,18 @@ mod fault_injection_tests {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("driver-methods").unwrap();
         assert!(!emit
-            .step(store.as_ref(), tl.id())
+            .step(store.as_ref(), tl.id(), ObservationView::empty())
             .unwrap()
             .drafts
             .is_empty());
-        assert!(!bad.step(store.as_ref(), tl.id()).unwrap().drafts.is_empty());
-        assert!(fail.step(store.as_ref(), tl.id()).is_err());
+        assert!(!bad
+            .step(store.as_ref(), tl.id(), ObservationView::empty())
+            .unwrap()
+            .drafts
+            .is_empty());
+        assert!(fail
+            .step(store.as_ref(), tl.id(), ObservationView::empty())
+            .is_err());
     }
 
     impl Driver for BadEmitDriver {
@@ -1657,6 +1684,7 @@ mod fault_injection_tests {
             &mut self,
             _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
+            _: ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
             let draft = EventDraft::new(
                 self.entity,

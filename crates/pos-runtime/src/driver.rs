@@ -23,7 +23,7 @@ pub struct StepOutput {
     pub drafts: Vec<EventDraft>,
 }
 
-/// Identifies the projection state a driver needs for one entity.
+/// Identifies a Timeline entity whose projection state is observed by a driver on a tick.
 ///
 /// A driver declares these keys up front so the scheduler only reads the
 /// projections it will observe on that tick.
@@ -37,7 +37,7 @@ impl ProjectionKey {
     }
 
     #[must_use]
-    pub fn entity(&self) -> &EntityId {
+    pub fn entity_id(&self) -> &EntityId {
         &self.0
     }
 }
@@ -58,7 +58,7 @@ impl<'a> ObservationView<'a> {
     }
 
     #[must_use]
-    pub fn from_subscriptions(
+    pub(crate) fn from_subscriptions(
         subscriptions: Vec<ProjectionKey>,
         state_for: impl Fn(&ProjectionKey) -> Option<&'a State>,
     ) -> Self {
@@ -113,8 +113,8 @@ impl StepOutput {
 pub trait Driver: Send + Sync {
     /// Produce the next batch of events for this driver's plugin.
     ///
-    /// Called once per tick. Returns [`StepOutput::empty()`] to indicate
-    /// the driver is idle this tick.
+    /// Called once per tick. `observations` contains exactly the projection
+    /// states declared in [`Self::subscriptions()`].
     ///
     /// # Errors
     /// Returns [`RuntimeError`] on step failure.
@@ -122,25 +122,8 @@ pub trait Driver: Send + Sync {
         &mut self,
         store: &dyn EventStore,
         timeline: TimelineId,
+        observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError>;
-
-    /// Produce drafts using this tick's subscribed projection states.
-    ///
-    /// New drivers should override this method when they consume observations.
-    /// The compatibility default preserves existing drivers while ensuring the
-    /// scheduler never exposes the full projection registry.
-    ///
-    /// # Errors
-    ///
-    /// Returns any error produced by [`Self::step`].
-    fn step_with_observations(
-        &mut self,
-        store: &dyn EventStore,
-        timeline: TimelineId,
-        _observations: ObservationView<'_>,
-    ) -> Result<StepOutput, RuntimeError> {
-        self.step(store, timeline)
-    }
 
     /// Human-readable name for this driver (used in logs/diagnostics).
     fn name(&self) -> &'static str;
@@ -178,6 +161,7 @@ mod tests {
             &mut self,
             _store: &dyn EventStore,
             _timeline: TimelineId,
+            _observations: ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
             self.ticks += 1;
             let draft = EventDraft::new(
@@ -194,7 +178,12 @@ mod tests {
         fn name(&self) -> &'static str {
             "idle"
         }
-        fn step(&mut self, _: &dyn EventStore, _: TimelineId) -> Result<StepOutput, RuntimeError> {
+        fn step(
+            &mut self,
+            _: &dyn EventStore,
+            _: TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
             Ok(StepOutput::empty())
         }
     }
@@ -207,7 +196,7 @@ mod tests {
         let entity = EntityId::new();
         let mut driver = TickDriver { entity, ticks: 0 };
         let out = driver
-            .step_with_observations(store.as_ref(), tl.id(), ObservationView::empty())
+            .step(store.as_ref(), tl.id(), ObservationView::empty())
             .unwrap();
         assert_eq!(out.drafts.len(), 1);
         assert_eq!(out.drafts[0].event_type.as_str(), "tick.event");
@@ -220,9 +209,15 @@ mod tests {
         let tl = store.create_timeline("t").unwrap();
         let entity = EntityId::new();
         let mut driver = TickDriver { entity, ticks: 0 };
-        driver.step(store.as_ref(), tl.id()).unwrap();
-        driver.step(store.as_ref(), tl.id()).unwrap();
-        let out = driver.step(store.as_ref(), tl.id()).unwrap();
+        driver
+            .step(store.as_ref(), tl.id(), ObservationView::empty())
+            .unwrap();
+        driver
+            .step(store.as_ref(), tl.id(), ObservationView::empty())
+            .unwrap();
+        let out = driver
+            .step(store.as_ref(), tl.id(), ObservationView::empty())
+            .unwrap();
         // tick 3 — payload contains 3u32 as le bytes
         assert_eq!(out.drafts[0].payload.as_slice(), &3u32.to_le_bytes());
     }
@@ -233,7 +228,9 @@ mod tests {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("t").unwrap();
         let mut driver = IdleDriver;
-        let out = driver.step(store.as_ref(), tl.id()).unwrap();
+        let out = driver
+            .step(store.as_ref(), tl.id(), ObservationView::empty())
+            .unwrap();
         assert!(out.drafts.is_empty());
     }
 

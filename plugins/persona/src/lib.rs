@@ -17,7 +17,7 @@ use pos_core::{
     store::EventStore,
 };
 use pos_plugin_eval::{draft_outcome, draft_prediction};
-use pos_runtime::{Driver, RuntimeError, StepOutput};
+use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -330,6 +330,7 @@ impl Driver for PersonaEvalDriver {
         &mut self,
         _store: &dyn EventStore,
         _timeline: TimelineId,
+        _observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
         let idx =
             usize::try_from(self.tick % u64::try_from(self.pairs.len()).unwrap_or(1)).unwrap_or(0);
@@ -866,7 +867,9 @@ mod tests {
 
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("persona-eval").unwrap();
-        let out = driver.step(store.as_ref(), tl.id()).unwrap();
+        let out = driver
+            .step(store.as_ref(), tl.id(), ObservationView::empty())
+            .unwrap();
 
         assert_eq!(out.drafts.len(), 3);
         assert_eq!(out.drafts[0].event_type.as_str(), EVENT_TYPE_DECISION);

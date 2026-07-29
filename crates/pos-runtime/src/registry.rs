@@ -40,6 +40,15 @@ pub struct PluginRegistry {
 }
 
 impl PluginRegistry {
+    fn observations_for<'a>(
+        driver: &dyn Driver,
+        projections: &'a ProjectionRegistry,
+    ) -> ObservationView<'a> {
+        ObservationView::from_subscriptions(driver.subscriptions(), |key| {
+            projections.state_for(key.entity_id())
+        })
+    }
+
     #[must_use]
     pub fn new() -> Self {
         let mut schemas = SchemaRegistry::new();
@@ -206,11 +215,8 @@ impl PluginRegistry {
                     None => true,
                 };
                 if ready {
-                    let observations =
-                        ObservationView::from_subscriptions(driver.subscriptions(), |key| {
-                            projections.state_for(key.entity())
-                        });
-                    let output = driver.step_with_observations(store, timeline, observations)?;
+                    let observations = Self::observations_for(driver.as_ref(), projections);
+                    let output = driver.step(store, timeline, observations)?;
                     entry.last_tick = Some(now_ns);
                     all_drafts.extend(output.drafts);
                 }
@@ -227,7 +233,7 @@ impl PluginRegistry {
 
     /// Step all plugins that have a driver, collecting their event drafts.
     ///
-    /// Calls `driver.step(store, timeline)` on each plugin that registered a driver.
+    /// Calls `driver.step(store, timeline, observations)` on each plugin that registered a driver.
     /// Returns all drafts from all drivers in registration order.
     ///
     /// # Errors
@@ -241,11 +247,8 @@ impl PluginRegistry {
         let projections = &self.projections;
         for entry in self.plugins.values_mut() {
             if let Some(driver) = entry.driver.as_mut() {
-                let observations =
-                    ObservationView::from_subscriptions(driver.subscriptions(), |key| {
-                        projections.state_for(key.entity())
-                    });
-                let output = driver.step_with_observations(store, timeline, observations)?;
+                let observations = Self::observations_for(driver.as_ref(), projections);
+                let output = driver.step(store, timeline, observations)?;
                 all_drafts.extend(output.drafts);
             }
         }
@@ -336,6 +339,7 @@ mod tests {
             &mut self,
             _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
+            _: ObservationView<'_>,
         ) -> Result<crate::driver::StepOutput, RuntimeError> {
             Ok(crate::driver::StepOutput::empty())
         }
@@ -456,6 +460,7 @@ mod tests {
                 &mut self,
                 _: &dyn pos_core::store::EventStore,
                 _: pos_core::ids::TimelineId,
+                _: ObservationView<'_>,
             ) -> Result<StepOutput, RuntimeError> {
                 self.calls += 1;
                 let draft = EventDraft::new(
@@ -513,19 +518,11 @@ mod tests {
                 "observing"
             }
 
-            fn step(
-                &mut self,
-                _: &dyn pos_core::store::EventStore,
-                _: pos_core::ids::TimelineId,
-            ) -> Result<crate::driver::StepOutput, RuntimeError> {
-                Ok(crate::driver::StepOutput::empty())
-            }
-
             fn subscriptions(&self) -> Vec<ProjectionKey> {
                 vec![self.key.clone()]
             }
 
-            fn step_with_observations(
+            fn step(
                 &mut self,
                 _: &dyn pos_core::store::EventStore,
                 _: pos_core::ids::TimelineId,
@@ -635,6 +632,7 @@ mod tests {
             &mut noop,
             open_store(StoreConfig::Memory).unwrap().as_ref(),
             TimelineId::new(),
+            ObservationView::empty(),
         );
         let err = reg.register(&p4, None, Some(Box::new(noop))).unwrap_err();
         assert!(matches!(err, RuntimeError::CapabilityMismatch { .. }));

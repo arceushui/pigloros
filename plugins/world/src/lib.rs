@@ -16,7 +16,7 @@ use pos_core::{
     state::{Reducer, State},
     store::EventStore,
 };
-use pos_runtime::{Driver, RuntimeError, StepOutput};
+use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 use serde::{Deserialize, Serialize};
 
 /// The entity kind string for world bodies.
@@ -183,6 +183,7 @@ impl Driver for WorldDriver {
         &mut self,
         _store: &dyn EventStore,
         _timeline: TimelineId,
+        _observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
         let observations = self.backend.step(&self.entities);
 
@@ -437,7 +438,9 @@ mod tests {
         let backend = Box::new(SimpleKinematicBackend::new());
         let mut driver = WorldDriver::new(vec![body], backend);
 
-        let out = driver.step(store.as_ref(), tl.id()).unwrap();
+        let out = driver
+            .step(store.as_ref(), tl.id(), ObservationView::empty())
+            .unwrap();
         assert_eq!(out.drafts.len(), 1);
         assert_eq!(out.drafts[0].event_type.as_str(), EVENT_TYPE_OBSERVATION);
     }
@@ -458,7 +461,9 @@ mod tests {
         let backend = Box::new(SimpleKinematicBackend::new());
         let mut driver = WorldDriver::new(vec![body], backend);
 
-        let out = driver.step(store.as_ref(), tl.id()).unwrap();
+        let out = driver
+            .step(store.as_ref(), tl.id(), ObservationView::empty())
+            .unwrap();
         let payload: WorldObservationPayload =
             ciborium::from_reader(out.drafts[0].payload.as_slice()).unwrap();
 
@@ -482,11 +487,15 @@ mod tests {
         let backend = Box::new(SimpleKinematicBackend::new());
         let mut driver = WorldDriver::new(vec![body], backend);
 
-        driver.step(store.as_ref(), tl.id()).unwrap();
+        driver
+            .step(store.as_ref(), tl.id(), ObservationView::empty())
+            .unwrap();
         assert!((driver.entities[0].x - 1.0).abs() < f64::EPSILON);
         assert!((driver.entities[0].y - 1.0).abs() < f64::EPSILON);
 
-        driver.step(store.as_ref(), tl.id()).unwrap();
+        driver
+            .step(store.as_ref(), tl.id(), ObservationView::empty())
+            .unwrap();
         assert!((driver.entities[0].x - 2.0).abs() < f64::EPSILON);
         assert!((driver.entities[0].y - 2.0).abs() < f64::EPSILON);
     }
@@ -550,7 +559,9 @@ mod tests {
             vy: 0.0,
         };
         let mut driver = WorldDriver::new(vec![body], Box::new(UnknownEntityBackend));
-        let out = driver.step(store.as_ref(), tl.id()).unwrap();
+        let out = driver
+            .step(store.as_ref(), tl.id(), ObservationView::empty())
+            .unwrap();
         assert_eq!(out.drafts.len(), 1);
         assert!((driver.entities[0].x - 1.0).abs() < f64::EPSILON);
         assert!((driver.entities[0].y - 2.0).abs() < f64::EPSILON);
@@ -572,7 +583,9 @@ mod tests {
         };
         let mut driver =
             WorldDriver::new(vec![body], Box::new(MixedEntityBackend { extra: unknown }));
-        driver.step(store.as_ref(), tl.id()).unwrap();
+        driver
+            .step(store.as_ref(), tl.id(), ObservationView::empty())
+            .unwrap();
         assert!((driver.entities[0].x - 1.0).abs() < f64::EPSILON);
         assert!((driver.entities[0].y - 2.0).abs() < f64::EPSILON);
     }
@@ -691,7 +704,9 @@ mod tests {
         let backend = Box::new(SimpleKinematicBackend::new());
         let mut driver = WorldDriver::new(vec![], backend);
 
-        let out = driver.step(store.as_ref(), tl.id()).unwrap();
+        let out = driver
+            .step(store.as_ref(), tl.id(), ObservationView::empty())
+            .unwrap();
         assert_eq!(out.drafts.len(), 0);
     }
 
@@ -750,9 +765,13 @@ mod tests {
         let mut driver = WorldDriver::new(vec![body], backend);
 
         assert_eq!(driver.tick, 0);
-        driver.step(store.as_ref(), tl.id()).unwrap();
+        driver
+            .step(store.as_ref(), tl.id(), ObservationView::empty())
+            .unwrap();
         assert_eq!(driver.tick, 1);
-        driver.step(store.as_ref(), tl.id()).unwrap();
+        driver
+            .step(store.as_ref(), tl.id(), ObservationView::empty())
+            .unwrap();
         assert_eq!(driver.tick, 2);
     }
 }
