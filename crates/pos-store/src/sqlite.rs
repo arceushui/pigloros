@@ -12,7 +12,10 @@ use pos_core::{
     event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
     hasher::Hasher,
     ids::{EntityId, EventId, TimelineId},
-    store::{EventReadBounds, EventStore, IngressAppendOutcome, IngressIdentity, SeqRange},
+    store::{
+        append_identity_expires_at, AppendDedupScope, AppendIdentity, AppendOrDuplicateOutcome,
+        EventReadBounds, EventStore, SeqRange,
+    },
     timeline::{Timeline, TimelineMeta, TimelineMode},
     CoreError,
 };
@@ -37,8 +40,6 @@ thread_local! {
     static BOUNDED_METADATA_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Test-only count of full Event rows fetched by bounded reads.
     static BOUNDED_EVENT_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// Test-only count of root Timeline IDs fetched by bounded quota checks.
-    static BOUNDED_ROOT_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Test-only fault injection for the open-time sequence validation query.
     static FAIL_SEQUENCE_VALIDATION_QUERY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -49,13 +50,12 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
-    fn append_fresh_ingress(
+    fn append_one_in_transaction(
         tx: &rusqlite::Transaction<'_>,
         hasher: &dyn Hasher,
         timeline: TimelineId,
-        identity: IngressIdentity,
         draft: EventDraft,
-    ) -> Result<Box<Event>, CoreError> {
+    ) -> Result<Event, CoreError> {
         let head = tx.query_row(
             "SELECT head_seq, chain_head FROM timelines WHERE id = ?1",
             params![timeline.to_string()],
@@ -119,19 +119,7 @@ impl SqliteStore {
         ) {
             return Err(CoreError::Storage(error.to_string()));
         }
-        if let Err(error) = tx.execute(
-            "INSERT INTO ingress_identities (dedup_key, content_key, event_id, expires_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                identity.dedup_key.as_bytes().as_slice(),
-                identity.content_key.as_bytes().as_slice(),
-                event_id.to_string(),
-                i64::try_from(identity.expires_at.as_micros()).unwrap_or(i64::MAX),
-            ],
-        ) {
-            return Err(CoreError::Storage(error.to_string()));
-        }
-        Ok(Box::new(Event {
+        Ok(Event {
             id: event_id,
             entity: draft.entity,
             event_type: draft.event_type,
@@ -143,7 +131,48 @@ impl SqliteStore {
             schema_version: draft.schema_version,
             signature: None,
             payload_hash,
-        }))
+        })
+    }
+
+    fn retained_event_matches_draft(
+        tx: &rusqlite::Transaction<'_>,
+        event_id: &str,
+        draft: &EventDraft,
+    ) -> Result<bool, CoreError> {
+        let retained = tx.query_row(
+            "SELECT CASE
+                WHEN EXISTS (
+                    SELECT 1 FROM events
+                    WHERE event_id = ?1
+                      AND entity_id = ?2
+                      AND event_type = ?3
+                      AND payload = ?4
+                      AND causation_id IS ?5
+                      AND correlation_id IS ?6
+                      AND schema_version = ?7
+                ) THEN 1
+                WHEN EXISTS (SELECT 1 FROM events WHERE event_id = ?1) THEN 0
+                ELSE -1
+             END",
+            params![
+                event_id,
+                draft.entity.to_string(),
+                draft.event_type.as_str(),
+                draft.payload.as_slice(),
+                draft.causation_id.map(|id| id.to_string()),
+                draft.correlation_id.map(|id| id.to_string()),
+                i64::from(draft.schema_version.as_u32()),
+            ],
+            |row| row.get::<_, i64>(0),
+        );
+        match retained {
+            Ok(1) => Ok(true),
+            Ok(0) => Ok(false),
+            Ok(_) => Err(CoreError::Storage(
+                "append identity points to a missing Event".to_owned(),
+            )),
+            Err(error) => Err(CoreError::Storage(error.to_string())),
+        }
     }
 
     /// Open a `SQLite` WAL store at the given path. Use `":memory:"` for in-memory.
@@ -364,7 +393,7 @@ impl SqliteStore {
         }
 
         if version < 4 {
-            self.migrate_ingress_identities_to_v4()?;
+            self.migrate_append_identities_to_v4()?;
             self.conn
                 .execute("UPDATE schema_version SET version = 4", [])
                 .map_err(|e| CoreError::Storage(e.to_string()))?;
@@ -410,19 +439,21 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// Add opaque, bounded-lifetime ingress identities. No raw ingress content
+    /// Add opaque, bounded-lifetime append identities. No raw external content
     /// or deduplication preimage is stored in this table.
-    fn migrate_ingress_identities_to_v4(&self) -> Result<(), CoreError> {
+    fn migrate_append_identities_to_v4(&self) -> Result<(), CoreError> {
         self.conn
             .execute_batch(
-                "CREATE TABLE IF NOT EXISTS ingress_identities (
+                "CREATE TABLE IF NOT EXISTS append_identities (
                      dedup_key BLOB PRIMARY KEY CHECK (length(dedup_key) = 32),
-                     content_key BLOB NOT NULL CHECK (length(content_key) = 32),
+                     scope_key BLOB NOT NULL CHECK (length(scope_key) = 32),
                      event_id TEXT NOT NULL,
                      expires_at INTEGER NOT NULL
                  );
-                 CREATE INDEX IF NOT EXISTS idx_ingress_identities_expiry
-                 ON ingress_identities(expires_at);",
+                 CREATE INDEX IF NOT EXISTS idx_append_identities_expiry
+                 ON append_identities(expires_at);
+                 CREATE INDEX IF NOT EXISTS idx_append_identities_scope
+                 ON append_identities(scope_key);",
             )
             .map_err(|error| CoreError::Storage(error.to_string()))
     }
@@ -965,106 +996,30 @@ impl EventStore for SqliteStore {
         if drafts.is_empty() {
             return Ok(Vec::new());
         }
-
-        // Load head seq + chain head in one existence check (avoids a second
-        // get_head_seq/? path that cannot fail once the row is known to exist).
-        let (mut seq, mut prev_hash) = match self.conn.query_row(
-            "SELECT head_seq, chain_head FROM timelines WHERE id = ?1",
-            params![timeline.to_string()],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
-        ) {
-            Ok((n, bytes)) => {
-                let arr: [u8; 32] = bytes
-                    .try_into()
-                    .map_err(|_| CoreError::Serialization("bad hash length".to_owned()))?;
-                (
-                    Seq::from_u64(u64::try_from(n).unwrap_or(0)),
-                    pos_core::Hash::from_bytes(arr),
-                )
-            }
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
-                return Err(CoreError::TimelineNotFound(timeline));
-            }
-            Err(e) => return Err(CoreError::Storage(e.to_string())),
-        };
         let mut committed = Vec::with_capacity(drafts.len());
-
         let tx = self
             .conn
             .transaction()
             .map_err(|e| CoreError::Storage(e.to_string()))?;
-
         for draft in drafts {
-            seq = seq.next();
-            let event_id = EventId::new();
-            let id_str = event_id.to_string();
-            let payload_hash = self.hasher.hash_payload(&draft.payload);
-            let chain_hash = self
-                .hasher
-                .hash_event(&prev_hash, id_str.as_bytes(), &draft.payload);
-            let wall_time = draft.wall_time.unwrap_or_else(WallTime::now);
-
-            tx.execute(
-                "INSERT INTO events
-                 (timeline_id, seq, event_id, entity_id, event_type, payload, wall_time,
-                  causation_id, correlation_id, schema_version, payload_hash, signature)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                params![
-                    timeline.to_string(),
-                    i64::try_from(seq.as_u64()).unwrap_or(i64::MAX),
-                    id_str,
-                    draft.entity.to_string(),
-                    draft.event_type.as_str(),
-                    draft.payload.as_slice(),
-                    i64::try_from(wall_time.as_micros()).unwrap_or(i64::MAX),
-                    draft.causation_id.map(|id| id.to_string()),
-                    draft.correlation_id.map(|id| id.to_string()),
-                    i64::from(draft.schema_version.as_u32()),
-                    payload_hash.as_bytes().as_slice(),
-                    Option::<&[u8]>::None,
-                ],
-            )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-
-            committed.push(Event {
-                id: event_id,
-                entity: draft.entity,
-                event_type: draft.event_type.clone(),
-                payload: draft.payload.clone(),
-                wall_time,
-                seq,
-                causation_id: draft.causation_id,
-                correlation_id: draft.correlation_id,
-                schema_version: draft.schema_version,
-                signature: None,
-                payload_hash,
-            });
-
-            prev_hash = chain_hash;
+            committed.push(Self::append_one_in_transaction(
+                &tx,
+                self.hasher.as_ref(),
+                timeline,
+                draft.clone(),
+            )?);
         }
-
-        // Update head and chain hash
-        tx.execute(
-            "UPDATE timelines SET head_seq = ?1, chain_head = ?2 WHERE id = ?3",
-            params![
-                i64::try_from(seq.as_u64()).unwrap_or(i64::MAX),
-                prev_hash.as_bytes().as_slice(),
-                timeline.to_string(),
-            ],
-        )
-        .map_err(|e| CoreError::Storage(e.to_string()))?;
-
         tx.commit().map_err(|e| CoreError::Storage(e.to_string()))?;
-
         Ok(committed)
     }
 
     fn append_or_duplicate(
         &mut self,
         timeline: TimelineId,
-        identity: IngressIdentity,
+        identity: AppendIdentity,
+        admitted_at: WallTime,
         draft: EventDraft,
-    ) -> Result<IngressAppendOutcome, CoreError> {
+    ) -> Result<AppendOrDuplicateOutcome, CoreError> {
         let tx = match self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1074,46 +1029,59 @@ impl EventStore for SqliteStore {
         };
 
         let existing = tx.query_row(
-            "SELECT content_key, event_id FROM ingress_identities WHERE dedup_key = ?1",
+            "SELECT event_id FROM append_identities WHERE dedup_key = ?1",
             params![identity.dedup_key.as_bytes().as_slice()],
-            |row| {
-                row.get::<_, Vec<u8>>(0).and_then(|content_key| {
-                    row.get::<_, String>(1)
-                        .map(|event_id| (content_key, event_id))
-                })
-            },
+            |row| row.get::<_, String>(0),
         );
         match existing {
-            Ok((content_key, event_id)) => {
-                if content_key.as_slice() == identity.content_key.as_bytes().as_slice() {
+            Ok(event_id) => {
+                if Self::retained_event_matches_draft(&tx, &event_id, &draft)? {
                     return match parse_event_id(&event_id) {
-                        Ok(event_id) => Ok(IngressAppendOutcome::Duplicate { event_id }),
+                        Ok(event_id) => Ok(AppendOrDuplicateOutcome::Duplicate { event_id }),
                         Err(error) => Err(error),
                     };
                 }
-                return Ok(IngressAppendOutcome::Conflict);
+                return Ok(AppendOrDuplicateOutcome::Conflict);
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => {}
             Err(error) => return Err(CoreError::Storage(error.to_string())),
         }
 
-        Self::append_fresh_ingress(&tx, self.hasher.as_ref(), timeline, identity, draft).and_then(
-            |event| {
-                tx.commit()
-                    .map_err(|error| CoreError::Storage(error.to_string()))
-                    .map(|()| IngressAppendOutcome::Appended(event))
-            },
+        let event = Self::append_one_in_transaction(&tx, self.hasher.as_ref(), timeline, draft)?;
+        tx.execute(
+            "INSERT INTO append_identities (dedup_key, scope_key, event_id, expires_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                identity.dedup_key.as_bytes().as_slice(),
+                identity.scope.as_bytes().as_slice(),
+                event.id.to_string(),
+                i64::try_from(append_identity_expires_at(admitted_at).as_micros())
+                    .unwrap_or(i64::MAX),
+            ],
         )
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
+        tx.commit()
+            .map_err(|error| CoreError::Storage(error.to_string()))
+            .map(|()| AppendOrDuplicateOutcome::Appended(Box::new(event)))
     }
 
-    fn purge_expired_ingress_identities(&mut self, now: WallTime) -> Result<usize, CoreError> {
+    fn purge_expired_append_identities(&mut self, now: WallTime) -> Result<usize, CoreError> {
         match self.conn.execute(
-            "DELETE FROM ingress_identities WHERE expires_at <= ?1",
+            "DELETE FROM append_identities WHERE expires_at <= ?1",
             params![i64::try_from(now.as_micros()).unwrap_or(i64::MAX)],
         ) {
             Ok(deleted) => Ok(deleted),
             Err(error) => Err(CoreError::Storage(error.to_string())),
         }
+    }
+
+    fn remove_append_identities(&mut self, scope: AppendDedupScope) -> Result<usize, CoreError> {
+        self.conn
+            .execute(
+                "DELETE FROM append_identities WHERE scope_key = ?1",
+                params![scope.as_bytes().as_slice()],
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))
     }
 
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
@@ -1235,55 +1203,39 @@ impl EventStore for SqliteStore {
     fn root_timeline_count_bounded(&self, maximum: usize) -> Result<usize, CoreError> {
         let stop_after = maximum.saturating_add(1);
         let limit = i64::try_from(stop_after).unwrap_or(i64::MAX);
-        let mut statement = self
-            .conn
-            .prepare(
-                "SELECT id
-                 FROM timelines INDEXED BY idx_timelines_parent_id_id
-                 WHERE parent_id IS NULL
-                 LIMIT ?1",
-            )
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let query = {
+        let count = {
             #[cfg(test)]
             {
                 if FAIL_STMT_QUERY.with(std::cell::Cell::get) {
                     Err(rusqlite::Error::InvalidQuery)
                 } else {
-                    statement.query(params![limit])
+                    self.conn.query_row(
+                        "SELECT COUNT(*) FROM (
+                            SELECT id
+                            FROM timelines INDEXED BY idx_timelines_parent_id_id
+                            WHERE parent_id IS NULL
+                            LIMIT ?1
+                         )",
+                        params![limit],
+                        |row| row.get::<_, usize>(0),
+                    )
                 }
             }
             #[cfg(not(test))]
             {
-                statement.query(params![limit])
+                self.conn.query_row(
+                    "SELECT COUNT(*) FROM (
+                        SELECT id
+                        FROM timelines INDEXED BY idx_timelines_parent_id_id
+                        WHERE parent_id IS NULL
+                        LIMIT ?1
+                     )",
+                    params![limit],
+                    |row| row.get::<_, usize>(0),
+                )
             }
         };
-        let mut rows = query.map_err(|error| CoreError::Storage(error.to_string()))?;
-        let mut count = 0_usize;
-        loop {
-            let next = {
-                #[cfg(test)]
-                {
-                    if FAIL_ROWS_NEXT.with(std::cell::Cell::get) {
-                        Err(rusqlite::Error::InvalidQuery)
-                    } else {
-                        rows.next()
-                    }
-                }
-                #[cfg(not(test))]
-                {
-                    rows.next()
-                }
-            };
-            match next.map_err(|error| CoreError::Storage(error.to_string()))? {
-                Some(_) => {
-                    count += 1;
-                    #[cfg(test)]
-                    BOUNDED_ROOT_ROWS.with(|rows| rows.set(rows.get().saturating_add(1)));
-                }
-                None => return Ok(count),
-            }
-        }
+        count.map_err(|error| CoreError::Storage(error.to_string()))
     }
 
     fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
@@ -1687,24 +1639,24 @@ mod tests {
         SqliteStore::open_in_memory().unwrap()
     }
 
-    fn ingress_identity(key: u8, content: u8) -> IngressIdentity {
-        IngressIdentity::new(
-            pos_core::IngressDedupKey::from_keyed_hash([key; 32]),
-            pos_core::IngressContentKey::from_keyed_hash([content; 32]),
-            WallTime::from_micros(100),
+    fn append_identity(key: u8, scope: u8) -> AppendIdentity {
+        AppendIdentity::new(
+            pos_core::AppendDedupKey::from_keyed_hash([key; 32]),
+            pos_core::AppendDedupScope::from_keyed_hash([scope; 32]),
         )
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn ingress_append_surfaces_storage_failures_without_partial_events() {
+    fn append_or_duplicate_surfaces_storage_failures_without_partial_events() {
         let entity = EntityId::new();
 
         let mut missing = new_store();
         assert!(missing
             .append_or_duplicate(
                 TimelineId::new(),
-                ingress_identity(1, 1),
+                append_identity(1, 1),
+                WallTime::from_micros(1),
                 make_draft(entity, b"x")
             )
             .is_err());
@@ -1718,7 +1670,8 @@ mod tests {
         assert!(bad_hash
             .append_or_duplicate(
                 timeline.id(),
-                ingress_identity(2, 2),
+                append_identity(2, 2),
+                WallTime::from_micros(1),
                 make_draft(entity, b"x")
             )
             .is_err());
@@ -1729,7 +1682,8 @@ mod tests {
         assert!(events
             .append_or_duplicate(
                 timeline.id(),
-                ingress_identity(3, 3),
+                append_identity(3, 3),
+                WallTime::from_micros(1),
                 make_draft(entity, b"x")
             )
             .is_err());
@@ -1740,18 +1694,20 @@ mod tests {
         assert!(update
             .append_or_duplicate(
                 timeline.id(),
-                ingress_identity(4, 4),
+                append_identity(4, 4),
+                WallTime::from_micros(1),
                 make_draft(entity, b"x")
             )
             .is_err());
 
         let mut identity = new_store();
         let timeline = identity.create_timeline("identity").unwrap();
-        identity.conn.execute_batch("CREATE TRIGGER deny_identity BEFORE INSERT ON ingress_identities BEGIN SELECT RAISE(ABORT, 'deny'); END;").unwrap();
+        identity.conn.execute_batch("CREATE TRIGGER deny_identity BEFORE INSERT ON append_identities BEGIN SELECT RAISE(ABORT, 'deny'); END;").unwrap();
         assert!(identity
             .append_or_duplicate(
                 timeline.id(),
-                ingress_identity(5, 5),
+                append_identity(5, 5),
+                WallTime::from_micros(1),
                 make_draft(entity, b"x")
             )
             .is_err());
@@ -1766,7 +1722,8 @@ mod tests {
         assert!(commit
             .append_or_duplicate(
                 timeline.id(),
-                ingress_identity(6, 6),
+                append_identity(6, 6),
+                WallTime::from_micros(1),
                 make_draft(entity, b"x")
             )
             .is_err());
@@ -1774,18 +1731,19 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn ingress_append_rejects_corrupt_identity_rows_and_identity_table_errors() {
+    fn append_or_duplicate_rejects_corrupt_identity_rows_and_identity_table_errors() {
         let entity = EntityId::new();
         let mut corrupt = new_store();
         let timeline = corrupt.create_timeline("corrupt").unwrap();
         corrupt.conn.execute(
-            "INSERT INTO ingress_identities (dedup_key, content_key, event_id, expires_at) VALUES (?1, ?2, 'bad', 100)",
+            "INSERT INTO append_identities (dedup_key, scope_key, event_id, expires_at) VALUES (?1, ?2, 'bad', 100)",
             params![[7_u8; 32].as_slice(), [7_u8; 32].as_slice()],
         ).unwrap();
         assert!(corrupt
             .append_or_duplicate(
                 timeline.id(),
-                ingress_identity(7, 7),
+                append_identity(7, 7),
+                WallTime::from_micros(1),
                 make_draft(entity, b"x")
             )
             .is_err());
@@ -1794,12 +1752,13 @@ mod tests {
         let timeline = missing.create_timeline("missing-table").unwrap();
         missing
             .conn
-            .execute("DROP TABLE ingress_identities", [])
+            .execute("DROP TABLE append_identities", [])
             .unwrap();
         assert!(missing
             .append_or_duplicate(
                 timeline.id(),
-                ingress_identity(8, 8),
+                append_identity(8, 8),
+                WallTime::from_micros(1),
                 make_draft(entity, b"x")
             )
             .is_err());
@@ -1807,7 +1766,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn ingress_admission_and_cleanup_surface_transaction_and_query_failures() {
+    fn append_or_duplicate_and_cleanup_surface_transaction_and_query_failures() {
         let entity = EntityId::new();
 
         let mut transaction = new_store();
@@ -1816,7 +1775,8 @@ mod tests {
         assert!(transaction
             .append_or_duplicate(
                 timeline.id(),
-                ingress_identity(9, 9),
+                append_identity(9, 9),
+                WallTime::from_micros(1),
                 make_draft(entity, b"x")
             )
             .is_err());
@@ -1830,7 +1790,8 @@ mod tests {
         assert!(timeline_query
             .append_or_duplicate(
                 TimelineId::new(),
-                ingress_identity(10, 10),
+                append_identity(10, 10),
+                WallTime::from_micros(1),
                 make_draft(entity, b"x")
             )
             .is_err());
@@ -1838,10 +1799,72 @@ mod tests {
         let mut cleanup = new_store();
         cleanup
             .conn
-            .execute("DROP TABLE ingress_identities", [])
+            .execute("DROP TABLE append_identities", [])
             .unwrap();
         assert!(cleanup
-            .purge_expired_ingress_identities(WallTime::from_micros(100))
+            .purge_expired_append_identities(WallTime::from_micros(100))
+            .is_err());
+
+        let mut withdrawal = new_store();
+        withdrawal
+            .conn
+            .execute("DROP TABLE append_identities", [])
+            .unwrap();
+        assert!(withdrawal
+            .remove_append_identities(pos_core::AppendDedupScope::from_keyed_hash([11; 32]))
+            .is_err());
+    }
+
+    #[test]
+    fn append_or_duplicate_fails_closed_on_corrupt_retained_event_rows() {
+        let entity = EntityId::new();
+        let mut missing_event = new_store();
+        let timeline = missing_event.create_timeline("missing-event").unwrap();
+        missing_event
+            .append_or_duplicate(
+                timeline.id(),
+                append_identity(11, 11),
+                WallTime::from_micros(1),
+                make_draft(entity, b"x"),
+            )
+            .unwrap();
+        missing_event.conn.execute("DROP TABLE events", []).unwrap();
+        assert!(missing_event
+            .append_or_duplicate(
+                timeline.id(),
+                append_identity(11, 11),
+                WallTime::from_micros(2),
+                make_draft(entity, b"x"),
+            )
+            .is_err());
+
+        let mut malformed_event_id = new_store();
+        let timeline = malformed_event_id
+            .create_timeline("malformed-event-id")
+            .unwrap();
+        malformed_event_id
+            .append_or_duplicate(
+                timeline.id(),
+                append_identity(12, 12),
+                WallTime::from_micros(1),
+                make_draft(entity, b"x"),
+            )
+            .unwrap();
+        malformed_event_id
+            .conn
+            .execute("UPDATE events SET event_id = 'bad'", [])
+            .unwrap();
+        malformed_event_id
+            .conn
+            .execute("UPDATE append_identities SET event_id = 'bad'", [])
+            .unwrap();
+        assert!(malformed_event_id
+            .append_or_duplicate(
+                timeline.id(),
+                append_identity(12, 12),
+                WallTime::from_micros(2),
+                make_draft(entity, b"x"),
+            )
             .is_err());
     }
 
@@ -2518,17 +2541,20 @@ mod tests {
                 .unwrap();
         }
 
-        BOUNDED_ROOT_ROWS.with(|rows| rows.set(0));
         assert_eq!(store.root_timeline_count_bounded(0).unwrap(), 1);
-        BOUNDED_ROOT_ROWS.with(|rows| assert_eq!(rows.get(), 1));
 
         for index in 0..100 {
             store.create_timeline(&format!("root-{index}")).unwrap();
         }
-        BOUNDED_ROOT_ROWS.with(|rows| rows.set(0));
         assert_eq!(store.root_timeline_count_bounded(64).unwrap(), 65);
-        BOUNDED_ROOT_ROWS.with(|rows| assert_eq!(rows.get(), 65));
         assert_eq!(store.root_timeline_count_bounded(usize::MAX).unwrap(), 101);
+    }
+
+    #[test]
+    fn bounded_root_count_returns_nonzero_for_a_root() {
+        let mut store: Box<dyn EventStore> = Box::new(new_store());
+        store.create_timeline("root").unwrap();
+        assert_eq!(store.root_timeline_count_bounded(1).unwrap(), 1);
     }
 
     #[test]
@@ -3740,16 +3766,6 @@ mod tests {
         FAIL_ROWS_NEXT.with(|f| f.set(true));
         let result = store.list_timelines();
         FAIL_ROWS_NEXT.with(|f| f.set(false));
-        assert_storage_err(result.map(|_| ()));
-    }
-
-    #[test]
-    fn bounded_root_count_fails_when_rows_next_injected() {
-        let mut store = new_store();
-        store.create_timeline("main").unwrap();
-        FAIL_ROWS_NEXT.with(|fail| fail.set(true));
-        let result = store.root_timeline_count_bounded(64);
-        FAIL_ROWS_NEXT.with(|fail| fail.set(false));
         assert_storage_err(result.map(|_| ()));
     }
 
@@ -5061,7 +5077,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn migrate_v4_fails_when_identity_table_cannot_be_created() {
+    fn migrate_v4_fails_when_append_identity_table_cannot_be_created() {
         let store = new_store();
         store
             .conn
@@ -5069,14 +5085,11 @@ mod tests {
             .unwrap();
         store
             .conn
-            .execute("DROP TABLE ingress_identities", [])
+            .execute("DROP TABLE append_identities", [])
             .unwrap();
         store
             .conn
-            .execute(
-                "CREATE VIEW ingress_identities AS SELECT 1 AS dedup_key",
-                [],
-            )
+            .execute("CREATE VIEW append_identities AS SELECT 1 AS dedup_key", [])
             .unwrap();
 
         assert_storage_err(store.test_run_migrations());

@@ -14,8 +14,8 @@ use pos_core::{
     hasher::Hasher,
     ids::{EventId, TimelineId},
     store::{
-        EventReadBounds, EventStore, IngressAppendOutcome, IngressContentKey, IngressDedupKey,
-        IngressIdentity, SeqRange,
+        append_identity_expires_at, AppendDedupKey, AppendDedupScope, AppendIdentity,
+        AppendOrDuplicateOutcome, EventReadBounds, EventStore, SeqRange,
     },
     timeline::{Timeline, TimelineMeta},
 };
@@ -36,16 +36,16 @@ pub struct MemoryStore {
     chain_heads: HashMap<TimelineId, Hash>,
     /// Global `EventId` index for O(1) uniqueness checks.
     event_ids: HashSet<EventId>,
-    /// Opaque ingress identities retained only until their configured horizon.
-    ingress_identities: HashMap<IngressDedupKey, IngressIdentityRecord>,
+    /// Opaque append identities retained only until their fixed horizon.
+    append_identities: HashMap<AppendDedupKey, AppendIdentityRecord>,
     /// Exact number of root Timelines, maintained with Timeline mutations.
     root_timeline_count: usize,
     hasher: Box<dyn Hasher>,
 }
 
 #[derive(Clone, Copy)]
-struct IngressIdentityRecord {
-    content_key: IngressContentKey,
+struct AppendIdentityRecord {
+    scope: AppendDedupScope,
     event_id: EventId,
     expires_at: WallTime,
 }
@@ -63,7 +63,7 @@ impl MemoryStore {
             timelines: HashMap::new(),
             chain_heads: HashMap::new(),
             event_ids: HashSet::new(),
-            ingress_identities: HashMap::new(),
+            append_identities: HashMap::new(),
             root_timeline_count: 0,
             hasher: Box::new(pos_crypto::chain::Blake3Hasher),
         }
@@ -76,7 +76,7 @@ impl MemoryStore {
             timelines: HashMap::new(),
             chain_heads: HashMap::new(),
             event_ids: HashSet::new(),
-            ingress_identities: HashMap::new(),
+            append_identities: HashMap::new(),
             root_timeline_count: 0,
             hasher,
         }
@@ -98,6 +98,18 @@ impl MemoryStore {
 
     fn missing_timeline_state(id: TimelineId, state: &str) -> CoreError {
         CoreError::Storage(format!("timeline {id} is missing its {state}"))
+    }
+
+    fn retained_event_matches(&self, event_id: EventId, draft: &EventDraft) -> bool {
+        self.events.values().flatten().any(|event| {
+            event.id == event_id
+                && event.entity == draft.entity
+                && event.event_type == draft.event_type
+                && event.payload == draft.payload
+                && event.causation_id == draft.causation_id
+                && event.correlation_id == draft.correlation_id
+                && event.schema_version == draft.schema_version
+        })
     }
 
     /// Collect all events for a timeline, walking the fork chain.
@@ -367,16 +379,17 @@ impl EventStore for MemoryStore {
     fn append_or_duplicate(
         &mut self,
         timeline: TimelineId,
-        identity: IngressIdentity,
+        identity: AppendIdentity,
+        admitted_at: WallTime,
         draft: EventDraft,
-    ) -> Result<IngressAppendOutcome, CoreError> {
-        if let Some(record) = self.ingress_identities.get(&identity.dedup_key) {
-            return if record.content_key == identity.content_key {
-                Ok(IngressAppendOutcome::Duplicate {
+    ) -> Result<AppendOrDuplicateOutcome, CoreError> {
+        if let Some(record) = self.append_identities.get(&identity.dedup_key) {
+            return if self.retained_event_matches(record.event_id, &draft) {
+                Ok(AppendOrDuplicateOutcome::Duplicate {
                     event_id: record.event_id,
                 })
             } else {
-                Ok(IngressAppendOutcome::Conflict)
+                Ok(AppendOrDuplicateOutcome::Conflict)
             };
         }
 
@@ -385,23 +398,30 @@ impl EventStore for MemoryStore {
                 let event = events
                     .pop()
                     .expect("one ingress draft must commit one Event");
-                self.ingress_identities.insert(
+                self.append_identities.insert(
                     identity.dedup_key,
-                    IngressIdentityRecord {
-                        content_key: identity.content_key,
+                    AppendIdentityRecord {
+                        scope: identity.scope,
                         event_id: event.id,
-                        expires_at: identity.expires_at,
+                        expires_at: append_identity_expires_at(admitted_at),
                     },
                 );
-                IngressAppendOutcome::Appended(Box::new(event))
+                AppendOrDuplicateOutcome::Appended(Box::new(event))
             })
     }
 
-    fn purge_expired_ingress_identities(&mut self, now: WallTime) -> Result<usize, CoreError> {
-        let before = self.ingress_identities.len();
-        self.ingress_identities
+    fn purge_expired_append_identities(&mut self, now: WallTime) -> Result<usize, CoreError> {
+        let before = self.append_identities.len();
+        self.append_identities
             .retain(|_, record| record.expires_at > now);
-        Ok(before.saturating_sub(self.ingress_identities.len()))
+        Ok(before.saturating_sub(self.append_identities.len()))
+    }
+
+    fn remove_append_identities(&mut self, scope: AppendDedupScope) -> Result<usize, CoreError> {
+        let before = self.append_identities.len();
+        self.append_identities
+            .retain(|_, record| record.scope != scope);
+        Ok(before.saturating_sub(self.append_identities.len()))
     }
 
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {

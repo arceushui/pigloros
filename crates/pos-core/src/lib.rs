@@ -35,9 +35,10 @@ pub use plugin::{Capability, Plugin};
 pub use schema::{SchemaVersionMap, Upcaster, UpcasterRegistry};
 pub use state::{Reducer, State, StateRegistry};
 pub use store::{
-    export_timeline, export_timeline_cow, export_timeline_own, export_timeline_raw,
-    import_committed_with_rollback, import_timeline, import_timeline_with_id,
-    validate_committed_batch, EventReadBounds, EventStore, IngressAppendOutcome, IngressContentKey,
-    IngressDedupKey, IngressIdentity, SeqRange, TimelineExport,
+    append_identity_expires_at, export_timeline, export_timeline_cow, export_timeline_own,
+    export_timeline_raw, import_committed_with_rollback, import_timeline, import_timeline_with_id,
+    validate_committed_batch, AppendDedupKey, AppendDedupScope, AppendIdentity,
+    AppendOrDuplicateOutcome, EventReadBounds, EventStore, SeqRange, TimelineExport,
+    APPEND_IDENTITY_RETENTION_MICROS,
 };
 pub use timeline::{Timeline, TimelineMeta, TimelineMode};

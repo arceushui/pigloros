@@ -181,7 +181,8 @@ mod tests {
         event::{CanonicalBytes, EventDraft, Kind},
         ids::{CorrelationId, EntityId, EventId},
         store::{
-            IngressAppendOutcome, IngressContentKey, IngressDedupKey, IngressIdentity, SeqRange,
+            AppendDedupKey, AppendDedupScope, AppendIdentity, AppendOrDuplicateOutcome, SeqRange,
+            APPEND_IDENTITY_RETENTION_MICROS,
         },
     };
 
@@ -194,69 +195,135 @@ mod tests {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn ingress_identity(key: u8, content: u8, expires_at: u64) -> IngressIdentity {
-        IngressIdentity::new(
-            IngressDedupKey::from_keyed_hash([key; 32]),
-            IngressContentKey::from_keyed_hash([content; 32]),
-            WallTime::from_micros(expires_at),
+    fn append_identity(key: u8, scope: u8) -> AppendIdentity {
+        AppendIdentity::new(
+            AppendDedupKey::from_keyed_hash([key; 32]),
+            AppendDedupScope::from_keyed_hash([scope; 32]),
         )
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn ingress_contract(store: &mut dyn EventStore) {
-        let timeline = store.create_timeline("ingress").unwrap();
+    fn assert_scope_withdrawal(
+        store: &mut dyn EventStore,
+        timeline: pos_core::TimelineId,
+        draft: &EventDraft,
+    ) {
+        assert!(matches!(
+            store
+                .append_or_duplicate(
+                    timeline,
+                    append_identity(3, 4),
+                    WallTime::from_micros(40),
+                    draft.clone(),
+                )
+                .unwrap(),
+            AppendOrDuplicateOutcome::Appended(_)
+        ));
+        assert_eq!(
+            store
+                .remove_append_identities(AppendDedupScope::from_keyed_hash([4; 32]))
+                .unwrap(),
+            1
+        );
+        assert!(matches!(
+            store
+                .append_or_duplicate(
+                    timeline,
+                    append_identity(3, 4),
+                    WallTime::from_micros(40),
+                    draft.clone(),
+                )
+                .unwrap(),
+            AppendOrDuplicateOutcome::Appended(_)
+        ));
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_or_duplicate_contract(store: &mut dyn EventStore) {
+        let timeline = store.create_timeline("append-or-duplicate").unwrap();
         let mut draft = EventDraft::new(
             EntityId::new(),
-            Kind::new("test.ingress"),
+            Kind::new("test.append"),
             CanonicalBytes::from_vec(b"retained-canonical-content".to_vec()),
         );
         draft.causation_id = Some(EventId::new());
         draft.correlation_id = Some(CorrelationId::new());
         let first = store
-            .append_or_duplicate(timeline.id(), ingress_identity(1, 2, 20), draft.clone())
+            .append_or_duplicate(
+                timeline.id(),
+                append_identity(1, 2),
+                WallTime::from_micros(20),
+                draft.clone(),
+            )
             .unwrap();
         let event_id = match first {
-            IngressAppendOutcome::Appended(event) => {
+            AppendOrDuplicateOutcome::Appended(event) => {
                 assert_eq!(event.causation_id, draft.causation_id);
                 assert_eq!(event.correlation_id, draft.correlation_id);
                 event.id
             }
-            IngressAppendOutcome::Duplicate { .. } | IngressAppendOutcome::Conflict => {
-                panic!("first ingress admission must append")
+            AppendOrDuplicateOutcome::Duplicate { .. } | AppendOrDuplicateOutcome::Conflict => {
+                panic!("first identified append must append")
             }
         };
         let duplicate = store
-            .append_or_duplicate(timeline.id(), ingress_identity(1, 2, 20), draft.clone())
+            .append_or_duplicate(
+                timeline.id(),
+                append_identity(1, 2),
+                WallTime::from_micros(21),
+                draft.clone(),
+            )
             .unwrap();
-        assert_eq!(duplicate, IngressAppendOutcome::Duplicate { event_id });
+        assert_eq!(duplicate, AppendOrDuplicateOutcome::Duplicate { event_id });
+        let conflict_draft = EventDraft::new(
+            draft.entity,
+            Kind::new("test.append"),
+            CanonicalBytes::from_vec(b"different-retained-canonical-content".to_vec()),
+        );
         let conflict = store
-            .append_or_duplicate(timeline.id(), ingress_identity(1, 3, 20), draft.clone())
+            .append_or_duplicate(
+                timeline.id(),
+                append_identity(1, 2),
+                WallTime::from_micros(21),
+                conflict_draft,
+            )
             .unwrap();
-        assert_eq!(conflict, IngressAppendOutcome::Conflict);
+        assert_eq!(conflict, AppendOrDuplicateOutcome::Conflict);
         assert_eq!(store.read(timeline.id(), SeqRange::all()).unwrap().len(), 1);
 
         assert_eq!(
             store
-                .purge_expired_ingress_identities(WallTime::from_micros(19))
+                .purge_expired_append_identities(WallTime::from_micros(
+                    20 + APPEND_IDENTITY_RETENTION_MICROS - 1,
+                ))
                 .unwrap(),
             0
         );
         assert_eq!(
             store
-                .purge_expired_ingress_identities(WallTime::from_micros(20))
+                .purge_expired_append_identities(WallTime::from_micros(
+                    20 + APPEND_IDENTITY_RETENTION_MICROS,
+                ))
                 .unwrap(),
             1
         );
         match store
-            .append_or_duplicate(timeline.id(), ingress_identity(1, 2, 40), draft)
+            .append_or_duplicate(
+                timeline.id(),
+                append_identity(1, 2),
+                WallTime::from_micros(40),
+                draft.clone(),
+            )
             .unwrap()
         {
-            IngressAppendOutcome::Appended(_) => {}
-            IngressAppendOutcome::Duplicate { .. } | IngressAppendOutcome::Conflict => {
-                panic!("expired identity must admit a new Event")
+            AppendOrDuplicateOutcome::Appended(_) => {}
+            AppendOrDuplicateOutcome::Duplicate { .. } | AppendOrDuplicateOutcome::Conflict => {
+                panic!("expired identity must append a new Event")
             }
         }
         assert_eq!(store.read(timeline.id(), SeqRange::all()).unwrap().len(), 2);
+
+        assert_scope_withdrawal(store, timeline.id(), &draft);
     }
 
     #[test]
@@ -268,9 +335,9 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn ingress_contract_memory() {
+    fn append_or_duplicate_contract_memory() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
-        ingress_contract(&mut *store);
+        append_or_duplicate_contract(&mut *store);
     }
 
     #[cfg(feature = "sqlite")]
@@ -284,9 +351,9 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn ingress_contract_sqlite() {
+    fn append_or_duplicate_contract_sqlite() {
         let mut store = open_store(StoreConfig::SqliteInMemory).unwrap();
-        ingress_contract(&mut *store);
+        append_or_duplicate_contract(&mut *store);
     }
 
     #[cfg(feature = "sqlite")]

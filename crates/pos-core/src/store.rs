@@ -29,15 +29,15 @@ use crate::{
     timeline::{Timeline, TimelineMeta},
 };
 
-/// Opaque, fixed-size identity for a retried ingress message.
+/// Opaque, fixed-size identity for a retried external append.
 ///
-/// The ingress adapter derives this with a gateway-local keyed hash. The
-/// `EventStore` persists only these digest bytes; it never receives the raw
-/// message or the deduplication preimage.
+/// An application derives this from its external identity using a keyed hash.
+/// The `EventStore` persists only these digest bytes; it never receives the
+/// raw message or the deduplication preimage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct IngressDedupKey([u8; 32]);
+pub struct AppendDedupKey([u8; 32]);
 
-impl IngressDedupKey {
+impl AppendDedupKey {
     #[must_use]
     pub const fn from_keyed_hash(bytes: [u8; 32]) -> Self {
         Self(bytes)
@@ -49,14 +49,14 @@ impl IngressDedupKey {
     }
 }
 
-/// Opaque, fixed-size digest of the retained canonical ingress content.
+/// Opaque, fixed-size scope that owns one or more deduplication identities.
 ///
-/// This distinguishes a retry from a conflicting re-use of the same
-/// [`IngressDedupKey`] without retaining the canonical content itself.
+/// Applications use this to revoke all removable deduplication state for one
+/// external principal without persisting that principal's raw identifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct IngressContentKey([u8; 32]);
+pub struct AppendDedupScope([u8; 32]);
 
-impl IngressContentKey {
+impl AppendDedupScope {
     #[must_use]
     pub const fn from_keyed_hash(bytes: [u8; 32]) -> Self {
         Self(bytes)
@@ -68,37 +68,44 @@ impl IngressContentKey {
     }
 }
 
-/// Bounded-lifetime ingress identity supplied by an authenticated adapter.
+/// A deduplication identity and its revocable ownership scope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct IngressIdentity {
-    pub dedup_key: IngressDedupKey,
-    pub content_key: IngressContentKey,
-    pub expires_at: WallTime,
+pub struct AppendIdentity {
+    pub dedup_key: AppendDedupKey,
+    pub scope: AppendDedupScope,
 }
 
-impl IngressIdentity {
+impl AppendIdentity {
     #[must_use]
-    pub const fn new(
-        dedup_key: IngressDedupKey,
-        content_key: IngressContentKey,
-        expires_at: WallTime,
-    ) -> Self {
-        Self {
-            dedup_key,
-            content_key,
-            expires_at,
-        }
+    pub const fn new(dedup_key: AppendDedupKey, scope: AppendDedupScope) -> Self {
+        Self { dedup_key, scope }
     }
 }
 
-/// Result of atomically admitting one ingress event.
+/// The fixed retention horizon for an append identity.
+///
+/// The horizon is part of the append-or-duplicate storage contract rather
+/// than a caller-selected expiry policy.
+pub const APPEND_IDENTITY_RETENTION_MICROS: u64 = 7 * 24 * 60 * 60 * 1_000_000;
+
+/// Return the fixed expiry for an identity admitted at `admitted_at`.
+#[must_use]
+pub const fn append_identity_expires_at(admitted_at: WallTime) -> WallTime {
+    WallTime::from_micros(
+        admitted_at
+            .as_micros()
+            .saturating_add(APPEND_IDENTITY_RETENTION_MICROS),
+    )
+}
+
+/// Result of atomically appending one externally identified Event.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum IngressAppendOutcome {
+pub enum AppendOrDuplicateOutcome {
     /// The Event was durably appended for the first time.
     Appended(Box<Event>),
-    /// The same identity and canonical content had already been appended.
+    /// The same identity and retained canonical content had already been appended.
     Duplicate { event_id: EventId },
-    /// The identity was already used for different canonical content.
+    /// The identity was already used for different retained canonical content.
     Conflict,
 }
 
@@ -219,37 +226,54 @@ pub trait EventStore: Send {
         drafts: &[EventDraft],
     ) -> Result<Vec<Event>, CoreError>;
 
-    /// Atomically append one ingress draft or report its prior admission.
+    /// Atomically append one externally identified draft or report its prior admission.
     ///
-    /// Implementations must persist the ingress identity and Event in the
-    /// same transaction. Call [`Self::purge_expired_ingress_identities`] from
-    /// asynchronous maintenance, never from this admission path.
+    /// Implementations must persist the opaque identity and Event in the same
+    /// transaction, derive the fixed seven-day expiry from `admitted_at`, and
+    /// compare retained Event content themselves on a repeated identity. Call
+    /// [`Self::purge_expired_append_identities`] from asynchronous maintenance,
+    /// never from this admission path.
     ///
     /// # Errors
     /// Returns [`CoreError::Storage`] when the backend does not implement
-    /// ingress idempotency, or the same errors as [`Self::append`].
+    /// atomic append-or-duplicate, or the same errors as [`Self::append`].
     fn append_or_duplicate(
         &mut self,
         _timeline: TimelineId,
-        _identity: IngressIdentity,
+        _identity: AppendIdentity,
+        _admitted_at: WallTime,
         _draft: EventDraft,
-    ) -> Result<IngressAppendOutcome, CoreError> {
+    ) -> Result<AppendOrDuplicateOutcome, CoreError> {
         Err(CoreError::Storage(
-            "atomic ingress idempotency is unsupported by this EventStore".to_owned(),
+            "atomic append-or-duplicate is unsupported by this EventStore".to_owned(),
         ))
     }
 
-    /// Delete deduplication identities whose retention horizon has passed.
+    /// Delete append identities whose fixed retention horizon has passed.
     ///
     /// This maintenance operation is intentionally separate from admission so
     /// normal ingress remains one bounded lookup and one atomic write.
     ///
     /// # Errors
     /// Returns [`CoreError::Storage`] when the backend does not implement
-    /// ingress identity cleanup.
-    fn purge_expired_ingress_identities(&mut self, _now: WallTime) -> Result<usize, CoreError> {
+    /// append identity cleanup.
+    fn purge_expired_append_identities(&mut self, _now: WallTime) -> Result<usize, CoreError> {
         Err(CoreError::Storage(
-            "ingress identity cleanup is unsupported by this EventStore".to_owned(),
+            "append identity cleanup is unsupported by this EventStore".to_owned(),
+        ))
+    }
+
+    /// Remove all append identities owned by one revocable opaque scope.
+    ///
+    /// Applications call this outside the admission path when an external
+    /// principal is revoked or withdrawn. It cannot remove Timeline Events.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the backend does not implement
+    /// append identity withdrawal cleanup.
+    fn remove_append_identities(&mut self, _scope: AppendDedupScope) -> Result<usize, CoreError> {
+        Err(CoreError::Storage(
+            "append identity withdrawal cleanup is unsupported by this EventStore".to_owned(),
         ))
     }
 
@@ -991,26 +1015,29 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn ingress_defaults_fail_closed() {
+    fn append_or_duplicate_defaults_fail_closed() {
         let mut store = TrivialStore::new();
-        let identity = IngressIdentity::new(
-            IngressDedupKey::from_keyed_hash([1; 32]),
-            IngressContentKey::from_keyed_hash([2; 32]),
-            WallTime::from_micros(3),
+        let identity = AppendIdentity::new(
+            AppendDedupKey::from_keyed_hash([1; 32]),
+            AppendDedupScope::from_keyed_hash([2; 32]),
         );
         let draft = EventDraft::new(
             EntityId::new(),
-            Kind::new("test.ingress"),
+            Kind::new("test.append"),
             CanonicalBytes::from_vec(Vec::new()),
         );
         let append_error = store
-            .append_or_duplicate(TimelineId::new(), identity, draft)
+            .append_or_duplicate(TimelineId::new(), identity, WallTime::from_micros(3), draft)
             .unwrap_err();
-        assert!(append_error.to_string().contains("idempotency"));
+        assert!(append_error.to_string().contains("append-or-duplicate"));
         let cleanup_error = store
-            .purge_expired_ingress_identities(WallTime::from_micros(3))
+            .purge_expired_append_identities(WallTime::from_micros(3))
             .unwrap_err();
         assert!(cleanup_error.to_string().contains("cleanup"));
+        let withdrawal_error = store
+            .remove_append_identities(AppendDedupScope::from_keyed_hash([2; 32]))
+            .unwrap_err();
+        assert!(withdrawal_error.to_string().contains("withdrawal"));
     }
 
     #[test]
