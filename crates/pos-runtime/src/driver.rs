@@ -15,7 +15,7 @@ use pos_core::{
 };
 
 use crate::error::RuntimeError;
-use std::collections::hash_map::Entry;
+use std::collections::{hash_map::Entry, HashSet};
 
 /// The output of a single driver step.
 #[derive(Debug, Default)]
@@ -48,8 +48,8 @@ impl ProjectionKey {
 /// The scheduler creates one snapshot before it steps any driver. Its views own
 /// cloned state, so every driver observes the same committed projection state
 /// even if later tick work changes the live registry.
-pub struct ObservationSnapshot {
-    states: std::collections::HashMap<ProjectionKey, Option<State>>,
+pub(crate) struct ObservationSnapshot {
+    states: std::collections::HashMap<ProjectionKey, State>,
 }
 
 impl ObservationSnapshot {
@@ -68,7 +68,9 @@ impl ObservationSnapshot {
         let mut states = std::collections::HashMap::new();
         for key in subscriptions {
             if let Entry::Vacant(entry) = states.entry(key.clone()) {
-                entry.insert(state_for(key));
+                if let Some(state) = state_for(key) {
+                    entry.insert(state);
+                }
             }
         }
         Self { states }
@@ -76,13 +78,17 @@ impl ObservationSnapshot {
 
     #[must_use]
     pub(crate) fn view_for<'a>(&'a self, subscriptions: &[ProjectionKey]) -> ObservationView<'a> {
-        let mut states = std::collections::HashMap::with_capacity(subscriptions.len());
+        let mut unique = 0usize;
+        let mut seen = HashSet::with_capacity(subscriptions.len());
         for key in subscriptions {
-            if let Entry::Vacant(entry) = states.entry(key.clone()) {
-                entry.insert(self.states.get(key).and_then(Option::as_ref));
+            if seen.insert(key.clone()) {
+                unique += 1;
             }
         }
-        ObservationView { states }
+        ObservationView {
+            snapshot: Some(self),
+            len: unique,
+        }
     }
 }
 
@@ -94,30 +100,32 @@ impl ObservationSnapshot {
 /// a driver to distinguish a subscribed-but-unseen entity from an undeclared
 /// dependency.
 pub struct ObservationView<'a> {
-    states: std::collections::HashMap<ProjectionKey, Option<&'a State>>,
+    snapshot: Option<&'a ObservationSnapshot>,
+    len: usize,
 }
 
 impl ObservationView<'_> {
     #[must_use]
     pub fn empty() -> Self {
         Self {
-            states: std::collections::HashMap::new(),
+            snapshot: None,
+            len: 0,
         }
     }
 
     #[must_use]
     pub fn state_for(&self, key: &ProjectionKey) -> Option<&State> {
-        self.states.get(key).and_then(Option::as_ref).copied()
+        self.snapshot.and_then(|snapshot| snapshot.states.get(key))
     }
 
     #[must_use]
     pub fn len(&self) -> usize {
-        self.states.len()
+        self.len
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.states.is_empty()
+        self.len == 0
     }
 }
 
