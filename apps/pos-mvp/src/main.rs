@@ -442,10 +442,12 @@ fn print_privacy(scenario: &Scenario) {
                 );
                 any = true;
             }
-            let (cloaked_latitude, cloaked_longitude) = cloaker.cloak(point);
+            let cloaked_point = cloaker.cloak(point);
             println!(
-                "  {} ≈ ({cloaked_latitude:.1}, {cloaked_longitude:.1})",
-                opt.label
+                "  {} ≈ ({:.1}, {:.1})",
+                opt.label,
+                cloaked_point.latitude(),
+                cloaked_point.longitude()
             );
         }
     }
