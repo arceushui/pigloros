@@ -17,16 +17,6 @@ pub struct AdapterRecord {
     pub wall_time: WallTime,
 }
 
-/// A versioned, allow-listed experiment configuration that can be executed again.
-///
-/// This deliberately describes only compositions the host knows how to construct;
-/// arbitrary plugin trait objects are not portable manifest data.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ExperimentRecipe {
-    /// The deterministic reference composition shipped by `pos experiment run`.
-    BuiltinReferenceV1 { ticks: u64 },
-}
-
 /// A signed manifest that allows a third party to re-run an experiment and
 /// get a bit-identical result hash. Moat #5: cryptographically verifiable provenance.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,9 +28,6 @@ pub struct ReproManifest {
     pub adapter_records: Vec<AdapterRecord>,
     /// Human-readable label for this experiment run.
     pub label: Option<String>,
-    /// An executable configuration when the producing host can provide one.
-    #[serde(default)]
-    pub recipe: Option<ExperimentRecipe>,
 }
 
 impl ReproManifest {
@@ -53,7 +40,6 @@ impl ReproManifest {
             plugin_versions: HashMap::new(),
             adapter_records: Vec::new(),
             label: None,
-            recipe: None,
         }
     }
 
@@ -70,13 +56,6 @@ impl ReproManifest {
     #[must_use]
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
         self.label = Some(label.into());
-        self
-    }
-
-    /// Attach the versioned recipe required for an independent re-run.
-    #[must_use]
-    pub fn with_recipe(mut self, recipe: ExperimentRecipe) -> Self {
-        self.recipe = Some(recipe);
         self
     }
 }
@@ -154,23 +133,5 @@ mod tests {
 
         let labeled = m.with_label("my-run");
         assert_eq!(labeled.label.as_deref(), Some("my-run"));
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn manifest_recipe_round_trip() {
-        let manifest =
-            sample_manifest().with_recipe(ExperimentRecipe::BuiltinReferenceV1 { ticks: 12 });
-        let decoded: ReproManifest =
-            serde_json::from_str(&serde_json::to_string(&manifest).unwrap()).unwrap();
-        assert_eq!(decoded.recipe, manifest.recipe);
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn legacy_manifest_without_recipe_is_readable() {
-        let json = serde_json::to_string(&sample_manifest()).unwrap();
-        let decoded: ReproManifest = serde_json::from_str(&json).unwrap();
-        assert!(decoded.recipe.is_none());
     }
 }

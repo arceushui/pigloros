@@ -12,10 +12,30 @@
 //!   pos version
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-use pos_core::{clock::Seq, ids::TimelineId, store::SeqRange, ExperimentRecipe};
-use pos_experiment::{Experiment, ExperimentConfig, RunResult, StopCondition};
+use pos_core::{clock::Seq, ids::TimelineId, store::SeqRange};
+use pos_experiment::{
+    Experiment, ExperimentConfig, ReproductionManifest, ReproductionRecipe, RunResult,
+    StopCondition,
+};
 use pos_store::{open_store, StoreConfig};
 use ulid::Ulid;
+
+const POS_CLI_REPRODUCTION_HOST: &str = "pos-cli";
+const POS_CLI_REPRODUCTION_FORMAT: u32 = 1;
+const MAX_REPRODUCTION_TICKS: u64 = 1_000_000;
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CliExperimentRecipe {
+    #[serde(rename = "BuiltinReferenceV1")]
+    builtin_reference_v1: BuiltinReferenceV1,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuiltinReferenceV1 {
+    ticks: u64,
+}
 
 #[cfg(not(test))]
 fn handle_run_error(e: &dyn std::error::Error) -> ! {
@@ -458,23 +478,34 @@ fn run_builtin_reference_experiment(
 }
 
 fn cmd_experiment_run(path: &str, ticks: u64) -> Result<(), Box<dyn std::error::Error>> {
-    let mut result = run_builtin_reference_experiment(
+    let result = run_builtin_reference_experiment(
         StoreConfig::Sqlite {
             path: path.to_owned(),
         },
         ticks,
     )?;
-    result.manifest.recipe = Some(ExperimentRecipe::BuiltinReferenceV1 { ticks });
+    let completed_ticks = result.ticks;
+    let total_events = result.total_events;
+    let timeline_id = result.timeline_id;
+    let reproduction = result.with_reproduction_recipe(cli_reproduction_recipe(ticks));
 
     // Save manifest alongside the store for later verification
     let manifest_path = path.replace(".db", "-manifest.json");
-    save_run_manifest(&manifest_path, &result.manifest)?;
+    save_run_manifest(&manifest_path, &reproduction)?;
 
     println!(
-        "Experiment complete: {} ticks, {} events, timeline={}, manifest={}",
-        result.ticks, result.total_events, result.timeline_id, manifest_path
+        "Experiment complete: {completed_ticks} ticks, {total_events} events, \
+         timeline={timeline_id}, manifest={manifest_path}"
     );
     Ok(())
+}
+
+fn cli_reproduction_recipe(ticks: u64) -> ReproductionRecipe {
+    ReproductionRecipe::new(
+        POS_CLI_REPRODUCTION_HOST,
+        POS_CLI_REPRODUCTION_FORMAT,
+        serde_json::json!({"BuiltinReferenceV1": {"ticks": ticks}}),
+    )
 }
 
 fn cmd_experiment_reproduce(manifest_path: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -484,17 +515,13 @@ fn cmd_experiment_reproduce(manifest_path: &str) -> Result<(), Box<dyn std::erro
         .and_then(reproduce_manifest)
 }
 
-fn reproduce_manifest(manifest: pos_core::ReproManifest) -> Result<(), Box<dyn std::error::Error>> {
-    manifest
-        .recipe
-        .ok_or_else(|| "manifest has no executable experiment recipe".into())
-        .and_then(|recipe| match recipe {
-            ExperimentRecipe::BuiltinReferenceV1 { ticks } => {
-                run_builtin_reference_experiment(StoreConfig::Memory, ticks)
-            }
-        })
+fn reproduce_manifest(
+    reproduction: ReproductionManifest,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let recipe = reproduce_cli_recipe(reproduction.recipe)?;
+    run_builtin_reference_experiment(StoreConfig::Memory, recipe.builtin_reference_v1.ticks)
         .and_then(|reproduced| {
-            if reproduced.manifest.head_hash == manifest.head_hash {
+            if reproduced.manifest.head_hash == reproduction.manifest.head_hash {
                 println!("OK");
                 Ok(())
             } else {
@@ -502,6 +529,22 @@ fn reproduce_manifest(manifest: pos_core::ReproManifest) -> Result<(), Box<dyn s
                 Err("reproduced chain_head does not match manifest".into())
             }
         })
+}
+
+fn reproduce_cli_recipe(
+    recipe: ReproductionRecipe,
+) -> Result<CliExperimentRecipe, Box<dyn std::error::Error>> {
+    if recipe.host_id != POS_CLI_REPRODUCTION_HOST {
+        return Err("manifest recipe belongs to a different host".into());
+    }
+    if recipe.format_version != POS_CLI_REPRODUCTION_FORMAT {
+        return Err("manifest recipe has an unsupported format version".into());
+    }
+    let decoded: CliExperimentRecipe = serde_json::from_value(recipe.configuration)?;
+    if decoded.builtin_reference_v1.ticks > MAX_REPRODUCTION_TICKS {
+        return Err("manifest recipe tick count exceeds the reproduction limit".into());
+    }
+    Ok(decoded)
 }
 
 fn cmd_experiment_backtest(
@@ -723,13 +766,11 @@ fn accumulate_entities_from_registry_json(
 /// Serialize and write the run manifest next to the store.
 fn save_run_manifest(
     path: &str,
-    manifest: &pos_core::manifest::ReproManifest,
+    manifest: &ReproductionManifest,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // `ReproManifest` is derived `Serialize` with plain fields — encoding cannot fail.
-    let manifest_json =
-        serde_json::to_string_pretty(manifest).expect("ReproManifest serialization is infallible");
-    std::fs::write(path, &manifest_json)?;
-    Ok(())
+    serde_json::to_string_pretty(manifest)
+        .map_err(Into::into)
+        .and_then(|manifest_json| std::fs::write(path, manifest_json).map_err(Into::into))
 }
 
 /// Print eval calibration metrics when a report is present.
@@ -968,12 +1009,9 @@ mod tests {
         // Verify manifest was written alongside store
         let manifest_path = path.replace(".db", "-manifest.json");
         assert!(std::path::Path::new(&manifest_path).exists());
-        let manifest: pos_core::ReproManifest =
+        let manifest: ReproductionManifest =
             serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
-        assert_eq!(
-            manifest.recipe,
-            Some(ExperimentRecipe::BuiltinReferenceV1 { ticks: 2 })
-        );
+        assert_eq!(manifest.recipe, cli_reproduction_recipe(2));
     }
 
     #[test]
@@ -1006,14 +1044,80 @@ mod tests {
 
     #[test]
     fn cmd_experiment_reproduce_reports_chain_head_mismatch() {
-        let manifest = pos_core::ReproManifest::new(
-            TimelineId::new(),
-            pos_core::Hash::zero(),
-            pos_core::clock::WallTime::from_micros(0),
-        )
-        .with_recipe(ExperimentRecipe::BuiltinReferenceV1 { ticks: 1 });
+        let manifest = ReproductionManifest {
+            manifest: pos_core::ReproManifest::new(
+                TimelineId::new(),
+                pos_core::Hash::zero(),
+                pos_core::clock::WallTime::from_micros(0),
+            ),
+            recipe: cli_reproduction_recipe(1),
+        };
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), serde_json::to_string(&manifest).unwrap()).unwrap();
+        assert!(cmd_experiment_reproduce(file.path().to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn reproduce_cli_recipe_rejects_a_different_host() {
+        let recipe = ReproductionRecipe::new("another-host", 1, serde_json::json!({}));
+        assert!(reproduce_cli_recipe(recipe).is_err());
+    }
+
+    #[test]
+    fn reproduce_manifest_rejects_a_different_host_before_running() {
+        let reproduction = ReproductionManifest {
+            manifest: pos_core::ReproManifest::new(
+                TimelineId::new(),
+                pos_core::Hash::zero(),
+                pos_core::clock::WallTime::from_micros(0),
+            ),
+            recipe: ReproductionRecipe::new("another-host", 1, serde_json::json!({})),
+        };
+        assert!(reproduce_manifest(reproduction).is_err());
+    }
+
+    #[test]
+    fn reproduce_cli_recipe_rejects_an_unknown_format() {
+        let recipe = ReproductionRecipe::new(
+            POS_CLI_REPRODUCTION_HOST,
+            POS_CLI_REPRODUCTION_FORMAT + 1,
+            serde_json::json!({}),
+        );
+        assert!(reproduce_cli_recipe(recipe).is_err());
+    }
+
+    #[test]
+    fn reproduce_cli_recipe_rejects_unknown_configuration_fields() {
+        let recipe = ReproductionRecipe::new(
+            POS_CLI_REPRODUCTION_HOST,
+            POS_CLI_REPRODUCTION_FORMAT,
+            serde_json::json!({"BuiltinReferenceV1": {"ticks": 1, "extra": true}}),
+        );
+        assert!(reproduce_cli_recipe(recipe).is_err());
+    }
+
+    #[test]
+    fn reproduce_cli_recipe_rejects_excessive_tick_count() {
+        let recipe = cli_reproduction_recipe(MAX_REPRODUCTION_TICKS + 1);
+        assert!(reproduce_cli_recipe(recipe).is_err());
+    }
+
+    #[test]
+    fn cmd_experiment_reproduce_rejects_unknown_envelope_field() {
+        let reproduction = ReproductionManifest {
+            manifest: pos_core::ReproManifest::new(
+                TimelineId::new(),
+                pos_core::Hash::zero(),
+                pos_core::clock::WallTime::from_micros(0),
+            ),
+            recipe: cli_reproduction_recipe(1),
+        };
+        let mut json = serde_json::to_value(reproduction).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .insert("extra".to_owned(), serde_json::Value::Null);
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), serde_json::to_string(&json).unwrap()).unwrap();
         assert!(cmd_experiment_reproduce(file.path().to_str().unwrap()).is_err());
     }
 

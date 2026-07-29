@@ -12,6 +12,7 @@
 use pos_core::{clock::WallTime, crypto::Hash, ReproManifest, Timeline};
 use pos_runtime::PluginRegistry;
 use pos_store::{open_store, StoreConfig};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -48,6 +49,38 @@ pub struct RunResult {
     pub store_config: StoreConfig,
 }
 
+/// Host-owned configuration required to execute a reproduction.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReproductionRecipe {
+    pub host_id: String,
+    pub format_version: u32,
+    pub configuration: serde_json::Value,
+}
+
+impl ReproductionRecipe {
+    #[must_use]
+    pub fn new(
+        host_id: impl Into<String>,
+        format_version: u32,
+        configuration: serde_json::Value,
+    ) -> Self {
+        Self {
+            host_id: host_id.into(),
+            format_version,
+            configuration,
+        }
+    }
+}
+
+/// A host envelope containing kernel provenance and a host-executable recipe.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReproductionManifest {
+    pub manifest: ReproManifest,
+    pub recipe: ReproductionRecipe,
+}
+
 impl RunResult {
     /// Reopen the store and branch from this result's timeline at its head.
     ///
@@ -68,6 +101,15 @@ impl RunResult {
         let forked = store.fork(timeline.id(), timeline.head, name)?;
         Ok(forked)
     }
+
+    /// Require host-owned execution metadata before exporting a reproducible run.
+    #[must_use]
+    pub fn with_reproduction_recipe(self, recipe: ReproductionRecipe) -> ReproductionManifest {
+        ReproductionManifest {
+            manifest: self.manifest,
+            recipe,
+        }
+    }
 }
 
 /// The closed experiment host loop.
@@ -76,6 +118,7 @@ impl RunResult {
 pub struct Experiment {
     config: ExperimentConfig,
     registry: PluginRegistry,
+    fork_registry_factory: Option<ForkRegistryFactory>,
 }
 
 /// A started experiment that owns its live `EventStore` and Timeline.
@@ -85,12 +128,17 @@ pub struct Experiment {
 pub struct ExperimentSession {
     config: ExperimentConfig,
     registry: PluginRegistry,
-    store: Box<dyn pos_core::store::EventStore>,
+    store: SharedEventStore,
+    fork_registry_factory: Option<ForkRegistryFactory>,
     timeline: Timeline,
     ticks: u64,
     total_events: u64,
     complete: bool,
 }
+
+type ForkRegistryFactory =
+    Arc<dyn Fn() -> Result<PluginRegistry, pos_runtime::RuntimeError> + Send + Sync>;
+type SharedEventStore = Arc<Mutex<Box<dyn pos_core::store::EventStore>>>;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -102,11 +150,84 @@ pub enum ExperimentError {
     Runtime(#[from] pos_runtime::RuntimeError),
     #[error("store error: {0}")]
     Store(#[from] pos_core::CoreError),
+    #[error("a fresh PluginRegistry factory is required to run a forked experiment session")]
+    MissingForkRegistryFactory,
+    #[error("the shared experiment EventStore lock is poisoned")]
+    SharedStoreLockPoisoned,
 }
 
 // ---------------------------------------------------------------------------
-// Private helper: run a tick loop on an existing store + timeline
+// Private helpers: shared tick and completion pipeline
 // ---------------------------------------------------------------------------
+
+/// Advance exactly one complete tick through the experiment pipeline.
+fn advance_tick(
+    store: &mut dyn pos_core::store::EventStore,
+    timeline_id: pos_core::ids::TimelineId,
+    registry: &mut PluginRegistry,
+) -> Result<Option<(pos_core::clock::Seq, u64)>, ExperimentError> {
+    let drafts = registry.step_all(store, timeline_id)?;
+    if drafts.is_empty() {
+        return Ok(None);
+    }
+
+    registry.schemas.validate_batch(&drafts)?;
+    let committed = store.append(timeline_id, &drafts)?;
+    let last_seq = committed[committed.len() - 1].seq;
+    for event in &committed {
+        registry.projections.apply_event(event);
+    }
+    Ok(Some((last_seq, committed.len() as u64)))
+}
+
+fn chain_head(
+    store: &dyn pos_core::store::EventStore,
+    timeline_id: pos_core::ids::TimelineId,
+) -> Result<Hash, ExperimentError> {
+    store
+        .read(timeline_id, pos_store::SeqRange::all())
+        .map(|events| {
+            if events.is_empty() {
+                Hash::zero()
+            } else {
+                let mut hasher = blake3::Hasher::new();
+                for event in &events {
+                    hasher.update(event.payload_hash.as_bytes());
+                }
+                Hash::from_bytes(*hasher.finalize().as_bytes())
+            }
+        })
+        .map_err(ExperimentError::from)
+}
+
+fn lock_store(
+    store: &Mutex<Box<dyn pos_core::store::EventStore>>,
+) -> Result<MutexGuard<'_, Box<dyn pos_core::store::EventStore>>, ExperimentError> {
+    store
+        .lock()
+        .map_err(|_| ExperimentError::SharedStoreLockPoisoned)
+}
+
+fn read_upcast_events(
+    store: &Mutex<Box<dyn pos_core::store::EventStore>>,
+    timeline_id: pos_core::ids::TimelineId,
+    registry: &PluginRegistry,
+) -> Result<Vec<pos_core::Event>, ExperimentError> {
+    lock_store(store).and_then(|store| {
+        store
+            .read_upcast(
+                timeline_id,
+                pos_store::SeqRange::all(),
+                &registry.upcasters,
+                &registry.schema_versions,
+            )
+            .map_err(ExperimentError::from)
+    })
+}
+
+fn hydrate_projections(registry: &mut PluginRegistry, events: &[pos_core::Event]) {
+    registry.projections.fold_events(events);
+}
 
 /// Run the tick loop on the given store and timeline.
 ///
@@ -132,38 +253,16 @@ fn run_experiment_on_store(
             break;
         }
 
-        let drafts = registry.step_all(store, timeline_id)?;
-
-        if drafts.is_empty() {
+        let advanced = advance_tick(store, timeline_id, registry)?;
+        let Some((_, committed_count)) = advanced else {
             break;
-        }
-
-        registry.schemas.validate_batch(&drafts)?;
-
-        let committed = store.append(timeline_id, &drafts)?;
-        let committed_count = committed.len() as u64;
-
-        for event in &committed {
-            registry.projections.apply_event(event);
-        }
+        };
 
         total_events += committed_count;
         ticks += 1;
     }
 
-    // Compute chain_head as BLAKE3 hash of all payload hashes in seq order.
-    let events = store.read(timeline_id, pos_store::SeqRange::all())?;
-    let chain_head = if events.is_empty() {
-        Hash::zero()
-    } else {
-        let mut hasher = blake3::Hasher::new();
-        for e in &events {
-            hasher.update(e.payload_hash.as_bytes());
-        }
-        Hash::from_bytes(*hasher.finalize().as_bytes())
-    };
-
-    Ok((ticks, total_events, chain_head))
+    chain_head(store, timeline_id).map(|head| (ticks, total_events, head))
 }
 
 /// Fork the train timeline for eval. Error path covered via fault-injection tests.
@@ -188,7 +287,22 @@ impl Experiment {
         Self {
             config,
             registry: PluginRegistry::new(),
+            fork_registry_factory: None,
         }
+    }
+
+    /// Configure how each runnable Fork receives fresh plugin runtime state.
+    ///
+    /// The factory must register the same deterministic plugin composition as
+    /// the parent. Fork creation hydrates fresh projections from inherited
+    /// Timeline history while drivers begin with fresh runtime state.
+    #[must_use]
+    pub fn with_fork_registry_factory(
+        mut self,
+        factory: impl Fn() -> Result<PluginRegistry, pos_runtime::RuntimeError> + Send + Sync + 'static,
+    ) -> Self {
+        self.fork_registry_factory = Some(Arc::new(factory));
+        self
     }
 
     /// Register a plugin (wires schemas + reducer + driver).
@@ -216,7 +330,8 @@ impl Experiment {
         Ok(ExperimentSession {
             config: self.config,
             registry: self.registry,
-            store,
+            store: Arc::new(Mutex::new(store)),
+            fork_registry_factory: self.fork_registry_factory,
             timeline,
             ticks: 0,
             total_events: 0,
@@ -294,37 +409,59 @@ impl ExperimentSession {
             return Ok(false);
         }
 
-        let drafts = self
-            .registry
-            .step_all(self.store.as_ref(), self.timeline.id())?;
-        if drafts.is_empty() {
+        let mut store = lock_store(&self.store)?;
+        let advanced = advance_tick(store.as_mut(), self.timeline.id(), &mut self.registry)?;
+        let Some((last_seq, committed_count)) = advanced else {
             self.complete = true;
             return Ok(false);
-        }
+        };
+        self.timeline.head = last_seq;
 
-        self.registry.schemas.validate_batch(&drafts)?;
-        let committed = self.store.append(self.timeline.id(), &drafts)?;
-        self.timeline.head = committed
-            .last()
-            .map_or(self.timeline.head, |event| event.seq);
-
-        for event in &committed {
-            self.registry.projections.apply_event(event);
-        }
-
-        self.total_events += committed.len() as u64;
+        self.total_events += committed_count;
         self.ticks += 1;
         Ok(true)
     }
 
     /// Fork the active Timeline at its most recently completed tick boundary.
     ///
+    /// The child shares the live store, owns fresh runtime state, hydrates
+    /// projections from inherited Timeline history, and can be stepped
+    /// immediately without reopening persistence.
+    ///
     /// # Errors
-    /// Returns [`ExperimentError::Store`] if the `EventStore` rejects the fork.
-    pub fn fork(&mut self, name: &str) -> Result<Timeline, ExperimentError> {
-        self.store
-            .fork(self.timeline.id(), self.timeline.head, name)
-            .map_err(ExperimentError::from)
+    /// Returns [`ExperimentError::Runtime`] if fresh runtime construction fails,
+    /// [`ExperimentError::Store`] if history hydration or forking fails, or
+    /// [`ExperimentError::SharedStoreLockPoisoned`] if the shared store is poisoned.
+    pub fn fork(&mut self, name: &str) -> Result<Self, ExperimentError> {
+        let factory = self
+            .fork_registry_factory
+            .as_ref()
+            .ok_or(ExperimentError::MissingForkRegistryFactory)?;
+        let mut registry = factory()?;
+        let events = read_upcast_events(&self.store, self.timeline.id(), &registry)?;
+        hydrate_projections(&mut registry, &events);
+        let config = ExperimentConfig {
+            name: name.to_owned(),
+            stop: self.config.stop.clone(),
+            store_config: self.config.store_config.clone(),
+        };
+
+        lock_store(&self.store)
+            .and_then(|mut store| {
+                store
+                    .fork(self.timeline.id(), self.timeline.head, name)
+                    .map_err(ExperimentError::from)
+            })
+            .map(|timeline| Self {
+                config,
+                registry,
+                store: Arc::clone(&self.store),
+                fork_registry_factory: Some(Arc::clone(factory)),
+                timeline,
+                ticks: self.ticks,
+                total_events: self.total_events,
+                complete: false,
+            })
     }
 
     /// Advance until the stop condition or an empty driver batch, then return
@@ -336,16 +473,8 @@ impl ExperimentSession {
         while self.step()? {}
 
         let timeline_id = self.timeline.id();
-        let events = self.store.read(timeline_id, pos_store::SeqRange::all())?;
-        let chain_head = if events.is_empty() {
-            Hash::zero()
-        } else {
-            let mut hasher = blake3::Hasher::new();
-            for event in &events {
-                hasher.update(event.payload_hash.as_bytes());
-            }
-            Hash::from_bytes(*hasher.finalize().as_bytes())
-        };
+        let chain_head =
+            lock_store(&self.store).and_then(|store| chain_head(store.as_ref(), timeline_id))?;
 
         let mut manifest = ReproManifest::new(timeline_id, chain_head, WallTime::now());
         for (name, version) in self.registry.plugin_versions() {
@@ -845,30 +974,135 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn live_session_steps_and_forks_memory_timeline() {
         let entity = EntityId::new();
-        let plugin = make_plugin("session-ticker", &["session.event"]);
+        let plugin = make_plugin_with_reducer("session-ticker", &["session.event"]);
         let driver = FixedDriver::new(entity, "session.event", 1);
-        let mut experiment = Experiment::new(ExperimentConfig {
+        let config = ExperimentConfig {
             name: "session-test".to_owned(),
             stop: StopCondition::MaxTicks(2),
             store_config: StoreConfig::Memory,
+        };
+        let mut experiment = Experiment::new(config).with_fork_registry_factory(move || {
+            let plugin = make_plugin_with_reducer("session-ticker", &["session.event"]);
+            let driver = FixedDriver::new(entity, "session.event", 1);
+            let mut registry = PluginRegistry::new();
+            registry
+                .register(
+                    &plugin,
+                    Some(Box::new(CountReducer)),
+                    Some(Box::new(driver)),
+                )
+                .unwrap();
+            Ok(registry)
         });
         experiment
-            .register(&plugin, None, Some(Box::new(driver)))
+            .register(
+                &plugin,
+                Some(Box::new(CountReducer)),
+                Some(Box::new(driver)),
+            )
             .unwrap();
 
         let mut session = experiment.start().unwrap();
         assert!(session.step().unwrap());
         assert_eq!(session.timeline().head, pos_core::clock::Seq::from_u64(1));
 
-        let fork = session.fork("session-fork").unwrap();
+        let mut fork = session.fork("session-fork").unwrap();
         assert_eq!(
-            fork.meta.fork_point,
+            fork.timeline().meta.fork_point,
             Some((session.timeline().id(), session.timeline().head))
         );
+        let inherited_count = fork
+            .registry
+            .projections
+            .state_for(&entity)
+            .and_then(|state| state.get("n"))
+            .and_then(serde_json::Value::as_u64);
+        assert_eq!(inherited_count, Some(1));
+
+        assert!(fork.step().unwrap());
+        assert!(session.step().unwrap());
+        assert_ne!(fork.timeline().id(), session.timeline().id());
+        assert_eq!(session.timeline().head, pos_core::clock::Seq::from_u64(2));
+
+        let fork_result = fork.run_to_completion().unwrap();
+        assert_eq!(fork_result.ticks, 2);
+        assert_eq!(fork_result.total_events, 2);
 
         let result = session.run_to_completion().unwrap();
         assert_eq!(result.ticks, 2);
         assert_eq!(result.total_events, 2);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn live_session_fork_requires_fresh_runtime_factory() {
+        let mut session = Experiment::new(ExperimentConfig {
+            name: "missing-factory".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        })
+        .start()
+        .unwrap();
+
+        assert!(matches!(
+            session.fork("child"),
+            Err(ExperimentError::MissingForkRegistryFactory)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn live_session_fork_propagates_runtime_factory_failure() {
+        let mut session = Experiment::new(ExperimentConfig {
+            name: "factory-failure".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        })
+        .with_fork_registry_factory(|| {
+            Err(RuntimeError::NoDriver {
+                name: "unavailable".to_owned(),
+            })
+        })
+        .start()
+        .unwrap();
+
+        assert!(matches!(
+            session.fork("child"),
+            Err(ExperimentError::Runtime(RuntimeError::NoDriver { .. }))
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn live_session_returns_a_stable_error_for_a_poisoned_shared_store() {
+        let mut session = Experiment::new(ExperimentConfig {
+            name: "poisoned-store".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        })
+        .with_fork_registry_factory(|| Ok(PluginRegistry::new()))
+        .start()
+        .unwrap();
+        let store = Arc::clone(&session.store);
+        let _ = std::thread::spawn(move || {
+            let _guard = store.lock().unwrap();
+            panic!("poison the shared store for this test");
+        })
+        .join();
+
+        let error = session.step().unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "the shared experiment EventStore lock is poisoned"
+        );
+        assert!(matches!(
+            session.fork("child"),
+            Err(ExperimentError::SharedStoreLockPoisoned)
+        ));
+        assert!(matches!(
+            session.run_to_completion(),
+            Err(ExperimentError::SharedStoreLockPoisoned)
+        ));
     }
 
     #[test]
@@ -2047,6 +2281,37 @@ mod fault_injection_tests {
             session.run_to_completion(),
             Err(ExperimentError::Store(_))
         ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn live_session_fork_hydration_error_does_not_create_a_child_timeline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-fork-read.db");
+        let mut session = Experiment::new(ExperimentConfig {
+            name: "session-fork-read-fault".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Sqlite {
+                path: path.to_str().unwrap().to_owned(),
+            },
+        })
+        .with_fork_registry_factory(|| Ok(PluginRegistry::new()))
+        .start()
+        .unwrap();
+        drop_table(path.to_str().unwrap(), "events");
+
+        assert!(matches!(
+            session.fork("child"),
+            Err(ExperimentError::Store(_))
+        ));
+        assert_eq!(
+            lock_store(&session.store)
+                .unwrap()
+                .list_timelines()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
