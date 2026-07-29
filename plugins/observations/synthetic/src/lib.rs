@@ -124,7 +124,7 @@ impl Driver for SyntheticDriver {
         &mut self,
         _store: &dyn EventStore,
         _timeline: TimelineId,
-        _observations: ObservationView<'_>,
+        _observations: ObservationView,
     ) -> Result<StepOutput, RuntimeError> {
         #[allow(clippy::cast_precision_loss)]
         let value = (self.tick as f64 * 0.1_f64).sin() * self.amplitude;

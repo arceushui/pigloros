@@ -136,7 +136,7 @@ impl Driver for RuleAgentDriver {
         &mut self,
         _store: &dyn EventStore,
         _timeline: TimelineId,
-        _observations: ObservationView<'_>,
+        _observations: ObservationView,
     ) -> Result<StepOutput, RuntimeError> {
         let action = self.actions[self.tick as usize % self.actions.len()].clone();
         let payload = DecisionPayload {

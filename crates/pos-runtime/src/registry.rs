@@ -11,7 +11,7 @@ use pos_core::{ids::PluginId, Plugin, Reducer, SchemaVersionMap, Upcaster, Upcas
 use pos_state::ProjectionRegistry;
 
 use crate::{
-    driver::{Driver, ObservationView},
+    driver::{Driver, ObservationSnapshot},
     error::RuntimeError,
     recorder::RECORDER_EVENT_TYPE,
     schema::{EventTypeSchema, SchemaRegistry},
@@ -40,13 +40,14 @@ pub struct PluginRegistry {
 }
 
 impl PluginRegistry {
-    fn observations_for<'a>(
-        driver: &dyn Driver,
-        projections: &'a ProjectionRegistry,
-    ) -> ObservationView<'a> {
-        ObservationView::from_subscriptions(driver.subscriptions(), |key| {
-            projections.state_for(key.entity_id())
-        })
+    fn snapshot_for_tick(&self) -> ObservationSnapshot {
+        ObservationSnapshot::from_subscriptions(
+            self.plugins
+                .values()
+                .filter_map(|entry| entry.driver.as_deref())
+                .flat_map(|driver| driver.subscriptions().iter()),
+            |key| self.projections.state_for(key.entity_id()).cloned(),
+        )
     }
 
     #[must_use]
@@ -206,7 +207,7 @@ impl PluginRegistry {
         now_ns: u128,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         let mut all_drafts = Vec::new();
-        let projections = &self.projections;
+        let snapshot = self.snapshot_for_tick();
         for entry in self.plugins.values_mut() {
             if let Some(driver) = entry.driver.as_mut() {
                 let interval_ns = driver.tick_interval().as_nanos();
@@ -215,7 +216,7 @@ impl PluginRegistry {
                     None => true,
                 };
                 if ready {
-                    let observations = Self::observations_for(driver.as_ref(), projections);
+                    let observations = snapshot.view_for(driver.subscriptions());
                     let output = driver.step(store, timeline, observations)?;
                     entry.last_tick = Some(now_ns);
                     all_drafts.extend(output.drafts);
@@ -244,10 +245,10 @@ impl PluginRegistry {
         timeline: pos_core::ids::TimelineId,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         let mut all_drafts = Vec::new();
-        let projections = &self.projections;
+        let snapshot = self.snapshot_for_tick();
         for entry in self.plugins.values_mut() {
             if let Some(driver) = entry.driver.as_mut() {
-                let observations = Self::observations_for(driver.as_ref(), projections);
+                let observations = snapshot.view_for(driver.subscriptions());
                 let output = driver.step(store, timeline, observations)?;
                 all_drafts.extend(output.drafts);
             }
@@ -265,6 +266,7 @@ impl Default for PluginRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::driver::{ObservationView, StepOutput};
     use pos_core::{
         clock::{Seq, WallTime},
         crypto::Hash,
@@ -339,7 +341,7 @@ mod tests {
             &mut self,
             _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
-            _: ObservationView<'_>,
+            _: ObservationView,
         ) -> Result<crate::driver::StepOutput, RuntimeError> {
             Ok(crate::driver::StepOutput::empty())
         }
@@ -440,6 +442,9 @@ mod tests {
         let names: Vec<&str> = reg.plugin_names().collect();
         assert!(names.contains(&"alpha"));
         assert!(names.contains(&"beta"));
+        let versions: Vec<(&str, &str)> = reg.plugin_versions().collect();
+        assert!(versions.contains(&("alpha", "0.1.0")));
+        assert!(versions.contains(&("beta", "0.1.0")));
     }
 
     #[test]
@@ -460,7 +465,7 @@ mod tests {
                 &mut self,
                 _: &dyn pos_core::store::EventStore,
                 _: pos_core::ids::TimelineId,
-                _: ObservationView<'_>,
+                _: ObservationView,
             ) -> Result<StepOutput, RuntimeError> {
                 self.calls += 1;
                 let draft = EventDraft::new(
@@ -504,6 +509,37 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn step_all_propagates_driver_error() {
+        struct FailingDriver;
+
+        impl Driver for FailingDriver {
+            fn name(&self) -> &'static str {
+                "failing"
+            }
+
+            fn step(
+                &mut self,
+                _: &dyn pos_core::store::EventStore,
+                _: TimelineId,
+                _: ObservationView,
+            ) -> Result<StepOutput, RuntimeError> {
+                Err(RuntimeError::NoDriver {
+                    name: "failing".to_owned(),
+                })
+            }
+        }
+
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let timeline = store.create_timeline("t").unwrap();
+        let mut reg = PluginRegistry::new();
+        reg.register_driver(Box::new(FailingDriver));
+
+        let error = reg.step_all(store.as_ref(), timeline.id()).unwrap_err();
+        assert!(error.to_string().contains("failing"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn tick_cadenced_materializes_only_subscribed_projection_state() {
         use crate::driver::ProjectionKey;
         use pos_store::{open_store, StoreConfig};
@@ -526,7 +562,7 @@ mod tests {
                 &mut self,
                 _: &dyn pos_core::store::EventStore,
                 _: pos_core::ids::TimelineId,
-                observations: ObservationView<'_>,
+                observations: ObservationView,
             ) -> Result<crate::driver::StepOutput, RuntimeError> {
                 let observed = observations
                     .state_for(&self.target)

@@ -42,18 +42,16 @@ impl ProjectionKey {
     }
 }
 
-/// Read-only projection states materialized for one driver tick.
+/// Immutable projection state captured at a tick boundary.
 ///
-/// This view contains the distinct keys declared by a driver's subscriptions.
-/// Repeated subscription keys are coalesced because lookup is keyed by
-/// [`ProjectionKey`]. Missing projection state is represented by `None`, allowing
-/// a driver to distinguish a subscribed-but-unseen entity from an undeclared
-/// dependency.
-pub struct ObservationView<'a> {
-    states: std::collections::HashMap<ProjectionKey, Option<&'a State>>,
+/// The scheduler creates one snapshot before it steps any driver. Its views own
+/// cloned state, so every driver observes the same committed projection state
+/// even if later tick work changes the live registry.
+pub struct ObservationSnapshot {
+    states: std::collections::HashMap<ProjectionKey, Option<State>>,
 }
 
-impl<'a> ObservationView<'a> {
+impl ObservationSnapshot {
     #[must_use]
     pub fn empty() -> Self {
         Self {
@@ -62,11 +60,11 @@ impl<'a> ObservationView<'a> {
     }
 
     #[must_use]
-    pub(crate) fn from_subscriptions(
-        subscriptions: &[ProjectionKey],
-        state_for: impl Fn(&ProjectionKey) -> Option<&'a State>,
+    pub(crate) fn from_subscriptions<'a>(
+        subscriptions: impl IntoIterator<Item = &'a ProjectionKey>,
+        state_for: impl Fn(&ProjectionKey) -> Option<State>,
     ) -> Self {
-        let mut states = std::collections::HashMap::with_capacity(subscriptions.len());
+        let mut states = std::collections::HashMap::new();
         for key in subscriptions {
             states.insert(key.clone(), state_for(key));
         }
@@ -74,8 +72,35 @@ impl<'a> ObservationView<'a> {
     }
 
     #[must_use]
-    pub fn state_for(&self, key: &ProjectionKey) -> Option<&'a State> {
-        self.states.get(key).copied().flatten()
+    pub(crate) fn view_for(&self, subscriptions: &[ProjectionKey]) -> ObservationView {
+        let mut states = std::collections::HashMap::with_capacity(subscriptions.len());
+        for key in subscriptions {
+            states.insert(key.clone(), self.states.get(key).cloned().flatten());
+        }
+        ObservationView { states }
+    }
+}
+
+/// Read-only projection states materialized for one driver tick.
+///
+/// This view contains the distinct keys declared by a driver's subscriptions.
+/// Repeated subscription keys are coalesced because lookup is keyed by
+/// [`ProjectionKey`]. Missing projection state is represented by `None`, allowing
+/// a driver to distinguish a subscribed-but-unseen entity from an undeclared
+/// dependency.
+pub struct ObservationView {
+    states: std::collections::HashMap<ProjectionKey, Option<State>>,
+}
+
+impl ObservationView {
+    #[must_use]
+    pub fn empty() -> Self {
+        ObservationSnapshot::empty().view_for(&[])
+    }
+
+    #[must_use]
+    pub fn state_for(&self, key: &ProjectionKey) -> Option<&State> {
+        self.states.get(key).and_then(Option::as_ref)
     }
 
     #[must_use]
@@ -120,7 +145,7 @@ pub trait Driver: Send + Sync {
         &mut self,
         store: &dyn EventStore,
         timeline: TimelineId,
-        observations: ObservationView<'_>,
+        observations: ObservationView,
     ) -> Result<StepOutput, RuntimeError>;
 
     /// Human-readable name for this driver (used in logs/diagnostics).
@@ -159,7 +184,7 @@ mod tests {
             &mut self,
             _store: &dyn EventStore,
             _timeline: TimelineId,
-            _observations: ObservationView<'_>,
+            _observations: ObservationView,
         ) -> Result<StepOutput, RuntimeError> {
             self.ticks += 1;
             let draft = EventDraft::new(
@@ -180,7 +205,7 @@ mod tests {
             &mut self,
             _: &dyn EventStore,
             _: TimelineId,
-            _: ObservationView<'_>,
+            _: ObservationView,
         ) -> Result<StepOutput, RuntimeError> {
             Ok(StepOutput::empty())
         }
@@ -273,9 +298,10 @@ mod tests {
         let mut state = State::new();
         state.set("ticks", serde_json::json!(3));
         let subscriptions = [seen.clone(), absent.clone()];
-        let view = ObservationView::from_subscriptions(&subscriptions, |key| {
-            (key == &seen).then_some(&state)
+        let snapshot = ObservationSnapshot::from_subscriptions(&subscriptions, |key| {
+            (key == &seen).then(|| state.clone())
         });
+        let view = snapshot.view_for(&subscriptions);
         assert_eq!(view.len(), 2);
         assert!(!view.is_empty());
         assert_eq!(view.state_for(&seen), Some(&state));
@@ -289,10 +315,40 @@ mod tests {
         let mut state = State::new();
         state.set("ticks", serde_json::json!(3));
         let subscriptions = [key.clone(), key.clone()];
-        let view = ObservationView::from_subscriptions(&subscriptions, |_| Some(&state));
+        let snapshot =
+            ObservationSnapshot::from_subscriptions(&subscriptions, |_| Some(state.clone()));
+        let view = snapshot.view_for(&subscriptions);
 
         assert_eq!(view.len(), 1);
         assert_eq!(view.state_for(&key), Some(&state));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn observation_snapshot_keeps_tick_state_immutable() {
+        let key = ProjectionKey::new(EntityId::new());
+        let subscriptions = [key.clone()];
+        let mut live_state = State::new();
+        live_state.set("ticks", serde_json::json!(3));
+        let snapshot =
+            ObservationSnapshot::from_subscriptions(&subscriptions, |_| Some(live_state.clone()));
+        live_state.set("ticks", serde_json::json!(4));
+
+        let first_driver_view = snapshot.view_for(&subscriptions);
+        let second_driver_view = snapshot.view_for(&subscriptions);
+        let expected = Some(&serde_json::json!(3));
+        assert_eq!(
+            first_driver_view
+                .state_for(&key)
+                .and_then(|state| state.get("ticks")),
+            expected
+        );
+        assert_eq!(
+            second_driver_view
+                .state_for(&key)
+                .and_then(|state| state.get("ticks")),
+            expected
+        );
     }
 
     #[test]
