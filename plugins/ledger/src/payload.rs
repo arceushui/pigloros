@@ -152,7 +152,7 @@ pub(crate) fn expect_invalid(result: Result<(), LedgerError>, needle: &str) {
 #[must_use]
 pub fn draft_prediction(entity: EntityId, prediction: &LedgerPrediction) -> EventDraft {
     let mut buf = Vec::new();
-    ciborium::into_writer(prediction, &mut buf).expect("ciborium write to Vec<u8> is infallible");
+    let _ = ciborium::into_writer(prediction, &mut buf);
     EventDraft::new(
         entity,
         Kind::new(EVENT_TYPE_PREDICTION),
