@@ -31,18 +31,21 @@ fn society_pref_aliases(dim: &str) -> &'static [&'static str] {
     }
 }
 
-#[cfg(all(test, coverage_nightly))]
+#[cfg(test)]
 mod coverage_tests {
-    use super::GatewayEventPage;
+    use super::{next_gateway_cursor, GatewayEventPage};
+    use pos_core::clock::Seq;
 
     #[test]
     fn gateway_page_parser_covers_shape_and_field_errors() {
         assert!(GatewayEventPage::parse(r#"{"events":[],"next_from_seq":null}"#).is_ok());
-        assert!(GatewayEventPage::parse(r#"{}"#).is_ok());
+        assert!(GatewayEventPage::parse(r"{}").is_ok());
         assert!(GatewayEventPage::parse("not-json").is_err());
         assert!(GatewayEventPage::parse("[]").is_err());
         assert!(GatewayEventPage::parse(r#"{"events":"bad"}"#).is_err());
         assert!(GatewayEventPage::parse(r#"{"next_from_seq":"bad"}"#).is_err());
+        let stalled = GatewayEventPage::parse(r#"{"next_from_seq":10}"#).unwrap();
+        assert!(next_gateway_cursor(&stalled, Seq::from_u64(10)).is_err());
     }
 }
 
@@ -754,6 +757,14 @@ mod tests {
         let error = fetch_gateway_events(&gateway, "01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap_err();
         server.join().unwrap();
         assert!(error.contains("cursor"), "{error}");
+
+        let (gateway, server) = spawn_scripted_gateway(vec![(
+            r#"{"events":[],"next_from_seq":0}"#.to_owned(),
+            None,
+        )]);
+        let error = fetch_gateway_events(&gateway, "01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap_err();
+        server.join().unwrap();
+        assert!(error.contains("invalid next_from_seq"), "{error}");
     }
 
     #[test]
