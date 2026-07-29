@@ -12,8 +12,8 @@
 //!   pos version
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-use pos_core::{clock::Seq, ids::TimelineId, store::SeqRange};
-use pos_experiment::{Experiment, ExperimentConfig, StopCondition};
+use pos_core::{clock::Seq, ids::TimelineId, store::SeqRange, ExperimentRecipe};
+use pos_experiment::{Experiment, ExperimentConfig, RunResult, StopCondition};
 use pos_store::{open_store, StoreConfig};
 use ulid::Ulid;
 
@@ -405,14 +405,23 @@ fn handle_experiment(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                 .ok_or("Usage: pos experiment verify <manifest.json>")?;
             cmd_experiment_verify(manifest_path)
         }
+        Some("reproduce") => {
+            let manifest_path = args
+                .get(1)
+                .ok_or("Usage: pos experiment reproduce <manifest.json>")?;
+            cmd_experiment_reproduce(manifest_path)
+        }
         _ => {
-            eprintln!("Usage: pos experiment <run|backtest|verify> ...");
+            eprintln!("Usage: pos experiment <run|backtest|verify|reproduce> ...");
             Ok(())
         }
     }
 }
 
-fn cmd_experiment_run(path: &str, ticks: u64) -> Result<(), Box<dyn std::error::Error>> {
+fn run_builtin_reference_experiment(
+    store_config: StoreConfig,
+    ticks: u64,
+) -> Result<RunResult, Box<dyn std::error::Error>> {
     use pos_core::ids::EntityId;
     use pos_plugin_rule_agent::{RuleAgentDriver, RuleAgentPlugin, RuleAgentReducer};
     use pos_plugin_synthetic_obs::{SyntheticDriver, SyntheticObsPlugin, SyntheticReducer};
@@ -420,9 +429,7 @@ fn cmd_experiment_run(path: &str, ticks: u64) -> Result<(), Box<dyn std::error::
     let mut exp = Experiment::new(ExperimentConfig {
         name: "cli-run".to_owned(),
         stop: StopCondition::MaxTicks(ticks),
-        store_config: StoreConfig::Sqlite {
-            path: path.to_owned(),
-        },
+        store_config,
     });
 
     // Register reference plugins
@@ -447,7 +454,17 @@ fn cmd_experiment_run(path: &str, ticks: u64) -> Result<(), Box<dyn std::error::
     )
     .expect("fresh plugin id cannot conflict");
 
-    let result = exp.run()?;
+    exp.run().map_err(Into::into)
+}
+
+fn cmd_experiment_run(path: &str, ticks: u64) -> Result<(), Box<dyn std::error::Error>> {
+    let mut result = run_builtin_reference_experiment(
+        StoreConfig::Sqlite {
+            path: path.to_owned(),
+        },
+        ticks,
+    )?;
+    result.manifest.recipe = Some(ExperimentRecipe::BuiltinReferenceV1 { ticks });
 
     // Save manifest alongside the store for later verification
     let manifest_path = path.replace(".db", "-manifest.json");
@@ -458,6 +475,33 @@ fn cmd_experiment_run(path: &str, ticks: u64) -> Result<(), Box<dyn std::error::
         result.ticks, result.total_events, result.timeline_id, manifest_path
     );
     Ok(())
+}
+
+fn cmd_experiment_reproduce(manifest_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    std::fs::read_to_string(manifest_path)
+        .map_err(Into::into)
+        .and_then(|json| serde_json::from_str(&json).map_err(Into::into))
+        .and_then(reproduce_manifest)
+}
+
+fn reproduce_manifest(manifest: pos_core::ReproManifest) -> Result<(), Box<dyn std::error::Error>> {
+    manifest
+        .recipe
+        .ok_or_else(|| "manifest has no executable experiment recipe".into())
+        .and_then(|recipe| match recipe {
+            ExperimentRecipe::BuiltinReferenceV1 { ticks } => {
+                run_builtin_reference_experiment(StoreConfig::Memory, ticks)
+            }
+        })
+        .and_then(|reproduced| {
+            if reproduced.manifest.head_hash == manifest.head_hash {
+                println!("OK");
+                Ok(())
+            } else {
+                println!("MISMATCH");
+                Err("reproduced chain_head does not match manifest".into())
+            }
+        })
 }
 
 fn cmd_experiment_backtest(
@@ -924,6 +968,63 @@ mod tests {
         // Verify manifest was written alongside store
         let manifest_path = path.replace(".db", "-manifest.json");
         assert!(std::path::Path::new(&manifest_path).exists());
+        let manifest: pos_core::ReproManifest =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        assert_eq!(
+            manifest.recipe,
+            Some(ExperimentRecipe::BuiltinReferenceV1 { ticks: 2 })
+        );
+    }
+
+    #[test]
+    fn cmd_experiment_reproduce_matches_builtin_recipe() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reproduce.db").to_str().unwrap().to_owned();
+        cmd_experiment_run(&path, 3).unwrap();
+        let manifest_path = path.replace(".db", "-manifest.json");
+        cmd_experiment_reproduce(&manifest_path).unwrap();
+    }
+
+    #[test]
+    fn cmd_experiment_reproduce_rejects_manifest_without_recipe() {
+        let manifest = pos_core::ReproManifest::new(
+            TimelineId::new(),
+            pos_core::Hash::zero(),
+            pos_core::clock::WallTime::from_micros(0),
+        );
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), serde_json::to_string(&manifest).unwrap()).unwrap();
+        assert!(cmd_experiment_reproduce(file.path().to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn cmd_experiment_reproduce_rejects_bad_manifest_json() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "not-json").unwrap();
+        assert!(cmd_experiment_reproduce(file.path().to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn cmd_experiment_reproduce_reports_chain_head_mismatch() {
+        let manifest = pos_core::ReproManifest::new(
+            TimelineId::new(),
+            pos_core::Hash::zero(),
+            pos_core::clock::WallTime::from_micros(0),
+        )
+        .with_recipe(ExperimentRecipe::BuiltinReferenceV1 { ticks: 1 });
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), serde_json::to_string(&manifest).unwrap()).unwrap();
+        assert!(cmd_experiment_reproduce(file.path().to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn handle_experiment_reproduce_dispatches_and_requires_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dispatch.db").to_str().unwrap().to_owned();
+        cmd_experiment_run(&path, 1).unwrap();
+        let manifest_path = path.replace(".db", "-manifest.json");
+        assert!(handle_experiment(&args(&["reproduce", &manifest_path])).is_ok());
+        assert!(handle_experiment(&args(&["reproduce"])).is_err());
     }
 
     #[test]

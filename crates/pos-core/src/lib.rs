@@ -30,7 +30,7 @@ pub use error::CoreError;
 pub use event::{CanonicalBytes, Determinism, Event, EventDraft, Kind, RunMode, SchemaVersion};
 pub use hasher::Hasher;
 pub use ids::{CorrelationId, EntityId, EventId, PluginId, RelationshipId, TimelineId};
-pub use manifest::{AdapterRecord, ReproManifest};
+pub use manifest::{AdapterRecord, ExperimentRecipe, ReproManifest};
 pub use plugin::{Capability, Plugin};
 pub use schema::{SchemaVersionMap, Upcaster, UpcasterRegistry};
 pub use state::{Reducer, State, StateRegistry};

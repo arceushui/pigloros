@@ -78,6 +78,20 @@ pub struct Experiment {
     registry: PluginRegistry,
 }
 
+/// A started experiment that owns its live `EventStore` and Timeline.
+///
+/// A session advances only at completed tick boundaries. Its [`Self::fork`]
+/// operation therefore never exposes a partially-applied driver batch.
+pub struct ExperimentSession {
+    config: ExperimentConfig,
+    registry: PluginRegistry,
+    store: Box<dyn pos_core::store::EventStore>,
+    timeline: Timeline,
+    ticks: u64,
+    total_events: u64,
+    complete: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -191,6 +205,25 @@ impl Experiment {
         self.registry.register(plugin, reducer, driver)
     }
 
+    /// Create the experiment Timeline and retain the live runtime resources.
+    ///
+    /// # Errors
+    /// Returns [`ExperimentError::Store`] if the configured `EventStore` cannot be
+    /// opened or cannot create the Timeline.
+    pub fn start(self) -> Result<ExperimentSession, ExperimentError> {
+        let mut store = open_store(self.config.store_config.clone())?;
+        let timeline = store.create_timeline(&self.config.name)?;
+        Ok(ExperimentSession {
+            config: self.config,
+            registry: self.registry,
+            store,
+            timeline,
+            ticks: 0,
+            total_events: 0,
+            complete: false,
+        })
+    }
+
     /// Run the experiment to completion and return a [`RunResult`].
     ///
     /// The closed tick loop:
@@ -202,52 +235,8 @@ impl Experiment {
     /// # Errors
     /// Returns [`ExperimentError::Runtime`] on driver or schema errors,
     /// or [`ExperimentError::Store`] on persistence errors.
-    pub fn run(mut self) -> Result<RunResult, ExperimentError> {
-        let store_config = self.config.store_config.clone();
-        let mut store = open_store(self.config.store_config)?;
-        let timeline = store.create_timeline(&self.config.name)?;
-        let timeline_id = timeline.id();
-
-        let (ticks, total_events, chain_head) = run_experiment_on_store(
-            store.as_mut(),
-            timeline_id,
-            &self.config.stop,
-            &mut self.registry,
-        )?;
-
-        // Build manifest with plugin_versions and adapter_records
-        let mut manifest = ReproManifest::new(timeline_id, chain_head, WallTime::now());
-
-        // Populate plugin_versions from registry
-        for (name, version) in self.registry.plugin_versions() {
-            manifest = manifest.with_plugin_version(name, version.to_owned());
-        }
-
-        // Populate adapter_records with store backend identity.
-        // Full nondeterministic adapter call recording is deferred (requires Recorder
-        // infrastructure for capturing input/output with deterministic hashes).
-        manifest
-            .adapter_records
-            .push(pos_core::manifest::AdapterRecord {
-                plugin_id: pos_core::ids::PluginId::new(),
-                call_index: 0,
-                input_hash: Hash::zero(),
-                output_hash: pos_core::Hash::from_bytes(
-                    *blake3::hash(timeline_id.to_string().as_bytes()).as_bytes(),
-                ),
-                wall_time: WallTime::now(),
-            });
-
-        let projections = self.registry.projections;
-
-        Ok(RunResult {
-            timeline_id,
-            ticks,
-            total_events,
-            manifest,
-            projections,
-            store_config,
-        })
+    pub fn run(self) -> Result<RunResult, ExperimentError> {
+        self.start()?.run_to_completion()
     }
 
     /// Fork the experiment's timeline at the current head, returning a new child [`Timeline`].
@@ -275,6 +264,113 @@ impl Experiment {
 
         let forked = store.fork(timeline.id(), timeline.head, name)?;
         Ok(forked)
+    }
+}
+
+impl ExperimentSession {
+    fn reached_stop_condition(&self) -> bool {
+        match self.config.stop {
+            StopCondition::MaxTicks(max) => self.ticks >= max,
+            StopCondition::MaxEvents(max) => self.total_events >= max,
+        }
+    }
+
+    /// Return the active Timeline handle.
+    #[must_use]
+    pub fn timeline(&self) -> &Timeline {
+        &self.timeline
+    }
+
+    /// Advance one complete tick.
+    ///
+    /// Returns `true` when a batch was committed and folded, or `false` once
+    /// the stop condition or an empty driver batch completes the session.
+    ///
+    /// # Errors
+    /// Returns runtime or store errors from the atomic tick pipeline.
+    pub fn step(&mut self) -> Result<bool, ExperimentError> {
+        if self.complete || self.reached_stop_condition() {
+            self.complete = true;
+            return Ok(false);
+        }
+
+        let drafts = self
+            .registry
+            .step_all(self.store.as_ref(), self.timeline.id())?;
+        if drafts.is_empty() {
+            self.complete = true;
+            return Ok(false);
+        }
+
+        self.registry.schemas.validate_batch(&drafts)?;
+        let committed = self.store.append(self.timeline.id(), &drafts)?;
+        self.timeline.head = committed
+            .last()
+            .map_or(self.timeline.head, |event| event.seq);
+
+        for event in &committed {
+            self.registry.projections.apply_event(event);
+        }
+
+        self.total_events += committed.len() as u64;
+        self.ticks += 1;
+        Ok(true)
+    }
+
+    /// Fork the active Timeline at its most recently completed tick boundary.
+    ///
+    /// # Errors
+    /// Returns [`ExperimentError::Store`] if the `EventStore` rejects the fork.
+    pub fn fork(&mut self, name: &str) -> Result<Timeline, ExperimentError> {
+        self.store
+            .fork(self.timeline.id(), self.timeline.head, name)
+            .map_err(ExperimentError::from)
+    }
+
+    /// Advance until the stop condition or an empty driver batch, then return
+    /// the completed result.
+    ///
+    /// # Errors
+    /// Returns runtime or store errors from a tick or final chain-head read.
+    pub fn run_to_completion(mut self) -> Result<RunResult, ExperimentError> {
+        while self.step()? {}
+
+        let timeline_id = self.timeline.id();
+        let events = self.store.read(timeline_id, pos_store::SeqRange::all())?;
+        let chain_head = if events.is_empty() {
+            Hash::zero()
+        } else {
+            let mut hasher = blake3::Hasher::new();
+            for event in &events {
+                hasher.update(event.payload_hash.as_bytes());
+            }
+            Hash::from_bytes(*hasher.finalize().as_bytes())
+        };
+
+        let mut manifest = ReproManifest::new(timeline_id, chain_head, WallTime::now());
+        for (name, version) in self.registry.plugin_versions() {
+            manifest = manifest.with_plugin_version(name, version.to_owned());
+        }
+        manifest
+            .adapter_records
+            .push(pos_core::manifest::AdapterRecord {
+                plugin_id: pos_core::ids::PluginId::new(),
+                call_index: 0,
+                input_hash: Hash::zero(),
+                output_hash: Hash::from_bytes(
+                    *blake3::hash(timeline_id.to_string().as_bytes()).as_bytes(),
+                ),
+                wall_time: WallTime::now(),
+            });
+
+        Ok(RunResult {
+            timeline_id,
+            ticks: self.ticks,
+            total_events: self.total_events,
+            manifest,
+            projections: self.registry.projections,
+            store_config: self.config.store_config,
+        })
     }
 }
 
@@ -625,6 +721,30 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn store_runner_supports_max_events_and_empty_batches() {
+        let entity = EntityId::new();
+        let plugin = make_plugin("store-runner", &["store-runner.event"]);
+        let driver = FixedDriver::new(entity, "store-runner.event", 1).with_max_ticks(1);
+        let mut registry = PluginRegistry::new();
+        registry
+            .register(&plugin, None, Some(Box::new(driver)))
+            .unwrap();
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let timeline = store.create_timeline("store-runner").unwrap();
+
+        let (ticks, events, _) = run_experiment_on_store(
+            store.as_mut(),
+            timeline.id(),
+            &StopCondition::MaxEvents(2),
+            &mut registry,
+        )
+        .unwrap();
+
+        assert_eq!((ticks, events), (1, 1));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn experiment_empty_driver_terminates() {
         struct IdleDriver;
         impl Driver for IdleDriver {
@@ -719,6 +839,36 @@ mod tests {
         let result = exp.run().unwrap();
         assert_eq!(result.ticks, 3);
         assert_eq!(result.total_events, 3);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn live_session_steps_and_forks_memory_timeline() {
+        let entity = EntityId::new();
+        let plugin = make_plugin("session-ticker", &["session.event"]);
+        let driver = FixedDriver::new(entity, "session.event", 1);
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "session-test".to_owned(),
+            stop: StopCondition::MaxTicks(2),
+            store_config: StoreConfig::Memory,
+        });
+        experiment
+            .register(&plugin, None, Some(Box::new(driver)))
+            .unwrap();
+
+        let mut session = experiment.start().unwrap();
+        assert!(session.step().unwrap());
+        assert_eq!(session.timeline().head, pos_core::clock::Seq::from_u64(1));
+
+        let fork = session.fork("session-fork").unwrap();
+        assert_eq!(
+            fork.meta.fork_point,
+            Some((session.timeline().id(), session.timeline().head))
+        );
+
+        let result = session.run_to_completion().unwrap();
+        assert_eq!(result.ticks, 2);
+        assert_eq!(result.total_events, 2);
     }
 
     #[test]
@@ -1807,6 +1957,96 @@ mod fault_injection_tests {
             &mut reg,
         );
         assert!(matches!(err, Err(ExperimentError::Runtime(_))));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn live_session_propagates_driver_error() {
+        let plugin = FaultPlugin {
+            id: PluginId::new(),
+            event_type: Kind::new("known.event"),
+        };
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "session-step-fault".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        });
+        experiment
+            .register(&plugin, None, Some(Box::new(FailStepDriver)))
+            .unwrap();
+
+        assert!(matches!(
+            experiment.start().unwrap().step(),
+            Err(ExperimentError::Runtime(_))
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn live_session_propagates_append_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-append.db");
+        let plugin = FaultPlugin {
+            id: PluginId::new(),
+            event_type: Kind::new("session.append"),
+        };
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "session-append-fault".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Sqlite {
+                path: path.to_str().unwrap().to_owned(),
+            },
+        });
+        experiment
+            .register(
+                &plugin,
+                None,
+                Some(Box::new(EmitDriver {
+                    entity: EntityId::new(),
+                    event_type: Kind::new("session.append"),
+                })),
+            )
+            .unwrap();
+        let mut session = experiment.start().unwrap();
+        drop_table(path.to_str().unwrap(), "events");
+
+        assert!(matches!(session.step(), Err(ExperimentError::Store(_))));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn live_session_propagates_final_read_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-read.db");
+        let plugin = FaultPlugin {
+            id: PluginId::new(),
+            event_type: Kind::new("session.read"),
+        };
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "session-read-fault".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Sqlite {
+                path: path.to_str().unwrap().to_owned(),
+            },
+        });
+        experiment
+            .register(
+                &plugin,
+                None,
+                Some(Box::new(EmitDriver {
+                    entity: EntityId::new(),
+                    event_type: Kind::new("session.read"),
+                })),
+            )
+            .unwrap();
+        let mut session = experiment.start().unwrap();
+        assert!(session.step().unwrap());
+        drop_table(path.to_str().unwrap(), "events");
+
+        assert!(matches!(
+            session.run_to_completion(),
+            Err(ExperimentError::Store(_))
+        ));
     }
 
     #[test]
