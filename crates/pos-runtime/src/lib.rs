@@ -32,10 +32,7 @@ pub mod registry;
 pub mod scheduler;
 pub mod schema;
 
-pub use composition::{
-    PluginComposition, RegisteredEventSchema, RegisteredPlugin, RegisteredSchemaVersion,
-    RegisteredUpcaster,
-};
+pub use composition::{PluginComposition, RegisteredEventSchema, RegisteredPlugin};
 pub use driver::{Driver, ObservationView, ProjectionKey, StepOutput};
 pub use error::RuntimeError;
 pub use recorder::{RecordedOutput, Recorder, RunMode};

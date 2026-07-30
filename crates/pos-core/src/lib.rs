@@ -17,7 +17,6 @@ pub mod hasher;
 pub mod ids;
 pub mod manifest;
 pub mod plugin;
-pub mod schema;
 pub mod state;
 pub mod store;
 pub mod timeline;
@@ -34,7 +33,6 @@ pub use hasher::Hasher;
 pub use ids::{CorrelationId, EntityId, EventId, PluginId, RelationshipId, TimelineId};
 pub use manifest::{AdapterRecord, ReproManifest};
 pub use plugin::{Capability, Plugin};
-pub use schema::{SchemaVersionMap, Upcaster, UpcasterRegistry};
 pub use state::{Reducer, State, StateRegistry};
 pub use store::{
     append_identity_expires_at, checked_append_identity_expires_at, export_timeline,

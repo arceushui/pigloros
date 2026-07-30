@@ -289,9 +289,6 @@ impl SqliteStore {
             .execute_batch(
                 "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
-             CREATE TABLE IF NOT EXISTS schema_version (
-                 version INTEGER NOT NULL
-             );
              CREATE TABLE IF NOT EXISTS timelines (
                  id          TEXT PRIMARY KEY,
                  name        TEXT,
@@ -316,10 +313,20 @@ impl SqliteStore {
                  signature   BLOB,
                  PRIMARY KEY (timeline_id, seq)
              );
-             CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id);",
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id);
+             CREATE TABLE IF NOT EXISTS append_identities (
+                 dedup_key BLOB PRIMARY KEY CHECK (length(dedup_key) = 32),
+                 scope_key BLOB NOT NULL CHECK (length(scope_key) = 32),
+                 event_id TEXT NOT NULL,
+                 expires_at INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_append_identities_expiry
+             ON append_identities(expires_at);
+             CREATE INDEX IF NOT EXISTS idx_append_identities_scope
+             ON append_identities(scope_key);",
             )
             .map_err(|e| CoreError::Storage(e.to_string()))?;
-        self.run_migrations()
+        Ok(())
     }
 
     fn validate_event_sequence_invariant(&self) -> Result<(), CoreError> {
@@ -373,93 +380,6 @@ impl SqliteStore {
                     .to_owned(),
             ))
         }
-    }
-
-    fn run_migrations(&self) -> Result<(), CoreError> {
-        // Get current schema version (0 if table is empty)
-        let version: i64 = self
-            .conn
-            .query_row(
-                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-
-        // Always ensure v2 columns/indexes exist before stamping the version.
-        // Covers: fresh DBs (CREATE TABLE already has them — ALTER is no-op-ish),
-        // and legacy DBs that somehow lack a schema_version row (version == 0)
-        // while still having a pre-v2 events table without `signature`.
-        if version < 2 {
-            self.migrate_events_to_v2()?;
-            if version == 0 {
-                self.conn
-                    .execute("INSERT INTO schema_version (version) VALUES (2)", [])
-                    .map_err(|e| CoreError::Storage(e.to_string()))?;
-            } else {
-                self.conn
-                    .execute("UPDATE schema_version SET version = 2", [])
-                    .map_err(|e| CoreError::Storage(e.to_string()))?;
-            }
-        }
-
-        if version < 4 {
-            self.migrate_append_identities_to_v4()?;
-            self.conn
-                .execute("UPDATE schema_version SET version = 4", [])
-                .map_err(|e| CoreError::Storage(e.to_string()))?;
-        }
-
-        Ok(())
-    }
-
-    /// Add `signature` column + unique `event_id` index (idempotent where possible).
-    fn migrate_events_to_v2(&self) -> Result<(), CoreError> {
-        // Prefer probing the schema over matching error strings.
-        let has_signature = self
-            .conn
-            .prepare("SELECT signature FROM events LIMIT 0")
-            .is_ok();
-        if !has_signature {
-            self.conn
-                .execute("ALTER TABLE events ADD COLUMN signature BLOB", [])
-                .map_err(|e| CoreError::Storage(e.to_string()))?;
-        }
-        self.conn
-            .execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id)",
-                [],
-            )
-            .map_err(|e| {
-                CoreError::Storage(format!(
-                    "cannot enforce unique event_id index (duplicate EventIds in existing data?): {e}"
-                ))
-            })?;
-        Ok(())
-    }
-
-    /// Add opaque, bounded-lifetime append identities. No raw external content
-    /// or deduplication preimage is stored in this table.
-    fn migrate_append_identities_to_v4(&self) -> Result<(), CoreError> {
-        self.conn
-            .execute_batch(
-                "CREATE TABLE IF NOT EXISTS append_identities (
-                     dedup_key BLOB PRIMARY KEY CHECK (length(dedup_key) = 32),
-                     scope_key BLOB NOT NULL CHECK (length(scope_key) = 32),
-                     event_id TEXT NOT NULL,
-                     expires_at INTEGER NOT NULL
-                 );
-                 CREATE INDEX IF NOT EXISTS idx_append_identities_expiry
-                 ON append_identities(expires_at);
-                 CREATE INDEX IF NOT EXISTS idx_append_identities_scope
-                 ON append_identities(scope_key);",
-            )
-            .map_err(|error| CoreError::Storage(error.to_string()))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_run_migrations(&self) -> Result<(), CoreError> {
-        self.run_migrations()
     }
 
     fn get_head_seq(&self, timeline_id: TimelineId) -> Result<Seq, CoreError> {
@@ -584,7 +504,13 @@ impl SqliteStore {
                     .as_deref()
                     .map(parse_correlation_id)
                     .transpose()?,
-                schema_version: SchemaVersion::new(u32::try_from(schema_version).unwrap_or(0)),
+                schema_version: if schema_version == 1 {
+                    SchemaVersion::V1
+                } else {
+                    return Err(CoreError::Serialization(
+                        "only schema version 1 is supported".to_owned(),
+                    ));
+                },
                 signature,
                 payload_hash: pos_core::Hash::from_bytes(ph_arr),
             });
@@ -3103,55 +3029,6 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn schema_version_is_set_after_open() {
-        let store = new_store();
-        let version: i64 = store
-            .conn
-            .query_row(
-                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
-                [],
-                |row| row.get(0),
-            )
-            .expect("schema_version query should succeed");
-        assert!(
-            version >= 3,
-            "schema_version should be at least 3 after open, got {version}"
-        );
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn schema_version_not_duplicated_on_reopen() {
-        // Opens the same file twice — second open finds version already set,
-        // so the INSERT branch is skipped (covers the version == 0 false path).
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_str().unwrap().to_owned();
-        {
-            let _store = SqliteStore::open(&path).unwrap();
-            // First open: migrates through schema version 4.
-        }
-        {
-            let store = SqliteStore::open(&path).unwrap();
-            // Second open: version already = 4, INSERT is skipped.
-            let count: i64 = store
-                .conn
-                .query_row("SELECT COUNT(*) FROM schema_version", [], |row| row.get(0))
-                .unwrap();
-            assert_eq!(count, 1, "schema_version should have exactly one row");
-            let version: i64 = store
-                .conn
-                .query_row(
-                    "SELECT COALESCE(MAX(version), 0) FROM schema_version",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(version, 4);
-        }
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn explicit_wall_time_is_preserved() {
         let mut store = new_store();
         let tl = store.create_timeline("main").unwrap();
@@ -3556,46 +3433,6 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn reopen_fails_when_schema_version_query_breaks() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_str().unwrap().to_owned();
-        {
-            let _store = SqliteStore::open(&path).unwrap();
-        }
-        {
-            let conn = Connection::open(&path).unwrap();
-            conn.execute("DROP TABLE schema_version", []).unwrap();
-            conn.execute(
-                "CREATE VIEW schema_version AS SELECT (SELECT RAISE(ABORT, 'fail')) AS version",
-                [],
-            )
-            .unwrap();
-        }
-        assert_storage_err(SqliteStore::open(&path).map(|_| ()));
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn reopen_fails_when_schema_version_insert_breaks() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_str().unwrap().to_owned();
-        {
-            let _store = SqliteStore::open(&path).unwrap();
-        }
-        {
-            let conn = Connection::open(&path).unwrap();
-            conn.execute("DROP TABLE schema_version", []).unwrap();
-            conn.execute(
-                "CREATE TABLE schema_version (version INTEGER NOT NULL CHECK (version > 100))",
-                [],
-            )
-            .unwrap();
-        }
-        assert_storage_err(SqliteStore::open(&path).map(|_| ()));
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn read_fails_on_wrong_type_event_seq() {
         let mut store = new_store();
         let tl = store.create_timeline("main").unwrap();
@@ -3736,7 +3573,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn read_fails_on_wrong_type_schema_version() {
+    fn read_rejects_non_v1_schema_version() {
         let mut store = new_store();
         let tl = store.create_timeline("main").unwrap();
         let entity = EntityId::new();
@@ -3749,6 +3586,17 @@ mod tests {
             )
             .unwrap();
         assert_storage_err(store.read(tl.id(), SeqRange::all()).map(|_| ()));
+        store
+            .conn
+            .execute(
+                "UPDATE events SET schema_version = 2 WHERE timeline_id = ?1",
+                rusqlite::params![tl.id().to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.read(tl.id(), SeqRange::all()),
+            Err(CoreError::Serialization(_))
+        ));
     }
 
     #[test]
@@ -5061,49 +4909,6 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn migrates_v1_schema_to_v2_with_signature_column() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_str().unwrap().to_owned();
-        {
-            let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(
-                "PRAGMA journal_mode=WAL;
-                 CREATE TABLE schema_version (version INTEGER NOT NULL);
-                 INSERT INTO schema_version (version) VALUES (1);
-                 CREATE TABLE timelines (
-                     id TEXT PRIMARY KEY, name TEXT, mode TEXT NOT NULL,
-                     parent_id TEXT, fork_seq INTEGER, head_seq INTEGER NOT NULL DEFAULT 0,
-                     chain_head BLOB NOT NULL
-                 );
-                 CREATE TABLE events (
-                     timeline_id TEXT NOT NULL, seq INTEGER NOT NULL, event_id TEXT NOT NULL,
-                     entity_id TEXT NOT NULL, event_type TEXT NOT NULL, payload BLOB NOT NULL,
-                     wall_time INTEGER NOT NULL, causation_id TEXT, correlation_id TEXT,
-                     schema_version INTEGER NOT NULL, payload_hash BLOB NOT NULL,
-                     PRIMARY KEY (timeline_id, seq)
-                 );",
-            )
-            .unwrap();
-        }
-        let store = SqliteStore::open(&path).unwrap();
-        let version: i64 = store
-            .conn
-            .query_row(
-                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(version, 4);
-        // signature column must exist after migration
-        store
-            .conn
-            .prepare("SELECT signature FROM events LIMIT 0")
-            .unwrap();
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn export_own_fork_roundtrip_sqlite() {
         use pos_core::store::{export_timeline_own, import_timeline_with_id};
 
@@ -5280,195 +5085,12 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn migrates_legacy_events_table_when_schema_version_missing() {
-        // version == 0 path must still ALTER a pre-v2 events table (no signature column).
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_str().unwrap().to_owned();
-        {
-            let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(
-                "PRAGMA journal_mode=WAL;
-                 CREATE TABLE schema_version (version INTEGER NOT NULL);
-                 CREATE TABLE timelines (
-                     id TEXT PRIMARY KEY, name TEXT, mode TEXT NOT NULL,
-                     parent_id TEXT, fork_seq INTEGER, head_seq INTEGER NOT NULL DEFAULT 0,
-                     chain_head BLOB NOT NULL
-                 );
-                 CREATE TABLE events (
-                     timeline_id TEXT NOT NULL, seq INTEGER NOT NULL, event_id TEXT NOT NULL,
-                     entity_id TEXT NOT NULL, event_type TEXT NOT NULL, payload BLOB NOT NULL,
-                     wall_time INTEGER NOT NULL, causation_id TEXT, correlation_id TEXT,
-                     schema_version INTEGER NOT NULL, payload_hash BLOB NOT NULL,
-                     PRIMARY KEY (timeline_id, seq)
-                 );",
-            )
-            .unwrap();
-        }
-        let store = SqliteStore::open(&path).unwrap();
-        let version: i64 = store
-            .conn
-            .query_row(
-                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(version, 4);
-        store
-            .conn
-            .prepare("SELECT signature FROM events LIMIT 0")
-            .unwrap();
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn read_own_missing_timeline_errors() {
         let store = new_store();
         let err = store
             .read_own(TimelineId::new(), SeqRange::all())
             .unwrap_err();
         assert!(matches!(err, CoreError::TimelineNotFound(_)));
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn migrate_v2_ignores_duplicate_signature_column() {
-        let store = new_store();
-        store
-            .conn
-            .execute("UPDATE schema_version SET version = 1", [])
-            .unwrap();
-        store.test_run_migrations().unwrap();
-        let version: i64 = store
-            .conn
-            .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, 4);
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn migrate_v4_fails_when_append_identity_table_cannot_be_created() {
-        let store = new_store();
-        store
-            .conn
-            .execute("UPDATE schema_version SET version = 3", [])
-            .unwrap();
-        store
-            .conn
-            .execute("DROP TABLE append_identities", [])
-            .unwrap();
-        store
-            .conn
-            .execute("CREATE VIEW append_identities AS SELECT 1 AS dedup_key", [])
-            .unwrap();
-
-        assert_storage_err(store.test_run_migrations());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn migrate_v4_fails_when_version_update_aborts() {
-        let store = new_store();
-        store.conn.execute("DROP TABLE schema_version", []).unwrap();
-        store
-            .conn
-            .execute(
-                "CREATE TABLE schema_version (version INTEGER NOT NULL CHECK (version < 4))",
-                [],
-            )
-            .unwrap();
-        store
-            .conn
-            .execute("INSERT INTO schema_version (version) VALUES (3)", [])
-            .unwrap();
-
-        assert_storage_err(store.test_run_migrations());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn migrate_v2_fails_when_alter_is_not_duplicate_column() {
-        let store = new_store();
-        store
-            .conn
-            .execute("UPDATE schema_version SET version = 1", [])
-            .unwrap();
-        store.conn.execute("DROP TABLE events", []).unwrap();
-        store
-            .conn
-            .execute("CREATE VIEW events AS SELECT 1 AS x", [])
-            .unwrap();
-        assert_storage_err(store.test_run_migrations());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn migrate_v2_fails_when_index_create_aborts() {
-        let store = new_store();
-        store
-            .conn
-            .execute("UPDATE schema_version SET version = 1", [])
-            .unwrap();
-        // Force index creation to fail: leave a non-unique duplicate event_id first.
-        // Drop the unique index so migration will recreate it, then insert dup ids.
-        store
-            .conn
-            .execute("DROP INDEX IF EXISTS idx_events_event_id", [])
-            .unwrap();
-        let tl = TimelineId::new();
-        let genesis = pos_crypto::chain::genesis_hash();
-        store
-            .conn
-            .execute(
-                "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
-                 VALUES (?1, 't', 'live', NULL, NULL, 0, ?2)",
-                params![tl.to_string(), genesis.as_bytes().as_slice()],
-            )
-            .unwrap();
-        let eid = EventId::new().to_string();
-        for seq in 1..=2 {
-            store
-                .conn
-                .execute(
-                    "INSERT INTO events
-                     (timeline_id, seq, event_id, entity_id, event_type, payload, wall_time,
-                      causation_id, correlation_id, schema_version, payload_hash, signature)
-                     VALUES (?1, ?2, ?3, ?4, 't', X'00', 0, NULL, NULL, 1, ?5, NULL)",
-                    params![
-                        tl.to_string(),
-                        seq,
-                        eid,
-                        EntityId::new().to_string(),
-                        [0u8; 32].as_slice(),
-                    ],
-                )
-                .unwrap();
-        }
-        assert_storage_err(store.test_run_migrations());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn migrate_v2_fails_when_version_update_aborts() {
-        let store = new_store();
-        store
-            .conn
-            .execute("UPDATE schema_version SET version = 1", [])
-            .unwrap();
-        store.conn.execute("DROP TABLE schema_version", []).unwrap();
-        store
-            .conn
-            .execute(
-                "CREATE TABLE schema_version (version INTEGER NOT NULL CHECK (version < 2))",
-                [],
-            )
-            .unwrap();
-        store
-            .conn
-            .execute("INSERT INTO schema_version (version) VALUES (1)", [])
-            .unwrap();
-        assert_storage_err(store.test_run_migrations());
     }
 
     #[test]
@@ -5578,26 +5200,5 @@ mod tests {
         let drafts = [make_draft(EntityId::new(), b"payload")];
         let events = store.append(tl.id(), &drafts).unwrap();
         assert_eq!(events.len(), 1);
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn read_upcast_on_sqlite_default_noop() {
-        let mut store = new_store();
-        let tl = store.create_timeline("upcast-test").unwrap();
-        let drafts = [make_draft(EntityId::new(), b"payload")];
-        store.append(tl.id(), &drafts).unwrap();
-        let upcasters = pos_core::UpcasterRegistry::new();
-        let schema_versions = pos_core::SchemaVersionMap::new();
-        let store_ref: &dyn pos_core::EventStore = &store;
-        let result = store_ref
-            .read_upcast(
-                tl.id(),
-                pos_core::store::SeqRange::all(),
-                &upcasters,
-                &schema_versions,
-            )
-            .unwrap();
-        assert!(!result.is_empty());
     }
 }

@@ -96,8 +96,7 @@ impl Recorder {
     /// Load replay events from the store for a given timeline.
     ///
     /// Reads all `runtime.recorded_output` events from `entity` and
-    /// prepares the Recorder for replay. When `upcasters` is `Some`,
-    /// reads through [`EventStore::read_upcast`] to apply schema migrations.
+    /// prepares the Recorder for replay.
     ///
     /// # Errors
     /// Returns [`RuntimeError::Store`] on store read failure.
@@ -105,13 +104,9 @@ impl Recorder {
         entity: EntityId,
         store: &dyn EventStore,
         timeline: TimelineId,
-        upcasters: Option<(&pos_core::UpcasterRegistry, &pos_core::SchemaVersionMap)>,
     ) -> Result<Self, RuntimeError> {
         use pos_core::store::SeqRange;
-        let all_events = match upcasters {
-            Some((uc, sv)) => store.read_upcast(timeline, SeqRange::all(), uc, sv)?,
-            None => store.read(timeline, SeqRange::all())?,
-        };
+        let all_events = store.read(timeline, SeqRange::all())?;
         let recorded: Vec<Vec<u8>> = all_events
             .into_iter()
             .filter(|e| e.entity == entity && e.event_type.as_str() == RECORDER_EVENT_TYPE)
@@ -268,7 +263,7 @@ mod tests {
         ];
         store.append(tl.id(), &drafts).unwrap();
 
-        let mut rec = Recorder::prepare_replay(entity, store.as_ref(), tl.id(), None).unwrap();
+        let mut rec = Recorder::prepare_replay(entity, store.as_ref(), tl.id()).unwrap();
         assert_eq!(rec.remaining(), 2);
         assert_eq!(rec.record(vec![]).unwrap().bytes, b"r1");
         assert_eq!(rec.record(vec![]).unwrap().bytes, b"r2");
@@ -341,8 +336,7 @@ mod tests {
         }
 
         let store = ReadFailStore;
-        let result =
-            Recorder::prepare_replay(EntityId::new(), &store, pos_core::TimelineId::new(), None);
+        let result = Recorder::prepare_replay(EntityId::new(), &store, pos_core::TimelineId::new());
         assert!(matches!(result, Err(RuntimeError::Store(_))));
     }
 
@@ -367,56 +361,5 @@ mod tests {
             let result = replay.record(b"ignored".to_vec()).unwrap();
             assert_eq!(&result.bytes, expected);
         }
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn prepare_replay_upcast_reads_via_read_upcast() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("t").unwrap();
-        let entity = EntityId::new();
-
-        let draft = EventDraft::new(
-            entity,
-            Kind::new(RECORDER_EVENT_TYPE),
-            CanonicalBytes::from_vec(b"r1".to_vec()),
-        );
-        store.append(tl.id(), &[draft]).unwrap();
-
-        let upcasters = pos_core::UpcasterRegistry::new();
-        let schema_versions = pos_core::SchemaVersionMap::new();
-
-        let mut rec = Recorder::prepare_replay(
-            entity,
-            store.as_ref(),
-            tl.id(),
-            Some((&upcasters, &schema_versions)),
-        )
-        .unwrap();
-        assert_eq!(rec.remaining(), 1);
-        assert_eq!(rec.record(vec![]).unwrap().bytes, b"r1");
-        assert!(rec.record(vec![]).is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn prepare_replay_upcast_propagates_read_err() {
-        let store = open_store(StoreConfig::Memory).unwrap();
-        let entity = EntityId::new();
-        let upcasters = pos_core::UpcasterRegistry::new();
-        let schema_versions = pos_core::SchemaVersionMap::new();
-        let bad_timeline = TimelineId::new();
-        let result = Recorder::prepare_replay(
-            entity,
-            store.as_ref(),
-            bad_timeline,
-            Some((&upcasters, &schema_versions)),
-        );
-        assert!(matches!(
-            result,
-            Err(RuntimeError::Store(pos_core::CoreError::TimelineNotFound(
-                _
-            )))
-        ));
     }
 }

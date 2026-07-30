@@ -78,8 +78,6 @@ A shared language for humans and agents working on PiglorOS. Use these terms exa
 | **Reducer** | `pos-runtime` | Folds events into `State`. Read-only w.r.t. the event store. |
 | **Driver** | `pos-runtime` | Produces `EventDraft`s in response to state or external stimuli. |
 | **Hasher** | `pos-core` | Trait decoupling BLAKE3 from store adapters (`genesis_hash`, `hash_payload`, `hash_event`). Default: `Blake3Hasher`. |
-| **Upcaster** | `pos-core` | Trait for schema evolution: transforms a payload from one `SchemaVersion` to the next. |
-| **UpcasterRegistry** | `pos-core` | Registry of `Upcaster`s, keyed by `(event_type, source_version)`. Applied via `EventStore::read_upcast`. |
 
 ---
 

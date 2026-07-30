@@ -25,7 +25,6 @@ use crate::{
     event::{Event, EventDraft},
     hasher::Hasher,
     ids::{EventId, TimelineId},
-    schema::{SchemaVersionMap, UpcasterRegistry},
     timeline::{Timeline, TimelineMeta},
 };
 
@@ -446,48 +445,6 @@ pub trait EventStore: Send {
         self.read(timeline, range)
     }
 
-    /// Read events and apply schema migrations via the [`UpcasterRegistry`].
-    ///
-    /// For each event, if its [`SchemaVersion`] is older than the target version in
-    /// [`SchemaVersionMap`], the registered upcasters are applied to transform the
-    /// payload. The event's `schema_version` is updated to the target version.
-    ///
-    /// Uses [`Self::read`] internally, then applies upcasters.
-    ///
-    /// # Errors
-    /// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist.
-    fn read_upcast(
-        &self,
-        timeline: TimelineId,
-        range: SeqRange,
-        upcasters: &UpcasterRegistry,
-        schema_versions: &SchemaVersionMap,
-    ) -> Result<Vec<Event>, CoreError> {
-        self.read(timeline, range).map(|mut events| {
-            upcast_events_in_place(&mut events, upcasters, schema_versions);
-            events
-        })
-    }
-
-    /// Read own events and apply schema migrations.
-    ///
-    /// Reads via [`Self::read_own`] (no fork stitching), then applies upcasters.
-    ///
-    /// # Errors
-    /// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist.
-    fn read_own_upcast(
-        &self,
-        timeline: TimelineId,
-        range: SeqRange,
-        upcasters: &UpcasterRegistry,
-        schema_versions: &SchemaVersionMap,
-    ) -> Result<Vec<Event>, CoreError> {
-        self.read_own(timeline, range).map(|mut events| {
-            upcast_events_in_place(&mut events, upcasters, schema_versions);
-            events
-        })
-    }
-
     /// Create a forked child timeline at `at_seq`.
     ///
     /// The child is copy-on-write: it stores only its own events going forward.
@@ -846,26 +803,6 @@ fn materialize_fork_export_as_root(export: &mut TimelineExport) {
     }
 }
 
-/// Apply upcasters to event payloads in-place where schema versions are stale.
-pub fn upcast_events_in_place(
-    events: &mut [Event],
-    upcasters: &UpcasterRegistry,
-    schema_versions: &SchemaVersionMap,
-) {
-    for event in events {
-        let target = schema_versions.current(event.event_type.as_str());
-        if event.schema_version < target {
-            event.payload = upcasters.upcast(
-                &event.event_type,
-                event.schema_version,
-                target,
-                event.payload.clone(),
-            );
-            event.schema_version = target;
-        }
-    }
-}
-
 /// Validate a committed-event batch before apply: sort, contiguous seqs from `head+1`,
 /// payload-hash integrity via `hasher`, and unique event ids (via `id_is_taken`).
 ///
@@ -964,7 +901,6 @@ mod tests {
         crypto::Hash,
         event::{CanonicalBytes, EventDraft, Kind, SchemaVersion},
         ids::{EntityId, EventId, TimelineId},
-        schema::{SchemaVersionMap, Upcaster, UpcasterRegistry},
         timeline::{Timeline, TimelineMeta},
     };
 
@@ -2869,168 +2805,5 @@ mod tests {
         let mut store = FlakyStore::new(FlakyMode::Healthy);
         let imported = import_timeline(&mut store, export).unwrap();
         let _ = imported.id();
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn read_upcast_propagates_read_err() {
-        let upcasters = UpcasterRegistry::new();
-        let schema_versions = SchemaVersionMap::new();
-        let store = FlakyStore::new(FlakyMode::ReadErr);
-        let err = store
-            .read_upcast(
-                TimelineId::new(),
-                SeqRange::all(),
-                &upcasters,
-                &schema_versions,
-            )
-            .unwrap_err();
-        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("read")));
-        let err = store
-            .read_own_upcast(
-                TimelineId::new(),
-                SeqRange::all(),
-                &upcasters,
-                &schema_versions,
-            )
-            .unwrap_err();
-        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("read")));
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn read_upcast_applies_migration() {
-        struct MigrationStore(Vec<Event>);
-        impl EventStore for MigrationStore {
-            fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
-                Ok(Timeline::new(TimelineMeta::root("t")))
-            }
-            fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
-                Ok(Vec::new())
-            }
-            fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
-                Ok(self.0.clone())
-            }
-            fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
-                Ok(Timeline::new(TimelineMeta::root("f")))
-            }
-            fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
-                Ok(Vec::new())
-            }
-            fn get_timeline(&self, _: TimelineId) -> Result<Option<Timeline>, CoreError> {
-                Ok(None)
-            }
-        }
-        struct Up(Kind);
-        impl Upcaster for Up {
-            fn event_type(&self) -> &Kind {
-                &self.0
-            }
-            fn source_version(&self) -> SchemaVersion {
-                SchemaVersion::V1
-            }
-            fn target_version(&self) -> SchemaVersion {
-                SchemaVersion::new(2)
-            }
-            fn upcast(&self, p: CanonicalBytes) -> CanonicalBytes {
-                p
-            }
-        }
-
-        let kind = Kind::new("test.event");
-        let mut store = MigrationStore(vec![Event {
-            id: EventId::new(),
-            entity: EntityId::new(),
-            event_type: kind.clone(),
-            payload: CanonicalBytes::from_vec(b"orig".to_vec()),
-            wall_time: WallTime::from_micros(1),
-            seq: Seq::from_u64(1),
-            causation_id: None,
-            correlation_id: None,
-            schema_version: SchemaVersion::V1,
-            signature: None,
-            payload_hash: Hash::zero(),
-        }]);
-
-        let mut upcasters = UpcasterRegistry::new();
-        upcasters.register(Box::new(Up(kind)));
-        let mut sv = SchemaVersionMap::new();
-        sv.set("test.event", 2);
-
-        let result = store
-            .read_upcast(TimelineId::new(), SeqRange::all(), &upcasters, &sv)
-            .unwrap();
-        assert_eq!(result[0].schema_version, SchemaVersion::new(2));
-
-        let result2 = store
-            .read_own_upcast(TimelineId::new(), SeqRange::all(), &upcasters, &sv)
-            .unwrap();
-        assert_eq!(result2[0].schema_version, SchemaVersion::new(2));
-
-        let _ = store.create_timeline("x").unwrap();
-        let _ = store.append(TimelineId::new(), &[]).unwrap();
-        let _ = store.fork(TimelineId::new(), Seq::ZERO, "x").unwrap();
-        let _ = store.list_timelines().unwrap();
-        let _ = store.get_timeline(TimelineId::new()).unwrap();
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn read_upcast_skips_when_current() {
-        struct Store(Vec<Event>);
-        impl EventStore for Store {
-            fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
-                Ok(Timeline::new(TimelineMeta::root("t")))
-            }
-            fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
-                Ok(Vec::new())
-            }
-            fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
-                Ok(self.0.clone())
-            }
-            fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
-                Ok(Timeline::new(TimelineMeta::root("f")))
-            }
-            fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
-                Ok(Vec::new())
-            }
-            fn get_timeline(&self, _: TimelineId) -> Result<Option<Timeline>, CoreError> {
-                Ok(None)
-            }
-        }
-
-        let mut store = Store(vec![Event {
-            id: EventId::new(),
-            entity: EntityId::new(),
-            event_type: Kind::new("t"),
-            payload: CanonicalBytes::from_vec(b"x".to_vec()),
-            wall_time: WallTime::from_micros(1),
-            seq: Seq::from_u64(1),
-            causation_id: None,
-            correlation_id: None,
-            schema_version: SchemaVersion::new(2),
-            signature: None,
-            payload_hash: Hash::zero(),
-        }]);
-
-        let upcasters = UpcasterRegistry::new();
-        let mut sv = SchemaVersionMap::new();
-        sv.set("t", 2);
-
-        let r = store
-            .read_upcast(TimelineId::new(), SeqRange::all(), &upcasters, &sv)
-            .unwrap();
-        assert_eq!(r[0].schema_version, SchemaVersion::new(2));
-        let r = store
-            .read_own_upcast(TimelineId::new(), SeqRange::all(), &upcasters, &sv)
-            .unwrap();
-        assert_eq!(r[0].schema_version, SchemaVersion::new(2));
-
-        // Exercise all trait methods for region coverage.
-        let _ = store.create_timeline("x").unwrap();
-        let _ = store.append(TimelineId::new(), &[]).unwrap();
-        let _ = store.fork(TimelineId::new(), Seq::ZERO, "x").unwrap();
-        let _ = store.list_timelines().unwrap();
-        let _ = store.get_timeline(TimelineId::new()).unwrap();
     }
 }

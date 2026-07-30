@@ -2129,27 +2129,4 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(!events[0].payload_hash.as_bytes().iter().all(|b| *b == 0));
     }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn read_upcast_on_memory_store_default_noop() {
-        let mut store = MemoryStore::new();
-        let tl = store.create_timeline("upcast-test").unwrap();
-        let entity = EntityId::new();
-        store
-            .append(tl.id(), &[make_draft(entity, b"payload")])
-            .unwrap();
-        let upcasters = pos_core::UpcasterRegistry::new();
-        let schema_versions = pos_core::SchemaVersionMap::new();
-        let store_ref: &dyn pos_core::EventStore = &store;
-        let result = store_ref
-            .read_upcast(
-                tl.id(),
-                pos_core::store::SeqRange::all(),
-                &upcasters,
-                &schema_versions,
-            )
-            .unwrap();
-        assert!(!result.is_empty());
-    }
 }

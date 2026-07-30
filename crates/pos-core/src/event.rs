@@ -93,28 +93,20 @@ pub enum RunMode {
     Replay,
 }
 
-/// Schema version for an event type. Enables upcasting on read.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// The sole schema marker emitted by `PiglorOS` V1 events.
+///
+/// It remains a numeric `1` in serialized Events, but no version ladder or
+/// payload-upgrade behavior is supported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct SchemaVersion(u32);
+pub struct SchemaVersion(u8);
 
 impl SchemaVersion {
     pub const V1: Self = Self(1);
 
     #[must_use]
-    pub const fn new(v: u32) -> Self {
-        Self(v)
-    }
-
-    #[must_use]
     pub const fn as_u32(self) -> u32 {
-        self.0
-    }
-}
-
-impl Default for SchemaVersion {
-    fn default() -> Self {
-        Self::V1
+        1
     }
 }
 
@@ -162,7 +154,7 @@ impl EventDraft {
             payload,
             causation_id: None,
             correlation_id: None,
-            schema_version: SchemaVersion::default(),
+            schema_version: SchemaVersion::V1,
             wall_time: None,
         }
     }
@@ -282,15 +274,13 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn schema_version_default_is_v1() {
-        assert_eq!(SchemaVersion::default(), SchemaVersion::V1);
+    fn schema_version_is_v1_only() {
         assert_eq!(SchemaVersion::V1.as_u32(), 1);
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn schema_version_ordering() {
-        assert!(SchemaVersion::new(1) < SchemaVersion::new(2));
+        assert_eq!(serde_json::to_string(&SchemaVersion::V1).unwrap(), "1");
+        assert_eq!(
+            serde_json::from_str::<SchemaVersion>("1").unwrap(),
+            SchemaVersion::V1
+        );
     }
 
     #[test]
@@ -321,7 +311,7 @@ mod tests {
             seq: Seq::ZERO,
             causation_id: Some(EventId::new()),
             correlation_id: Some(CorrelationId::new()),
-            schema_version: SchemaVersion::new(2),
+            schema_version: SchemaVersion::V1,
             signature: None,
             payload_hash: Hash::from_bytes([255u8; 32]),
         };

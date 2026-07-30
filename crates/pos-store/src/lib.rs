@@ -90,7 +90,7 @@ pub enum StoreConfig {
 /// # Errors
 ///
 /// Returns [`CoreError::Storage`] if the backend cannot be initialised
-/// (e.g. the `SQLite` file path is not writable or schema migration fails).
+/// (e.g. the `SQLite` file path is not writable or schema initialisation fails).
 ///
 /// # Panics
 ///
