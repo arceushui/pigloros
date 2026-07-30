@@ -2129,4 +2129,13 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(!events[0].payload_hash.as_bytes().iter().all(|b| *b == 0));
     }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn memory_boundary_rejects_non_v1_serialized_draft() {
+        let draft = make_draft(EntityId::new(), b"payload");
+        let mut encoded = serde_json::to_value(draft).unwrap();
+        encoded["schema_version"] = serde_json::json!(2);
+        assert!(serde_json::from_value::<EventDraft>(encoded).is_err());
+    }
 }

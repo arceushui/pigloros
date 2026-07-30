@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
     clock::{Seq, WallTime},
@@ -97,8 +97,7 @@ pub enum RunMode {
 ///
 /// It remains a numeric `1` in serialized Events, but no version ladder or
 /// payload-upgrade behavior is supported.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SchemaVersion(u8);
 
 impl SchemaVersion {
@@ -107,6 +106,26 @@ impl SchemaVersion {
     #[must_use]
     pub const fn as_u32(self) -> u32 {
         1
+    }
+}
+
+impl Serialize for SchemaVersion {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u8(1)
+    }
+}
+
+impl<'de> Deserialize<'de> for SchemaVersion {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        u8::deserialize(deserializer).and_then(|value| {
+            if value == 1 {
+                Ok(Self::V1)
+            } else {
+                Err(serde::de::Error::custom(
+                    "only schema version 1 is supported",
+                ))
+            }
+        })
     }
 }
 
@@ -281,6 +300,10 @@ mod tests {
             serde_json::from_str::<SchemaVersion>("1").unwrap(),
             SchemaVersion::V1
         );
+        assert!(serde_json::from_str::<SchemaVersion>("2").is_err());
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&2_u8, &mut cbor).unwrap();
+        assert!(ciborium::from_reader::<SchemaVersion, _>(cbor.as_slice()).is_err());
     }
 
     #[test]

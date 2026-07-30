@@ -308,7 +308,7 @@ impl SqliteStore {
                  wall_time   INTEGER NOT NULL,
                  causation_id TEXT,
                  correlation_id TEXT,
-                 schema_version INTEGER NOT NULL,
+                 schema_version INTEGER NOT NULL CHECK (schema_version = 1),
                  payload_hash BLOB NOT NULL,
                  signature   BLOB,
                  PRIMARY KEY (timeline_id, seq)
@@ -476,7 +476,6 @@ impl SqliteStore {
                 row.get(6).map_err(|e| CoreError::Storage(e.to_string()))?;
             let correlation_id: Option<String> =
                 row.get(7).map_err(|e| CoreError::Storage(e.to_string()))?;
-            let schema_version: i64 = row.get(8).map_err(|e| CoreError::Storage(e.to_string()))?;
             let ph_bytes: Vec<u8> = row.get(9).map_err(|e| CoreError::Storage(e.to_string()))?;
             let sig_bytes: Option<Vec<u8>> =
                 row.get(10).map_err(|e| CoreError::Storage(e.to_string()))?;
@@ -504,13 +503,7 @@ impl SqliteStore {
                     .as_deref()
                     .map(parse_correlation_id)
                     .transpose()?,
-                schema_version: if schema_version == 1 {
-                    SchemaVersion::V1
-                } else {
-                    return Err(CoreError::Serialization(
-                        "only schema version 1 is supported".to_owned(),
-                    ));
-                },
+                schema_version: SchemaVersion::V1,
                 signature,
                 payload_hash: pos_core::Hash::from_bytes(ph_arr),
             });
@@ -3573,30 +3566,29 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn read_rejects_non_v1_schema_version() {
+    fn sqlite_schema_rejects_non_v1_schema_version() {
         let mut store = new_store();
         let tl = store.create_timeline("main").unwrap();
         let entity = EntityId::new();
         store.append(tl.id(), &[make_draft(entity, b"x")]).unwrap();
-        store
+        assert!(store
             .conn
             .execute(
                 "UPDATE events SET schema_version = 'not-an-int' WHERE timeline_id = ?1",
                 rusqlite::params![tl.id().to_string()],
             )
-            .unwrap();
-        assert_storage_err(store.read(tl.id(), SeqRange::all()).map(|_| ()));
-        store
+            .is_err());
+        assert!(store
             .conn
             .execute(
                 "UPDATE events SET schema_version = 2 WHERE timeline_id = ?1",
                 rusqlite::params![tl.id().to_string()],
             )
-            .unwrap();
-        assert!(matches!(
-            store.read(tl.id(), SeqRange::all()),
-            Err(CoreError::Serialization(_))
-        ));
+            .is_err());
+        assert_eq!(
+            store.read(tl.id(), SeqRange::all()).unwrap()[0].schema_version,
+            SchemaVersion::V1
+        );
     }
 
     #[test]
