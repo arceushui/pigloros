@@ -467,6 +467,51 @@ mod tests {
         append_or_duplicate_contract(&mut *store);
     }
 
+    fn bounded_identity_contract(store: &mut dyn EventStore) {
+        let timeline = store.create_timeline("bounded-identity").unwrap();
+        let entity = EntityId::new();
+        let draft = EventDraft::new(
+            entity,
+            Kind::new("test.bounded"),
+            CanonicalBytes::from_vec(b"bounded".to_vec()),
+        );
+        let identity = append_identity(21, 22);
+        let intent = AppendIntent::new(&draft);
+        let first = store
+            .append_intent_or_duplicate_bounded(timeline.id(), identity, intent.clone(), 1)
+            .unwrap()
+            .unwrap();
+        let event_id = appended_event_id(first);
+        assert_eq!(
+            store
+                .append_intent_or_duplicate_bounded(timeline.id(), identity, intent.clone(), 1)
+                .unwrap(),
+            Some(AppendOrDuplicateOutcome::Duplicate { event_id })
+        );
+        assert_eq!(
+            store
+                .read_event_by_id(timeline.id(), event_id)
+                .unwrap()
+                .unwrap()
+                .id,
+            event_id
+        );
+        assert!(store
+            .read_event_by_id(timeline.id(), EventId::new())
+            .unwrap()
+            .is_none());
+        assert!(store
+            .append_intent_or_duplicate_bounded(timeline.id(), append_identity(23, 24), intent, 1,)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn bounded_identity_contract_memory() {
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        bounded_identity_contract(&mut *store);
+    }
+
     #[cfg(feature = "sqlite")]
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -481,6 +526,12 @@ mod tests {
     fn append_or_duplicate_contract_sqlite() {
         let mut store = open_store(StoreConfig::SqliteInMemory).unwrap();
         append_or_duplicate_contract(&mut *store);
+    }
+
+    #[test]
+    fn bounded_identity_contract_sqlite() {
+        let mut store = open_store(StoreConfig::SqliteInMemory).unwrap();
+        bounded_identity_contract(&mut *store);
     }
 
     #[cfg(feature = "sqlite")]

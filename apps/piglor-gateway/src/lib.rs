@@ -399,12 +399,17 @@ impl Gateway {
             let timeline_meta = guard
                 .get_timeline(timeline)?
                 .ok_or(GatewayError::Store(CoreError::TimelineNotFound(timeline)))?;
-            if timeline_meta.head.as_u64() >= self.limits.max_events_per_timeline {
-                return Err(GatewayError::EventLimitReached {
+            let _ = timeline_meta;
+            guard
+                .append_intent_or_duplicate_bounded(
+                    timeline,
+                    identity,
+                    AppendIntent::new(&draft),
+                    self.limits.max_events_per_timeline,
+                )?
+                .ok_or(GatewayError::EventLimitReached {
                     maximum: self.limits.max_events_per_timeline,
-                });
-            }
-            guard.append_intent_or_duplicate(timeline, identity, AppendIntent::new(&draft))?
+                })?
         };
         let (event, duplicate) = match outcome {
             AppendOrDuplicateOutcome::Appended(event) => (*event, false),
@@ -498,9 +503,7 @@ impl Gateway {
     ) -> Result<Event, GatewayError> {
         let guard = self.store.lock().await;
         guard
-            .read(timeline, SeqRange::all())?
-            .into_iter()
-            .find(|event| event.id == event_id)
+            .read_event_by_id(timeline, event_id)?
             .ok_or(GatewayError::Store(CoreError::Storage(
                 "duplicate identity points to a missing Event".to_owned(),
             )))
@@ -533,6 +536,8 @@ fn ingress_identity(timeline: TimelineId, entity: EntityId, ingress_id: &str) ->
     let mut key = blake3::Hasher::new_derive_key("pigloros ingress dedup key v1");
     key.update(b"timeline:");
     key.update(timeline.to_string().as_bytes());
+    key.update(b"\nentity:");
+    key.update(entity.to_string().as_bytes());
     key.update(b"\ningress:");
     key.update(ingress_id.as_bytes());
     let mut scope = blake3::Hasher::new_derive_key("pigloros ingress dedup scope v1");
@@ -720,6 +725,9 @@ mod tests {
         FailAppend,
         FailRead,
         RejectListUse,
+        Duplicate,
+        DuplicateReadError,
+        MissingTimeline,
     }
 
     struct ScriptedStore {
@@ -802,7 +810,39 @@ mod tests {
             if matches!(self.mode, ScriptMode::FailGetTimeline) {
                 return Err(CoreError::Storage("get timeline failed".into()));
             }
+            if matches!(self.mode, ScriptMode::MissingTimeline) {
+                return Ok(None);
+            }
             Ok(Some(Timeline::new(TimelineMeta::root("scripted"))))
+        }
+
+        fn append_intent_or_duplicate_bounded(
+            &mut self,
+            _timeline: TimelineId,
+            _identity: AppendIdentity,
+            _intent: AppendIntent,
+            _max_owned_events: u64,
+        ) -> Result<Option<AppendOrDuplicateOutcome>, CoreError> {
+            if matches!(
+                self.mode,
+                ScriptMode::Duplicate | ScriptMode::DuplicateReadError
+            ) {
+                return Ok(Some(AppendOrDuplicateOutcome::Duplicate {
+                    event_id: EventId::new(),
+                }));
+            }
+            Err(CoreError::Storage("scripted bounded append failed".into()))
+        }
+
+        fn read_event_by_id(
+            &self,
+            _timeline: TimelineId,
+            _event_id: EventId,
+        ) -> Result<Option<Event>, CoreError> {
+            if matches!(self.mode, ScriptMode::DuplicateReadError) {
+                return Err(CoreError::Storage("scripted event lookup failed".into()));
+            }
+            Ok(None)
         }
     }
 
@@ -963,6 +1003,265 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(page.events.len(), 2);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn identified_retry_wins_over_event_capacity() {
+        let gateway = Gateway::with_limits(
+            open_store(StoreConfig::Memory).unwrap(),
+            GatewayLimits {
+                max_timelines: 1,
+                max_events_per_timeline: 1,
+            },
+        );
+        let timeline = gateway.create_timeline("dedup-capacity").await.unwrap();
+        let entity = EntityId::new();
+        let first = gateway
+            .append_identified_action(
+                &timeline.id().to_string(),
+                &entity.to_string(),
+                EVENT_TYPE_ACTION,
+                &serde_json::json!({"value": 1}),
+                "device-1:capacity",
+            )
+            .await
+            .unwrap();
+        let retry = gateway
+            .append_identified_action(
+                &timeline.id().to_string(),
+                &entity.to_string(),
+                EVENT_TYPE_ACTION,
+                &serde_json::json!({"value": 1}),
+                "device-1:capacity",
+            )
+            .await
+            .unwrap();
+        assert!(retry.duplicate);
+        assert_eq!(retry.event.id, first.event.id);
+        let error = gateway
+            .append_identified_action(
+                &timeline.id().to_string(),
+                &entity.to_string(),
+                EVENT_TYPE_ACTION,
+                &serde_json::json!({"value": 2}),
+                "device-1:new",
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            GatewayError::EventLimitReached { maximum: 1 }
+        ));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn same_ingress_id_is_scoped_to_entity() {
+        let gateway = memory_gw();
+        let timeline = gateway.create_timeline("entity-scope").await.unwrap();
+        let timeline_id = timeline.id().to_string();
+        let first = gateway
+            .append_identified_action(
+                &timeline_id,
+                &EntityId::new().to_string(),
+                EVENT_TYPE_ACTION,
+                &serde_json::json!({"value": 1}),
+                "device-1:shared",
+            )
+            .await
+            .unwrap();
+        let second_entity = EntityId::new().to_string();
+        let second = gateway
+            .append_identified_action(
+                &timeline_id,
+                &second_entity,
+                EVENT_TYPE_ACTION,
+                &serde_json::json!({"value": 1}),
+                "device-1:shared",
+            )
+            .await
+            .unwrap();
+        assert!(!second.duplicate);
+        assert_ne!(first.event.id, second.event.id);
+    }
+
+    #[tokio::test]
+    async fn identified_admission_covers_bounds_and_maintenance() {
+        let gateway = memory_gw();
+        let timeline = gateway.create_timeline("identified-bounds").await.unwrap();
+        let timeline_id = timeline.id().to_string();
+        let entity_id = EntityId::new().to_string();
+        let payload = serde_json::json!({"data": "x".repeat(MAX_EVENT_PAYLOAD_BYTES)});
+        assert!(matches!(
+            gateway
+                .append_identified_action(
+                    &timeline_id,
+                    &entity_id,
+                    EVENT_TYPE_ACTION,
+                    &payload,
+                    "device-1:oversized",
+                )
+                .await,
+            Err(GatewayError::EventPayloadTooLarge { .. })
+        ));
+        let high_expansion = serde_json::json!({"data": "\0".repeat(160 * 1024)});
+        assert!(matches!(
+            gateway
+                .append_identified_action(
+                    &timeline_id,
+                    &entity_id,
+                    EVENT_TYPE_ACTION,
+                    &high_expansion,
+                    "device-1:expanded",
+                )
+                .await,
+            Err(GatewayError::EventResponseTooLarge { .. })
+        ));
+        assert_eq!(
+            gateway
+                .purge_expired_ingress_identities(NonZeroUsize::new(1).unwrap())
+                .await
+                .unwrap()
+                .removed,
+            0
+        );
+        assert!(matches!(
+            gateway
+                .append_identified_action(
+                    &timeline_id,
+                    &entity_id,
+                    "other.event",
+                    &serde_json::json!({}),
+                    "device-1:unsupported",
+                )
+                .await,
+            Err(GatewayError::UnsupportedAction(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn identified_admission_fails_closed_for_input_and_append_boundaries() {
+        let gateway = memory_gw();
+        let timeline = gateway.create_timeline("identified-errors").await.unwrap();
+        let valid_timeline = timeline.id().to_string();
+        let valid_entity = EntityId::new().to_string();
+        let payload = serde_json::json!({});
+        assert!(matches!(
+            gateway
+                .append_identified_action(
+                    "bad",
+                    &valid_entity,
+                    EVENT_TYPE_ACTION,
+                    &payload,
+                    "device-1:bad-timeline",
+                )
+                .await,
+            Err(GatewayError::InvalidId(_))
+        ));
+        assert!(matches!(
+            gateway
+                .append_identified_action(
+                    &valid_timeline,
+                    "bad",
+                    EVENT_TYPE_ACTION,
+                    &payload,
+                    "device-1:bad-entity",
+                )
+                .await,
+            Err(GatewayError::InvalidId(_))
+        ));
+        let get_error = Gateway::new(Box::new(ScriptedStore {
+            mode: ScriptMode::FailGetTimeline,
+        }));
+        assert!(matches!(
+            get_error
+                .append_identified_action(
+                    &valid_timeline,
+                    &valid_entity,
+                    EVENT_TYPE_ACTION,
+                    &payload,
+                    "device-1:get-error",
+                )
+                .await,
+            Err(GatewayError::Store(_))
+        ));
+        let missing_timeline = Gateway::new(Box::new(ScriptedStore {
+            mode: ScriptMode::MissingTimeline,
+        }));
+        assert!(matches!(
+            missing_timeline
+                .append_identified_action(
+                    &valid_timeline,
+                    &valid_entity,
+                    EVENT_TYPE_ACTION,
+                    &payload,
+                    "device-1:missing-timeline",
+                )
+                .await,
+            Err(GatewayError::Store(_))
+        ));
+        let append_error = Gateway::new(Box::new(ScriptedStore {
+            mode: ScriptMode::RejectListUse,
+        }));
+        assert!(matches!(
+            append_error
+                .append_identified_action(
+                    &valid_timeline,
+                    &valid_entity,
+                    EVENT_TYPE_ACTION,
+                    &payload,
+                    "device-1:append-error",
+                )
+                .await,
+            Err(GatewayError::Store(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn identified_admission_fails_closed_for_purge_and_duplicate_boundaries() {
+        let gateway = memory_gw();
+        let timeline = gateway.create_timeline("identified-errors").await.unwrap();
+        let valid_timeline = timeline.id().to_string();
+        let valid_entity = EntityId::new().to_string();
+        let payload = serde_json::json!({});
+        let purge_error = Gateway::new(Box::new(ScriptedStore {
+            mode: ScriptMode::RejectListUse,
+        }));
+        assert!(purge_error
+            .purge_expired_ingress_identities(NonZeroUsize::new(1).unwrap())
+            .await
+            .is_err());
+        let duplicate_error = Gateway::new(Box::new(ScriptedStore {
+            mode: ScriptMode::Duplicate,
+        }));
+        assert!(matches!(
+            duplicate_error
+                .append_identified_action(
+                    &valid_timeline,
+                    &valid_entity,
+                    EVENT_TYPE_ACTION,
+                    &payload,
+                    "device-1:missing-event",
+                )
+                .await,
+            Err(GatewayError::Store(_))
+        ));
+        let duplicate_read_error = Gateway::new(Box::new(ScriptedStore {
+            mode: ScriptMode::DuplicateReadError,
+        }));
+        assert!(matches!(
+            duplicate_read_error
+                .append_identified_action(
+                    &valid_timeline,
+                    &valid_entity,
+                    EVENT_TYPE_ACTION,
+                    &payload,
+                    "device-1:read-error",
+                )
+                .await,
+            Err(GatewayError::Store(_))
+        ));
     }
 
     #[tokio::test]

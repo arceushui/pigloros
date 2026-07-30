@@ -967,6 +967,87 @@ fn timeline_fields_to_timeline(
     Ok(tl)
 }
 
+impl SqliteStore {
+    fn append_or_duplicate_with_limit(
+        &mut self,
+        timeline: TimelineId,
+        identity: AppendIdentity,
+        admitted_at: WallTime,
+        draft: &EventDraft,
+        max_owned_events: Option<u64>,
+    ) -> Result<Option<AppendOrDuplicateOutcome>, CoreError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let timeline_text = timeline.to_string();
+        let exists = tx
+            .query_row(
+                "SELECT head_seq FROM timelines WHERE id = ?1",
+                params![&timeline_text],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let Some(head_seq) = exists else {
+            return Err(CoreError::TimelineNotFound(timeline));
+        };
+        let existing = tx.query_row(
+            "SELECT event_id, expires_at FROM append_identities WHERE dedup_key = ?1",
+            params![identity.dedup_key.as_bytes().as_slice()],
+            |row| {
+                row.get::<_, String>(0)
+                    .and_then(|event_id| row.get::<_, i64>(1).map(|expires| (event_id, expires)))
+            },
+        );
+        match existing {
+            Ok((event_id, expires_at))
+                if u64::try_from(expires_at).unwrap_or(0) > admitted_at.as_micros() =>
+            {
+                return Self::retained_event_matches_draft(&tx, &event_id, timeline, draft)
+                    .and_then(|matches| {
+                        if matches {
+                            parse_event_id(&event_id).map(|id| {
+                                Some(AppendOrDuplicateOutcome::Duplicate { event_id: id })
+                            })
+                        } else {
+                            Ok(Some(AppendOrDuplicateOutcome::Conflict))
+                        }
+                    });
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => {}
+            Err(error) => return Err(CoreError::Storage(error.to_string())),
+            Ok(_) => {
+                tx.execute(
+                    "DELETE FROM append_identities WHERE dedup_key = ?1",
+                    params![identity.dedup_key.as_bytes().as_slice()],
+                )
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            }
+        }
+        if max_owned_events.is_some_and(|maximum| u64::try_from(head_seq).unwrap_or(0) >= maximum) {
+            return Ok(None);
+        }
+        let expires_at = checked_append_identity_expires_at(admitted_at)?;
+        let event =
+            Self::append_one_in_transaction(&tx, self.hasher.as_ref(), timeline, draft.clone())?;
+        tx.execute(
+            "INSERT INTO append_identities (dedup_key, scope_key, event_id, expires_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                identity.dedup_key.as_bytes().as_slice(),
+                identity.scope.as_bytes().as_slice(),
+                event.id.to_string(),
+                i64::try_from(expires_at.as_micros()).unwrap_or(i64::MAX),
+            ],
+        )
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
+        tx.commit()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        Ok(Some(AppendOrDuplicateOutcome::Appended(Box::new(event))))
+    }
+}
+
 impl EventStore for SqliteStore {
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
         let meta = TimelineMeta::root(name);
@@ -1019,81 +1100,8 @@ impl EventStore for SqliteStore {
         admitted_at: WallTime,
         draft: EventDraft,
     ) -> Result<AppendOrDuplicateOutcome, CoreError> {
-        let tx = match self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-        {
-            Ok(tx) => tx,
-            Err(error) => return Err(CoreError::Storage(error.to_string())),
-        };
-
-        let timeline_text = timeline.to_string();
-        let target_exists = tx
-            .query_row(
-                "SELECT 1 FROM timelines WHERE id = ?1",
-                params![&timeline_text],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        if target_exists.is_none() {
-            return Err(CoreError::TimelineNotFound(timeline));
-        }
-
-        let existing = tx.query_row(
-            "SELECT event_id, expires_at FROM append_identities WHERE dedup_key = ?1",
-            params![identity.dedup_key.as_bytes().as_slice()],
-            |row| {
-                row.get::<_, String>(0)
-                    .and_then(|event_id| row.get::<_, i64>(1).map(|expires| (event_id, expires)))
-            },
-        );
-        match existing {
-            Ok((event_id, expires_at))
-                if u64::try_from(expires_at).unwrap_or(0) > admitted_at.as_micros() =>
-            {
-                return Self::retained_event_matches_draft(&tx, &event_id, timeline, &draft)
-                    .and_then(|retained_matches| {
-                        if retained_matches {
-                            parse_event_id(&event_id)
-                                .map(|event_id| AppendOrDuplicateOutcome::Duplicate { event_id })
-                        } else {
-                            Ok(AppendOrDuplicateOutcome::Conflict)
-                        }
-                    });
-            }
-            Err(rusqlite::Error::QueryReturnedNoRows) => {}
-            Err(error) => return Err(CoreError::Storage(error.to_string())),
-            Ok(_) => {
-                tx.execute(
-                    "DELETE FROM append_identities WHERE dedup_key = ?1",
-                    params![identity.dedup_key.as_bytes().as_slice()],
-                )
-                .map_err(|error| CoreError::Storage(error.to_string()))?;
-            }
-        }
-
-        let expires_at = checked_append_identity_expires_at(admitted_at)?;
-        Self::append_one_in_transaction(&tx, self.hasher.as_ref(), timeline, draft).and_then(
-            |event| {
-                tx.execute(
-                    "INSERT INTO append_identities (dedup_key, scope_key, event_id, expires_at)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    params![
-                        identity.dedup_key.as_bytes().as_slice(),
-                        identity.scope.as_bytes().as_slice(),
-                        event.id.to_string(),
-                        i64::try_from(expires_at.as_micros()).unwrap_or(i64::MAX),
-                    ],
-                )
-                .map_err(|error| CoreError::Storage(error.to_string()))
-                .and_then(|_| {
-                    tx.commit()
-                        .map_err(|error| CoreError::Storage(error.to_string()))
-                        .map(|()| AppendOrDuplicateOutcome::Appended(Box::new(event)))
-                })
-            },
-        )
+        self.append_or_duplicate_with_limit(timeline, identity, admitted_at, &draft, None)
+            .map(|outcome| outcome.expect("unbounded append cannot hit an event limit"))
     }
 
     fn purge_expired_append_identities(&mut self, now: WallTime) -> Result<usize, CoreError> {
@@ -1116,6 +1124,52 @@ impl EventStore for SqliteStore {
         let mut draft = intent.into_draft();
         draft.wall_time = Some(admitted_at);
         self.append_or_duplicate(timeline, identity, admitted_at, draft)
+    }
+
+    fn append_intent_or_duplicate_bounded(
+        &mut self,
+        timeline: TimelineId,
+        identity: AppendIdentity,
+        intent: AppendIntent,
+        max_owned_events: u64,
+    ) -> Result<Option<AppendOrDuplicateOutcome>, CoreError> {
+        let admitted_at = self.clock.now()?;
+        let mut draft = intent.into_draft();
+        draft.wall_time = Some(admitted_at);
+        self.append_or_duplicate_with_limit(
+            timeline,
+            identity,
+            admitted_at,
+            &draft,
+            Some(max_owned_events),
+        )
+    }
+
+    fn read_event_by_id(
+        &self,
+        timeline: TimelineId,
+        event_id: EventId,
+    ) -> Result<Option<Event>, CoreError> {
+        let seq = self
+            .conn
+            .query_row(
+                "SELECT seq FROM events WHERE timeline_id = ?1 AND event_id = ?2",
+                params![timeline.to_string(), event_id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let Some(seq) = seq else {
+            return Ok(None);
+        };
+        let mut events = Self::read_own_events_limited_on(
+            &self.conn,
+            timeline,
+            Seq::from_u64(u64::try_from(seq).unwrap_or(0)),
+            Some(Seq::from_u64(u64::try_from(seq).unwrap_or(0))),
+            Some(1),
+        )?;
+        Ok(events.pop())
     }
 
     fn purge_expired_append_identities_bounded(
@@ -1740,6 +1794,15 @@ mod tests {
         assert!(store
             .append_intent_or_duplicate(timeline.id(), append_identity(90, 90), intent)
             .is_err());
+        let bounded_intent = AppendIntent::new(&make_draft(EntityId::new(), b"bounded-clock"));
+        assert!(store
+            .append_intent_or_duplicate_bounded(
+                timeline.id(),
+                append_identity(92, 92),
+                bounded_intent,
+                1,
+            )
+            .is_err());
         assert!(store
             .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).unwrap())
             .is_err());
@@ -1782,6 +1845,31 @@ mod tests {
         assert!(query
             .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).unwrap())
             .is_err());
+    }
+
+    #[test]
+    fn read_event_by_id_fails_closed_on_query_error() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("read-event-by-id").unwrap();
+        store.conn.execute("DROP TABLE events", []).unwrap();
+        assert!(store
+            .read_event_by_id(timeline.id(), EventId::new())
+            .is_err());
+    }
+
+    #[test]
+    fn read_event_by_id_fails_closed_when_event_row_read_fails() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("read-event-row").unwrap();
+        let event = store
+            .append(timeline.id(), &[make_draft(EntityId::new(), b"row")])
+            .unwrap()
+            .pop()
+            .unwrap();
+        FAIL_ROWS_NEXT.with(|flag| flag.set(true));
+        let result = store.read_event_by_id(timeline.id(), event.id);
+        FAIL_ROWS_NEXT.with(|flag| flag.set(false));
+        assert!(result.is_err());
     }
 
     #[test]

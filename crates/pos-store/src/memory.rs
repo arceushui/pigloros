@@ -103,6 +103,57 @@ impl MemoryStore {
         store
     }
 
+    fn append_or_duplicate_with_limit(
+        &mut self,
+        timeline: TimelineId,
+        identity: AppendIdentity,
+        admitted_at: WallTime,
+        draft: &EventDraft,
+        max_owned_events: Option<u64>,
+    ) -> Result<Option<AppendOrDuplicateOutcome>, CoreError> {
+        self.timeline(timeline)?;
+        if let Some(record) = self.append_identities.get(&identity.dedup_key) {
+            if record.expires_at > admitted_at {
+                if record.timeline != timeline {
+                    return Ok(Some(AppendOrDuplicateOutcome::Conflict));
+                }
+                return Ok(Some(
+                    if Self::retained_content_matches(&record.retained_content, draft) {
+                        AppendOrDuplicateOutcome::Duplicate {
+                            event_id: record.event_id,
+                        }
+                    } else {
+                        AppendOrDuplicateOutcome::Conflict
+                    },
+                ));
+            }
+        }
+        if max_owned_events.is_some_and(|maximum| {
+            self.timelines
+                .get(&timeline)
+                .is_some_and(|meta| meta.head.as_u64() >= maximum)
+        }) {
+            return Ok(None);
+        }
+        let expires_at = checked_append_identity_expires_at(admitted_at)?;
+        let event = self
+            .append(timeline, std::slice::from_ref(draft))?
+            .into_iter()
+            .next()
+            .expect("single-draft append must return one Event");
+        self.append_identities.insert(
+            identity.dedup_key,
+            AppendIdentityRecord {
+                timeline,
+                scope: identity.scope,
+                event_id: event.id,
+                expires_at,
+                retained_content: Self::retained_content(&event),
+            },
+        );
+        Ok(Some(AppendOrDuplicateOutcome::Appended(Box::new(event))))
+    }
+
     fn timeline(&self, id: TimelineId) -> Result<&Timeline, CoreError> {
         match self.timelines.get(&id) {
             Some(timeline) => Ok(timeline),
@@ -410,40 +461,8 @@ impl EventStore for MemoryStore {
         admitted_at: WallTime,
         draft: EventDraft,
     ) -> Result<AppendOrDuplicateOutcome, CoreError> {
-        self.timeline(timeline)?;
-        if let Some(record) = self.append_identities.get(&identity.dedup_key) {
-            if record.expires_at > admitted_at {
-                if record.timeline != timeline {
-                    return Ok(AppendOrDuplicateOutcome::Conflict);
-                }
-                return if Self::retained_content_matches(&record.retained_content, &draft) {
-                    Ok(AppendOrDuplicateOutcome::Duplicate {
-                        event_id: record.event_id,
-                    })
-                } else {
-                    Ok(AppendOrDuplicateOutcome::Conflict)
-                };
-            }
-        }
-
-        let expires_at = checked_append_identity_expires_at(admitted_at)?;
-        let mut events = self.append(timeline, std::slice::from_ref(&draft))?;
-        let Some(event) = events.pop() else {
-            return Err(CoreError::Storage(
-                "empty append while recording ingress identity".to_owned(),
-            ));
-        };
-        self.append_identities.insert(
-            identity.dedup_key,
-            AppendIdentityRecord {
-                timeline,
-                scope: identity.scope,
-                event_id: event.id,
-                expires_at,
-                retained_content: Self::retained_content(&event),
-            },
-        );
-        Ok(AppendOrDuplicateOutcome::Appended(Box::new(event)))
+        self.append_or_duplicate_with_limit(timeline, identity, admitted_at, &draft, None)
+            .map(|outcome| outcome.expect("unbounded append cannot hit an event limit"))
     }
 
     fn purge_expired_append_identities(&mut self, now: WallTime) -> Result<usize, CoreError> {
@@ -463,6 +482,40 @@ impl EventStore for MemoryStore {
         let mut draft = intent.into_draft();
         draft.wall_time = Some(admitted_at);
         self.append_or_duplicate(timeline, identity, admitted_at, draft)
+    }
+
+    fn append_intent_or_duplicate_bounded(
+        &mut self,
+        timeline: TimelineId,
+        identity: AppendIdentity,
+        intent: AppendIntent,
+        max_owned_events: u64,
+    ) -> Result<Option<AppendOrDuplicateOutcome>, CoreError> {
+        let admitted_at = self.clock.now()?;
+        let mut draft = intent.into_draft();
+        draft.wall_time = Some(admitted_at);
+        self.append_or_duplicate_with_limit(
+            timeline,
+            identity,
+            admitted_at,
+            &draft,
+            Some(max_owned_events),
+        )
+    }
+
+    fn read_event_by_id(
+        &self,
+        timeline: TimelineId,
+        event_id: EventId,
+    ) -> Result<Option<Event>, CoreError> {
+        self.timeline(timeline)?;
+        Ok(self
+            .events
+            .get(&timeline)
+            .into_iter()
+            .flatten()
+            .find(|event| event.id == event_id)
+            .cloned())
     }
 
     fn purge_expired_append_identities_bounded(
@@ -799,6 +852,17 @@ mod tests {
             .append_intent_or_duplicate(timeline.id(), append_identity(1, 1), intent.clone())
             .is_err());
         assert!(clock_error
+            .append_intent_or_duplicate_bounded(
+                timeline.id(),
+                AppendIdentity::new(
+                    AppendDedupKey::from_keyed_hash([3; 32]),
+                    AppendDedupScope::from_keyed_hash([4; 32]),
+                ),
+                intent.clone(),
+                1,
+            )
+            .is_err());
+        assert!(clock_error
             .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).unwrap())
             .is_err());
 
@@ -810,6 +874,28 @@ mod tests {
             .append_intent_or_duplicate(timeline.id(), append_identity(2, 2), intent)
             .is_err());
         drop(timeline);
+    }
+
+    #[test]
+    fn bounded_append_surfaces_missing_event_storage() {
+        let mut store = MemoryStore::new();
+        let timeline = store.create_timeline("missing-event-storage").unwrap();
+        store.events.remove(&timeline.id());
+        let draft = make_draft(EntityId::new(), b"payload");
+        assert!(store
+            .append_intent_or_duplicate_bounded(
+                timeline.id(),
+                AppendIdentity::new(
+                    AppendDedupKey::from_keyed_hash([31; 32]),
+                    AppendDedupScope::from_keyed_hash([32; 32]),
+                ),
+                AppendIntent::new(&draft),
+                1,
+            )
+            .is_err());
+        assert!(store
+            .read_event_by_id(TimelineId::new(), EventId::new())
+            .is_err());
     }
 
     fn append_identity(key: u8, scope: u8) -> AppendIdentity {

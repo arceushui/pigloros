@@ -322,6 +322,41 @@ pub trait EventStore: Send {
         ))
     }
 
+    /// Append an identified intent subject to an owned-event ceiling.
+    ///
+    /// The identity lookup always precedes the ceiling check, so a retry can
+    /// recover its original Event even when the Timeline is already full.
+    /// `Some` contains the normal append-or-duplicate outcome; `None` means a
+    /// new append would exceed `max_owned_events`.
+    ///
+    /// # Errors
+    /// Returns a backend or clock error when admission cannot be committed.
+    fn append_intent_or_duplicate_bounded(
+        &mut self,
+        timeline: TimelineId,
+        identity: AppendIdentity,
+        intent: AppendIntent,
+        max_owned_events: u64,
+    ) -> Result<Option<AppendOrDuplicateOutcome>, CoreError> {
+        let _ = max_owned_events;
+        self.append_intent_or_duplicate(timeline, identity, intent)
+            .map(Some)
+    }
+
+    /// Read one Event by its durable identifier without materialising a
+    /// Timeline range. Adapters must override this with an indexed lookup;
+    /// the compatibility default reports no retained Event.
+    ///
+    /// # Errors
+    /// Returns the same storage errors as [`Self::read`].
+    fn read_event_by_id(
+        &self,
+        _timeline: TimelineId,
+        _event_id: EventId,
+    ) -> Result<Option<Event>, CoreError> {
+        Ok(None)
+    }
+
     /// Remove at most `limit` expired identities using the store-owned clock.
     ///
     /// # Errors
@@ -1128,6 +1163,19 @@ mod tests {
             .append_intent_or_duplicate(TimelineId::new(), identity, AppendIntent::new(&draft))
             .unwrap_err();
         assert!(intent_error.to_string().contains("store-owned"));
+        let bounded_intent_error = store
+            .append_intent_or_duplicate_bounded(
+                TimelineId::new(),
+                identity,
+                AppendIntent::new(&draft),
+                1,
+            )
+            .unwrap_err();
+        assert!(bounded_intent_error.to_string().contains("store-owned"));
+        assert!(store
+            .read_event_by_id(TimelineId::new(), EventId::new())
+            .unwrap()
+            .is_none());
         let bounded_error = store
             .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).unwrap())
             .unwrap_err();
