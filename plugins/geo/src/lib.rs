@@ -14,7 +14,7 @@
 
 use pos_core::{
     event::{CanonicalBytes, Event, Kind},
-    ids::{EntityId, PluginId},
+    ids::PluginId,
     plugin::{Capability, Plugin},
     state::{Reducer, State},
 };
@@ -416,30 +416,6 @@ impl SpatialCloaker {
             resolution,
         }
     }
-
-    /// Convert exact coordinates to a geo.location `EventDraft`.
-    ///
-    /// # Panics
-    ///
-    /// Never panics in practice — CBOR serialization to `Vec<u8>` is infallible.
-    #[must_use]
-    pub fn to_draft(&self, entity: EntityId, point: Wgs84Point) -> pos_core::EventDraft {
-        let cloaked_point = self.cloak(point);
-        let payload = GeoLocationPayload {
-            cell_lat: cloaked_point.latitude(),
-            cell_lng: cloaked_point.longitude(),
-            resolution: self.resolution,
-        };
-
-        let mut buf = Vec::new();
-        ciborium::into_writer(&payload, &mut buf).expect("ciborium write to Vec<u8> is infallible");
-
-        pos_core::EventDraft::new(
-            entity,
-            Kind::new(EVENT_TYPE_LOCATION),
-            CanonicalBytes::from_vec(buf),
-        )
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -771,31 +747,6 @@ mod tests {
 
         assert!((lat1 - lat2).abs() < f64::EPSILON);
         assert!((lng1 - lng2).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn spatial_cloaker_to_draft_produces_correct_event_type() {
-        let cloaker = SpatialCloaker::new(0.1).unwrap();
-        let entity = EntityId::new();
-        let draft = cloaker.to_draft(entity, wgs84_point(37.0, -122.0));
-
-        assert_eq!(draft.event_type.as_str(), EVENT_TYPE_LOCATION);
-        assert_eq!(draft.entity, entity);
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn spatial_cloaker_to_draft_has_decodable_payload() {
-        let cloaker = SpatialCloaker::new(0.1).unwrap();
-        let entity = EntityId::new();
-        let draft = cloaker.to_draft(entity, wgs84_point(37.07, -122.03));
-
-        let payload: GeoLocationPayload = ciborium::from_reader(draft.payload.as_slice()).unwrap();
-
-        assert!((payload.cell_lat - 37.1).abs() < f64::EPSILON);
-        assert!((payload.cell_lng - (-122.0)).abs() < f64::EPSILON);
-        assert!((payload.resolution - 0.1).abs() < f64::EPSILON);
     }
 
     #[test]

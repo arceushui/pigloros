@@ -105,6 +105,9 @@ impl ProjectionRegistry {
 
     /// Apply a single event to every registered reducer.
     pub fn apply_event(&mut self, event: &Event) {
+        if pos_core::is_geographic_event_type(&event.event_type) {
+            return;
+        }
         for (_, slot) in &mut self.slots {
             slot.registry.apply(slot.reducer.as_ref(), event);
         }

@@ -573,6 +573,24 @@ pub trait EventStore: Send {
     }
 }
 
+/// Privileged adapter seam for geographic evidence.
+///
+/// This is deliberately separate from [`EventStore`]: ordinary consumers can
+/// hold the general event-store port without gaining a raw evidence-read API.
+pub trait GeographicEvidenceStore: Send {
+    /// Read protected evidence under explicit field, depth, and event bounds.
+    ///
+    /// # Errors
+    /// Returns storage, bound, or integrity errors from the privileged adapter.
+    fn read_geographic_evidence_bounded(
+        &self,
+        reader: &crate::GeoEvidenceReader,
+        timeline: TimelineId,
+        range: SeqRange,
+        bounds: EventReadBounds,
+    ) -> Result<Vec<Event>, CoreError>;
+}
+
 /// Export a timeline's **logical** event stream as a portable snapshot.
 ///
 /// Uses [`EventStore::read`], which stitches parent history into forked children and

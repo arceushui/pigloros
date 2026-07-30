@@ -28,6 +28,37 @@ pub struct AppState {
     pub ledger_write: LedgerWriteMode,
 }
 
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use pos_core::Kind;
+    use pos_store::{open_store, StoreConfig};
+
+    #[tokio::test]
+    async fn bounded_response_rejects_geographic_event() {
+        let gateway = Gateway::new(open_store(StoreConfig::Memory).unwrap());
+        let timeline = gateway.create_timeline("coverage-geo").await.unwrap();
+        let mut event = gateway
+            .append_action(
+                &timeline.id().to_string(),
+                &pos_core::EntityId::new().to_string(),
+                crate::EVENT_TYPE_ACTION,
+                &serde_json::json!({"value": 1}),
+            )
+            .await
+            .unwrap();
+        event.event_type = Kind::new(pos_core::GEOGRAPHIC_EVENT_TYPE);
+        assert!(bounded_events_response(
+            EventPage {
+                events: vec![event],
+                next_from_seq: None,
+            },
+            MAX_EVENTS_RESPONSE_BYTES,
+        )
+        .is_err());
+    }
+}
+
 /// Build the MVP router (ADR-014 route table; WS deferred to follow-up).
 pub fn router(state: AppState) -> Router {
     build_router(state, MAX_HTTP_BODY_BYTES)
@@ -163,10 +194,8 @@ fn bounded_events_response(
     let mut source = page.events.into_iter().peekable();
     while let Some(event) = source.next() {
         let event_seq = event.seq.as_u64();
-        events.push(
-            serde_json::to_value(EventView::from(&event))
-                .expect("EventView serialization is infallible"),
-        );
+        let view = EventView::try_from(&event)?;
+        events.push(serde_json::to_value(view).expect("EventView serialization is infallible"));
         let next_from_seq = source
             .peek()
             .map(|next| Seq::from_u64(next.seq.as_u64()))
@@ -221,13 +250,13 @@ async fn post_action(
         } else {
             StatusCode::CREATED
         };
-        return Ok((status, Json(EventView::from(&result.event))));
+        return EventView::try_from(&result.event).map(|view| (status, Json(view)));
     }
     let event = state
         .gateway
         .append_action(&id, &body.entity_id, &body.event_type, &body.payload)
         .await?;
-    Ok((StatusCode::CREATED, Json(EventView::from(&event))))
+    EventView::try_from(&event).map(|view| (StatusCode::CREATED, Json(view)))
 }
 
 async fn post_signal(
@@ -240,7 +269,7 @@ async fn post_signal(
         .gateway
         .append_signal(&id, &entity_id, &body.into_signal())
         .await?;
-    Ok((StatusCode::CREATED, Json(EventView::from(&event))))
+    EventView::try_from(&event).map(|view| (StatusCode::CREATED, Json(view)))
 }
 
 async fn post_ledger_prediction(
@@ -274,10 +303,11 @@ impl IntoResponse for GatewayError {
             | GatewayError::EventMetadataTooLarge { .. }
             | GatewayError::ForkDepthTooLarge { .. }
             | GatewayError::EventResponseTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
-            GatewayError::IngressConflict | GatewayError::CompatibilityReadTruncated { .. } => {
+            GatewayError::CompatibilityReadTruncated { .. } | GatewayError::IngressConflict => {
                 StatusCode::CONFLICT
             }
-            GatewayError::Store(CoreError::TimelineNotFound(_)) => StatusCode::NOT_FOUND,
+            GatewayError::ResourceUnavailable
+            | GatewayError::Store(CoreError::TimelineNotFound(_)) => StatusCode::NOT_FOUND,
             GatewayError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
             GatewayError::LedgerWriteDisabled => StatusCode::FORBIDDEN,
             GatewayError::LedgerUnavailable => StatusCode::SERVICE_UNAVAILABLE,
@@ -655,7 +685,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    async fn identified_action_retries_are_duplicate_or_conflict() {
+    async fn identified_http_action_retries_are_idempotent_and_conflicts_are_visible() {
         let app = test_app();
         let (status, created) = json_request(
             app.clone(),
@@ -1147,6 +1177,8 @@ mod tests {
         assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
         let r = GatewayError::CompatibilityReadTruncated { maximum: 1 }.into_response();
         assert_eq!(r.status(), StatusCode::CONFLICT);
+        let r = GatewayError::ResourceUnavailable.into_response();
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
         let r = GatewayError::Store(CoreError::Storage("boom".into())).into_response();
         assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let r = GatewayError::LedgerWriteDisabled.into_response();

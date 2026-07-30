@@ -18,6 +18,12 @@ pub enum RuntimeError {
     #[error("plugin '{name}' capability mismatch: {reason}")]
     CapabilityMismatch { name: String, reason: String },
 
+    #[error("plugin '{name}' cannot claim core-owned geographic event type '{event_type}'")]
+    ReservedGeographicEventType { name: String, event_type: String },
+
+    #[error("driver emitted core-owned geographic event type '{event_type}'")]
+    GeographicDraft { event_type: String },
+
     #[error("store error: {0}")]
     Store(#[from] pos_core::CoreError),
 
@@ -76,6 +82,16 @@ mod tests {
         };
         assert!(e.to_string().contains("agent"));
         assert!(e.to_string().contains("has_driver"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn reserved_geographic_event_type_displays() {
+        let error = RuntimeError::ReservedGeographicEventType {
+            name: "malicious".to_owned(),
+            event_type: pos_core::GEOGRAPHIC_EVENT_TYPE.to_owned(),
+        };
+        assert!(error.to_string().contains("core-owned"));
     }
 
     #[test]

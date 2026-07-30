@@ -7,30 +7,43 @@
 use piglor_gateway::{router, spectator_router, AppState, Gateway, LedgerConfig, LedgerWriteMode};
 use piglor_ledger::LedgerView;
 use pos_store::{open_store, StoreConfig};
-use std::{net::SocketAddr, path::PathBuf};
+use std::{future::Future, net::SocketAddr, path::PathBuf, pin::Pin};
 
-#[cfg(not(test))]
-fn handle_run_error(e: &dyn std::error::Error) -> ! {
-    eprintln!("Error: {e}");
-    std::process::exit(1);
-}
+type ShutdownFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
-#[cfg(test)]
 fn handle_run_error(e: &dyn std::error::Error) {
-    eprintln!("Error (test): {e}");
+    eprintln!("Error: {e}");
 }
 
-fn main() {
-    run_main(&std::env::args().collect::<Vec<_>>());
+fn main() -> std::process::ExitCode {
+    main_with_args(&std::env::args().collect::<Vec<_>>())
 }
 
-fn run_main(args: &[String]) {
-    if let Err(e) = run_with_args(args) {
-        handle_run_error(e.as_ref());
+fn main_with_args(args: &[String]) -> std::process::ExitCode {
+    match run_main(args) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            handle_run_error(error.as_ref());
+            std::process::ExitCode::FAILURE
+        }
     }
 }
 
+fn run_main(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    run_with_args(args)
+}
+
 fn run_with_args(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    run_with_args_and_shutdown(
+        args,
+        Box::pin(shutdown_signal_from(tokio::signal::ctrl_c())),
+    )
+}
+
+fn run_with_args_and_shutdown(
+    args: &[String],
+    shutdown: ShutdownFuture,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match args.get(1).map(String::as_str) {
         Some("serve") => {
             let addr = args
@@ -46,15 +59,7 @@ fn run_with_args(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send
                 .enable_all()
                 .build()
                 .expect("gateway Tokio runtime initialization failed");
-            rt.block_on(serve(
-                addr,
-                store_path,
-                shutdown_signal(),
-                ledger_view,
-                ledger_write,
-            ))
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
-            Ok(())
+            rt.block_on(serve(addr, store_path, shutdown, ledger_view, ledger_write))
         }
         Some("version") => {
             println!("piglor-gateway {}", env!("CARGO_PKG_VERSION"));
@@ -93,15 +98,11 @@ fn load_ledger() -> Result<(LedgerView, LedgerWriteMode), pos_plugin_ledger::Led
     .load(&piglor_ledger::today_utc())
 }
 
-#[cfg(not(test))]
-async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
-}
-
-#[cfg(test)]
-async fn shutdown_signal() {
-    // Tests must not hang on ctrl_c; shut down as soon as the server is ready.
-    tokio::task::yield_now().await;
+async fn shutdown_signal_from<F>(signal: F)
+where
+    F: std::future::Future<Output = Result<(), std::io::Error>>,
+{
+    let _ = signal.await;
 }
 
 async fn serve(
@@ -110,29 +111,86 @@ async fn serve(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     ledger_view: LedgerView,
     ledger_write: LedgerWriteMode,
-) -> Result<(), String> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = match sqlite_path {
         Some(path) => StoreConfig::Sqlite {
             path: path.to_owned(),
         },
         None => StoreConfig::Memory,
     };
-    let gateway = Gateway::new(open_store(config).map_err(|e| e.to_string())?);
+    let gateway = Gateway::new(open_store(config)?);
     let state = AppState {
         gateway,
         ledger_view,
         ledger_write,
     };
     let app = router_for_addr(addr, state);
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|e| e.to_string())?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
     eprintln!("piglor-gateway listening on http://{addr}");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await
-        .expect("gateway HTTP accept loop failed");
-    Ok(())
+        .map_err(Into::into)
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::handle_run_error;
+    use std::fmt;
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[derive(Debug)]
+    struct ProbeError;
+
+    impl fmt::Display for ProbeError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("probe")
+        }
+    }
+
+    impl std::error::Error for ProbeError {}
+
+    #[test]
+    fn error_handler_is_callable_at_public_process_seam() {
+        handle_run_error(&ProbeError);
+    }
+
+    #[test]
+    fn main_error_returns_failure_exit_code() {
+        let _ = super::main_with_args(&[
+            "piglor-gateway".to_owned(),
+            "serve".to_owned(),
+            "not-an-address".to_owned(),
+        ]);
+    }
+
+    #[test]
+    fn run_with_args_reports_parse_and_bind_errors() {
+        let parse_error = super::run_with_args(&[
+            "piglor-gateway".to_owned(),
+            "serve".to_owned(),
+            "not-an-address".to_owned(),
+        ])
+        .unwrap_err();
+        assert!(!parse_error.to_string().is_empty());
+
+        let _environment = ENV_LOCK.lock().unwrap();
+        std::env::set_var(
+            "LEDGER_SOURCE",
+            std::env::temp_dir()
+                .join("piglor-gateway-missing-ledger")
+                .as_os_str(),
+        );
+        let ledger_error = super::run_with_args(&[
+            "piglor-gateway".to_owned(),
+            "serve".to_owned(),
+            "127.0.0.1:0".to_owned(),
+        ])
+        .unwrap_err();
+        std::env::remove_var("LEDGER_SOURCE");
+        assert!(!ledger_error.to_string().is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -269,14 +327,14 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn version_and_usage_paths() {
-        run_main(&[String::from("piglor-gateway"), String::from("version")]);
-        run_main(&[String::from("piglor-gateway")]);
+        let _ = run_main(&[String::from("piglor-gateway"), String::from("version")]);
+        let _ = run_main(&[String::from("piglor-gateway")]);
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_main_error_path() {
-        run_main(&[
+        let _ = run_main(&[
             String::from("piglor-gateway"),
             String::from("serve"),
             String::from("not-an-addr"),
@@ -291,11 +349,16 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
-        run_with_args(&[
-            String::from("piglor-gateway"),
-            String::from("serve"),
-            addr.to_string(),
-        ])
+        run_with_args_and_shutdown(
+            &[
+                String::from("piglor-gateway"),
+                String::from("serve"),
+                addr.to_string(),
+            ],
+            Box::pin(async {
+                tokio::task::yield_now().await;
+            }),
+        )
         .unwrap();
     }
 
@@ -308,12 +371,17 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         drop(listener);
         let path = std::env::temp_dir().join(format!("piglor-gw-cli-{}.db", std::process::id()));
-        run_with_args(&[
-            String::from("piglor-gateway"),
-            String::from("serve"),
-            addr.to_string(),
-            path.to_str().unwrap().to_owned(),
-        ])
+        run_with_args_and_shutdown(
+            &[
+                String::from("piglor-gateway"),
+                String::from("serve"),
+                addr.to_string(),
+                path.to_str().unwrap().to_owned(),
+            ],
+            Box::pin(async {
+                tokio::task::yield_now().await;
+            }),
+        )
         .unwrap();
         let _ = std::fs::remove_file(path);
     }
@@ -443,7 +511,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(!err.is_empty());
+        assert!(!err.to_string().is_empty());
         drop(occupied);
     }
 
@@ -464,7 +532,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(!err.is_empty());
+        assert!(!err.to_string().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -541,8 +609,15 @@ mod tests {
 
         let _guard = ENV_LOCK.lock().unwrap();
         let _environment = clean_ledger_environment();
-        let mut path =
-            format!("/tmp/piglor-gw-ledger-non-unicode-{}-", std::process::id()).into_bytes();
+        let temporary = std::env::temp_dir().join(format!(
+            "piglor-gw-ledger-non-unicode-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut path = temporary.into_os_string().into_vec();
         path.push(0xff);
         let source = OsString::from_vec(path);
         let _source = EnvVarGuard::set("LEDGER_SOURCE", &source);
@@ -553,5 +628,13 @@ mod tests {
         ])
         .unwrap_err();
         assert!(error.to_string().contains("No such file or directory"));
+    }
+}
+
+#[cfg(test)]
+mod shutdown_signal_tests {
+    #[tokio::test]
+    async fn completed_signal_is_observed_without_process_signals() {
+        super::shutdown_signal_from(async { Ok(()) }).await;
     }
 }

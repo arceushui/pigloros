@@ -23,7 +23,7 @@ use gateway_context::{apply_society_context, fetch_timeline_context, plain_langu
 use pos_core::ids::EntityId;
 use pos_experiment::{BacktestConfig, BacktestRunner};
 use pos_plugin_eval::{EvalPlugin, EvalReducer};
-use pos_plugin_geo::{GeoPlugin, GeoReducer, SpatialCloaker, Wgs84Point};
+use pos_plugin_geo::{SpatialCloaker, Wgs84Point};
 use pos_plugin_persona::{
     PersonaEvalDriver, PersonaModel, PersonaPlugin, PersonaReducer, PreferencePair,
 };
@@ -352,11 +352,6 @@ fn build_registry_with(
     registry
         .register(&eval, Some(Box::new(EvalReducer)), None)
         .expect("eval plugin registration failed");
-
-    let geo = GeoPlugin::new();
-    registry
-        .register(&geo, Some(Box::new(GeoReducer)), None)
-        .expect("geo plugin registration failed");
 
     registry
 }

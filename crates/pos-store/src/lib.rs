@@ -43,15 +43,75 @@ pub mod sqlite;
 // Re-export the port, its append-deduplication surface, and Wave 6 export/import helpers so
 // hosts need one crate.
 pub use pos_core::store::{
-    append_identity_expires_at, export_timeline, export_timeline_cow, export_timeline_own,
-    export_timeline_raw, import_committed_with_rollback, import_timeline, import_timeline_with_id,
-    AppendDedupKey, AppendDedupScope, AppendIdentity, AppendIntent, AppendOrDuplicateOutcome,
-    EventStore, PurgeOutcome, SeqRange, TimelineExport, APPEND_IDENTITY_RETENTION_MICROS,
+    append_identity_expires_at, checked_append_identity_expires_at, export_timeline,
+    export_timeline_cow, export_timeline_own, export_timeline_raw, import_committed_with_rollback,
+    import_timeline, import_timeline_with_id, AppendDedupKey, AppendDedupScope, AppendIdentity,
+    AppendIntent, AppendOrDuplicateOutcome, EventStore, GeographicEvidenceStore, PurgeOutcome,
+    SeqRange, TimelineExport, APPEND_IDENTITY_RETENTION_MICROS,
 };
 pub use pos_core::{
     CanonicalBytes, CoreError, CorrelationId, EntityId, Event, EventDraft, EventId, Kind,
     TimelineId, WallTime,
 };
+
+/// Resolve a generic-adapter visibility check without exposing protected Timeline state.
+///
+/// Both store backends use this concrete seam so that an unavailable presence marker
+/// remains a backend error, while an existing marker is indistinguishable from a
+/// missing Timeline to ordinary callers.
+pub(crate) fn ensure_generic_timeline_visibility(
+    geographic_presence: Result<bool, CoreError>,
+    timeline: TimelineId,
+) -> Result<(), CoreError> {
+    generic_timeline_is_visible(geographic_presence).and_then(|visible| {
+        if visible {
+            Ok(())
+        } else {
+            Err(CoreError::TimelineNotFound(timeline))
+        }
+    })
+}
+
+/// Convert a backend's protected-evidence marker into its generic visibility.
+pub(crate) fn generic_timeline_is_visible(
+    geographic_presence: Result<bool, CoreError>,
+) -> Result<bool, CoreError> {
+    match geographic_presence {
+        Ok(false) => Ok(true),
+        Ok(true) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Refuse geographic drafts before a generic adapter evaluates Timeline visibility.
+///
+/// This preserves the public boundary's `TimelineNotFound` response and, importantly,
+/// avoids querying a possibly unavailable presence marker for an already-forbidden
+/// draft.
+pub(crate) fn ensure_non_geographic_draft(
+    draft: &EventDraft,
+    timeline: TimelineId,
+) -> Result<(), CoreError> {
+    if pos_core::is_geographic_event_type(&draft.event_type) {
+        Err(CoreError::TimelineNotFound(timeline))
+    } else {
+        Ok(())
+    }
+}
+
+/// Apply [`ensure_non_geographic_draft`] to one batched generic append.
+pub(crate) fn ensure_non_geographic_drafts(
+    drafts: &[EventDraft],
+    timeline: TimelineId,
+) -> Result<(), CoreError> {
+    match drafts
+        .iter()
+        .find(|draft| pos_core::is_geographic_event_type(&draft.event_type))
+    {
+        Some(_) => Err(CoreError::TimelineNotFound(timeline)),
+        None => Ok(()),
+    }
+}
 
 /// Selects which backend [`open_store`] constructs.
 ///

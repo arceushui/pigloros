@@ -47,6 +47,41 @@ pub struct LedgerEntryView {
     pub timestamp: String,
 }
 
+#[cfg(test)]
+mod coverage_tests {
+    use super::Gateway;
+    use pos_core::EntityId;
+    use pos_store::{open_store, StoreConfig};
+
+    #[tokio::test]
+    async fn identified_conflict_is_returned() {
+        let gateway = Gateway::new(open_store(StoreConfig::Memory).unwrap());
+        let timeline = gateway.create_timeline("coverage-conflict").await.unwrap();
+        let timeline_id = timeline.id().to_string();
+        let entity_id = EntityId::new().to_string();
+        gateway
+            .append_identified_action(
+                &timeline_id,
+                &entity_id,
+                "world.action",
+                &serde_json::json!({"choice": "left"}),
+                "coverage-conflict",
+            )
+            .await
+            .unwrap();
+        let _ = gateway
+            .append_identified_action(
+                &timeline_id,
+                &entity_id,
+                "world.action",
+                &serde_json::json!({"choice": "right"}),
+                "coverage-conflict",
+            )
+            .await
+            .unwrap_err();
+    }
+}
+
 /// Maximum JSON request body size for HTTP handlers (1 MiB).
 pub const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024;
 
@@ -171,6 +206,9 @@ pub enum GatewayError {
     /// The deprecated aggregate-style read would silently truncate Events.
     #[error("compatibility read exceeds its bounded page of {maximum} events")]
     CompatibilityReadTruncated { maximum: usize },
+    /// Sensitive and absent resources share one bounded, non-enumerable shape.
+    #[error("resource not found")]
+    ResourceUnavailable,
     /// Underlying store failure.
     #[error(transparent)]
     Store(#[from] CoreError),
@@ -669,17 +707,22 @@ pub struct EventView {
     pub payload_hex: String,
 }
 
-impl From<&Event> for EventView {
-    fn from(event: &Event) -> Self {
+impl TryFrom<&Event> for EventView {
+    type Error = GatewayError;
+
+    fn try_from(event: &Event) -> Result<Self, Self::Error> {
+        if pos_core::is_geographic_event_type(&event.event_type) {
+            return Err(GatewayError::ResourceUnavailable);
+        }
         let bytes = event.payload.as_slice();
-        Self {
+        Ok(Self {
             id: event.id.to_string(),
             entity: event.entity.to_string(),
             event_type: event.event_type.as_str().to_owned(),
             seq: event.seq.as_u64(),
             payload: decode_cbor_json(bytes),
             payload_hex: hex_encode(bytes),
-        }
+        })
     }
 }
 
@@ -1489,7 +1532,11 @@ mod tests {
             .await
             .unwrap();
         let response = serde_json::json!({
-            "events": page.events.iter().map(EventView::from).collect::<Vec<_>>(),
+            "events": page
+                .events
+                .iter()
+                .map(|event| EventView::try_from(event).unwrap())
+                .collect::<Vec<_>>(),
             "next_from_seq": page.next_from_seq,
         });
         assert!(serde_json::to_vec(&response).unwrap().len() <= MAX_EVENTS_RESPONSE_BYTES);
@@ -1922,11 +1969,16 @@ mod tests {
             )
             .await
             .unwrap();
-        let view = EventView::from(&event);
+        let view = EventView::try_from(&event).unwrap();
         assert_eq!(view.event_type, EVENT_TYPE_ACTION);
         assert!(!view.payload_hex.is_empty());
         assert_eq!(view.payload, Some(serde_json::json!({"k": "v"})));
         assert_eq!(hex_encode(&[0x0a, 0xfb]), "0afb");
+
+        let mut geographic = event;
+        geographic.event_type = Kind::new(pos_core::GEOGRAPHIC_EVENT_TYPE);
+        let error = EventView::try_from(&geographic).unwrap_err();
+        assert!(error.to_string().contains("not found"));
     }
 
     #[test]

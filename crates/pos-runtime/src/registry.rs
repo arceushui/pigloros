@@ -146,6 +146,17 @@ impl PluginRegistry {
 
         let cap = plugin.capability();
 
+        if let Some(kind) = cap
+            .owned_event_types
+            .iter()
+            .find(|kind| pos_core::is_geographic_event_type(kind))
+        {
+            return Err(RuntimeError::ReservedGeographicEventType {
+                name,
+                event_type: kind.as_str().to_owned(),
+            });
+        }
+
         if cap.has_driver != driver.is_some() {
             return Err(RuntimeError::CapabilityMismatch {
                 name: name.clone(),
@@ -280,6 +291,15 @@ impl PluginRegistry {
                 if let Some(driver) = entry.driver.as_mut() {
                     let observations = snapshot.view_for(driver.subscriptions());
                     let output = driver.step(store, timeline, observations)?;
+                    if let Some(draft) = output
+                        .drafts
+                        .iter()
+                        .find(|draft| pos_core::is_geographic_event_type(&draft.event_type))
+                    {
+                        return Err(RuntimeError::GeographicDraft {
+                            event_type: draft.event_type.as_str().to_owned(),
+                        });
+                    }
                     entry.last_tick = Some(now_ns);
                     all_drafts.extend(output.drafts);
                 }
@@ -312,6 +332,15 @@ impl PluginRegistry {
             if let Some(driver) = entry.driver.as_mut() {
                 let observations = snapshot.view_for(driver.subscriptions());
                 let output = driver.step(store, timeline, observations)?;
+                if let Some(draft) = output
+                    .drafts
+                    .iter()
+                    .find(|draft| pos_core::is_geographic_event_type(&draft.event_type))
+                {
+                    return Err(RuntimeError::GeographicDraft {
+                        event_type: draft.event_type.as_str().to_owned(),
+                    });
+                }
                 all_drafts.extend(output.drafts);
             }
         }
@@ -424,6 +453,19 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn plugins_cannot_claim_core_owned_geographic_event_types() {
+        let plugin = simple_plugin("malicious-geo", &[pos_core::GEOGRAPHIC_EVENT_TYPE]);
+        let error = PluginRegistry::new()
+            .register(&plugin, None, None)
+            .unwrap_err();
+        assert!(error.to_string().contains(pos_core::GEOGRAPHIC_EVENT_TYPE));
+
+        let inert = simple_plugin("future-geo", &["geo.cell"]);
+        assert!(PluginRegistry::new().register(&inert, None, None).is_ok());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn register_plugin_with_reducer_wires_projections() {
         let mut reg = PluginRegistry::new();
         let p = plugin_with_caps("counter", &["counter.tick"], false, true);
@@ -446,6 +488,16 @@ mod tests {
         reg.projections.apply_event(&event);
         let state = reg.projections.state_for(&event.entity).unwrap();
         assert_eq!(state.get("n").and_then(serde_json::Value::as_u64), Some(1));
+        let mut protected = event;
+        protected.event_type = Kind::new(pos_core::GEOGRAPHIC_EVENT_TYPE);
+        reg.projections.apply_event(&protected);
+        assert_eq!(
+            reg.projections
+                .state_for(&protected.entity)
+                .and_then(|state| state.get("n"))
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
     }
 
     #[test]
@@ -598,6 +650,43 @@ mod tests {
 
         let error = reg.step_all(store.as_ref(), timeline.id()).unwrap_err();
         assert!(error.to_string().contains("failing"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn generic_driver_boundaries_reject_geographic_drafts() {
+        struct GeographicDriver;
+        impl Driver for GeographicDriver {
+            fn name(&self) -> &'static str {
+                "geographic"
+            }
+
+            fn step(
+                &mut self,
+                _: &dyn pos_core::store::EventStore,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                Ok(StepOutput::new(vec![EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("geo.location"),
+                    CanonicalBytes::from_vec(Vec::new()),
+                )]))
+            }
+        }
+
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let timeline = store.create_timeline("driver-geo").unwrap();
+        let mut registry = PluginRegistry::new();
+        registry.register_driver(Box::new(GeographicDriver));
+        assert!(matches!(
+            registry.step_all(store.as_ref(), timeline.id()),
+            Err(RuntimeError::GeographicDraft { .. })
+        ));
+        assert!(matches!(
+            registry.tick_cadenced(store.as_ref(), timeline.id(), 0),
+            Err(RuntimeError::GeographicDraft { .. })
+        ));
     }
 
     #[test]

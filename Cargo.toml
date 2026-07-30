@@ -58,7 +58,7 @@ thiserror = "2"
 indexmap = "2"
 
 # SQLite
-rusqlite = { version = "0.36", features = ["bundled", "hooks"] }
+rusqlite = { version = "0.36", features = ["bundled", "hooks", "functions"] }
 
 # Testing
 proptest = "1"

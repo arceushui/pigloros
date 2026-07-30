@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::event::Event;
 use crate::ids::EntityId;
+use crate::{event::Event, is_geographic_event_type};
 
 /// Opaque state value stored as a JSON-serializable map.
 /// Plugins manage their own state shape inside this map.
@@ -57,6 +57,13 @@ impl StateRegistry {
     }
 
     pub fn apply(&mut self, reducer: &dyn Reducer, event: &Event) {
+        // Geographic evidence is owned by the Core visibility boundary.  A
+        // generic StateRegistry must never hand it to a plugin reducer, even
+        // when a caller bypasses ProjectionRegistry and uses this low-level
+        // seam directly.
+        if is_geographic_event_type(&event.event_type) {
+            return;
+        }
         let state = self
             .states
             .entry(event.entity)
@@ -138,6 +145,18 @@ mod tests {
         assert!(registry.get(&entity).is_none());
         let default = registry.get_or_default(&entity);
         assert!(default.fields.is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn state_registry_ignores_geographic_events() {
+        let reducer = CountReducer;
+        let entity = EntityId::new();
+        let mut registry = StateRegistry::new();
+        let mut event = make_event(entity);
+        event.event_type = crate::Kind::new(crate::GEOGRAPHIC_EVENT_TYPE);
+        registry.apply(&reducer, &event);
+        assert!(registry.get(&entity).is_none());
     }
 
     #[test]
