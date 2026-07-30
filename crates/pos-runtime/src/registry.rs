@@ -11,6 +11,10 @@ use pos_core::{ids::PluginId, Plugin, Reducer, SchemaVersionMap, Upcaster, Upcas
 use pos_state::ProjectionRegistry;
 
 use crate::{
+    composition::{
+        PluginComposition, RegisteredEventSchema, RegisteredPlugin, RegisteredSchemaVersion,
+        RegisteredUpcaster,
+    },
     driver::{Driver, ObservationSnapshot, ProjectionKey},
     error::RuntimeError,
     recorder::RECORDER_EVENT_TYPE,
@@ -53,6 +57,72 @@ pub struct PluginRegistry {
 }
 
 impl PluginRegistry {
+    /// Return an immutable, deterministic description of the effective
+    /// registration topology.
+    ///
+    /// Plugin order is preserved; unordered schema and upcaster registries are
+    /// sorted so equality is independent of hash-map iteration order. The
+    /// result compares metadata only, never opaque plugin or upcaster code.
+    #[must_use]
+    pub fn composition(&self) -> PluginComposition {
+        let plugins = self
+            .plugins
+            .iter()
+            .map(|(id, entry)| RegisteredPlugin {
+                id: *id,
+                name: entry.name.clone(),
+                version: entry.version.clone(),
+            })
+            .collect();
+
+        let mut schemas: Vec<_> = self
+            .schemas
+            .iter()
+            .map(|schema| RegisteredEventSchema {
+                event_type: schema.event_type.as_str().to_owned(),
+                json_schema: schema.json_schema.clone(),
+            })
+            .collect();
+        schemas.sort_unstable_by(|left, right| left.event_type.cmp(&right.event_type));
+
+        let mut schema_versions: Vec<_> = self
+            .schema_versions
+            .versions
+            .iter()
+            .map(|(event_type, version)| RegisteredSchemaVersion {
+                event_type: event_type.clone(),
+                version: *version,
+            })
+            .collect();
+        schema_versions.sort_unstable_by(|left, right| left.event_type.cmp(&right.event_type));
+
+        let mut upcasters: Vec<_> = self
+            .upcasters
+            .registrations()
+            .map(
+                |(event_type, source_version, target_version)| RegisteredUpcaster {
+                    event_type: event_type.to_owned(),
+                    source_version: source_version.as_u32(),
+                    target_version: target_version.as_u32(),
+                },
+            )
+            .collect();
+        upcasters.sort_unstable_by(|left, right| {
+            (&left.event_type, left.source_version, left.target_version).cmp(&(
+                &right.event_type,
+                right.source_version,
+                right.target_version,
+            ))
+        });
+
+        PluginComposition {
+            plugins,
+            schemas,
+            schema_versions,
+            upcasters,
+        }
+    }
+
     fn snapshot_for_subscriptions<'a>(
         &self,
         subscriptions: impl IntoIterator<Item = &'a ProjectionKey>,
@@ -937,5 +1007,109 @@ mod tests {
 
         reg.set_schema_version("test.upcast", 2);
         assert!(!reg.schema_versions.versions.is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn composition_preserves_plugin_order_and_canonicalizes_unordered_registrations() {
+        use pos_core::event::{CanonicalBytes, SchemaVersion};
+
+        struct TestUpcaster {
+            event_type: Kind,
+            source_version: SchemaVersion,
+            target_version: SchemaVersion,
+        }
+
+        impl pos_core::Upcaster for TestUpcaster {
+            fn event_type(&self) -> &Kind {
+                &self.event_type
+            }
+
+            fn source_version(&self) -> SchemaVersion {
+                self.source_version
+            }
+
+            fn target_version(&self) -> SchemaVersion {
+                self.target_version
+            }
+
+            fn upcast(&self, payload: CanonicalBytes) -> CanonicalBytes {
+                payload
+            }
+        }
+
+        let first = TestPlugin {
+            id: PluginId::new(),
+            name: "first",
+            cap: Capability {
+                owned_event_types: vec![Kind::new("z.event")],
+                owned_entity_kinds: vec![],
+                has_driver: false,
+                has_reducer: false,
+            },
+        };
+        let second = TestPlugin {
+            id: PluginId::new(),
+            name: "second",
+            cap: Capability {
+                owned_event_types: vec![Kind::new("a.event")],
+                owned_entity_kinds: vec![],
+                has_driver: false,
+                has_reducer: false,
+            },
+        };
+        let mut registry = PluginRegistry::new();
+        registry.register(&first, None, None).unwrap();
+        registry.register(&second, None, None).unwrap();
+        registry.set_schema_version("z.event", 2);
+        registry.set_schema_version("a.event", 3);
+        registry.register_upcaster(Box::new(TestUpcaster {
+            event_type: Kind::new("z.event"),
+            source_version: SchemaVersion::new(2),
+            target_version: SchemaVersion::new(3),
+        }));
+        registry.register_upcaster(Box::new(TestUpcaster {
+            event_type: Kind::new("a.event"),
+            source_version: SchemaVersion::V1,
+            target_version: SchemaVersion::new(2),
+        }));
+
+        let composition = registry.composition();
+        assert_eq!(
+            composition
+                .plugins
+                .iter()
+                .map(|plugin| plugin.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+        assert_eq!(
+            composition
+                .schemas
+                .iter()
+                .map(|schema| schema.event_type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.event", "runtime.recorded_output", "z.event"]
+        );
+        assert_eq!(
+            composition
+                .schema_versions
+                .iter()
+                .map(|version| version.event_type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.event", "z.event"]
+        );
+        assert_eq!(
+            composition
+                .upcasters
+                .iter()
+                .map(|upcaster| (
+                    upcaster.event_type.as_str(),
+                    upcaster.source_version,
+                    upcaster.target_version,
+                ))
+                .collect::<Vec<_>>(),
+            vec![("a.event", 1, 2), ("z.event", 2, 3)]
+        );
     }
 }

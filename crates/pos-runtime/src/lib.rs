@@ -24,6 +24,7 @@
 //! ```
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+pub mod composition;
 pub mod driver;
 pub mod error;
 pub mod recorder;
@@ -31,6 +32,10 @@ pub mod registry;
 pub mod scheduler;
 pub mod schema;
 
+pub use composition::{
+    PluginComposition, RegisteredEventSchema, RegisteredPlugin, RegisteredSchemaVersion,
+    RegisteredUpcaster,
+};
 pub use driver::{Driver, ObservationView, ProjectionKey, StepOutput};
 pub use error::RuntimeError;
 pub use recorder::{RecordedOutput, Recorder, RunMode};

@@ -34,6 +34,20 @@ impl UpcasterRegistry {
         self.upcasters.insert(key, upcaster);
     }
 
+    /// Iterate over the registered schema-transition topology.
+    ///
+    /// This exposes only registration metadata. It deliberately does not
+    /// expose or compare the opaque upcaster implementations themselves.
+    pub fn registrations(&self) -> impl Iterator<Item = (&str, SchemaVersion, SchemaVersion)> {
+        self.upcasters.values().map(|upcaster| {
+            (
+                upcaster.event_type().as_str(),
+                upcaster.source_version(),
+                upcaster.target_version(),
+            )
+        })
+    }
+
     /// Upcast `payload` for `event_type` from `from` to `to`, chaining upcasters if needed.
     /// Returns the payload unchanged if no upcaster is registered.
     pub fn upcast(

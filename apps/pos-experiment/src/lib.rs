@@ -137,6 +137,7 @@ pub struct Experiment {
 pub struct ExperimentSession {
     config: ExperimentConfig,
     registry: PluginRegistry,
+    parent_composition: pos_runtime::PluginComposition,
     store: SharedEventStore,
     fork_registry_factory: Option<ForkRegistryFactory>,
     timeline: Timeline,
@@ -163,6 +164,8 @@ pub enum ExperimentError {
     MissingForkRegistryFactory,
     #[error("the shared experiment EventStore lock is poisoned")]
     SharedStoreLockPoisoned,
+    #[error("the fresh PluginRegistry is incompatible with the parent plugin composition")]
+    IncompatibleForkRegistry,
 }
 
 // ---------------------------------------------------------------------------
@@ -358,11 +361,13 @@ impl Experiment {
     /// Returns [`ExperimentError::Store`] if the configured `EventStore` cannot be
     /// opened or cannot create the Timeline.
     pub fn start(self) -> Result<ExperimentSession, ExperimentError> {
+        let parent_composition = self.registry.composition();
         let mut store = open_store(self.config.store_config.clone())?;
         let timeline = store.create_timeline(&self.config.name)?;
         Ok(ExperimentSession {
             config: self.config,
             registry: self.registry,
+            parent_composition,
             store: Arc::new(Mutex::new(store)),
             fork_registry_factory: self.fork_registry_factory,
             timeline,
@@ -474,6 +479,9 @@ impl ExperimentSession {
             .as_ref()
             .ok_or(ExperimentError::MissingForkRegistryFactory)?;
         let mut registry = factory()?;
+        if registry.composition() != self.parent_composition {
+            return Err(ExperimentError::IncompatibleForkRegistry);
+        }
         let events = read_upcast_events(&self.store, self.timeline.id(), &registry)?;
         hydrate_projections(&mut registry, &events);
         let config = ExperimentConfig {
@@ -491,6 +499,7 @@ impl ExperimentSession {
             .map(|timeline| Self {
                 config,
                 registry,
+                parent_composition: self.parent_composition.clone(),
                 store: Arc::clone(&self.store),
                 fork_registry_factory: Some(Arc::clone(factory)),
                 timeline,
@@ -737,7 +746,7 @@ mod tests {
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         ids::{EntityId, PluginId},
-        Capability, Event, Plugin, Reducer, State,
+        Capability, Event, Plugin, Reducer, State, Upcaster as _,
     };
     use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
     use pos_store::StoreConfig;
@@ -781,6 +790,106 @@ mod tests {
         let mut p = make_plugin(name, event_types);
         p.has_reducer = true;
         p
+    }
+
+    #[derive(Clone, Copy)]
+    struct CompositionPluginSpec {
+        id: PluginId,
+        name: &'static str,
+        version: &'static str,
+        event_type: &'static str,
+    }
+
+    struct CompositionPlugin(CompositionPluginSpec);
+
+    impl Plugin for CompositionPlugin {
+        fn id(&self) -> PluginId {
+            self.0.id
+        }
+
+        fn name(&self) -> &'static str {
+            self.0.name
+        }
+
+        fn version(&self) -> &'static str {
+            self.0.version
+        }
+
+        fn capability(&self) -> Capability {
+            Capability {
+                owned_event_types: vec![Kind::new(self.0.event_type)],
+                owned_entity_kinds: vec![],
+                has_driver: false,
+                has_reducer: false,
+            }
+        }
+    }
+
+    struct CompositionUpcaster {
+        event_type: Kind,
+        source_version: pos_core::event::SchemaVersion,
+        target_version: pos_core::event::SchemaVersion,
+    }
+
+    impl pos_core::Upcaster for CompositionUpcaster {
+        fn event_type(&self) -> &Kind {
+            &self.event_type
+        }
+
+        fn source_version(&self) -> pos_core::event::SchemaVersion {
+            self.source_version
+        }
+
+        fn target_version(&self) -> pos_core::event::SchemaVersion {
+            self.target_version
+        }
+
+        fn upcast(&self, payload: CanonicalBytes) -> CanonicalBytes {
+            payload
+        }
+    }
+
+    fn composition_registry(
+        plugins: &[CompositionPluginSpec],
+        schema_version: Option<(&str, u32)>,
+        upcaster: Option<(&str, u32, u32)>,
+    ) -> PluginRegistry {
+        let mut registry = PluginRegistry::new();
+        for spec in plugins {
+            registry
+                .register(&CompositionPlugin(*spec), None, None)
+                .unwrap();
+        }
+        if let Some((event_type, version)) = schema_version {
+            registry.set_schema_version(event_type, version);
+        }
+        if let Some((event_type, source_version, target_version)) = upcaster {
+            registry.register_upcaster(Box::new(CompositionUpcaster {
+                event_type: Kind::new(event_type),
+                source_version: pos_core::event::SchemaVersion::new(source_version),
+                target_version: pos_core::event::SchemaVersion::new(target_version),
+            }));
+        }
+        registry
+    }
+
+    fn assert_incompatible_fork(mut session: ExperimentSession) {
+        let error = session
+            .fork("incompatible-child")
+            .err()
+            .expect("an incompatible fork registry must be rejected");
+        assert_eq!(
+            error.to_string(),
+            "the fresh PluginRegistry is incompatible with the parent plugin composition"
+        );
+        assert_eq!(
+            lock_store(&session.store)
+                .unwrap()
+                .list_timelines()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     /// A driver that emits `n` events of `event_type` per tick, for at most `max_ticks` ticks.
@@ -1012,6 +1121,7 @@ mod tests {
     fn live_session_steps_and_forks_memory_timeline() {
         let entity = EntityId::new();
         let plugin = make_plugin_with_reducer("session-ticker", &["session.event"]);
+        let plugin_id = plugin.id;
         let driver = FixedDriver::new(entity, "session.event", 1);
         let config = ExperimentConfig {
             name: "session-test".to_owned(),
@@ -1019,7 +1129,12 @@ mod tests {
             store_config: StoreConfig::Memory,
         };
         let mut experiment = Experiment::new(config).with_fork_registry_factory(move || {
-            let plugin = make_plugin_with_reducer("session-ticker", &["session.event"]);
+            let plugin = TestPlugin {
+                id: plugin_id,
+                name: "session-ticker",
+                event_types: vec![Kind::new("session.event")],
+                has_reducer: true,
+            };
             let driver = FixedDriver::new(entity, "session.event", 1);
             let mut registry = PluginRegistry::new();
             registry
@@ -1068,6 +1183,216 @@ mod tests {
         let result = session.run_to_completion().unwrap();
         assert_eq!(result.ticks, 2);
         assert_eq!(result.total_events, 2);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn live_session_fork_rejects_plugin_identity_mismatch_before_store_work() {
+        let parent = CompositionPluginSpec {
+            id: PluginId::new(),
+            name: "composition",
+            version: "1.0.0",
+            event_type: "composition.event",
+        };
+        let child = CompositionPluginSpec {
+            id: PluginId::new(),
+            ..parent
+        };
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "identity-mismatch".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        })
+        .with_fork_registry_factory(move || Ok(composition_registry(&[child], None, None)));
+        experiment
+            .register(&CompositionPlugin(parent), None, None)
+            .unwrap();
+        assert_incompatible_fork(experiment.start().unwrap());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn live_session_fork_rejects_plugin_version_mismatch() {
+        let parent = CompositionPluginSpec {
+            id: PluginId::new(),
+            name: "composition",
+            version: "1.0.0",
+            event_type: "composition.event",
+        };
+        let child = CompositionPluginSpec {
+            version: "2.0.0",
+            ..parent
+        };
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "version-mismatch".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        })
+        .with_fork_registry_factory(move || Ok(composition_registry(&[child], None, None)));
+        experiment
+            .register(&CompositionPlugin(parent), None, None)
+            .unwrap();
+        assert_incompatible_fork(experiment.start().unwrap());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn live_session_fork_rejects_plugin_registration_order_mismatch() {
+        let first = CompositionPluginSpec {
+            id: PluginId::new(),
+            name: "first",
+            version: "1.0.0",
+            event_type: "first.event",
+        };
+        let second = CompositionPluginSpec {
+            id: PluginId::new(),
+            name: "second",
+            version: "1.0.0",
+            event_type: "second.event",
+        };
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "order-mismatch".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        })
+        .with_fork_registry_factory(move || Ok(composition_registry(&[second, first], None, None)));
+        experiment
+            .register(&CompositionPlugin(first), None, None)
+            .unwrap();
+        experiment
+            .register(&CompositionPlugin(second), None, None)
+            .unwrap();
+        assert_incompatible_fork(experiment.start().unwrap());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn live_session_fork_rejects_effective_schema_mismatch() {
+        let parent = CompositionPluginSpec {
+            id: PluginId::new(),
+            name: "composition",
+            version: "1.0.0",
+            event_type: "parent.event",
+        };
+        let child = CompositionPluginSpec {
+            event_type: "child.event",
+            ..parent
+        };
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "schema-mismatch".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        })
+        .with_fork_registry_factory(move || Ok(composition_registry(&[child], None, None)));
+        experiment
+            .register(&CompositionPlugin(parent), None, None)
+            .unwrap();
+        assert_incompatible_fork(experiment.start().unwrap());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn live_session_fork_rejects_current_schema_version_mismatch() {
+        let plugin = CompositionPluginSpec {
+            id: PluginId::new(),
+            name: "composition",
+            version: "1.0.0",
+            event_type: "composition.event",
+        };
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "schema-version-mismatch".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        })
+        .with_fork_registry_factory(move || {
+            Ok(composition_registry(
+                &[plugin],
+                Some(("composition.event", 2)),
+                None,
+            ))
+        });
+        experiment
+            .register(&CompositionPlugin(plugin), None, None)
+            .unwrap();
+        experiment
+            .registry
+            .set_schema_version("composition.event", 1);
+        assert_incompatible_fork(experiment.start().unwrap());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn live_session_fork_rejects_upcaster_topology_mismatch() {
+        let plugin = CompositionPluginSpec {
+            id: PluginId::new(),
+            name: "composition",
+            version: "1.0.0",
+            event_type: "composition.event",
+        };
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "upcaster-mismatch".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        })
+        .with_fork_registry_factory(move || {
+            Ok(composition_registry(
+                &[plugin],
+                None,
+                Some(("composition.event", 1, 2)),
+            ))
+        });
+        experiment
+            .register(&CompositionPlugin(plugin), None, None)
+            .unwrap();
+        let upcaster = CompositionUpcaster {
+            event_type: Kind::new("composition.event"),
+            source_version: pos_core::event::SchemaVersion::V1,
+            target_version: pos_core::event::SchemaVersion::new(2),
+        };
+        assert_eq!(
+            upcaster
+                .upcast(CanonicalBytes::from_vec(vec![42]))
+                .as_slice(),
+            [42]
+        );
+        assert_incompatible_fork(experiment.start().unwrap());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn live_session_fork_builds_compatible_runtime_outside_the_store_lock() {
+        let plugin = CompositionPluginSpec {
+            id: PluginId::new(),
+            name: "composition",
+            version: "1.0.0",
+            event_type: "composition.event",
+        };
+        let store: Arc<Mutex<Option<SharedEventStore>>> = Arc::new(Mutex::new(None));
+        let saw_unlocked_store = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let factory_store = Arc::clone(&store);
+        let factory_saw_unlocked_store = Arc::clone(&saw_unlocked_store);
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "factory-outside-store-lock".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        })
+        .with_fork_registry_factory(move || {
+            let store = factory_store.lock().unwrap().clone();
+            let is_unlocked = store.is_some_and(|store| store.try_lock().is_ok());
+            factory_saw_unlocked_store.store(is_unlocked, std::sync::atomic::Ordering::SeqCst);
+            Ok(composition_registry(&[plugin], None, None))
+        });
+        experiment
+            .register(&CompositionPlugin(plugin), None, None)
+            .unwrap();
+        let mut session = experiment.start().unwrap();
+        *store.lock().unwrap() = Some(Arc::clone(&session.store));
+        let child = session.fork("compatible-child").unwrap();
+        assert!(saw_unlocked_store.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            child.timeline().meta.fork_point,
+            Some((session.timeline().id(), session.timeline().head))
+        );
     }
 
     #[test]
