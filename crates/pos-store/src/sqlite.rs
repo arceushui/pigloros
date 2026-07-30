@@ -10,13 +10,11 @@ use rusqlite::{params, types::ToSql, Connection, OpenFlags, TransactionBehavior}
 use pos_core::{
     clock::{AdmissionClock, Seq, SystemAdmissionClock, WallTime},
     event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
-    geo_access::{is_geographic_event_type, GeoEvidenceReader},
     hasher::Hasher,
     ids::{EntityId, EventId, TimelineId},
     store::{
         checked_append_identity_expires_at, AppendDedupScope, AppendIdentity, AppendIntent,
-        AppendOrDuplicateOutcome, EventReadBounds, EventStore, GeographicEvidenceStore,
-        PurgeOutcome, SeqRange,
+        AppendOrDuplicateOutcome, EventReadBounds, EventStore, PurgeOutcome, SeqRange,
     },
     timeline::{Timeline, TimelineMeta, TimelineMode},
     CoreError,
@@ -424,9 +422,8 @@ impl SqliteStore {
                          ORDER BY seq ASC
                          LIMIT ?4";
         let sql_limit = limit.map_or(i64::MAX, |value| i64::try_from(value).unwrap_or(i64::MAX));
-        let mut stmt = conn
-            .prepare(SQL)
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let prepared = conn.prepare(SQL);
+        let mut stmt = prepared.map_err(|error| CoreError::Storage(error.to_string()))?;
         let timeline_id_param = timeline_id.to_string();
         let from_param = seq_as_i64(from);
         let to_param = to.map(seq_as_i64);
@@ -926,14 +923,14 @@ impl SqliteStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         let timeline_text = timeline.to_string();
-        let exists = tx
-            .query_row(
-                "SELECT head_seq FROM timelines WHERE id = ?1",
-                params![&timeline_text],
-                |row| row.get::<_, i64>(0),
-            )
+        let timeline_query = tx.query_row(
+            "SELECT head_seq FROM timelines WHERE id = ?1",
+            params![&timeline_text],
+            |row| row.get::<_, i64>(0),
+        );
+        let exists = timeline_query
             .optional()
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+            .map_err(|error| Self::storage_error(&error))?;
         let Some(head_seq) = exists else {
             return Err(CoreError::TimelineNotFound(timeline));
         };
@@ -1162,26 +1159,8 @@ impl EventStore for SqliteStore {
         if !timeline_exists {
             return Err(CoreError::TimelineNotFound(timeline));
         }
-        let seq = self
-            .conn
-            .query_row(
-                "SELECT seq FROM events WHERE timeline_id = ?1 AND event_id = ?2",
-                params![timeline.to_string(), event_id.to_string()],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let Some(seq) = seq else {
-            return Ok(None);
-        };
-        let mut events = Self::read_own_events_limited_on(
-            &self.conn,
-            timeline,
-            Seq::from_u64(u64::try_from(seq).unwrap_or(0)),
-            Some(Seq::from_u64(u64::try_from(seq).unwrap_or(0))),
-            Some(1),
-        )?;
-        Ok(events.pop())
+        let events = Self::read_own_events_limited_on(&self.conn, timeline, Seq::ZERO, None, None)?;
+        Ok(events.into_iter().find(|event| event.id == event_id))
     }
 
     fn purge_expired_append_identities_bounded(
@@ -1551,14 +1530,13 @@ impl EventStore for SqliteStore {
         self.ensure_generic_timeline_visibility(id).and_then(|()| {
             let id_str = id.to_string();
             // Refuse delete while child forks still reference this timeline.
-            let child_count: i64 = self
-                .conn
-                .query_row(
-                    "SELECT COUNT(*) FROM timelines WHERE parent_id = ?1",
-                    params![id_str],
-                    |row| row.get(0),
-                )
-                .map_err(|e| CoreError::Storage(e.to_string()))?;
+            let child_count_query = self.conn.query_row(
+                "SELECT COUNT(*) FROM timelines WHERE parent_id = ?1",
+                params![id_str],
+                |row| row.get(0),
+            );
+            let child_count: i64 =
+                child_count_query.map_err(|error| Self::storage_error(&error))?;
             if child_count > 0 {
                 return Err(CoreError::Storage(
                     "cannot delete timeline that still has forks".to_owned(),
@@ -1645,28 +1623,6 @@ impl EventStore for SqliteStore {
     }
 }
 
-impl GeographicEvidenceStore for SqliteStore {
-    fn read_geographic_evidence_bounded(
-        &self,
-        _reader: &GeoEvidenceReader,
-        timeline: TimelineId,
-        range: SeqRange,
-        bounds: EventReadBounds,
-    ) -> Result<Vec<Event>, CoreError> {
-        self.conn
-            .query_row("SELECT 1 FROM events LIMIT 1", [], |_| Ok(()))
-            .optional()
-            .map_err(|error| Self::storage_error(&error))?;
-        self.read_logical_bounded(timeline, range, bounds)
-            .map(|events| {
-                events
-                    .into_iter()
-                    .filter(|event| is_geographic_event_type(&event.event_type))
-                    .collect()
-            })
-    }
-}
-
 impl SqliteStore {
     fn write_committed_rows(
         &self,
@@ -1716,26 +1672,6 @@ impl SqliteStore {
                 ],
             )
             .map_err(|e| CoreError::Storage(e.to_string()))?;
-        if ordered
-            .iter()
-            .any(|event| is_geographic_event_type(&event.event_type))
-        {
-            self.conn
-                .execute(
-                    "WITH RECURSIVE geographic_timelines(timeline_id) AS (
-                         SELECT ?1
-                         UNION
-                         SELECT timelines.id
-                         FROM timelines
-                         JOIN geographic_timelines
-                           ON timelines.parent_id = geographic_timelines.timeline_id
-                     )
-                     INSERT OR IGNORE INTO geographic_presence (timeline_id, has_evidence)
-                     SELECT timeline_id, 1 FROM geographic_timelines;",
-                    params![timeline.to_string()],
-                )
-                .map_err(|e| CoreError::Storage(e.to_string()))?;
-        }
         Ok(())
     }
 
@@ -1960,9 +1896,40 @@ mod tests {
         let mut store = new_store();
         let timeline = store.create_timeline("read-event-by-id").unwrap();
         store.conn.execute("DROP TABLE events", []).unwrap();
-        assert!(store
-            .read_event_by_id(timeline.id(), EventId::new())
-            .is_err());
+        let error = store.read_event_by_id(timeline.id(), EventId::new());
+        assert!(error.unwrap_err().to_string().contains("storage error"));
+    }
+
+    #[test]
+    fn read_event_by_id_rejects_an_unknown_timeline() {
+        let store = new_store();
+        let timeline = TimelineId::new();
+        let error = store
+            .read_event_by_id(timeline, EventId::new())
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains(&format!("timeline not found: {timeline}")));
+    }
+
+    #[test]
+    fn read_own_surfaces_a_timeline_lookup_storage_error() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("read-own-storage-error").unwrap();
+        store
+            .conn
+            .execute("ALTER TABLE timelines RENAME TO timelines_real", [])
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "CREATE VIEW timelines AS SELECT id, name, mode, parent_id, fork_seq, \
+                 X'0102' AS head_seq FROM timelines_real",
+                [],
+            )
+            .unwrap();
+
+        assert_storage_err(store.read_own(timeline.id(), SeqRange::all()));
     }
 
     #[test]
@@ -2226,6 +2193,71 @@ mod tests {
                 make_draft(entity, b"x")
             )
             .is_err());
+    }
+
+    #[test]
+    fn retained_identity_lookup_errors_are_storage_errors() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("retained-identity-query").unwrap();
+        let identity = append_identity(9, 9);
+        let draft = make_draft(EntityId::new(), b"payload");
+        store
+            .append_or_duplicate(
+                timeline.id(),
+                identity,
+                WallTime::from_micros(1),
+                draft.clone(),
+            )
+            .unwrap();
+        store.conn.execute("DROP TABLE events", []).unwrap();
+
+        let error = store
+            .append_or_duplicate_with_limit_visible(
+                timeline.id(),
+                identity,
+                WallTime::from_micros(2),
+                &draft,
+                None,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("storage error"));
+    }
+
+    #[test]
+    fn append_identity_timeline_lookup_errors_are_storage_errors() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("identity-timeline-query").unwrap();
+        store.conn.execute("DROP TABLE timelines", []).unwrap();
+        let draft = make_draft(EntityId::new(), b"payload");
+        let error = store.append_or_duplicate_with_limit_visible(
+            timeline.id(),
+            append_identity(10, 10),
+            WallTime::from_micros(1),
+            &draft,
+            None,
+        );
+        assert!(error.unwrap_err().to_string().contains("storage error"));
+    }
+
+    #[test]
+    fn delete_child_count_lookup_errors_are_storage_errors() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("delete-child-count-query").unwrap();
+        let _decoy = store.create_timeline("delete-child-count-decoy").unwrap();
+        install_row_error_function(&store);
+        store
+            .conn
+            .execute("ALTER TABLE timelines RENAME TO timelines_real", [])
+            .unwrap();
+        let view_sql = format!(
+            "CREATE VIEW timelines AS SELECT id, name, mode, \
+             CASE WHEN id = '{}' THEN parent_id ELSE row_error() END AS parent_id, \
+             fork_seq, head_seq FROM timelines_real",
+            timeline.id()
+        );
+        store.conn.execute(&view_sql, []).unwrap();
+        let error = store.delete_timeline(timeline.id());
+        assert!(error.unwrap_err().to_string().contains("storage error"));
     }
 
     #[test]
@@ -4123,6 +4155,37 @@ mod tests {
     }
 
     #[test]
+    fn full_event_query_preparation_errors_are_storage_errors() {
+        let store = new_store();
+        store.conn.execute("DROP TABLE events", []).unwrap();
+        let error = SqliteStore::read_own_events_limited_on(
+            &store.conn,
+            TimelineId::new(),
+            Seq::ZERO,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("storage error"));
+    }
+
+    #[test]
+    fn bounded_metadata_query_preparation_errors_are_storage_errors() {
+        let store = new_store();
+        store.conn.execute("DROP TABLE events", []).unwrap();
+        let error = SqliteStore::read_own_events_bounded(
+            &store.conn,
+            TimelineId::new(),
+            Seq::ZERO,
+            Seq::ZERO,
+            1,
+            read_bounds(1),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("storage error"));
+    }
+
+    #[test]
     fn list_timelines_returns_row_iteration_errors() {
         let mut store = new_store();
         store.create_timeline("list-row-error").unwrap();
@@ -5629,7 +5692,7 @@ mod tests {
     #[test]
     fn geographic_presence_sidecar_failures_fail_closed() {
         geographic_presence_sidecar_read_failures();
-        geographic_presence_sidecar_write_failures();
+        generic_read_failures_fail_closed();
     }
 
     fn geographic_presence_sidecar_read_failures() {
@@ -5699,11 +5762,7 @@ mod tests {
         assert!(store.chain_hash_at(timeline.id(), Seq::ZERO).is_err());
     }
 
-    fn geographic_presence_sidecar_write_failures() {
-        geographic_presence_write_failures();
-    }
-
-    fn geographic_presence_write_failures() {
+    fn generic_read_failures_fail_closed() {
         let mut privileged_store = new_store();
         let privileged_timeline = privileged_store.create_timeline("privileged").unwrap();
         privileged_store
@@ -5726,62 +5785,6 @@ mod tests {
 
         generic_reads_fail_closed_on_corrupt_or_missing_event_rows();
         geographic_presence_delete_failure_is_fail_closed();
-
-        let mut fork_insert_store = new_store();
-        let fork_insert_parent = fork_insert_store.create_timeline("fork-insert").unwrap();
-        fork_insert_store
-            .conn
-            .execute(
-                "INSERT INTO geographic_presence (timeline_id, has_evidence) VALUES (?1, 1)",
-                params![fork_insert_parent.id().to_string()],
-            )
-            .unwrap();
-        fork_insert_store
-            .conn
-            .execute(
-                "CREATE TRIGGER reject_geo_presence INSERT ON geographic_presence
-                 BEGIN SELECT RAISE(ABORT, 'reject marker'); END",
-                [],
-            )
-            .unwrap();
-        assert!(fork_insert_store
-            .fork(fork_insert_parent.id(), Seq::ZERO, "child")
-            .is_err());
-        let timeline_count: i64 = fork_insert_store
-            .conn
-            .query_row("SELECT COUNT(*) FROM timelines", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(timeline_count, 1);
-
-        let mut append_insert_store = new_store();
-        let append_timeline = append_insert_store
-            .create_timeline("append-insert")
-            .unwrap();
-        append_insert_store
-            .conn
-            .execute(
-                "CREATE TRIGGER reject_geo_presence INSERT ON geographic_presence
-                 BEGIN SELECT RAISE(ABORT, 'reject marker'); END",
-                [],
-            )
-            .unwrap();
-        let payload = CanonicalBytes::from_vec(b"geo".to_vec());
-        let event = Event {
-            id: EventId::new(),
-            entity: EntityId::new(),
-            event_type: Kind::new("geo.location"),
-            payload: payload.clone(),
-            wall_time: WallTime::from_micros(1),
-            seq: Seq::from_u64(1),
-            causation_id: None,
-            correlation_id: None,
-            schema_version: SchemaVersion::V1,
-            signature: None,
-            payload_hash: pos_crypto::chain::hash_payload(&payload),
-        };
-        assert!(append_insert_store
-            .append_committed(append_timeline.id(), &[event])
-            .is_err());
     }
 
     fn generic_reads_fail_closed_on_corrupt_or_missing_event_rows() {

@@ -32,11 +32,7 @@ pub use crypto::{Hash, PublicKey, Signature};
 pub use entity::{Entity, EntityKind, Relationship, RelationshipKind};
 pub use error::CoreError;
 pub use event::{CanonicalBytes, Determinism, Event, EventDraft, Kind, RunMode, SchemaVersion};
-pub use geo_access::{
-    is_geographic_event_type, CoreGeographicVisibilityProjector, DisclosureDecision,
-    GeoEvidenceReader, GeoEvidenceWriter, GeographicAuditRecord, GEOGRAPHIC_CELL_EVENT_TYPE,
-    GEOGRAPHIC_EVENT_TYPE,
-};
+pub use geo_access::{is_geographic_event_type, GEOGRAPHIC_CELL_EVENT_TYPE, GEOGRAPHIC_EVENT_TYPE};
 pub use hasher::Hasher;
 pub use ids::{CorrelationId, EntityId, EventId, PluginId, RelationshipId, TimelineId};
 pub use manifest::{AdapterRecord, ReproManifest};
@@ -47,7 +43,6 @@ pub use store::{
     export_timeline_cow, export_timeline_own, export_timeline_raw, import_committed_with_rollback,
     import_timeline, import_timeline_with_id, validate_committed_batch, AppendDedupKey,
     AppendDedupScope, AppendIdentity, AppendIntent, AppendOrDuplicateOutcome, EventReadBounds,
-    EventStore, GeographicEvidenceStore, PurgeOutcome, SeqRange, TimelineExport,
-    APPEND_IDENTITY_RETENTION_MICROS,
+    EventStore, PurgeOutcome, SeqRange, TimelineExport, APPEND_IDENTITY_RETENTION_MICROS,
 };
 pub use timeline::{Timeline, TimelineMeta, TimelineMode};

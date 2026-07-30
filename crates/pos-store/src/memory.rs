@@ -11,13 +11,12 @@ use pos_core::{
     crypto::Hash,
     error::CoreError,
     event::{Event, EventDraft},
-    geo_access::{is_geographic_event_type, GeoEvidenceReader},
     hasher::Hasher,
     ids::{EventId, TimelineId},
     store::{
         checked_append_identity_expires_at, AppendDedupKey, AppendDedupScope, AppendIdentity,
-        AppendIntent, AppendOrDuplicateOutcome, EventReadBounds, EventStore,
-        GeographicEvidenceStore, PurgeOutcome, SeqRange,
+        AppendIntent, AppendOrDuplicateOutcome, EventReadBounds, EventStore, PurgeOutcome,
+        SeqRange,
     },
     timeline::{Timeline, TimelineMeta},
 };
@@ -41,10 +40,6 @@ pub struct MemoryStore {
     geographic_timelines: HashSet<TimelineId>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
-}
-
-fn is_geographic_event_type_for_event(event: &Event) -> bool {
-    is_geographic_event_type(&event.event_type)
 }
 
 #[inline(never)]
@@ -577,28 +572,6 @@ impl MemoryStore {
         )
     }
 
-    fn geographic_descendants(&self, root: TimelineId) -> Vec<TimelineId> {
-        let mut descendants = Vec::new();
-        let mut frontier = vec![root];
-        while let Some(parent) = frontier.pop() {
-            let children: Vec<_> = self
-                .timelines
-                .values()
-                .filter_map(|state| {
-                    state
-                        .timeline
-                        .meta
-                        .fork_point
-                        .is_some_and(|(candidate, _)| candidate == parent)
-                        .then_some(state.timeline.id())
-                })
-                .collect();
-            frontier.extend(children.iter().copied());
-            descendants.extend(children);
-        }
-        descendants
-    }
-
     fn fork_visible_timeline(
         &mut self,
         parent: TimelineId,
@@ -866,8 +839,6 @@ impl EventStore for MemoryStore {
                     &mut |id| self.event_ids.contains(id),
                     &*self.hasher,
                 )?;
-                let geographic = ordered.iter().any(is_geographic_event_type_for_event);
-                let descendants = geographic.then(|| self.geographic_descendants(timeline));
                 let mut new_head = head;
                 let mut previous_hash = self.chain_head(timeline);
                 for event in &ordered {
@@ -879,17 +850,11 @@ impl EventStore for MemoryStore {
                 }
 
                 self.event_ids.extend(ordered.iter().map(|event| event.id));
-                let update = self.state_mut(timeline).map(|state| {
+                self.state_mut(timeline).map(|state| {
                     state.events.extend(ordered);
                     timeline_state.head = new_head;
                     state.timeline = timeline_state;
                     state.chain_head = previous_hash;
-                });
-                update.map(|()| {
-                    if let Some(descendants) = descendants {
-                        self.geographic_timelines.insert(timeline);
-                        self.geographic_timelines.extend(descendants);
-                    }
                 })
             })
     }
@@ -909,24 +874,6 @@ impl EventStore for MemoryStore {
         events: &[Event],
     ) -> Result<Timeline, CoreError> {
         pos_core::store::import_committed_with_rollback(self, meta, events)
-    }
-}
-
-impl GeographicEvidenceStore for MemoryStore {
-    fn read_geographic_evidence_bounded(
-        &self,
-        _reader: &GeoEvidenceReader,
-        timeline: TimelineId,
-        range: SeqRange,
-        bounds: EventReadBounds,
-    ) -> Result<Vec<Event>, CoreError> {
-        self.collect_events_in_range_bounded(timeline, range, bounds)
-            .map(|events| {
-                events
-                    .into_iter()
-                    .filter(is_geographic_event_type_for_event)
-                    .collect()
-            })
     }
 }
 
@@ -1631,22 +1578,6 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn geographic_descendants_include_each_generation_only() {
-        let mut store = MemoryStore::new();
-        let root = store.create_timeline("root").unwrap();
-        let child = store.fork(root.id(), Seq::ZERO, "child").unwrap();
-        let grandchild = store.fork(child.id(), Seq::ZERO, "grandchild").unwrap();
-        let unrelated = store.create_timeline("unrelated").unwrap();
-
-        let descendants = store.geographic_descendants(root.id());
-        assert!(descendants.contains(&child.id()));
-        assert!(descendants.contains(&grandchild.id()));
-        assert!(!descendants.contains(&root.id()));
-        assert!(!descendants.contains(&unrelated.id()));
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_read_rejects_unknown_timeline() {
         let store = MemoryStore::new();
         let bounded_error = store
@@ -1657,6 +1588,25 @@ mod tests {
             )
             .unwrap_err();
         assert!(bounded_error.to_string().contains("timeline not found"));
+    }
+
+    #[test]
+    fn bounded_chain_rejects_a_missing_ancestor() {
+        let mut store = MemoryStore::new();
+        let parent = store.create_timeline("parent").unwrap();
+        let child = store.fork(parent.id(), Seq::ZERO, "child").unwrap();
+        store.test_remove_timeline(parent.id());
+
+        let error = store
+            .collect_events_in_range_bounded(
+                child.id(),
+                SeqRange::all(),
+                EventReadBounds::new(1, 1, 1, 1),
+            )
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains(&format!("timeline not found: {}", parent.id())));
     }
 
     #[test]

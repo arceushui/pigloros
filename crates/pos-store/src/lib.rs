@@ -46,8 +46,8 @@ pub use pos_core::store::{
     append_identity_expires_at, checked_append_identity_expires_at, export_timeline,
     export_timeline_cow, export_timeline_own, export_timeline_raw, import_committed_with_rollback,
     import_timeline, import_timeline_with_id, AppendDedupKey, AppendDedupScope, AppendIdentity,
-    AppendIntent, AppendOrDuplicateOutcome, EventStore, GeographicEvidenceStore, PurgeOutcome,
-    SeqRange, TimelineExport, APPEND_IDENTITY_RETENTION_MICROS,
+    AppendIntent, AppendOrDuplicateOutcome, EventStore, PurgeOutcome, SeqRange, TimelineExport,
+    APPEND_IDENTITY_RETENTION_MICROS,
 };
 pub use pos_core::{
     CanonicalBytes, CoreError, CorrelationId, EntityId, Event, EventDraft, EventId, Kind,

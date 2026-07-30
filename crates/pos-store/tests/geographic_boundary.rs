@@ -160,3 +160,19 @@ fn sqlite_public_adapter_still_reads_ordinary_events() {
         .unwrap();
     assert_eq!(store.read(timeline.id(), SeqRange::all()).unwrap().len(), 1);
 }
+
+#[test]
+fn sqlite_event_id_lookup_propagates_storage_errors() {
+    let database = tempfile::NamedTempFile::new().unwrap();
+    let mut store =
+        pos_store::sqlite::SqliteStore::open(database.path().to_str().unwrap()).unwrap();
+    let timeline = store.create_timeline("event-id-storage-error").unwrap();
+    let connection = rusqlite::Connection::open(database.path()).unwrap();
+    connection.execute("DROP TABLE events", []).unwrap();
+
+    assert!(store
+        .read_event_by_id(timeline.id(), EventId::new())
+        .unwrap_err()
+        .to_string()
+        .contains("storage error"));
+}
