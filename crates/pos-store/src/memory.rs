@@ -45,6 +45,7 @@ pub struct MemoryStore {
 
 #[derive(Clone)]
 struct AppendIdentityRecord {
+    timeline: TimelineId,
     scope: AppendDedupScope,
     event_id: EventId,
     expires_at: WallTime,
@@ -57,7 +58,6 @@ struct RetainedAppendContent {
     entity: pos_core::EntityId,
     event_type: pos_core::Kind,
     payload: pos_core::CanonicalBytes,
-    wall_time: WallTime,
     causation_id: Option<EventId>,
     correlation_id: Option<pos_core::CorrelationId>,
     schema_version: pos_core::SchemaVersion,
@@ -128,9 +128,6 @@ impl MemoryStore {
             && content.causation_id == draft.causation_id
             && content.correlation_id == draft.correlation_id
             && content.schema_version == draft.schema_version
-            && draft
-                .wall_time
-                .is_none_or(|wall_time| content.wall_time == wall_time)
     }
 
     fn retained_content(event: &Event) -> RetainedAppendContent {
@@ -138,7 +135,6 @@ impl MemoryStore {
             entity: event.entity,
             event_type: event.event_type.clone(),
             payload: event.payload.clone(),
-            wall_time: event.wall_time,
             causation_id: event.causation_id,
             correlation_id: event.correlation_id,
             schema_version: event.schema_version,
@@ -414,8 +410,12 @@ impl EventStore for MemoryStore {
         admitted_at: WallTime,
         draft: EventDraft,
     ) -> Result<AppendOrDuplicateOutcome, CoreError> {
+        self.timeline(timeline)?;
         if let Some(record) = self.append_identities.get(&identity.dedup_key) {
             if record.expires_at > admitted_at {
+                if record.timeline != timeline {
+                    return Ok(AppendOrDuplicateOutcome::Conflict);
+                }
                 return if Self::retained_content_matches(&record.retained_content, &draft) {
                     Ok(AppendOrDuplicateOutcome::Duplicate {
                         event_id: record.event_id,
@@ -427,22 +427,23 @@ impl EventStore for MemoryStore {
         }
 
         let expires_at = checked_append_identity_expires_at(admitted_at)?;
-        self.append(timeline, std::slice::from_ref(&draft))
-            .map(|mut events| {
-                let event = events
-                    .pop()
-                    .expect("one ingress draft must commit one Event");
-                self.append_identities.insert(
-                    identity.dedup_key,
-                    AppendIdentityRecord {
-                        scope: identity.scope,
-                        event_id: event.id,
-                        expires_at,
-                        retained_content: Self::retained_content(&event),
-                    },
-                );
-                AppendOrDuplicateOutcome::Appended(Box::new(event))
-            })
+        let mut events = self.append(timeline, std::slice::from_ref(&draft))?;
+        let Some(event) = events.pop() else {
+            return Err(CoreError::Storage(
+                "empty append while recording ingress identity".to_owned(),
+            ));
+        };
+        self.append_identities.insert(
+            identity.dedup_key,
+            AppendIdentityRecord {
+                timeline,
+                scope: identity.scope,
+                event_id: event.id,
+                expires_at,
+                retained_content: Self::retained_content(&event),
+            },
+        );
+        Ok(AppendOrDuplicateOutcome::Appended(Box::new(event)))
     }
 
     fn purge_expired_append_identities(&mut self, now: WallTime) -> Result<usize, CoreError> {

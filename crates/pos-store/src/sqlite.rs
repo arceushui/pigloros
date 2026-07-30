@@ -138,6 +138,7 @@ impl SqliteStore {
     fn retained_event_matches_draft(
         tx: &rusqlite::Transaction<'_>,
         event_id: &str,
+        timeline: TimelineId,
         draft: &EventDraft,
     ) -> Result<bool, CoreError> {
         let retained = tx.query_row(
@@ -145,28 +146,26 @@ impl SqliteStore {
                 WHEN EXISTS (
                     SELECT 1 FROM events
                     WHERE event_id = ?1
-                      AND entity_id = ?2
-                      AND event_type = ?3
-                      AND payload = ?4
-                      AND causation_id IS ?5
-                      AND correlation_id IS ?6
-                      AND schema_version = ?7
-                      AND (?8 IS NULL OR wall_time = ?8)
+                      AND timeline_id = ?2
+                      AND entity_id = ?3
+                      AND event_type = ?4
+                      AND payload = ?5
+                      AND causation_id IS ?6
+                      AND correlation_id IS ?7
+                      AND schema_version = ?8
                 ) THEN 1
                 WHEN EXISTS (SELECT 1 FROM events WHERE event_id = ?1) THEN 0
                 ELSE -1
              END",
             params![
                 event_id,
+                timeline.to_string(),
                 draft.entity.to_string(),
                 draft.event_type.as_str(),
                 draft.payload.as_slice(),
                 draft.causation_id.map(|id| id.to_string()),
                 draft.correlation_id.map(|id| id.to_string()),
                 i64::from(draft.schema_version.as_u32()),
-                draft
-                    .wall_time
-                    .map(|wall_time| i64::try_from(wall_time.as_micros()).unwrap_or(i64::MAX)),
             ],
             |row| row.get::<_, i64>(0),
         );
@@ -1028,6 +1027,19 @@ impl EventStore for SqliteStore {
             Err(error) => return Err(CoreError::Storage(error.to_string())),
         };
 
+        let timeline_text = timeline.to_string();
+        let target_exists = tx
+            .query_row(
+                "SELECT 1 FROM timelines WHERE id = ?1",
+                params![&timeline_text],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        if target_exists.is_none() {
+            return Err(CoreError::TimelineNotFound(timeline));
+        }
+
         let existing = tx.query_row(
             "SELECT event_id, expires_at FROM append_identities WHERE dedup_key = ?1",
             params![identity.dedup_key.as_bytes().as_slice()],
@@ -1040,16 +1052,15 @@ impl EventStore for SqliteStore {
             Ok((event_id, expires_at))
                 if u64::try_from(expires_at).unwrap_or(0) > admitted_at.as_micros() =>
             {
-                return Self::retained_event_matches_draft(&tx, &event_id, &draft).and_then(
-                    |retained_matches| {
+                return Self::retained_event_matches_draft(&tx, &event_id, timeline, &draft)
+                    .and_then(|retained_matches| {
                         if retained_matches {
                             parse_event_id(&event_id)
                                 .map(|event_id| AppendOrDuplicateOutcome::Duplicate { event_id })
                         } else {
                             Ok(AppendOrDuplicateOutcome::Conflict)
                         }
-                    },
-                );
+                    });
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => {}
             Err(error) => return Err(CoreError::Storage(error.to_string())),

@@ -26,6 +26,7 @@ ulid = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
+blake3 = { workspace = true }
 
 [lints]
 workspace = true

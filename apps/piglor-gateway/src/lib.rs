@@ -16,13 +16,17 @@ use pos_core::{
     clock::Seq,
     event::{CanonicalBytes, Event, EventDraft, Kind},
     ids::{EntityId, TimelineId},
-    store::{EventReadBounds, EventStore, SeqRange},
+    store::{
+        AppendDedupKey, AppendDedupScope, AppendIdentity, AppendIntent, AppendOrDuplicateOutcome,
+        EventReadBounds, EventStore, PurgeOutcome, SeqRange,
+    },
     timeline::Timeline,
     CoreError,
 };
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
 use pos_plugin_world::EVENT_TYPE_ACTION;
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::{broadcast, Mutex};
@@ -121,6 +125,13 @@ pub struct EventNotice {
     pub seq: u64,
 }
 
+/// Result of an identified Gateway append.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentifiedAppend {
+    pub event: Event,
+    pub duplicate: bool,
+}
+
 /// API / domain errors for the gateway library.
 #[derive(Debug, Error)]
 pub enum GatewayError {
@@ -130,6 +141,9 @@ pub enum GatewayError {
     /// Unsupported action event type.
     #[error("unsupported action type: {0}")]
     UnsupportedAction(String),
+    /// An ingress identity was reused with a different canonical intent.
+    #[error("ingress identity conflicts with retained canonical intent")]
+    IngressConflict,
     /// Requested poll page is outside the Gateway bounds.
     #[error("event poll limit must be between 1 and {maximum}")]
     InvalidPageLimit { maximum: usize },
@@ -190,6 +204,21 @@ impl Gateway {
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<EventNotice> {
         self.bus.subscribe()
+    }
+
+    /// Run one bounded deduplication-maintenance pass.
+    ///
+    /// The server lifecycle supervisor owns scheduling and readiness; this
+    /// method only holds the store lock for the bounded adapter operation.
+    ///
+    /// # Errors
+    /// Returns [`GatewayError::Store`] when the bounded maintenance pass fails.
+    pub async fn purge_expired_ingress_identities(
+        &self,
+        limit: NonZeroUsize,
+    ) -> Result<PurgeOutcome, GatewayError> {
+        let mut guard = self.store.lock().await;
+        Ok(guard.purge_expired_append_identities_bounded(limit)?)
     }
 
     /// Create a root Timeline.
@@ -332,6 +361,52 @@ impl Gateway {
         self.append_draft(timeline, draft).await
     }
 
+    /// Append an action using an opaque external ingress identity.
+    ///
+    /// The identity is hashed before it crosses the store boundary. The store
+    /// owns admission time and compares only the canonical append intent, so
+    /// generated Event metadata cannot turn a retry into a conflict.
+    ///
+    /// # Errors
+    /// Returns an ID, payload, unsupported-action, conflict, or store error.
+    pub async fn append_identified_action(
+        &self,
+        timeline_id: &str,
+        entity_id: &str,
+        event_type: &str,
+        payload: &serde_json::Value,
+        ingress_id: &str,
+    ) -> Result<IdentifiedAppend, GatewayError> {
+        if event_type != EVENT_TYPE_ACTION {
+            return Err(GatewayError::UnsupportedAction(event_type.to_owned()));
+        }
+        let timeline = parse_timeline_id(timeline_id)?;
+        let entity = parse_entity_id(entity_id)?;
+        let draft = EventDraft::new(entity, Kind::new(EVENT_TYPE_ACTION), json_to_cbor(payload));
+        if draft.payload.len() > MAX_EVENT_PAYLOAD_BYTES {
+            return Err(GatewayError::EventPayloadTooLarge {
+                maximum: MAX_EVENT_PAYLOAD_BYTES,
+            });
+        }
+        let identity = ingress_identity(timeline, entity, ingress_id);
+        let outcome = {
+            let mut guard = self.store.lock().await;
+            guard.append_intent_or_duplicate(timeline, identity, AppendIntent::new(&draft))?
+        };
+        let (event, duplicate) = match outcome {
+            AppendOrDuplicateOutcome::Appended(event) => (*event, false),
+            AppendOrDuplicateOutcome::Duplicate { event_id } => {
+                let event = self.read_event_by_id(timeline, event_id).await?;
+                (event, true)
+            }
+            AppendOrDuplicateOutcome::Conflict => return Err(GatewayError::IngressConflict),
+        };
+        if !duplicate {
+            self.publish_notice(timeline, &event);
+        }
+        Ok(IdentifiedAppend { event, duplicate })
+    }
+
     /// Append one `society.signal` (fan-out convenience for #71).
     ///
     /// # Errors
@@ -388,6 +463,11 @@ impl Gateway {
                 }
             }
         };
+        self.publish_notice(timeline, &event);
+        Ok(event)
+    }
+
+    fn publish_notice(&self, timeline: TimelineId, event: &Event) {
         let notice = EventNotice {
             timeline_id: timeline.to_string(),
             event_id: event.id.to_string(),
@@ -395,9 +475,22 @@ impl Gateway {
             event_type: event.event_type.as_str().to_owned(),
             seq: event.seq.as_u64(),
         };
-        // `send` is infallible when receivers lag; lagged clients must resync from the store.
         let _ = self.bus.send(notice);
-        Ok(event)
+    }
+
+    async fn read_event_by_id(
+        &self,
+        timeline: TimelineId,
+        event_id: pos_core::ids::EventId,
+    ) -> Result<Event, GatewayError> {
+        let guard = self.store.lock().await;
+        guard
+            .read(timeline, SeqRange::all())?
+            .into_iter()
+            .find(|event| event.id == event_id)
+            .ok_or(GatewayError::Store(CoreError::Storage(
+                "duplicate identity points to a missing Event".to_owned(),
+            )))
     }
 
     #[cfg(test)]
@@ -417,6 +510,21 @@ impl Gateway {
             limits,
         }
     }
+}
+
+fn ingress_identity(timeline: TimelineId, entity: EntityId, ingress_id: &str) -> AppendIdentity {
+    let mut key = blake3::Hasher::new();
+    key.update(b"pigloros:ingress:v1:key:");
+    key.update(timeline.to_string().as_bytes());
+    key.update(b":");
+    key.update(ingress_id.as_bytes());
+    let mut scope = blake3::Hasher::new();
+    scope.update(b"pigloros:ingress:v1:scope:");
+    scope.update(entity.to_string().as_bytes());
+    AppendIdentity::new(
+        AppendDedupKey::from_keyed_hash(*key.finalize().as_bytes()),
+        AppendDedupScope::from_keyed_hash(*scope.finalize().as_bytes()),
+    )
 }
 
 fn event_seq(event: &Event) -> u64 {
@@ -476,6 +584,9 @@ pub struct ActionRequest {
     #[serde(default = "default_action_type")]
     pub event_type: String,
     pub payload: serde_json::Value,
+    /// Optional external ingress identity for retry-safe append.
+    #[serde(default)]
+    pub ingress_id: Option<String>,
 }
 
 fn default_action_type() -> String {

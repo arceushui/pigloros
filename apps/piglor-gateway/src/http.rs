@@ -205,6 +205,24 @@ async fn post_action(
     Path(id): Path<String>,
     Json(body): Json<ActionRequest>,
 ) -> Result<impl IntoResponse, GatewayError> {
+    if let Some(ingress_id) = body.ingress_id.as_deref() {
+        let result = state
+            .gateway
+            .append_identified_action(
+                &id,
+                &body.entity_id,
+                &body.event_type,
+                &body.payload,
+                ingress_id,
+            )
+            .await?;
+        let status = if result.duplicate {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        };
+        return Ok((status, Json(EventView::from(&result.event))));
+    }
     let event = state
         .gateway
         .append_action(&id, &body.entity_id, &body.event_type, &body.payload)
@@ -256,7 +274,9 @@ impl IntoResponse for GatewayError {
             | GatewayError::EventMetadataTooLarge { .. }
             | GatewayError::ForkDepthTooLarge { .. }
             | GatewayError::EventResponseTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
-            GatewayError::CompatibilityReadTruncated { .. } => StatusCode::CONFLICT,
+            GatewayError::IngressConflict | GatewayError::CompatibilityReadTruncated { .. } => {
+                StatusCode::CONFLICT
+            }
             GatewayError::Store(CoreError::TimelineNotFound(_)) => StatusCode::NOT_FOUND,
             GatewayError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
             GatewayError::LedgerWriteDisabled => StatusCode::FORBIDDEN,
@@ -631,6 +651,57 @@ mod tests {
         assert_eq!(listed["events"].as_array().unwrap().len(), 1);
         assert_eq!(listed["events"][0]["payload"]["dx"], 1);
         assert!(listed["next_from_seq"].is_null());
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn identified_action_retries_are_duplicate_or_conflict() {
+        let app = test_app();
+        let (status, created) = json_request(
+            app.clone(),
+            "POST",
+            "/v1/timelines",
+            Some(json!({"name": "identified"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap();
+        let entity = EntityId::new().to_string();
+        let request = json!({
+            "entity_id": entity,
+            "ingress_id": "device-1-42",
+            "payload": {"lat": 1}
+        });
+        let (status, first) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/v1/timelines/{id}/actions"),
+            Some(request.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, retry) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/v1/timelines/{id}/actions"),
+            Some(request),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(retry["id"], first["id"]);
+        let (status, error) = json_request(
+            app,
+            "POST",
+            &format!("/v1/timelines/{id}/actions"),
+            Some(json!({
+                "entity_id": entity,
+                "ingress_id": "device-1-42",
+                "payload": {"lat": 2}
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(error["error"].as_str().unwrap().contains("conflicts"));
     }
 
     #[tokio::test]
