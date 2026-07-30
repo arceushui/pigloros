@@ -526,13 +526,17 @@ impl Gateway {
 }
 
 fn ingress_identity(timeline: TimelineId, entity: EntityId, ingress_id: &str) -> AppendIdentity {
-    let mut key = blake3::Hasher::new();
-    key.update(b"pigloros:ingress:v1:key:");
+    // Derive each persisted digest in an independent BLAKE3 context.  The
+    // Gateway never stores the caller's ingress identifier or its preimage;
+    // the context strings provide a stable, domain-separated opaque seam
+    // without inventing a process-wide secret or configuration value.
+    let mut key = blake3::Hasher::new_derive_key("pigloros ingress dedup key v1");
+    key.update(b"timeline:");
     key.update(timeline.to_string().as_bytes());
-    key.update(b":");
+    key.update(b"\ningress:");
     key.update(ingress_id.as_bytes());
-    let mut scope = blake3::Hasher::new();
-    scope.update(b"pigloros:ingress:v1:scope:");
+    let mut scope = blake3::Hasher::new_derive_key("pigloros ingress dedup scope v1");
+    scope.update(b"entity:");
     scope.update(entity.to_string().as_bytes());
     AppendIdentity::new(
         AppendDedupKey::from_keyed_hash(*key.finalize().as_bytes()),
@@ -1686,5 +1690,27 @@ mod tests {
             maximum: MAX_EVENTS_PER_POLL,
         };
         assert!(e.to_string().contains("compatibility"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn ingress_identity_is_domain_separated_and_namespaced() {
+        let timeline = TimelineId::new();
+        let entity = EntityId::new();
+        let same = ingress_identity(timeline, entity, "device-1:42");
+        assert_eq!(same, ingress_identity(timeline, entity, "device-1:42"));
+        assert_ne!(
+            same.dedup_key,
+            ingress_identity(timeline, entity, "device-1:43").dedup_key
+        );
+        assert_ne!(
+            same.dedup_key,
+            ingress_identity(TimelineId::new(), entity, "device-1:42").dedup_key
+        );
+        assert_ne!(
+            same.scope,
+            ingress_identity(timeline, EntityId::new(), "device-1:42").scope
+        );
+        assert_ne!(same.dedup_key.as_bytes(), same.scope.as_bytes());
     }
 }
