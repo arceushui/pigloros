@@ -12,7 +12,7 @@ use pos_state::ProjectionRegistry;
 
 use crate::{
     composition::{PluginComposition, RegisteredEventSchema, RegisteredPlugin},
-    driver::{Driver, ObservationSnapshot, ProjectionKey},
+    driver::{Driver, ObservationSnapshot, ProjectionKey, StepOutput},
     error::RuntimeError,
     recorder::RECORDER_EVENT_TYPE,
     schema::{EventTypeSchema, SchemaRegistry},
@@ -28,6 +28,19 @@ fn extend_unique_subscriptions(
         if seen.insert(key.clone()) {
             subscriptions.push(key.clone());
         }
+    }
+}
+
+fn reject_geographic_drafts(output: &StepOutput) -> Result<(), RuntimeError> {
+    match output
+        .drafts
+        .iter()
+        .find(|draft| pos_core::is_geographic_event_type(&draft.event_type))
+    {
+        Some(draft) => Err(RuntimeError::GeographicDraft {
+            event_type: draft.event_type.as_str().to_owned(),
+        }),
+        None => Ok(()),
     }
 }
 
@@ -258,7 +271,6 @@ impl PluginRegistry {
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn tick_cadenced(
         &mut self,
-        store: &dyn pos_core::store::EventStore,
         timeline: pos_core::ids::TimelineId,
         now_ns: u128,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
@@ -290,16 +302,8 @@ impl PluginRegistry {
             if let Some(entry) = self.plugins.get_mut(&id) {
                 if let Some(driver) = entry.driver.as_mut() {
                     let observations = snapshot.view_for(driver.subscriptions());
-                    let output = driver.step(store, timeline, observations)?;
-                    if let Some(draft) = output
-                        .drafts
-                        .iter()
-                        .find(|draft| pos_core::is_geographic_event_type(&draft.event_type))
-                    {
-                        return Err(RuntimeError::GeographicDraft {
-                            event_type: draft.event_type.as_str().to_owned(),
-                        });
-                    }
+                    let output = driver.step(timeline, observations)?;
+                    reject_geographic_drafts(&output)?;
                     entry.last_tick = Some(now_ns);
                     all_drafts.extend(output.drafts);
                 }
@@ -316,14 +320,13 @@ impl PluginRegistry {
 
     /// Step all plugins that have a driver, collecting their event drafts.
     ///
-    /// Calls `driver.step(store, timeline, observations)` on each plugin that registered a driver.
+    /// Calls `driver.step(timeline, observations)` on each plugin that registered a driver.
     /// Returns all drafts from all drivers in registration order.
     ///
     /// # Errors
     /// Propagates any [`RuntimeError`] from drivers.
     pub fn step_all(
         &mut self,
-        store: &dyn pos_core::store::EventStore,
         timeline: pos_core::ids::TimelineId,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         let mut all_drafts = Vec::new();
@@ -331,16 +334,8 @@ impl PluginRegistry {
         for entry in self.plugins.values_mut() {
             if let Some(driver) = entry.driver.as_mut() {
                 let observations = snapshot.view_for(driver.subscriptions());
-                let output = driver.step(store, timeline, observations)?;
-                if let Some(draft) = output
-                    .drafts
-                    .iter()
-                    .find(|draft| pos_core::is_geographic_event_type(&draft.event_type))
-                {
-                    return Err(RuntimeError::GeographicDraft {
-                        event_type: draft.event_type.as_str().to_owned(),
-                    });
-                }
+                let output = driver.step(timeline, observations)?;
+                reject_geographic_drafts(&output)?;
                 all_drafts.extend(output.drafts);
             }
         }
@@ -430,7 +425,6 @@ mod tests {
         }
         fn step(
             &mut self,
-            _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
             _: ObservationView<'_>,
         ) -> Result<crate::driver::StepOutput, RuntimeError> {
@@ -460,8 +454,13 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains(pos_core::GEOGRAPHIC_EVENT_TYPE));
 
-        let inert = simple_plugin("future-geo", &["geo.cell"]);
-        assert!(PluginRegistry::new().register(&inert, None, None).is_ok());
+        let cell = simple_plugin("future-geo", &[pos_core::GEOGRAPHIC_CELL_EVENT_TYPE]);
+        let error = PluginRegistry::new()
+            .register(&cell, None, None)
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains(pos_core::GEOGRAPHIC_CELL_EVENT_TYPE));
     }
 
     #[test]
@@ -541,7 +540,7 @@ mod tests {
         let mut reg = PluginRegistry::new();
         let p = simple_plugin("p", &[]);
         reg.register(&p, None, None).unwrap();
-        let drafts = reg.tick_cadenced(store.as_ref(), tl.id(), 0).unwrap();
+        let drafts = reg.tick_cadenced(tl.id(), 0).unwrap();
         assert!(drafts.is_empty());
     }
 
@@ -577,7 +576,6 @@ mod tests {
             }
             fn step(
                 &mut self,
-                _: &dyn pos_core::store::EventStore,
                 _: pos_core::ids::TimelineId,
                 _: ObservationView<'_>,
             ) -> Result<StepOutput, RuntimeError> {
@@ -603,7 +601,7 @@ mod tests {
         reg.register(&p, None, Some(Box::new(driver))).unwrap();
         assert_eq!(reg.driver_count(), 1);
 
-        let drafts = reg.step_all(store.as_ref(), tl.id()).unwrap();
+        let drafts = reg.step_all(tl.id()).unwrap();
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].event_type.as_str(), "driver.tick");
     }
@@ -617,7 +615,7 @@ mod tests {
         let p = simple_plugin("nodrive", &[]);
         let mut reg = PluginRegistry::new();
         reg.register(&p, None, None).unwrap();
-        let drafts = reg.step_all(store.as_ref(), tl.id()).unwrap();
+        let drafts = reg.step_all(tl.id()).unwrap();
         assert!(drafts.is_empty());
     }
 
@@ -633,7 +631,6 @@ mod tests {
 
             fn step(
                 &mut self,
-                _: &dyn pos_core::store::EventStore,
                 _: TimelineId,
                 _: ObservationView<'_>,
             ) -> Result<StepOutput, RuntimeError> {
@@ -648,7 +645,7 @@ mod tests {
         let mut reg = PluginRegistry::new();
         reg.register_driver(Box::new(FailingDriver));
 
-        let error = reg.step_all(store.as_ref(), timeline.id()).unwrap_err();
+        let error = reg.step_all(timeline.id()).unwrap_err();
         assert!(error.to_string().contains("failing"));
     }
 
@@ -663,7 +660,6 @@ mod tests {
 
             fn step(
                 &mut self,
-                _: &dyn pos_core::store::EventStore,
                 _: TimelineId,
                 _: ObservationView<'_>,
             ) -> Result<StepOutput, RuntimeError> {
@@ -680,11 +676,11 @@ mod tests {
         let mut registry = PluginRegistry::new();
         registry.register_driver(Box::new(GeographicDriver));
         assert!(matches!(
-            registry.step_all(store.as_ref(), timeline.id()),
+            registry.step_all(timeline.id()),
             Err(RuntimeError::GeographicDraft { .. })
         ));
         assert!(matches!(
-            registry.tick_cadenced(store.as_ref(), timeline.id(), 0),
+            registry.tick_cadenced(timeline.id(), 0),
             Err(RuntimeError::GeographicDraft { .. })
         ));
     }
@@ -711,7 +707,6 @@ mod tests {
 
             fn step(
                 &mut self,
-                _: &dyn pos_core::store::EventStore,
                 _: pos_core::ids::TimelineId,
                 observations: ObservationView<'_>,
             ) -> Result<crate::driver::StepOutput, RuntimeError> {
@@ -758,11 +753,11 @@ mod tests {
             entity: EntityId::new(),
         }));
 
-        let drafts = reg.tick_cadenced(store.as_ref(), timeline.id(), 0).unwrap();
+        let drafts = reg.tick_cadenced(timeline.id(), 0).unwrap();
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].event_type.as_str(), "driver.observed");
 
-        let drafts = reg.step_all(store.as_ref(), timeline.id()).unwrap();
+        let drafts = reg.step_all(timeline.id()).unwrap();
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].event_type.as_str(), "driver.observed");
     }
@@ -788,7 +783,6 @@ mod tests {
 
             fn step(
                 &mut self,
-                _: &dyn pos_core::store::EventStore,
                 _: TimelineId,
                 _: ObservationView<'_>,
             ) -> Result<StepOutput, RuntimeError> {
@@ -806,7 +800,7 @@ mod tests {
         let mut reg = PluginRegistry::new();
         reg.register(&plugin, None, Some(Box::new(driver))).unwrap();
 
-        let drafts = reg.tick_cadenced(store.as_ref(), timeline.id(), 0).unwrap();
+        let drafts = reg.tick_cadenced(timeline.id(), 0).unwrap();
         assert!(drafts.is_empty());
     }
 
@@ -863,7 +857,6 @@ mod tests {
 
             fn step(
                 &mut self,
-                _: &dyn pos_core::store::EventStore,
                 _: TimelineId,
                 _: ObservationView<'_>,
             ) -> Result<StepOutput, RuntimeError> {
@@ -883,20 +876,16 @@ mod tests {
         reg.register(&plugin, None, Some(Box::new(IntervalDriver)))
             .unwrap();
 
-        let first = reg.tick_cadenced(store.as_ref(), timeline.id(), 0).unwrap();
+        let first = reg.tick_cadenced(timeline.id(), 0).unwrap();
         assert_eq!(first.len(), 1);
 
-        let too_early = reg
-            .tick_cadenced(store.as_ref(), timeline.id(), 50_000_000)
-            .unwrap();
+        let too_early = reg.tick_cadenced(timeline.id(), 50_000_000).unwrap();
         assert!(
             too_early.is_empty(),
             "interval gate should suppress a second tick"
         );
 
-        let ready = reg
-            .tick_cadenced(store.as_ref(), timeline.id(), 100_000_000)
-            .unwrap();
+        let ready = reg.tick_cadenced(timeline.id(), 100_000_000).unwrap();
         assert_eq!(
             ready.len(),
             1,
@@ -927,7 +916,6 @@ mod tests {
 
             fn step(
                 &mut self,
-                _: &dyn pos_core::store::EventStore,
                 _: TimelineId,
                 observations: ObservationView<'_>,
             ) -> Result<StepOutput, RuntimeError> {
@@ -951,7 +939,7 @@ mod tests {
             observed: observed.clone(),
         }));
 
-        let drafts = reg.step_all(store.as_ref(), timeline.id()).unwrap();
+        let drafts = reg.step_all(timeline.id()).unwrap();
         assert_eq!(drafts.len(), 0);
 
         assert_eq!(observed.lock().unwrap().as_slice(), [1, 1]);
@@ -1005,12 +993,7 @@ mod tests {
         let p4 = plugin_with_caps("mismatch4", &["x.y"], false, false);
         let mut noop = NoopDriver;
         assert_eq!(crate::driver::Driver::name(&noop), "noop");
-        let _ = crate::driver::Driver::step(
-            &mut noop,
-            open_store(StoreConfig::Memory).unwrap().as_ref(),
-            TimelineId::new(),
-            ObservationView::empty(),
-        );
+        let _ = crate::driver::Driver::step(&mut noop, TimelineId::new(), ObservationView::empty());
         let err = reg.register(&p4, None, Some(Box::new(noop))).unwrap_err();
         assert!(matches!(err, RuntimeError::CapabilityMismatch { .. }));
     }

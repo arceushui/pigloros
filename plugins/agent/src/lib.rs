@@ -14,7 +14,6 @@ use pos_core::{
     ids::{EntityId, PluginId, TimelineId},
     plugin::{Capability, Plugin},
     state::{Reducer, State},
-    store::EventStore,
 };
 use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 use serde::{Deserialize, Serialize};
@@ -210,7 +209,6 @@ impl Driver for AgentDriver {
 
     fn step(
         &mut self,
-        _store: &dyn EventStore,
         _timeline: TimelineId,
         _observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
@@ -431,9 +429,7 @@ mod tests {
         let policy = Box::new(RoundRobinPolicy::new(vec!["act1".to_owned()]));
         let mut driver = AgentDriver::new(entity, policy, vec!["act1".to_owned()]);
 
-        let out = driver
-            .step(store.as_ref(), tl.id(), ObservationView::empty())
-            .unwrap();
+        let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
         assert_eq!(out.drafts.len(), 1);
         assert_eq!(out.drafts[0].event_type.as_str(), EVENT_TYPE_ACTION);
     }
@@ -451,9 +447,7 @@ mod tests {
         let mut driver =
             AgentDriver::new(entity, policy, vec!["jump".to_owned(), "duck".to_owned()]);
 
-        let out = driver
-            .step(store.as_ref(), tl.id(), ObservationView::empty())
-            .unwrap();
+        let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
         let payload: ActionPayload =
             ciborium::from_reader(out.drafts[0].payload.as_slice()).unwrap();
 
@@ -588,12 +582,8 @@ mod tests {
         let policy = Box::new(RoundRobinPolicy::new(vec!["a".to_owned()]));
         let mut driver = AgentDriver::new(entity, policy, vec!["a".to_owned()]);
 
-        driver
-            .step(store.as_ref(), tl.id(), ObservationView::empty())
-            .unwrap();
-        let out = driver
-            .step(store.as_ref(), tl.id(), ObservationView::empty())
-            .unwrap();
+        driver.step(tl.id(), ObservationView::empty()).unwrap();
+        let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
 
         let payload: ActionPayload =
             ciborium::from_reader(out.drafts[0].payload.as_slice()).unwrap();

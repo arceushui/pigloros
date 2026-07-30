@@ -1000,8 +1000,32 @@ impl SqliteStore {
         timeline: TimelineId,
     ) -> Result<bool, CoreError> {
         match self.conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM geographic_presence WHERE timeline_id = ?1)",
-            params![timeline.to_string()],
+            "SELECT EXISTS (
+                WITH RECURSIVE timeline_lineage(timeline_id) AS (
+                    SELECT ?1
+                    UNION ALL
+                    SELECT timelines.parent_id
+                    FROM timelines
+                    JOIN timeline_lineage
+                      ON timelines.id = timeline_lineage.timeline_id
+                    WHERE timelines.parent_id IS NOT NULL
+                )
+                SELECT 1
+                FROM geographic_presence
+                JOIN timeline_lineage
+                  ON geographic_presence.timeline_id = timeline_lineage.timeline_id
+                UNION ALL
+                SELECT 1
+                FROM events
+                JOIN timeline_lineage
+                  ON events.timeline_id = timeline_lineage.timeline_id
+                WHERE events.event_type IN (?2, ?3)
+            )",
+            params![
+                timeline.to_string(),
+                pos_core::GEOGRAPHIC_EVENT_TYPE,
+                pos_core::GEOGRAPHIC_CELL_EVENT_TYPE,
+            ],
             |row| row.get(0),
         ) {
             Ok(contains) => Ok(contains),
@@ -1454,7 +1478,8 @@ impl EventStore for SqliteStore {
                 .ok_or(CoreError::TimelineNotFound(timeline))?;
             return Ok(());
         }
-        self.ensure_generic_timeline_visibility(timeline)
+        crate::ensure_non_geographic_events(events, timeline)
+            .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
             .and_then(|()| {
                 let (head_seq, prev_hash) = match self.conn.query_row(
                     "SELECT head_seq, chain_head FROM timelines WHERE id = ?1",
@@ -1810,7 +1835,6 @@ use rusqlite::OptionalExtension;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pos_core::CoreGeographicVisibilityProjector;
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         ids::{EntityId, EventId},
@@ -4193,15 +4217,6 @@ mod tests {
         assert_storage_err(bounded.map(|_| ()));
 
         FAIL_STMT_QUERY.with(|fail| fail.set(true));
-        let geographic = CoreGeographicVisibilityProjector::new().project_bounded(
-            &store,
-            timeline.id(),
-            read_bounds(1),
-        );
-        FAIL_STMT_QUERY.with(|fail| fail.set(false));
-        assert!(geographic.is_err());
-
-        FAIL_STMT_QUERY.with(|fail| fail.set(true));
         let listed = store.list_timelines();
         FAIL_STMT_QUERY.with(|fail| fail.set(false));
         assert_storage_err(listed.map(|_| ()));
@@ -5357,7 +5372,7 @@ mod tests {
         ev.payload_hash = hash_payload(&ev.payload);
         store.conn.execute("DROP TABLE events", []).unwrap();
         let err = store.append_committed(tl.id(), &[ev]).unwrap_err();
-        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("duplicate")));
+        assert!(matches!(err, CoreError::Storage(_)));
     }
 
     #[test]
@@ -5451,14 +5466,12 @@ mod tests {
         assert_eq!(events.len(), 1);
     }
     #[test]
-    fn geographic_presence_sidecar_withholds_generic_reads() {
+    fn generic_committed_geographic_events_are_rejected_and_markers_withhold_reads() {
         let mut store = new_store();
         let ordinary = store.create_timeline("ordinary").unwrap();
-        let ordinary_event = store
+        store
             .append(ordinary.id(), &[make_draft(EntityId::new(), b"ordinary")])
-            .unwrap()
-            .pop()
-            .expect("one ordinary Event");
+            .unwrap();
         assert!(store
             .read_event_by_id(ordinary.id(), EventId::new())
             .unwrap()
@@ -5478,16 +5491,17 @@ mod tests {
             signature: None,
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
-        let event_id = event.id;
-        store.append_committed(timeline.id(), &[event]).unwrap();
-        assert_geographic_audit_contract(
-            &store,
-            ordinary.id(),
-            ordinary_event.id,
-            timeline.id(),
-            event_id,
-        );
-        assert!(store.read(timeline.id(), SeqRange::all()).is_err());
+        assert!(store.append_committed(timeline.id(), &[event]).is_err());
+        store
+            .conn
+            .execute(
+                "INSERT INTO geographic_presence (timeline_id, has_evidence) VALUES (?1, 1)",
+                params![timeline.id().to_string()],
+            )
+            .unwrap();
+        assert!(store
+            .read_bounded(timeline.id(), SeqRange::all(), read_bounds(1024))
+            .is_err());
         assert!(store
             .read_bounded(timeline.id(), SeqRange::all(), read_bounds(1024))
             .unwrap_err()
@@ -5495,11 +5509,6 @@ mod tests {
             .contains("not found"));
         assert!(store
             .read_own(timeline.id(), SeqRange::all())
-            .unwrap_err()
-            .to_string()
-            .contains("not found"));
-        assert!(store
-            .read_event_by_id(timeline.id(), event_id)
             .unwrap_err()
             .to_string()
             .contains("not found"));
@@ -5519,9 +5528,6 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("not found"));
-        CoreGeographicVisibilityProjector::new()
-            .project(&store, timeline.id())
-            .unwrap();
         assert!(store
             .create_timeline_with_meta(TimelineMeta::forked_from(
                 timeline.id(),
@@ -5552,27 +5558,8 @@ mod tests {
         assert_eq!(store.root_timeline_count_bounded(1).unwrap(), 1);
     }
 
-    fn assert_geographic_audit_contract(
-        store: &SqliteStore,
-        ordinary_timeline: TimelineId,
-        ordinary_event: EventId,
-        geographic_timeline: TimelineId,
-        geographic_event: EventId,
-    ) {
-        let projector = CoreGeographicVisibilityProjector::new();
-        assert!(projector
-            .audit(store, ordinary_timeline, EventId::new())
-            .is_err());
-        assert!(projector
-            .audit(store, ordinary_timeline, ordinary_event)
-            .is_err());
-        assert!(projector
-            .audit(store, geographic_timeline, geographic_event)
-            .is_ok());
-    }
-
     #[test]
-    fn geographic_audit_fails_closed_when_event_sequence_is_malformed() {
+    fn generic_read_fails_closed_when_event_sequence_is_malformed() {
         let mut store = new_store();
         let timeline = store.create_timeline("malformed-sequence").unwrap();
         let event = store
@@ -5588,8 +5575,8 @@ mod tests {
             )
             .unwrap();
 
-        assert!(CoreGeographicVisibilityProjector::new()
-            .audit(&store, timeline.id(), event.id)
+        assert!(store
+            .read_bounded(timeline.id(), SeqRange::all(), read_bounds(1024))
             .is_err());
     }
 
@@ -5719,8 +5706,8 @@ mod tests {
             .conn
             .execute("DROP TABLE events", [])
             .unwrap();
-        assert!(CoreGeographicVisibilityProjector::new()
-            .project(&privileged_store, privileged_timeline.id())
+        assert!(privileged_store
+            .read(privileged_timeline.id(), SeqRange::all())
             .is_err());
 
         let mut missing_timeline_store = new_store();
@@ -5729,11 +5716,11 @@ mod tests {
             .conn
             .execute("DROP TABLE timelines", [])
             .unwrap();
-        assert!(CoreGeographicVisibilityProjector::new()
-            .project(&missing_timeline_store, missing_timeline.id())
+        assert!(missing_timeline_store
+            .read(missing_timeline.id(), SeqRange::all())
             .is_err());
 
-        geographic_audit_fails_closed_on_corrupt_or_missing_event_rows();
+        generic_reads_fail_closed_on_corrupt_or_missing_event_rows();
         geographic_presence_delete_failure_is_fail_closed();
 
         let mut fork_insert_store = new_store();
@@ -5793,12 +5780,12 @@ mod tests {
             .is_err());
     }
 
-    fn geographic_audit_fails_closed_on_corrupt_or_missing_event_rows() {
+    fn generic_reads_fail_closed_on_corrupt_or_missing_event_rows() {
         let mut missing_store = new_store();
         let missing_timeline = missing_store.create_timeline("audit-missing").unwrap();
         missing_store.conn.execute("DROP TABLE events", []).unwrap();
-        assert!(CoreGeographicVisibilityProjector::new()
-            .audit(&missing_store, missing_timeline.id(), EventId::new())
+        assert!(missing_store
+            .read(missing_timeline.id(), SeqRange::all())
             .is_err());
 
         let mut corrupt_store = new_store();
@@ -5807,7 +5794,7 @@ mod tests {
         let event = Event {
             id: EventId::new(),
             entity: EntityId::new(),
-            event_type: Kind::new("geo.location"),
+            event_type: Kind::new("ordinary.event"),
             payload: payload.clone(),
             wall_time: WallTime::from_micros(1),
             seq: Seq::from_u64(1),
@@ -5827,8 +5814,8 @@ mod tests {
                 params![event.id.to_string()],
             )
             .unwrap();
-        assert!(CoreGeographicVisibilityProjector::new()
-            .audit(&corrupt_store, corrupt_timeline.id(), event.id)
+        assert!(corrupt_store
+            .read_bounded(corrupt_timeline.id(), SeqRange::all(), read_bounds(1024))
             .is_err());
 
         corrupt_store
@@ -5838,8 +5825,8 @@ mod tests {
                 params![event.id.to_string()],
             )
             .unwrap();
-        assert!(CoreGeographicVisibilityProjector::new()
-            .audit(&corrupt_store, corrupt_timeline.id(), event.id)
+        assert!(corrupt_store
+            .read_bounded(corrupt_timeline.id(), SeqRange::all(), read_bounds(1024))
             .is_err());
     }
 

@@ -2,18 +2,27 @@
 
 use crate::{
     event::Kind,
-    ids::{EventId, TimelineId},
+    ids::TimelineId,
     store::{EventReadBounds, GeographicEvidenceStore, SeqRange},
     CoreError,
 };
 
-/// The only protected V1 geographic Event type.
+/// Accepted V1 degree-grid geographic evidence.
 pub const GEOGRAPHIC_EVENT_TYPE: &str = "geo.location";
+
+/// Reserved future geographic-cell evidence.
+///
+/// ADR-034 reserves this name now so an untrusted Plugin cannot create an
+/// alternate sensitive-event route before its enclosing Event contract exists.
+pub const GEOGRAPHIC_CELL_EVENT_TYPE: &str = "geo.cell";
 
 /// Returns whether an Event kind is protected geographic evidence.
 #[must_use]
 pub fn is_geographic_event_type(kind: &Kind) -> bool {
-    kind.as_str() == GEOGRAPHIC_EVENT_TYPE
+    matches!(
+        kind.as_str(),
+        GEOGRAPHIC_EVENT_TYPE | GEOGRAPHIC_CELL_EVENT_TYPE
+    )
 }
 
 /// Unforgeable authority accepted by the geographic repository seam.
@@ -30,17 +39,33 @@ impl GeoEvidenceReader {
     }
 }
 
+/// Unforgeable authority held by the disabled Core Geographic Admission seam.
+///
+/// The constructor is core-private. Until ADR-034's admission-snapshot and
+/// atomic-linkage prerequisites exist, concrete stores intentionally decline
+/// every admission through this capability.
+pub struct GeoEvidenceWriter {
+    _private: (),
+}
+
+impl GeoEvidenceWriter {
+    #[allow(dead_code)]
+    pub(crate) const fn for_admission() -> Self {
+        Self { _private: () }
+    }
+}
+
 /// A projector deliberately reveals no geographic evidence to its caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DisclosureDecision {
     Withheld,
 }
 
-/// Evidence that one bounded geographic inspection was performed.
+/// Evidence that one core-authorized bounded geographic inspection was performed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GeographicAuditRecord {
     pub timeline_id: TimelineId,
-    pub event_id: EventId,
+    pub event_id: crate::EventId,
 }
 
 /// Core-owned privileged reader for geographic evidence.
@@ -49,8 +74,9 @@ pub struct CoreGeographicVisibilityProjector {
 }
 
 impl CoreGeographicVisibilityProjector {
+    #[allow(dead_code)]
     #[must_use]
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             reader: GeoEvidenceReader::for_projector(),
         }
@@ -85,30 +111,34 @@ impl CoreGeographicVisibilityProjector {
             .map(|_| DisclosureDecision::Withheld)
     }
 
-    /// Confirm that one protected Event was present in a bounded inspection.
+    /// Confirm that one protected Event was present in a core-authorized inspection.
+    ///
+    /// This existence check is intentionally available only through this
+    /// core-constructed projector; callers outside `pos-core` cannot construct
+    /// the capability.
     ///
     /// # Errors
-    /// Propagates repository, bound, and integrity failures. A missing Event
-    /// is reported as `TimelineNotFound` so it reveals no evidence metadata.
+    /// Returns an integrity, bound, or repository error. A missing Event is
+    /// represented as [`CoreError::TimelineNotFound`] to avoid a distinct
+    /// existence-oracle result.
     pub fn audit(
         &self,
         store: &dyn GeographicEvidenceStore,
         timeline: TimelineId,
-        event_id: EventId,
+        event_id: crate::EventId,
     ) -> Result<GeographicAuditRecord, CoreError> {
         self.audit_bounded(store, timeline, event_id, default_bounds())
     }
 
-    /// Confirm that one protected Event was present in an explicitly bounded inspection.
+    /// Confirm one protected Event using explicit work bounds.
     ///
     /// # Errors
-    /// Propagates repository, bound, and integrity failures. A missing Event
-    /// is reported as `TimelineNotFound` so it reveals no evidence metadata.
+    /// See [`Self::audit`].
     pub fn audit_bounded(
         &self,
         store: &dyn GeographicEvidenceStore,
         timeline: TimelineId,
-        event_id: EventId,
+        event_id: crate::EventId,
         bounds: EventReadBounds,
     ) -> Result<GeographicAuditRecord, CoreError> {
         let evidence = store.read_geographic_evidence_bounded(
@@ -132,12 +162,6 @@ const fn default_bounds() -> EventReadBounds {
     EventReadBounds::new(1 << 20, 64 << 10, 64, 1024)
 }
 
-impl Default for CoreGeographicVisibilityProjector {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,7 +169,7 @@ mod tests {
         clock::{Seq, WallTime},
         crypto::Hash,
         event::{CanonicalBytes, Event, SchemaVersion},
-        ids::EntityId,
+        ids::{EntityId, EventId},
     };
 
     struct FixtureStore {
@@ -166,6 +190,16 @@ mod tests {
             } else {
                 Ok(self.evidence.clone())
             }
+        }
+
+        fn append_geographic_evidence(
+            &mut self,
+            _: &GeoEvidenceWriter,
+            _: TimelineId,
+            event: Event,
+        ) -> Result<(), CoreError> {
+            self.evidence.push(event);
+            Ok(())
         }
     }
 
@@ -193,16 +227,18 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn only_geo_location_is_protected() {
         assert!(is_geographic_event_type(&Kind::new(GEOGRAPHIC_EVENT_TYPE)));
-        assert!(!is_geographic_event_type(&Kind::new("geo.cell")));
+        assert!(is_geographic_event_type(&Kind::new(
+            GEOGRAPHIC_CELL_EVENT_TYPE
+        )));
         assert!(matches!(
-            CoreGeographicVisibilityProjector::default(),
+            CoreGeographicVisibilityProjector::new(),
             CoreGeographicVisibilityProjector { .. }
         ));
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn projector_withholds_evidence_and_audits_a_bounded_match() {
+    fn projector_withholds_evidence() {
         let event = geographic_event();
         let store = FixtureStore {
             evidence: vec![event.clone()],
@@ -226,6 +262,13 @@ mod tests {
                 event_id: event.id,
             }
         );
+        assert_eq!(
+            projector.audit(&store, timeline, event.id).unwrap(),
+            GeographicAuditRecord {
+                timeline_id: timeline,
+                event_id: event.id,
+            }
+        );
         assert!(projector
             .audit_bounded(&store, timeline, EventId::new(), bounds())
             .is_err());
@@ -238,8 +281,13 @@ mod tests {
             evidence: Vec::new(),
             fails: true,
         };
-        assert!(CoreGeographicVisibilityProjector::new()
-            .project_bounded(&store, TimelineId::new(), bounds())
+        let projector = CoreGeographicVisibilityProjector::new();
+        let timeline = TimelineId::new();
+        assert!(projector
+            .project_bounded(&store, timeline, bounds())
+            .is_err());
+        assert!(projector
+            .audit_bounded(&store, timeline, EventId::new(), bounds())
             .is_err());
     }
 }

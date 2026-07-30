@@ -113,6 +113,23 @@ pub(crate) fn ensure_non_geographic_drafts(
     }
 }
 
+/// Refuse committed sensitive Events before a generic import or append path can
+/// mutate a Timeline. Geographic admission is available only through the
+/// disabled core-owned capability seam until ADR-034's snapshot transaction is
+/// implemented.
+pub(crate) fn ensure_non_geographic_events(
+    events: &[Event],
+    timeline: TimelineId,
+) -> Result<(), CoreError> {
+    match events
+        .iter()
+        .find(|event| pos_core::is_geographic_event_type(&event.event_type))
+    {
+        Some(_) => Err(CoreError::TimelineNotFound(timeline)),
+        None => Ok(()),
+    }
+}
+
 /// Selects which backend [`open_store`] constructs.
 ///
 /// `Memory` is always available. The `Sqlite` variants require the

@@ -10,7 +10,6 @@
 use pos_core::{
     event::EventDraft,
     ids::{EntityId, TimelineId},
-    store::EventStore,
     State,
 };
 
@@ -137,8 +136,9 @@ impl StepOutput {
 
 /// A plugin component that produces events on each simulation tick.
 ///
-/// Drivers are called by the runtime's step loop. They receive read-only access
-/// to the store (for reading current state via replay) and the timeline id.
+/// Drivers are called by the runtime's step loop. They receive only the
+/// Timeline id and the scoped projection observations they declared; raw
+/// `EventStore` access is deliberately unavailable.
 ///
 /// Nondeterministic outputs (LLM calls, sensor reads, RNG) must go through the
 /// [`crate::recorder::Recorder`] so replay is bit-exact.
@@ -152,7 +152,6 @@ pub trait Driver: Send + Sync {
     /// Returns [`RuntimeError`] on step failure.
     fn step(
         &mut self,
-        store: &dyn EventStore,
         timeline: TimelineId,
         observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError>;
@@ -191,7 +190,6 @@ mod tests {
         }
         fn step(
             &mut self,
-            _store: &dyn EventStore,
             _timeline: TimelineId,
             _observations: ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
@@ -212,7 +210,6 @@ mod tests {
         }
         fn step(
             &mut self,
-            _: &dyn EventStore,
             _: TimelineId,
             _: ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
@@ -227,9 +224,7 @@ mod tests {
         let tl = store.create_timeline("t").unwrap();
         let entity = EntityId::new();
         let mut driver = TickDriver { entity, ticks: 0 };
-        let out = driver
-            .step(store.as_ref(), tl.id(), ObservationView::empty())
-            .unwrap();
+        let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
         assert_eq!(out.drafts.len(), 1);
         assert_eq!(out.drafts[0].event_type.as_str(), "tick.event");
     }
@@ -241,15 +236,9 @@ mod tests {
         let tl = store.create_timeline("t").unwrap();
         let entity = EntityId::new();
         let mut driver = TickDriver { entity, ticks: 0 };
-        driver
-            .step(store.as_ref(), tl.id(), ObservationView::empty())
-            .unwrap();
-        driver
-            .step(store.as_ref(), tl.id(), ObservationView::empty())
-            .unwrap();
-        let out = driver
-            .step(store.as_ref(), tl.id(), ObservationView::empty())
-            .unwrap();
+        driver.step(tl.id(), ObservationView::empty()).unwrap();
+        driver.step(tl.id(), ObservationView::empty()).unwrap();
+        let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
         // tick 3 — payload contains 3u32 as le bytes
         assert_eq!(out.drafts[0].payload.as_slice(), &3u32.to_le_bytes());
     }
@@ -260,9 +249,7 @@ mod tests {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("t").unwrap();
         let mut driver = IdleDriver;
-        let out = driver
-            .step(store.as_ref(), tl.id(), ObservationView::empty())
-            .unwrap();
+        let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
         assert!(out.drafts.is_empty());
     }
 

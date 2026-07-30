@@ -14,7 +14,6 @@ use pos_core::{
     ids::{EntityId, PluginId, TimelineId},
     plugin::{Capability, Plugin},
     state::{Reducer, State},
-    store::EventStore,
 };
 use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 use serde::{Deserialize, Serialize};
@@ -122,7 +121,6 @@ impl Driver for SyntheticDriver {
 
     fn step(
         &mut self,
-        _store: &dyn EventStore,
         _timeline: TimelineId,
         _observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
@@ -272,9 +270,7 @@ mod tests {
         let tl = store.create_timeline("test-amp").unwrap();
         let entity = EntityId::new();
         let mut driver = SyntheticDriver::with_amplitude(entity, 2.0);
-        let out = driver
-            .step(store.as_ref(), tl.id(), ObservationView::empty())
-            .unwrap();
+        let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
         let payload: ObsPayload = ciborium::from_reader(out.drafts[0].payload.as_slice()).unwrap();
         // tick=0 → sin(0) * 2.0 = 0.0
         assert!((payload.value - 0.0_f64).abs() < f64::EPSILON);
@@ -300,9 +296,7 @@ mod tests {
         for _ in 0..2 {
             let mut driver = SyntheticDriver::new(entity);
             for &expected_val in &expected {
-                let out = driver
-                    .step(store.as_ref(), tl.id(), ObservationView::empty())
-                    .unwrap();
+                let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
                 assert_eq!(out.drafts.len(), 1);
 
                 let payload: ObsPayload =

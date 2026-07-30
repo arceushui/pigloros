@@ -4,8 +4,10 @@
 
 //! `pos-core` — the five kernel primitives.
 //!
-//! No I/O, no async, no domain logic. Everything else depends on this crate.
-//! Plugins are forbidden from importing domain concepts through this crate.
+//! No I/O or async. Everything else depends on this crate.
+//! Core-owned security policy may live here when an accepted ADR requires a
+//! non-bypassable cross-cutting boundary; Plugins remain forbidden from owning
+//! those protected domain concepts.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 pub mod clock;
@@ -32,7 +34,8 @@ pub use error::CoreError;
 pub use event::{CanonicalBytes, Determinism, Event, EventDraft, Kind, RunMode, SchemaVersion};
 pub use geo_access::{
     is_geographic_event_type, CoreGeographicVisibilityProjector, DisclosureDecision,
-    GeoEvidenceReader, GeographicAuditRecord, GEOGRAPHIC_EVENT_TYPE,
+    GeoEvidenceReader, GeoEvidenceWriter, GeographicAuditRecord, GEOGRAPHIC_CELL_EVENT_TYPE,
+    GEOGRAPHIC_EVENT_TYPE,
 };
 pub use hasher::Hasher;
 pub use ids::{CorrelationId, EntityId, EventId, PluginId, RelationshipId, TimelineId};

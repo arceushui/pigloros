@@ -589,6 +589,25 @@ pub trait GeographicEvidenceStore: Send {
         range: SeqRange,
         bounds: EventReadBounds,
     ) -> Result<Vec<Event>, CoreError>;
+
+    /// Append one geographic Event through the core-only admission capability.
+    ///
+    /// The default refuses admission. Concrete V1 adapters retain this fail-closed
+    /// behavior until ADR-034's snapshot linkage transaction is available.
+    ///
+    /// # Errors
+    /// Returns a storage error when the adapter has no activated core admission
+    /// transaction.
+    fn append_geographic_evidence(
+        &mut self,
+        _writer: &crate::geo_access::GeoEvidenceWriter,
+        _timeline: TimelineId,
+        _event: Event,
+    ) -> Result<(), CoreError> {
+        Err(CoreError::Storage(
+            "geographic admission is disabled pending ADR-034 snapshot linkage".to_owned(),
+        ))
+    }
 }
 
 /// Export a timeline's **logical** event stream as a portable snapshot.

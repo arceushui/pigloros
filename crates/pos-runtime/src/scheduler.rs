@@ -4,7 +4,7 @@
 //! skipping drivers whose `tick_interval()` has not yet elapsed.
 
 use crate::{registry::PluginRegistry, RuntimeError};
-use pos_core::{event::EventDraft, ids::TimelineId, store::EventStore};
+use pos_core::{event::EventDraft, ids::TimelineId};
 
 pub struct TickScheduler {
     /// The plugin registry being driven.
@@ -28,11 +28,10 @@ impl TickScheduler {
     /// Propagates any [`RuntimeError`] from drivers.
     pub fn tick(
         &mut self,
-        store: &dyn EventStore,
         timeline: TimelineId,
         now_ns: u128,
     ) -> Result<Vec<EventDraft>, RuntimeError> {
-        self.registry.tick_cadenced(store, timeline, now_ns)
+        self.registry.tick_cadenced(timeline, now_ns)
     }
 }
 
@@ -70,7 +69,6 @@ mod tests {
         }
         fn step(
             &mut self,
-            _store: &dyn EventStore,
             _timeline: TimelineId,
             _observations: crate::driver::ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
@@ -109,7 +107,6 @@ mod tests {
         }
         fn step(
             &mut self,
-            _store: &dyn EventStore,
             _timeline: TimelineId,
             _observations: crate::driver::ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
@@ -131,7 +128,7 @@ mod tests {
         reg.register_driver(Box::new(SlowDriver::new(Duration::from_secs(1))));
         reg.register_driver(Box::new(FastDriver::new()));
         let mut sched = TickScheduler::new(reg);
-        let drafts = sched.tick(store.as_ref(), tl.id(), 0).unwrap();
+        let drafts = sched.tick(tl.id(), 0).unwrap();
         assert_eq!(drafts.len(), 2);
     }
 
@@ -144,8 +141,8 @@ mod tests {
         reg.register_driver(Box::new(SlowDriver::new(Duration::from_secs(10))));
         reg.register_driver(Box::new(FastDriver::new()));
         let mut sched = TickScheduler::new(reg);
-        sched.tick(store.as_ref(), tl.id(), 0).unwrap();
-        let drafts = sched.tick(store.as_ref(), tl.id(), 1).unwrap();
+        sched.tick(tl.id(), 0).unwrap();
+        let drafts = sched.tick(tl.id(), 1).unwrap();
         assert_eq!(drafts.len(), 1);
     }
 
@@ -158,10 +155,10 @@ mod tests {
         reg.register_driver(Box::new(SlowDriver::new(Duration::from_millis(100))));
         reg.register_driver(Box::new(FastDriver::new()));
         let mut sched = TickScheduler::new(reg);
-        sched.tick(store.as_ref(), tl.id(), 0).unwrap();
-        let d = sched.tick(store.as_ref(), tl.id(), 50_000_000).unwrap();
+        sched.tick(tl.id(), 0).unwrap();
+        let d = sched.tick(tl.id(), 50_000_000).unwrap();
         assert_eq!(d.len(), 1);
-        let d = sched.tick(store.as_ref(), tl.id(), 100_000_000).unwrap();
+        let d = sched.tick(tl.id(), 100_000_000).unwrap();
         assert_eq!(d.len(), 2);
     }
 
@@ -172,7 +169,7 @@ mod tests {
         let tl = store.create_timeline("t").unwrap();
         let reg = PluginRegistry::new();
         let mut sched = TickScheduler::new(reg);
-        let drafts = sched.tick(store.as_ref(), tl.id(), 0).unwrap();
+        let drafts = sched.tick(tl.id(), 0).unwrap();
         assert!(drafts.is_empty());
     }
 }

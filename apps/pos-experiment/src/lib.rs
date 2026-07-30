@@ -179,7 +179,7 @@ fn commit_tick(
     registry: &mut PluginRegistry,
 ) -> Result<Option<Vec<pos_core::Event>>, ExperimentError> {
     registry
-        .step_all(store, timeline_id)
+        .step_all(timeline_id)
         .map_err(ExperimentError::from)
         .and_then(|drafts| {
             if drafts.is_empty() {
@@ -878,7 +878,6 @@ mod tests {
         }
         fn step(
             &mut self,
-            _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
             _: ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
@@ -984,7 +983,6 @@ mod tests {
             }
             fn step(
                 &mut self,
-                _: &dyn pos_core::store::EventStore,
                 _: pos_core::ids::TimelineId,
                 _: ObservationView<'_>,
             ) -> Result<StepOutput, RuntimeError> {
@@ -1020,7 +1018,6 @@ mod tests {
             }
             fn step(
                 &mut self,
-                _: &dyn pos_core::store::EventStore,
                 _: pos_core::ids::TimelineId,
                 _: ObservationView<'_>,
             ) -> Result<StepOutput, RuntimeError> {
@@ -1455,7 +1452,6 @@ mod tests {
             }
             fn step(
                 &mut self,
-                _: &dyn pos_core::store::EventStore,
                 _: pos_core::ids::TimelineId,
                 _: ObservationView<'_>,
             ) -> Result<StepOutput, RuntimeError> {
@@ -1467,9 +1463,7 @@ mod tests {
         let mut d = IdleDriver2;
         assert_eq!(d.name(), "idle2");
         // Also call step to cover those lines
-        let out = d
-            .step(store.as_ref(), tl.id(), ObservationView::empty())
-            .unwrap();
+        let out = d.step(tl.id(), ObservationView::empty()).unwrap();
         assert!(out.drafts.is_empty());
     }
 
@@ -1485,7 +1479,6 @@ mod tests {
             }
             fn step(
                 &mut self,
-                _: &dyn pos_core::store::EventStore,
                 _: pos_core::ids::TimelineId,
                 _: ObservationView<'_>,
             ) -> Result<StepOutput, RuntimeError> {
@@ -1503,9 +1496,7 @@ mod tests {
         let mut d = BadDriver2 { entity };
         assert_eq!(d.name(), "bad2");
         // Also call step to cover those lines
-        let out = d
-            .step(store.as_ref(), tl.id(), ObservationView::empty())
-            .unwrap();
+        let out = d.step(tl.id(), ObservationView::empty()).unwrap();
         assert_eq!(out.drafts.len(), 1);
     }
 
@@ -1732,7 +1723,6 @@ mod tests {
     fn chain_head_hash_matches_manual_blake3() {
         // Verify that chain_head is actually BLAKE3 of all payload hashes concatenated.
         use pos_store::SeqRange;
-        use pos_store::{open_store, StoreConfig};
 
         let entity = EntityId::new();
         let plugin = make_plugin("chain-plugin", &["chain.event"]);
@@ -1871,7 +1861,6 @@ mod backtest_tests {
         }
         fn step(
             &mut self,
-            _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
             _: pos_runtime::ObservationView<'_>,
         ) -> Result<pos_runtime::StepOutput, pos_runtime::RuntimeError> {
@@ -1886,16 +1875,14 @@ mod backtest_tests {
 
     fn make_registry() -> pos_runtime::PluginRegistry {
         use pos_runtime::Driver as _;
-        use pos_store::{open_store, StoreConfig};
         let entity = pos_core::ids::EntityId::new();
         let plugin = BtPlugin {
             id: pos_core::ids::PluginId::new(),
         };
         let mut driver = BtDriver { entity };
         assert_eq!(driver.name(), "bt-driver"); // force coverage of fn name()
-        let store = open_store(StoreConfig::Memory).unwrap();
         let tl_id = pos_core::ids::TimelineId::new();
-        let _ = driver.step(store.as_ref(), tl_id, pos_runtime::ObservationView::empty());
+        let _ = driver.step(tl_id, pos_runtime::ObservationView::empty());
         let mut reg = pos_runtime::PluginRegistry::new();
         reg.register(&plugin, None, Some(Box::new(driver))).unwrap();
         reg
@@ -2067,7 +2054,6 @@ mod backtest_tests {
         }
         fn step(
             &mut self,
-            _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
             _: pos_runtime::ObservationView<'_>,
         ) -> Result<pos_runtime::StepOutput, pos_runtime::RuntimeError> {
@@ -2088,7 +2074,6 @@ mod backtest_tests {
         }
         fn step(
             &mut self,
-            _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
             _: pos_runtime::ObservationView<'_>,
         ) -> Result<pos_runtime::StepOutput, pos_runtime::RuntimeError> {
@@ -2105,7 +2090,6 @@ mod backtest_tests {
         }
         fn step(
             &mut self,
-            _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
             _: pos_runtime::ObservationView<'_>,
         ) -> Result<pos_runtime::StepOutput, pos_runtime::RuntimeError> {
@@ -2135,11 +2119,7 @@ mod backtest_tests {
         let mut store = pos_store::open_store(pos_store::StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("good-step-test").unwrap();
         let out = GoodBtDriver
-            .step(
-                store.as_ref(),
-                tl.id(),
-                pos_runtime::ObservationView::empty(),
-            )
+            .step(tl.id(), pos_runtime::ObservationView::empty())
             .unwrap();
         assert!(out.drafts.is_empty());
     }
@@ -2287,7 +2267,6 @@ mod fault_injection_tests {
         }
         fn step(
             &mut self,
-            _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
             _: ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
@@ -2312,7 +2291,6 @@ mod fault_injection_tests {
         }
         fn step(
             &mut self,
-            _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
             _: ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
@@ -2340,18 +2318,16 @@ mod fault_injection_tests {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("driver-methods").unwrap();
         assert!(!emit
-            .step(store.as_ref(), tl.id(), ObservationView::empty())
+            .step(tl.id(), ObservationView::empty())
             .unwrap()
             .drafts
             .is_empty());
         assert!(!bad
-            .step(store.as_ref(), tl.id(), ObservationView::empty())
+            .step(tl.id(), ObservationView::empty())
             .unwrap()
             .drafts
             .is_empty());
-        assert!(fail
-            .step(store.as_ref(), tl.id(), ObservationView::empty())
-            .is_err());
+        assert!(fail.step(tl.id(), ObservationView::empty()).is_err());
     }
 
     impl Driver for BadEmitDriver {
@@ -2360,7 +2336,6 @@ mod fault_injection_tests {
         }
         fn step(
             &mut self,
-            _: &dyn pos_core::store::EventStore,
             _: pos_core::ids::TimelineId,
             _: ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
@@ -2555,14 +2530,11 @@ mod fault_injection_tests {
             session.fork("child"),
             Err(ExperimentError::Store(_))
         ));
-        assert_eq!(
-            lock_store(&session.store)
-                .unwrap()
-                .list_timelines()
-                .unwrap()
-                .len(),
-            1
-        );
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let timeline_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM timelines", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(timeline_count, 1);
     }
 
     #[test]

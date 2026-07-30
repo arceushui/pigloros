@@ -2,10 +2,13 @@
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
-//! `pos-plugin-geo` — degree-grid spatial cloaking plugin.
+//! `pos-plugin-geo` — degree-grid spatial cloaking utilities.
 //!
-//! Owns event type `"geo.location"` and entity kind `"geo-entity"`.
-//! Provides spatial cloaking: exact lat/lng → discretized grid cell.
+//! Provides spatial cloaking: exact lat/lng → discretized grid cell. Geographic
+//! evidence is core-owned under ADR-034: this crate neither admits nor owns
+//! `geo.location` or `geo.cell` at runtime. Its legacy [`GeoPlugin`] and
+//! [`GeoReducer`] descriptors are retained only for compatibility with stored
+//! V1 payload tooling; `PluginRegistry` rejects their reserved capability.
 //!
 //! Wave 5 uses a pure-Rust degree-grid snap ([`SpatialCloaker`]); H3/S2 are deferred.
 //! Privacy property: exact coordinates are snapped to a configurable grid resolution
@@ -339,7 +342,7 @@ impl V1SpatialCloaker {
 /// The entity kind string for geo entities.
 pub const ENTITY_KIND: &str = "geo-entity";
 
-/// The event type for location updates.
+/// Legacy V1 payload type name. Core-owned admission is required to persist it.
 pub const EVENT_TYPE_LOCATION: &str = "geo.location";
 
 const WGS84_LATITUDE_HALF_SPAN_DEGREES: f64 = 90.0;
@@ -350,7 +353,7 @@ const COMPACT_LOCATION_V1_RESOLUTION_DEGREES: f64 = 0.1;
 // Payload types
 // ---------------------------------------------------------------------------
 
-/// CBOR payload for geo.location events.
+/// CBOR payload shape for legacy `geo.location` evidence.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GeoLocationPayload {
     /// Cloaked latitude (snapped to grid).
@@ -422,7 +425,10 @@ impl SpatialCloaker {
 // Plugin descriptor
 // ---------------------------------------------------------------------------
 
-/// Geo plugin for spatial cloaking.
+/// Legacy descriptor for V1 geographic payload tooling.
+///
+/// It cannot be registered: `geo.location` is reserved to the core-owned
+/// geographic boundary.
 pub struct GeoPlugin {
     id: PluginId,
 }
@@ -466,7 +472,9 @@ impl Plugin for GeoPlugin {
 // Reducer
 // ---------------------------------------------------------------------------
 
-/// Tracks per-entity location count and last cell coordinates.
+/// Legacy in-memory reducer for V1 geographic payload tooling.
+///
+/// It must not be registered in a runtime because its event type is core-owned.
 pub struct GeoReducer;
 
 impl Reducer for GeoReducer {

@@ -851,7 +851,8 @@ impl EventStore for MemoryStore {
         timeline: TimelineId,
         events: &[Event],
     ) -> Result<(), CoreError> {
-        self.ensure_generic_timeline_visibility(timeline)
+        crate::ensure_non_geographic_events(events, timeline)
+            .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
             .and_then(|()| {
                 if events.is_empty() {
                     return Ok(());
@@ -1003,7 +1004,6 @@ mod tests {
         event::{CanonicalBytes, EventDraft, Kind},
         ids::{EntityId, EventId},
         store::{SeqRange, TimelineExport},
-        CoreGeographicVisibilityProjector,
     };
 
     fn make_draft(entity: EntityId, payload: &[u8]) -> EventDraft {
@@ -1928,7 +1928,7 @@ mod tests {
     }
 
     #[test]
-    fn geographic_presence_marker_withholds_generic_reads() {
+    fn generic_committed_geographic_events_are_rejected() {
         let mut store = MemoryStore::new();
         let timeline = store.create_timeline("geo").unwrap();
         let payload = CanonicalBytes::from_vec(b"protected".to_vec());
@@ -1945,92 +1945,18 @@ mod tests {
             signature: None,
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
-        store.append_committed(timeline.id(), &[event]).unwrap();
-        let event_id = store.timelines[&timeline.id()].events[0].id;
-        let projector = CoreGeographicVisibilityProjector::new();
-        assert!(projector.audit(&store, timeline.id(), event_id).is_ok());
-        assert!(projector
-            .audit(&store, timeline.id(), EventId::new())
-            .is_err());
-        assert!(store.read(timeline.id(), SeqRange::all()).is_err());
-        assert!(store
-            .read_bounded(
-                timeline.id(),
-                SeqRange::all(),
-                EventReadBounds::new(1024, 1024, 8, 8),
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("not found"));
-        assert!(store
-            .read_own(timeline.id(), SeqRange::all())
-            .unwrap_err()
-            .to_string()
-            .contains("not found"));
-        assert!(store
-            .read_event_by_id(timeline.id(), event_id)
-            .unwrap_err()
-            .to_string()
-            .contains("not found"));
-        assert_eq!(store.list_timelines().unwrap().len(), 0);
+        assert!(store.append_committed(timeline.id(), &[event]).is_err());
         assert!(store
             .append(
                 timeline.id(),
                 &[EventDraft::new(
                     EntityId::new(),
                     Kind::new("ordinary.event"),
-                    CanonicalBytes::from_vec(b"blocked-after-marker".to_vec()),
+                    CanonicalBytes::from_vec(b"allowed".to_vec()),
                 )],
             )
-            .is_err());
-        assert!(store
-            .append(
-                timeline.id(),
-                &[EventDraft::new(
-                    EntityId::new(),
-                    Kind::new("geo.location"),
-                    CanonicalBytes::from_vec(b"x".to_vec()),
-                )],
-            )
-            .is_err());
-        assert!(store
-            .fork(timeline.id(), Seq::from_u64(1), "child")
-            .unwrap_err()
-            .to_string()
-            .contains("not found"));
-        assert!(store
-            .create_timeline_with_meta(TimelineMeta::forked_from(
-                timeline.id(),
-                Seq::ZERO,
-                "imported",
-            ))
-            .unwrap_err()
-            .to_string()
-            .contains("not found"));
-
-        let broken_parent = store.create_timeline("broken-parent").unwrap();
-        let broken_child = store
-            .fork(broken_parent.id(), Seq::ZERO, "broken-child")
-            .unwrap();
-        store.test_remove_timeline(broken_parent.id());
-        assert!(store
-            .read_bounded(
-                broken_child.id(),
-                SeqRange::all(),
-                EventReadBounds::new(1024, 1024, 8, 8),
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("not found"));
-
-        assert!(CoreGeographicVisibilityProjector::new()
-            .project(&store, timeline.id())
             .is_ok());
-        assert!(store.delete_timeline(timeline.id()).is_err());
-        assert_eq!(store.root_timeline_count_bounded(1).unwrap(), 0);
-        assert!(CoreGeographicVisibilityProjector::new()
-            .project(&store, timeline.id())
-            .is_ok());
+        assert_eq!(store.read(timeline.id(), SeqRange::all()).unwrap().len(), 1);
     }
 
     #[test]
@@ -2070,7 +1996,7 @@ mod tests {
     }
 
     #[test]
-    fn geographic_lookup_does_not_inspect_parent_events_after_a_fork_point() {
+    fn child_reads_do_not_include_parent_events_after_a_fork_point() {
         let mut store = MemoryStore::new();
         let parent = store.create_timeline("lookup-parent").unwrap();
         store
@@ -2079,15 +2005,11 @@ mod tests {
         let child = store
             .fork(parent.id(), Seq::from_u64(1), "lookup-child")
             .unwrap();
-        let after_fork = store
+        store
             .append(parent.id(), &[make_draft(EntityId::new(), b"after-fork")])
-            .unwrap()
-            .pop()
             .unwrap();
 
-        assert!(CoreGeographicVisibilityProjector::new()
-            .audit(&store, child.id(), after_fork.id)
-            .is_err());
+        assert_eq!(store.read(child.id(), SeqRange::all()).unwrap().len(), 1);
     }
 
     #[test]

@@ -15,7 +15,6 @@ use pos_core::{
     ids::{EntityId, PluginId},
     plugin::{Capability, Plugin},
     state::{Reducer, State},
-    store::EventStore,
 };
 use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 use serde::{Deserialize, Serialize};
@@ -134,7 +133,6 @@ impl Driver for RuleAgentDriver {
 
     fn step(
         &mut self,
-        _store: &dyn EventStore,
         _timeline: TimelineId,
         _observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
@@ -251,9 +249,7 @@ mod tests {
 
         let expected = ["idle", "move", "interact", "observe"];
         for expected_action in &expected {
-            let out = driver
-                .step(store.as_ref(), tl.id(), ObservationView::empty())
-                .unwrap();
+            let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
             assert_eq!(out.drafts.len(), 1);
             assert_eq!(out.drafts[0].event_type.as_str(), EVENT_TYPE_DECISION);
 
@@ -320,9 +316,7 @@ mod tests {
         let plugin = RuleAgentPlugin::new();
         let mut driver = RuleAgentDriver::new(entity, plugin.actions().to_vec());
 
-        let out = driver
-            .step(store.as_ref(), tl.id(), ObservationView::empty())
-            .unwrap();
+        let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
         assert_eq!(out.drafts.len(), 1);
 
         let payload: DecisionPayload =

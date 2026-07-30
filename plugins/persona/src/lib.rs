@@ -14,7 +14,6 @@ use pos_core::{
     ids::{EntityId, PluginId, TimelineId},
     plugin::{Capability, Plugin},
     state::{Reducer, State},
-    store::EventStore,
 };
 use pos_plugin_eval::{draft_outcome, draft_prediction};
 use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
@@ -328,7 +327,6 @@ impl Driver for PersonaEvalDriver {
 
     fn step(
         &mut self,
-        _store: &dyn EventStore,
         _timeline: TimelineId,
         _observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
@@ -867,9 +865,7 @@ mod tests {
 
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("persona-eval").unwrap();
-        let out = driver
-            .step(store.as_ref(), tl.id(), ObservationView::empty())
-            .unwrap();
+        let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
 
         assert_eq!(out.drafts.len(), 3);
         assert_eq!(out.drafts[0].event_type.as_str(), EVENT_TYPE_DECISION);
@@ -909,7 +905,7 @@ mod tests {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("loop").unwrap();
         for _ in 0..5 {
-            let drafts = registry.step_all(store.as_ref(), tl.id()).unwrap();
+            let drafts = registry.step_all(tl.id()).unwrap();
             registry.schemas.validate_batch(&drafts).unwrap();
             store.append(tl.id(), &drafts).unwrap();
         }
