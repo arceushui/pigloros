@@ -388,9 +388,22 @@ impl Gateway {
                 maximum: MAX_EVENT_PAYLOAD_BYTES,
             });
         }
+        if draft_event_response_len(&draft) > MAX_EVENTS_RESPONSE_BYTES {
+            return Err(GatewayError::EventResponseTooLarge {
+                maximum: MAX_EVENTS_RESPONSE_BYTES,
+            });
+        }
         let identity = ingress_identity(timeline, entity, ingress_id);
         let outcome = {
             let mut guard = self.store.lock().await;
+            let timeline_meta = guard
+                .get_timeline(timeline)?
+                .ok_or(GatewayError::Store(CoreError::TimelineNotFound(timeline)))?;
+            if timeline_meta.head.as_u64() >= self.limits.max_events_per_timeline {
+                return Err(GatewayError::EventLimitReached {
+                    maximum: self.limits.max_events_per_timeline,
+                });
+            }
             guard.append_intent_or_duplicate(timeline, identity, AppendIntent::new(&draft))?
         };
         let (event, duplicate) = match outcome {
