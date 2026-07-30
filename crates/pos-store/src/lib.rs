@@ -269,18 +269,21 @@ mod tests {
                 .unwrap(),
             AppendOrDuplicateOutcome::Duplicate { event_id }
         );
-        let mut wall_time_conflict = draft.clone();
-        wall_time_conflict.wall_time = Some(WallTime::from_micros(31));
+        // Generated Event metadata is not part of canonical retry intent. A
+        // caller retrying with a different wall-time hint remains a duplicate;
+        // identified append owns admission time at the store boundary.
+        let mut wall_time_variant = draft.clone();
+        wall_time_variant.wall_time = Some(WallTime::from_micros(31));
         assert_eq!(
             store
                 .append_or_duplicate(
                     timeline,
                     append_identity(1, 2),
                     WallTime::from_micros(21),
-                    wall_time_conflict,
+                    wall_time_variant,
                 )
                 .unwrap(),
-            AppendOrDuplicateOutcome::Conflict
+            AppendOrDuplicateOutcome::Duplicate { event_id }
         );
     }
 

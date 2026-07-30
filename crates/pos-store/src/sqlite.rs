@@ -150,7 +150,6 @@ impl SqliteStore {
                       AND causation_id IS ?5
                       AND correlation_id IS ?6
                       AND schema_version = ?7
-                      AND (?8 IS NULL OR wall_time = ?8)
                 ) THEN 1
                 WHEN EXISTS (SELECT 1 FROM events WHERE event_id = ?1) THEN 0
                 ELSE -1
@@ -163,9 +162,6 @@ impl SqliteStore {
                 draft.causation_id.map(|id| id.to_string()),
                 draft.correlation_id.map(|id| id.to_string()),
                 i64::from(draft.schema_version.as_u32()),
-                draft
-                    .wall_time
-                    .map(|wall_time| i64::try_from(wall_time.as_micros()).unwrap_or(i64::MAX)),
             ],
             |row| row.get::<_, i64>(0),
         );
