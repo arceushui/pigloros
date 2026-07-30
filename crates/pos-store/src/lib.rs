@@ -40,13 +40,18 @@ pub mod stitch;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 
-// Re-export the port and Wave 6 export/import helpers so hosts need one crate.
+// Re-export the port, its append-deduplication surface, and Wave 6 export/import helpers so
+// hosts need one crate.
 pub use pos_core::store::{
-    export_timeline, export_timeline_cow, export_timeline_own, export_timeline_raw,
-    import_committed_with_rollback, import_timeline, import_timeline_with_id, EventStore, SeqRange,
-    TimelineExport,
+    append_identity_expires_at, export_timeline, export_timeline_cow, export_timeline_own,
+    export_timeline_raw, import_committed_with_rollback, import_timeline, import_timeline_with_id,
+    AppendDedupKey, AppendDedupScope, AppendIdentity, AppendOrDuplicateOutcome, EventStore,
+    SeqRange, TimelineExport, APPEND_IDENTITY_RETENTION_MICROS,
 };
-pub use pos_core::CoreError;
+pub use pos_core::{
+    CanonicalBytes, CoreError, CorrelationId, EntityId, Event, EventDraft, EventId, Kind,
+    TimelineId, WallTime,
+};
 
 /// Selects which backend [`open_store`] constructs.
 ///
@@ -176,15 +181,6 @@ pub fn import_timeline_with_verified_signatures(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pos_core::{
-        clock::WallTime,
-        event::{CanonicalBytes, EventDraft, Kind},
-        ids::{CorrelationId, EntityId, EventId},
-        store::{
-            AppendDedupKey, AppendDedupScope, AppendIdentity, AppendOrDuplicateOutcome, SeqRange,
-            APPEND_IDENTITY_RETENTION_MICROS,
-        },
-    };
 
     /// Helper: run a minimal contract against any backend via the port.
     fn contract(store: &mut dyn EventStore) {
@@ -288,6 +284,35 @@ mod tests {
         );
     }
 
+    fn assert_timeline_deletion_removes_identities(
+        store: &mut dyn EventStore,
+        timeline: TimelineId,
+        draft: &EventDraft,
+    ) {
+        store.delete_timeline(timeline).unwrap();
+        let replacement = store
+            .create_timeline("append-or-duplicate-replacement")
+            .unwrap();
+        let first_retry = store
+            .append_or_duplicate(
+                replacement.id(),
+                append_identity(1, 2),
+                WallTime::from_micros(50),
+                draft.clone(),
+            )
+            .unwrap();
+        let _ = appended_event_id(first_retry);
+        let second_retry = store
+            .append_or_duplicate(
+                replacement.id(),
+                append_identity(3, 4),
+                WallTime::from_micros(50),
+                draft.clone(),
+            )
+            .unwrap();
+        let _ = appended_event_id(second_retry);
+    }
+
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_or_duplicate_contract(store: &mut dyn EventStore) {
         let timeline = store.create_timeline("append-or-duplicate").unwrap();
@@ -361,6 +386,7 @@ mod tests {
         assert_eq!(store.read(timeline.id(), SeqRange::all()).unwrap().len(), 2);
 
         assert_scope_withdrawal(store, timeline.id(), &draft);
+        assert_timeline_deletion_removes_identities(store, timeline.id(), &draft);
     }
 
     #[test]

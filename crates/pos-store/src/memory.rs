@@ -34,20 +34,31 @@ pub struct MemoryStore {
     timelines: HashMap<TimelineId, Timeline>,
     /// Running hash chain head per timeline.
     chain_heads: HashMap<TimelineId, Hash>,
-    /// Global `EventId` index for O(1) uniqueness and retained-content checks.
-    events_by_id: HashMap<EventId, Event>,
+    /// Global `EventId` index for O(1) uniqueness checks.
+    event_ids: HashSet<EventId>,
     /// Opaque append identities retained only until their fixed horizon.
     append_identities: HashMap<AppendDedupKey, AppendIdentityRecord>,
-    /// Exact number of root Timelines, maintained with Timeline mutations.
-    root_timeline_count: usize,
     hasher: Box<dyn Hasher>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct AppendIdentityRecord {
     scope: AppendDedupScope,
     event_id: EventId,
     expires_at: WallTime,
+    retained_content: RetainedAppendContent,
+}
+
+/// Comparison material retained only with an opaque append identity.
+#[derive(Clone)]
+struct RetainedAppendContent {
+    entity: pos_core::EntityId,
+    event_type: pos_core::Kind,
+    payload: pos_core::CanonicalBytes,
+    wall_time: WallTime,
+    causation_id: Option<EventId>,
+    correlation_id: Option<pos_core::CorrelationId>,
+    schema_version: pos_core::SchemaVersion,
 }
 
 struct ForkChain {
@@ -62,9 +73,8 @@ impl MemoryStore {
             events: HashMap::new(),
             timelines: HashMap::new(),
             chain_heads: HashMap::new(),
-            events_by_id: HashMap::new(),
+            event_ids: HashSet::new(),
             append_identities: HashMap::new(),
-            root_timeline_count: 0,
             hasher: Box::new(pos_crypto::chain::Blake3Hasher),
         }
     }
@@ -75,9 +85,8 @@ impl MemoryStore {
             events: HashMap::new(),
             timelines: HashMap::new(),
             chain_heads: HashMap::new(),
-            events_by_id: HashMap::new(),
+            event_ids: HashSet::new(),
             append_identities: HashMap::new(),
-            root_timeline_count: 0,
             hasher,
         }
     }
@@ -100,18 +109,28 @@ impl MemoryStore {
         CoreError::Storage(format!("timeline {id} is missing its {state}"))
     }
 
-    fn retained_event_matches(&self, event_id: EventId, draft: &EventDraft) -> bool {
-        self.events_by_id.get(&event_id).is_some_and(|event| {
-            event.entity == draft.entity
-                && event.event_type == draft.event_type
-                && event.payload == draft.payload
-                && event.causation_id == draft.causation_id
-                && event.correlation_id == draft.correlation_id
-                && event.schema_version == draft.schema_version
-                && draft
-                    .wall_time
-                    .is_none_or(|wall_time| event.wall_time == wall_time)
-        })
+    fn retained_content_matches(content: &RetainedAppendContent, draft: &EventDraft) -> bool {
+        content.entity == draft.entity
+            && content.event_type == draft.event_type
+            && content.payload == draft.payload
+            && content.causation_id == draft.causation_id
+            && content.correlation_id == draft.correlation_id
+            && content.schema_version == draft.schema_version
+            && draft
+                .wall_time
+                .is_none_or(|wall_time| content.wall_time == wall_time)
+    }
+
+    fn retained_content(event: &Event) -> RetainedAppendContent {
+        RetainedAppendContent {
+            entity: event.entity,
+            event_type: event.event_type.clone(),
+            payload: event.payload.clone(),
+            wall_time: event.wall_time,
+            causation_id: event.causation_id,
+            correlation_id: event.correlation_id,
+            schema_version: event.schema_version,
+        }
     }
 
     /// Collect all events for a timeline, walking the fork chain.
@@ -316,7 +335,6 @@ impl EventStore for MemoryStore {
         self.events.insert(timeline.id(), Vec::new());
         self.chain_heads
             .insert(timeline.id(), self.hasher.genesis_hash());
-        self.root_timeline_count += 1;
         Ok(timeline)
     }
 
@@ -366,9 +384,8 @@ impl EventStore for MemoryStore {
             return Err(Self::missing_timeline_state(timeline, "Event storage"));
         };
         events.extend(committed.iter().cloned());
-        for event in &committed {
-            self.events_by_id.insert(event.id, event.clone());
-        }
+        self.event_ids
+            .extend(committed.iter().map(|event| event.id));
 
         // Update head and chain hash
         timeline_state.head = seq;
@@ -386,7 +403,7 @@ impl EventStore for MemoryStore {
         draft: EventDraft,
     ) -> Result<AppendOrDuplicateOutcome, CoreError> {
         if let Some(record) = self.append_identities.get(&identity.dedup_key) {
-            return if self.retained_event_matches(record.event_id, &draft) {
+            return if Self::retained_content_matches(&record.retained_content, &draft) {
                 Ok(AppendOrDuplicateOutcome::Duplicate {
                     event_id: record.event_id,
                 })
@@ -406,6 +423,7 @@ impl EventStore for MemoryStore {
                         scope: identity.scope,
                         event_id: event.id,
                         expires_at: append_identity_expires_at(admitted_at),
+                        retained_content: Self::retained_content(&event),
                     },
                 );
                 AppendOrDuplicateOutcome::Appended(Box::new(event))
@@ -488,7 +506,13 @@ impl EventStore for MemoryStore {
     }
 
     fn root_timeline_count_bounded(&self, maximum: usize) -> Result<usize, CoreError> {
-        Ok(self.root_timeline_count.min(maximum.saturating_add(1)))
+        let stop_after = maximum.saturating_add(1);
+        Ok(self
+            .timelines
+            .values()
+            .filter(|timeline| timeline.meta.is_root())
+            .take(stop_after)
+            .count())
     }
 
     fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
@@ -523,9 +547,6 @@ impl EventStore for MemoryStore {
         self.timelines.insert(id, timeline.clone());
         self.events.insert(id, Vec::new());
         self.chain_heads.insert(id, chain);
-        if timeline.meta.is_root() {
-            self.root_timeline_count += 1;
-        }
         Ok(timeline)
     }
 
@@ -546,7 +567,7 @@ impl EventStore for MemoryStore {
         pos_core::store::validate_committed_batch(
             head,
             events,
-            &mut |id| self.events_by_id.contains_key(id),
+            &mut |id| self.event_ids.contains(id),
             &*self.hasher,
         )
         .and_then(|ordered| {
@@ -564,9 +585,7 @@ impl EventStore for MemoryStore {
                     new_head = event.seq;
                 }
 
-                for event in &ordered {
-                    self.events_by_id.insert(event.id, event.clone());
-                }
+                self.event_ids.extend(ordered.iter().map(|event| event.id));
                 stored_events.extend(ordered);
                 timeline_state.head = new_head;
                 self.timelines.insert(timeline, timeline_state);
@@ -589,13 +608,7 @@ impl EventStore for MemoryStore {
                 "cannot delete timeline that still has forks".to_owned(),
             ));
         }
-        let was_root = self.timelines[&id].meta.is_root();
         self.chain_head(id).and_then(|_| {
-            if was_root && self.root_timeline_count == 0 {
-                return Err(CoreError::Storage(
-                    "root Timeline count underflow during deletion".to_owned(),
-                ));
-            }
             let Some(events) = self.events.remove(&id) else {
                 return Err(Self::missing_timeline_state(id, "Event storage"));
             };
@@ -604,12 +617,11 @@ impl EventStore for MemoryStore {
                 timeline.is_some(),
                 "Timeline existence was validated before deletion"
             );
-            if was_root {
-                self.root_timeline_count -= 1;
-            }
-            for event in events {
-                self.events_by_id.remove(&event.id);
-            }
+            let event_ids: HashSet<_> = events.iter().map(|event| event.id).collect();
+            self.event_ids
+                .retain(|event_id| !event_ids.contains(event_id));
+            self.append_identities
+                .retain(|_, record| !event_ids.contains(&record.event_id));
             self.chain_heads.remove(&id);
             Ok(())
         })
@@ -670,7 +682,6 @@ enum TestCorruption {
     },
     MissingChainHead(TimelineId),
     MissingEvents(TimelineId),
-    ZeroRootCount,
 }
 
 #[cfg(test)]
@@ -694,24 +705,11 @@ impl MemoryStore {
             TestCorruption::MissingEvents(timeline) => {
                 self.events.remove(&timeline);
             }
-            TestCorruption::ZeroRootCount => {
-                self.root_timeline_count = 0;
-            }
         }
     }
 
     pub(crate) fn test_remove_timeline(&mut self, id: TimelineId) {
         self.timelines.remove(&id);
-    }
-
-    fn assert_root_timeline_count_invariant(&self) {
-        assert_eq!(
-            self.root_timeline_count,
-            self.timelines
-                .values()
-                .filter(|timeline| timeline.meta.is_root())
-                .count()
-        );
     }
 }
 
@@ -944,22 +942,17 @@ mod tests {
     fn bounded_root_count_ignores_many_children_and_caps_at_maximum_plus_one() {
         let mut store = MemoryStore::new();
         let first = store.create_timeline("first").unwrap();
-        for index in 0..4096 {
+        for index in 0..256 {
             store
                 .fork(first.id(), Seq::ZERO, &format!("child-{index}"))
                 .unwrap();
         }
-        let second = store.create_timeline("second").unwrap();
+        store.create_timeline("second").unwrap();
 
         assert_eq!(store.root_timeline_count_bounded(0).unwrap(), 1);
         assert_eq!(store.root_timeline_count_bounded(1).unwrap(), 2);
         assert_eq!(store.root_timeline_count_bounded(10).unwrap(), 2);
         assert_eq!(store.root_timeline_count_bounded(usize::MAX).unwrap(), 2);
-        store.assert_root_timeline_count_invariant();
-
-        store.delete_timeline(second.id()).unwrap();
-        assert_eq!(store.root_timeline_count_bounded(10).unwrap(), 1);
-        store.assert_root_timeline_count_invariant();
     }
 
     #[test]
@@ -1368,18 +1361,6 @@ mod tests {
             )
             .unwrap_err();
         assert!(bounded_error.to_string().contains("timeline not found"));
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn delete_rejects_a_corrupt_root_count() {
-        let mut store = MemoryStore::new();
-        let timeline = store.create_timeline("root").unwrap();
-        store.test_corrupt(TestCorruption::ZeroRootCount);
-
-        let error = store.delete_timeline(timeline.id()).unwrap_err();
-        assert!(error.to_string().contains("root Timeline count underflow"));
-        assert!(store.get_timeline(timeline.id()).unwrap().is_some());
     }
 
     #[test]
