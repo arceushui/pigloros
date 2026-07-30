@@ -704,21 +704,16 @@ mod tests {
                 draft.clone(),
             )
             .unwrap();
-        let event = match first {
-            AppendOrDuplicateOutcome::Appended(event) => event,
-            other => panic!("unexpected outcome: {other:?}"),
-        };
+        let event_id = appended_event_id(first);
         let replaced = store
             .append_intent_or_duplicate(timeline.id(), append_identity(9, 9), intent.clone())
             .unwrap();
-        assert!(matches!(replaced, AppendOrDuplicateOutcome::Appended(_)));
+        let _ = appended_event_id(replaced);
         let second = store
             .append_intent_or_duplicate(timeline.id(), append_identity(8, 8), intent.clone())
             .unwrap();
-        let second_event = match second {
-            AppendOrDuplicateOutcome::Appended(event) => event,
-            other => panic!("unexpected outcome: {other:?}"),
-        };
+        let second_event_id = appended_event_id(second);
+        let second_event = store.read(timeline.id(), SeqRange::all()).unwrap()[1].clone();
         assert_eq!(second_event.wall_time, admission);
         store
             .append_or_duplicate(
@@ -728,24 +723,40 @@ mod tests {
                 draft,
             )
             .unwrap();
+        store
+            .append_or_duplicate(
+                timeline.id(),
+                append_identity(11, 11),
+                WallTime::from_micros(1),
+                EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("clock.test.second"),
+                    CanonicalBytes::from_vec(b"second".to_vec()),
+                ),
+            )
+            .unwrap();
         assert_eq!(
             store
                 .append_intent_or_duplicate(timeline.id(), append_identity(8, 8), intent)
                 .unwrap(),
             AppendOrDuplicateOutcome::Duplicate {
-                event_id: second_event.id
+                event_id: second_event_id
             }
         );
         let outcome = store
             .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).unwrap())
             .unwrap();
+        assert_eq!(outcome.removed, 1);
+        assert!(outcome.more_may_remain);
         assert_eq!(
-            outcome,
+            store
+                .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).unwrap())
+                .unwrap(),
             PurgeOutcome {
                 removed: 1,
                 more_may_remain: false
             }
         );
-        assert_ne!(event.id, second_event.id);
+        assert_ne!(event_id, second_event_id);
     }
 }

@@ -781,6 +781,44 @@ mod tests {
         )
     }
 
+    struct ErrorClock;
+
+    impl AdmissionClock for ErrorClock {
+        fn now(&mut self) -> Result<WallTime, CoreError> {
+            Err(CoreError::Storage("clock failed".to_owned()))
+        }
+    }
+
+    #[test]
+    fn lifecycle_clock_errors_and_expiry_overflow_fail_closed() {
+        let draft = make_draft(EntityId::new(), b"payload");
+        let intent = AppendIntent::new(&draft);
+        let mut clock_error = MemoryStore::with_clock(Box::new(ErrorClock));
+        let timeline = clock_error.create_timeline("clock-error").unwrap();
+        assert!(clock_error
+            .append_intent_or_duplicate(timeline.id(), append_identity(1, 1), intent.clone())
+            .is_err());
+        assert!(clock_error
+            .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).unwrap())
+            .is_err());
+
+        let mut overflow = MemoryStore::with_clock(Box::new(pos_core::FixedAdmissionClock(
+            WallTime::from_micros(u64::MAX),
+        )));
+        let timeline = overflow.create_timeline("overflow").unwrap();
+        assert!(overflow
+            .append_intent_or_duplicate(timeline.id(), append_identity(2, 2), intent)
+            .is_err());
+        drop(timeline);
+    }
+
+    fn append_identity(key: u8, scope: u8) -> AppendIdentity {
+        AppendIdentity::new(
+            AppendDedupKey::from_keyed_hash([key; 32]),
+            AppendDedupScope::from_keyed_hash([scope; 32]),
+        )
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn create_and_get_timeline() {

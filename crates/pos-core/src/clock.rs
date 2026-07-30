@@ -150,6 +150,10 @@ impl SimDuration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::{
+        append_identity_expires_at, checked_append_identity_expires_at,
+        APPEND_IDENTITY_RETENTION_MICROS,
+    };
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -167,6 +171,24 @@ mod tests {
         assert_eq!(fixed.now().unwrap(), expected);
         let mut system = SystemAdmissionClock;
         assert!(system.now().unwrap().as_micros() > 0);
+    }
+
+    #[test]
+    fn append_identity_expiry_helpers_cover_saturation_and_overflow() {
+        let admitted_at = WallTime::from_micros(42);
+        assert_eq!(
+            append_identity_expires_at(admitted_at),
+            WallTime::from_micros(42 + APPEND_IDENTITY_RETENTION_MICROS)
+        );
+        assert_eq!(
+            checked_append_identity_expires_at(admitted_at).unwrap(),
+            append_identity_expires_at(admitted_at)
+        );
+        assert_eq!(
+            append_identity_expires_at(WallTime::from_micros(u64::MAX)),
+            WallTime::from_micros(u64::MAX)
+        );
+        assert!(checked_append_identity_expires_at(WallTime::from_micros(u64::MAX)).is_err());
     }
 
     #[test]

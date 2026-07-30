@@ -1708,6 +1708,144 @@ mod tests {
         )
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn appended_event_id(outcome: AppendOrDuplicateOutcome) -> EventId {
+        match outcome {
+            AppendOrDuplicateOutcome::Appended(event) => event.id,
+            AppendOrDuplicateOutcome::Duplicate { .. } | AppendOrDuplicateOutcome::Conflict => {
+                panic!("identified append must append an Event")
+            }
+        }
+    }
+
+    struct ErrorClock;
+
+    impl AdmissionClock for ErrorClock {
+        fn now(&mut self) -> Result<WallTime, CoreError> {
+            Err(CoreError::Storage("clock failed".to_owned()))
+        }
+    }
+
+    #[test]
+    fn lifecycle_clock_and_open_errors_fail_closed() {
+        assert!(SqliteStore::open_with_clock(
+            "/definitely/missing/pigloros/lifecycle.db",
+            Box::new(pos_core::FixedAdmissionClock(WallTime::from_micros(1))),
+        )
+        .is_err());
+        let mut store = new_store();
+        store.clock = Box::new(ErrorClock);
+        let timeline = store.create_timeline("clock-error").unwrap();
+        let intent = AppendIntent::new(&make_draft(EntityId::new(), b"payload"));
+        assert!(store
+            .append_intent_or_duplicate(timeline.id(), append_identity(90, 90), intent)
+            .is_err());
+        assert!(store
+            .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).unwrap())
+            .is_err());
+
+        let mut overflow = SqliteStore::open_with_clock(
+            ":memory:",
+            Box::new(pos_core::FixedAdmissionClock(WallTime::from_micros(
+                u64::MAX,
+            ))),
+        )
+        .unwrap();
+        let timeline = overflow.create_timeline("overflow").unwrap();
+        let intent = AppendIntent::new(&make_draft(EntityId::new(), b"payload"));
+        assert!(overflow
+            .append_intent_or_duplicate(timeline.id(), append_identity(91, 91), intent)
+            .is_err());
+
+        let mut transaction = new_store();
+        transaction.conn.execute_batch("BEGIN").unwrap();
+        assert!(transaction
+            .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).unwrap())
+            .is_err());
+        let _ = transaction.conn.execute_batch("ROLLBACK");
+
+        let mut prepare = new_store();
+        prepare
+            .conn
+            .execute_batch("DROP TABLE append_identities")
+            .unwrap();
+        assert!(prepare
+            .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).unwrap())
+            .is_err());
+
+        let mut query = new_store();
+        query.conn.execute_batch(
+            "DROP TABLE append_identities;
+             CREATE TABLE append_identities (dedup_key INTEGER, scope_key BLOB, event_id TEXT, expires_at INTEGER);
+             INSERT INTO append_identities VALUES (1, X'00', 'id', 0);",
+        ).unwrap();
+        assert!(query
+            .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).unwrap())
+            .is_err());
+    }
+
+    #[test]
+    fn lifecycle_delete_errors_fail_closed() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("delete-failure").unwrap();
+        let event_id = appended_event_id(
+            store
+                .append_intent_or_duplicate(
+                    timeline.id(),
+                    append_identity(92, 92),
+                    AppendIntent::new(&make_draft(EntityId::new(), b"payload")),
+                )
+                .unwrap(),
+        );
+        store
+            .conn
+            .execute(
+                "UPDATE append_identities SET expires_at = 0 WHERE event_id = ?1",
+                rusqlite::params![event_id.to_string()],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER deny_identity_delete BEFORE DELETE ON append_identities
+                 BEGIN SELECT RAISE(ABORT, 'delete denied'); END;",
+            )
+            .unwrap();
+        assert!(store
+            .append_intent_or_duplicate(
+                timeline.id(),
+                append_identity(92, 92),
+                AppendIntent::new(&make_draft(EntityId::new(), b"different")),
+            )
+            .is_err());
+        assert!(store
+            .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).unwrap())
+            .is_err());
+
+        let mut commit_failure = new_store();
+        let timeline = commit_failure.create_timeline("commit-failure").unwrap();
+        let event_id = appended_event_id(
+            commit_failure
+                .append_intent_or_duplicate(
+                    timeline.id(),
+                    append_identity(93, 93),
+                    AppendIntent::new(&make_draft(EntityId::new(), b"payload")),
+                )
+                .unwrap(),
+        );
+        commit_failure
+            .conn
+            .execute(
+                "UPDATE append_identities SET expires_at = 0 WHERE event_id = ?1",
+                rusqlite::params![event_id.to_string()],
+            )
+            .unwrap();
+        commit_failure.conn.commit_hook(Some(|| true));
+        assert!(commit_failure
+            .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).unwrap())
+            .is_err());
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_or_duplicate_surfaces_storage_failures_without_partial_events() {
@@ -1805,15 +1943,51 @@ mod tests {
         let first = store
             .append_intent_or_duplicate(timeline.id(), append_identity(7, 7), intent.clone())
             .unwrap();
-        let event_id = match first {
-            AppendOrDuplicateOutcome::Appended(event) => event.id,
-            other => panic!("unexpected outcome: {other:?}"),
-        };
+        let event_id = appended_event_id(first);
         assert_eq!(
             store
                 .append_intent_or_duplicate(timeline.id(), append_identity(7, 7), intent)
                 .unwrap(),
             AppendOrDuplicateOutcome::Duplicate { event_id }
+        );
+        assert_eq!(
+            store
+                .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).unwrap())
+                .unwrap(),
+            PurgeOutcome {
+                removed: 0,
+                more_may_remain: false
+            }
+        );
+
+        store
+            .conn
+            .execute(
+                "UPDATE append_identities SET expires_at = 0 WHERE event_id = ?1",
+                rusqlite::params![event_id.to_string()],
+            )
+            .unwrap();
+        let _ = appended_event_id(
+            store
+                .append_intent_or_duplicate(
+                    timeline.id(),
+                    append_identity(7, 7),
+                    AppendIntent::new(&make_draft(EntityId::new(), b"different")),
+                )
+                .unwrap(),
+        );
+        store
+            .conn
+            .execute("UPDATE append_identities SET expires_at = 0", [])
+            .unwrap();
+        assert_eq!(
+            store
+                .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).unwrap())
+                .unwrap(),
+            PurgeOutcome {
+                removed: 1,
+                more_may_remain: true
+            }
         );
         assert_eq!(
             store
