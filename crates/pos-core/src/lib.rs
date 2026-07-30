@@ -23,7 +23,9 @@ pub mod store;
 pub mod timeline;
 
 // Re-export commonly used types at the crate root.
-pub use clock::{Seq, SimDuration, SimTime, WallTime};
+pub use clock::{
+    AdmissionClock, FixedAdmissionClock, Seq, SimDuration, SimTime, SystemAdmissionClock, WallTime,
+};
 pub use crypto::{Hash, PublicKey, Signature};
 pub use entity::{Entity, EntityKind, Relationship, RelationshipKind};
 pub use error::CoreError;
@@ -35,10 +37,10 @@ pub use plugin::{Capability, Plugin};
 pub use schema::{SchemaVersionMap, Upcaster, UpcasterRegistry};
 pub use state::{Reducer, State, StateRegistry};
 pub use store::{
-    append_identity_expires_at, export_timeline, export_timeline_cow, export_timeline_own,
-    export_timeline_raw, import_committed_with_rollback, import_timeline, import_timeline_with_id,
-    validate_committed_batch, AppendDedupKey, AppendDedupScope, AppendIdentity,
-    AppendOrDuplicateOutcome, EventReadBounds, EventStore, SeqRange, TimelineExport,
-    APPEND_IDENTITY_RETENTION_MICROS,
+    append_identity_expires_at, checked_append_identity_expires_at, export_timeline,
+    export_timeline_cow, export_timeline_own, export_timeline_raw, import_committed_with_rollback,
+    import_timeline, import_timeline_with_id, validate_committed_batch, AppendDedupKey,
+    AppendDedupScope, AppendIdentity, AppendIntent, AppendOrDuplicateOutcome, EventReadBounds,
+    EventStore, PurgeOutcome, SeqRange, TimelineExport, APPEND_IDENTITY_RETENTION_MICROS,
 };
 pub use timeline::{Timeline, TimelineMeta, TimelineMode};

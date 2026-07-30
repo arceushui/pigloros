@@ -45,8 +45,8 @@ pub mod sqlite;
 pub use pos_core::store::{
     append_identity_expires_at, export_timeline, export_timeline_cow, export_timeline_own,
     export_timeline_raw, import_committed_with_rollback, import_timeline, import_timeline_with_id,
-    AppendDedupKey, AppendDedupScope, AppendIdentity, AppendOrDuplicateOutcome, EventStore,
-    SeqRange, TimelineExport, APPEND_IDENTITY_RETENTION_MICROS,
+    AppendDedupKey, AppendDedupScope, AppendIdentity, AppendIntent, AppendOrDuplicateOutcome,
+    EventStore, PurgeOutcome, SeqRange, TimelineExport, APPEND_IDENTITY_RETENTION_MICROS,
 };
 pub use pos_core::{
     CanonicalBytes, CoreError, CorrelationId, EntityId, Event, EventDraft, EventId, Kind,
@@ -682,5 +682,70 @@ mod tests {
             matches!(result, Err(CoreError::Storage(_))),
             "expected Storage error from injected open_in_memory failure"
         );
+    }
+
+    #[test]
+    fn store_owned_clock_drives_canonical_intent_and_bounded_cleanup() {
+        let admission = WallTime::from_micros(APPEND_IDENTITY_RETENTION_MICROS + 42);
+        let mut store =
+            memory::MemoryStore::with_clock(Box::new(pos_core::FixedAdmissionClock(admission)));
+        let timeline = store.create_timeline("clock").unwrap();
+        let draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new("clock.test"),
+            CanonicalBytes::from_vec(b"payload".to_vec()),
+        );
+        let intent = AppendIntent::new(&draft);
+        let first = store
+            .append_or_duplicate(
+                timeline.id(),
+                append_identity(9, 9),
+                WallTime::from_micros(0),
+                draft.clone(),
+            )
+            .unwrap();
+        let event = match first {
+            AppendOrDuplicateOutcome::Appended(event) => event,
+            other => panic!("unexpected outcome: {other:?}"),
+        };
+        let replaced = store
+            .append_intent_or_duplicate(timeline.id(), append_identity(9, 9), intent.clone())
+            .unwrap();
+        assert!(matches!(replaced, AppendOrDuplicateOutcome::Appended(_)));
+        let second = store
+            .append_intent_or_duplicate(timeline.id(), append_identity(8, 8), intent.clone())
+            .unwrap();
+        let second_event = match second {
+            AppendOrDuplicateOutcome::Appended(event) => event,
+            other => panic!("unexpected outcome: {other:?}"),
+        };
+        assert_eq!(second_event.wall_time, admission);
+        store
+            .append_or_duplicate(
+                timeline.id(),
+                append_identity(10, 10),
+                WallTime::from_micros(0),
+                draft,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .append_intent_or_duplicate(timeline.id(), append_identity(8, 8), intent)
+                .unwrap(),
+            AppendOrDuplicateOutcome::Duplicate {
+                event_id: second_event.id
+            }
+        );
+        let outcome = store
+            .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).unwrap())
+            .unwrap();
+        assert_eq!(
+            outcome,
+            PurgeOutcome {
+                removed: 1,
+                more_may_remain: false
+            }
+        );
+        assert_ne!(event.id, second_event.id);
     }
 }

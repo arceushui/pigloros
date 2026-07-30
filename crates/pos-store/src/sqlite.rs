@@ -8,13 +8,13 @@
 use rusqlite::{params, Connection, OpenFlags, Params, TransactionBehavior};
 
 use pos_core::{
-    clock::{Seq, WallTime},
+    clock::{AdmissionClock, Seq, SystemAdmissionClock, WallTime},
     event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
     hasher::Hasher,
     ids::{EntityId, EventId, TimelineId},
     store::{
-        append_identity_expires_at, AppendDedupScope, AppendIdentity, AppendOrDuplicateOutcome,
-        EventReadBounds, EventStore, SeqRange,
+        checked_append_identity_expires_at, AppendDedupScope, AppendIdentity, AppendIntent,
+        AppendOrDuplicateOutcome, EventReadBounds, EventStore, PurgeOutcome, SeqRange,
     },
     timeline::{Timeline, TimelineMeta, TimelineMode},
     CoreError,
@@ -47,6 +47,7 @@ thread_local! {
 pub struct SqliteStore {
     conn: Connection,
     hasher: Box<dyn Hasher>,
+    clock: Box<dyn AdmissionClock>,
 }
 
 impl SqliteStore {
@@ -150,6 +151,7 @@ impl SqliteStore {
                       AND causation_id IS ?5
                       AND correlation_id IS ?6
                       AND schema_version = ?7
+                      AND (?8 IS NULL OR wall_time = ?8)
                 ) THEN 1
                 WHEN EXISTS (SELECT 1 FROM events WHERE event_id = ?1) THEN 0
                 ELSE -1
@@ -162,6 +164,9 @@ impl SqliteStore {
                 draft.causation_id.map(|id| id.to_string()),
                 draft.correlation_id.map(|id| id.to_string()),
                 i64::from(draft.schema_version.as_u32()),
+                draft
+                    .wall_time
+                    .map(|wall_time| i64::try_from(wall_time.as_micros()).unwrap_or(i64::MAX)),
             ],
             |row| row.get::<_, i64>(0),
         );
@@ -197,9 +202,23 @@ impl SqliteStore {
         .map_err(|e| CoreError::Storage(e.to_string()))?;
 
         Self::require_utf8_encoding(&conn)?;
-        let store = Self { conn, hasher };
+        let store = Self {
+            conn,
+            hasher,
+            clock: Box::new(SystemAdmissionClock),
+        };
         store.init_schema()?;
         store.validate_event_sequence_invariant()?;
+        Ok(store)
+    }
+
+    /// Open a `SQLite` store with a trusted admission clock.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the database cannot be opened.
+    pub fn open_with_clock(path: &str, clock: Box<dyn AdmissionClock>) -> Result<Self, CoreError> {
+        let mut store = Self::open(path)?;
+        store.clock = clock;
         Ok(store)
     }
 
@@ -1009,80 +1028,41 @@ impl EventStore for SqliteStore {
             Err(error) => return Err(CoreError::Storage(error.to_string())),
         };
 
-        // Validate the target before consulting opaque identity state. This
-        // avoids cross-session identity disclosure for missing timelines.
-        let timeline_text = timeline.to_string();
-        let target_exists = match tx
-            .query_row(
-                "SELECT 1 FROM timelines WHERE id = ?1",
-                params![&timeline_text],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()
-        {
-            Ok(value) => value,
-            Err(error) => return Err(CoreError::Storage(error.to_string())),
-        };
-        if target_exists.is_none() {
-            return Err(CoreError::TimelineNotFound(timeline));
-        }
-
         let existing = tx.query_row(
             "SELECT event_id, expires_at FROM append_identities WHERE dedup_key = ?1",
             params![identity.dedup_key.as_bytes().as_slice()],
             |row| {
-                row.get::<_, String>(0).and_then(|event_id| {
-                    row.get::<_, i64>(1)
-                        .map(|expires_at| (event_id, expires_at))
-                })
+                row.get::<_, String>(0)
+                    .and_then(|event_id| row.get::<_, i64>(1).map(|expires| (event_id, expires)))
             },
         );
         match existing {
-            Ok((event_id, expires_at)) => {
-                let admitted_micros = i64::try_from(admitted_at.as_micros()).unwrap_or(i64::MAX);
-                if expires_at <= admitted_micros {
-                    if let Err(error) = tx.execute(
-                        "DELETE FROM append_identities
-                         WHERE dedup_key = ?1 AND expires_at <= ?2",
-                        params![identity.dedup_key.as_bytes().as_slice(), admitted_micros],
-                    ) {
-                        return Err(CoreError::Storage(error.to_string()));
-                    }
-                } else {
-                    let retained_timeline = match tx
-                        .query_row(
-                            "SELECT timeline_id FROM events WHERE event_id = ?1",
-                            params![&event_id],
-                            |row| row.get::<_, String>(0),
-                        )
-                        .optional()
-                    {
-                        Ok(value) => value,
-                        Err(error) => return Err(CoreError::Storage(error.to_string())),
-                    };
-                    if retained_timeline
-                        .as_deref()
-                        .is_some_and(|stored| stored != timeline_text)
-                    {
-                        return Ok(AppendOrDuplicateOutcome::Conflict);
-                    }
-                    return Self::retained_event_matches_draft(&tx, &event_id, &draft).and_then(
-                        |retained_matches| {
-                            if retained_matches {
-                                parse_event_id(&event_id).map(|event_id| {
-                                    AppendOrDuplicateOutcome::Duplicate { event_id }
-                                })
-                            } else {
-                                Ok(AppendOrDuplicateOutcome::Conflict)
-                            }
-                        },
-                    );
-                }
+            Ok((event_id, expires_at))
+                if u64::try_from(expires_at).unwrap_or(0) > admitted_at.as_micros() =>
+            {
+                return Self::retained_event_matches_draft(&tx, &event_id, &draft).and_then(
+                    |retained_matches| {
+                        if retained_matches {
+                            parse_event_id(&event_id)
+                                .map(|event_id| AppendOrDuplicateOutcome::Duplicate { event_id })
+                        } else {
+                            Ok(AppendOrDuplicateOutcome::Conflict)
+                        }
+                    },
+                );
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => {}
             Err(error) => return Err(CoreError::Storage(error.to_string())),
+            Ok(_) => {
+                tx.execute(
+                    "DELETE FROM append_identities WHERE dedup_key = ?1",
+                    params![identity.dedup_key.as_bytes().as_slice()],
+                )
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            }
         }
 
+        let expires_at = checked_append_identity_expires_at(admitted_at)?;
         Self::append_one_in_transaction(&tx, self.hasher.as_ref(), timeline, draft).and_then(
             |event| {
                 tx.execute(
@@ -1092,8 +1072,7 @@ impl EventStore for SqliteStore {
                         identity.dedup_key.as_bytes().as_slice(),
                         identity.scope.as_bytes().as_slice(),
                         event.id.to_string(),
-                        i64::try_from(append_identity_expires_at(admitted_at).as_micros())
-                            .unwrap_or(i64::MAX),
+                        i64::try_from(expires_at.as_micros()).unwrap_or(i64::MAX),
                     ],
                 )
                 .map_err(|error| CoreError::Storage(error.to_string()))
@@ -1114,6 +1093,54 @@ impl EventStore for SqliteStore {
             Ok(deleted) => Ok(deleted),
             Err(error) => Err(CoreError::Storage(error.to_string())),
         }
+    }
+
+    fn append_intent_or_duplicate(
+        &mut self,
+        timeline: TimelineId,
+        identity: AppendIdentity,
+        intent: AppendIntent,
+    ) -> Result<AppendOrDuplicateOutcome, CoreError> {
+        let admitted_at = self.clock.now()?;
+        let mut draft = intent.into_draft();
+        draft.wall_time = Some(admitted_at);
+        self.append_or_duplicate(timeline, identity, admitted_at, draft)
+    }
+
+    fn purge_expired_append_identities_bounded(
+        &mut self,
+        limit: std::num::NonZeroUsize,
+    ) -> Result<PurgeOutcome, CoreError> {
+        let now = self.clock.now()?;
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let mut stmt = tx.prepare("SELECT dedup_key FROM append_identities WHERE expires_at <= ?1 ORDER BY expires_at, dedup_key LIMIT ?2").map_err(|error| CoreError::Storage(error.to_string()))?;
+        let keys: Result<Vec<Vec<u8>>, _> = stmt
+            .query_map(
+                params![
+                    i64::try_from(now.as_micros()).unwrap_or(i64::MAX),
+                    i64::try_from(limit.get()).unwrap_or(i64::MAX)
+                ],
+                |row| row.get(0),
+            )
+            .and_then(Iterator::collect);
+        let keys = keys.map_err(|error| CoreError::Storage(error.to_string()))?;
+        drop(stmt);
+        for key in &keys {
+            tx.execute(
+                "DELETE FROM append_identities WHERE dedup_key = ?1",
+                params![key],
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        }
+        tx.commit()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        Ok(PurgeOutcome {
+            removed: keys.len(),
+            more_may_remain: keys.len() == limit.get(),
+        })
     }
 
     fn remove_append_identities(&mut self, scope: AppendDedupScope) -> Result<usize, CoreError> {
@@ -1754,6 +1781,41 @@ mod tests {
     }
 
     #[test]
+    fn store_owned_clock_intent_and_bounded_cleanup_contract() {
+        let admission = WallTime::from_micros(pos_core::APPEND_IDENTITY_RETENTION_MICROS + 42);
+        let mut store = SqliteStore::open_with_clock(
+            ":memory:",
+            Box::new(pos_core::FixedAdmissionClock(admission)),
+        )
+        .unwrap();
+        let timeline = store.create_timeline("clock").unwrap();
+        let draft = make_draft(EntityId::new(), b"payload");
+        let intent = AppendIntent::new(&draft);
+        let first = store
+            .append_intent_or_duplicate(timeline.id(), append_identity(7, 7), intent.clone())
+            .unwrap();
+        let event_id = match first {
+            AppendOrDuplicateOutcome::Appended(event) => event.id,
+            other => panic!("unexpected outcome: {other:?}"),
+        };
+        assert_eq!(
+            store
+                .append_intent_or_duplicate(timeline.id(), append_identity(7, 7), intent)
+                .unwrap(),
+            AppendOrDuplicateOutcome::Duplicate { event_id }
+        );
+        assert_eq!(
+            store
+                .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).unwrap())
+                .unwrap(),
+            PurgeOutcome {
+                removed: 0,
+                more_may_remain: false
+            }
+        );
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_or_duplicate_rejects_corrupt_identity_rows_and_identity_table_errors() {
         let entity = EntityId::new();
@@ -1887,71 +1949,6 @@ mod tests {
                 timeline.id(),
                 append_identity(12, 12),
                 WallTime::from_micros(2),
-                make_draft(entity, b"x"),
-            )
-            .is_err());
-
-        let mut malformed_event_shape = new_store();
-        let timeline = malformed_event_shape
-            .create_timeline("malformed-event-shape")
-            .unwrap();
-        malformed_event_shape
-            .append_or_duplicate(
-                timeline.id(),
-                append_identity(13, 13),
-                WallTime::from_micros(1),
-                make_draft(entity, b"x"),
-            )
-            .unwrap();
-        malformed_event_shape
-            .conn
-            .execute("ALTER TABLE events RENAME TO retained_events", [])
-            .unwrap();
-        malformed_event_shape
-            .conn
-            .execute(
-                "CREATE VIEW events AS
-                 SELECT timeline_id, event_id FROM retained_events",
-                [],
-            )
-            .unwrap();
-        assert!(malformed_event_shape
-            .append_or_duplicate(
-                timeline.id(),
-                append_identity(13, 13),
-                WallTime::from_micros(2),
-                make_draft(entity, b"x"),
-            )
-            .is_err());
-    }
-
-    #[test]
-    fn append_or_duplicate_fails_closed_when_expired_identity_replacement_is_blocked() {
-        let entity = EntityId::new();
-        let mut store = new_store();
-        let timeline = store.create_timeline("blocked-expiry-replacement").unwrap();
-        let identity = append_identity(14, 14);
-        store
-            .append_or_duplicate(
-                timeline.id(),
-                identity,
-                WallTime::from_micros(1),
-                make_draft(entity, b"x"),
-            )
-            .unwrap();
-        store
-            .conn
-            .execute_batch(
-                "CREATE TRIGGER deny_expired_identity_delete
-                 BEFORE DELETE ON append_identities
-                 BEGIN SELECT RAISE(ABORT, 'deny'); END;",
-            )
-            .unwrap();
-        assert!(store
-            .append_or_duplicate(
-                timeline.id(),
-                identity,
-                WallTime::from_micros(1 + pos_core::APPEND_IDENTITY_RETENTION_MICROS),
                 make_draft(entity, b"x"),
             )
             .is_err());

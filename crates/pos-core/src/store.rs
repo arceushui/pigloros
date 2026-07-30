@@ -88,6 +88,64 @@ impl AppendIdentity {
 /// than a caller-selected expiry policy.
 pub const APPEND_IDENTITY_RETENTION_MICROS: u64 = 7 * 24 * 60 * 60 * 1_000_000;
 
+/// Canonical caller-owned fields used to compare identified retries.
+/// Generated Event metadata, including `wall_time`, is intentionally absent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppendIntent {
+    pub entity: crate::EntityId,
+    pub event_type: crate::Kind,
+    pub payload: crate::CanonicalBytes,
+    pub causation_id: Option<crate::EventId>,
+    pub correlation_id: Option<crate::CorrelationId>,
+    pub schema_version: crate::SchemaVersion,
+}
+
+impl AppendIntent {
+    #[must_use]
+    pub fn new(draft: &EventDraft) -> Self {
+        Self {
+            entity: draft.entity,
+            event_type: draft.event_type.clone(),
+            payload: draft.payload.clone(),
+            causation_id: draft.causation_id,
+            correlation_id: draft.correlation_id,
+            schema_version: draft.schema_version,
+        }
+    }
+
+    #[must_use]
+    pub fn into_draft(self) -> EventDraft {
+        EventDraft {
+            entity: self.entity,
+            event_type: self.event_type,
+            payload: self.payload,
+            wall_time: None,
+            causation_id: self.causation_id,
+            correlation_id: self.correlation_id,
+            schema_version: self.schema_version,
+        }
+    }
+}
+
+/// Result of one bounded physical cleanup pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PurgeOutcome {
+    pub removed: usize,
+    pub more_may_remain: bool,
+}
+
+/// Checked seven-day expiry calculation; saturation is forbidden.
+///
+/// # Errors
+/// Returns [`CoreError::Storage`] when the timestamp would overflow.
+pub fn checked_append_identity_expires_at(admitted_at: WallTime) -> Result<WallTime, CoreError> {
+    admitted_at
+        .as_micros()
+        .checked_add(APPEND_IDENTITY_RETENTION_MICROS)
+        .map(WallTime::from_micros)
+        .ok_or_else(|| CoreError::Storage("append identity expiry overflow".to_owned()))
+}
+
 /// Return the fixed expiry for an identity admitted at `admitted_at`.
 #[must_use]
 pub const fn append_identity_expires_at(admitted_at: WallTime) -> WallTime {
@@ -246,6 +304,34 @@ pub trait EventStore: Send {
     ) -> Result<AppendOrDuplicateOutcome, CoreError> {
         Err(CoreError::Storage(
             "atomic append-or-duplicate is unsupported by this EventStore".to_owned(),
+        ))
+    }
+
+    /// Append using a canonical intent and the store-owned admission clock.
+    ///
+    /// # Errors
+    /// Returns a backend or clock error when admission cannot be committed.
+    fn append_intent_or_duplicate(
+        &mut self,
+        _timeline: TimelineId,
+        _identity: AppendIdentity,
+        _intent: AppendIntent,
+    ) -> Result<AppendOrDuplicateOutcome, CoreError> {
+        Err(CoreError::Storage(
+            "store-owned identified append is unsupported by this EventStore".to_owned(),
+        ))
+    }
+
+    /// Remove at most `limit` expired identities using the store-owned clock.
+    ///
+    /// # Errors
+    /// Returns a backend or clock error when cleanup cannot complete.
+    fn purge_expired_append_identities_bounded(
+        &mut self,
+        _limit: std::num::NonZeroUsize,
+    ) -> Result<PurgeOutcome, CoreError> {
+        Err(CoreError::Storage(
+            "bounded append identity cleanup is unsupported by this EventStore".to_owned(),
         ))
     }
 
@@ -1014,7 +1100,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_or_duplicate_defaults_fail_closed() {
         let mut store = TrivialStore::new();
         let identity = AppendIdentity::new(
@@ -1027,13 +1112,26 @@ mod tests {
             CanonicalBytes::from_vec(Vec::new()),
         );
         let append_error = store
-            .append_or_duplicate(TimelineId::new(), identity, WallTime::from_micros(3), draft)
+            .append_or_duplicate(
+                TimelineId::new(),
+                identity,
+                WallTime::from_micros(3),
+                draft.clone(),
+            )
             .unwrap_err();
         assert!(append_error.to_string().contains("append-or-duplicate"));
         let cleanup_error = store
             .purge_expired_append_identities(WallTime::from_micros(3))
             .unwrap_err();
         assert!(cleanup_error.to_string().contains("cleanup"));
+        let intent_error = store
+            .append_intent_or_duplicate(TimelineId::new(), identity, AppendIntent::new(&draft))
+            .unwrap_err();
+        assert!(intent_error.to_string().contains("store-owned"));
+        let bounded_error = store
+            .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).unwrap())
+            .unwrap_err();
+        assert!(bounded_error.to_string().contains("bounded"));
         let withdrawal_error = store
             .remove_append_identities(AppendDedupScope::from_keyed_hash([2; 32]))
             .unwrap_err();
@@ -2576,6 +2674,18 @@ mod tests {
     fn trivial_store_list_timelines_returns_empty() {
         let store = TrivialStore::new();
         assert!(store.list_timelines().unwrap().is_empty());
+    }
+
+    #[test]
+    fn append_intent_round_trip_excludes_generated_metadata() {
+        let draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new("intent"),
+            CanonicalBytes::from_vec(vec![1, 2]),
+        );
+        let intent = AppendIntent::new(&draft);
+        assert_eq!(intent.into_draft().wall_time, None);
+        assert!(checked_append_identity_expires_at(WallTime::from_micros(u64::MAX)).is_err());
     }
 
     #[test]

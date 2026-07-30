@@ -7,15 +7,16 @@
 use std::collections::{HashMap, HashSet};
 
 use pos_core::{
-    clock::{Seq, WallTime},
+    clock::{AdmissionClock, Seq, SystemAdmissionClock, WallTime},
     crypto::Hash,
     error::CoreError,
     event::{Event, EventDraft},
     hasher::Hasher,
     ids::{EventId, TimelineId},
     store::{
-        append_identity_expires_at, AppendDedupKey, AppendDedupScope, AppendIdentity,
-        AppendOrDuplicateOutcome, EventReadBounds, EventStore, SeqRange,
+        checked_append_identity_expires_at, AppendDedupKey, AppendDedupScope, AppendIdentity,
+        AppendIntent, AppendOrDuplicateOutcome, EventReadBounds, EventStore, PurgeOutcome,
+        SeqRange,
     },
     timeline::{Timeline, TimelineMeta},
 };
@@ -39,11 +40,11 @@ pub struct MemoryStore {
     /// Opaque append identities retained only until their fixed horizon.
     append_identities: HashMap<AppendDedupKey, AppendIdentityRecord>,
     hasher: Box<dyn Hasher>,
+    clock: Box<dyn AdmissionClock>,
 }
 
 #[derive(Clone)]
 struct AppendIdentityRecord {
-    timeline: TimelineId,
     scope: AppendDedupScope,
     event_id: EventId,
     expires_at: WallTime,
@@ -77,6 +78,7 @@ impl MemoryStore {
             event_ids: HashSet::new(),
             append_identities: HashMap::new(),
             hasher: Box::new(pos_crypto::chain::Blake3Hasher),
+            clock: Box::new(SystemAdmissionClock),
         }
     }
 
@@ -89,7 +91,16 @@ impl MemoryStore {
             event_ids: HashSet::new(),
             append_identities: HashMap::new(),
             hasher,
+            clock: Box::new(SystemAdmissionClock),
         }
+    }
+
+    /// Construct a store with a deterministic or host-provided admission clock.
+    #[must_use]
+    pub fn with_clock(clock: Box<dyn AdmissionClock>) -> Self {
+        let mut store = Self::new();
+        store.clock = clock;
+        store
     }
 
     fn timeline(&self, id: TimelineId) -> Result<&Timeline, CoreError> {
@@ -117,6 +128,9 @@ impl MemoryStore {
             && content.causation_id == draft.causation_id
             && content.correlation_id == draft.correlation_id
             && content.schema_version == draft.schema_version
+            && draft
+                .wall_time
+                .is_none_or(|wall_time| content.wall_time == wall_time)
     }
 
     fn retained_content(event: &Event) -> RetainedAppendContent {
@@ -400,40 +414,35 @@ impl EventStore for MemoryStore {
         admitted_at: WallTime,
         draft: EventDraft,
     ) -> Result<AppendOrDuplicateOutcome, CoreError> {
-        // Validate the target before consulting opaque identity state.  This
-        // keeps missing targets from revealing whether an identity exists.
-        self.timeline(timeline)?;
         if let Some(record) = self.append_identities.get(&identity.dedup_key) {
-            if record.expires_at <= admitted_at {
-                self.append_identities.remove(&identity.dedup_key);
-            } else if record.timeline != timeline {
-                return Ok(AppendOrDuplicateOutcome::Conflict);
-            } else if Self::retained_content_matches(&record.retained_content, &draft) {
-                return Ok(AppendOrDuplicateOutcome::Duplicate {
-                    event_id: record.event_id,
-                });
-            } else {
-                return Ok(AppendOrDuplicateOutcome::Conflict);
+            if record.expires_at > admitted_at {
+                return if Self::retained_content_matches(&record.retained_content, &draft) {
+                    Ok(AppendOrDuplicateOutcome::Duplicate {
+                        event_id: record.event_id,
+                    })
+                } else {
+                    Ok(AppendOrDuplicateOutcome::Conflict)
+                };
             }
         }
 
-        let mut events = self.append(timeline, std::slice::from_ref(&draft))?;
-        let Some(event) = events.pop() else {
-            return Err(CoreError::Storage(
-                "empty append while recording ingress identity".to_owned(),
-            ));
-        };
-        self.append_identities.insert(
-            identity.dedup_key,
-            AppendIdentityRecord {
-                timeline,
-                scope: identity.scope,
-                event_id: event.id,
-                expires_at: append_identity_expires_at(admitted_at),
-                retained_content: Self::retained_content(&event),
-            },
-        );
-        Ok(AppendOrDuplicateOutcome::Appended(Box::new(event)))
+        let expires_at = checked_append_identity_expires_at(admitted_at)?;
+        self.append(timeline, std::slice::from_ref(&draft))
+            .map(|mut events| {
+                let event = events
+                    .pop()
+                    .expect("one ingress draft must commit one Event");
+                self.append_identities.insert(
+                    identity.dedup_key,
+                    AppendIdentityRecord {
+                        scope: identity.scope,
+                        event_id: event.id,
+                        expires_at,
+                        retained_content: Self::retained_content(&event),
+                    },
+                );
+                AppendOrDuplicateOutcome::Appended(Box::new(event))
+            })
     }
 
     fn purge_expired_append_identities(&mut self, now: WallTime) -> Result<usize, CoreError> {
@@ -441,6 +450,41 @@ impl EventStore for MemoryStore {
         self.append_identities
             .retain(|_, record| record.expires_at > now);
         Ok(before.saturating_sub(self.append_identities.len()))
+    }
+
+    fn append_intent_or_duplicate(
+        &mut self,
+        timeline: TimelineId,
+        identity: AppendIdentity,
+        intent: AppendIntent,
+    ) -> Result<AppendOrDuplicateOutcome, CoreError> {
+        let admitted_at = self.clock.now()?;
+        let mut draft = intent.into_draft();
+        draft.wall_time = Some(admitted_at);
+        self.append_or_duplicate(timeline, identity, admitted_at, draft)
+    }
+
+    fn purge_expired_append_identities_bounded(
+        &mut self,
+        limit: std::num::NonZeroUsize,
+    ) -> Result<PurgeOutcome, CoreError> {
+        let now = self.clock.now()?;
+        let mut expired: Vec<_> = self
+            .append_identities
+            .iter()
+            .filter(|(_, record)| record.expires_at <= now)
+            .map(|(key, record)| (record.expires_at, *key))
+            .collect();
+        expired.sort_unstable_by_key(|(expires_at, key)| (*expires_at, key.as_bytes()));
+        let more_may_remain = expired.len() > limit.get();
+        let removed = expired.len().min(limit.get());
+        for (_, key) in expired.into_iter().take(removed) {
+            self.append_identities.remove(&key);
+        }
+        Ok(PurgeOutcome {
+            removed,
+            more_may_remain,
+        })
     }
 
     fn remove_append_identities(&mut self, scope: AppendDedupScope) -> Result<usize, CoreError> {

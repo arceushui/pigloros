@@ -1,3 +1,4 @@
+use crate::error::CoreError;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -27,6 +28,35 @@ impl WallTime {
         )
         .unwrap_or(u64::MAX);
         Self(micros)
+    }
+}
+
+/// Trusted clock used for server-side admission timestamps and durable TTLs.
+pub trait AdmissionClock: Send {
+    /// Return the current durable epoch time.
+    ///
+    /// # Errors
+    /// Implementations may return a clock or storage error.
+    fn now(&mut self) -> Result<WallTime, CoreError>;
+}
+
+/// Production host wall clock for admission operations.
+#[derive(Debug, Default)]
+pub struct SystemAdmissionClock;
+
+impl AdmissionClock for SystemAdmissionClock {
+    fn now(&mut self) -> Result<WallTime, CoreError> {
+        Ok(WallTime::now())
+    }
+}
+
+/// Deterministic clock for backend contract tests.
+#[derive(Debug, Clone, Copy)]
+pub struct FixedAdmissionClock(pub WallTime);
+
+impl AdmissionClock for FixedAdmissionClock {
+    fn now(&mut self) -> Result<WallTime, CoreError> {
+        Ok(self.0)
     }
 }
 
@@ -128,6 +158,15 @@ mod tests {
         let s = serde_json::to_string(&t).unwrap();
         let back: WallTime = serde_json::from_str(&s).unwrap();
         assert_eq!(t, back);
+    }
+
+    #[test]
+    fn admission_clocks_return_configured_times() {
+        let expected = WallTime::from_micros(9);
+        let mut fixed = FixedAdmissionClock(expected);
+        assert_eq!(fixed.now().unwrap(), expected);
+        let mut system = SystemAdmissionClock;
+        assert!(system.now().unwrap().as_micros() > 0);
     }
 
     #[test]
