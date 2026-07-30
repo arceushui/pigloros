@@ -150,6 +150,7 @@ impl SqliteStore {
                       AND causation_id IS ?5
                       AND correlation_id IS ?6
                       AND schema_version = ?7
+                      AND (?8 IS NULL OR wall_time = ?8)
                 ) THEN 1
                 WHEN EXISTS (SELECT 1 FROM events WHERE event_id = ?1) THEN 0
                 ELSE -1
@@ -162,6 +163,9 @@ impl SqliteStore {
                 draft.causation_id.map(|id| id.to_string()),
                 draft.correlation_id.map(|id| id.to_string()),
                 i64::from(draft.schema_version.as_u32()),
+                draft
+                    .wall_time
+                    .map(|wall_time| i64::try_from(wall_time.as_micros()).unwrap_or(i64::MAX)),
             ],
             |row| row.get::<_, i64>(0),
         );
@@ -1035,34 +1039,42 @@ impl EventStore for SqliteStore {
         );
         match existing {
             Ok(event_id) => {
-                if Self::retained_event_matches_draft(&tx, &event_id, &draft)? {
-                    return match parse_event_id(&event_id) {
-                        Ok(event_id) => Ok(AppendOrDuplicateOutcome::Duplicate { event_id }),
-                        Err(error) => Err(error),
-                    };
-                }
-                return Ok(AppendOrDuplicateOutcome::Conflict);
+                return Self::retained_event_matches_draft(&tx, &event_id, &draft).and_then(
+                    |retained_matches| {
+                        if retained_matches {
+                            parse_event_id(&event_id)
+                                .map(|event_id| AppendOrDuplicateOutcome::Duplicate { event_id })
+                        } else {
+                            Ok(AppendOrDuplicateOutcome::Conflict)
+                        }
+                    },
+                );
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => {}
             Err(error) => return Err(CoreError::Storage(error.to_string())),
         }
 
-        let event = Self::append_one_in_transaction(&tx, self.hasher.as_ref(), timeline, draft)?;
-        tx.execute(
-            "INSERT INTO append_identities (dedup_key, scope_key, event_id, expires_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                identity.dedup_key.as_bytes().as_slice(),
-                identity.scope.as_bytes().as_slice(),
-                event.id.to_string(),
-                i64::try_from(append_identity_expires_at(admitted_at).as_micros())
-                    .unwrap_or(i64::MAX),
-            ],
+        Self::append_one_in_transaction(&tx, self.hasher.as_ref(), timeline, draft).and_then(
+            |event| {
+                tx.execute(
+                    "INSERT INTO append_identities (dedup_key, scope_key, event_id, expires_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        identity.dedup_key.as_bytes().as_slice(),
+                        identity.scope.as_bytes().as_slice(),
+                        event.id.to_string(),
+                        i64::try_from(append_identity_expires_at(admitted_at).as_micros())
+                            .unwrap_or(i64::MAX),
+                    ],
+                )
+                .map_err(|error| CoreError::Storage(error.to_string()))
+                .and_then(|_| {
+                    tx.commit()
+                        .map_err(|error| CoreError::Storage(error.to_string()))
+                        .map(|()| AppendOrDuplicateOutcome::Appended(Box::new(event)))
+                })
+            },
         )
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
-        tx.commit()
-            .map_err(|error| CoreError::Storage(error.to_string()))
-            .map(|()| AppendOrDuplicateOutcome::Appended(Box::new(event)))
     }
 
     fn purge_expired_append_identities(&mut self, now: WallTime) -> Result<usize, CoreError> {

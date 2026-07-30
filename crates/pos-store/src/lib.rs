@@ -208,34 +208,84 @@ mod tests {
         timeline: pos_core::TimelineId,
         draft: &EventDraft,
     ) {
-        assert!(matches!(
-            store
-                .append_or_duplicate(
-                    timeline,
-                    append_identity(3, 4),
-                    WallTime::from_micros(40),
-                    draft.clone(),
-                )
-                .unwrap(),
-            AppendOrDuplicateOutcome::Appended(_)
-        ));
+        let first = store
+            .append_or_duplicate(
+                timeline,
+                append_identity(3, 4),
+                WallTime::from_micros(40),
+                draft.clone(),
+            )
+            .unwrap();
+        let _ = appended_event_id(first);
         assert_eq!(
             store
                 .remove_append_identities(AppendDedupScope::from_keyed_hash([4; 32]))
                 .unwrap(),
             1
         );
-        assert!(matches!(
+        let after_withdrawal = store
+            .append_or_duplicate(
+                timeline,
+                append_identity(3, 4),
+                WallTime::from_micros(40),
+                draft.clone(),
+            )
+            .unwrap();
+        let _ = appended_event_id(after_withdrawal);
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn appended_event_id(outcome: AppendOrDuplicateOutcome) -> EventId {
+        match outcome {
+            AppendOrDuplicateOutcome::Appended(event) => event.id,
+            AppendOrDuplicateOutcome::Duplicate { .. } | AppendOrDuplicateOutcome::Conflict => {
+                panic!("identified append must append an Event")
+            }
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn assert_wall_time_contract(
+        store: &mut dyn EventStore,
+        timeline: pos_core::TimelineId,
+        draft: &EventDraft,
+        event_id: EventId,
+    ) {
+        let duplicate = store
+            .append_or_duplicate(
+                timeline,
+                append_identity(1, 2),
+                WallTime::from_micros(21),
+                draft.clone(),
+            )
+            .unwrap();
+        assert_eq!(duplicate, AppendOrDuplicateOutcome::Duplicate { event_id });
+        let mut retry_without_wall_time = draft.clone();
+        retry_without_wall_time.wall_time = None;
+        assert_eq!(
             store
                 .append_or_duplicate(
                     timeline,
-                    append_identity(3, 4),
-                    WallTime::from_micros(40),
-                    draft.clone(),
+                    append_identity(1, 2),
+                    WallTime::from_micros(21),
+                    retry_without_wall_time,
                 )
                 .unwrap(),
-            AppendOrDuplicateOutcome::Appended(_)
-        ));
+            AppendOrDuplicateOutcome::Duplicate { event_id }
+        );
+        let mut wall_time_conflict = draft.clone();
+        wall_time_conflict.wall_time = Some(WallTime::from_micros(31));
+        assert_eq!(
+            store
+                .append_or_duplicate(
+                    timeline,
+                    append_identity(1, 2),
+                    WallTime::from_micros(21),
+                    wall_time_conflict,
+                )
+                .unwrap(),
+            AppendOrDuplicateOutcome::Conflict
+        );
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -245,7 +295,8 @@ mod tests {
             EntityId::new(),
             Kind::new("test.append"),
             CanonicalBytes::from_vec(b"retained-canonical-content".to_vec()),
-        );
+        )
+        .with_wall_time(WallTime::from_micros(30));
         draft.causation_id = Some(EventId::new());
         draft.correlation_id = Some(CorrelationId::new());
         let first = store
@@ -256,25 +307,11 @@ mod tests {
                 draft.clone(),
             )
             .unwrap();
-        let event_id = match first {
-            AppendOrDuplicateOutcome::Appended(event) => {
-                assert_eq!(event.causation_id, draft.causation_id);
-                assert_eq!(event.correlation_id, draft.correlation_id);
-                event.id
-            }
-            AppendOrDuplicateOutcome::Duplicate { .. } | AppendOrDuplicateOutcome::Conflict => {
-                panic!("first identified append must append")
-            }
-        };
-        let duplicate = store
-            .append_or_duplicate(
-                timeline.id(),
-                append_identity(1, 2),
-                WallTime::from_micros(21),
-                draft.clone(),
-            )
-            .unwrap();
-        assert_eq!(duplicate, AppendOrDuplicateOutcome::Duplicate { event_id });
+        let event_id = appended_event_id(first);
+        let admitted_events = store.read(timeline.id(), SeqRange::all()).unwrap();
+        assert_eq!(admitted_events[0].causation_id, draft.causation_id);
+        assert_eq!(admitted_events[0].correlation_id, draft.correlation_id);
+        assert_wall_time_contract(store, timeline.id(), &draft, event_id);
         let conflict_draft = EventDraft::new(
             draft.entity,
             Kind::new("test.append"),

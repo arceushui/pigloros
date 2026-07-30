@@ -34,8 +34,8 @@ pub struct MemoryStore {
     timelines: HashMap<TimelineId, Timeline>,
     /// Running hash chain head per timeline.
     chain_heads: HashMap<TimelineId, Hash>,
-    /// Global `EventId` index for O(1) uniqueness checks.
-    event_ids: HashSet<EventId>,
+    /// Global `EventId` index for O(1) uniqueness and retained-content checks.
+    events_by_id: HashMap<EventId, Event>,
     /// Opaque append identities retained only until their fixed horizon.
     append_identities: HashMap<AppendDedupKey, AppendIdentityRecord>,
     /// Exact number of root Timelines, maintained with Timeline mutations.
@@ -62,7 +62,7 @@ impl MemoryStore {
             events: HashMap::new(),
             timelines: HashMap::new(),
             chain_heads: HashMap::new(),
-            event_ids: HashSet::new(),
+            events_by_id: HashMap::new(),
             append_identities: HashMap::new(),
             root_timeline_count: 0,
             hasher: Box::new(pos_crypto::chain::Blake3Hasher),
@@ -75,7 +75,7 @@ impl MemoryStore {
             events: HashMap::new(),
             timelines: HashMap::new(),
             chain_heads: HashMap::new(),
-            event_ids: HashSet::new(),
+            events_by_id: HashMap::new(),
             append_identities: HashMap::new(),
             root_timeline_count: 0,
             hasher,
@@ -101,14 +101,16 @@ impl MemoryStore {
     }
 
     fn retained_event_matches(&self, event_id: EventId, draft: &EventDraft) -> bool {
-        self.events.values().flatten().any(|event| {
-            event.id == event_id
-                && event.entity == draft.entity
+        self.events_by_id.get(&event_id).is_some_and(|event| {
+            event.entity == draft.entity
                 && event.event_type == draft.event_type
                 && event.payload == draft.payload
                 && event.causation_id == draft.causation_id
                 && event.correlation_id == draft.correlation_id
                 && event.schema_version == draft.schema_version
+                && draft
+                    .wall_time
+                    .is_none_or(|wall_time| event.wall_time == wall_time)
         })
     }
 
@@ -365,7 +367,7 @@ impl EventStore for MemoryStore {
         };
         events.extend(committed.iter().cloned());
         for event in &committed {
-            self.event_ids.insert(event.id);
+            self.events_by_id.insert(event.id, event.clone());
         }
 
         // Update head and chain hash
@@ -544,7 +546,7 @@ impl EventStore for MemoryStore {
         pos_core::store::validate_committed_batch(
             head,
             events,
-            &mut |id| self.event_ids.contains(id),
+            &mut |id| self.events_by_id.contains_key(id),
             &*self.hasher,
         )
         .and_then(|ordered| {
@@ -553,7 +555,6 @@ impl EventStore for MemoryStore {
                     return Err(Self::missing_timeline_state(timeline, "Event storage"));
                 };
                 let mut new_head = head;
-                let mut event_ids_to_insert = Vec::with_capacity(ordered.len());
                 let mut previous_hash = prev_hash;
                 for event in &ordered {
                     let id_str = event.id.to_string();
@@ -561,11 +562,12 @@ impl EventStore for MemoryStore {
                         self.hasher
                             .hash_event(&previous_hash, id_str.as_bytes(), &event.payload);
                     new_head = event.seq;
-                    event_ids_to_insert.push(event.id);
                 }
 
+                for event in &ordered {
+                    self.events_by_id.insert(event.id, event.clone());
+                }
                 stored_events.extend(ordered);
-                self.event_ids.extend(event_ids_to_insert);
                 timeline_state.head = new_head;
                 self.timelines.insert(timeline, timeline_state);
                 self.chain_heads.insert(timeline, previous_hash);
@@ -606,7 +608,7 @@ impl EventStore for MemoryStore {
                 self.root_timeline_count -= 1;
             }
             for event in events {
-                self.event_ids.remove(&event.id);
+                self.events_by_id.remove(&event.id);
             }
             self.chain_heads.remove(&id);
             Ok(())
