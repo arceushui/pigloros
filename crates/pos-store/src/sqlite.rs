@@ -1003,7 +1003,7 @@ impl SqliteStore {
             "SELECT EXISTS (
                 WITH RECURSIVE timeline_lineage(timeline_id) AS (
                     SELECT ?1
-                    UNION ALL
+                    UNION
                     SELECT timelines.parent_id
                     FROM timelines
                     JOIN timeline_lineage
@@ -1262,12 +1262,7 @@ impl EventStore for SqliteStore {
         bounds: EventReadBounds,
     ) -> Result<Vec<Event>, CoreError> {
         self.ensure_generic_timeline_visibility(timeline)
-            .and_then(|()| {
-                let _ = self
-                    .get_timeline(timeline)?
-                    .ok_or(CoreError::TimelineNotFound(timeline))?;
-                self.read_logical_bounded(timeline, range, bounds)
-            })
+            .and_then(|()| self.read_logical_bounded(timeline, range, bounds))
     }
 
     fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
