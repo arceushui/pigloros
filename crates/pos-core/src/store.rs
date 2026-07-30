@@ -712,10 +712,17 @@ pub fn import_timeline(
     store: &mut dyn EventStore,
     export: TimelineExport,
 ) -> Result<Timeline, CoreError> {
-    let name = export.timeline.meta.name.unwrap_or_default();
-    let create_result = store.create_timeline(&name);
-    import_timeline_using(create_result, export.events, |timeline_id, drafts| {
-        store.append(timeline_id, drafts)
+    let TimelineExport {
+        timeline,
+        events,
+        parent_fork_hash: _,
+    } = export;
+    let name = timeline.meta.name.unwrap_or_default();
+    ensure_import_events_are_non_geographic(&events).and_then(|()| {
+        let create_result = store.create_timeline(&name);
+        import_timeline_using(create_result, events, |timeline_id, drafts| {
+            store.append(timeline_id, drafts)
+        })
     })
 }
 
@@ -756,21 +763,37 @@ pub fn import_timeline_with_id(
         parent_fork_hash,
     } = export;
 
-    if let Some((parent, at_seq)) = timeline.meta.fork_point {
-        let Some(expected) = parent_fork_hash else {
-            return Err(CoreError::Storage(
-                "forked import requires parent_fork_hash (use export_timeline_own)".to_owned(),
-            ));
-        };
-        let actual = store.chain_hash_at(parent, at_seq)?;
-        if actual != expected {
-            return Err(CoreError::Storage(
-                "fork parent chain hash mismatch".to_owned(),
-            ));
+    ensure_import_events_are_non_geographic(&events).and_then(|()| {
+        if let Some((parent, at_seq)) = timeline.meta.fork_point {
+            let expected = parent_fork_hash.ok_or_else(|| {
+                CoreError::Storage(
+                    "forked import requires parent_fork_hash (use export_timeline_own)".to_owned(),
+                )
+            })?;
+            let actual = store.chain_hash_at(parent, at_seq)?;
+            if actual != expected {
+                return Err(CoreError::Storage(
+                    "fork parent chain hash mismatch".to_owned(),
+                ));
+            }
         }
-    }
 
-    store.import_committed(timeline.meta, &events)
+        store.import_committed(timeline.meta, &events)
+    })
+}
+
+/// Refuse protected evidence before a generic import creates or mutates a Timeline.
+fn ensure_import_events_are_non_geographic(events: &[Event]) -> Result<(), CoreError> {
+    if events
+        .iter()
+        .any(|event| crate::is_geographic_event_type(&event.event_type))
+    {
+        Err(CoreError::Storage(
+            "generic import of geographic evidence is disabled".to_owned(),
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 /// Default create→append→fetch import with delete-based rollback.

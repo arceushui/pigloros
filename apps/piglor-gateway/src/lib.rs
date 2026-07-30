@@ -339,6 +339,12 @@ impl Gateway {
             }
             Err(error) => return Err(GatewayError::Store(error)),
         };
+        if events
+            .iter()
+            .any(|event| pos_core::is_geographic_event_type(&event.event_type))
+        {
+            return Err(GatewayError::ResourceUnavailable);
+        }
         let next_from_seq = events
             .get(limit)
             .map(|event| Seq::from_u64(event_seq(event)));
@@ -747,6 +753,7 @@ mod tests {
     use pos_core::{
         clock::{Seq, WallTime},
         crypto::Hash,
+        event::SchemaVersion,
         ids::EventId,
         store::{export_timeline_own, import_timeline_with_id},
         timeline::TimelineMeta,
@@ -770,6 +777,7 @@ mod tests {
         RejectListUse,
         Duplicate,
         DuplicateReadError,
+        GeographicRead(&'static str),
         MissingTimeline,
     }
 
@@ -819,7 +827,32 @@ mod tests {
             if matches!(self.mode, ScriptMode::FailRead) {
                 return Err(CoreError::Storage("read failed".into()));
             }
+            if let ScriptMode::GeographicRead(event_type) = self.mode {
+                let payload = CanonicalBytes::from_vec(b"protected".to_vec());
+                return Ok(vec![Event {
+                    id: EventId::new(),
+                    entity: EntityId::new(),
+                    event_type: Kind::new(event_type),
+                    payload: payload.clone(),
+                    wall_time: WallTime::from_micros(1),
+                    seq: Seq::from_u64(1),
+                    causation_id: None,
+                    correlation_id: None,
+                    schema_version: SchemaVersion::V1,
+                    signature: None,
+                    payload_hash: Hash::from_bytes([0; 32]),
+                }]);
+            }
             Ok(Vec::new())
+        }
+
+        fn read_bounded(
+            &self,
+            timeline: TimelineId,
+            range: SeqRange,
+            _bounds: EventReadBounds,
+        ) -> Result<Vec<Event>, CoreError> {
+            self.read(timeline, range)
         }
 
         fn fork(
@@ -912,6 +945,24 @@ mod tests {
         assert_eq!(page.events.len(), 1);
         assert_eq!(page.events[0].id, event.id);
         assert_eq!(page.next_from_seq, None);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn public_gateway_read_rejects_geographic_events_from_an_adapter() {
+        for event_type in [
+            pos_core::GEOGRAPHIC_EVENT_TYPE,
+            pos_core::GEOGRAPHIC_CELL_EVENT_TYPE,
+        ] {
+            let gateway = Gateway::new(Box::new(ScriptedStore {
+                mode: ScriptMode::GeographicRead(event_type),
+            }));
+            let error = gateway
+                .read_events_page(&TimelineId::new().to_string(), 0, 1)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, GatewayError::ResourceUnavailable));
+        }
     }
 
     #[tokio::test]

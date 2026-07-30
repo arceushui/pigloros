@@ -6,20 +6,24 @@
 //!
 //! Provides spatial cloaking: exact lat/lng → discretized grid cell. Geographic
 //! evidence is core-owned under ADR-034: this crate neither admits nor owns
-//! `geo.location` or `geo.cell` at runtime. Its legacy [`GeoPlugin`] and
-//! [`GeoReducer`] descriptors are retained only for compatibility with stored
-//! V1 payload tooling; `PluginRegistry` rejects their reserved capability.
+//! `geo.location` or `geo.cell` at runtime. Its legacy [`GeoPlugin`] descriptor
+//! is retained only for compatibility with stored V1 payload tooling;
+//! `PluginRegistry` rejects its reserved capability.
 //!
 //! Wave 5 uses a pure-Rust degree-grid snap ([`SpatialCloaker`]); H3/S2 are deferred.
 //! Privacy property: exact coordinates are snapped to a configurable grid resolution
 //! (e.g., 0.1 degree cells), preventing exact location tracking.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
+#[cfg(test)]
 use pos_core::{
-    event::{CanonicalBytes, Event, Kind},
+    event::Event,
+    state::{Reducer, State},
+};
+use pos_core::{
+    event::{CanonicalBytes, Kind},
     ids::PluginId,
     plugin::{Capability, Plugin},
-    state::{Reducer, State},
 };
 use pos_crypto::canonical;
 use serde::{Deserialize, Serialize};
@@ -472,11 +476,10 @@ impl Plugin for GeoPlugin {
 // Reducer
 // ---------------------------------------------------------------------------
 
-/// Legacy in-memory reducer for V1 geographic payload tooling.
-///
-/// It must not be registered in a runtime because its event type is core-owned.
-pub struct GeoReducer;
+#[cfg(test)]
+struct GeoReducer;
 
+#[cfg(test)]
 impl Reducer for GeoReducer {
     fn initial(&self) -> State {
         let mut s = State::new();

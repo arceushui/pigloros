@@ -3,8 +3,8 @@ use pos_core::{
     Timeline, TimelineMeta, WallTime,
 };
 use pos_store::{
-    import_timeline_with_id, memory::MemoryStore, AppendDedupKey, AppendDedupScope, AppendIdentity,
-    EventStore, TimelineExport,
+    import_timeline, import_timeline_with_id, memory::MemoryStore, AppendDedupKey,
+    AppendDedupScope, AppendIdentity, EventStore, TimelineExport,
 };
 
 fn geographic_event(kind: &str, entity: EntityId) -> Event {
@@ -72,13 +72,23 @@ fn assert_generic_geographic_admission_is_closed(store: &mut dyn EventStore) {
         .unwrap();
     assert_eq!(store.read(timeline.id(), SeqRange::all()).unwrap().len(), 1);
 
-    let imported = TimelineExport {
-        timeline: Timeline::new(TimelineMeta::root("sensitive-import")),
-        events: vec![geographic_event("geo.location", entity)],
-        parent_fork_hash: None,
-    };
-    assert!(import_timeline_with_id(store, imported).is_err());
-    assert_eq!(store.list_timelines().unwrap().len(), 1);
+    for kind in ["geo.location", "geo.cell"] {
+        let imported = TimelineExport {
+            timeline: Timeline::new(TimelineMeta::root("sensitive-import")),
+            events: vec![geographic_event(kind, entity)],
+            parent_fork_hash: None,
+        };
+        assert!(import_timeline(store, imported).is_err());
+        assert_eq!(store.list_timelines().unwrap().len(), 1);
+
+        let imported = TimelineExport {
+            timeline: Timeline::new(TimelineMeta::root("sensitive-import-with-id")),
+            events: vec![geographic_event(kind, entity)],
+            parent_fork_hash: None,
+        };
+        assert!(import_timeline_with_id(store, imported).is_err());
+        assert_eq!(store.list_timelines().unwrap().len(), 1);
+    }
 }
 
 #[test]
@@ -122,6 +132,8 @@ fn sqlite_existing_geo_rows_are_detected_at_read_time_without_marker_backfill() 
         })
         .unwrap();
     assert_eq!(marker_count, 0);
+
+    assert_eq!(store.root_timeline_count_bounded(1).unwrap(), 0);
 
     assert!(store.read(timeline.id(), SeqRange::all()).is_err());
     let marker_count: i64 = connection

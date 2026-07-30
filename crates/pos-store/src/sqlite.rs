@@ -1384,9 +1384,18 @@ impl EventStore for SqliteStore {
                           SELECT 1 FROM geographic_presence
                           WHERE geographic_presence.timeline_id = timelines.id
                       )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM events
+                          WHERE events.timeline_id = timelines.id
+                            AND events.event_type IN (?2, ?3)
+                      )
                     LIMIT ?1
                  )",
-                params![limit],
+                params![
+                    limit,
+                    pos_core::GEOGRAPHIC_EVENT_TYPE,
+                    pos_core::GEOGRAPHIC_CELL_EVENT_TYPE,
+                ],
                 read_first_i64,
             )
             .map(sqlite_usize_or_max)
