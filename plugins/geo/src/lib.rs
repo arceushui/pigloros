@@ -30,6 +30,9 @@ pub enum GeoError {
     /// The grid resolution does not preserve the WGS84 coordinate bounds.
     #[error("spatial-cloaking resolution must partition the 90-degree WGS84 latitude half-span")]
     ResolutionDoesNotPartitionWgs84,
+    /// A compact V1 observation requires a 0.1-degree cloaked cell.
+    #[error("compact location V1 requires a 0.1-degree cloaked cell")]
+    CompactLocationV1Resolution,
     /// A coordinate is not a finite floating-point number.
     #[error("WGS84 coordinate must be finite")]
     NonFiniteCoordinate,
@@ -89,6 +92,22 @@ impl Wgs84Point {
 pub struct CloakedPoint {
     latitude: f64,
     longitude: f64,
+    resolution: f64,
+}
+
+/// A cloaked cell known to use the ADR-026 V1 0.1-degree grid.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct V1CloakedPoint(CloakedPoint);
+
+impl TryFrom<CloakedPoint> for V1CloakedPoint {
+    type Error = GeoError;
+
+    fn try_from(cell: CloakedPoint) -> Result<Self, Self::Error> {
+        if cell.resolution != COMPACT_LOCATION_V1_RESOLUTION_DEGREES {
+            return Err(GeoError::CompactLocationV1Resolution);
+        }
+        Ok(Self(cell))
+    }
 }
 
 /// A durable, minimized coarse location observation.
@@ -109,18 +128,18 @@ pub struct CompactLocationObservation {
 /// The floor-rounded index of a source-time bucket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
-pub struct SourceTimeBucket(u64);
+pub struct SourceTimeBucket(i64);
 
 impl SourceTimeBucket {
     /// Create a source-time bucket index.
     #[must_use]
-    pub const fn new(value: u64) -> Self {
+    pub const fn new(value: i64) -> Self {
         Self(value)
     }
 
     /// Return the numeric bucket index.
     #[must_use]
-    pub const fn value(self) -> u64 {
+    pub const fn value(self) -> i64 {
         self.0
     }
 }
@@ -217,15 +236,16 @@ impl CompactLocationMetadata {
 }
 
 impl CompactLocationObservation {
-    /// Construct a compact observation from a cloaked cell and typed metadata.
+    /// Construct a V1 compact observation from a typed V1 cell and metadata.
     ///
-    /// The API accepts only a [`CloakedPoint`], so it cannot retain an exact
-    /// coordinate or construct an invalid coarse WGS84 cell.
+    /// The API accepts only a [`V1CloakedPoint`], so callers cannot construct a
+    /// V1 observation from a differently resolved cell or retain an exact
+    /// coordinate.
     #[must_use]
-    pub fn new(cell: CloakedPoint, metadata: CompactLocationMetadata) -> Self {
+    pub fn new(cell: V1CloakedPoint, metadata: CompactLocationMetadata) -> Self {
         Self {
-            cell_latitude: cell.latitude(),
-            cell_longitude: cell.longitude(),
+            cell_latitude: cell.0.latitude(),
+            cell_longitude: cell.0.longitude(),
             source_time_bucket: metadata.source_time_bucket,
             schema_version: metadata.schema_version,
             policy_version: metadata.policy_version,
@@ -295,6 +315,27 @@ impl CloakedPoint {
     }
 }
 
+/// The fixed ADR-026 V1 0.1-degree spatial cloaker.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct V1SpatialCloaker;
+
+impl V1SpatialCloaker {
+    /// Construct the fixed V1 spatial cloaker.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+
+    /// Cloak a valid WGS84 point to the fixed V1 grid.
+    #[must_use]
+    pub fn cloak(self, point: Wgs84Point) -> V1CloakedPoint {
+        V1CloakedPoint(SpatialCloaker::cloak_at(
+            point,
+            COMPACT_LOCATION_V1_RESOLUTION_DEGREES,
+        ))
+    }
+}
+
 /// The entity kind string for geo entities.
 pub const ENTITY_KIND: &str = "geo-entity";
 
@@ -303,6 +344,7 @@ pub const EVENT_TYPE_LOCATION: &str = "geo.location";
 
 const WGS84_LATITUDE_HALF_SPAN_DEGREES: f64 = 90.0;
 const GRID_ALIGNMENT_TOLERANCE: f64 = 1e-9;
+const COMPACT_LOCATION_V1_RESOLUTION_DEGREES: f64 = 0.1;
 
 // ---------------------------------------------------------------------------
 // Payload types
@@ -364,9 +406,14 @@ impl SpatialCloaker {
     /// This ensures that all points within `resolution/2` map to the same cell.
     #[must_use]
     pub fn cloak(&self, point: Wgs84Point) -> CloakedPoint {
+        Self::cloak_at(point, self.resolution)
+    }
+
+    fn cloak_at(point: Wgs84Point, resolution: f64) -> CloakedPoint {
         CloakedPoint {
-            latitude: (point.latitude / self.resolution).round() * self.resolution,
-            longitude: (point.longitude / self.resolution).round() * self.resolution,
+            latitude: (point.latitude / resolution).round() * resolution,
+            longitude: (point.longitude / resolution).round() * resolution,
+            resolution,
         }
     }
 
@@ -673,7 +720,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn compact_location_uses_cloaked_cell_and_typed_v1_metadata() {
-        let cloaker = SpatialCloaker::new(0.1).unwrap();
+        let cloaker = V1SpatialCloaker::new();
         let cell = cloaker.cloak(wgs84_point(0.0, 0.0));
         let metadata = CompactLocationMetadata::v1(SourceTimeBucket::new(2));
         let location = CompactLocationObservation::new(cell, metadata);
@@ -694,6 +741,20 @@ mod tests {
                 b'u', b'r', b'c', b'e', b'_', b't', b'i', b'm', b'e', b'_', b'b', b'u', b'c', b'k',
                 b'e', b't', 2,
             ]
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn v1_compact_cells_require_the_fixed_v1_resolution() {
+        let point = wgs84_point(0.0, 0.0);
+        let valid = SpatialCloaker::new(0.1).unwrap().cloak(point);
+        assert!(V1CloakedPoint::try_from(valid).is_ok());
+
+        let invalid = SpatialCloaker::new(1.0).unwrap().cloak(point);
+        assert_eq!(
+            V1CloakedPoint::try_from(invalid),
+            Err(GeoError::CompactLocationV1Resolution)
         );
     }
 

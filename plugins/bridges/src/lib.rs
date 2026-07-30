@@ -33,7 +33,7 @@ use pos_core::{
 };
 use pos_plugin_geo::{
     CompactLocationMetadata, CompactLocationObservation, GeoError, SourceTimeBucket,
-    SpatialCloaker, Wgs84Point,
+    V1SpatialCloaker, Wgs84Point,
 };
 use serde::{Deserialize, Serialize};
 
@@ -57,7 +57,7 @@ pub const OWNTRACKS_LOCATION_POLICY_VERSION: u8 = 1;
 pub const OWNTRACKS_LOCATION_RESOLUTION_DEGREES: f64 = 0.1;
 
 /// The V1 source-time bucket size in seconds.
-pub const OWNTRACKS_SOURCE_TIME_BUCKET_SECONDS: u64 = 15 * 60;
+pub const OWNTRACKS_SOURCE_TIME_BUCKET_SECONDS: i64 = 15 * 60;
 
 /// The largest `OwnTracks` JSON body accepted by this pure decoder.
 pub const MAX_OWNTRACKS_BODY_BYTES: usize = 64 * 1024;
@@ -95,8 +95,8 @@ pub enum OwnTracksDecodeError {
     /// A location message has no numeric longitude.
     #[error("OwnTracks location requires a numeric lon")]
     MissingLongitude,
-    /// A location message has no unsigned integer timestamp.
-    #[error("OwnTracks location requires an unsigned integer tst")]
+    /// A location message has no signed integer timestamp.
+    #[error("OwnTracks location requires a signed integer tst")]
     MissingTimestamp,
     /// The supplied WGS84 coordinate cannot be minimized safely.
     #[error("OwnTracks location has an invalid WGS84 coordinate: {0}")]
@@ -149,18 +149,17 @@ pub fn decode_owntracks_location(body: &[u8]) -> Result<OwnTracksDecoded, OwnTra
     let Some(longitude) = object.get("lon").and_then(serde_json::Value::as_f64) else {
         return Err(OwnTracksDecodeError::MissingLongitude);
     };
-    let Some(source_time) = object.get("tst").and_then(serde_json::Value::as_u64) else {
+    let Some(source_time) = object.get("tst").and_then(serde_json::Value::as_i64) else {
         return Err(OwnTracksDecodeError::MissingTimestamp);
     };
     let point = match Wgs84Point::new(latitude, longitude) {
         Ok(point) => point,
         Err(error) => return Err(OwnTracksDecodeError::InvalidCoordinate(error)),
     };
-    let cloaker = SpatialCloaker::new(OWNTRACKS_LOCATION_RESOLUTION_DEGREES)
-        .expect("the fixed V1 resolution is WGS84-aligned");
+    let cloaker = V1SpatialCloaker::new();
     let cell = cloaker.cloak(point);
     let metadata = CompactLocationMetadata::v1(SourceTimeBucket::new(
-        source_time / OWNTRACKS_SOURCE_TIME_BUCKET_SECONDS,
+        source_time.div_euclid(OWNTRACKS_SOURCE_TIME_BUCKET_SECONDS),
     ));
     let compact = CompactLocationObservation::new(cell, metadata);
     Ok(OwnTracksDecoded::Location(compact))
@@ -478,6 +477,25 @@ mod tests {
             decode_owntracks_location(br#"{"_type":"location","lat":1,"lon":1,"tst":1.5}"#),
             Err(OwnTracksDecodeError::MissingTimestamp)
         );
+        assert_eq!(
+            decode_owntracks_location(
+                br#"{"_type":"location","lat":1,"lon":1,"tst":18446744073709551615}"#
+            ),
+            Err(OwnTracksDecodeError::MissingTimestamp)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn owntracks_signed_timestamps_use_euclidean_15_minute_buckets() {
+        for (timestamp, bucket) in [(-1, -1), (-900, -1), (-901, -2), (0, 0), (899, 0)] {
+            let body = format!(r#"{{"_type":"location","lat":0,"lon":0,"tst":{timestamp}}}"#);
+            let decoded = decode_owntracks_location(body.as_bytes());
+            let Ok(OwnTracksDecoded::Location(location)) = decoded else {
+                panic!("signed integer tst must minimize");
+            };
+            assert_eq!(location.source_time_bucket().value(), bucket);
+        }
     }
 
     #[test]
