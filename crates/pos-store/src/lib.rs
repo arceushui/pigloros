@@ -385,8 +385,69 @@ mod tests {
         }
         assert_eq!(store.read(timeline.id(), SeqRange::all()).unwrap().len(), 2);
 
+        assert_timeline_scoped_and_delayed_expiry(store, timeline.id(), &draft);
+
         assert_scope_withdrawal(store, timeline.id(), &draft);
         assert_timeline_deletion_removes_identities(store, timeline.id(), &draft);
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn assert_timeline_scoped_and_delayed_expiry(
+        store: &mut dyn EventStore,
+        timeline: pos_core::TimelineId,
+        draft: &EventDraft,
+    ) {
+        let other_timeline = store.create_timeline("append-or-duplicate-other").unwrap();
+        // A target Timeline is part of the admission boundary: reusing an
+        // opaque key against another Timeline must not disclose the retained
+        // Event or return its EventId.
+        assert_eq!(
+            store
+                .append_or_duplicate(
+                    other_timeline.id(),
+                    append_identity(1, 2),
+                    WallTime::from_micros(21),
+                    draft.clone(),
+                )
+                .unwrap(),
+            AppendOrDuplicateOutcome::Conflict
+        );
+        assert!(matches!(
+            store.append_or_duplicate(
+                pos_core::TimelineId::new(),
+                append_identity(1, 2),
+                WallTime::from_micros(21),
+                draft.clone(),
+            ),
+            Err(pos_core::CoreError::TimelineNotFound(_))
+        ));
+
+        // Admission must replace a logically expired identity even when
+        // asynchronous maintenance has not purged it yet.
+        let delayed_identity = append_identity(13, 14);
+        let delayed_draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new("test.delayed-expiry"),
+            CanonicalBytes::from_vec(b"delayed".to_vec()),
+        );
+        let delayed_first = store
+            .append_or_duplicate(
+                timeline,
+                delayed_identity,
+                WallTime::from_micros(100),
+                delayed_draft.clone(),
+            )
+            .unwrap();
+        let _ = appended_event_id(delayed_first);
+        assert!(matches!(
+            store.append_or_duplicate(
+                timeline,
+                delayed_identity,
+                WallTime::from_micros(100 + APPEND_IDENTITY_RETENTION_MICROS),
+                delayed_draft,
+            ),
+            Ok(AppendOrDuplicateOutcome::Appended(_))
+        ));
     }
 
     #[test]

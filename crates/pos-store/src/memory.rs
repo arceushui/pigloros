@@ -43,6 +43,7 @@ pub struct MemoryStore {
 
 #[derive(Clone)]
 struct AppendIdentityRecord {
+    timeline: TimelineId,
     scope: AppendDedupScope,
     event_id: EventId,
     expires_at: WallTime,
@@ -402,14 +403,21 @@ impl EventStore for MemoryStore {
         admitted_at: WallTime,
         draft: EventDraft,
     ) -> Result<AppendOrDuplicateOutcome, CoreError> {
+        // Validate the target before consulting opaque identity state.  This
+        // keeps missing targets from revealing whether an identity exists.
+        self.timeline(timeline)?;
         if let Some(record) = self.append_identities.get(&identity.dedup_key) {
-            return if Self::retained_content_matches(&record.retained_content, &draft) {
-                Ok(AppendOrDuplicateOutcome::Duplicate {
+            if record.expires_at <= admitted_at {
+                self.append_identities.remove(&identity.dedup_key);
+            } else if record.timeline != timeline {
+                return Ok(AppendOrDuplicateOutcome::Conflict);
+            } else if Self::retained_content_matches(&record.retained_content, &draft) {
+                return Ok(AppendOrDuplicateOutcome::Duplicate {
                     event_id: record.event_id,
-                })
+                });
             } else {
-                Ok(AppendOrDuplicateOutcome::Conflict)
-            };
+                return Ok(AppendOrDuplicateOutcome::Conflict);
+            }
         }
 
         self.append(timeline, std::slice::from_ref(&draft))
@@ -420,6 +428,7 @@ impl EventStore for MemoryStore {
                 self.append_identities.insert(
                     identity.dedup_key,
                     AppendIdentityRecord {
+                        timeline,
                         scope: identity.scope,
                         event_id: event.id,
                         expires_at: append_identity_expires_at(admitted_at),
