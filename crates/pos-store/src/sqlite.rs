@@ -268,6 +268,12 @@ impl SqliteStore {
         CoreError::Storage(error.to_string())
     }
 
+    fn optional_sequence_query(
+        result: rusqlite::Result<Option<i64>>,
+    ) -> Result<Option<i64>, CoreError> {
+        result.map_err(|error| CoreError::Storage(error.to_string()))
+    }
+
     fn require_utf8_encoding(conn: &Connection) -> Result<(), CoreError> {
         let encoding: String = conn
             .query_row("PRAGMA encoding", [], |row| row.get(0))
@@ -1159,8 +1165,28 @@ impl EventStore for SqliteStore {
         if !timeline_exists {
             return Err(CoreError::TimelineNotFound(timeline));
         }
-        let events = Self::read_own_events_limited_on(&self.conn, timeline, Seq::ZERO, None, None)?;
-        Ok(events.into_iter().find(|event| event.id == event_id))
+        Self::optional_sequence_query(
+            self.conn
+                .query_row(
+                    "SELECT seq FROM events WHERE timeline_id = ?1 AND event_id = ?2",
+                    params![timeline.to_string(), event_id.to_string()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional(),
+        )
+        .and_then(|seq| {
+            let Some(seq) = seq else {
+                return Ok(None);
+            };
+            let mut events = Self::read_own_events_limited_on(
+                &self.conn,
+                timeline,
+                Seq::from_u64(u64::try_from(seq).unwrap_or(0)),
+                Some(Seq::from_u64(u64::try_from(seq).unwrap_or(0))),
+                Some(1),
+            )?;
+            Ok(events.pop())
+        })
     }
 
     fn purge_expired_append_identities_bounded(
@@ -1898,6 +1924,21 @@ mod tests {
         store.conn.execute("DROP TABLE events", []).unwrap();
         let error = store.read_event_by_id(timeline.id(), EventId::new());
         assert!(error.unwrap_err().to_string().contains("storage error"));
+    }
+
+    #[test]
+    fn optional_sequence_query_maps_all_result_variants() {
+        assert_eq!(
+            SqliteStore::optional_sequence_query(Ok(Some(7))).unwrap(),
+            Some(7)
+        );
+        assert_eq!(
+            SqliteStore::optional_sequence_query(Ok(None)).unwrap(),
+            None
+        );
+        let error =
+            SqliteStore::optional_sequence_query(Err(rusqlite::Error::InvalidQuery)).unwrap_err();
+        assert!(error.to_string().contains("storage error"));
     }
 
     #[test]
