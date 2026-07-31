@@ -296,9 +296,9 @@ impl IntoResponse for GatewayError {
             | GatewayError::UnsupportedAction(_)
             | GatewayError::InvalidPageLimit { .. }
             | GatewayError::InvalidEventsQuery(_) => StatusCode::BAD_REQUEST,
-            GatewayError::TimelineLimitReached { .. } | GatewayError::EventLimitReached { .. } => {
-                StatusCode::TOO_MANY_REQUESTS
-            }
+            GatewayError::TimelineLimitReached { .. }
+            | GatewayError::EventLimitReached { .. }
+            | GatewayError::StoreExecutorSaturated => StatusCode::TOO_MANY_REQUESTS,
             GatewayError::EventPayloadTooLarge { .. }
             | GatewayError::EventMetadataTooLarge { .. }
             | GatewayError::ForkDepthTooLarge { .. }
@@ -310,7 +310,9 @@ impl IntoResponse for GatewayError {
             | GatewayError::Store(CoreError::TimelineNotFound(_)) => StatusCode::NOT_FOUND,
             GatewayError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
             GatewayError::LedgerWriteDisabled => StatusCode::FORBIDDEN,
-            GatewayError::LedgerUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            GatewayError::StoreExecutorClosed | GatewayError::LedgerUnavailable => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             GatewayError::Ledger(le) => match le {
                 pos_plugin_ledger::LedgerError::InvalidPrediction(_) => {
                     StatusCode::UNPROCESSABLE_ENTITY
@@ -1162,6 +1164,8 @@ mod tests {
         assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
         let r = GatewayError::EventLimitReached { maximum: 1 }.into_response();
         assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        let r = GatewayError::StoreExecutorSaturated.into_response();
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
         let r = GatewayError::EventPayloadTooLarge { maximum: 1 }.into_response();
         assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
         let r = GatewayError::EventMetadataTooLarge {
@@ -1180,6 +1184,8 @@ mod tests {
         assert_eq!(r.status(), StatusCode::NOT_FOUND);
         let r = GatewayError::Store(CoreError::Storage("boom".into())).into_response();
         assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let r = GatewayError::StoreExecutorClosed.into_response();
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         let r = GatewayError::LedgerWriteDisabled.into_response();
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
         let r = GatewayError::LedgerUnavailable.into_response();

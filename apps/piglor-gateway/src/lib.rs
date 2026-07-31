@@ -209,6 +209,12 @@ pub enum GatewayError {
     /// Sensitive and absent resources share one bounded, non-enumerable shape.
     #[error("resource not found")]
     ResourceUnavailable,
+    /// The bounded `StoreExecutor` queue cannot accept another command.
+    #[error("store executor queue saturated")]
+    StoreExecutorSaturated,
+    /// The `StoreExecutor` is no longer accepting commands.
+    #[error("store executor closed")]
+    StoreExecutorClosed,
     /// Underlying store failure.
     #[error(transparent)]
     Store(#[from] CoreError),
@@ -221,6 +227,16 @@ pub enum GatewayError {
     /// Ledger store is not configured.
     #[error("ledger store not available")]
     LedgerUnavailable,
+}
+
+impl From<executor::StoreExecutorError> for GatewayError {
+    fn from(error: executor::StoreExecutorError) -> Self {
+        match error {
+            executor::StoreExecutorError::Saturated => Self::StoreExecutorSaturated,
+            executor::StoreExecutorError::Closed => Self::StoreExecutorClosed,
+            executor::StoreExecutorError::Store(error) => Self::Store(error),
+        }
+    }
 }
 
 impl Gateway {
@@ -318,23 +334,26 @@ impl Gateway {
         );
         let mut events = match self.store.read(id, range, bounds).await {
             Ok(events) => events,
-            Err(CoreError::PayloadTooLarge { .. }) => {
+            Err(executor::StoreExecutorError::Store(CoreError::PayloadTooLarge { .. })) => {
                 return Err(GatewayError::EventPayloadTooLarge {
                     maximum: MAX_EVENT_PAYLOAD_BYTES,
                 })
             }
-            Err(CoreError::EventMetadataTooLarge { field, .. }) => {
+            Err(executor::StoreExecutorError::Store(CoreError::EventMetadataTooLarge {
+                field,
+                ..
+            })) => {
                 return Err(GatewayError::EventMetadataTooLarge {
                     field,
                     maximum: MAX_EVENT_TYPE_BYTES,
                 })
             }
-            Err(CoreError::ForkDepthTooLarge { .. }) => {
+            Err(executor::StoreExecutorError::Store(CoreError::ForkDepthTooLarge { .. })) => {
                 return Err(GatewayError::ForkDepthTooLarge {
                     maximum: MAX_FORK_DEPTH,
                 })
             }
-            Err(error) => return Err(GatewayError::Store(error)),
+            Err(error) => return Err(error.into()),
         };
         if events
             .iter()
@@ -515,12 +534,14 @@ impl Gateway {
                 .await
             {
                 Ok(committed) => committed,
-                Err(CoreError::Storage(message)) if message == "event limit reached" => {
+                Err(executor::StoreExecutorError::Store(CoreError::Storage(message)))
+                    if message == "event limit reached" =>
+                {
                     return Err(GatewayError::EventLimitReached {
                         maximum: self.limits.max_events_per_timeline,
                     });
                 }
-                Err(error) => return Err(GatewayError::Store(error)),
+                Err(error) => return Err(error.into()),
             };
             match committed.pop() {
                 Some(event) => event,
@@ -564,6 +585,15 @@ impl Gateway {
         Self {
             store: executor::StoreExecutor::new(store),
             bus: broadcast::channel(capacity).0,
+            limits: GatewayLimits::LOCAL_DEFAULT,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_executor_for_test(store: executor::StoreExecutor) -> Self {
+        Self {
+            store,
+            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
         }
     }
@@ -765,6 +795,13 @@ mod tests {
         timeline::TimelineMeta,
     };
     use pos_store::{open_store, StoreConfig};
+    use std::{
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        },
+        time::Duration,
+    };
     use tokio::sync::broadcast;
 
     fn memory_gw() -> Gateway {
@@ -925,6 +962,151 @@ mod tests {
             }
             Ok(None)
         }
+    }
+
+    struct BlockFirstRootCount {
+        inner: Box<dyn EventStore>,
+        started: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+        block: AtomicBool,
+    }
+
+    impl EventStore for BlockFirstRootCount {
+        fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
+            self.inner.create_timeline(name)
+        }
+
+        fn append(
+            &mut self,
+            timeline: TimelineId,
+            drafts: &[EventDraft],
+        ) -> Result<Vec<Event>, CoreError> {
+            self.inner.append(timeline, drafts)
+        }
+
+        fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            self.inner.read(timeline, range)
+        }
+
+        fn read_bounded(
+            &self,
+            timeline: TimelineId,
+            range: SeqRange,
+            bounds: EventReadBounds,
+        ) -> Result<Vec<Event>, CoreError> {
+            self.inner.read_bounded(timeline, range, bounds)
+        }
+
+        fn fork(
+            &mut self,
+            parent: TimelineId,
+            at_seq: Seq,
+            name: &str,
+        ) -> Result<Timeline, CoreError> {
+            self.inner.fork(parent, at_seq, name)
+        }
+
+        fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+            self.inner.list_timelines()
+        }
+
+        fn root_timeline_count_bounded(&self, maximum: usize) -> Result<usize, CoreError> {
+            if self.block.swap(false, Ordering::SeqCst) {
+                self.started.send(()).unwrap();
+                self.release.recv().unwrap();
+            }
+            self.inner.root_timeline_count_bounded(maximum)
+        }
+
+        fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+            self.inner.get_timeline(id)
+        }
+    }
+
+    #[tokio::test]
+    async fn closed_executor_is_typed_at_gateway_seam() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let _ = std::thread::spawn(move || drop(rx.blocking_recv()));
+        let gateway = Gateway::with_executor_for_test(executor::StoreExecutor { tx });
+
+        assert!(matches!(
+            gateway.create_timeline("closed").await,
+            Err(GatewayError::StoreExecutorClosed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn closed_queue_is_typed_at_gateway_seam() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx);
+        let gateway = Gateway::with_executor_for_test(executor::StoreExecutor { tx });
+
+        assert!(matches!(
+            gateway.create_timeline("closed-queue").await,
+            Err(GatewayError::StoreExecutorClosed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn saturated_gateway_append_is_typed_and_does_not_mutate_or_publish() {
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let timeline = store.create_timeline("saturation-target").unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let gateway = Gateway::with_executor_for_test(executor::StoreExecutor::new(Box::new(
+            BlockFirstRootCount {
+                inner: store,
+                started: started_tx,
+                release: release_rx,
+                block: AtomicBool::new(true),
+            },
+        )));
+        let blocker_gateway = gateway.clone();
+        let blocker =
+            tokio::spawn(
+                async move { blocker_gateway.create_timeline("block-store-worker").await },
+            );
+        tokio::task::yield_now().await;
+        assert!(started_rx.recv_timeout(Duration::from_secs(1)).is_ok());
+
+        let mut queued = Vec::new();
+        for _ in 0..executor::QUEUE_CAPACITY {
+            let queued_gateway = gateway.clone();
+            queued.push(tokio::spawn(async move {
+                queued_gateway
+                    .create_timeline("fill-store-executor-queue")
+                    .await
+            }));
+            tokio::task::yield_now().await;
+        }
+        let mut notices = gateway.subscribe();
+
+        let error = gateway
+            .append_action(
+                &timeline.id().to_string(),
+                &EntityId::new().to_string(),
+                EVENT_TYPE_ACTION,
+                &serde_json::json!({"choice": "saturated"}),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, GatewayError::StoreExecutorSaturated));
+        release_tx.send(()).unwrap();
+        assert!(blocker.await.unwrap().is_ok());
+        for request in queued {
+            assert!(request.await.is_ok());
+        }
+        assert!(matches!(
+            notices.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+
+        let page = gateway
+            .read_events_page(&timeline.id().to_string(), 0, 1)
+            .await
+            .unwrap();
+        assert!(page.events.is_empty());
     }
 
     #[tokio::test]
