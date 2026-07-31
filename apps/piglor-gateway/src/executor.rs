@@ -23,55 +23,44 @@ const QUEUE_CAPACITY: usize = 64;
 enum Command {
     Purge {
         limit: NonZeroUsize,
-        reply: oneshot::Sender<Result<Response, CoreError>>,
+        reply: oneshot::Sender<Result<PurgeOutcome, CoreError>>,
     },
     RootCount {
         maximum: usize,
-        reply: oneshot::Sender<Result<Response, CoreError>>,
+        reply: oneshot::Sender<Result<usize, CoreError>>,
     },
     Create {
         name: String,
-        reply: oneshot::Sender<Result<Response, CoreError>>,
+        reply: oneshot::Sender<Result<Timeline, CoreError>>,
     },
     Read {
         timeline: TimelineId,
         range: SeqRange,
         bounds: EventReadBounds,
-        reply: oneshot::Sender<Result<Response, CoreError>>,
+        reply: oneshot::Sender<Result<Vec<Event>, CoreError>>,
     },
     ReadOne {
         timeline: TimelineId,
         event: EventId,
-        reply: oneshot::Sender<Result<Response, CoreError>>,
+        reply: oneshot::Sender<Result<Option<Event>, CoreError>>,
     },
     Append {
         timeline: TimelineId,
         drafts: Vec<EventDraft>,
         maximum: Option<u64>,
-        reply: oneshot::Sender<Result<Response, CoreError>>,
+        reply: oneshot::Sender<Result<Vec<Event>, CoreError>>,
     },
     AppendIdentified {
         timeline: TimelineId,
         identity: AppendIdentity,
         intent: AppendIntent,
         maximum: u64,
-        reply: oneshot::Sender<Result<Response, CoreError>>,
+        reply: oneshot::Sender<Result<Option<AppendOrDuplicateOutcome>, CoreError>>,
     },
     GetTimeline {
         timeline: TimelineId,
-        reply: oneshot::Sender<Result<Response, CoreError>>,
+        reply: oneshot::Sender<Result<Option<Timeline>, CoreError>>,
     },
-}
-
-pub(crate) enum Response {
-    Purge(PurgeOutcome),
-    RootCount(usize),
-    Timeline(Option<Timeline>),
-    CreatedTimeline(Timeline),
-    Events(Vec<Event>),
-    Event(Option<Event>),
-    Appended(Vec<Event>),
-    Identified(Option<AppendOrDuplicateOutcome>),
 }
 
 #[derive(Clone)]
@@ -94,57 +83,43 @@ impl StoreExecutor {
         Self { tx }
     }
 
-    async fn submit(&self, command: Command) -> Result<Response, CoreError> {
-        let (tx, rx) = oneshot::channel();
-        // Replace the placeholder sender with the real one by rebuilding the command.
-        let command = command.with_reply(tx);
-        self.tx.try_send(command).map_err(|error| match error {
-            mpsc::error::TrySendError::Full(_) => {
-                CoreError::Storage("store executor queue saturated".to_owned())
-            }
-            mpsc::error::TrySendError::Closed(_) => {
-                CoreError::Storage("store executor closed".to_owned())
-            }
-        })?;
-        rx.await
-            .map_err(|_| CoreError::Storage("store executor closed".to_owned()))?
+    async fn submit<T>(
+        &self,
+        build: impl FnOnce(oneshot::Sender<Result<T, CoreError>>) -> Command,
+    ) -> Result<T, CoreError> {
+        let result = match self.enqueue(build) {
+            Ok(result) => result,
+            Err(error) => return Err(error),
+        };
+        match result.await {
+            Ok(result) => result,
+            Err(_) => Err(closed_error()),
+        }
+    }
+
+    fn enqueue<T>(
+        &self,
+        build: impl FnOnce(oneshot::Sender<Result<T, CoreError>>) -> Command,
+    ) -> Result<oneshot::Receiver<Result<T, CoreError>>, CoreError> {
+        let (reply, result) = oneshot::channel();
+        match self.tx.try_send(build(reply)) {
+            Ok(()) => Ok(result),
+            Err(error) => Err(match error {
+                mpsc::error::TrySendError::Full(_) => saturated_error(),
+                mpsc::error::TrySendError::Closed(_) => closed_error(),
+            }),
+        }
     }
 
     pub(crate) async fn purge(&self, limit: NonZeroUsize) -> Result<PurgeOutcome, CoreError> {
-        match self
-            .submit(Command::Purge {
-                limit,
-                reply: oneshot::channel().0,
-            })
-            .await?
-        {
-            Response::Purge(v) => Ok(v),
-            _ => Err(type_mismatch()),
-        }
+        self.submit(|reply| Command::Purge { limit, reply }).await
     }
     pub(crate) async fn root_count(&self, maximum: usize) -> Result<usize, CoreError> {
-        match self
-            .submit(Command::RootCount {
-                maximum,
-                reply: oneshot::channel().0,
-            })
-            .await?
-        {
-            Response::RootCount(v) => Ok(v),
-            _ => Err(type_mismatch()),
-        }
+        self.submit(|reply| Command::RootCount { maximum, reply })
+            .await
     }
     pub(crate) async fn create(&self, name: String) -> Result<Timeline, CoreError> {
-        match self
-            .submit(Command::Create {
-                name,
-                reply: oneshot::channel().0,
-            })
-            .await?
-        {
-            Response::CreatedTimeline(v) => Ok(v),
-            _ => Err(type_mismatch()),
-        }
+        self.submit(|reply| Command::Create { name, reply }).await
     }
     pub(crate) async fn read(
         &self,
@@ -152,35 +127,25 @@ impl StoreExecutor {
         range: SeqRange,
         bounds: EventReadBounds,
     ) -> Result<Vec<Event>, CoreError> {
-        match self
-            .submit(Command::Read {
-                timeline,
-                range,
-                bounds,
-                reply: oneshot::channel().0,
-            })
-            .await?
-        {
-            Response::Events(v) => Ok(v),
-            _ => Err(type_mismatch()),
-        }
+        self.submit(|reply| Command::Read {
+            timeline,
+            range,
+            bounds,
+            reply,
+        })
+        .await
     }
     pub(crate) async fn read_one(
         &self,
         timeline: TimelineId,
         event: EventId,
     ) -> Result<Option<Event>, CoreError> {
-        match self
-            .submit(Command::ReadOne {
-                timeline,
-                event,
-                reply: oneshot::channel().0,
-            })
-            .await?
-        {
-            Response::Event(v) => Ok(v),
-            _ => Err(type_mismatch()),
-        }
+        self.submit(|reply| Command::ReadOne {
+            timeline,
+            event,
+            reply,
+        })
+        .await
     }
     pub(crate) async fn append(
         &self,
@@ -188,18 +153,13 @@ impl StoreExecutor {
         drafts: Vec<EventDraft>,
         maximum: Option<u64>,
     ) -> Result<Vec<Event>, CoreError> {
-        match self
-            .submit(Command::Append {
-                timeline,
-                drafts,
-                maximum,
-                reply: oneshot::channel().0,
-            })
-            .await?
-        {
-            Response::Appended(v) => Ok(v),
-            _ => Err(type_mismatch()),
-        }
+        self.submit(|reply| Command::Append {
+            timeline,
+            drafts,
+            maximum,
+            reply,
+        })
+        .await
     }
     pub(crate) async fn append_identified(
         &self,
@@ -208,145 +168,65 @@ impl StoreExecutor {
         intent: AppendIntent,
         maximum: u64,
     ) -> Result<Option<AppendOrDuplicateOutcome>, CoreError> {
-        match self
-            .submit(Command::AppendIdentified {
-                timeline,
-                identity,
-                intent,
-                maximum,
-                reply: oneshot::channel().0,
-            })
-            .await?
-        {
-            Response::Identified(v) => Ok(v),
-            _ => Err(type_mismatch()),
-        }
+        self.submit(|reply| Command::AppendIdentified {
+            timeline,
+            identity,
+            intent,
+            maximum,
+            reply,
+        })
+        .await
     }
     pub(crate) async fn timeline(
         &self,
         timeline: TimelineId,
     ) -> Result<Option<Timeline>, CoreError> {
-        match self
-            .submit(Command::GetTimeline {
-                timeline,
-                reply: oneshot::channel().0,
-            })
-            .await?
-        {
-            Response::Timeline(v) => Ok(v),
-            _ => Err(type_mismatch()),
-        }
-    }
-}
-
-impl Command {
-    fn with_reply(self, reply: oneshot::Sender<Result<Response, CoreError>>) -> Self {
-        match self {
-            Self::Purge { limit, .. } => Self::Purge { limit, reply },
-            Self::RootCount { maximum, .. } => Self::RootCount { maximum, reply },
-            Self::Create { name, .. } => Self::Create { name, reply },
-            Self::Read {
-                timeline,
-                range,
-                bounds,
-                ..
-            } => Self::Read {
-                timeline,
-                range,
-                bounds,
-                reply,
-            },
-            Self::ReadOne {
-                timeline, event, ..
-            } => Self::ReadOne {
-                timeline,
-                event,
-                reply,
-            },
-            Self::Append {
-                timeline,
-                drafts,
-                maximum,
-                ..
-            } => Self::Append {
-                timeline,
-                drafts,
-                maximum,
-                reply,
-            },
-            Self::AppendIdentified {
-                timeline,
-                identity,
-                intent,
-                maximum,
-                ..
-            } => Self::AppendIdentified {
-                timeline,
-                identity,
-                intent,
-                maximum,
-                reply,
-            },
-            Self::GetTimeline { timeline, .. } => Self::GetTimeline { timeline, reply },
-        }
+        self.submit(|reply| Command::GetTimeline { timeline, reply })
+            .await
     }
 }
 
 fn execute(store: &mut dyn EventStore, command: Command) {
-    let (reply, result) = match command {
-        Command::Purge { limit, reply } => (
-            reply,
-            store
-                .purge_expired_append_identities_bounded(limit)
-                .map(Response::Purge),
-        ),
-        Command::RootCount { maximum, reply } => (
-            reply,
-            store
-                .root_timeline_count_bounded(maximum)
-                .map(Response::RootCount),
-        ),
-        Command::Create { name, reply } => (
-            reply,
-            store.create_timeline(&name).map(Response::CreatedTimeline),
-        ),
+    match command {
+        Command::Purge { limit, reply } => {
+            let _ = reply.send(store.purge_expired_append_identities_bounded(limit));
+        }
+        Command::RootCount { maximum, reply } => {
+            let _ = reply.send(store.root_timeline_count_bounded(maximum));
+        }
+        Command::Create { name, reply } => {
+            let _ = reply.send(store.create_timeline(&name));
+        }
         Command::Read {
             timeline,
             range,
             bounds,
             reply,
-        } => (
-            reply,
-            store
-                .read_bounded(timeline, range, bounds)
-                .map(Response::Events),
-        ),
+        } => {
+            let _ = reply.send(store.read_bounded(timeline, range, bounds));
+        }
         Command::ReadOne {
             timeline,
             event,
             reply,
-        } => (
-            reply,
-            store.read_event_by_id(timeline, event).map(Response::Event),
-        ),
+        } => {
+            let _ = reply.send(store.read_event_by_id(timeline, event));
+        }
         Command::Append {
             timeline,
             drafts,
             maximum,
             reply,
         } => {
-            let result = store
-                .get_timeline(timeline)
-                .and_then(|meta| {
-                    if let (Some(maximum), Some(meta)) = (maximum, meta) {
-                        if meta.head.as_u64() >= maximum {
-                            return Err(CoreError::Storage("event limit reached".to_owned()));
-                        }
+            let result = store.get_timeline(timeline).and_then(|meta| {
+                if let (Some(maximum), Some(meta)) = (maximum, meta) {
+                    if meta.head.as_u64() >= maximum {
+                        return Err(CoreError::Storage("event limit reached".to_owned()));
                     }
-                    store.append(timeline, &drafts)
-                })
-                .map(Response::Appended);
-            (reply, result)
+                }
+                store.append(timeline, &drafts)
+            });
+            let _ = reply.send(result);
         }
         Command::AppendIdentified {
             timeline,
@@ -354,19 +234,53 @@ fn execute(store: &mut dyn EventStore, command: Command) {
             intent,
             maximum,
             reply,
-        } => (
-            reply,
-            store
-                .append_intent_or_duplicate_bounded(timeline, identity, intent, maximum)
-                .map(Response::Identified),
-        ),
-        Command::GetTimeline { timeline, reply } => {
-            (reply, store.get_timeline(timeline).map(Response::Timeline))
+        } => {
+            let _ = reply.send(
+                store.append_intent_or_duplicate_bounded(timeline, identity, intent, maximum),
+            );
         }
-    };
-    let _ = reply.send(result);
+        Command::GetTimeline { timeline, reply } => {
+            let _ = reply.send(store.get_timeline(timeline));
+        }
+    }
 }
 
-fn type_mismatch() -> CoreError {
-    CoreError::Storage("store executor response type mismatch".to_owned())
+fn saturated_error() -> CoreError {
+    CoreError::Storage("store executor queue saturated".to_owned())
+}
+
+fn closed_error() -> CoreError {
+    CoreError::Storage("store executor closed".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Command, StoreExecutor, QUEUE_CAPACITY};
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn closed_executor_reports_closed_through_public_operation() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let executor = StoreExecutor { tx };
+
+        let error = executor.root_count(1).await.unwrap_err().to_string();
+
+        assert!(error.contains("store executor closed"));
+    }
+
+    #[tokio::test]
+    async fn full_queue_reports_saturation_through_public_operation() {
+        let (tx, _rx) = mpsc::channel(QUEUE_CAPACITY);
+        let executor = StoreExecutor { tx };
+        for _ in 0..QUEUE_CAPACITY {
+            executor
+                .enqueue(|reply| Command::RootCount { maximum: 1, reply })
+                .unwrap();
+        }
+
+        let error = executor.root_count(1).await.unwrap_err().to_string();
+
+        assert!(error.contains("store executor queue saturated"));
+    }
 }
