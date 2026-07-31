@@ -6,6 +6,7 @@
 //! JSON HTTP envelope; CBOR payloads into [`EventStore`]. No auth in this slice.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
+mod executor;
 mod http;
 mod ledger_config;
 
@@ -27,9 +28,8 @@ use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TY
 use pos_plugin_world::EVENT_TYPE_ACTION;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
-use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::broadcast;
 use ulid::Ulid;
 
 /// Pre-registered Prediction Ledger entry view (Redmine #58 / OKR KR4.6).
@@ -114,14 +114,14 @@ pub const MAX_EVENTS_PER_TIMELINE: u64 = 10_000;
 /// Default broadcast channel capacity for live event fan-out.
 pub const EVENT_BUS_CAPACITY: usize = 256;
 
-/// Shared Gateway handle (async store mutex + live Event bus).
+/// Shared Gateway handle (bounded `StoreExecutor` + live Event bus).
 ///
 /// The supported local-first write boundary is one `Gateway` instance per store:
-/// its mutex makes each owned-Event ceiling check and append one critical section.
+/// its executor makes each owned-Event ceiling check and append one critical section.
 /// Concurrent mutation through another process is outside this contract.
 #[derive(Clone)]
 pub struct Gateway {
-    store: Arc<Mutex<Box<dyn EventStore>>>,
+    store: executor::StoreExecutor,
     bus: broadcast::Sender<EventNotice>,
     limits: GatewayLimits,
 }
@@ -229,7 +229,7 @@ impl Gateway {
     pub fn new(store: Box<dyn EventStore>) -> Self {
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         Self {
-            store: Arc::new(Mutex::new(store)),
+            store: executor::StoreExecutor::new(store),
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
         }
@@ -247,7 +247,7 @@ impl Gateway {
     /// Run one bounded deduplication-maintenance pass.
     ///
     /// The server lifecycle supervisor owns scheduling and readiness; this
-    /// method only holds the store lock for the bounded adapter operation.
+    /// method only submits a bounded command to the `StoreExecutor`.
     ///
     /// # Errors
     /// Returns [`GatewayError::Store`] when the bounded maintenance pass fails.
@@ -255,8 +255,7 @@ impl Gateway {
         &self,
         limit: NonZeroUsize,
     ) -> Result<PurgeOutcome, GatewayError> {
-        let mut guard = self.store.lock().await;
-        Ok(guard.purge_expired_append_identities_bounded(limit)?)
+        Ok(self.store.purge(limit).await?)
     }
 
     /// Create a root Timeline.
@@ -266,14 +265,13 @@ impl Gateway {
     /// # Errors
     /// Returns [`GatewayError::Store`] on backend failure.
     pub async fn create_timeline(&self, name: &str) -> Result<Timeline, GatewayError> {
-        let mut guard = self.store.lock().await;
-        let root_count = guard.root_timeline_count_bounded(self.limits.max_timelines)?;
+        let root_count = self.store.root_count(self.limits.max_timelines).await?;
         if root_count >= self.limits.max_timelines {
             return Err(GatewayError::TimelineLimitReached {
                 maximum: self.limits.max_timelines,
             });
         }
-        Ok(guard.create_timeline(name)?)
+        Ok(self.store.create(name.to_owned()).await?)
     }
 
     /// Poll one bounded page of Timeline events, starting at `from_seq` (inclusive).
@@ -312,14 +310,13 @@ impl Gateway {
             from: Seq::from_u64(first_seq),
             to: Some(Seq::from_u64(last_seq)),
         };
-        let guard = self.store.lock().await;
         let bounds = EventReadBounds::new(
             MAX_EVENT_PAYLOAD_BYTES,
             MAX_EVENT_TYPE_BYTES,
             MAX_FORK_DEPTH,
             limit + 1,
         );
-        let mut events = match guard.read_bounded(id, range, bounds) {
+        let mut events = match self.store.read(id, range, bounds).await {
             Ok(events) => events,
             Err(CoreError::PayloadTooLarge { .. }) => {
                 return Err(GatewayError::EventPayloadTooLarge {
@@ -439,18 +436,20 @@ impl Gateway {
         }
         let identity = ingress_identity(timeline, entity, ingress_id);
         let outcome = {
-            let mut guard = self.store.lock().await;
-            let timeline_meta = guard
-                .get_timeline(timeline)?
+            let timeline_meta = self
+                .store
+                .timeline(timeline)
+                .await?
                 .ok_or(GatewayError::Store(CoreError::TimelineNotFound(timeline)))?;
             let _ = timeline_meta;
-            guard
-                .append_intent_or_duplicate_bounded(
+            self.store
+                .append_identified(
                     timeline,
                     identity,
                     AppendIntent::new(&draft),
                     self.limits.max_events_per_timeline,
-                )?
+                )
+                .await?
                 .ok_or(GatewayError::EventLimitReached {
                     maximum: self.limits.max_events_per_timeline,
                 })?
@@ -503,19 +502,26 @@ impl Gateway {
                 maximum: MAX_EVENTS_RESPONSE_BYTES,
             });
         }
-        // Release the store lock before bus fan-out so future WS handlers can
-        // re-enter the store without deadlocking on the same task.
+        // Fan out only after the committed command returns so subscribers can
+        // safely issue a follow-up read.
         let event = {
-            let mut guard = self.store.lock().await;
-            let timeline_meta = guard
-                .get_timeline(timeline)?
-                .ok_or(GatewayError::Store(CoreError::TimelineNotFound(timeline)))?;
-            if timeline_meta.head.as_u64() >= self.limits.max_events_per_timeline {
-                return Err(GatewayError::EventLimitReached {
-                    maximum: self.limits.max_events_per_timeline,
-                });
-            }
-            let mut committed = guard.append(timeline, &[draft])?;
+            let mut committed = match self
+                .store
+                .append(
+                    timeline,
+                    vec![draft],
+                    Some(self.limits.max_events_per_timeline),
+                )
+                .await
+            {
+                Ok(committed) => committed,
+                Err(CoreError::Storage(message)) if message == "event limit reached" => {
+                    return Err(GatewayError::EventLimitReached {
+                        maximum: self.limits.max_events_per_timeline,
+                    });
+                }
+                Err(error) => return Err(GatewayError::Store(error)),
+            };
             match committed.pop() {
                 Some(event) => event,
                 None => {
@@ -545,9 +551,9 @@ impl Gateway {
         timeline: TimelineId,
         event_id: pos_core::ids::EventId,
     ) -> Result<Event, GatewayError> {
-        let guard = self.store.lock().await;
-        guard
-            .read_event_by_id(timeline, event_id)?
+        self.store
+            .read_one(timeline, event_id)
+            .await?
             .ok_or(GatewayError::Store(CoreError::Storage(
                 "duplicate identity points to a missing Event".to_owned(),
             )))
@@ -556,7 +562,7 @@ impl Gateway {
     #[cfg(test)]
     fn with_bus_capacity(store: Box<dyn EventStore>, capacity: usize) -> Self {
         Self {
-            store: Arc::new(Mutex::new(store)),
+            store: executor::StoreExecutor::new(store),
             bus: broadcast::channel(capacity).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
         }
@@ -565,7 +571,7 @@ impl Gateway {
     #[cfg(test)]
     fn with_limits(store: Box<dyn EventStore>, limits: GatewayLimits) -> Self {
         Self {
-            store: Arc::new(Mutex::new(store)),
+            store: executor::StoreExecutor::new(store),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits,
         }
@@ -759,8 +765,7 @@ mod tests {
         timeline::TimelineMeta,
     };
     use pos_store::{open_store, StoreConfig};
-    use std::sync::Arc;
-    use tokio::sync::{broadcast, Mutex};
+    use tokio::sync::broadcast;
 
     fn memory_gw() -> Gateway {
         Gateway::new(open_store(StoreConfig::Memory).unwrap())
@@ -1741,8 +1746,11 @@ mod tests {
             })
             .collect();
         {
-            let mut store = gateway.store.lock().await;
-            store.append(timeline.id(), &drafts).unwrap();
+            gateway
+                .store
+                .append(timeline.id(), drafts, None)
+                .await
+                .unwrap();
         }
         let page: EventPage = gateway
             .read_events_page(&timeline.id().to_string(), 0, MAX_EVENTS_PER_POLL)
@@ -1913,9 +1921,9 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn store_error_paths() {
         let fail_create = Gateway {
-            store: Arc::new(Mutex::new(Box::new(ScriptedStore {
+            store: executor::StoreExecutor::new(Box::new(ScriptedStore {
                 mode: ScriptMode::FailCreate,
-            }))),
+            })),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
         };
@@ -1925,9 +1933,9 @@ mod tests {
         ));
 
         let fail_list = Gateway {
-            store: Arc::new(Mutex::new(Box::new(ScriptedStore {
+            store: executor::StoreExecutor::new(Box::new(ScriptedStore {
                 mode: ScriptMode::FailList,
-            }))),
+            })),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
         };
@@ -1937,9 +1945,9 @@ mod tests {
         ));
 
         let empty_append = Gateway {
-            store: Arc::new(Mutex::new(Box::new(ScriptedStore {
+            store: executor::StoreExecutor::new(Box::new(ScriptedStore {
                 mode: ScriptMode::EmptyAppend,
-            }))),
+            })),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
         };
@@ -1956,9 +1964,9 @@ mod tests {
         assert!(matches!(err, GatewayError::Store(_)));
 
         let fail_get_timeline = Gateway {
-            store: Arc::new(Mutex::new(Box::new(ScriptedStore {
+            store: executor::StoreExecutor::new(Box::new(ScriptedStore {
                 mode: ScriptMode::FailGetTimeline,
-            }))),
+            })),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
         };
@@ -1974,9 +1982,9 @@ mod tests {
         assert!(matches!(err, GatewayError::Store(_)));
 
         let fail_append = Gateway {
-            store: Arc::new(Mutex::new(Box::new(ScriptedStore {
+            store: executor::StoreExecutor::new(Box::new(ScriptedStore {
                 mode: ScriptMode::FailAppend,
-            }))),
+            })),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
         };
@@ -1993,9 +2001,9 @@ mod tests {
         assert!(matches!(err, GatewayError::Store(_)));
 
         let fail_read = Gateway {
-            store: Arc::new(Mutex::new(Box::new(ScriptedStore {
+            store: executor::StoreExecutor::new(Box::new(ScriptedStore {
                 mode: ScriptMode::FailRead,
-            }))),
+            })),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
         };

@@ -1055,8 +1055,7 @@ mod tests {
             timeline::{Timeline, TimelineMeta},
             CoreError,
         };
-        use std::sync::Arc;
-        use tokio::sync::{broadcast, Mutex};
+        use tokio::sync::broadcast;
 
         struct FailCreate;
         impl EventStore for FailCreate {
@@ -1089,7 +1088,7 @@ mod tests {
         }
 
         let gw = Gateway {
-            store: Arc::new(Mutex::new(Box::new(FailCreate))),
+            store: crate::executor::StoreExecutor::new(Box::new(FailCreate)),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: crate::GatewayLimits::LOCAL_DEFAULT,
         };
