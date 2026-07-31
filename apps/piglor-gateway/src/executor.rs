@@ -95,12 +95,14 @@ pub(crate) struct StoreExecutor {
 impl StoreExecutor {
     pub(crate) fn new(store: Box<dyn EventStore>) -> Self {
         let (tx, mut rx) = mpsc::channel(QUEUE_CAPACITY);
-        let _ = thread::spawn(move || {
-            let mut store = store;
-            while let Some(command) = rx.blocking_recv() {
-                execute(&mut *store, command);
-            }
-        });
+        let _ = thread::Builder::new()
+            .name("piglor-store-executor".to_owned())
+            .spawn(move || {
+                let mut store = store;
+                while let Some(command) = rx.blocking_recv() {
+                    execute(&mut *store, command);
+                }
+            });
         Self { tx }
     }
 
