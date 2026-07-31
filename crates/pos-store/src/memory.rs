@@ -43,7 +43,7 @@ pub struct MemoryStore {
 }
 
 #[inline(never)]
-fn read_event_by_id_v1(
+fn read_event_by_id(
     store: &MemoryStore,
     timeline: TimelineId,
     event_id: EventId,
@@ -66,7 +66,7 @@ fn read_event_by_id_v1(
 }
 
 #[inline(never)]
-fn read_own_v1(
+fn read_own(
     store: &MemoryStore,
     timeline: TimelineId,
     range: SeqRange,
@@ -116,13 +116,13 @@ fn unbounded_append_outcome(
 }
 
 #[inline(never)]
-fn delete_timeline_v1(store: &mut MemoryStore, id: TimelineId) -> Result<(), CoreError> {
+fn delete_timeline(store: &mut MemoryStore, id: TimelineId) -> Result<(), CoreError> {
     store
         .ensure_generic_timeline_visibility(id)
-        .and_then(|()| delete_visible_timeline_v1(store, id))
+        .and_then(|()| delete_visible_timeline(store, id))
 }
 
-fn delete_visible_timeline_v1(store: &mut MemoryStore, id: TimelineId) -> Result<(), CoreError> {
+fn delete_visible_timeline(store: &mut MemoryStore, id: TimelineId) -> Result<(), CoreError> {
     if has_child_timeline(&store.timelines, id) {
         return Err(CoreError::Storage(
             "cannot delete timeline that still has forks".to_owned(),
@@ -689,7 +689,7 @@ impl EventStore for MemoryStore {
         timeline: TimelineId,
         event_id: EventId,
     ) -> Result<Option<Event>, CoreError> {
-        read_event_by_id_v1(self, timeline, event_id)
+        read_event_by_id(self, timeline, event_id)
     }
 
     fn purge_expired_append_identities_bounded(
@@ -738,7 +738,7 @@ impl EventStore for MemoryStore {
     }
 
     fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
-        read_own_v1(self, timeline, range)
+        read_own(self, timeline, range)
     }
 
     fn fork(&mut self, parent: TimelineId, at_seq: Seq, name: &str) -> Result<Timeline, CoreError> {
@@ -860,7 +860,7 @@ impl EventStore for MemoryStore {
     }
 
     fn delete_timeline(&mut self, id: TimelineId) -> Result<(), CoreError> {
-        delete_timeline_v1(self, id)
+        delete_timeline(self, id)
     }
 
     fn chain_hash_at(&self, timeline: TimelineId, at_seq: Seq) -> Result<Hash, CoreError> {
@@ -1933,7 +1933,7 @@ mod tests {
             )
             .unwrap();
 
-        let events = read_own_v1(
+        let events = read_own(
             &store,
             timeline.id(),
             SeqRange::bounded(Seq::from_u64(1), Seq::from_u64(1)),
@@ -1941,7 +1941,7 @@ mod tests {
         .unwrap();
         assert_eq!(events.len(), 1);
 
-        let all_events = read_own_v1(&store, timeline.id(), SeqRange::all()).unwrap();
+        let all_events = read_own(&store, timeline.id(), SeqRange::all()).unwrap();
         assert_eq!(all_events.len(), 2);
     }
 
@@ -1981,7 +1981,7 @@ mod tests {
             .fork(retained_timeline.id(), Seq::ZERO, "retained-child")
             .unwrap();
 
-        delete_timeline_v1(&mut store, timeline.id()).unwrap();
+        delete_timeline(&mut store, timeline.id()).unwrap();
         assert_eq!(store.append_identities.len(), 1);
     }
 
@@ -1990,7 +1990,7 @@ mod tests {
         let mut store = MemoryStore::new();
         let timeline = store.create_timeline("delete-empty-identities").unwrap();
 
-        delete_timeline_v1(&mut store, timeline.id()).unwrap();
+        delete_timeline(&mut store, timeline.id()).unwrap();
 
         assert!(store.append_identities.is_empty());
     }
