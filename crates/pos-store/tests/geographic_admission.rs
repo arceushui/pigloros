@@ -1,9 +1,12 @@
+use std::collections::VecDeque;
+
 use pos_core::{
     geo_admission::{
         GeoLocationAdmissionAdmin, GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1,
         GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore,
     },
-    CanonicalBytes, EntityId, EventStore, TimelineId,
+    AdmissionClock, CanonicalBytes, CoreError, EntityId, EventStore, TimelineId, WallTime,
+    APPEND_IDENTITY_RETENTION_MICROS,
 };
 use pos_store::memory::MemoryStore;
 use pos_store::sqlite::SqliteStore;
@@ -94,6 +97,42 @@ where
         .is_err());
 }
 
+struct SequenceClock(VecDeque<WallTime>);
+
+impl SequenceClock {
+    fn new(values: impl IntoIterator<Item = WallTime>) -> Self {
+        Self(values.into_iter().collect())
+    }
+}
+
+impl AdmissionClock for SequenceClock {
+    fn now(&mut self) -> Result<WallTime, CoreError> {
+        self.0
+            .pop_front()
+            .ok_or_else(|| CoreError::Storage("test clock exhausted".to_owned()))
+    }
+}
+
+fn assert_expired_dedup_allows_one_new_admission<S>(store: &mut S)
+where
+    S: EventStore + GeoLocationAdmissionAdmin + GeoLocationAdmissionStore,
+{
+    let timeline = store.create_timeline("dedup-expiry").unwrap();
+    let entity = EntityId::new();
+    store
+        .set_geo_location_admission_fence(timeline.id(), entity, fence())
+        .unwrap();
+    let first = store
+        .admit_geo_location(request(timeline.id(), entity, ([4; 32], [5; 32])))
+        .unwrap();
+    let after_expiry = store
+        .admit_geo_location(request(timeline.id(), entity, ([6; 32], [5; 32])))
+        .unwrap();
+    assert!(first.is_accepted());
+    assert!(after_expiry.is_accepted());
+    assert_ne!(first.event_id(), after_expiry.event_id());
+}
+
 #[test]
 fn memory_admission_is_atomic_and_revalidates_before_deduplication() {
     assert_admission_contract(&mut MemoryStore::default());
@@ -102,6 +141,28 @@ fn memory_admission_is_atomic_and_revalidates_before_deduplication() {
 #[test]
 fn sqlite_admission_is_atomic_and_revalidates_before_deduplication() {
     assert_admission_contract(&mut SqliteStore::open_in_memory().unwrap());
+}
+
+#[test]
+fn memory_expired_geographic_dedup_allows_one_new_admission() {
+    let mut store = MemoryStore::with_clock(Box::new(SequenceClock::new([
+        WallTime::from_micros(1),
+        WallTime::from_micros(APPEND_IDENTITY_RETENTION_MICROS.saturating_add(2)),
+    ])));
+    assert_expired_dedup_allows_one_new_admission(&mut store);
+}
+
+#[test]
+fn sqlite_expired_geographic_dedup_allows_one_new_admission() {
+    let mut store = SqliteStore::open_with_clock(
+        ":memory:",
+        Box::new(SequenceClock::new([
+            WallTime::from_micros(1),
+            WallTime::from_micros(APPEND_IDENTITY_RETENTION_MICROS.saturating_add(2)),
+        ])),
+    )
+    .unwrap();
+    assert_expired_dedup_allows_one_new_admission(&mut store);
 }
 
 #[test]
