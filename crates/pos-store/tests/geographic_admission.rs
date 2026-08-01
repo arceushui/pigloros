@@ -1,4 +1,10 @@
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 use pos_core::{
     geo_admission::{
@@ -123,6 +129,47 @@ impl AdmissionClock for SequenceClock {
     }
 }
 
+struct RevokingClock {
+    store: SqliteStore,
+    timeline: TimelineId,
+    entity: EntityId,
+    revoked: Arc<AtomicBool>,
+}
+
+impl RevokingClock {
+    fn new(path: &str, timeline: TimelineId, entity: EntityId, revoked: Arc<AtomicBool>) -> Self {
+        Self {
+            store: SqliteStore::open(path).unwrap(),
+            timeline,
+            entity,
+            revoked,
+        }
+    }
+}
+
+impl AdmissionClock for RevokingClock {
+    fn now(&mut self) -> Result<WallTime, CoreError> {
+        if !self.revoked.load(Ordering::Relaxed) {
+            self.store.set_geo_location_admission_fence(
+                self.timeline,
+                self.entity,
+                GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, true, 10)),
+            )?;
+            self.revoked.store(true, Ordering::Relaxed);
+        }
+        Ok(WallTime::from_micros(1))
+    }
+}
+
+struct CountingFixedClock(Arc<AtomicBool>);
+
+impl AdmissionClock for CountingFixedClock {
+    fn now(&mut self) -> Result<WallTime, CoreError> {
+        self.0.store(true, Ordering::Relaxed);
+        Ok(WallTime::from_micros(1))
+    }
+}
+
 fn assert_expired_dedup_allows_one_new_admission<S>(store: &mut S)
 where
     S: EventStore + GeoLocationAdmissionAdmin + GeoLocationAdmissionStore,
@@ -184,6 +231,71 @@ fn memory_admission_is_atomic_and_revalidates_before_deduplication() {
 #[test]
 fn sqlite_admission_is_atomic_and_revalidates_before_deduplication() {
     assert_admission_contract(&mut SqliteStore::open_in_memory().unwrap());
+}
+
+#[test]
+fn sqlite_rejects_a_missing_fence_before_consulting_the_admission_clock() {
+    let called = Arc::new(AtomicBool::new(false));
+    let mut store = SqliteStore::open_with_clock(
+        ":memory:",
+        Box::new(CountingFixedClock(Arc::clone(&called))),
+    )
+    .unwrap();
+    let timeline = store.create_timeline("missing-fence-before-clock").unwrap();
+
+    assert!(matches!(
+        store.admit_geo_location(request(timeline.id(), EntityId::new(), ([4; 32], [5; 32]))),
+        Err(CoreError::GeographicAdmissionValidationFailed)
+    ));
+    assert!(!called.load(Ordering::Relaxed));
+}
+
+#[test]
+fn sqlite_rechecks_a_revoked_fence_before_committing_geographic_admission() {
+    let database = tempfile::NamedTempFile::new().unwrap();
+    let path = database.path().to_str().unwrap();
+    let mut setup = SqliteStore::open(path).unwrap();
+    let timeline = setup.create_timeline("recheck-revoked-fence").unwrap();
+    let original_timeline = timeline.clone();
+    let entity = EntityId::new();
+    let revoked = Arc::new(AtomicBool::new(false));
+    setup
+        .set_geo_location_admission_fence(timeline.id(), entity, fence())
+        .unwrap();
+    drop(setup);
+
+    let mut store = SqliteStore::open_with_clock(
+        path,
+        Box::new(RevokingClock::new(
+            path,
+            timeline.id(),
+            entity,
+            Arc::clone(&revoked),
+        )),
+    )
+    .unwrap();
+    let error = store
+        .admit_geo_location(request(timeline.id(), entity, ([4; 32], [5; 32])))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        CoreError::GeographicAdmissionValidationFailed
+    ));
+    assert!(revoked.load(Ordering::Relaxed));
+
+    assert!(store
+        .read(timeline.id(), pos_core::SeqRange::all())
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store.get_timeline(timeline.id()).unwrap(),
+        Some(original_timeline)
+    );
+    let mut reopened = SqliteStore::open(path).unwrap();
+    assert!(matches!(
+        reopened.admit_geo_location(request(timeline.id(), entity, ([6; 32], [7; 32]))),
+        Err(CoreError::GeographicAdmissionValidationFailed)
+    ));
 }
 
 #[test]
