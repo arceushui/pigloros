@@ -369,6 +369,10 @@ impl Gateway {
     ///
     /// # Errors
     /// Returns a bounded executor or store error when admission cannot run.
+    ///
+    /// # Panics
+    /// Panics only if a core outcome violates its invariant that an accepted
+    /// admission includes both an Event ID and sequence.
     pub async fn admit_geo_location_from_core(
         &self,
         request: GeoLocationAdmissionRequestV1,
@@ -377,12 +381,12 @@ impl Gateway {
         let entity = request.entity();
         let outcome = self.store.admit_geo_location(request).await?;
         if outcome.is_accepted() {
-            let event_id = outcome.event_id().ok_or(GatewayError::Store(
-                CoreError::GeographicAdmissionOutcomeUnknown,
-            ))?;
-            let seq = outcome.event_seq().ok_or(GatewayError::Store(
-                CoreError::GeographicAdmissionOutcomeUnknown,
-            ))?;
+            let event_id = outcome
+                .event_id()
+                .expect("accepted geographic admission always carries an Event ID");
+            let seq = outcome
+                .event_seq()
+                .expect("accepted geographic admission always carries an Event sequence");
             self.publish_geographic_notice(timeline, event_id, entity, seq);
         }
         Ok(outcome)
