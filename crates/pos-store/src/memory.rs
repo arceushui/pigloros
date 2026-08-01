@@ -1188,6 +1188,93 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn geographic_admission_clock_and_expiry_failures_leave_no_evidence() {
+        let entity = EntityId::new();
+        let mut clock_error = MemoryStore::with_clock(Box::new(ErrorClock));
+        let timeline = clock_error.create_timeline("geo-clock-error").unwrap();
+        let request = GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
+            timeline.id(),
+            entity,
+            CanonicalBytes::from_static(b"geo-clock-error"),
+            7,
+            ([1; 32], 8, [2; 32]),
+            (1, false, 9),
+            ([4; 32], [5; 32]),
+        ));
+        clock_error
+            .set_geo_location_admission_fence(
+                timeline.id(),
+                entity,
+                GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
+            )
+            .unwrap();
+        assert!(clock_error.admit_geo_location(request).is_err());
+        assert!(clock_error.state(timeline.id()).events.is_empty());
+        assert!(clock_error.geographic_admission_dedup.is_empty());
+        assert!(clock_error.geographic_admission_snapshots.is_empty());
+        assert!(clock_error.geographic_admission_links.is_empty());
+
+        let entity = EntityId::new();
+        let mut overflow = MemoryStore::with_clock(Box::new(pos_core::FixedAdmissionClock(
+            WallTime::from_micros(u64::MAX),
+        )));
+        let timeline = overflow.create_timeline("geo-expiry-overflow").unwrap();
+        let request = GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
+            timeline.id(),
+            entity,
+            CanonicalBytes::from_static(b"geo-expiry-overflow"),
+            7,
+            ([1; 32], 8, [2; 32]),
+            (1, false, 9),
+            ([4; 32], [5; 32]),
+        ));
+        overflow
+            .set_geo_location_admission_fence(
+                timeline.id(),
+                entity,
+                GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
+            )
+            .unwrap();
+        assert!(overflow.admit_geo_location(request).is_err());
+        assert!(overflow.state(timeline.id()).events.is_empty());
+        assert!(overflow.geographic_admission_dedup.is_empty());
+        assert!(overflow.geographic_admission_snapshots.is_empty());
+        assert!(overflow.geographic_admission_links.is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn geographic_admission_rejects_unknown_timeline_and_stale_internal_fence() {
+        let entity = EntityId::new();
+        let missing_timeline = TimelineId::new();
+        let fence = GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9));
+        let request = GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
+            missing_timeline,
+            entity,
+            CanonicalBytes::from_static(b"geo-stale-timeline"),
+            7,
+            ([1; 32], 8, [2; 32]),
+            (1, false, 9),
+            ([4; 32], [5; 32]),
+        ));
+        let mut store = MemoryStore::default();
+
+        assert!(store
+            .set_geo_location_admission_fence(missing_timeline, entity, fence.clone())
+            .is_err());
+        assert!(store.geographic_admission_fences.is_empty());
+
+        store
+            .geographic_admission_fences
+            .insert((missing_timeline, entity), fence);
+        assert!(store.admit_geo_location(request).is_err());
+        assert!(store.geographic_admission_dedup.is_empty());
+        assert!(store.geographic_admission_snapshots.is_empty());
+        assert!(store.geographic_admission_links.is_empty());
+    }
+
+    #[test]
     fn geographic_admission_keeps_private_sidecars_in_lockstep_with_timeline_lifecycle() {
         let mut store = MemoryStore::default();
         let timeline = store.create_timeline("protected").unwrap();
