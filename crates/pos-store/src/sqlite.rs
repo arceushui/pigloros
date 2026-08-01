@@ -2549,32 +2549,27 @@ mod tests {
             let mut store = new_store();
             let timeline = store.create_timeline(name).unwrap();
             let entity = EntityId::new();
+            let request = geographic_request(timeline.id(), entity);
             store
                 .set_geo_location_admission_fence(timeline.id(), entity, geographic_fence())
                 .unwrap();
             let outcome = store
-                .admit_geo_location(geographic_request(timeline.id(), entity))
+                .admit_geo_location(request.clone())
                 .unwrap();
             let event_id = outcome.event_id().unwrap();
             let event_seq = outcome.event_seq().unwrap();
-            let (event_payload_hash, snapshot_cbor): (Vec<u8>, Vec<u8>) = store
-                .conn
-                .query_row(
-                    "SELECT event.payload_hash, snapshot.snapshot_cbor
-                     FROM events AS event
-                     JOIN geographic_admission_snapshots AS snapshot
-                       ON snapshot.event_id = event.event_id
-                     WHERE event.event_id = ?1",
-                    params![event_id.to_string()],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .unwrap();
+            let link = pos_core::geo_admission::GeoLocationAdmissionLinkV1::for_snapshot(
+                timeline.id(),
+                event_id,
+                event_seq,
+                request.snapshot(),
+            );
             let evidence = GeoLocationReplayEvidenceV1::new(
                 timeline.id(),
                 event_id,
                 event_seq,
-                Hash::from_bytes(event_payload_hash.try_into().unwrap()),
-                hash_payload(&CanonicalBytes::from_vec(snapshot_cbor)),
+                hash_payload(request.payload()),
+                hash_payload(link.snapshot_cbor()),
             );
             store
                 .conn
@@ -2595,7 +2590,7 @@ mod tests {
             }
 
             let result = store.verify_v1_event_snapshot_link(evidence);
-            assert!(matches!(result, Err(CoreError::Storage(_))), "{name}: {result:?}");
+            assert_storage_err(result);
         }
     }
 

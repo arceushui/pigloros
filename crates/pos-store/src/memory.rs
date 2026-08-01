@@ -1345,6 +1345,14 @@ mod tests {
         store
             .geographic_admission_links
             .insert((retained_timeline.id(), event_id), deleted_event_link);
+        let retained_event_link = store
+            .geographic_admission_links
+            .get(&(retained_timeline.id(), retained_event_id))
+            .unwrap()
+            .clone();
+        store
+            .geographic_admission_links
+            .insert((timeline.id(), retained_event_id), retained_event_link);
 
         delete_visible_timeline(&mut store, timeline.id()).unwrap();
         assert_eq!(store.geographic_admission_fences.len(), 1);
