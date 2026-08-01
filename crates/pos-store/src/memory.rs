@@ -1400,6 +1400,15 @@ mod tests {
     #[test]
     fn replay_verifier_rejects_missing_sidecars_and_non_geographic_event() {
         let mut fixture = replay_fixture();
+        assert_replay_validation(fixture.store.verify_v1_event_snapshot_link(
+            GeoLocationReplayEvidenceV1::new(
+                fixture.timeline,
+                EventId::new(),
+                fixture.event_seq,
+                fixture.event_hash,
+                fixture.snapshot_hash,
+            ),
+        ));
         let snapshot = fixture
             .store
             .geographic_admission_snapshots
@@ -1412,6 +1421,30 @@ mod tests {
             .store
             .geographic_admission_snapshots
             .insert(fixture.event_id, snapshot);
+        let mismatched_snapshot =
+            GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
+                fixture.timeline,
+                EntityId::new(),
+                CanonicalBytes::from_static(b"existing-v1-geo-location-payload"),
+                7,
+                ([1; 32], 8, [2; 32]),
+                (1, false, 9),
+                ([6; 32], [7; 32]),
+            ))
+            .snapshot()
+            .clone();
+        let original_snapshot = fixture
+            .store
+            .geographic_admission_snapshots
+            .insert(fixture.event_id, mismatched_snapshot)
+            .unwrap();
+        assert_replay_validation(fixture.store.verify_v1_event_snapshot_link(
+            fixture.evidence(fixture.event_hash, fixture.snapshot_hash),
+        ));
+        fixture
+            .store
+            .geographic_admission_snapshots
+            .insert(fixture.event_id, original_snapshot);
         let link = fixture
             .store
             .geographic_admission_links
