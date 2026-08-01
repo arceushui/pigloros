@@ -10,15 +10,21 @@ use pos_core::{
     clock::{AdmissionClock, Seq, SystemAdmissionClock, WallTime},
     crypto::Hash,
     error::CoreError,
-    event::{Event, EventDraft},
+    event::{Event, EventDraft, Kind},
+    geo_admission::{
+        GeoLocationAdmissionAdmin, GeoLocationAdmissionFenceV1, GeoLocationAdmissionFingerprintV1,
+        GeoLocationAdmissionIntentV1, GeoLocationAdmissionLinkV1, GeoLocationAdmissionOutcome,
+        GeoLocationAdmissionRequestV1, GeoLocationAdmissionSnapshotV1, GeoLocationAdmissionStore,
+    },
     hasher::Hasher,
-    ids::{EventId, TimelineId},
+    ids::{EntityId, EventId, TimelineId},
     store::{
         checked_append_identity_expires_at, AppendDedupKey, AppendDedupScope, AppendIdentity,
         AppendIntent, AppendOrDuplicateOutcome, EventReadBounds, EventStore, PurgeOutcome,
         SeqRange,
     },
     timeline::{Timeline, TimelineMeta},
+    GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -38,6 +44,15 @@ pub struct MemoryStore {
     append_identities: HashMap<AppendDedupKey, AppendIdentityRecord>,
     /// Durable-equivalent marker for Timelines containing protected evidence.
     geographic_timelines: HashSet<TimelineId>,
+    /// Current removable authorization state for protected geographic admission.
+    geographic_admission_fences: HashMap<(TimelineId, EntityId), GeoLocationAdmissionFenceV1>,
+    /// Private keyed deduplication records for protected geographic admission.
+    geographic_admission_dedup:
+        HashMap<GeoLocationAdmissionFingerprintV1, GeographicAdmissionDedupRecord>,
+    /// Immutable admission snapshots, retained for the lifetime of their Event.
+    geographic_admission_snapshots: HashMap<EventId, GeoLocationAdmissionSnapshotV1>,
+    /// Immutable Event-to-snapshot links, uniquely keyed by `(TimelineId, EventId)`.
+    geographic_admission_links: HashMap<(TimelineId, EventId), GeoLocationAdmissionLinkV1>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
 }
@@ -146,6 +161,18 @@ fn delete_visible_timeline(store: &mut MemoryStore, id: TimelineId) -> Result<()
             }
             store.append_identities = retained_identities;
             store.geographic_timelines.remove(&id);
+            store
+                .geographic_admission_fences
+                .retain(|(timeline, _), _| *timeline != id);
+            store
+                .geographic_admission_dedup
+                .retain(|_, record| record.timeline != id);
+            store
+                .geographic_admission_snapshots
+                .retain(|event_id, _| !event_ids.contains(event_id));
+            store
+                .geographic_admission_links
+                .retain(|(timeline, event_id), _| *timeline != id && !event_ids.contains(event_id));
         })
 }
 
@@ -203,6 +230,10 @@ impl MemoryStore {
             event_ids: HashSet::new(),
             append_identities: HashMap::new(),
             geographic_timelines: HashSet::new(),
+            geographic_admission_fences: HashMap::new(),
+            geographic_admission_dedup: HashMap::new(),
+            geographic_admission_snapshots: HashMap::new(),
+            geographic_admission_links: HashMap::new(),
             hasher,
             clock: Box::new(SystemAdmissionClock),
         }
@@ -595,9 +626,108 @@ impl MemoryStore {
     }
 }
 
+#[derive(Clone, Copy)]
+struct GeographicAdmissionDedupRecord {
+    timeline: TimelineId,
+    intent: GeoLocationAdmissionIntentV1,
+    event_id: EventId,
+    expires_at: WallTime,
+}
+
 impl Default for MemoryStore {
     fn default() -> Self {
         Self::with_default_components(Box::new(pos_crypto::chain::Blake3Hasher))
+    }
+}
+
+impl GeoLocationAdmissionAdmin for MemoryStore {
+    fn set_geo_location_admission_fence(
+        &mut self,
+        timeline: TimelineId,
+        entity: EntityId,
+        fence: GeoLocationAdmissionFenceV1,
+    ) -> Result<(), CoreError> {
+        self.timeline(timeline)?;
+        self.geographic_admission_fences
+            .insert((timeline, entity), fence);
+        Ok(())
+    }
+}
+
+impl GeoLocationAdmissionStore for MemoryStore {
+    fn admit_geo_location(
+        &mut self,
+        request: GeoLocationAdmissionRequestV1,
+    ) -> Result<GeoLocationAdmissionOutcome, CoreError> {
+        let timeline = request.timeline();
+        let entity = request.entity();
+        let admitted_at = self.clock.now()?;
+        let permits_request = |store: &Self| {
+            store
+                .geographic_admission_fences
+                .get(&(timeline, entity))
+                .is_some_and(|fence| fence.permits(&request))
+        };
+
+        if !permits_request(self) {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        }
+
+        if let Some(record) = self
+            .geographic_admission_dedup
+            .get(&request.fingerprint())
+            .copied()
+            .filter(|record| record.expires_at > admitted_at)
+        {
+            if !permits_request(self) {
+                return Err(CoreError::GeographicAdmissionValidationFailed);
+            }
+            return Ok(GeoLocationAdmissionOutcome::classify_retained_intent(
+                request.intent(),
+                record.intent,
+                record.event_id,
+            ));
+        }
+
+        let expires_at = checked_append_identity_expires_at(admitted_at)?;
+        if !permits_request(self) {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        }
+
+        let draft = EventDraft::new(
+            entity,
+            Kind::new(GEOGRAPHIC_EVENT_TYPE),
+            request.payload().clone(),
+        )
+        .with_wall_time(admitted_at);
+        let event = {
+            let (timelines, event_ids, hasher) =
+                (&mut self.timelines, &mut self.event_ids, &self.hasher);
+            mutable_state(timelines, timeline).map(|state| {
+                let event = Self::append_one_to_state(state, &draft, hasher.as_ref());
+                event_ids.insert(event.id);
+                event
+            })?
+        };
+        let snapshot = request.snapshot().clone();
+        let link =
+            GeoLocationAdmissionLinkV1::for_snapshot(timeline, event.id, event.seq, &snapshot);
+
+        self.geographic_timelines.insert(timeline);
+        self.geographic_admission_snapshots
+            .insert(event.id, snapshot);
+        self.geographic_admission_links
+            .insert((timeline, event.id), link);
+        self.geographic_admission_dedup.insert(
+            request.fingerprint(),
+            GeographicAdmissionDedupRecord {
+                timeline,
+                intent: request.intent(),
+                event_id: event.id,
+                expires_at,
+            },
+        );
+        Ok(GeoLocationAdmissionOutcome::accepted(event.id))
     }
 }
 
@@ -949,6 +1079,10 @@ mod tests {
     use super::*;
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
+        geo_admission::{
+            GeoLocationAdmissionAdmin, GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1,
+            GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore,
+        },
         ids::{EntityId, EventId},
         store::{SeqRange, TimelineExport},
     };
@@ -1001,6 +1135,52 @@ mod tests {
             .append_intent_or_duplicate(timeline.id(), append_identity(2, 2), intent)
             .is_err());
         drop(timeline);
+    }
+
+    #[test]
+    fn geographic_admission_keeps_private_sidecars_in_lockstep_with_timeline_lifecycle() {
+        let mut store = MemoryStore::default();
+        let timeline = store.create_timeline("protected").unwrap();
+        let entity = EntityId::new();
+        store
+            .set_geo_location_admission_fence(
+                timeline.id(),
+                entity,
+                GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
+            )
+            .unwrap();
+        let request = GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
+            timeline.id(),
+            entity,
+            CanonicalBytes::from_static(b"existing-v1-geo-location-payload"),
+            7,
+            ([1; 32], 8, [2; 32]),
+            (1, false, 9),
+            ([4; 32], [5; 32]),
+        ));
+
+        let accepted = store.admit_geo_location(request.clone()).unwrap();
+        let event_id = accepted.event_id().unwrap();
+        let event = &store.state(timeline.id()).events[0];
+        let snapshot = store.geographic_admission_snapshots.get(&event_id).unwrap();
+        let link = store
+            .geographic_admission_links
+            .get(&(timeline.id(), event_id))
+            .unwrap();
+        assert!(link
+            .validate_for(snapshot, timeline.id(), event_id, event.seq)
+            .is_ok());
+        assert_eq!(store.geographic_admission_dedup.len(), 1);
+
+        assert!(store.admit_geo_location(request).unwrap().is_duplicate());
+        assert_eq!(store.geographic_admission_snapshots.len(), 1);
+        assert_eq!(store.geographic_admission_links.len(), 1);
+
+        delete_visible_timeline(&mut store, timeline.id()).unwrap();
+        assert!(store.geographic_admission_fences.is_empty());
+        assert!(store.geographic_admission_dedup.is_empty());
+        assert!(store.geographic_admission_snapshots.is_empty());
+        assert!(store.geographic_admission_links.is_empty());
     }
 
     fn append_identity(key: u8, scope: u8) -> AppendIdentity {

@@ -107,6 +107,49 @@ pub struct GeoLocationAdmissionSnapshotV1 {
     consent: GeoLocationConsentStateV1,
 }
 
+/// Current trusted authorization state for one `(TimelineId, EntityId)` pair.
+///
+/// This operational state is not retained with accepted evidence. A backend
+/// compares it to the request snapshot before deduplication and again while
+/// holding its commit fence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GeoLocationAdmissionFenceV1 {
+    binding_revision: u64,
+    consent: GeoLocationConsentStateV1,
+}
+
+impl GeoLocationAdmissionFenceV1 {
+    /// Create current core-owned state for a trusted composition root.
+    #[must_use]
+    pub fn new(
+        binding_revision: u64,
+        consent: ([u8; 32], u64, [u8; 32]),
+        policy: (u32, bool, u64),
+    ) -> Self {
+        Self {
+            binding_revision,
+            consent: GeoLocationConsentStateV1 {
+                identity: consent.0,
+                revision: consent.1,
+                hash: consent.2,
+                policy_version: policy.0,
+                withdrawn: policy.1,
+                admission_epoch: policy.2,
+            },
+        }
+    }
+
+    /// Return whether the immutable request still matches current state.
+    #[must_use]
+    pub fn permits(&self, request: &GeoLocationAdmissionRequestV1) -> bool {
+        let snapshot = request.snapshot();
+        self.consent.admission_epoch != 0
+            && !self.consent.withdrawn
+            && self.binding_revision == snapshot.binding_revision
+            && self.consent == snapshot.consent
+    }
+}
+
 impl GeoLocationAdmissionSnapshotV1 {
     #[must_use]
     pub const fn timeline(&self) -> TimelineId {
@@ -210,7 +253,7 @@ impl GeoLocationAdmissionIntentV1 {
 }
 
 /// Opaque owner-keyed fingerprint used as the retained deduplication key.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct GeoLocationAdmissionFingerprintV1([u8; 32]);
 
 impl GeoLocationAdmissionFingerprintV1 {
@@ -309,7 +352,7 @@ impl GeoLocationAdmissionRequestV1 {
 ///
 /// Generic [`crate::EventStore`] APIs do not expose this trait, so ordinary
 /// callers cannot use them to append protected geographic evidence.
-pub trait GeoLocationAdmission {
+pub trait GeoLocationAdmissionStore {
     /// Admit one already-minimized V1 location request atomically.
     ///
     /// # Errors
@@ -319,6 +362,24 @@ pub trait GeoLocationAdmission {
         &mut self,
         request: GeoLocationAdmissionRequestV1,
     ) -> Result<GeoLocationAdmissionOutcome, CoreError>;
+}
+
+/// Administrative capability for current, removable geographic admission state.
+///
+/// This trait is intentionally outside [`crate::EventStore`]. Only a trusted
+/// composition root imports this module to install or replace an admission
+/// fence; implementations must not mutate accepted Timeline evidence.
+pub trait GeoLocationAdmissionAdmin {
+    /// Install or replace current authorization state for one Timeline entity.
+    ///
+    /// # Errors
+    /// Returns an error when the Timeline cannot be used as an admission key.
+    fn set_geo_location_admission_fence(
+        &mut self,
+        timeline: TimelineId,
+        entity: EntityId,
+        fence: GeoLocationAdmissionFenceV1,
+    ) -> Result<(), CoreError>;
 }
 
 /// The definite or explicitly indeterminate result of one admission attempt.
@@ -450,7 +511,7 @@ mod tests {
 
     struct CoreAdmissionProbe;
 
-    impl GeoLocationAdmission for CoreAdmissionProbe {
+    impl GeoLocationAdmissionStore for CoreAdmissionProbe {
         fn admit_geo_location(
             &mut self,
             _request: GeoLocationAdmissionRequestV1,
@@ -461,7 +522,7 @@ mod tests {
 
     #[test]
     fn exposes_a_separate_core_admission_capability() {
-        fn requires_capability<T: GeoLocationAdmission>() {}
+        fn requires_capability<T: GeoLocationAdmissionStore>() {}
 
         requires_capability::<CoreAdmissionProbe>();
     }
