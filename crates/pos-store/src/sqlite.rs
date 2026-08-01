@@ -10,6 +10,10 @@ use rusqlite::{params, types::ToSql, Connection, OpenFlags, TransactionBehavior}
 use pos_core::{
     clock::{AdmissionClock, Seq, SystemAdmissionClock, WallTime},
     event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
+    geo_admission::{
+        GeoLocationAdmissionAdmin, GeoLocationAdmissionFenceV1, GeoLocationAdmissionOutcome,
+        GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore,
+    },
     hasher::Hasher,
     ids::{EntityId, EventId, TimelineId},
     store::{
@@ -17,7 +21,7 @@ use pos_core::{
         AppendOrDuplicateOutcome, EventReadBounds, EventStore, PurgeOutcome, SeqRange,
     },
     timeline::{Timeline, TimelineMeta, TimelineMode},
-    CoreError,
+    CoreError, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -330,9 +334,163 @@ impl SqliteStore {
              CREATE TABLE IF NOT EXISTS geographic_presence (
                  timeline_id TEXT PRIMARY KEY,
                  has_evidence INTEGER NOT NULL CHECK (has_evidence = 1)
-             );",
+             );
+             CREATE TABLE IF NOT EXISTS geographic_admission_fences (
+                 timeline_id TEXT NOT NULL,
+                 entity_id TEXT NOT NULL,
+                 binding_revision INTEGER NOT NULL,
+                 consent_identity BLOB NOT NULL CHECK (length(consent_identity) = 32),
+                 consent_revision INTEGER NOT NULL,
+                 consent_hash BLOB NOT NULL CHECK (length(consent_hash) = 32),
+                 policy_version INTEGER NOT NULL,
+                 withdrawn INTEGER NOT NULL CHECK (withdrawn IN (0, 1)),
+                 admission_epoch INTEGER NOT NULL,
+                 PRIMARY KEY (timeline_id, entity_id)
+             );
+             CREATE TABLE IF NOT EXISTS geographic_admission_snapshots (
+                 event_id TEXT PRIMARY KEY,
+                 snapshot_cbor BLOB NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS geographic_admission_links (
+                 timeline_id TEXT NOT NULL,
+                 event_id TEXT NOT NULL,
+                 event_seq INTEGER NOT NULL,
+                 snapshot_cbor BLOB NOT NULL,
+                 PRIMARY KEY (timeline_id, event_id)
+             );
+             CREATE TABLE IF NOT EXISTS geographic_admission_dedup (
+                 fingerprint BLOB PRIMARY KEY CHECK (length(fingerprint) = 32),
+                 timeline_id TEXT NOT NULL,
+                 intent BLOB NOT NULL CHECK (length(intent) = 32),
+                 event_id TEXT NOT NULL,
+                 expires_at INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_geographic_admission_dedup_expiry
+             ON geographic_admission_dedup(expires_at);",
             )
             .map_err(|error| Self::storage_error(&error))
+    }
+
+    fn geographic_fence_permits(
+        &self,
+        request: &GeoLocationAdmissionRequestV1,
+    ) -> Result<bool, CoreError> {
+        let snapshot = request.snapshot();
+        let consent = snapshot.consent();
+        if consent.withdrawn() {
+            return Ok(false);
+        }
+        self.conn
+            .query_row(
+                "SELECT EXISTS (
+                    SELECT 1 FROM geographic_admission_fences
+                    WHERE timeline_id = ?1 AND entity_id = ?2
+                      AND binding_revision = ?3
+                      AND consent_identity = ?4 AND consent_revision = ?5
+                      AND consent_hash = ?6 AND policy_version = ?7
+                      AND withdrawn = 0 AND admission_epoch = ?8
+                      AND admission_epoch != 0
+                )",
+                params![
+                    request.timeline().to_string(),
+                    request.entity().to_string(),
+                    i64::try_from(snapshot.binding_revision()).unwrap_or(i64::MAX),
+                    consent.identity().as_slice(),
+                    i64::try_from(consent.revision()).unwrap_or(i64::MAX),
+                    consent.hash().as_slice(),
+                    i64::from(consent.policy_version()),
+                    i64::try_from(consent.admission_epoch()).unwrap_or(i64::MAX),
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|exists| exists == 1)
+            .map_err(|error| CoreError::Storage(error.to_string()))
+    }
+
+    fn geographic_fence_permits_in_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        request: &GeoLocationAdmissionRequestV1,
+    ) -> Result<bool, CoreError> {
+        let snapshot = request.snapshot();
+        let consent = snapshot.consent();
+        if consent.withdrawn() {
+            return Ok(false);
+        }
+        tx.query_row(
+            "SELECT EXISTS (
+                SELECT 1 FROM geographic_admission_fences
+                WHERE timeline_id = ?1 AND entity_id = ?2
+                  AND binding_revision = ?3
+                  AND consent_identity = ?4 AND consent_revision = ?5
+                  AND consent_hash = ?6 AND policy_version = ?7
+                  AND withdrawn = 0 AND admission_epoch = ?8
+                  AND admission_epoch != 0
+            )",
+            params![
+                request.timeline().to_string(),
+                request.entity().to_string(),
+                i64::try_from(snapshot.binding_revision()).unwrap_or(i64::MAX),
+                consent.identity().as_slice(),
+                i64::try_from(consent.revision()).unwrap_or(i64::MAX),
+                consent.hash().as_slice(),
+                i64::from(consent.policy_version()),
+                i64::try_from(consent.admission_epoch()).unwrap_or(i64::MAX),
+            ],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|exists| exists == 1)
+        .map_err(|error| CoreError::Storage(error.to_string()))
+    }
+
+    fn geographic_dedup_outcome(
+        tx: &rusqlite::Transaction<'_>,
+        request: &GeoLocationAdmissionRequestV1,
+        admitted_at: WallTime,
+    ) -> Result<Option<GeoLocationAdmissionOutcome>, CoreError> {
+        let existing = tx.query_row(
+            "SELECT intent, event_id, expires_at
+             FROM geographic_admission_dedup WHERE fingerprint = ?1",
+            params![request.fingerprint().as_owner_keyed_bytes().as_slice()],
+            |row| {
+                row.get::<_, Vec<u8>>(0).and_then(|intent| {
+                    row.get::<_, String>(1).and_then(|event_id| {
+                        row.get::<_, i64>(2)
+                            .map(|expires| (intent, event_id, expires))
+                    })
+                })
+            },
+        );
+        match existing {
+            Ok((intent, event_id, expiry))
+                if u64::try_from(expiry).unwrap_or(0) > admitted_at.as_micros() =>
+            {
+                let intent: [u8; 32] = intent.try_into().map_err(|_| {
+                    CoreError::Storage(
+                        "geographic admission dedup has invalid intent length".to_owned(),
+                    )
+                })?;
+                let retained =
+                    pos_core::geo_admission::GeoLocationAdmissionIntentV1::from_owner_keyed_bytes(
+                        intent,
+                    );
+                let event_id = parse_event_id(&event_id)?;
+                Ok(Some(GeoLocationAdmissionOutcome::classify_retained_intent(
+                    request.intent(),
+                    retained,
+                    event_id,
+                )))
+            }
+            Ok(_) => {
+                tx.execute(
+                    "DELETE FROM geographic_admission_dedup WHERE fingerprint = ?1",
+                    params![request.fingerprint().as_owner_keyed_bytes().as_slice()],
+                )
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+                Ok(None)
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(CoreError::Storage(error.to_string())),
+        }
     }
 
     fn validate_event_sequence_invariant(&self) -> Result<(), CoreError> {
@@ -1070,6 +1228,134 @@ impl SqliteStore {
     }
 }
 
+impl GeoLocationAdmissionAdmin for SqliteStore {
+    fn set_geo_location_admission_fence(
+        &mut self,
+        timeline: TimelineId,
+        entity: EntityId,
+        fence: GeoLocationAdmissionFenceV1,
+    ) -> Result<(), CoreError> {
+        let exists = self
+            .conn
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM timelines WHERE id = ?1)",
+                params![timeline.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        if exists != 1 {
+            return Err(CoreError::TimelineNotFound(timeline));
+        }
+        let consent = fence.consent();
+        self.conn
+            .execute(
+                "INSERT INTO geographic_admission_fences (
+                    timeline_id, entity_id, binding_revision, consent_identity,
+                    consent_revision, consent_hash, policy_version, withdrawn, admission_epoch
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(timeline_id, entity_id) DO UPDATE SET
+                    binding_revision = excluded.binding_revision,
+                    consent_identity = excluded.consent_identity,
+                    consent_revision = excluded.consent_revision,
+                    consent_hash = excluded.consent_hash,
+                    policy_version = excluded.policy_version,
+                    withdrawn = excluded.withdrawn,
+                    admission_epoch = excluded.admission_epoch",
+                params![
+                    timeline.to_string(),
+                    entity.to_string(),
+                    i64::try_from(fence.binding_revision()).unwrap_or(i64::MAX),
+                    consent.identity().as_slice(),
+                    i64::try_from(consent.revision()).unwrap_or(i64::MAX),
+                    consent.hash().as_slice(),
+                    i64::from(consent.policy_version()),
+                    i64::from(u8::from(consent.withdrawn())),
+                    i64::try_from(consent.admission_epoch()).unwrap_or(i64::MAX),
+                ],
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        Ok(())
+    }
+}
+
+impl GeoLocationAdmissionStore for SqliteStore {
+    fn admit_geo_location(
+        &mut self,
+        request: GeoLocationAdmissionRequestV1,
+    ) -> Result<GeoLocationAdmissionOutcome, CoreError> {
+        if !self.geographic_fence_permits(&request)? {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        }
+        let admitted_at = self.clock.now()?;
+        let expires_at = checked_append_identity_expires_at(admitted_at)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        if !Self::geographic_fence_permits_in_transaction(&tx, &request)? {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        }
+
+        if let Some(outcome) = Self::geographic_dedup_outcome(&tx, &request, admitted_at)? {
+            tx.commit()
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            return Ok(outcome);
+        }
+
+        let draft = EventDraft::new(
+            request.entity(),
+            Kind::new(GEOGRAPHIC_EVENT_TYPE),
+            request.payload().clone(),
+        )
+        .with_wall_time(admitted_at);
+        let event =
+            Self::append_one_in_transaction(&tx, self.hasher.as_ref(), request.timeline(), draft)?;
+        let link = pos_core::geo_admission::GeoLocationAdmissionLinkV1::for_snapshot(
+            request.timeline(),
+            event.id,
+            event.seq,
+            request.snapshot(),
+        );
+        tx.execute(
+            "INSERT INTO geographic_admission_snapshots (event_id, snapshot_cbor) VALUES (?1, ?2)",
+            params![event.id.to_string(), link.snapshot_cbor().as_slice()],
+        )
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
+        tx.execute(
+            "INSERT INTO geographic_admission_links (timeline_id, event_id, event_seq, snapshot_cbor)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                request.timeline().to_string(),
+                event.id.to_string(),
+                i64::try_from(event.seq.as_u64()).unwrap_or(i64::MAX),
+                link.snapshot_cbor().as_slice(),
+            ],
+        )
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
+        tx.execute(
+            "INSERT INTO geographic_presence (timeline_id, has_evidence) VALUES (?1, 1)
+             ON CONFLICT(timeline_id) DO UPDATE SET has_evidence = 1",
+            params![request.timeline().to_string()],
+        )
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
+        tx.execute(
+            "INSERT INTO geographic_admission_dedup
+             (fingerprint, timeline_id, intent, event_id, expires_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                request.fingerprint().as_owner_keyed_bytes().as_slice(),
+                request.timeline().to_string(),
+                request.intent().as_owner_keyed_bytes().as_slice(),
+                event.id.to_string(),
+                i64::try_from(expires_at.as_micros()).unwrap_or(i64::MAX),
+            ],
+        )
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
+        tx.commit()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        Ok(GeoLocationAdmissionOutcome::accepted(event.id))
+    }
+}
+
 impl EventStore for SqliteStore {
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
         let meta = TimelineMeta::root(name);
@@ -1576,6 +1862,27 @@ impl EventStore for SqliteStore {
             tx.execute(
                 "DELETE FROM append_identities
              WHERE event_id IN (SELECT event_id FROM events WHERE timeline_id = ?1)",
+                params![id_str],
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+            tx.execute(
+                "DELETE FROM geographic_admission_dedup WHERE timeline_id = ?1",
+                params![id_str],
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+            tx.execute(
+                "DELETE FROM geographic_admission_links WHERE timeline_id = ?1",
+                params![id_str],
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+            tx.execute(
+                "DELETE FROM geographic_admission_snapshots
+                 WHERE event_id IN (SELECT event_id FROM events WHERE timeline_id = ?1)",
+                params![id_str],
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+            tx.execute(
+                "DELETE FROM geographic_admission_fences WHERE timeline_id = ?1",
                 params![id_str],
             )
             .map_err(|e| CoreError::Storage(e.to_string()))?;

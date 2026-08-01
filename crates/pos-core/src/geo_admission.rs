@@ -148,6 +148,16 @@ impl GeoLocationAdmissionFenceV1 {
             && self.binding_revision == snapshot.binding_revision
             && self.consent == snapshot.consent
     }
+
+    #[must_use]
+    pub const fn binding_revision(&self) -> u64 {
+        self.binding_revision
+    }
+
+    #[must_use]
+    pub const fn consent(&self) -> &GeoLocationConsentStateV1 {
+        &self.consent
+    }
 }
 
 impl GeoLocationAdmissionSnapshotV1 {
@@ -239,6 +249,12 @@ impl GeoLocationAdmissionLinkV1 {
             Err(CoreError::GeographicAdmissionValidationFailed)
         }
     }
+
+    /// Return the canonical immutable snapshot bytes retained by this link.
+    #[must_use]
+    pub const fn snapshot_cbor(&self) -> &CanonicalBytes {
+        &self.snapshot_cbor
+    }
 }
 
 /// Opaque owner-keyed canonical intent used for retry comparison.
@@ -246,6 +262,12 @@ impl GeoLocationAdmissionLinkV1 {
 pub struct GeoLocationAdmissionIntentV1([u8; 32]);
 
 impl GeoLocationAdmissionIntentV1 {
+    /// Reconstitute a retained opaque owner-keyed intent from backend storage.
+    #[must_use]
+    pub const fn from_owner_keyed_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     #[must_use]
     pub const fn as_owner_keyed_bytes(&self) -> &[u8; 32] {
         &self.0
