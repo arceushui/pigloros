@@ -134,6 +134,7 @@ mod coverage_tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn privileged_geographic_gateway_retains_generic_timeline_commands() {
         let gateway = Gateway::new_with_geo_location_admission(MemoryStore::default());
 
