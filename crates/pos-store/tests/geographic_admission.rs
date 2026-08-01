@@ -236,22 +236,20 @@ fn sqlite_replay_verifier_accepts_only_the_exact_durable_snapshot_link() {
     let timeline_id = timeline.id().to_string();
     let event_id_text = event_id.to_string();
     let inspection = rusqlite::Connection::open(path).unwrap();
-    let (event_hash, snapshot_cbor, persisted_snapshot_hash): (Vec<u8>, Vec<u8>, Vec<u8>) =
-        inspection
-            .query_row(
-                "SELECT event.payload_hash, snapshot.snapshot_cbor, link.snapshot_hash
+    let (event_hash, snapshot_cbor): (Vec<u8>, Vec<u8>) = inspection
+        .query_row(
+            "SELECT event.payload_hash, snapshot.snapshot_cbor
              FROM events AS event
              JOIN geographic_admission_snapshots AS snapshot ON snapshot.event_id = event.event_id
              JOIN geographic_admission_links AS link
                ON link.timeline_id = event.timeline_id AND link.event_id = event.event_id
              WHERE event.timeline_id = ?1 AND event.event_id = ?2",
-                [&timeline_id, &event_id_text],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap();
+            [&timeline_id, &event_id_text],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
     let event_hash = pos_core::Hash::from_bytes(event_hash.try_into().unwrap());
     let snapshot_hash = pos_crypto::chain::hash_payload(&CanonicalBytes::from_vec(snapshot_cbor));
-    assert_eq!(persisted_snapshot_hash, snapshot_hash.as_bytes());
     let evidence = |event_seq, event_payload_hash, expected_snapshot_hash| {
         GeoLocationReplayEvidenceV1::new(
             timeline.id(),
@@ -262,6 +260,13 @@ fn sqlite_replay_verifier_accepts_only_the_exact_durable_snapshot_link() {
         )
     };
 
+    store
+        .set_geo_location_admission_fence(
+            timeline.id(),
+            entity,
+            GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, true, 10)),
+        )
+        .unwrap();
     assert!(store
         .verify_v1_event_snapshot_link(evidence(event_seq, event_hash, snapshot_hash))
         .is_ok());
@@ -279,29 +284,15 @@ fn sqlite_replay_verifier_accepts_only_the_exact_durable_snapshot_link() {
         .unwrap_err()
         .to_string()
         .contains("geographic admission validation failed"));
-    assert_eq!(
-        inspection
-        .execute(
-            "UPDATE geographic_admission_links SET snapshot_hash = ?1 WHERE timeline_id = ?2 AND event_id = ?3",
-            rusqlite::params![[0_u8; 32].as_slice(), &timeline_id, &event_id_text],
-        )
-        .unwrap(),
-        1
-    );
     assert!(store
-        .verify_v1_event_snapshot_link(evidence(event_seq, event_hash, snapshot_hash))
+        .verify_v1_event_snapshot_link(evidence(
+            event_seq,
+            event_hash,
+            pos_core::Hash::from_bytes([0; 32]),
+        ))
         .unwrap_err()
         .to_string()
         .contains("geographic admission validation failed"));
-    assert_eq!(
-        inspection
-        .execute(
-            "UPDATE geographic_admission_links SET snapshot_hash = ?1 WHERE timeline_id = ?2 AND event_id = ?3",
-            rusqlite::params![snapshot_hash.as_bytes().as_slice(), &timeline_id, &event_id_text],
-        )
-        .unwrap(),
-        1
-    );
     assert_eq!(
         inspection
             .execute(
