@@ -85,6 +85,62 @@ fn initial_admission_state() -> AdmissionState {
     }
 }
 
+fn assert_replay_verifier_rejects_durable_corruption(
+    store: &SqliteStore,
+    inspection: &rusqlite::Connection,
+    evidence: GeoLocationReplayEvidenceV1,
+    timeline_id: &str,
+    event_id: &str,
+    event_hash: pos_core::Hash,
+) {
+    assert_eq!(
+        inspection
+            .execute(
+                "UPDATE events SET payload_hash = ?1 WHERE timeline_id = ?2 AND event_id = ?3",
+                rusqlite::params![vec![0_u8], timeline_id, event_id],
+            )
+            .unwrap(),
+        1
+    );
+    assert!(store
+        .verify_v1_event_snapshot_link(evidence)
+        .unwrap_err()
+        .to_string()
+        .contains("geographic admission validation failed"));
+    assert_eq!(
+        inspection
+            .execute(
+                "UPDATE events SET payload_hash = ?1 WHERE timeline_id = ?2 AND event_id = ?3",
+                rusqlite::params![event_hash.as_bytes().as_slice(), timeline_id, event_id],
+            )
+            .unwrap(),
+        1
+    );
+    inspection
+        .execute(
+            "UPDATE geographic_admission_links SET snapshot_cbor = ?1 WHERE timeline_id = ?2 AND event_id = ?3",
+            rusqlite::params![vec![0_u8], timeline_id, event_id],
+        )
+        .unwrap();
+    inspection
+        .execute(
+            "UPDATE geographic_admission_snapshots SET snapshot_cbor = ?1 WHERE event_id = ?2",
+            rusqlite::params![vec![0_u8], event_id],
+        )
+        .unwrap();
+    assert!(store
+        .verify_v1_event_snapshot_link(evidence)
+        .unwrap_err()
+        .to_string()
+        .contains("geographic admission validation failed"));
+    inspection.execute_batch("DROP TABLE events").unwrap();
+    assert!(store
+        .verify_v1_event_snapshot_link(evidence)
+        .unwrap_err()
+        .to_string()
+        .contains("no such table"));
+}
+
 fn assert_admission_contract<S>(store: &mut S)
 where
     S: EventStore + GeoLocationAdmissionAdmin + GeoLocationAdmissionStore,
@@ -630,6 +686,58 @@ fn sqlite_replay_verifier_accepts_only_the_exact_durable_snapshot_link() {
         .unwrap_err()
         .to_string()
         .contains("geographic admission validation failed"));
+
+    assert_replay_verifier_rejects_durable_corruption(
+        &store,
+        &inspection,
+        evidence(event_seq, event_hash, snapshot_hash),
+        &timeline_id,
+        &event_id_text,
+        event_hash,
+    );
+}
+
+#[test]
+fn sqlite_rejects_invalid_or_unreadable_geographic_dedup_records() {
+    let database = tempfile::NamedTempFile::new().unwrap();
+    let path = database.path().to_str().unwrap();
+    let mut store = SqliteStore::open(path).unwrap();
+    let timeline = store.create_timeline("dedup-corruption").unwrap();
+    let entity = EntityId::new();
+    let admission = request(timeline.id(), entity, ([4; 32], [5; 32]));
+    store
+        .set_geo_location_admission_fence(timeline.id(), entity, fence())
+        .unwrap();
+    assert!(store
+        .admit_geo_location(admission.clone())
+        .unwrap()
+        .is_accepted());
+    let inspection = rusqlite::Connection::open(path).unwrap();
+    inspection
+        .execute_batch("PRAGMA ignore_check_constraints = ON")
+        .unwrap();
+    inspection
+        .execute(
+            "UPDATE geographic_admission_dedup SET intent = ?1 WHERE fingerprint = ?2",
+            rusqlite::params![
+                vec![1_u8],
+                admission.fingerprint().as_owner_keyed_bytes().as_slice()
+            ],
+        )
+        .unwrap();
+    assert!(store
+        .admit_geo_location(admission.clone())
+        .unwrap_err()
+        .to_string()
+        .contains("invalid intent length"));
+    inspection
+        .execute_batch("DROP TABLE geographic_admission_dedup")
+        .unwrap();
+    assert!(store
+        .admit_geo_location(admission)
+        .unwrap_err()
+        .to_string()
+        .contains("no such table"));
 }
 
 #[test]

@@ -2287,6 +2287,24 @@ mod tests {
         SqliteStore::open_in_memory().unwrap()
     }
 
+    fn geographic_request(timeline: TimelineId, entity: EntityId) -> GeoLocationAdmissionRequestV1 {
+        GeoLocationAdmissionRequestV1::from_input(
+            pos_core::geo_admission::GeoLocationAdmissionInputV1::new(
+                timeline,
+                entity,
+                CanonicalBytes::from_static(b"geographic-commit-outcome"),
+                7,
+                ([1; 32], 8, [2; 32]),
+                (1, false, 9),
+                ([4; 32], [5; 32]),
+            ),
+        )
+    }
+
+    fn geographic_fence() -> GeoLocationAdmissionFenceV1 {
+        GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9))
+    }
+
     fn append_identity(key: u8, scope: u8) -> AppendIdentity {
         AppendIdentity::new(
             pos_core::AppendDedupKey::from_keyed_hash([key; 32]),
@@ -5137,6 +5155,45 @@ mod tests {
             .append(tl.id(), &[make_draft(entity, b"x")])
             .unwrap_err();
         assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    fn geographic_admission_reports_an_unknown_outcome_when_commit_aborts() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("geographic-commit-failure").unwrap();
+        let entity = EntityId::new();
+        store
+            .set_geo_location_admission_fence(timeline.id(), entity, geographic_fence())
+            .unwrap();
+        store.conn.commit_hook(Some(|| true));
+
+        let outcome = store
+            .admit_geo_location(geographic_request(timeline.id(), entity))
+            .unwrap();
+
+        assert!(outcome.is_outcome_unknown());
+    }
+
+    #[test]
+    fn retained_geographic_admission_reports_an_unknown_outcome_when_commit_aborts() {
+        let mut store = new_store();
+        let timeline = store
+            .create_timeline("geographic-retained-commit-failure")
+            .unwrap();
+        let entity = EntityId::new();
+        let request = geographic_request(timeline.id(), entity);
+        store
+            .set_geo_location_admission_fence(timeline.id(), entity, geographic_fence())
+            .unwrap();
+        assert!(store
+            .admit_geo_location(request.clone())
+            .unwrap()
+            .is_accepted());
+        store.conn.commit_hook(Some(|| true));
+
+        let outcome = store.admit_geo_location(request).unwrap();
+
+        assert!(outcome.is_outcome_unknown());
     }
 
     #[test]
