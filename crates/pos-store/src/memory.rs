@@ -1313,11 +1313,39 @@ mod tests {
         assert_eq!(store.geographic_admission_snapshots.len(), 1);
         assert_eq!(store.geographic_admission_links.len(), 1);
 
+        let retained_timeline = store.create_timeline("retained").unwrap();
+        let retained_entity = EntityId::new();
+        store
+            .set_geo_location_admission_fence(
+                retained_timeline.id(),
+                retained_entity,
+                GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
+            )
+            .unwrap();
+        let retained_request =
+            GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
+                retained_timeline.id(),
+                retained_entity,
+                CanonicalBytes::from_static(b"retained-v1-geo-location-payload"),
+                7,
+                ([1; 32], 8, [2; 32]),
+                (1, false, 9),
+                ([6; 32], [7; 32]),
+            ));
+        let retained_event_id = store
+            .admit_geo_location(retained_request)
+            .unwrap()
+            .event_id()
+            .unwrap();
+
         delete_visible_timeline(&mut store, timeline.id()).unwrap();
-        assert!(store.geographic_admission_fences.is_empty());
-        assert!(store.geographic_admission_dedup.is_empty());
-        assert!(store.geographic_admission_snapshots.is_empty());
-        assert!(store.geographic_admission_links.is_empty());
+        assert_eq!(store.geographic_admission_fences.len(), 1);
+        assert_eq!(store.geographic_admission_dedup.len(), 1);
+        assert_eq!(store.geographic_admission_snapshots.len(), 1);
+        assert_eq!(store.geographic_admission_links.len(), 1);
+        assert!(store
+            .geographic_admission_links
+            .contains_key(&(retained_timeline.id(), retained_event_id)));
     }
 
     struct ReplayFixture {

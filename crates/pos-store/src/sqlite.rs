@@ -2332,6 +2332,21 @@ mod tests {
         }
     }
 
+    struct FenceDroppingClock {
+        path: String,
+    }
+
+    impl AdmissionClock for FenceDroppingClock {
+        fn now(&mut self) -> Result<WallTime, CoreError> {
+            Connection::open(&self.path)
+                .and_then(|connection| {
+                    connection.execute_batch("DROP TABLE geographic_admission_fences")
+                })
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            Ok(WallTime::from_micros(1))
+        }
+    }
+
     #[test]
     fn lifecycle_clock_and_open_errors_fail_closed() {
         assert!(SqliteStore::open_with_clock(
@@ -2397,6 +2412,111 @@ mod tests {
         assert!(query
             .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).unwrap())
             .is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn geographic_admission_clock_and_transactional_fence_failures_are_fail_closed() {
+        let mut clock_error =
+            SqliteStore::open_with_clock(":memory:", Box::new(ErrorClock)).unwrap();
+        let timeline = clock_error
+            .create_timeline("geographic-clock-error")
+            .unwrap();
+        let entity = EntityId::new();
+        clock_error
+            .set_geo_location_admission_fence(timeline.id(), entity, geographic_fence())
+            .unwrap();
+        assert_storage_err(
+            clock_error
+                .admit_geo_location(geographic_request(timeline.id(), entity))
+                .map(|_| ()),
+        );
+        assert!(clock_error
+            .read(timeline.id(), SeqRange::all())
+            .unwrap()
+            .is_empty());
+
+        let mut overflow = SqliteStore::open_with_clock(
+            ":memory:",
+            Box::new(pos_core::FixedAdmissionClock(WallTime::from_micros(
+                u64::MAX,
+            ))),
+        )
+        .unwrap();
+        let timeline = overflow
+            .create_timeline("geographic-expiry-overflow")
+            .unwrap();
+        let entity = EntityId::new();
+        overflow
+            .set_geo_location_admission_fence(timeline.id(), entity, geographic_fence())
+            .unwrap();
+        assert_storage_err(
+            overflow
+                .admit_geo_location(geographic_request(timeline.id(), entity))
+                .map(|_| ()),
+        );
+        assert!(overflow
+            .read(timeline.id(), SeqRange::all())
+            .unwrap()
+            .is_empty());
+
+        let database = tempfile::NamedTempFile::new().unwrap();
+        let path = database.path().to_str().unwrap().to_owned();
+        let mut store = SqliteStore::open_with_clock(
+            &path,
+            Box::new(FenceDroppingClock { path: path.clone() }),
+        )
+        .unwrap();
+        let timeline = store.create_timeline("transactional-fence-read").unwrap();
+        let entity = EntityId::new();
+        store
+            .set_geo_location_admission_fence(timeline.id(), entity, geographic_fence())
+            .unwrap();
+        assert_storage_err(
+            store
+                .admit_geo_location(geographic_request(timeline.id(), entity))
+                .map(|_| ()),
+        );
+        assert!(store
+            .read(timeline.id(), SeqRange::all())
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn geographic_replay_verifier_reads_the_durable_event_snapshot_link() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("replay-row").unwrap();
+        let entity = EntityId::new();
+        store
+            .set_geo_location_admission_fence(timeline.id(), entity, geographic_fence())
+            .unwrap();
+        let outcome = store
+            .admit_geo_location(geographic_request(timeline.id(), entity))
+            .unwrap();
+        let event_id = outcome.event_id().unwrap();
+        let event_seq = outcome.event_seq().unwrap();
+        let (event_payload_hash, snapshot_cbor): (Vec<u8>, Vec<u8>) = store
+            .conn
+            .query_row(
+                "SELECT event.payload_hash, snapshot.snapshot_cbor
+                 FROM events AS event
+                 JOIN geographic_admission_snapshots AS snapshot ON snapshot.event_id = event.event_id
+                 WHERE event.event_id = ?1",
+                params![event_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let evidence = GeoLocationReplayEvidenceV1::new(
+            timeline.id(),
+            event_id,
+            event_seq,
+            Hash::from_bytes(event_payload_hash.try_into().unwrap()),
+            hash_payload(&CanonicalBytes::from_vec(snapshot_cbor)),
+        );
+
+        assert!(store.verify_v1_event_snapshot_link(evidence).is_ok());
     }
 
     #[test]
@@ -5330,8 +5450,9 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn geographic_admission_rolls_back_each_sidecar_write_failure() {
+    fn geographic_admission_rolls_back_event_and_sidecar_write_failures() {
         for (name, table) in [
+            ("event", "events"),
             ("snapshot", "geographic_admission_snapshots"),
             ("link", "geographic_admission_links"),
             ("presence", "geographic_presence"),
