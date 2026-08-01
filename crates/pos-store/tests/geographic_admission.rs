@@ -214,3 +214,59 @@ fn sqlite_admission_rolls_back_every_artifact_when_link_write_fails() {
         .unwrap();
     assert_eq!(head, 0);
 }
+
+#[test]
+fn sqlite_rejects_a_preexisting_unlinked_geographic_marker_before_deduplication() {
+    let database = tempfile::NamedTempFile::new().unwrap();
+    let path = database.path().to_str().unwrap();
+    let mut store = SqliteStore::open(path).unwrap();
+    let timeline = store.create_timeline("unlinked-geographic-state").unwrap();
+    let entity = EntityId::new();
+    store
+        .set_geo_location_admission_fence(timeline.id(), entity, fence())
+        .unwrap();
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .execute(
+            "INSERT INTO geographic_presence (timeline_id, has_evidence) VALUES (?1, 1)",
+            [timeline.id().to_string()],
+        )
+        .unwrap();
+
+    let error = store
+        .admit_geo_location(request(timeline.id(), entity, ([4; 32], [5; 32])))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        pos_core::CoreError::GeographicAdmissionValidationFailed
+    ));
+}
+
+#[test]
+fn sqlite_rejects_an_orphaned_geographic_snapshot_before_deduplication() {
+    let database = tempfile::NamedTempFile::new().unwrap();
+    let path = database.path().to_str().unwrap();
+    let mut store = SqliteStore::open(path).unwrap();
+    let timeline = store
+        .create_timeline("orphaned-geographic-snapshot")
+        .unwrap();
+    let entity = EntityId::new();
+    store
+        .set_geo_location_admission_fence(timeline.id(), entity, fence())
+        .unwrap();
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .execute(
+            "INSERT INTO geographic_admission_snapshots (event_id, snapshot_cbor) VALUES (?1, ?2)",
+            ["orphaned-event", "orphaned-snapshot"],
+        )
+        .unwrap();
+
+    let error = store
+        .admit_geo_location(request(timeline.id(), entity, ([4; 32], [5; 32])))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        pos_core::CoreError::GeographicAdmissionValidationFailed
+    ));
+}

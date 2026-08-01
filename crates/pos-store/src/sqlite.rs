@@ -493,6 +493,82 @@ impl SqliteStore {
         }
     }
 
+    fn geographic_admission_integrity_is_intact(
+        tx: &rusqlite::Transaction<'_>,
+        timeline: TimelineId,
+    ) -> Result<bool, CoreError> {
+        tx.query_row(
+            "SELECT NOT EXISTS (
+                SELECT 1
+                FROM geographic_presence
+                WHERE timeline_id = ?1
+                  AND NOT EXISTS (
+                    SELECT 1 FROM events
+                    WHERE timeline_id = ?1 AND event_type IN (?2, ?3)
+                  )
+                UNION ALL
+                SELECT 1
+                FROM events AS event
+                WHERE event.timeline_id = ?1
+                  AND event.event_type IN (?2, ?3)
+                  AND (
+                    NOT EXISTS (
+                        SELECT 1
+                        FROM geographic_presence
+                        WHERE timeline_id = event.timeline_id
+                    )
+                    OR NOT EXISTS (
+                        SELECT 1
+                        FROM geographic_admission_links AS link
+                        JOIN geographic_admission_snapshots AS snapshot
+                          ON snapshot.event_id = link.event_id
+                         AND snapshot.snapshot_cbor = link.snapshot_cbor
+                        WHERE link.timeline_id = event.timeline_id
+                          AND link.event_id = event.event_id
+                          AND link.event_seq = event.seq
+                    )
+                  )
+                UNION ALL
+                SELECT 1
+                FROM geographic_admission_links AS link
+                WHERE link.timeline_id = ?1
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM events AS event
+                    JOIN geographic_admission_snapshots AS snapshot
+                      ON snapshot.event_id = link.event_id
+                     AND snapshot.snapshot_cbor = link.snapshot_cbor
+                    WHERE event.timeline_id = link.timeline_id
+                      AND event.event_id = link.event_id
+                      AND event.seq = link.event_seq
+                      AND event.event_type IN (?2, ?3)
+                  )
+                UNION ALL
+                SELECT 1
+                FROM geographic_admission_snapshots AS snapshot
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM geographic_admission_links AS link
+                    JOIN events AS event
+                      ON event.timeline_id = link.timeline_id
+                     AND event.event_id = link.event_id
+                     AND event.seq = link.event_seq
+                     AND event.event_type IN (?2, ?3)
+                    WHERE link.event_id = snapshot.event_id
+                      AND link.snapshot_cbor = snapshot.snapshot_cbor
+                )
+            )",
+            params![
+                timeline.to_string(),
+                pos_core::GEOGRAPHIC_EVENT_TYPE,
+                pos_core::GEOGRAPHIC_CELL_EVENT_TYPE,
+            ],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|intact| intact == 1)
+        .map_err(|error| CoreError::Storage(error.to_string()))
+    }
+
     fn validate_event_sequence_invariant(&self) -> Result<(), CoreError> {
         const SQL: &str = "SELECT EXISTS (
                     SELECT 1
@@ -1293,6 +1369,9 @@ impl GeoLocationAdmissionStore for SqliteStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         if !Self::geographic_fence_permits_in_transaction(&tx, &request)? {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        }
+        if !Self::geographic_admission_integrity_is_intact(&tx, request.timeline())? {
             return Err(CoreError::GeographicAdmissionValidationFailed);
         }
 
