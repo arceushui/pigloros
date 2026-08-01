@@ -217,8 +217,10 @@ impl GeoLocationAdmissionSnapshotV1 {
             u32,
             bool,
             u64,
-        ) = ciborium::from_reader(bytes.as_slice())
-            .map_err(|error| CoreError::Serialization(error.to_string()))?;
+        ) = match ciborium::from_reader(bytes.as_slice()) {
+            Ok(decoded) => decoded,
+            Err(error) => return Err(CoreError::Serialization(error.to_string())),
+        };
         Ok(Self {
             timeline: decoded.0,
             entity: decoded.1,
@@ -242,7 +244,6 @@ pub struct GeoLocationAdmissionLinkV1 {
     event_id: EventId,
     event_seq: Seq,
     snapshot_cbor: CanonicalBytes,
-    snapshot_hash: Hash,
 }
 
 impl GeoLocationAdmissionLinkV1 {
@@ -258,15 +259,7 @@ impl GeoLocationAdmissionLinkV1 {
             event_id,
             event_seq,
             snapshot_cbor: snapshot.deterministic_cbor(),
-            snapshot_hash: Hash::zero(),
         }
-    }
-
-    /// Bind the canonical snapshot hash computed by the selected store hasher.
-    #[must_use]
-    pub const fn with_snapshot_hash(mut self, snapshot_hash: Hash) -> Self {
-        self.snapshot_hash = snapshot_hash;
-        self
     }
 
     /// Verify this retained link against its Event metadata and immutable snapshot.
@@ -296,12 +289,6 @@ impl GeoLocationAdmissionLinkV1 {
     #[must_use]
     pub const fn snapshot_cbor(&self) -> &CanonicalBytes {
         &self.snapshot_cbor
-    }
-
-    /// Return the durable hash of the retained canonical snapshot bytes.
-    #[must_use]
-    pub const fn snapshot_hash(&self) -> Hash {
-        self.snapshot_hash
     }
 }
 
@@ -753,6 +740,18 @@ mod tests {
                 .unwrap();
 
         assert_eq!(decoded, *snapshot);
+    }
+
+    #[test]
+    fn canonical_snapshot_decode_rejects_malformed_bytes() {
+        let result = GeoLocationAdmissionSnapshotV1::from_deterministic_cbor(
+            &CanonicalBytes::from_static(b"not-canonical-cbor"),
+        );
+
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("serialization error"));
     }
 
     #[test]

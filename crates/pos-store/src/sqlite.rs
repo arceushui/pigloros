@@ -357,7 +357,6 @@ impl SqliteStore {
                  event_id TEXT NOT NULL,
                  event_seq INTEGER NOT NULL,
                  snapshot_cbor BLOB NOT NULL,
-                 snapshot_hash BLOB NOT NULL CHECK (length(snapshot_hash) = 32),
                  PRIMARY KEY (timeline_id, event_id)
              );
              CREATE TABLE IF NOT EXISTS geographic_admission_dedup (
@@ -1398,23 +1397,19 @@ impl GeoLocationAdmissionStore for SqliteStore {
             event.seq,
             request.snapshot(),
         );
-        let snapshot_hash = self.hasher.hash_payload(link.snapshot_cbor());
-        let link = link.with_snapshot_hash(snapshot_hash);
         tx.execute(
             "INSERT INTO geographic_admission_snapshots (event_id, snapshot_cbor) VALUES (?1, ?2)",
             params![event.id.to_string(), link.snapshot_cbor().as_slice()],
         )
         .map_err(|error| CoreError::Storage(error.to_string()))?;
         tx.execute(
-            "INSERT INTO geographic_admission_links
-             (timeline_id, event_id, event_seq, snapshot_cbor, snapshot_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO geographic_admission_links (timeline_id, event_id, event_seq, snapshot_cbor)
+             VALUES (?1, ?2, ?3, ?4)",
             params![
                 request.timeline().to_string(),
                 event.id.to_string(),
                 i64::try_from(event.seq.as_u64()).unwrap_or(i64::MAX),
                 link.snapshot_cbor().as_slice(),
-                link.snapshot_hash().as_bytes().as_slice(),
             ],
         )
         .map_err(|error| CoreError::Storage(error.to_string()))?;
@@ -1450,7 +1445,7 @@ impl GeoLocationReplayVerifier for SqliteStore {
     ) -> Result<(), CoreError> {
         let stored = self.conn.query_row(
             "SELECT event.entity_id, event.schema_version, event.payload,
-                    event.payload_hash, link.snapshot_cbor, link.snapshot_hash
+                    event.payload_hash, link.snapshot_cbor
              FROM events AS event
              JOIN geographic_admission_links AS link
                ON link.timeline_id = event.timeline_id
@@ -1476,18 +1471,11 @@ impl GeoLocationReplayVerifier for SqliteStore {
                     row.get::<_, Vec<u8>>(2)?,
                     row.get::<_, Vec<u8>>(3)?,
                     row.get::<_, Vec<u8>>(4)?,
-                    row.get::<_, Vec<u8>>(5)?,
                 ))
             },
         );
-        let (
-            event_entity,
-            schema_version,
-            payload,
-            stored_event_hash,
-            snapshot_cbor,
-            link_snapshot_hash,
-        ) = match stored {
+        let (event_entity, schema_version, payload, stored_event_hash, snapshot_cbor) = match stored
+        {
             Ok(value) => value,
             Err(rusqlite::Error::QueryReturnedNoRows) => {
                 return Err(CoreError::GeographicAdmissionValidationFailed);
@@ -1497,32 +1485,28 @@ impl GeoLocationReplayVerifier for SqliteStore {
         let Ok(stored_event_hash) = stored_event_hash.try_into() else {
             return Err(CoreError::GeographicAdmissionValidationFailed);
         };
-        let Ok(link_snapshot_hash) = link_snapshot_hash.try_into() else {
-            return Err(CoreError::GeographicAdmissionValidationFailed);
-        };
         let stored_event_hash = Hash::from_bytes(stored_event_hash);
-        let link_snapshot_hash = Hash::from_bytes(link_snapshot_hash);
         let snapshot_cbor = CanonicalBytes::from_vec(snapshot_cbor);
-        let snapshot =
+        let Ok(snapshot) =
             pos_core::geo_admission::GeoLocationAdmissionSnapshotV1::from_deterministic_cbor(
                 &snapshot_cbor,
             )
-            .map_err(|_| CoreError::GeographicAdmissionValidationFailed)?;
+        else {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        };
         let canonical_link = pos_core::geo_admission::GeoLocationAdmissionLinkV1::for_snapshot(
             evidence.timeline(),
             evidence.event_id(),
             evidence.event_seq(),
             &snapshot,
-        )
-        .with_snapshot_hash(link_snapshot_hash);
+        );
         if snapshot.timeline() != evidence.timeline()
             || snapshot.entity().to_string() != event_entity
             || schema_version != i64::from(pos_core::SchemaVersion::V1.as_u32())
             || canonical_link.snapshot_cbor() != &snapshot_cbor
             || self.hasher.hash_payload(&CanonicalBytes::from_vec(payload)) != stored_event_hash
             || stored_event_hash != evidence.event_payload_hash()
-            || self.hasher.hash_payload(&snapshot_cbor) != link_snapshot_hash
-            || link_snapshot_hash != evidence.snapshot_hash()
+            || self.hasher.hash_payload(&snapshot_cbor) != evidence.snapshot_hash()
         {
             return Err(CoreError::GeographicAdmissionValidationFailed);
         }

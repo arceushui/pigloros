@@ -713,8 +713,6 @@ impl GeoLocationAdmissionStore for MemoryStore {
         let snapshot = request.snapshot().clone();
         let link =
             GeoLocationAdmissionLinkV1::for_snapshot(timeline, event.id, event.seq, &snapshot);
-        let snapshot_hash = self.hasher.hash_payload(link.snapshot_cbor());
-        let link = link.with_snapshot_hash(snapshot_hash);
 
         self.geographic_timelines.insert(timeline);
         self.geographic_admission_snapshots
@@ -780,8 +778,7 @@ impl GeoLocationReplayVerifier for MemoryStore {
                 evidence.event_seq(),
             )
             .is_err()
-            || link.snapshot_hash() != evidence.snapshot_hash()
-            || self.hasher.hash_payload(link.snapshot_cbor()) != link.snapshot_hash()
+            || self.hasher.hash_payload(link.snapshot_cbor()) != evidence.snapshot_hash()
         {
             return validation_failure();
         }
@@ -1322,12 +1319,27 @@ mod tests {
 
     #[test]
     fn replay_verifier_accepts_only_exact_event_evidence() {
-        let fixture = replay_fixture();
+        let mut fixture = replay_fixture();
 
         assert!(fixture
             .store
             .verify_v1_event_snapshot_link(
                 fixture.evidence(fixture.event_hash, fixture.snapshot_hash,)
+            )
+            .is_ok());
+        fixture
+            .store
+            .set_geo_location_admission_fence(
+                fixture.timeline,
+                fixture.entity,
+                GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, true, 10)),
+            )
+            .unwrap();
+        fixture.store.clock = Box::new(ErrorClock);
+        assert!(fixture
+            .store
+            .verify_v1_event_snapshot_link(
+                fixture.evidence(fixture.event_hash, fixture.snapshot_hash)
             )
             .is_ok());
         assert_replay_validation(fixture.store.verify_v1_event_snapshot_link(
