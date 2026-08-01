@@ -15,6 +15,7 @@ use pos_core::{
         GeoLocationAdmissionAdmin, GeoLocationAdmissionFenceV1, GeoLocationAdmissionFingerprintV1,
         GeoLocationAdmissionIntentV1, GeoLocationAdmissionLinkV1, GeoLocationAdmissionOutcome,
         GeoLocationAdmissionRequestV1, GeoLocationAdmissionSnapshotV1, GeoLocationAdmissionStore,
+        GeoLocationReplayEvidenceV1, GeoLocationReplayVerifier,
     },
     hasher::Hasher,
     ids::{EntityId, EventId, TimelineId},
@@ -712,6 +713,8 @@ impl GeoLocationAdmissionStore for MemoryStore {
         let snapshot = request.snapshot().clone();
         let link =
             GeoLocationAdmissionLinkV1::for_snapshot(timeline, event.id, event.seq, &snapshot);
+        let snapshot_hash = self.hasher.hash_payload(link.snapshot_cbor());
+        let link = link.with_snapshot_hash(snapshot_hash);
 
         self.geographic_timelines.insert(timeline);
         self.geographic_admission_snapshots
@@ -728,6 +731,61 @@ impl GeoLocationAdmissionStore for MemoryStore {
             },
         );
         Ok(GeoLocationAdmissionOutcome::accepted(event.id, event.seq))
+    }
+}
+
+impl GeoLocationReplayVerifier for MemoryStore {
+    fn verify_v1_event_snapshot_link(
+        &self,
+        evidence: GeoLocationReplayEvidenceV1,
+    ) -> Result<(), CoreError> {
+        let validation_failure = || Err(CoreError::GeographicAdmissionValidationFailed);
+        let event = self.timelines.get(&evidence.timeline()).and_then(|state| {
+            state
+                .events
+                .iter()
+                .find(|event| event.id == evidence.event_id())
+        });
+        let Some(event) = event else {
+            return validation_failure();
+        };
+        if event.seq != evidence.event_seq()
+            || event.event_type.as_str() != GEOGRAPHIC_EVENT_TYPE
+            || event.schema_version != pos_core::SchemaVersion::V1
+            || event.payload_hash != evidence.event_payload_hash()
+            || self.hasher.hash_payload(&event.payload) != event.payload_hash
+        {
+            return validation_failure();
+        }
+        let Some(snapshot) = self
+            .geographic_admission_snapshots
+            .get(&evidence.event_id())
+        else {
+            return validation_failure();
+        };
+        if snapshot.timeline() != evidence.timeline() || snapshot.entity() != event.entity {
+            return validation_failure();
+        }
+        let Some(link) = self
+            .geographic_admission_links
+            .get(&(evidence.timeline(), evidence.event_id()))
+        else {
+            return validation_failure();
+        };
+        if link
+            .validate_for(
+                snapshot,
+                evidence.timeline(),
+                evidence.event_id(),
+                evidence.event_seq(),
+            )
+            .is_err()
+            || link.snapshot_hash() != evidence.snapshot_hash()
+            || self.hasher.hash_payload(link.snapshot_cbor()) != link.snapshot_hash()
+        {
+            return validation_failure();
+        }
+        Ok(())
     }
 }
 
@@ -1081,7 +1139,8 @@ mod tests {
         event::{CanonicalBytes, EventDraft, Kind},
         geo_admission::{
             GeoLocationAdmissionAdmin, GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1,
-            GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore,
+            GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore, GeoLocationReplayEvidenceV1,
+            GeoLocationReplayVerifier,
         },
         ids::{EntityId, EventId},
         store::{SeqRange, TimelineExport},
@@ -1181,6 +1240,189 @@ mod tests {
         assert!(store.geographic_admission_dedup.is_empty());
         assert!(store.geographic_admission_snapshots.is_empty());
         assert!(store.geographic_admission_links.is_empty());
+    }
+
+    struct ReplayFixture {
+        store: MemoryStore,
+        timeline: TimelineId,
+        entity: EntityId,
+        event_id: EventId,
+        event_seq: Seq,
+        event_hash: Hash,
+        snapshot_hash: Hash,
+    }
+
+    impl ReplayFixture {
+        fn evidence(
+            &self,
+            event_payload_hash: Hash,
+            snapshot_hash: Hash,
+        ) -> GeoLocationReplayEvidenceV1 {
+            GeoLocationReplayEvidenceV1::new(
+                self.timeline,
+                self.event_id,
+                self.event_seq,
+                event_payload_hash,
+                snapshot_hash,
+            )
+        }
+    }
+
+    fn replay_fixture() -> ReplayFixture {
+        let mut store = MemoryStore::default();
+        let timeline = store.create_timeline("replay-verifier").unwrap();
+        let entity = EntityId::new();
+        store
+            .set_geo_location_admission_fence(
+                timeline.id(),
+                entity,
+                GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
+            )
+            .unwrap();
+        let accepted = store
+            .admit_geo_location(GeoLocationAdmissionRequestV1::from_input(
+                GeoLocationAdmissionInputV1::new(
+                    timeline.id(),
+                    entity,
+                    CanonicalBytes::from_static(b"existing-v1-geo-location-payload"),
+                    7,
+                    ([1; 32], 8, [2; 32]),
+                    (1, false, 9),
+                    ([4; 32], [5; 32]),
+                ),
+            ))
+            .unwrap();
+        let event_id = accepted.event_id().unwrap();
+        let event_seq = accepted.event_seq().unwrap();
+        let event_hash = store.state(timeline.id()).events[0].payload_hash;
+        let snapshot_hash = store.hasher.hash_payload(
+            store
+                .geographic_admission_links
+                .get(&(timeline.id(), event_id))
+                .unwrap()
+                .snapshot_cbor(),
+        );
+        ReplayFixture {
+            store,
+            timeline: timeline.id(),
+            entity,
+            event_id,
+            event_seq,
+            event_hash,
+            snapshot_hash,
+        }
+    }
+
+    fn assert_replay_validation(result: Result<(), CoreError>) {
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("geographic admission validation failed"));
+    }
+
+    #[test]
+    fn replay_verifier_accepts_only_exact_event_evidence() {
+        let fixture = replay_fixture();
+
+        assert!(fixture
+            .store
+            .verify_v1_event_snapshot_link(
+                fixture.evidence(fixture.event_hash, fixture.snapshot_hash,)
+            )
+            .is_ok());
+        assert_replay_validation(fixture.store.verify_v1_event_snapshot_link(
+            fixture.evidence(fixture.event_hash, Hash::from_bytes([0; 32])),
+        ));
+        assert_replay_validation(fixture.store.verify_v1_event_snapshot_link(
+            fixture.evidence(Hash::from_bytes([0; 32]), fixture.snapshot_hash),
+        ));
+        assert_replay_validation(fixture.store.verify_v1_event_snapshot_link(
+            GeoLocationReplayEvidenceV1::new(
+                fixture.timeline,
+                fixture.event_id,
+                fixture.event_seq.next(),
+                fixture.event_hash,
+                fixture.snapshot_hash,
+            ),
+        ));
+    }
+
+    #[test]
+    fn replay_verifier_rejects_changed_canonical_link() {
+        let mut fixture = replay_fixture();
+        let original_link = fixture
+            .store
+            .geographic_admission_links
+            .get(&(fixture.timeline, fixture.event_id))
+            .unwrap()
+            .clone();
+        let altered_request =
+            GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
+                fixture.timeline,
+                fixture.entity,
+                CanonicalBytes::from_static(b"existing-v1-geo-location-payload"),
+                8,
+                ([1; 32], 8, [2; 32]),
+                (1, false, 9),
+                ([6; 32], [7; 32]),
+            ));
+        fixture.store.geographic_admission_links.insert(
+            (fixture.timeline, fixture.event_id),
+            GeoLocationAdmissionLinkV1::for_snapshot(
+                fixture.timeline,
+                fixture.event_id,
+                fixture.event_seq,
+                altered_request.snapshot(),
+            ),
+        );
+
+        assert_replay_validation(fixture.store.verify_v1_event_snapshot_link(
+            fixture.evidence(fixture.event_hash, fixture.snapshot_hash),
+        ));
+        fixture
+            .store
+            .geographic_admission_links
+            .insert((fixture.timeline, fixture.event_id), original_link);
+    }
+
+    #[test]
+    fn replay_verifier_rejects_missing_sidecars_and_non_geographic_event() {
+        let mut fixture = replay_fixture();
+        let snapshot = fixture
+            .store
+            .geographic_admission_snapshots
+            .remove(&fixture.event_id)
+            .unwrap();
+        assert_replay_validation(fixture.store.verify_v1_event_snapshot_link(
+            fixture.evidence(fixture.event_hash, fixture.snapshot_hash),
+        ));
+        fixture
+            .store
+            .geographic_admission_snapshots
+            .insert(fixture.event_id, snapshot);
+        let link = fixture
+            .store
+            .geographic_admission_links
+            .remove(&(fixture.timeline, fixture.event_id))
+            .unwrap();
+        assert_replay_validation(fixture.store.verify_v1_event_snapshot_link(
+            fixture.evidence(fixture.event_hash, fixture.snapshot_hash),
+        ));
+        fixture
+            .store
+            .geographic_admission_links
+            .insert((fixture.timeline, fixture.event_id), link);
+        fixture.store.state_mut(fixture.timeline).unwrap().events[0].event_type =
+            Kind::new("test.event");
+        assert_replay_validation(fixture.store.verify_v1_event_snapshot_link(
+            GeoLocationReplayEvidenceV1::new(
+                fixture.timeline,
+                fixture.event_id,
+                fixture.event_seq,
+                fixture.event_hash,
+                fixture.snapshot_hash,
+            ),
+        ));
     }
 
     fn append_identity(key: u8, scope: u8) -> AppendIdentity {
