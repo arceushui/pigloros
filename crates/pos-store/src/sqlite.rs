@@ -2287,6 +2287,73 @@ mod tests {
         SqliteStore::open_in_memory().unwrap()
     }
 
+    fn assert_replay_validation(result: Result<(), CoreError>) {
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("geographic admission validation failed"));
+    }
+
+    fn assert_durable_replay_corruption_is_rejected(
+        store: &mut SqliteStore,
+        event_id: &str,
+        event_seq: Seq,
+        event_hash: Hash,
+        snapshot_hash: Hash,
+        evidence: impl Fn(Seq, Hash, Hash) -> GeoLocationReplayEvidenceV1,
+    ) {
+        assert_eq!(
+            store
+                .conn
+                .execute(
+                    "UPDATE events SET payload_hash = ?1 WHERE event_id = ?2",
+                    params![vec![0_u8], event_id],
+                )
+                .unwrap(),
+            1
+        );
+        assert_replay_validation(store.verify_v1_event_snapshot_link(evidence(
+            event_seq,
+            event_hash,
+            snapshot_hash,
+        )));
+        assert_eq!(
+            store
+                .conn
+                .execute(
+                    "UPDATE events SET payload_hash = ?1 WHERE event_id = ?2",
+                    params![event_hash.as_bytes().as_slice(), event_id],
+                )
+                .unwrap(),
+            1
+        );
+        store
+            .conn
+            .execute(
+                "UPDATE geographic_admission_links SET snapshot_cbor = ?1 WHERE event_id = ?2",
+                params![vec![0_u8], event_id],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE geographic_admission_snapshots SET snapshot_cbor = ?1 WHERE event_id = ?2",
+                params![vec![0_u8], event_id],
+            )
+            .unwrap();
+        assert_replay_validation(store.verify_v1_event_snapshot_link(evidence(
+            event_seq,
+            event_hash,
+            snapshot_hash,
+        )));
+        store.conn.execute_batch("DROP TABLE events").unwrap();
+        assert!(store
+            .verify_v1_event_snapshot_link(evidence(event_seq, event_hash, snapshot_hash))
+            .unwrap_err()
+            .to_string()
+            .contains("no such table"));
+    }
+
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn geographic_request(timeline: TimelineId, entity: EntityId) -> GeoLocationAdmissionRequestV1 {
         GeoLocationAdmissionRequestV1::from_input(
@@ -2519,6 +2586,88 @@ mod tests {
         );
 
         assert!(store.verify_v1_event_snapshot_link(evidence).is_ok());
+    }
+
+    #[test]
+    fn geographic_replay_verifier_rejects_exact_evidence_and_durable_corruption() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("replay-corruption").unwrap();
+        let entity = EntityId::new();
+        let request = geographic_request(timeline.id(), entity);
+        store
+            .set_geo_location_admission_fence(timeline.id(), entity, geographic_fence())
+            .unwrap();
+        let outcome = store.admit_geo_location(request.clone()).unwrap();
+        let event_id = outcome.event_id().unwrap();
+        let event_seq = outcome.event_seq().unwrap();
+        let event_hash = hash_payload(request.payload());
+        let link = pos_core::geo_admission::GeoLocationAdmissionLinkV1::for_snapshot(
+            timeline.id(),
+            event_id,
+            event_seq,
+            request.snapshot(),
+        );
+        let snapshot_hash = hash_payload(link.snapshot_cbor());
+        let evidence = |seq, payload_hash, snapshot_hash| {
+            GeoLocationReplayEvidenceV1::new(
+                timeline.id(),
+                event_id,
+                seq,
+                payload_hash,
+                snapshot_hash,
+            )
+        };
+
+        store
+            .set_geo_location_admission_fence(
+                timeline.id(),
+                entity,
+                GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, true, 10)),
+            )
+            .unwrap();
+        assert!(store
+            .verify_v1_event_snapshot_link(evidence(event_seq, event_hash, snapshot_hash))
+            .is_ok());
+        for evidence in [
+            evidence(event_seq.next(), event_hash, snapshot_hash),
+            evidence(event_seq, Hash::from_bytes([0; 32]), snapshot_hash),
+            evidence(event_seq, event_hash, Hash::from_bytes([0; 32])),
+        ] {
+            assert_replay_validation(store.verify_v1_event_snapshot_link(evidence));
+        }
+
+        let event_id = event_id.to_string();
+        let original_entity = entity.to_string();
+        assert_eq!(
+            store
+                .conn
+                .execute(
+                    "UPDATE events SET entity_id = ?1 WHERE event_id = ?2",
+                    params![EntityId::new().to_string(), event_id],
+                )
+                .unwrap(),
+            1
+        );
+        assert_replay_validation(store.verify_v1_event_snapshot_link(evidence(
+            event_seq,
+            event_hash,
+            snapshot_hash,
+        )));
+        store
+            .conn
+            .execute(
+                "UPDATE events SET entity_id = ?1, payload_hash = ?2 WHERE event_id = ?3",
+                params![original_entity, event_hash.as_bytes().as_slice(), event_id],
+            )
+            .unwrap();
+        assert_durable_replay_corruption_is_rejected(
+            &mut store,
+            &event_id,
+            event_seq,
+            event_hash,
+            snapshot_hash,
+            evidence,
+        );
     }
 
     #[test]
