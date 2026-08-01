@@ -2493,7 +2493,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn geographic_replay_verifier_reads_the_durable_event_snapshot_link() {
         let mut store = new_store();
         let timeline = store.create_timeline("replay-row").unwrap();
