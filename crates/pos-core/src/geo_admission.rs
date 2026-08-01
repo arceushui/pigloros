@@ -186,6 +186,22 @@ pub struct GeoLocationAdmissionRequestV1 {
     fingerprint: GeoLocationAdmissionFingerprintV1,
 }
 
+/// Separate core-owned capability for one V1 geographic admission transaction.
+///
+/// Generic [`crate::EventStore`] APIs do not expose this trait, so ordinary
+/// callers cannot use them to append protected geographic evidence.
+pub trait GeoLocationAdmission {
+    /// Admit one already-minimized V1 location request atomically.
+    ///
+    /// # Errors
+    /// Returns a bounded geographic-admission error when the commit fence or
+    /// storage transaction cannot establish a definite outcome.
+    fn admit_geo_location(
+        &mut self,
+        request: GeoLocationAdmissionRequestV1,
+    ) -> Result<GeoLocationAdmissionOutcome, CoreError>;
+}
+
 impl GeoLocationAdmissionRequestV1 {
     #[must_use]
     pub fn new(
@@ -338,6 +354,24 @@ mod tests {
             7,
             consent,
         )
+    }
+
+    struct CoreAdmissionProbe;
+
+    impl GeoLocationAdmission for CoreAdmissionProbe {
+        fn admit_geo_location(
+            &mut self,
+            _request: GeoLocationAdmissionRequestV1,
+        ) -> Result<GeoLocationAdmissionOutcome, CoreError> {
+            Err(CoreError::GeographicAdmissionUnavailable)
+        }
+    }
+
+    #[test]
+    fn exposes_a_separate_core_admission_capability() {
+        fn requires_capability<T: GeoLocationAdmission>() {}
+
+        requires_capability::<CoreAdmissionProbe>();
     }
 
     #[test]
