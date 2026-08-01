@@ -1080,6 +1080,28 @@ fn read_first_i64(row: &rusqlite::Row<'_>) -> rusqlite::Result<i64> {
     row.get(0)
 }
 
+type GeographicReplayRow = (String, i64, Vec<u8>, Vec<u8>, Vec<u8>);
+
+fn read_geographic_replay_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GeographicReplayRow> {
+    row.get(0).and_then(|event_entity| {
+        row.get(1).and_then(|schema_version| {
+            row.get(2).and_then(|payload| {
+                row.get(3).and_then(|stored_event_hash| {
+                    row.get(4).map(|snapshot_cbor| {
+                        (
+                            event_entity,
+                            schema_version,
+                            payload,
+                            stored_event_hash,
+                            snapshot_cbor,
+                        )
+                    })
+                })
+            })
+        })
+    })
+}
+
 fn sqlite_usize_or_max(value: i64) -> usize {
     // SQLite `length(BLOB)` and `count(*)` are non-negative. Saturating an
     // unexpected negative or platform-width overflow remains fail-closed for
@@ -1461,15 +1483,7 @@ impl GeoLocationReplayVerifier for SqliteStore {
                 i64::try_from(evidence.event_seq().as_u64()).unwrap_or(i64::MAX),
                 GEOGRAPHIC_EVENT_TYPE,
             ],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, Vec<u8>>(2)?,
-                    row.get::<_, Vec<u8>>(3)?,
-                    row.get::<_, Vec<u8>>(4)?,
-                ))
-            },
+            read_geographic_replay_row,
         );
         let (event_entity, schema_version, payload, stored_event_hash, snapshot_cbor) = match stored
         {
