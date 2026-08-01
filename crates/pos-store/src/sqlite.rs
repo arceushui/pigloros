@@ -1297,9 +1297,10 @@ impl GeoLocationAdmissionStore for SqliteStore {
         }
 
         if let Some(outcome) = Self::geographic_dedup_outcome(&tx, &request, admitted_at)? {
-            tx.commit()
-                .map_err(|error| CoreError::Storage(error.to_string()))?;
-            return Ok(outcome);
+            return match tx.commit() {
+                Ok(()) => Ok(outcome),
+                Err(_) => Ok(GeoLocationAdmissionOutcome::outcome_unknown()),
+            };
         }
 
         let draft = EventDraft::new(
@@ -1350,9 +1351,10 @@ impl GeoLocationAdmissionStore for SqliteStore {
             ],
         )
         .map_err(|error| CoreError::Storage(error.to_string()))?;
-        tx.commit()
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        Ok(GeoLocationAdmissionOutcome::accepted(event.id))
+        match tx.commit() {
+            Ok(()) => Ok(GeoLocationAdmissionOutcome::accepted(event.id)),
+            Err(_) => Ok(GeoLocationAdmissionOutcome::outcome_unknown()),
+        }
     }
 }
 
