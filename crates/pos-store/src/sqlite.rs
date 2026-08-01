@@ -1431,7 +1431,7 @@ impl GeoLocationAdmissionStore for SqliteStore {
         )
         .map_err(|error| CoreError::Storage(error.to_string()))?;
         match tx.commit() {
-            Ok(()) => Ok(GeoLocationAdmissionOutcome::accepted(event.id)),
+            Ok(()) => Ok(GeoLocationAdmissionOutcome::accepted(event.id, event.seq)),
             Err(_) => Ok(GeoLocationAdmissionOutcome::outcome_unknown()),
         }
     }

@@ -409,6 +409,7 @@ pub trait GeoLocationAdmissionAdmin {
 pub struct GeoLocationAdmissionOutcome {
     kind: GeoLocationAdmissionOutcomeKind,
     event_id: Option<EventId>,
+    event_seq: Option<Seq>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -422,10 +423,11 @@ enum GeoLocationAdmissionOutcomeKind {
 
 impl GeoLocationAdmissionOutcome {
     #[must_use]
-    pub const fn accepted(event_id: EventId) -> Self {
+    pub const fn accepted(event_id: EventId, event_seq: Seq) -> Self {
         Self {
             kind: GeoLocationAdmissionOutcomeKind::Accepted,
             event_id: Some(event_id),
+            event_seq: Some(event_seq),
         }
     }
 
@@ -439,11 +441,13 @@ impl GeoLocationAdmissionOutcome {
             Self {
                 kind: GeoLocationAdmissionOutcomeKind::Duplicate,
                 event_id: Some(event_id),
+                event_seq: None,
             }
         } else {
             Self {
                 kind: GeoLocationAdmissionOutcomeKind::Conflict,
                 event_id: None,
+                event_seq: None,
             }
         }
     }
@@ -453,6 +457,7 @@ impl GeoLocationAdmissionOutcome {
         Self {
             kind: GeoLocationAdmissionOutcomeKind::Unavailable,
             event_id: None,
+            event_seq: None,
         }
     }
 
@@ -461,6 +466,7 @@ impl GeoLocationAdmissionOutcome {
         Self {
             kind: GeoLocationAdmissionOutcomeKind::OutcomeUnknown,
             event_id: None,
+            event_seq: None,
         }
     }
 
@@ -492,6 +498,11 @@ impl GeoLocationAdmissionOutcome {
     #[must_use]
     pub const fn event_id(&self) -> Option<EventId> {
         self.event_id
+    }
+
+    #[must_use]
+    pub const fn event_seq(&self) -> Option<Seq> {
+        self.event_seq
     }
 
     #[must_use]
@@ -621,9 +632,10 @@ mod tests {
         let request = request(timeline);
         let event_id = EventId::new();
 
-        let accepted = GeoLocationAdmissionOutcome::accepted(event_id);
+        let accepted = GeoLocationAdmissionOutcome::accepted(event_id, Seq::from_u64(3));
         assert!(accepted.is_accepted());
         assert_eq!(accepted.event_id(), Some(event_id));
+        assert_eq!(accepted.event_seq(), Some(Seq::from_u64(3)));
         assert!(accepted.error().is_none());
 
         let duplicate = GeoLocationAdmissionOutcome::classify_retained_intent(
