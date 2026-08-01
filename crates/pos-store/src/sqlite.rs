@@ -2424,7 +2424,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn geographic_admission_clock_and_transactional_fence_failures_are_fail_closed() {
         let mut clock_error =
             SqliteStore::open_with_clock(":memory:", Box::new(ErrorClock)).unwrap();
@@ -2493,7 +2492,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn geographic_replay_verifier_reads_the_durable_event_snapshot_link() {
         let mut store = new_store();
         let timeline = store.create_timeline("replay-row").unwrap();
@@ -5396,7 +5394,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn geographic_admission_maps_durable_read_and_transaction_failures() {
         let mut store = new_store();
         let timeline = store.create_timeline("missing-fence-table").unwrap();
@@ -5447,7 +5444,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn geographic_admission_maps_durable_dedup_and_fence_failures() {
         let mut store = new_store();
         let timeline = store.create_timeline("malformed-dedup-event").unwrap();
@@ -5524,7 +5520,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn geographic_admission_rolls_back_event_and_sidecar_write_failures() {
         for (name, table) in [
             ("event", "events"),
@@ -5573,7 +5568,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn geographic_sidecar_cleanup_failures_are_fail_closed() {
         for table in [
             "geographic_admission_dedup",
