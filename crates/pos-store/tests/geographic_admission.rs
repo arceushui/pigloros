@@ -16,13 +16,22 @@ fn request(
     entity: EntityId,
     dedup: ([u8; 32], [u8; 32]),
 ) -> GeoLocationAdmissionRequestV1 {
+    request_with_epoch(timeline, entity, 9, dedup)
+}
+
+fn request_with_epoch(
+    timeline: TimelineId,
+    entity: EntityId,
+    admission_epoch: u64,
+    dedup: ([u8; 32], [u8; 32]),
+) -> GeoLocationAdmissionRequestV1 {
     GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
         timeline,
         entity,
         CanonicalBytes::from_static(b"existing-v1-geo-location-payload"),
         7,
         ([1; 32], 8, [2; 32]),
-        (1, false, 9),
+        (1, false, admission_epoch),
         dedup,
     ))
 }
@@ -133,6 +142,39 @@ where
     assert_ne!(first.event_id(), after_expiry.event_id());
 }
 
+fn assert_replaced_fence_rejects_stale_epoch<S>(store: &mut S)
+where
+    S: EventStore + GeoLocationAdmissionAdmin + GeoLocationAdmissionStore,
+{
+    let timeline = store.create_timeline("re-pair").unwrap();
+    let entity = EntityId::new();
+    store
+        .set_geo_location_admission_fence(timeline.id(), entity, fence())
+        .unwrap();
+    let stale = request(timeline.id(), entity, ([4; 32], [5; 32]));
+    store
+        .set_geo_location_admission_fence(
+            timeline.id(),
+            entity,
+            GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 10)),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        store.admit_geo_location(stale),
+        Err(pos_core::CoreError::GeographicAdmissionValidationFailed)
+    ));
+    assert!(store
+        .admit_geo_location(request_with_epoch(
+            timeline.id(),
+            entity,
+            10,
+            ([4; 32], [5; 32]),
+        ))
+        .unwrap()
+        .is_accepted());
+}
+
 #[test]
 fn memory_admission_is_atomic_and_revalidates_before_deduplication() {
     assert_admission_contract(&mut MemoryStore::default());
@@ -163,6 +205,16 @@ fn sqlite_expired_geographic_dedup_allows_one_new_admission() {
     )
     .unwrap();
     assert_expired_dedup_allows_one_new_admission(&mut store);
+}
+
+#[test]
+fn memory_replaced_geographic_fence_rejects_stale_epoch() {
+    assert_replaced_fence_rejects_stale_epoch(&mut MemoryStore::default());
+}
+
+#[test]
+fn sqlite_replaced_geographic_fence_rejects_stale_epoch() {
+    assert_replaced_fence_rejects_stale_epoch(&mut SqliteStore::open_in_memory().unwrap());
 }
 
 #[test]
