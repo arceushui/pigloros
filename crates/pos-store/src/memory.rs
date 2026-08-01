@@ -2331,6 +2331,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn delete_timeline_removes_events_and_blocks_with_forks() {
         let mut store = MemoryStore::new();
         let root = store.create_timeline("root").unwrap();
