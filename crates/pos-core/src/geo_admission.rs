@@ -1,17 +1,58 @@
-//! Core-private values for admitting V1 `geo.location` evidence.
+//! Core-owned values for admitting V1 `geo.location` evidence.
 //!
-//! The request cannot carry writer-generated Event metadata. A storage adapter
-//! receives only a core-issued request and must verify the immutable admission
-//! snapshot/link before it can treat a retained admission as a duplicate.
+//! A gateway supplies one already-minimized input value. Core turns it into an
+//! opaque request, and only a storage adapter with the dedicated capability
+//! may admit it. Generic event storage has no geographic-admission API.
 
 use crate::{CanonicalBytes, CoreError, EntityId, EventId, Seq, TimelineId};
 
-/// Unforgeable authority required to issue geographic admission values.
+/// Already-minimized gateway input for one V1 geographic admission attempt.
 ///
-/// The core creates this capability internally. Its private field prevents a
-/// Plugin or a generic `EventStore` caller from manufacturing admission values.
-pub struct GeoLocationAdmissionAuthorityV1 {
-    _core_private: (),
+/// Its fields are deliberately private: callers can create it, but cannot
+/// mutate a request after core has captured the admission state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GeoLocationAdmissionInputV1 {
+    timeline: TimelineId,
+    entity: EntityId,
+    payload: CanonicalBytes,
+    binding_revision: u64,
+    consent_identity: [u8; 32],
+    consent_revision: u64,
+    consent_hash: [u8; 32],
+    policy_version: u32,
+    withdrawn: bool,
+    admission_epoch: u64,
+    intent: [u8; 32],
+    fingerprint: [u8; 32],
+}
+
+impl GeoLocationAdmissionInputV1 {
+    /// Create the bounded input captured by the gateway before storage begins.
+    #[must_use]
+    pub fn new(
+        timeline: TimelineId,
+        entity: EntityId,
+        payload: CanonicalBytes,
+        binding_revision: u64,
+        consent: ([u8; 32], u64, [u8; 32]),
+        policy: (u32, bool, u64),
+        dedup: ([u8; 32], [u8; 32]),
+    ) -> Self {
+        Self {
+            timeline,
+            entity,
+            payload,
+            binding_revision,
+            consent_identity: consent.0,
+            consent_revision: consent.1,
+            consent_hash: consent.2,
+            policy_version: policy.0,
+            withdrawn: policy.1,
+            admission_epoch: policy.2,
+            intent: dedup.0,
+            fingerprint: dedup.1,
+        }
+    }
 }
 
 /// Immutable consent state captured at the geographic admission fence.
@@ -27,23 +68,33 @@ pub struct GeoLocationConsentStateV1 {
 
 impl GeoLocationConsentStateV1 {
     #[must_use]
-    pub const fn from_verified_state(
-        _authority: &GeoLocationAdmissionAuthorityV1,
-        identity: [u8; 32],
-        revision: u64,
-        hash: [u8; 32],
-        policy_version: u32,
-        withdrawn: bool,
-        admission_epoch: u64,
-    ) -> Self {
-        Self {
-            identity,
-            revision,
-            hash,
-            policy_version,
-            withdrawn,
-            admission_epoch,
-        }
+    pub const fn identity(&self) -> &[u8; 32] {
+        &self.identity
+    }
+
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    #[must_use]
+    pub const fn hash(&self) -> &[u8; 32] {
+        &self.hash
+    }
+
+    #[must_use]
+    pub const fn policy_version(&self) -> u32 {
+        self.policy_version
+    }
+
+    #[must_use]
+    pub const fn withdrawn(&self) -> bool {
+        self.withdrawn
+    }
+
+    #[must_use]
+    pub const fn admission_epoch(&self) -> u64 {
+        self.admission_epoch
     }
 }
 
@@ -58,19 +109,23 @@ pub struct GeoLocationAdmissionSnapshotV1 {
 
 impl GeoLocationAdmissionSnapshotV1 {
     #[must_use]
-    pub const fn from_verified_state(
-        _authority: &GeoLocationAdmissionAuthorityV1,
-        timeline: TimelineId,
-        entity: EntityId,
-        binding_revision: u64,
-        consent: GeoLocationConsentStateV1,
-    ) -> Self {
-        Self {
-            timeline,
-            entity,
-            binding_revision,
-            consent,
-        }
+    pub const fn timeline(&self) -> TimelineId {
+        self.timeline
+    }
+
+    #[must_use]
+    pub const fn entity(&self) -> EntityId {
+        self.entity
+    }
+
+    #[must_use]
+    pub const fn binding_revision(&self) -> u64 {
+        self.binding_revision
+    }
+
+    #[must_use]
+    pub const fn consent(&self) -> &GeoLocationConsentStateV1 {
+        &self.consent
     }
 
     fn deterministic_cbor(&self) -> CanonicalBytes {
@@ -106,7 +161,6 @@ pub struct GeoLocationAdmissionLinkV1 {
 impl GeoLocationAdmissionLinkV1 {
     #[must_use]
     pub fn for_snapshot(
-        _authority: &GeoLocationAdmissionAuthorityV1,
         timeline: TimelineId,
         event_id: EventId,
         event_seq: Seq,
@@ -150,11 +204,8 @@ pub struct GeoLocationAdmissionIntentV1([u8; 32]);
 
 impl GeoLocationAdmissionIntentV1 {
     #[must_use]
-    pub const fn from_owner_keyed_bytes(
-        _authority: &GeoLocationAdmissionAuthorityV1,
-        bytes: [u8; 32],
-    ) -> Self {
-        Self(bytes)
+    pub const fn as_owner_keyed_bytes(&self) -> &[u8; 32] {
+        &self.0
     }
 }
 
@@ -164,11 +215,8 @@ pub struct GeoLocationAdmissionFingerprintV1([u8; 32]);
 
 impl GeoLocationAdmissionFingerprintV1 {
     #[must_use]
-    pub const fn from_owner_keyed_bytes(
-        _authority: &GeoLocationAdmissionAuthorityV1,
-        bytes: [u8; 32],
-    ) -> Self {
-        Self(bytes)
+    pub const fn as_owner_keyed_bytes(&self) -> &[u8; 32] {
+        &self.0
     }
 }
 
@@ -186,6 +234,77 @@ pub struct GeoLocationAdmissionRequestV1 {
     fingerprint: GeoLocationAdmissionFingerprintV1,
 }
 
+impl GeoLocationAdmissionRequestV1 {
+    /// Convert already-minimized gateway input into an immutable core request.
+    #[must_use]
+    pub fn from_input(input: GeoLocationAdmissionInputV1) -> Self {
+        let GeoLocationAdmissionInputV1 {
+            timeline,
+            entity,
+            payload,
+            binding_revision,
+            consent_identity,
+            consent_revision,
+            consent_hash,
+            policy_version,
+            withdrawn,
+            admission_epoch,
+            intent,
+            fingerprint,
+        } = input;
+        Self {
+            timeline,
+            entity,
+            payload,
+            snapshot: GeoLocationAdmissionSnapshotV1 {
+                timeline,
+                entity,
+                binding_revision,
+                consent: GeoLocationConsentStateV1 {
+                    identity: consent_identity,
+                    revision: consent_revision,
+                    hash: consent_hash,
+                    policy_version,
+                    withdrawn,
+                    admission_epoch,
+                },
+            },
+            intent: GeoLocationAdmissionIntentV1(intent),
+            fingerprint: GeoLocationAdmissionFingerprintV1(fingerprint),
+        }
+    }
+
+    #[must_use]
+    pub const fn timeline(&self) -> TimelineId {
+        self.timeline
+    }
+
+    #[must_use]
+    pub const fn entity(&self) -> EntityId {
+        self.entity
+    }
+
+    #[must_use]
+    pub const fn payload(&self) -> &CanonicalBytes {
+        &self.payload
+    }
+
+    #[must_use]
+    pub const fn snapshot(&self) -> &GeoLocationAdmissionSnapshotV1 {
+        &self.snapshot
+    }
+
+    #[must_use]
+    pub const fn intent(&self) -> GeoLocationAdmissionIntentV1 {
+        self.intent
+    }
+
+    #[must_use]
+    pub const fn fingerprint(&self) -> GeoLocationAdmissionFingerprintV1 {
+        self.fingerprint
+    }
+}
+
 /// Separate core-owned capability for one V1 geographic admission transaction.
 ///
 /// Generic [`crate::EventStore`] APIs do not expose this trait, so ordinary
@@ -200,28 +319,6 @@ pub trait GeoLocationAdmission {
         &mut self,
         request: GeoLocationAdmissionRequestV1,
     ) -> Result<GeoLocationAdmissionOutcome, CoreError>;
-}
-
-impl GeoLocationAdmissionRequestV1 {
-    #[must_use]
-    pub fn new(
-        _authority: &GeoLocationAdmissionAuthorityV1,
-        timeline: TimelineId,
-        entity: EntityId,
-        payload: CanonicalBytes,
-        snapshot: GeoLocationAdmissionSnapshotV1,
-        intent: GeoLocationAdmissionIntentV1,
-        fingerprint: GeoLocationAdmissionFingerprintV1,
-    ) -> Self {
-        Self {
-            timeline,
-            entity,
-            payload,
-            snapshot,
-            intent,
-            fingerprint,
-        }
-    }
 }
 
 /// The definite or explicitly indeterminate result of one admission attempt.
@@ -242,7 +339,7 @@ enum GeoLocationAdmissionOutcomeKind {
 
 impl GeoLocationAdmissionOutcome {
     #[must_use]
-    pub const fn accepted(_authority: &GeoLocationAdmissionAuthorityV1, event_id: EventId) -> Self {
+    pub const fn accepted(event_id: EventId) -> Self {
         Self {
             kind: GeoLocationAdmissionOutcomeKind::Accepted,
             event_id: Some(event_id),
@@ -251,7 +348,6 @@ impl GeoLocationAdmissionOutcome {
 
     #[must_use]
     pub fn classify_retained_intent(
-        _authority: &GeoLocationAdmissionAuthorityV1,
         requested: GeoLocationAdmissionIntentV1,
         retained: GeoLocationAdmissionIntentV1,
         event_id: EventId,
@@ -270,7 +366,7 @@ impl GeoLocationAdmissionOutcome {
     }
 
     #[must_use]
-    pub const fn unavailable(_authority: &GeoLocationAdmissionAuthorityV1) -> Self {
+    pub const fn unavailable() -> Self {
         Self {
             kind: GeoLocationAdmissionOutcomeKind::Unavailable,
             event_id: None,
@@ -278,7 +374,7 @@ impl GeoLocationAdmissionOutcome {
     }
 
     #[must_use]
-    pub const fn outcome_unknown(_authority: &GeoLocationAdmissionAuthorityV1) -> Self {
+    pub const fn outcome_unknown() -> Self {
         Self {
             kind: GeoLocationAdmissionOutcomeKind::OutcomeUnknown,
             event_id: None,
@@ -336,24 +432,20 @@ mod tests {
     use super::*;
     use crate::{EntityId, EventId, Seq, TimelineId};
 
-    fn authority() -> GeoLocationAdmissionAuthorityV1 {
-        GeoLocationAdmissionAuthorityV1 { _core_private: () }
-    }
-
-    fn snapshot(
-        authority: &GeoLocationAdmissionAuthorityV1,
-        timeline: TimelineId,
-    ) -> GeoLocationAdmissionSnapshotV1 {
-        let consent = GeoLocationConsentStateV1::from_verified_state(
-            authority, [1; 32], 8, [2; 32], 1, false, 9,
-        );
-        GeoLocationAdmissionSnapshotV1::from_verified_state(
-            authority,
+    fn input(timeline: TimelineId) -> GeoLocationAdmissionInputV1 {
+        GeoLocationAdmissionInputV1::new(
             timeline,
             EntityId::new(),
+            CanonicalBytes::from_static(b"existing-v1-geo-location-payload"),
             7,
-            consent,
+            ([1; 32], 8, [2; 32]),
+            (1, false, 9),
+            ([4; 32], [5; 32]),
         )
+    }
+
+    fn request(timeline: TimelineId) -> GeoLocationAdmissionRequestV1 {
+        GeoLocationAdmissionRequestV1::from_input(input(timeline))
     }
 
     struct CoreAdmissionProbe;
@@ -375,15 +467,41 @@ mod tests {
     }
 
     #[test]
-    fn canonical_link_validation_rejects_changed_admission_state() {
-        let authority = authority();
+    fn gateway_can_build_an_opaque_request_without_core_authority() {
         let timeline = TimelineId::new();
-        let snapshot = snapshot(&authority, timeline);
+        let entity = EntityId::new();
+        let input = GeoLocationAdmissionInputV1::new(
+            timeline,
+            entity,
+            CanonicalBytes::from_static(b"existing-v1-geo-location-payload"),
+            7,
+            ([1; 32], 8, [2; 32]),
+            (1, false, 9),
+            ([4; 32], [5; 32]),
+        );
+
+        let request = GeoLocationAdmissionRequestV1::from_input(input);
+
+        assert_eq!(request.timeline(), timeline);
+        assert_eq!(request.entity(), entity);
+        assert_eq!(
+            request.payload().as_slice(),
+            b"existing-v1-geo-location-payload"
+        );
+        assert_eq!(request.snapshot().binding_revision(), 7);
+        assert_eq!(request.intent().as_owner_keyed_bytes(), &[4; 32]);
+        assert_eq!(request.fingerprint().as_owner_keyed_bytes(), &[5; 32]);
+    }
+
+    #[test]
+    fn canonical_link_validation_rejects_changed_admission_state() {
+        let timeline = TimelineId::new();
+        let request = request(timeline);
+        let snapshot = request.snapshot().clone();
         let event_id = EventId::new();
         let event_seq = Seq::from_u64(3);
-        let link = GeoLocationAdmissionLinkV1::for_snapshot(
-            &authority, timeline, event_id, event_seq, &snapshot,
-        );
+        let link =
+            GeoLocationAdmissionLinkV1::for_snapshot(timeline, event_id, event_seq, &snapshot);
 
         assert!(link
             .validate_for(&snapshot, timeline, event_id, event_seq)
@@ -416,42 +534,18 @@ mod tests {
 
     #[test]
     fn owner_keyed_retry_classification_distinguishes_duplicate_conflict_and_unknown() {
-        let authority = authority();
         let timeline = TimelineId::new();
-        let snapshot = snapshot(&authority, timeline);
-        let expected_snapshot = snapshot.clone();
-        let intent = GeoLocationAdmissionIntentV1::from_owner_keyed_bytes(&authority, [4; 32]);
-        let fingerprint =
-            GeoLocationAdmissionFingerprintV1::from_owner_keyed_bytes(&authority, [5; 32]);
-        let entity = EntityId::new();
-        let request = GeoLocationAdmissionRequestV1::new(
-            &authority,
-            timeline,
-            entity,
-            CanonicalBytes::from_static(b"existing-v1-geo-location-payload"),
-            snapshot,
-            intent,
-            fingerprint,
-        );
-        assert_eq!(request.timeline, timeline);
-        assert_eq!(request.entity, entity);
-        assert_eq!(
-            request.payload.as_slice(),
-            b"existing-v1-geo-location-payload"
-        );
-        assert_eq!(request.snapshot, expected_snapshot);
-        assert_eq!(request.fingerprint, fingerprint);
+        let request = request(timeline);
         let event_id = EventId::new();
 
-        let accepted = GeoLocationAdmissionOutcome::accepted(&authority, event_id);
+        let accepted = GeoLocationAdmissionOutcome::accepted(event_id);
         assert!(accepted.is_accepted());
         assert_eq!(accepted.event_id(), Some(event_id));
         assert!(accepted.error().is_none());
 
         let duplicate = GeoLocationAdmissionOutcome::classify_retained_intent(
-            &authority,
-            request.intent,
-            request.intent,
+            request.intent(),
+            request.intent(),
             event_id,
         );
         assert!(duplicate.is_duplicate());
@@ -459,16 +553,15 @@ mod tests {
         assert!(duplicate.error().is_none());
 
         let conflict = GeoLocationAdmissionOutcome::classify_retained_intent(
-            &authority,
-            request.intent,
-            GeoLocationAdmissionIntentV1::from_owner_keyed_bytes(&authority, [6; 32]),
+            request.intent(),
+            GeoLocationAdmissionIntentV1([6; 32]),
             event_id,
         );
         assert!(conflict.is_conflict());
         assert_eq!(conflict.event_id(), None);
         assert!(conflict.error().is_none());
 
-        let unavailable = GeoLocationAdmissionOutcome::unavailable(&authority);
+        let unavailable = GeoLocationAdmissionOutcome::unavailable();
         assert!(unavailable.is_unavailable());
         assert!(unavailable
             .error()
@@ -477,7 +570,7 @@ mod tests {
             .contains("unavailable"));
         assert_eq!(unavailable.event_id(), None);
 
-        let unknown = GeoLocationAdmissionOutcome::outcome_unknown(&authority);
+        let unknown = GeoLocationAdmissionOutcome::outcome_unknown();
         assert!(unknown.is_outcome_unknown());
         assert!(unknown
             .error()
