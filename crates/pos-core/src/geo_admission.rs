@@ -666,6 +666,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn admission_capability_can_report_that_admission_is_unavailable() {
         let mut probe = CoreAdmissionProbe;
 

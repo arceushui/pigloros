@@ -2287,6 +2287,7 @@ mod tests {
         SqliteStore::open_in_memory().unwrap()
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn geographic_request(timeline: TimelineId, entity: EntityId) -> GeoLocationAdmissionRequestV1 {
         GeoLocationAdmissionRequestV1::from_input(
             pos_core::geo_admission::GeoLocationAdmissionInputV1::new(
@@ -2301,6 +2302,7 @@ mod tests {
         )
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn geographic_fence() -> GeoLocationAdmissionFenceV1 {
         GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9))
     }
@@ -5158,6 +5160,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn geographic_admission_reports_an_unknown_outcome_when_commit_aborts() {
         let mut store = new_store();
         let timeline = store.create_timeline("geographic-commit-failure").unwrap();
@@ -5175,6 +5178,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn retained_geographic_admission_reports_an_unknown_outcome_when_commit_aborts() {
         let mut store = new_store();
         let timeline = store
