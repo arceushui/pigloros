@@ -173,7 +173,12 @@ fn delete_visible_timeline(store: &mut MemoryStore, id: TimelineId) -> Result<()
                 .retain(|event_id, _| !event_ids.contains(event_id));
             store
                 .geographic_admission_links
-                .retain(|(timeline, event_id), _| *timeline != id && !event_ids.contains(event_id));
+                .retain(|(timeline, event_id), _| {
+                    if *timeline == id {
+                        return false;
+                    }
+                    !event_ids.contains(event_id)
+                });
         })
 }
 
