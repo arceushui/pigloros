@@ -5202,6 +5202,215 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn geographic_admission_maps_durable_read_and_transaction_failures() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("missing-fence-table").unwrap();
+        let entity = EntityId::new();
+        store
+            .set_geo_location_admission_fence(timeline.id(), entity, geographic_fence())
+            .unwrap();
+        store
+            .conn
+            .execute_batch("DROP TABLE geographic_admission_fences")
+            .unwrap();
+        assert_storage_err(
+            store
+                .admit_geo_location(geographic_request(timeline.id(), entity))
+                .map(|_| ()),
+        );
+
+        let mut store = new_store();
+        let timeline = store.create_timeline("missing-link-table").unwrap();
+        let entity = EntityId::new();
+        store
+            .set_geo_location_admission_fence(timeline.id(), entity, geographic_fence())
+            .unwrap();
+        store
+            .conn
+            .execute_batch("DROP TABLE geographic_admission_links")
+            .unwrap();
+        assert_storage_err(
+            store
+                .admit_geo_location(geographic_request(timeline.id(), entity))
+                .map(|_| ()),
+        );
+
+        let mut store = new_store();
+        let timeline = store
+            .create_timeline("outer-admission-transaction")
+            .unwrap();
+        let entity = EntityId::new();
+        store
+            .set_geo_location_admission_fence(timeline.id(), entity, geographic_fence())
+            .unwrap();
+        store.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let result = store
+            .admit_geo_location(geographic_request(timeline.id(), entity))
+            .map(|_| ());
+        let _ = store.conn.execute_batch("ROLLBACK");
+        assert_storage_err(result);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn geographic_admission_maps_durable_dedup_and_fence_failures() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("malformed-dedup-event").unwrap();
+        let entity = EntityId::new();
+        let request = geographic_request(timeline.id(), entity);
+        store
+            .set_geo_location_admission_fence(timeline.id(), entity, geographic_fence())
+            .unwrap();
+        assert!(store
+            .admit_geo_location(request.clone())
+            .unwrap()
+            .is_accepted());
+        store
+            .conn
+            .execute(
+                "UPDATE geographic_admission_dedup SET event_id = 'not-a-ulid' WHERE fingerprint = ?1",
+                params![request.fingerprint().as_owner_keyed_bytes().as_slice()],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.admit_geo_location(request),
+            Err(CoreError::Serialization(_))
+        ));
+
+        let mut store = new_store();
+        let timeline = store.create_timeline("expired-dedup-delete").unwrap();
+        let entity = EntityId::new();
+        let request = geographic_request(timeline.id(), entity);
+        store
+            .set_geo_location_admission_fence(timeline.id(), entity, geographic_fence())
+            .unwrap();
+        assert!(store
+            .admit_geo_location(request.clone())
+            .unwrap()
+            .is_accepted());
+        store
+            .conn
+            .execute(
+                "UPDATE geographic_admission_dedup SET expires_at = 0 WHERE fingerprint = ?1",
+                params![request.fingerprint().as_owner_keyed_bytes().as_slice()],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER deny_expired_geographic_dedup BEFORE DELETE ON geographic_admission_dedup
+                 BEGIN SELECT RAISE(ABORT, 'deny expired geographic dedup'); END;",
+            )
+            .unwrap();
+        assert_storage_err(store.admit_geo_location(request).map(|_| ()));
+
+        let mut store = new_store();
+        store.conn.execute_batch("DROP TABLE timelines").unwrap();
+        assert_storage_err(store.set_geo_location_admission_fence(
+            TimelineId::new(),
+            EntityId::new(),
+            geographic_fence(),
+        ));
+
+        let mut store = new_store();
+        let timeline = store.create_timeline("deny-fence-write").unwrap();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER deny_geographic_fence BEFORE INSERT ON geographic_admission_fences
+                 BEGIN SELECT RAISE(ABORT, 'deny geographic fence'); END;",
+            )
+            .unwrap();
+        assert_storage_err(store.set_geo_location_admission_fence(
+            timeline.id(),
+            EntityId::new(),
+            geographic_fence(),
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn geographic_admission_rolls_back_each_sidecar_write_failure() {
+        for (name, table) in [
+            ("snapshot", "geographic_admission_snapshots"),
+            ("link", "geographic_admission_links"),
+            ("presence", "geographic_presence"),
+            ("dedup", "geographic_admission_dedup"),
+        ] {
+            let mut store = new_store();
+            let timeline = store.create_timeline(name).unwrap();
+            let entity = EntityId::new();
+            store
+                .set_geo_location_admission_fence(timeline.id(), entity, geographic_fence())
+                .unwrap();
+            store
+                .conn
+                .execute_batch(&format!(
+                    "CREATE TRIGGER deny_{name} BEFORE INSERT ON {table}
+                     BEGIN SELECT RAISE(ABORT, 'deny {name}'); END;"
+                ))
+                .unwrap();
+            assert_storage_err(
+                store
+                    .admit_geo_location(geographic_request(timeline.id(), entity))
+                    .map(|_| ()),
+            );
+            assert!(store
+                .read(timeline.id(), SeqRange::all())
+                .unwrap()
+                .is_empty());
+            for sidecar in [
+                "geographic_admission_snapshots",
+                "geographic_admission_links",
+                "geographic_presence",
+                "geographic_admission_dedup",
+            ] {
+                let count: i64 = store
+                    .conn
+                    .query_row(&format!("SELECT COUNT(*) FROM {sidecar}"), [], |row| {
+                        row.get(0)
+                    })
+                    .unwrap();
+                assert_eq!(count, 0, "{sidecar} must roll back with the admission");
+            }
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn geographic_sidecar_cleanup_failures_are_fail_closed() {
+        for table in [
+            "geographic_admission_dedup",
+            "geographic_admission_links",
+            "geographic_admission_snapshots",
+            "geographic_admission_fences",
+            "geographic_presence",
+        ] {
+            let mut store = new_store();
+            let timeline = store.create_timeline(table).unwrap();
+            store
+                .conn
+                .authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
+                    if matches!(
+                        context.action,
+                        rusqlite::hooks::AuthAction::Delete { table_name } if table_name == table
+                    ) {
+                        rusqlite::hooks::Authorization::Deny
+                    } else {
+                        rusqlite::hooks::Authorization::Allow
+                    }
+                }));
+            assert_storage_err(store.delete_timeline(timeline.id()));
+            store.conn.authorizer(
+                None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+            );
+            assert!(store.get_timeline(timeline.id()).unwrap().is_some());
+            store.delete_timeline(timeline.id()).unwrap();
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_fails_when_chain_head_corrupted() {
         let mut store = new_store();
         let tl = store.create_timeline("main").unwrap();
