@@ -4,7 +4,7 @@
 //! opaque request, and only a storage adapter with the dedicated capability
 //! may admit it. Generic event storage has no geographic-admission API.
 
-use crate::{CanonicalBytes, CoreError, EntityId, EventId, Seq, TimelineId};
+use crate::{CanonicalBytes, CoreError, EntityId, EventId, Hash, Seq, TimelineId};
 
 /// Already-minimized gateway input for one V1 geographic admission attempt.
 ///
@@ -200,6 +200,39 @@ impl GeoLocationAdmissionSnapshotV1 {
         .expect("writing deterministic CBOR to a Vec cannot fail");
         CanonicalBytes::from_vec(bytes)
     }
+
+    /// Decode the canonical snapshot form retained by a V1 admission link.
+    ///
+    /// # Errors
+    /// Returns a serialization error when the retained bytes are not a valid
+    /// V1 admission snapshot.
+    pub fn from_deterministic_cbor(bytes: &CanonicalBytes) -> Result<Self, CoreError> {
+        let decoded: (
+            TimelineId,
+            EntityId,
+            u64,
+            [u8; 32],
+            u64,
+            [u8; 32],
+            u32,
+            bool,
+            u64,
+        ) = ciborium::from_reader(bytes.as_slice())
+            .map_err(|error| CoreError::Serialization(error.to_string()))?;
+        Ok(Self {
+            timeline: decoded.0,
+            entity: decoded.1,
+            binding_revision: decoded.2,
+            consent: GeoLocationConsentStateV1 {
+                identity: decoded.3,
+                revision: decoded.4,
+                hash: decoded.5,
+                policy_version: decoded.6,
+                withdrawn: decoded.7,
+                admission_epoch: decoded.8,
+            },
+        })
+    }
 }
 
 /// Immutable sidecar linking a geographic Event to its admission snapshot.
@@ -209,6 +242,7 @@ pub struct GeoLocationAdmissionLinkV1 {
     event_id: EventId,
     event_seq: Seq,
     snapshot_cbor: CanonicalBytes,
+    snapshot_hash: Hash,
 }
 
 impl GeoLocationAdmissionLinkV1 {
@@ -224,7 +258,15 @@ impl GeoLocationAdmissionLinkV1 {
             event_id,
             event_seq,
             snapshot_cbor: snapshot.deterministic_cbor(),
+            snapshot_hash: Hash::zero(),
         }
+    }
+
+    /// Bind the canonical snapshot hash computed by the selected store hasher.
+    #[must_use]
+    pub const fn with_snapshot_hash(mut self, snapshot_hash: Hash) -> Self {
+        self.snapshot_hash = snapshot_hash;
+        self
     }
 
     /// Verify this retained link against its Event metadata and immutable snapshot.
@@ -254,6 +296,12 @@ impl GeoLocationAdmissionLinkV1 {
     #[must_use]
     pub const fn snapshot_cbor(&self) -> &CanonicalBytes {
         &self.snapshot_cbor
+    }
+
+    /// Return the durable hash of the retained canonical snapshot bytes.
+    #[must_use]
+    pub const fn snapshot_hash(&self) -> Hash {
+        self.snapshot_hash
     }
 }
 
@@ -401,6 +449,76 @@ pub trait GeoLocationAdmissionAdmin {
         timeline: TimelineId,
         entity: EntityId,
         fence: GeoLocationAdmissionFenceV1,
+    ) -> Result<(), CoreError>;
+}
+
+/// Opaque evidence expected to be present in a V1 geographic replay record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GeoLocationReplayEvidenceV1 {
+    timeline: TimelineId,
+    event_id: EventId,
+    event_seq: Seq,
+    event_payload_hash: Hash,
+    snapshot_hash: Hash,
+}
+
+impl GeoLocationReplayEvidenceV1 {
+    /// Create verification-only evidence from already-durable replay metadata.
+    #[must_use]
+    pub const fn new(
+        timeline: TimelineId,
+        event_id: EventId,
+        event_seq: Seq,
+        event_payload_hash: Hash,
+        snapshot_hash: Hash,
+    ) -> Self {
+        Self {
+            timeline,
+            event_id,
+            event_seq,
+            event_payload_hash,
+            snapshot_hash,
+        }
+    }
+
+    #[must_use]
+    pub const fn timeline(&self) -> TimelineId {
+        self.timeline
+    }
+
+    #[must_use]
+    pub const fn event_id(&self) -> EventId {
+        self.event_id
+    }
+
+    #[must_use]
+    pub const fn event_seq(&self) -> Seq {
+        self.event_seq
+    }
+
+    #[must_use]
+    pub const fn event_payload_hash(&self) -> Hash {
+        self.event_payload_hash
+    }
+
+    #[must_use]
+    pub const fn snapshot_hash(&self) -> Hash {
+        self.snapshot_hash
+    }
+}
+
+/// Verification-only port for durable V1 geographic admission linkage.
+///
+/// Implementations return no protected Event, payload, or snapshot data.
+pub trait GeoLocationReplayVerifier: Send {
+    /// Verify one durable V1 Event-to-snapshot link from persisted state only.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::GeographicAdmissionValidationFailed`] on a broken
+    /// Event/snapshot/link relationship.
+    fn verify_v1_event_snapshot_link(
+        &self,
+        evidence: GeoLocationReplayEvidenceV1,
     ) -> Result<(), CoreError>;
 }
 
@@ -624,6 +742,17 @@ mod tests {
         assert!(link
             .validate_for(&changed_epoch, timeline, event_id, event_seq)
             .is_err());
+    }
+
+    #[test]
+    fn canonical_snapshot_round_trip_retains_identity_and_consent_state() {
+        let request = GeoLocationAdmissionRequestV1::from_input(input(TimelineId::new()));
+        let snapshot = request.snapshot();
+        let decoded =
+            GeoLocationAdmissionSnapshotV1::from_deterministic_cbor(&snapshot.deterministic_cbor())
+                .unwrap();
+
+        assert_eq!(decoded, *snapshot);
     }
 
     #[test]
