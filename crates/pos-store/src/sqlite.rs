@@ -414,9 +414,6 @@ impl SqliteStore {
     ) -> Result<bool, CoreError> {
         let snapshot = request.snapshot();
         let consent = snapshot.consent();
-        if consent.withdrawn() {
-            return Ok(false);
-        }
         tx.query_row(
             "SELECT EXISTS (
                 SELECT 1 FROM geographic_admission_fences

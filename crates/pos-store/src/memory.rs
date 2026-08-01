@@ -680,9 +680,6 @@ impl GeoLocationAdmissionStore for MemoryStore {
             .copied()
             .filter(|record| record.expires_at > admitted_at)
         {
-            if !permits_request(self) {
-                return Err(CoreError::GeographicAdmissionValidationFailed);
-            }
             return Ok(GeoLocationAdmissionOutcome::classify_retained_intent(
                 request.intent(),
                 record.intent,
@@ -691,9 +688,6 @@ impl GeoLocationAdmissionStore for MemoryStore {
         }
 
         let expires_at = checked_append_identity_expires_at(admitted_at)?;
-        if !permits_request(self) {
-            return Err(CoreError::GeographicAdmissionValidationFailed);
-        }
 
         let draft = EventDraft::new(
             entity,

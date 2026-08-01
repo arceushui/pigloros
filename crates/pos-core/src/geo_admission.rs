@@ -666,6 +666,16 @@ mod tests {
     }
 
     #[test]
+    fn admission_capability_can_report_that_admission_is_unavailable() {
+        let mut probe = CoreAdmissionProbe;
+
+        assert!(matches!(
+            probe.admit_geo_location(request(TimelineId::new())),
+            Err(CoreError::GeographicAdmissionUnavailable)
+        ));
+    }
+
+    #[test]
     fn gateway_can_build_an_opaque_request_without_core_authority() {
         let timeline = TimelineId::new();
         let entity = EntityId::new();

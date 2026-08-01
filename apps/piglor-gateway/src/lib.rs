@@ -134,6 +134,21 @@ mod coverage_tests {
     }
 
     #[tokio::test]
+    async fn privileged_geographic_gateway_retains_generic_timeline_commands() {
+        let gateway = Gateway::new_with_geo_location_admission(MemoryStore::default());
+
+        let created = gateway
+            .create_timeline("privileged-generic-command")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            created.meta.name.as_deref(),
+            Some("privileged-generic-command")
+        );
+    }
+
+    #[tokio::test]
     async fn generic_gateway_cannot_execute_geographic_admission() {
         let gateway = Gateway::new(Box::new(MemoryStore::default()));
         let result = gateway

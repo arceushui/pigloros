@@ -365,6 +365,45 @@ fn sqlite_rejects_a_missing_fence_before_consulting_the_admission_clock() {
 }
 
 #[test]
+fn sqlite_rejects_a_withdrawn_request_before_writing_an_event() {
+    let mut store = SqliteStore::open_in_memory().unwrap();
+    let timeline = store.create_timeline("withdrawn-request").unwrap();
+    let entity = EntityId::new();
+    let withdrawn = AdmissionState {
+        policy: (1, true, 9),
+        ..initial_admission_state()
+    };
+    store
+        .set_geo_location_admission_fence(timeline.id(), entity, withdrawn.fence())
+        .unwrap();
+
+    assert!(matches!(
+        store.admit_geo_location(request_with_admission_state(
+            timeline.id(),
+            entity,
+            withdrawn,
+            ([4; 32], [5; 32]),
+        )),
+        Err(CoreError::GeographicAdmissionValidationFailed)
+    ));
+    assert!(store
+        .read(timeline.id(), pos_core::SeqRange::all())
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn sqlite_refuses_to_set_a_geographic_fence_for_an_unknown_timeline() {
+    let mut store = SqliteStore::open_in_memory().unwrap();
+    let timeline = TimelineId::new();
+
+    assert!(matches!(
+        store.set_geo_location_admission_fence(timeline, EntityId::new(), fence()),
+        Err(CoreError::TimelineNotFound(id)) if id == timeline
+    ));
+}
+
+#[test]
 fn sqlite_rechecks_a_revoked_fence_before_committing_geographic_admission() {
     let database = tempfile::NamedTempFile::new().unwrap();
     let path = database.path().to_str().unwrap();
