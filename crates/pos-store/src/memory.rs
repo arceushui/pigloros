@@ -727,7 +727,7 @@ impl GeoLocationAdmissionStore for MemoryStore {
                 expires_at,
             },
         );
-        Ok(GeoLocationAdmissionOutcome::accepted(event.id))
+        Ok(GeoLocationAdmissionOutcome::accepted(event.id, event.seq))
     }
 }
 
