@@ -91,6 +91,7 @@ mod coverage_tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn privileged_geographic_admission_notifies_only_new_events() {
         let mut store = MemoryStore::default();
         let timeline = store.create_timeline("geo-gateway").unwrap();
@@ -150,6 +151,7 @@ mod coverage_tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn generic_gateway_cannot_execute_geographic_admission() {
         let gateway = Gateway::new(Box::new(MemoryStore::default()));
         let result = gateway

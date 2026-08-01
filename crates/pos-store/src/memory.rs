@@ -1188,6 +1188,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn geographic_admission_clock_and_expiry_failures_leave_no_evidence() {
         let entity = EntityId::new();
         let mut clock_error = MemoryStore::with_clock(Box::new(ErrorClock));
@@ -1243,6 +1244,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn geographic_admission_rejects_unknown_timeline_and_stale_internal_fence() {
         let entity = EntityId::new();
         let missing_timeline = TimelineId::new();
