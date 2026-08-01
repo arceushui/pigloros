@@ -2348,6 +2348,15 @@ mod tests {
     }
 
     #[test]
+    fn fence_dropping_clock_maps_a_durable_connection_error_to_storage() {
+        let mut clock = FenceDroppingClock {
+            path: "/definitely/missing/pigloros/fence.db".to_owned(),
+        };
+
+        assert_storage_err(clock.now());
+    }
+
+    #[test]
     fn lifecycle_clock_and_open_errors_fail_closed() {
         assert!(SqliteStore::open_with_clock(
             "/definitely/missing/pigloros/lifecycle.db",
@@ -2517,6 +2526,77 @@ mod tests {
         );
 
         assert!(store.verify_v1_event_snapshot_link(evidence).is_ok());
+    }
+
+    #[test]
+    fn geographic_replay_verifier_maps_each_durable_row_decode_failure_to_storage() {
+        for (name, statement) in [
+            ("entity", "UPDATE events SET entity_id = X'00' WHERE event_id = ?1"),
+            (
+                "schema-version",
+                "UPDATE events SET schema_version = X'00' WHERE event_id = ?1",
+            ),
+            ("payload", "UPDATE events SET payload = 'not-a-blob' WHERE event_id = ?1"),
+            (
+                "payload-hash",
+                "UPDATE events SET payload_hash = 'not-a-blob' WHERE event_id = ?1",
+            ),
+            (
+                "snapshot",
+                "UPDATE geographic_admission_links SET snapshot_cbor = 'not-a-blob' WHERE event_id = ?1",
+            ),
+        ] {
+            let mut store = new_store();
+            let timeline = store.create_timeline(name).unwrap();
+            let entity = EntityId::new();
+            store
+                .set_geo_location_admission_fence(timeline.id(), entity, geographic_fence())
+                .unwrap();
+            let outcome = store
+                .admit_geo_location(geographic_request(timeline.id(), entity))
+                .unwrap();
+            let event_id = outcome.event_id().unwrap();
+            let event_seq = outcome.event_seq().unwrap();
+            let (event_payload_hash, snapshot_cbor): (Vec<u8>, Vec<u8>) = store
+                .conn
+                .query_row(
+                    "SELECT event.payload_hash, snapshot.snapshot_cbor
+                     FROM events AS event
+                     JOIN geographic_admission_snapshots AS snapshot
+                       ON snapshot.event_id = event.event_id
+                     WHERE event.event_id = ?1",
+                    params![event_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            let evidence = GeoLocationReplayEvidenceV1::new(
+                timeline.id(),
+                event_id,
+                event_seq,
+                Hash::from_bytes(event_payload_hash.try_into().unwrap()),
+                hash_payload(&CanonicalBytes::from_vec(snapshot_cbor)),
+            );
+            store
+                .conn
+                .execute_batch("PRAGMA ignore_check_constraints = ON")
+                .unwrap();
+            store
+                .conn
+                .execute(statement, params![event_id.to_string()])
+                .unwrap();
+            if name == "snapshot" {
+                store
+                    .conn
+                    .execute(
+                        "UPDATE geographic_admission_snapshots SET snapshot_cbor = 'not-a-blob' WHERE event_id = ?1",
+                        params![event_id.to_string()],
+                    )
+                    .unwrap();
+            }
+
+            let result = store.verify_v1_event_snapshot_link(evidence);
+            assert!(matches!(result, Err(CoreError::Storage(_))), "{name}: {result:?}");
+        }
     }
 
     #[test]
