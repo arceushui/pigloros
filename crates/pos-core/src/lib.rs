@@ -16,6 +16,7 @@ pub mod entity;
 pub mod error;
 pub mod event;
 pub mod geo_access;
+pub mod geo_admission;
 pub mod hasher;
 pub mod ids;
 pub mod manifest;

@@ -42,6 +42,15 @@ pub enum CoreError {
 
     #[error("hash chain broken at seq {seq}")]
     HashChainBroken { seq: u64 },
+
+    #[error("geographic admission validation failed")]
+    GeographicAdmissionValidationFailed,
+
+    #[error("geographic admission unavailable")]
+    GeographicAdmissionUnavailable,
+
+    #[error("geographic admission outcome unknown")]
+    GeographicAdmissionOutcomeUnknown,
 }
 
 #[cfg(test)]
