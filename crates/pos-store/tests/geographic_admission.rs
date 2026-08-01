@@ -300,8 +300,16 @@ where
             ..initial
         },
     ];
+    let replacement_dedups = [
+        ([6; 32], [7; 32]),
+        ([8; 32], [9; 32]),
+        ([10; 32], [11; 32]),
+        ([12; 32], [13; 32]),
+        ([14; 32], [15; 32]),
+        ([16; 32], [17; 32]),
+    ];
 
-    for (index, replacement) in replacements.into_iter().enumerate() {
+    for (replacement, dedup) in replacements.into_iter().zip(replacement_dedups) {
         let timeline = store.create_timeline("re-consent-field").unwrap();
         let entity = EntityId::new();
         store
@@ -322,7 +330,7 @@ where
                 timeline.id(),
                 entity,
                 replacement,
-                ([6 + index as u8; 32], [7 + index as u8; 32]),
+                dedup,
             ))
             .unwrap()
             .is_accepted());
