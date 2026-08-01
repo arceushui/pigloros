@@ -16,6 +16,9 @@ pub use ledger_config::{LedgerConfig, LedgerGateway, LedgerWriteMode};
 use pos_core::{
     clock::Seq,
     event::{CanonicalBytes, Event, EventDraft, Kind},
+    geo_admission::{
+        GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore,
+    },
     ids::{EntityId, TimelineId},
     store::{
         AppendDedupKey, AppendDedupScope, AppendIdentity, AppendIntent, AppendOrDuplicateOutcome,
@@ -50,8 +53,14 @@ pub struct LedgerEntryView {
 #[cfg(test)]
 mod coverage_tests {
     use super::Gateway;
-    use pos_core::EntityId;
-    use pos_store::{open_store, StoreConfig};
+    use pos_core::{
+        geo_admission::{
+            GeoLocationAdmissionAdmin, GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1,
+            GeoLocationAdmissionRequestV1,
+        },
+        CanonicalBytes, EntityId, EventStore,
+    };
+    use pos_store::{memory::MemoryStore, open_store, StoreConfig};
 
     #[tokio::test]
     async fn identified_conflict_is_returned() {
@@ -79,6 +88,73 @@ mod coverage_tests {
             )
             .await
             .unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn privileged_geographic_admission_notifies_only_new_events() {
+        let mut store = MemoryStore::default();
+        let timeline = store.create_timeline("geo-gateway").unwrap();
+        let entity = EntityId::new();
+        store
+            .set_geo_location_admission_fence(
+                timeline.id(),
+                entity,
+                GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
+            )
+            .unwrap();
+        let gateway = Gateway::new_with_geo_location_admission(store);
+        let mut notices = gateway.subscribe();
+        let request = || {
+            GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
+                timeline.id(),
+                entity,
+                CanonicalBytes::from_static(b"existing-v1-geo-location-payload"),
+                7,
+                ([1; 32], 8, [2; 32]),
+                (1, false, 9),
+                ([4; 32], [5; 32]),
+            ))
+        };
+
+        assert!(gateway
+            .admit_geo_location_from_core(request())
+            .await
+            .unwrap()
+            .is_accepted());
+        assert_eq!(notices.recv().await.unwrap().event_type, "geo.location");
+        assert!(gateway
+            .admit_geo_location_from_core(request())
+            .await
+            .unwrap()
+            .is_duplicate());
+        assert!(matches!(
+            notices.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn generic_gateway_cannot_execute_geographic_admission() {
+        let gateway = Gateway::new(Box::new(MemoryStore::default()));
+        let result = gateway
+            .admit_geo_location_from_core(GeoLocationAdmissionRequestV1::from_input(
+                GeoLocationAdmissionInputV1::new(
+                    pos_core::TimelineId::new(),
+                    EntityId::new(),
+                    CanonicalBytes::from_static(b"existing-v1-geo-location-payload"),
+                    7,
+                    ([1; 32], 8, [2; 32]),
+                    (1, false, 9),
+                    ([4; 32], [5; 32]),
+                ),
+            ))
+            .await;
+        assert!(matches!(
+            result,
+            Err(super::GatewayError::Store(
+                pos_core::CoreError::GeographicAdmissionUnavailable
+            ))
+        ));
     }
 }
 
@@ -249,6 +325,49 @@ impl Gateway {
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
         }
+    }
+
+    /// Construct the only Gateway shape that can submit core geographic admission.
+    ///
+    /// This does not register an HTTP route or widen generic ingress. Callers
+    /// must already hold a backend implementing the dedicated core capability.
+    #[must_use]
+    pub fn new_with_geo_location_admission<S>(store: S) -> Self
+    where
+        S: EventStore + GeoLocationAdmissionStore + 'static,
+    {
+        let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        Self {
+            store: executor::StoreExecutor::new_with_geo_location_admission(store),
+            bus,
+            limits: GatewayLimits::LOCAL_DEFAULT,
+        }
+    }
+
+    /// Submit one already-authorized core geographic admission request.
+    ///
+    /// The generic Gateway action and HTTP paths cannot construct this command.
+    /// A notice is published only for a definite newly accepted Event.
+    ///
+    /// # Errors
+    /// Returns a bounded executor or store error when admission cannot run.
+    pub async fn admit_geo_location_from_core(
+        &self,
+        request: GeoLocationAdmissionRequestV1,
+    ) -> Result<GeoLocationAdmissionOutcome, GatewayError> {
+        let timeline = request.timeline();
+        let entity = request.entity();
+        let outcome = self.store.admit_geo_location(request).await?;
+        if outcome.is_accepted() {
+            let event_id = outcome.event_id().ok_or(GatewayError::Store(
+                CoreError::GeographicAdmissionOutcomeUnknown,
+            ))?;
+            let seq = outcome.event_seq().ok_or(GatewayError::Store(
+                CoreError::GeographicAdmissionOutcomeUnknown,
+            ))?;
+            self.publish_geographic_notice(timeline, event_id, entity, seq);
+        }
+        Ok(outcome)
     }
 
     /// Subscribe to live append notices (WebSocket / tests).
@@ -565,6 +684,22 @@ impl Gateway {
             seq: event.seq.as_u64(),
         };
         let _ = self.bus.send(notice);
+    }
+
+    fn publish_geographic_notice(
+        &self,
+        timeline: TimelineId,
+        event_id: pos_core::EventId,
+        entity: EntityId,
+        seq: Seq,
+    ) {
+        let _ = self.bus.send(EventNotice {
+            timeline_id: timeline.to_string(),
+            event_id: event_id.to_string(),
+            entity_id: entity.to_string(),
+            event_type: pos_core::GEOGRAPHIC_EVENT_TYPE.to_owned(),
+            seq: seq.as_u64(),
+        });
     }
 
     async fn read_event_by_id(

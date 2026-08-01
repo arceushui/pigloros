@@ -6,6 +6,9 @@
 
 use pos_core::{
     event::{Event, EventDraft},
+    geo_admission::{
+        GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore,
+    },
     ids::{EventId, TimelineId},
     store::{
         AppendIdentity, AppendIntent, AppendOrDuplicateOutcome, EventReadBounds, EventStore,
@@ -38,6 +41,10 @@ macro_rules! submit {
 }
 
 pub(super) enum Command {
+    AdmitGeoLocation {
+        request: GeoLocationAdmissionRequestV1,
+        reply: oneshot::Sender<Result<GeoLocationAdmissionOutcome, CoreError>>,
+    },
     Purge {
         limit: NonZeroUsize,
         reply: oneshot::Sender<Result<PurgeOutcome, CoreError>>,
@@ -80,6 +87,24 @@ pub(super) enum Command {
     },
 }
 
+trait GeoLocationGatewayStore: EventStore + GeoLocationAdmissionStore {}
+
+impl<T> GeoLocationGatewayStore for T where T: EventStore + GeoLocationAdmissionStore {}
+
+enum ExecutorStore {
+    Generic(Box<dyn EventStore>),
+    GeoLocation(Box<dyn GeoLocationGatewayStore>),
+}
+
+impl ExecutorStore {
+    fn event_store(&mut self) -> &mut dyn EventStore {
+        match self {
+            Self::Generic(store) => store.as_mut(),
+            Self::GeoLocation(store) => store.as_mut(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum StoreExecutorError {
     Saturated,
@@ -94,13 +119,24 @@ pub(crate) struct StoreExecutor {
 
 impl StoreExecutor {
     pub(crate) fn new(store: Box<dyn EventStore>) -> Self {
+        Self::spawn(ExecutorStore::Generic(store))
+    }
+
+    pub(crate) fn new_with_geo_location_admission<S>(store: S) -> Self
+    where
+        S: EventStore + GeoLocationAdmissionStore + 'static,
+    {
+        Self::spawn(ExecutorStore::GeoLocation(Box::new(store)))
+    }
+
+    fn spawn(store: ExecutorStore) -> Self {
         let (tx, mut rx) = mpsc::channel(QUEUE_CAPACITY);
         let _ = thread::Builder::new()
             .name("piglor-store-executor".to_owned())
             .spawn(move || {
                 let mut store = store;
                 while let Some(command) = rx.blocking_recv() {
-                    execute(&mut *store, command);
+                    execute(&mut store, command);
                 }
             });
         Self { tx }
@@ -111,6 +147,12 @@ impl StoreExecutor {
         limit: NonZeroUsize,
     ) -> Result<PurgeOutcome, StoreExecutorError> {
         submit!(self, |reply| Command::Purge { limit, reply })
+    }
+    pub(crate) async fn admit_geo_location(
+        &self,
+        request: GeoLocationAdmissionRequestV1,
+    ) -> Result<GeoLocationAdmissionOutcome, StoreExecutorError> {
+        submit!(self, |reply| Command::AdmitGeoLocation { request, reply })
     }
     pub(crate) async fn root_count(&self, maximum: usize) -> Result<usize, StoreExecutorError> {
         submit!(self, |reply| Command::RootCount { maximum, reply })
@@ -178,16 +220,27 @@ impl StoreExecutor {
     }
 }
 
-fn execute(store: &mut dyn EventStore, command: Command) {
+fn execute(store: &mut ExecutorStore, command: Command) {
     match command {
+        Command::AdmitGeoLocation { request, reply } => {
+            let result = match store {
+                ExecutorStore::GeoLocation(store) => store.admit_geo_location(request),
+                ExecutorStore::Generic(_) => Err(CoreError::GeographicAdmissionUnavailable),
+            };
+            let _ = reply.send(result);
+        }
         Command::Purge { limit, reply } => {
-            let _ = reply.send(store.purge_expired_append_identities_bounded(limit));
+            let _ = reply.send(
+                store
+                    .event_store()
+                    .purge_expired_append_identities_bounded(limit),
+            );
         }
         Command::RootCount { maximum, reply } => {
-            let _ = reply.send(store.root_timeline_count_bounded(maximum));
+            let _ = reply.send(store.event_store().root_timeline_count_bounded(maximum));
         }
         Command::Create { name, reply } => {
-            let _ = reply.send(store.create_timeline(&name));
+            let _ = reply.send(store.event_store().create_timeline(&name));
         }
         Command::Read {
             timeline,
@@ -195,14 +248,14 @@ fn execute(store: &mut dyn EventStore, command: Command) {
             bounds,
             reply,
         } => {
-            let _ = reply.send(store.read_bounded(timeline, range, bounds));
+            let _ = reply.send(store.event_store().read_bounded(timeline, range, bounds));
         }
         Command::ReadOne {
             timeline,
             event,
             reply,
         } => {
-            let _ = reply.send(store.read_event_by_id(timeline, event));
+            let _ = reply.send(store.event_store().read_event_by_id(timeline, event));
         }
         Command::Append {
             timeline,
@@ -210,6 +263,7 @@ fn execute(store: &mut dyn EventStore, command: Command) {
             maximum,
             reply,
         } => {
+            let store = store.event_store();
             let result = store.get_timeline(timeline).and_then(|meta| {
                 if let (Some(maximum), Some(meta)) = (maximum, meta) {
                     if meta.head.as_u64() >= maximum {
@@ -228,11 +282,13 @@ fn execute(store: &mut dyn EventStore, command: Command) {
             reply,
         } => {
             let _ = reply.send(
-                store.append_intent_or_duplicate_bounded(timeline, identity, intent, maximum),
+                store
+                    .event_store()
+                    .append_intent_or_duplicate_bounded(timeline, identity, intent, maximum),
             );
         }
         Command::GetTimeline { timeline, reply } => {
-            let _ = reply.send(store.get_timeline(timeline));
+            let _ = reply.send(store.event_store().get_timeline(timeline));
         }
     }
 }
