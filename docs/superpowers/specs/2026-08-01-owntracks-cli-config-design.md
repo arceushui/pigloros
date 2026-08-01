@@ -1,0 +1,146 @@
+# OwnTracks CLI Configuration Design
+
+## Scope
+
+This document specifies the approved preparatory portion of Redmine #146:
+local, CLI-only administration for one V1 OwnTracks binding. It deliberately
+does not add an HTTP ingress route or append `geo.location` Events. Those
+actions remain gated on Proposed ADR-053 and prerequisite #169.
+
+## Goals
+
+- Give the local deployment owner commands to pair, inspect, rotate, and
+  revoke exactly one device binding.
+- Use #169's core-owned admission-state capability for binding, consent,
+  policy, withdrawal, epoch, and keyed-verifier state, so future admission
+  and revocation share one SQLite transaction.
+- Keep the owner Gateway key in a separate owner-only file outside version
+  control; never persist the generated 256-bit Basic secret with that key.
+- Make revocation durable and immediately observable by a future ingress
+  adapter, without changing immutable Timeline state.
+- Keep every command deterministic except secure secret generation, and make
+  all behavior independently testable.
+
+## Non-goals
+
+- `POST /v1/bridges/owntracks`, HTTP Basic verification, rate limiting, body
+  decoding, metrics, or Timeline admission.
+- A UI, remote pairing/recovery, multiple bindings, public/same-LAN ingress,
+  any `geo.location` append, or a generic geographic-store capability.
+- Schema migration, historical conversion, backfill, dual-write, upcast, or
+  any change to the existing V1 location payload.
+
+## Command surface
+
+The existing manual `piglor-gateway` parser gains a top-level `owntracks`
+command group:
+
+```text
+piglor-gateway owntracks pair <sqlite-path> <owner-key-path> <timeline-id> <entity-id>
+piglor-gateway owntracks status <sqlite-path>
+piglor-gateway owntracks rotate <sqlite-path> <owner-key-path>
+piglor-gateway owntracks revoke <sqlite-path>
+```
+
+`pair` fails if an active binding already exists. On success it prints a fresh
+random Basic handle and independent 256-bit secret exactly once to the local
+terminal; it does not write either plaintext value to logs, errors, the
+Timeline, or durable state. `rotate` follows the same generation and one-time
+output rule.
+`status` prints only bounded, non-sensitive state: unpaired, active, or
+revoked plus the configured policy version. `rotate` replaces the active
+credential verifier and prints a new secret exactly once. `revoke` makes the
+binding inactive and deletes the removable verifier and transient state.
+
+Every invalid invocation returns a bounded local error and a non-zero exit
+status. Secrets are never repeated by `status`, `rotate` failures, or usage
+text.
+
+## Admission-state and ownership boundary
+
+`OwnTracksAdmissionStateV1` is a private core-owned #169 capability with:
+
+- a fixed state schema version of `1`;
+- one binding state: absent, active, or revoked;
+- an authorized Timeline and `EntityId`;
+- the fixed V1 purpose, compact degree-grid precision, source-time bucket,
+  local visibility scope, and current policy version;
+- an owner-keyed verifier only, never the plaintext Basic handle or secret;
+- consent identity, revision, typed hash, withdrawal state, and binding
+  revision; and
+- a monotonically increasing binding/admission revision for future revocation
+  fencing.
+
+The owner-key file contains an independently generated 256-bit key. It is
+created with owner-only permissions, rejects symlinks and unsafe existing
+paths, and uses create-new semantics with a directory sync. It must remain
+outside version control. Binding, consent, verifier, policy, withdrawal, and
+epoch state are durable only through #169's core admission-state transaction;
+the CLI must not maintain a parallel configuration file or mutable copy.
+
+The verifier derives from the owner key, random handle, and 256-bit secret
+with a domain-separated keyed BLAKE3 operation. Later HTTP verification will
+use constant-time comparison. This preparatory slice writes the verifier only
+through the #169 capability and does not expose an HTTP verifier or a
+geographic admission capability.
+
+## State transitions
+
+```text
+absent --pair--> active --rotate--> active
+                    |                |
+                    +----revoke------+--> revoked
+revoked --pair--> active
+```
+
+Pair and rotate transactionally increment the binding/admission epoch with the
+core admission state. Revoke transactionally advances that epoch and removes
+removable verifier material, so a future admission seam rejects requests
+authenticated against a superseded binding. A stale ADR-038 policy version
+fails closed until explicit re-pairing and re-consent establish the current
+version. The command does not append a Timeline Event or geographic evidence.
+
+## Module boundaries
+
+`main.rs` stays responsible only for argument dispatch and terminal output.
+A new focused module owns command parsing helpers, secure path/file handling,
+secret generation, verifier derivation, and command-state transitions. It
+depends only on a narrow #169 administration capability, not a generic
+`EventStore`; it has no Axum, OwnTracks decoder, or geographic-admission
+dependency. The CLI cannot construct, serialize, or widen the core capability.
+
+## Errors and privacy
+
+The module distinguishes malformed CLI input, missing/unsafe owner-key files,
+absent/active/revoked binding transitions, stale policy, unavailable core
+state, and durable I/O failure. Error strings are stable and bounded. They
+exclude secret bytes, verifier bytes, Basic headers, raw locations, Timeline
+payloads, and full configuration contents.
+
+The core transaction leaves either the old complete state or no new state; it
+must never leave a partially valid active binding. A failure while pairing must
+not make a credential usable. A failure while revoking must fail closed: future
+commands treat the state as unavailable rather than active.
+
+## Tests and acceptance
+
+Tests will cover:
+
+- every command's accepted and rejected argument forms;
+- single-binding enforcement, active-to-active rotation, revoke behavior, and
+  re-pairing after revocation;
+- unique 256-bit credentials and one-time secret output without secret reuse;
+- verifier domain separation and constant-time comparison seam;
+- owner-only owner-key file/directory permissions, symlink rejection,
+  create-new failures, and no plaintext-handle persistence;
+- core capability policy/version/withdrawal/epoch behavior, including stale
+  policy rejection and re-pair/re-consent requirements;
+- proof that the module has no route registration, EventStore call,
+  `geo.location` construction, or Timeline mutation.
+
+The #146 change set must pass formatter, ignored-inclusive workspace tests,
+pedantic clippy, the project CI checks, and exact 100% line/region coverage in
+a non-privileged test context. It also requires independent code review before
+merge. Production OwnTracks ingress remains disabled until ADR-053 is
+Accepted, #149 and #169 are Resolved, and a separate activation decision is
+recorded.
