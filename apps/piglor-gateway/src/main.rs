@@ -9,6 +9,8 @@ use piglor_ledger::LedgerView;
 use pos_store::{open_store, StoreConfig};
 use std::{future::Future, net::SocketAddr, path::PathBuf, pin::Pin};
 
+mod owntracks;
+
 type ShutdownFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 fn handle_run_error(e: &dyn std::error::Error) {
@@ -45,6 +47,11 @@ fn run_with_args_and_shutdown(
     shutdown: ShutdownFuture,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match args.get(1).map(String::as_str) {
+        Some("owntracks") => {
+            let output = owntracks::execute(&args[2..])?;
+            println!("{output}");
+            Ok(())
+        }
         Some("serve") => {
             let addr = args
                 .get(2)
@@ -66,7 +73,11 @@ fn run_with_args_and_shutdown(
             Ok(())
         }
         _ => {
-            eprintln!("Usage: piglor-gateway <serve [addr] [sqlite-path]|version>");
+            eprintln!("Usage: piglor-gateway <owntracks|serve [addr] [sqlite-path]|version>");
+            eprintln!("  owntracks pair <sqlite-path> <owner-key-path> <timeline-id> <entity-id>");
+            eprintln!("  owntracks status <sqlite-path>");
+            eprintln!("  owntracks rotate <sqlite-path> <owner-key-path>");
+            eprintln!("  owntracks revoke <sqlite-path>");
             eprintln!("  serve 127.0.0.1:8080           # Memory store");
             eprintln!("  serve 127.0.0.1:8080 /tmp/g.db # SQLite store");
             Ok(())

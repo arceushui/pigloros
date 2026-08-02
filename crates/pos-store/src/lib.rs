@@ -51,7 +51,7 @@ pub use pos_core::store::{
 };
 pub use pos_core::{
     CanonicalBytes, CoreError, CorrelationId, EntityId, Event, EventDraft, EventId, Kind,
-    TimelineId, WallTime,
+    OwnTracksEnrollmentStore, TimelineId, WallTime,
 };
 
 /// Resolve a generic-adapter visibility check without exposing protected Timeline state.
@@ -210,6 +210,22 @@ pub fn open_store(config: StoreConfig) -> Result<Box<dyn EventStore>, CoreError>
     open_store_with_hasher(config, Box::new(pos_crypto::chain::Blake3Hasher))
 }
 
+/// Open the SQLite-backed local `OwnTracks` enrollment administration capability.
+///
+/// This deliberately returns only [`OwnTracksEnrollmentStore`], not generic
+/// [`EventStore`] or geographic-admission capabilities.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Storage`] when the database cannot be opened or its
+/// enrollment schema cannot be initialized.
+#[cfg(feature = "sqlite")]
+pub fn open_owntracks_enrollment_store(
+    sqlite_path: &str,
+) -> Result<Box<dyn OwnTracksEnrollmentStore>, CoreError> {
+    sqlite::SqliteStore::open(sqlite_path).map(|store| Box::new(store) as Box<_>)
+}
+
 /// Like [`open_store`] but with a custom [`Hasher`] for hash-chain computation.
 ///
 /// # Errors
@@ -258,6 +274,22 @@ pub fn import_timeline_with_verified_signatures(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn owntracks_factory_exposes_only_the_narrow_enrollment_capability() {
+        let directory = tempfile::tempdir().expect("create temporary store directory");
+        let path = directory.path().join("owntracks.db");
+        let store = open_owntracks_enrollment_store(path.to_str().expect("UTF-8 path"))
+            .expect("open narrow OwnTracks enrollment store");
+        assert_eq!(
+            store
+                .owntracks_enrollment_status()
+                .expect("read bounded enrollment status")
+                .status(),
+            pos_core::OwnTracksEnrollmentStatusV1::Absent
+        );
+    }
 
     /// Helper: run a minimal contract against any backend via the port.
     fn contract(store: &mut dyn EventStore) {

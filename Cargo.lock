@@ -818,6 +818,7 @@ dependencies = [
  "pos-plugin-society",
  "pos-plugin-world",
  "pos-store",
+ "rand 0.9.5",
  "serde",
  "serde_json",
  "thiserror",

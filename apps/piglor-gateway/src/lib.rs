@@ -55,8 +55,7 @@ mod coverage_tests {
     use super::Gateway;
     use pos_core::{
         geo_admission::{
-            GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1,
-            GeoLocationAdmissionRequestV1,
+            GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1,
         },
         CanonicalBytes, EntityId, EventStore, OwnTracksEnrollmentRequestV1,
         OwnTracksEnrollmentStore,

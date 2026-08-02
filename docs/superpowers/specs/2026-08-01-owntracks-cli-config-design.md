@@ -48,6 +48,15 @@ random Basic handle and independent 256-bit secret exactly once to the local
 terminal; it does not write either plaintext value to logs, errors, the
 Timeline, or durable state. `rotate` follows the same generation and one-time
 output rule.
+
+The current command surface has no separately authorized source for the
+current consent and policy fence required by `OwnTracksEnrollmentRequestV1`.
+Until that source is approved, `pair` validates its identifier arguments and
+then returns the bounded `OwnTracks policy configuration is unavailable` error
+before creating an owner key or credential. It must not synthesize placeholder
+consent, policy, revision, or epoch data. `status`, `rotate`, and `revoke`
+remain narrow lifecycle commands for enrollment state created by an authorized
+future pairing source.
 `status` prints only bounded, non-sensitive state: unpaired, active, or
 revoked plus the configured policy version. `rotate` replaces the active
 credential verifier and prints a new secret exactly once. `revoke` makes the
@@ -80,6 +89,10 @@ outside version control. Binding, consent, verifier, policy, withdrawal, and
 epoch state are durable only through ADR-054's core enrollment-state
 transaction; the CLI must not maintain a parallel configuration file or
 mutable copy.
+
+The composition root may open a SQLite-backed `OwnTracksEnrollmentStore`, but
+that factory returns neither generic `EventStore` nor geographic-admission
+authority. The CLI cannot use it to append Timeline events.
 
 The verifier derives from the owner key, random handle, and 256-bit secret
 with a domain-separated keyed BLAKE3 operation. Later HTTP verification will
@@ -130,6 +143,8 @@ commands treat the state as unavailable rather than active.
 Tests will cover:
 
 - every command's accepted and rejected argument forms;
+- the fail-closed pair response when authorized policy configuration is absent,
+  including proof that it creates no owner key or credential material;
 - single-binding enforcement, active-to-active rotation, revoke behavior, and
   re-pairing after revocation;
 - unique 256-bit credentials and one-time secret output without secret reuse;
