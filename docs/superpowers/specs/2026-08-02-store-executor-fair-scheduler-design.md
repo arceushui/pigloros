@@ -1,15 +1,15 @@
 # StoreExecutor Fair Scheduler Design
 
 **Ticket:** Redmine #167
-**Status:** Proposed implementation design
+**Status:** Implemented checkpoint — awaiting integration
 **Date:** 2026-08-02
 **Parent decision:** ADR-052, V1 StoreExecutor and synchronous EventStore isolation
 
 The predecessor lifecycle/supervision work in Redmine #165 is complete and
 squash-merged to `main` at `9473f32f67498564db24b1c33b15148d930e6d55`; #167 is
-the local scheduler follow-up. This design authorizes no production work by
-itself: #165 is the implemented baseline, #167 is the proposed fairness
-amendment, and #166/#168 remain separately deferred and unauthorized.
+the local scheduler follow-up. ADR-052 is accepted and explicitly authorizes
+the #167 fairness amendment; #166/#168 remain separately deferred and
+unauthorized.
 
 ## Problem
 
@@ -232,7 +232,8 @@ state and has no lifecycle authority. Selected.
 - `Command::class()` is the exhaustive single source of truth:
   `CommandClass::Read` maps `RootCount`, `Read`, `ReadOne`, and `GetTimeline`;
   `CommandClass::Write` maps `AdmitOwnTracksIngress`, `AdmitGeoLocation`,
-  `Purge`, `Create`, `Append`, `AppendIdentified`, and test-only `Panic`.
+  `Purge`, `Create`, `Append`, `AppendIdentified`, and test-only `Panic`/
+  `PanicRead`.
 - No read is preempted; bounded read chunks limit the maximum work before the
   next scheduling decision.
 - If a write is pending at a scheduling boundary, at most `READ_BURST`
@@ -341,8 +342,15 @@ test stores and deterministic synchronization primitives:
   every pending envelope through the common selection path before terminating;
   the test asserts no direct channel-close cleanup path is used.
 
-After ADR-052 is accepted and implementation is explicitly authorized, the
-first scheduler test will be written and run red before production changes.
+ADR-052 acceptance and implementation authorization were recorded before the
+implementation checkpoint. The initial scheduler boundary test was written
+and run red against the FIFO baseline, then the worker-local scheduler and
+its lifecycle tests were implemented.
+The implementation is recorded in commits `a0d80d4`, `e245601`, `52801b1`,
+`bcaaca2`, and `569f58f`; CTO final review is `APPROVE` with no remaining
+findings. Capability-dropped repository CI passed through `CI gates OK` at
+99.03% lines, 99.12% regions, and 99.32% functions; local cargo-deny was not
+installed and was reported as skipped by the repository script.
 Before merge, run the exact repository gates:
 `cargo fmt --all -- --check`; and the `scripts/ci.sh` test step, which runs
 `test_log="$(mktemp)"`; `cargo test --workspace --locked -- --include-ignored
