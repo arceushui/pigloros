@@ -5,15 +5,16 @@
 This document specifies the approved preparatory portion of Redmine #146:
 local, CLI-only administration for one V1 OwnTracks binding. It deliberately
 does not add an HTTP ingress route or append `geo.location` Events. Those
-actions remain gated on Proposed ADR-053 and prerequisite #169.
+actions remain separately gated after Accepted ADR-053, Accepted ADR-054, and
+resolved #169.
 
 ## Goals
 
 - Give the local deployment owner commands to pair, inspect, rotate, and
   revoke exactly one device binding.
-- Use #169's core-owned admission-state capability for binding, consent,
-  policy, withdrawal, epoch, and keyed-verifier state, so future admission
-  and revocation share one SQLite transaction.
+- Use ADR-054's core-owned enrollment-state capability for binding, consent,
+  policy, withdrawal, epoch, and keyed-verifier state, and connect it to
+  #169's geographic-admission fence without maintaining parallel state.
 - Keep the owner Gateway key in a separate owner-only file outside version
   control; never persist the generated 256-bit Basic secret with that key.
 - Make revocation durable and immediately observable by a future ingress
@@ -58,7 +59,8 @@ text.
 
 ## Admission-state and ownership boundary
 
-`OwnTracksAdmissionStateV1` is a private core-owned #169 capability with:
+`OwnTracksEnrollmentStateV1` is the private core-owned ADR-054 capability
+that supplies the state later revalidated by #169's admission fence. It has:
 
 - a fixed state schema version of `1`;
 - one binding state: absent, active, or revoked;
@@ -75,13 +77,14 @@ The owner-key file contains an independently generated 256-bit key. It is
 created with owner-only permissions, rejects symlinks and unsafe existing
 paths, and uses create-new semantics with a directory sync. It must remain
 outside version control. Binding, consent, verifier, policy, withdrawal, and
-epoch state are durable only through #169's core admission-state transaction;
-the CLI must not maintain a parallel configuration file or mutable copy.
+epoch state are durable only through ADR-054's core enrollment-state
+transaction; the CLI must not maintain a parallel configuration file or
+mutable copy.
 
 The verifier derives from the owner key, random handle, and 256-bit secret
 with a domain-separated keyed BLAKE3 operation. Later HTTP verification will
 use constant-time comparison. This preparatory slice writes the verifier only
-through the #169 capability and does not expose an HTTP verifier or a
+through the ADR-054 capability and does not expose an HTTP verifier or a
 geographic admission capability.
 
 ## State transitions
@@ -94,18 +97,18 @@ revoked --pair--> active
 ```
 
 Pair and rotate transactionally increment the binding/admission epoch with the
-core admission state. Revoke transactionally advances that epoch and removes
-removable verifier material, so a future admission seam rejects requests
-authenticated against a superseded binding. A stale ADR-038 policy version
-fails closed until explicit re-pairing and re-consent establish the current
-version. The command does not append a Timeline Event or geographic evidence.
+core enrollment state. Revoke transactionally advances that epoch and removes
+removable verifier material, so #169's admission fence rejects requests
+authenticated against a superseded binding. A stale policy version fails closed
+until explicit re-pairing and re-consent establish the current version. The
+command does not append a Timeline Event or geographic evidence.
 
 ## Module boundaries
 
 `main.rs` stays responsible only for argument dispatch and terminal output.
 A new focused module owns command parsing helpers, secure path/file handling,
 secret generation, verifier derivation, and command-state transitions. It
-depends only on a narrow #169 administration capability, not a generic
+depends only on a narrow ADR-054 administration capability, not a generic
 `EventStore`; it has no Axum, OwnTracks decoder, or geographic-admission
 dependency. The CLI cannot construct, serialize, or widen the core capability.
 
@@ -139,8 +142,8 @@ Tests will cover:
   `geo.location` construction, or Timeline mutation.
 
 The #146 change set must pass formatter, ignored-inclusive workspace tests,
-pedantic clippy, the project CI checks, and exact 100% line/region coverage in
-a non-privileged test context. It also requires independent code review before
-merge. Production OwnTracks ingress remains disabled until ADR-053 is
-Accepted, #149 and #169 are Resolved, and a separate activation decision is
-recorded.
+pedantic clippy, the project CI checks, and the documented 99% line and region
+coverage floor in a non-privileged test context. It also requires independent
+code review before merge. Development databases may be recreated without a
+migration. Production OwnTracks ingress remains disabled until #149 is
+Resolved and a separate activation decision is recorded.
