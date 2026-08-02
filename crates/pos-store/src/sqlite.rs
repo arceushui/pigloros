@@ -2373,6 +2373,15 @@ mod tests {
     }
 
     #[test]
+    fn fence_revoking_clock_maps_a_durable_connection_error_to_storage() {
+        let mut clock = FenceRevokingClock {
+            path: "/definitely/missing/pigloros/fence.db".to_owned(),
+        };
+
+        assert_storage_err(clock.now());
+    }
+
+    #[test]
     fn lifecycle_clock_and_open_errors_fail_closed() {
         assert!(SqliteStore::open_with_clock(
             "/definitely/missing/pigloros/lifecycle.db",
