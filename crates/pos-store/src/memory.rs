@@ -23,6 +23,9 @@ use pos_core::{
         OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStateV1, OwnTracksEnrollmentStatusV1,
         OwnTracksEnrollmentStore,
     },
+    owntracks_ingress::{
+        OwnTracksIngressInputV1, OwnTracksIngressStore, PreparedOwnTracksIngressV1,
+    },
     store::{
         checked_append_identity_expires_at, AppendDedupKey, AppendDedupScope, AppendIdentity,
         AppendIntent, AppendOrDuplicateOutcome, EventReadBounds, EventStore, PurgeOutcome,
@@ -680,6 +683,47 @@ impl OwnTracksEnrollmentStore for MemoryStore {
         self.owntracks_enrollment = self.owntracks_enrollment.clone().revoke()?;
         Ok(self.owntracks_enrollment.status())
     }
+}
+
+impl OwnTracksIngressStore for MemoryStore {
+    fn prepare_owntracks_ingress(
+        &mut self,
+        input: OwnTracksIngressInputV1,
+    ) -> Result<PreparedOwnTracksIngressV1, CoreError> {
+        let candidate_verifier = owntracks_verifier(&input);
+        let rate_key = owntracks_key(&input, b"pigloros/owntracks/rate/v1\0", false);
+        let intent = owntracks_key(&input, b"pigloros/owntracks/intent/v1\0", true);
+        let fingerprint = owntracks_key(&input, b"pigloros/owntracks/fingerprint/v1\0", true);
+        self.owntracks_enrollment.prepare_owntracks_ingress(
+            &input,
+            candidate_verifier,
+            rate_key,
+            (intent, fingerprint),
+        )
+    }
+}
+
+fn owntracks_verifier(input: &OwnTracksIngressInputV1) -> [u8; 32] {
+    let mut material = Vec::with_capacity(96);
+    material.extend_from_slice(b"pigloros/owntracks/verifier/v1\0");
+    material.extend_from_slice(input.basic_handle());
+    material.extend_from_slice(input.basic_secret());
+    *blake3::keyed_hash(input.owner_key(), &material).as_bytes()
+}
+
+fn owntracks_key(
+    input: &OwnTracksIngressInputV1,
+    domain: &[u8],
+    includes_payload: bool,
+) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new_keyed(input.owner_key());
+    hasher.update(domain);
+    hasher.update(input.basic_handle());
+    if includes_payload {
+        hasher.update(input.basic_secret());
+        hasher.update(input.payload().as_slice());
+    }
+    *hasher.finalize().as_bytes()
 }
 
 impl GeoLocationAdmissionStore for MemoryStore {

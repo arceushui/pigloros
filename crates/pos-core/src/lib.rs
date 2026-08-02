@@ -21,6 +21,7 @@ pub mod hasher;
 pub mod ids;
 pub mod manifest;
 pub mod owntracks_enrollment;
+pub mod owntracks_ingress;
 pub mod plugin;
 pub mod state;
 pub mod store;
@@ -42,6 +43,10 @@ pub use manifest::{AdapterRecord, ReproManifest};
 pub use owntracks_enrollment::{
     OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStateV1, OwnTracksEnrollmentStatusV1,
     OwnTracksEnrollmentStatusViewV1, OwnTracksEnrollmentStore,
+};
+pub use owntracks_ingress::{
+    OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1, OwnTracksIngressStore,
+    PreparedOwnTracksIngressV1,
 };
 pub use plugin::{Capability, Plugin};
 pub use state::{Reducer, State, StateRegistry};

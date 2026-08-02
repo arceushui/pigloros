@@ -14,6 +14,7 @@ sqlite = ["dep:rusqlite"]
 [dependencies]
 pos-core = { path = "../pos-core" }
 pos-crypto = { path = "../pos-crypto" }
+blake3 = { workspace = true }
 ulid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -1144,6 +1144,7 @@ dependencies = [
 name = "pos-store"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "bytes",
  "ciborium",
  "pos-core",

@@ -1,8 +1,9 @@
 //! Core values for the one V1 `OwnTracks` enrollment.
 
 use crate::{
-    geo_admission::GeoLocationAdmissionRequestV1, CoreError, EntityId, GeoLocationAdmissionFenceV1,
-    TimelineId,
+    geo_admission::{GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1},
+    owntracks_ingress::{OwnTracksIngressInputV1, PreparedOwnTracksIngressV1},
+    CoreError, EntityId, GeoLocationAdmissionFenceV1, TimelineId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -108,6 +109,58 @@ pub trait OwnTracksEnrollmentStore {
 }
 
 impl OwnTracksEnrollmentStateV1 {
+    /// Bind authenticated ingress material to the current active enrollment.
+    ///
+    /// This keeps verifier and fence details within core while an adapter owns
+    /// keyed derivation and durable enrollment lookup.
+    ///
+    /// # Errors
+    /// Returns a bounded validation error unless this is an active enrollment
+    /// whose verifier and current consent fence accept the supplied input.
+    pub fn prepare_owntracks_ingress(
+        &self,
+        input: &OwnTracksIngressInputV1,
+        candidate_verifier: [u8; 32],
+        rate_key: [u8; 32],
+        dedup: ([u8; 32], [u8; 32]),
+    ) -> Result<PreparedOwnTracksIngressV1, CoreError> {
+        let (timeline, entity, fence, verifier) = match (
+            self.timeline,
+            self.entity,
+            self.fence.as_ref(),
+            self.verifier,
+        ) {
+            (Some(timeline), Some(entity), Some(fence), Some(verifier))
+                if self.status == OwnTracksEnrollmentStatusV1::Active =>
+            {
+                (timeline, entity, fence, verifier)
+            }
+            _ => return Err(CoreError::GeographicAdmissionValidationFailed),
+        };
+        if !constant_time_equal(&verifier, &candidate_verifier) {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        }
+        let consent = fence.consent();
+        if consent.withdrawn() || consent.admission_epoch() == 0 {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        }
+        Ok(PreparedOwnTracksIngressV1::from_authenticated_parts(
+            rate_key,
+            GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
+                timeline,
+                entity,
+                input.payload().clone(),
+                fence.binding_revision(),
+                (*consent.identity(), consent.revision(), *consent.hash()),
+                (
+                    consent.policy_version(),
+                    consent.withdrawn(),
+                    consent.admission_epoch(),
+                ),
+                dedup,
+            )),
+        ))
+    }
     #[must_use]
     pub const fn absent() -> Self {
         Self {
@@ -293,4 +346,13 @@ impl OwnTracksEnrollmentStateV1 {
             (consent.policy_version(), consent.withdrawn(), epoch),
         ))
     }
+}
+
+fn constant_time_equal(left: &[u8; 32], right: &[u8; 32]) -> bool {
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
 }
