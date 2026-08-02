@@ -21,26 +21,39 @@ started semantics, graceful shutdown, and existing bounded-read guarantees.
 ## Decision
 
 Keep one bounded inbound channel and add a bounded worker-local pending queue.
-The worker will drain currently available envelopes into that queue before each
-selection. The pending queue never exceeds the inbound channel capacity, so it
-does not create an unbounded memory path or a second store owner.
+The channel remains a transport bound, while a shared 64-permit admission
+budget is the authoritative total-capacity bound. Every accepted envelope owns
+one permit while it is in the channel, pending queue, or currently executing;
+the permit is released only after the command is executed or expired. A second
+56-permit read budget means reads cannot consume the eight write-reserved
+permits. Consequently, channel contents plus pending contents plus the current
+command can never exceed 64 envelopes, even while producers refill the channel
+as the worker moves messages into its local queue.
+
+The worker drains available envelopes into the pending queue only while the
+shared permits allow them. Each envelope carries its `CommandClass` so worker
+selection does not depend on the admission-only boolean currently passed to
+`try_submit`.
 
 Use a fixed `READ_BURST` of 8. The selection policy is:
 
-1. Preserve the oldest pending write relative to other writes.
-2. If a write is pending, select it before pending reads. This gives writes
-   priority at every scheduling boundary.
-3. If no write is pending, select the oldest pending read and increment the
-   consecutive-read counter.
-4. After eight reads, probe the inbound channel again before selecting another
-   read. A newly admitted write is therefore serviced at the next scheduling
-   boundary; a synchronous read already in progress is never preempted.
+1. Drain currently available envelopes into the pending queue, respecting the
+   shared permit budget.
+2. While `reads_since_write < READ_BURST` and a read is pending, select the
+   oldest pending read. This allows an admitted write to wait behind at most
+   the current synchronous command plus the remainder of the eight-read burst.
+3. Once the burst reaches eight, select the oldest pending write when one is
+   available. A write that arrives after the eighth-read probe is selected at
+   the next scheduling boundary, after the currently executing read returns.
+4. If no write is pending, continue with the oldest pending read; the counter
+   remains saturated until a write is selected, so the next admitted write is
+   prioritized immediately.
 5. Reset the consecutive-read counter after every write.
 
 Reads remain FIFO relative to other reads, and writes remain FIFO relative to
-other writes. The scheduler may move a write ahead of pending reads, which is
-the explicitly requested fairness behavior; it does not change the order in
-which writes receive store-assigned sequence numbers.
+other writes. Cross-class FIFO is intentionally replaced by bounded read-burst
+selection, which is the explicitly requested fairness behavior. It does not
+change the order in which writes receive store-assigned sequence numbers.
 
 The same policy applies while draining. Shutdown first stops accepting new
 commands, drains accepted channel messages into the bounded pending queue, and
@@ -71,10 +84,15 @@ scheduler state owned by the existing worker. Selected.
 ## Invariants
 
 - At most one worker owns and mutates the EventStore.
-- The inbound channel plus pending queue hold at most `QUEUE_CAPACITY`
-  envelopes, excluding the one currently executing.
+- A shared permit budget bounds channel, pending, and current envelopes to
+  `QUEUE_CAPACITY`; moving a message between channel and pending cannot create
+  additional accepted work.
+- Reads can hold at most `QUEUE_CAPACITY - RESERVED_WRITE_CAPACITY` permits.
 - Writes are never reordered with other writes.
 - Reads are never reordered with other reads.
+- `CommandClass::Read` maps `RootCount`, `Read`, `ReadOne`, and `GetTimeline`;
+  `CommandClass::Write` maps `AdmitOwnTracksIngress`, `AdmitGeoLocation`,
+  `Purge`, `Create`, `Append`, `AppendIdentified`, and test-only `Panic`.
 - No read is preempted; bounded read chunks limit the maximum work before the
   next scheduling decision.
 - A command is claimed with the existing queued-to-started deadline CAS before
@@ -86,20 +104,39 @@ scheduler state owned by the existing worker. Selected.
 - No persistent schema, EventStore trait, HTTP contract, or public command API
   changes.
 
+## ADR-052 disposition
+
+ADR-052 contains both an early description of a single global FIFO and a later
+normative fairness rule requiring bounded read bursts and write priority. This
+ticket implements the later rule and supersedes the earlier cross-class FIFO
+sentence for the local V1 executor. FIFO remains guaranteed within each class,
+and write sequence assignment remains deterministic in write-arrival order;
+callers must not rely on a read being ordered ahead of a write merely because
+it entered the channel first. The Proposed ADR-052 text should carry this
+clarification when that ADR reaches acceptance. No distributed or cross-process
+ordering claim is introduced.
+
 ## Test design
 
 Tests will exercise the scheduler through the StoreExecutor boundary with real
 test stores and deterministic synchronization primitives:
 
-- A write queued behind an active bounded read is serviced before the next
-  queued reads, proving the write does not starve.
-- A sustained read stream cannot delay a queued write beyond the configured
-  burst boundary; the test records operation order rather than timing.
+- A write queued behind an active bounded read is serviced after the configured
+  burst boundary and before the next read burst, proving the write does not
+  starve.
+- The eighth-read threshold is covered when a write is pending, the no-write
+  path is covered while reads continue, and a write arriving after the probe is
+  serviced at the next boundary; tests record operation order rather than time.
 - Multiple queued writes retain FIFO order and receive sequence numbers in that
   order even when reads are interleaved.
 - Reads retain FIFO order when no writes are pending.
+- Concurrent producers cannot exceed the shared 64-envelope budget while the
+  worker refills its pending queue; read admission still leaves eight write
+  permits available.
 - Expired queued commands still do not execute, and started writes still return
   their commit result after deadline.
+- Commands expired while locally pending release their permits and never call
+  the store.
 - Shutdown drains both pending reads and writes and leaves readiness closed.
 
 The first scheduler test will be written and run red before production changes.
