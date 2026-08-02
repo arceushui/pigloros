@@ -4,7 +4,10 @@
 //! `piglor-gateway` binary — bind local HTTP/WS listener (ADR-014 / #69).
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-use piglor_gateway::{router, spectator_router, AppState, Gateway, LedgerConfig, LedgerWriteMode};
+use piglor_gateway::{
+    router, router_with_owntracks, spectator_router, AppState, Gateway, LedgerConfig,
+    LedgerWriteMode,
+};
 use piglor_ledger::LedgerView;
 use pos_store::{open_store, StoreConfig};
 use std::{future::Future, net::SocketAddr, path::PathBuf, pin::Pin};
@@ -53,11 +56,7 @@ fn run_with_args_and_shutdown(
             Ok(())
         }
         Some("serve") => {
-            let addr = args
-                .get(2)
-                .map_or("127.0.0.1:8080", String::as_str)
-                .parse::<SocketAddr>()?;
-            let store_path = args.get(3).map(String::as_str);
+            let serve_args = parse_serve_args(&args[2..])?;
             let (ledger_view, ledger_write) = match load_ledger() {
                 Ok(ledger) => ledger,
                 Err(error) => return Err(Box::new(error)),
@@ -66,14 +65,21 @@ fn run_with_args_and_shutdown(
                 .enable_all()
                 .build()
                 .expect("gateway Tokio runtime initialization failed");
-            rt.block_on(serve(addr, store_path, shutdown, ledger_view, ledger_write))
+            rt.block_on(serve_with_owntracks(
+                serve_args.addr,
+                serve_args.sqlite_path.as_deref(),
+                serve_args.owntracks_owner_key.as_deref(),
+                shutdown,
+                ledger_view,
+                ledger_write,
+            ))
         }
         Some("version") => {
             println!("piglor-gateway {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         _ => {
-            eprintln!("Usage: piglor-gateway <owntracks|serve [addr] [sqlite-path]|version>");
+            eprintln!("Usage: piglor-gateway <owntracks|serve [addr] [sqlite-path] [--owntracks-owner-key <path>]|version>");
             eprintln!("  owntracks pair <sqlite-path> <owner-key-path> --consent-policy <path> <timeline-id> <entity-id>");
             eprintln!("  owntracks status <sqlite-path>");
             eprintln!("  owntracks rotate <sqlite-path> <owner-key-path>");
@@ -85,16 +91,67 @@ fn run_with_args_and_shutdown(
     }
 }
 
+#[derive(Debug)]
+struct ServeArgs {
+    addr: SocketAddr,
+    sqlite_path: Option<String>,
+    owntracks_owner_key: Option<PathBuf>,
+}
+
+fn parse_serve_args(
+    args: &[String],
+) -> Result<ServeArgs, Box<dyn std::error::Error + Send + Sync>> {
+    let mut positional = Vec::new();
+    let mut owner_key = None;
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--owntracks-owner-key" {
+            if owner_key.is_some() {
+                return Err("OwnTracks owner key option may be specified once".into());
+            }
+            let Some(path) = args.get(index + 1) else {
+                return Err("OwnTracks owner key path is required".into());
+            };
+            owner_key = Some(PathBuf::from(path));
+            index += 2;
+        } else {
+            positional.push(args[index].clone());
+            index += 1;
+        }
+    }
+    if positional.len() > 2 {
+        return Err("serve accepts at most an address and SQLite path".into());
+    }
+    let addr = positional
+        .first()
+        .map_or(Ok("127.0.0.1:8080".parse()?), |value| value.parse())?;
+    let sqlite_path = positional.get(1).cloned();
+    if owner_key.is_some() && sqlite_path.is_none() {
+        return Err("OwnTracks ingress requires an SQLite path".into());
+    }
+    Ok(ServeArgs {
+        addr,
+        sqlite_path,
+        owntracks_owner_key: owner_key,
+    })
+}
+
 fn is_spectator_deployment(addr: SocketAddr) -> bool {
     !addr.ip().is_loopback()
 }
 
-fn router_for_addr(addr: SocketAddr, state: AppState) -> axum::Router {
+fn router_for_addr(
+    addr: SocketAddr,
+    state: AppState,
+    owntracks_owner_key: Option<[u8; 32]>,
+) -> axum::Router {
     if is_spectator_deployment(addr) {
         eprintln!(
             "piglor-gateway serving public Prediction Ledger routes only at {addr}; Timeline and write routes require loopback until #68 authentication exists"
         );
         spectator_router(state)
+    } else if let Some(owner_key) = owntracks_owner_key {
+        router_with_owntracks(state, owner_key)
     } else {
         router(state)
     }
@@ -116,9 +173,21 @@ where
     let _ = signal.await;
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 async fn serve(
     addr: SocketAddr,
     sqlite_path: Option<&str>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ledger_view: LedgerView,
+    ledger_write: LedgerWriteMode,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    serve_with_owntracks(addr, sqlite_path, None, shutdown, ledger_view, ledger_write).await
+}
+
+async fn serve_with_owntracks(
+    addr: SocketAddr,
+    sqlite_path: Option<&str>,
+    owntracks_owner_key_path: Option<&std::path::Path>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     ledger_view: LedgerView,
     ledger_write: LedgerWriteMode,
@@ -129,13 +198,26 @@ async fn serve(
         },
         None => StoreConfig::Memory,
     };
-    let gateway = Gateway::new(open_store(config)?);
+    let owntracks_owner_key = if is_spectator_deployment(addr) {
+        None
+    } else {
+        owntracks_owner_key_path
+            .map(owntracks::load_owner_key)
+            .transpose()?
+    };
+    let gateway = match (owntracks_owner_key, sqlite_path) {
+        (Some(_), Some(path)) => {
+            Gateway::new_with_owntracks_ingress(pos_store::sqlite::SqliteStore::open(path)?)
+        }
+        (None, _) => Gateway::new(open_store(config)?),
+        (Some(_), None) => return Err("OwnTracks ingress requires an SQLite path".into()),
+    };
     let state = AppState {
         gateway,
         ledger_view,
         ledger_write,
     };
-    let app = router_for_addr(addr, state);
+    let app = router_for_addr(addr, state, owntracks_owner_key);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     eprintln!("piglor-gateway listening on http://{addr}");
     axum::serve(listener, app)
@@ -212,6 +294,41 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::Duration;
+
+    #[test]
+    fn owntracks_activation_requires_sqlite_and_parses_one_existing_key_path() {
+        let missing_sqlite = parse_serve_args(&[
+            "127.0.0.1:0".to_owned(),
+            "--owntracks-owner-key".to_owned(),
+            "/private/owner.key".to_owned(),
+        ])
+        .unwrap_err();
+        assert!(missing_sqlite.to_string().contains("SQLite"));
+
+        let parsed = parse_serve_args(&[
+            "127.0.0.1:0".to_owned(),
+            "/private/store.db".to_owned(),
+            "--owntracks-owner-key".to_owned(),
+            "/private/owner.key".to_owned(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.sqlite_path.as_deref(), Some("/private/store.db"));
+        assert_eq!(
+            parsed.owntracks_owner_key.as_deref(),
+            Some(std::path::Path::new("/private/owner.key"))
+        );
+
+        let repeated = parse_serve_args(&[
+            "127.0.0.1:0".to_owned(),
+            "/private/store.db".to_owned(),
+            "--owntracks-owner-key".to_owned(),
+            "/private/one.key".to_owned(),
+            "--owntracks-owner-key".to_owned(),
+            "/private/two.key".to_owned(),
+        ])
+        .unwrap_err();
+        assert!(repeated.to_string().contains("once"));
+    }
 
     async fn serve_http_requests(bind_ip: IpAddr, requests: &[&str]) -> Vec<String> {
         let listener = tokio::net::TcpListener::bind((bind_ip, 0)).await.unwrap();
