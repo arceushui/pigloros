@@ -135,6 +135,85 @@ impl Command {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SchedulerTrace {
+    Admitted {
+        ordinal: u64,
+        class: CommandClass,
+    },
+    DrainCompleted {
+        pending: usize,
+        disconnected: bool,
+    },
+    Selected {
+        ordinal: u64,
+        class: CommandClass,
+        reads_since_write: u8,
+    },
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+struct SchedulerObserver {
+    trace: std::sync::mpsc::SyncSender<SchedulerTrace>,
+    gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+impl SchedulerObserver {
+    fn new(capacity: usize) -> (Arc<Self>, std::sync::mpsc::Receiver<SchedulerTrace>) {
+        let (trace, records) = std::sync::mpsc::sync_channel(capacity);
+        (
+            Arc::new(Self {
+                trace,
+                gate: Mutex::new(None),
+            }),
+            records,
+        )
+    }
+
+    fn install_gate(&self, gate: std::sync::mpsc::Receiver<()>) {
+        let mut current = self.gate.lock().expect("scheduler gate lock is healthy");
+        *current = Some(gate);
+    }
+
+    fn record(&self, record: SchedulerTrace) {
+        self.trace
+            .try_send(record)
+            .expect("scheduler trace receiver accepts every expected record");
+    }
+
+    fn admitted(&self, ordinal: u64, class: CommandClass) {
+        self.record(SchedulerTrace::Admitted { ordinal, class });
+    }
+
+    fn drain_completed(&self, pending: usize, disconnected: bool) {
+        self.record(SchedulerTrace::DrainCompleted {
+            pending,
+            disconnected,
+        });
+        let gate = self
+            .gate
+            .lock()
+            .expect("scheduler gate lock is healthy")
+            .take();
+        if let Some(gate) = gate {
+            gate.recv()
+                .expect("scheduler controller releases the worker");
+        }
+    }
+
+    fn selected(&self, ordinal: u64, class: CommandClass, reads_since_write: u8) {
+        self.record(SchedulerTrace::Selected {
+            ordinal,
+            class,
+            reads_since_write,
+        });
+    }
+}
+
 trait GeoLocationGatewayStore: EventStore + GeoLocationAdmissionStore {}
 
 impl<T> GeoLocationGatewayStore for T where T: EventStore + GeoLocationAdmissionStore {}
@@ -313,6 +392,8 @@ struct ExecutorControl {
     global_budget: Arc<Semaphore>,
     read_budget: Arc<Semaphore>,
     next_admission_ordinal: Mutex<u64>,
+    #[cfg(test)]
+    observer: Option<Arc<SchedulerObserver>>,
     state: Arc<Mutex<LifecycleState>>,
     shutdown: Arc<Notify>,
     join: Mutex<Option<JoinHandle<()>>>,
@@ -362,6 +443,8 @@ impl StoreExecutor {
             owntracks_owner_key,
             COMMAND_DEADLINE,
             SHUTDOWN_DEADLINE,
+            #[cfg(test)]
+            None,
         )
     }
 
@@ -371,7 +454,21 @@ impl StoreExecutor {
         command_deadline: Duration,
         shutdown_deadline: Duration,
     ) -> Self {
-        Self::spawn_with_deadlines(store, None, command_deadline, shutdown_deadline)
+        Self::spawn_with_deadlines(store, None, command_deadline, shutdown_deadline, None)
+    }
+
+    #[cfg(test)]
+    fn spawn_with_observer_for_test(
+        store: ExecutorStore,
+        observer: Arc<SchedulerObserver>,
+    ) -> Self {
+        Self::spawn_with_deadlines(
+            store,
+            None,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Some(observer),
+        )
     }
 
     fn spawn_with_deadlines(
@@ -379,6 +476,7 @@ impl StoreExecutor {
         owntracks_owner_key: Option<[u8; 32]>,
         command_deadline: Duration,
         shutdown_deadline: Duration,
+        #[cfg(test)] observer: Option<Arc<SchedulerObserver>>,
     ) -> Self {
         let (tx, mut rx) = mpsc::channel(QUEUE_CAPACITY);
         let (join_completion, _join_receiver) = watch::channel(None);
@@ -387,6 +485,8 @@ impl StoreExecutor {
             global_budget: Arc::new(Semaphore::new(QUEUE_CAPACITY)),
             read_budget: Arc::new(Semaphore::new(READ_CAPACITY)),
             next_admission_ordinal: Mutex::new(0),
+            #[cfg(test)]
+            observer: observer.clone(),
             state: Arc::new(Mutex::new(LifecycleState::Open)),
             shutdown: Arc::new(Notify::new()),
             join: Mutex::new(None),
@@ -406,6 +506,8 @@ impl StoreExecutor {
                     &mut rx,
                     store,
                     owntracks_owner_key,
+                    #[cfg(test)]
+                    observer,
                 );
             });
         match worker {
@@ -446,6 +548,7 @@ impl StoreExecutor {
                 global_budget: Arc::new(Semaphore::new(QUEUE_CAPACITY)),
                 read_budget: Arc::new(Semaphore::new(READ_CAPACITY)),
                 next_admission_ordinal: Mutex::new(0),
+                observer: None,
                 state: Arc::new(Mutex::new(LifecycleState::Open)),
                 shutdown: Arc::new(Notify::new()),
                 join: Mutex::new(None),
@@ -482,61 +585,70 @@ impl StoreExecutor {
         deadline: Instant,
         lifecycle: Arc<CommandLifecycle>,
     ) -> Result<(), StoreExecutorError> {
-        let state = match self.control.state.lock() {
-            Ok(state) => state,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        match *state {
-            LifecycleState::Open => {}
-            LifecycleState::Draining | LifecycleState::Closed => {
-                return Err(StoreExecutorError::Closed)
-            }
-            LifecycleState::Unhealthy { .. } => return Err(StoreExecutorError::Unhealthy),
-        }
-
         let class = command.class();
-        let global_permit = self
-            .control
-            .global_budget
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| StoreExecutorError::Saturated)?;
-        let read_permit = match class {
-            CommandClass::Read => Some(
-                self.control
-                    .read_budget
-                    .clone()
-                    .try_acquire_owned()
-                    .map_err(|_| StoreExecutorError::Saturated)?,
-            ),
-            CommandClass::Write => None,
-        };
-        let admission_ordinal = match self.control.next_admission_ordinal.lock() {
-            Ok(ordinal) => *ordinal,
-            Err(poisoned) => *poisoned.into_inner(),
-        };
-        match self.control.tx.try_send(CommandEnvelope {
-            deadline,
-            lifecycle,
-            class,
-            admission_ordinal,
-            global_permit,
-            read_permit,
-            command,
-        }) {
-            Ok(()) => {
-                let mut ordinal = match self.control.next_admission_ordinal.lock() {
-                    Ok(ordinal) => ordinal,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                *ordinal = ordinal
-                    .checked_add(1)
-                    .expect("StoreExecutor admission ordinal overflow");
-                Ok(())
+        let admission = {
+            let state = match self.control.state.lock() {
+                Ok(state) => state,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            match *state {
+                LifecycleState::Open => {}
+                LifecycleState::Draining | LifecycleState::Closed => {
+                    return Err(StoreExecutorError::Closed)
+                }
+                LifecycleState::Unhealthy { .. } => return Err(StoreExecutorError::Unhealthy),
             }
-            Err(mpsc::error::TrySendError::Full(_)) => Err(StoreExecutorError::Saturated),
-            Err(mpsc::error::TrySendError::Closed(_)) => Err(StoreExecutorError::Closed),
+
+            let global_permit = self
+                .control
+                .global_budget
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| StoreExecutorError::Saturated)?;
+            let read_permit = match class {
+                CommandClass::Read => Some(
+                    self.control
+                        .read_budget
+                        .clone()
+                        .try_acquire_owned()
+                        .map_err(|_| StoreExecutorError::Saturated)?,
+                ),
+                CommandClass::Write => None,
+            };
+            let admission_ordinal = match self.control.next_admission_ordinal.lock() {
+                Ok(ordinal) => *ordinal,
+                Err(poisoned) => *poisoned.into_inner(),
+            };
+            match self.control.tx.try_send(CommandEnvelope {
+                deadline,
+                lifecycle,
+                class,
+                admission_ordinal,
+                global_permit,
+                read_permit,
+                command,
+            }) {
+                Ok(()) => {
+                    let mut ordinal = match self.control.next_admission_ordinal.lock() {
+                        Ok(ordinal) => ordinal,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    *ordinal = ordinal
+                        .checked_add(1)
+                        .expect("StoreExecutor admission ordinal overflow");
+                    Ok((class, admission_ordinal))
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => Err(StoreExecutorError::Saturated),
+                Err(mpsc::error::TrySendError::Closed(_)) => Err(StoreExecutorError::Closed),
+            }
+        };
+        #[cfg(test)]
+        if let Ok((class, ordinal)) = admission {
+            if let Some(observer) = &self.control.observer {
+                observer.admitted(ordinal, class);
+            }
         }
+        admission.map(|_| ())
     }
 
     pub(crate) fn is_ready(&self) -> bool {
@@ -808,6 +920,7 @@ fn worker_loop(
     receiver: &mut mpsc::Receiver<CommandEnvelope>,
     store: ExecutorStore,
     owntracks_owner_key: Option<[u8; 32]>,
+    #[cfg(test)] observer: Option<Arc<SchedulerObserver>>,
 ) {
     let worker_result = catch_unwind(AssertUnwindSafe(|| {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -820,6 +933,8 @@ fn worker_loop(
             receiver,
             store,
             owntracks_owner_key,
+            #[cfg(test)]
+            observer,
         ));
     }));
     match worker_result {
@@ -847,6 +962,7 @@ async fn worker_loop_async(
     receiver: &mut mpsc::Receiver<CommandEnvelope>,
     store: ExecutorStore,
     owntracks_owner_key: Option<[u8; 32]>,
+    #[cfg(test)] observer: Option<Arc<SchedulerObserver>>,
 ) {
     let mut state = ExecutorState {
         store,
@@ -889,6 +1005,10 @@ async fn worker_loop_async(
 
         if !pending.is_empty() {
             disconnected |= drain_available(receiver, &mut pending);
+            #[cfg(test)]
+            if let Some(observer) = &observer {
+                observer.drain_completed(pending.len(), disconnected);
+            }
             let Some(index) = select_pending_index(&pending, reads_since_write) else {
                 continue;
             };
@@ -896,6 +1016,10 @@ async fn worker_loop_async(
                 .remove(index)
                 .expect("selected pending envelope remains present");
             let class = envelope.class;
+            #[cfg(test)]
+            if let Some(observer) = &observer {
+                observer.selected(envelope.admission_ordinal, class, reads_since_write);
+            }
             let _permit_owners = (&envelope.global_permit, &envelope.read_permit);
             if !envelope.lifecycle.claim_for_execution(envelope.deadline) {
                 expire_command(envelope.command);
@@ -1405,6 +1529,7 @@ mod tests {
     struct OrderedStore {
         inner: MemoryStore,
         operations: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+        created_names: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
         entered: std::sync::mpsc::Sender<()>,
         release: std::sync::mpsc::Receiver<()>,
     }
@@ -1415,6 +1540,10 @@ mod tests {
                 .lock()
                 .expect("operation trace lock is healthy")
                 .push("create");
+            self.created_names
+                .lock()
+                .expect("created-name trace lock is healthy")
+                .push(name.to_owned());
             self.inner.create_timeline(name)
         }
 
@@ -1831,6 +1960,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_drains_accepted_channel_and_pending_commands() {
+        let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let executor = super::StoreExecutor::spawn_with_deadlines_for_test(
+            super::ExecutorStore::Generic(Box::new(BlockingRootCountStore {
+                inner: MemoryStore::new(),
+                entered: entered_sender,
+                release: release_receiver,
+            })),
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+        );
+        let first = {
+            let executor = executor.clone();
+            tokio::spawn(async move { executor.root_count(1).await })
+        };
+        tokio::task::spawn_blocking(move || {
+            entered_receiver
+                .recv()
+                .expect("first command entered the worker");
+        })
+        .await
+        .expect("first-command observer joined");
+
+        let deadline = Instant::now() + std::time::Duration::from_secs(1);
+        let read_result = submit_get_timeline(&executor, deadline);
+        let (create_reply, create_result) = tokio::sync::oneshot::channel();
+        executor
+            .try_submit(
+                Command::Create {
+                    name: "drained-write".to_owned(),
+                    reply: create_reply,
+                },
+                deadline,
+                std::sync::Arc::new(super::CommandLifecycle::new()),
+            )
+            .expect("accepted write is queued for shutdown drain");
+
+        let shutdown = {
+            let executor = executor.clone();
+            tokio::spawn(async move { executor.shutdown().await })
+        };
+        while executor.is_ready() {
+            tokio::task::yield_now().await;
+        }
+        let (rejected_reply, _rejected_result) = tokio::sync::oneshot::channel();
+        assert!(matches!(
+            executor.try_submit(
+                Command::Create {
+                    name: "rejected-after-draining".to_owned(),
+                    reply: rejected_reply,
+                },
+                deadline,
+                std::sync::Arc::new(super::CommandLifecycle::new()),
+            ),
+            Err(super::StoreExecutorError::Closed)
+        ));
+
+        release_sender
+            .send(())
+            .expect("first command release is alive");
+        assert!(first.await.expect("first command joined").is_ok());
+        assert!(read_result.await.expect("queued read reply").is_ok());
+        assert!(create_result.await.expect("queued write reply").is_ok());
+        assert!(shutdown.await.expect("shutdown task joined").is_ok());
+        assert!(!executor.is_ready());
+    }
+
+    #[tokio::test]
     async fn in_flight_command_returns_its_commit_outcome_after_deadline() {
         let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
@@ -1872,6 +2070,20 @@ mod tests {
             "panic result: {panic_result:?}"
         );
         assert!(!executor.is_ready());
+        for _ in 0..10 {
+            if executor.control.global_budget.available_permits() == super::QUEUE_CAPACITY {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            executor.control.global_budget.available_permits(),
+            super::QUEUE_CAPACITY
+        );
+        assert_eq!(
+            executor.control.read_budget.available_permits(),
+            super::READ_CAPACITY
+        );
         assert!(matches!(
             executor.create("unhealthy".to_owned()).await,
             Err(super::StoreExecutorError::Unhealthy)
@@ -2052,11 +2264,83 @@ mod tests {
             &mut receiver,
             super::ExecutorStore::Generic(Box::new(MemoryStore::new())),
             None,
+            None,
         );
         assert_eq!(
             *lifecycle
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
+            super::LifecycleState::Closed
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnected_receiver_drains_pending_commands_through_scheduler() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        let (read_reply, read_result) = tokio::sync::oneshot::channel();
+        let (write_reply, write_result) = tokio::sync::oneshot::channel();
+        let read_permit = std::sync::Arc::new(super::Semaphore::new(1))
+            .try_acquire_owned()
+            .expect("read test permit is available");
+        let read_global = std::sync::Arc::new(super::Semaphore::new(1))
+            .try_acquire_owned()
+            .expect("read global test permit is available");
+        let write_global = std::sync::Arc::new(super::Semaphore::new(1))
+            .try_acquire_owned()
+            .expect("write global test permit is available");
+        let read_lifecycle = std::sync::Arc::new(super::CommandLifecycle::new());
+        let write_lifecycle = std::sync::Arc::new(super::CommandLifecycle::new());
+        let deadline = Instant::now() + std::time::Duration::from_secs(1);
+        sender
+            .send(super::CommandEnvelope {
+                deadline,
+                lifecycle: read_lifecycle,
+                class: super::CommandClass::Read,
+                admission_ordinal: 0,
+                global_permit: read_global,
+                read_permit: Some(read_permit),
+                command: Command::GetTimeline {
+                    timeline: TimelineId::new(),
+                    reply: read_reply,
+                },
+            })
+            .await
+            .expect("read envelope is accepted");
+        sender
+            .send(super::CommandEnvelope {
+                deadline,
+                lifecycle: write_lifecycle,
+                class: super::CommandClass::Write,
+                admission_ordinal: 1,
+                global_permit: write_global,
+                read_permit: None,
+                command: Command::Create {
+                    name: "disconnected-write".to_owned(),
+                    reply: write_reply,
+                },
+            })
+            .await
+            .expect("write envelope is accepted");
+        drop(sender);
+
+        let lifecycle = std::sync::Arc::new(std::sync::Mutex::new(super::LifecycleState::Open));
+        let worker_lifecycle = std::sync::Arc::clone(&lifecycle);
+        let worker = tokio::task::spawn_blocking(move || {
+            super::worker_loop(
+                &worker_lifecycle,
+                std::sync::Arc::new(tokio::sync::Notify::new()),
+                &mut receiver,
+                super::ExecutorStore::Generic(Box::new(MemoryStore::new())),
+                None,
+                None,
+            );
+        });
+
+        assert!(read_result.await.expect("read terminal reply").is_ok());
+        assert!(write_result.await.expect("write terminal reply").is_ok());
+        worker.await.expect("disconnected worker joined");
+        assert_eq!(
+            *lifecycle.lock().expect("worker lifecycle lock is healthy"),
             super::LifecycleState::Closed
         );
     }
@@ -2134,15 +2418,154 @@ mod tests {
         executor.shutdown().await.expect("executor shuts down");
     }
 
+    fn submit_get_timeline(
+        executor: &super::StoreExecutor,
+        deadline: Instant,
+    ) -> tokio::sync::oneshot::Receiver<Result<Option<Timeline>, super::StoreExecutorError>> {
+        let (reply, result) = tokio::sync::oneshot::channel();
+        executor
+            .try_submit(
+                Command::GetTimeline {
+                    timeline: TimelineId::new(),
+                    reply,
+                },
+                deadline,
+                std::sync::Arc::new(super::CommandLifecycle::new()),
+            )
+            .expect("read is admitted");
+        result
+    }
+
+    fn release_scheduler_gate(
+        records: &std::sync::mpsc::Receiver<super::SchedulerTrace>,
+        gate_sender: &std::sync::mpsc::Sender<()>,
+    ) -> Vec<u64> {
+        let mut selected = Vec::new();
+        loop {
+            match records.recv().expect("scheduler trace is alive") {
+                super::SchedulerTrace::DrainCompleted { pending: 9, .. } => {
+                    gate_sender.send(()).expect("scheduler gate is alive");
+                    return selected;
+                }
+                super::SchedulerTrace::Selected { ordinal, .. } => selected.push(ordinal),
+                super::SchedulerTrace::Admitted { .. }
+                | super::SchedulerTrace::DrainCompleted { .. } => {}
+            }
+        }
+    }
+
+    fn collect_selected(records: &std::sync::mpsc::Receiver<super::SchedulerTrace>) -> Vec<u64> {
+        records
+            .try_iter()
+            .filter_map(|record| match record {
+                super::SchedulerTrace::Selected { ordinal, .. } => Some(ordinal),
+                super::SchedulerTrace::Admitted { .. }
+                | super::SchedulerTrace::DrainCompleted { .. } => None,
+            })
+            .collect()
+    }
+
     #[tokio::test]
     async fn pending_write_is_selected_after_eight_consecutive_reads() {
         let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
         let operations = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let executor = super::StoreExecutor::spawn_with_deadlines_for_test(
+        let created_names = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (observer, records) = super::SchedulerObserver::new(64);
+        let executor = super::StoreExecutor::spawn_with_observer_for_test(
             super::ExecutorStore::Generic(Box::new(OrderedStore {
                 inner: MemoryStore::new(),
                 operations: std::sync::Arc::clone(&operations),
+                created_names,
+                entered: entered_sender,
+                release: release_receiver,
+            })),
+            std::sync::Arc::clone(&observer),
+        );
+
+        let (root_reply, root_result) = tokio::sync::oneshot::channel();
+        executor
+            .try_submit(
+                Command::RootCount {
+                    maximum: 1,
+                    reply: root_reply,
+                },
+                Instant::now() + std::time::Duration::from_secs(1),
+                std::sync::Arc::new(super::CommandLifecycle::new()),
+            )
+            .expect("initial read is admitted");
+        tokio::task::spawn_blocking(move || {
+            entered_receiver
+                .recv()
+                .expect("initial read entered the worker");
+        })
+        .await
+        .expect("initial read observer joined");
+
+        let deadline = Instant::now() + std::time::Duration::from_secs(1);
+        let read_results = (0..8)
+            .map(|_| submit_get_timeline(&executor, deadline))
+            .collect::<Vec<_>>();
+
+        let (create_reply, create_result) = tokio::sync::oneshot::channel();
+        executor
+            .try_submit(
+                Command::Create {
+                    name: "fair-write".to_owned(),
+                    reply: create_reply,
+                },
+                deadline,
+                std::sync::Arc::new(super::CommandLifecycle::new()),
+            )
+            .expect("write is admitted behind the reads");
+
+        let (gate_sender, gate_receiver) = std::sync::mpsc::channel();
+        observer.install_gate(gate_receiver);
+        release_sender
+            .send(())
+            .expect("initial read release is alive");
+        let mut selected = release_scheduler_gate(&records, &gate_sender);
+        assert!(root_result.await.expect("initial read reply").is_ok());
+        assert!(create_result.await.expect("write reply").is_ok());
+        for result in read_results {
+            assert!(result.await.expect("read reply").is_ok());
+        }
+
+        let operations = operations
+            .lock()
+            .expect("operation trace lock is healthy")
+            .clone();
+        assert_eq!(
+            &operations[..10],
+            &[
+                "root_count",
+                "read",
+                "read",
+                "read",
+                "read",
+                "read",
+                "read",
+                "read",
+                "create",
+                "read",
+            ]
+        );
+        selected.extend(collect_selected(&records));
+        assert_eq!(&selected[..10], &[0, 1, 2, 3, 4, 5, 6, 7, 9, 8]);
+        executor.shutdown().await.expect("executor shuts down");
+    }
+
+    #[tokio::test]
+    async fn interleaved_writes_retain_successful_admission_order() {
+        let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let operations = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let created_names = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let executor = super::StoreExecutor::spawn_with_deadlines_for_test(
+            super::ExecutorStore::Generic(Box::new(OrderedStore {
+                inner: MemoryStore::new(),
+                operations,
+                created_names: std::sync::Arc::clone(&created_names),
                 entered: entered_sender,
                 release: release_receiver,
             })),
@@ -2170,61 +2593,42 @@ mod tests {
         .expect("initial read observer joined");
 
         let deadline = Instant::now() + std::time::Duration::from_secs(1);
-        let mut read_results = Vec::new();
-        for _ in 0..8 {
-            let (reply, result) = tokio::sync::oneshot::channel();
-            executor
-                .try_submit(
-                    Command::GetTimeline {
-                        timeline: TimelineId::new(),
-                        reply,
-                    },
-                    deadline,
-                    std::sync::Arc::new(super::CommandLifecycle::new()),
-                )
-                .expect("read is admitted");
-            read_results.push(result);
-        }
-
-        let (create_reply, create_result) = tokio::sync::oneshot::channel();
+        let (first_reply, first_result) = tokio::sync::oneshot::channel();
         executor
             .try_submit(
                 Command::Create {
-                    name: "fair-write".to_owned(),
-                    reply: create_reply,
+                    name: "write-1".to_owned(),
+                    reply: first_reply,
                 },
                 deadline,
                 std::sync::Arc::new(super::CommandLifecycle::new()),
             )
-            .expect("write is admitted behind the reads");
+            .expect("first write is admitted");
+        let read_result = submit_get_timeline(&executor, deadline);
+        let (second_reply, second_result) = tokio::sync::oneshot::channel();
+        executor
+            .try_submit(
+                Command::Create {
+                    name: "write-2".to_owned(),
+                    reply: second_reply,
+                },
+                deadline,
+                std::sync::Arc::new(super::CommandLifecycle::new()),
+            )
+            .expect("second write is admitted");
 
         release_sender
             .send(())
             .expect("initial read release is alive");
         assert!(root_result.await.expect("initial read reply").is_ok());
-        assert!(create_result.await.expect("write reply").is_ok());
-        for result in read_results {
-            assert!(result.await.expect("read reply").is_ok());
-        }
-
-        let operations = operations
-            .lock()
-            .expect("operation trace lock is healthy")
-            .clone();
+        assert!(first_result.await.expect("first write reply").is_ok());
+        assert!(read_result.await.expect("read reply").is_ok());
+        assert!(second_result.await.expect("second write reply").is_ok());
         assert_eq!(
-            &operations[..10],
-            &[
-                "root_count",
-                "read",
-                "read",
-                "read",
-                "read",
-                "read",
-                "read",
-                "read",
-                "create",
-                "read",
-            ]
+            *created_names
+                .lock()
+                .expect("created-name trace lock is healthy"),
+            vec!["write-1".to_owned(), "write-2".to_owned()]
         );
         executor.shutdown().await.expect("executor shuts down");
     }
@@ -2285,6 +2689,105 @@ mod tests {
             executor.control.read_budget.available_permits(),
             super::READ_CAPACITY
         );
+    }
+
+    #[tokio::test]
+    async fn failed_read_acquisition_releases_global_permit() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(super::QUEUE_CAPACITY);
+        let executor = super::StoreExecutor::from_sender_for_test(sender);
+        let deadline = Instant::now() + std::time::Duration::from_secs(1);
+
+        for _ in 0..super::READ_CAPACITY {
+            let (reply, _result) = tokio::sync::oneshot::channel();
+            executor
+                .try_submit(
+                    Command::GetTimeline {
+                        timeline: TimelineId::new(),
+                        reply,
+                    },
+                    deadline,
+                    std::sync::Arc::new(super::CommandLifecycle::new()),
+                )
+                .expect("read-class permit is available");
+        }
+        assert_eq!(executor.control.global_budget.available_permits(), 8);
+        assert_eq!(executor.control.read_budget.available_permits(), 0);
+
+        let (reply, _result) = tokio::sync::oneshot::channel();
+        assert!(matches!(
+            executor.try_submit(
+                Command::GetTimeline {
+                    timeline: TimelineId::new(),
+                    reply,
+                },
+                deadline,
+                std::sync::Arc::new(super::CommandLifecycle::new()),
+            ),
+            Err(super::StoreExecutorError::Saturated)
+        ));
+        assert_eq!(executor.control.global_budget.available_permits(), 8);
+        assert_eq!(executor.control.read_budget.available_permits(), 0);
+
+        while let Ok(envelope) = receiver.try_recv() {
+            drop(envelope);
+        }
+        assert_eq!(
+            executor.control.global_budget.available_permits(),
+            super::QUEUE_CAPACITY
+        );
+        assert_eq!(
+            executor.control.read_budget.available_permits(),
+            super::READ_CAPACITY
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_send_releases_admission_permits() {
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        drop(receiver);
+        let executor = super::StoreExecutor::from_sender_for_test(sender);
+        let (reply, _result) = tokio::sync::oneshot::channel();
+
+        assert!(matches!(
+            executor.try_submit(
+                Command::Create {
+                    name: "closed".to_owned(),
+                    reply,
+                },
+                Instant::now() + std::time::Duration::from_secs(1),
+                std::sync::Arc::new(super::CommandLifecycle::new()),
+            ),
+            Err(super::StoreExecutorError::Closed)
+        ));
+        assert_eq!(
+            executor.control.global_budget.available_permits(),
+            super::QUEUE_CAPACITY
+        );
+        assert_eq!(
+            executor.control.read_budget.available_permits(),
+            super::READ_CAPACITY
+        );
+    }
+
+    #[tokio::test]
+    async fn normal_completion_releases_admission_permits() {
+        let executor = super::StoreExecutor::new(Box::new(MemoryStore::new()));
+        assert!(executor.create("completed".to_owned()).await.is_ok());
+        for _ in 0..10 {
+            if executor.control.global_budget.available_permits() == super::QUEUE_CAPACITY {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            executor.control.global_budget.available_permits(),
+            super::QUEUE_CAPACITY
+        );
+        assert_eq!(
+            executor.control.read_budget.available_permits(),
+            super::READ_CAPACITY
+        );
+        executor.shutdown().await.expect("executor shuts down");
     }
 
     #[test]
