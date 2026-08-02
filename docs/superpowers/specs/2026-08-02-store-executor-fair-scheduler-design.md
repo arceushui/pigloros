@@ -30,25 +30,33 @@ permits. Consequently, channel contents plus pending contents plus the current
 command can never exceed 64 envelopes, even while producers refill the channel
 as the worker moves messages into its local queue.
 
-The worker drains available envelopes into the pending queue only while the
-shared permits allow them. Each envelope carries its `CommandClass` so worker
+The worker drains available envelopes into the pending queue without acquiring
+new permits: every accepted envelope already owns its permit, and moving that
+envelope from the inbound channel to local pending does not change the total
+accepted-work count. Each envelope carries its `CommandClass` so worker
 selection does not depend on the admission-only boolean currently passed to
 `try_submit`.
 
 Use a fixed `READ_BURST` of 8. The selection policy is:
 
-1. Drain currently available envelopes into the pending queue, respecting the
-   shared permit budget.
+1. Drain currently available envelopes into the pending queue. Draining moves
+   already-admitted envelopes and therefore does not depend on unused permits.
 2. While `reads_since_write < READ_BURST` and a read is pending, select the
    oldest pending read. This allows an admitted write to wait behind at most
    the current synchronous command plus the remainder of the eight-read burst.
-3. Once the burst reaches eight, select the oldest pending write when one is
+3. If no read is pending before the threshold, select the oldest pending write
+   when one is available; otherwise there is no selectable command yet.
+4. Once the burst reaches eight, select the oldest pending write when one is
    available. A write that arrives after the eighth-read probe is selected at
    the next scheduling boundary, after the currently executing read returns.
-4. If no write is pending, continue with the oldest pending read; the counter
-   remains saturated until a write is selected, so the next admitted write is
-   prioritized immediately.
-5. Reset the consecutive-read counter after every write.
+5. If no write is pending at the threshold, continue with the oldest pending
+   read; the counter remains saturated until a write is selected, so the next
+   admitted write is prioritized immediately.
+6. After a selected envelope is successfully claimed for execution, increment
+   and saturate `reads_since_write` when it is a read, and reset the counter
+   after every successfully claimed write. An envelope that fails the deadline
+   claim is expired without executing and does not advance or reset the counter;
+   selection continues for the next pending envelope.
 
 Reads remain FIFO relative to other reads, and writes remain FIFO relative to
 other writes. Cross-class FIFO is intentionally replaced by bounded read-burst
