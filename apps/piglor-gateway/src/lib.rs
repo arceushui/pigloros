@@ -1502,7 +1502,7 @@ mod tests {
 
     struct BlockFirstRootCount {
         inner: Box<dyn EventStore>,
-        started: mpsc::Sender<()>,
+        started: tokio::sync::mpsc::UnboundedSender<()>,
         release: mpsc::Receiver<()>,
         block: AtomicBool,
     }
@@ -1589,7 +1589,7 @@ mod tests {
     async fn saturated_gateway_append_is_typed_and_does_not_mutate_or_publish() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let timeline = store.create_timeline("saturation-target").unwrap();
-        let (started_tx, started_rx) = mpsc::channel();
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
         let (release_tx, release_rx) = mpsc::channel();
         let gateway = Gateway::with_executor_for_test(executor::StoreExecutor::new(Box::new(
             BlockFirstRootCount {
@@ -1601,11 +1601,11 @@ mod tests {
         )));
         let blocker_gateway = gateway.clone();
         let blocker =
-            tokio::spawn(
-                async move { blocker_gateway.create_timeline("block-store-worker").await },
-            );
-        tokio::task::yield_now().await;
-        assert!(started_rx.recv_timeout(Duration::from_secs(1)).is_ok());
+            tokio::spawn(async move { blocker_gateway.store.root_count(MAX_TIMELINES).await });
+        tokio::time::timeout(Duration::from_secs(1), started_rx.recv())
+            .await
+            .expect("store worker must start before the queue is filled")
+            .expect("store worker start signal must be delivered");
 
         let mut queued = Vec::new();
         for _ in 0..executor::QUEUE_CAPACITY {
