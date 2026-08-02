@@ -18,7 +18,7 @@ use pos_core::{
     CoreError, OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1, OwnTracksIngressStore,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     num::NonZeroUsize,
     panic::{catch_unwind, AssertUnwindSafe},
     sync::{
@@ -28,10 +28,12 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
-use tokio::sync::{mpsc, oneshot, watch, Notify};
+use tokio::sync::{mpsc, oneshot, watch, Notify, OwnedSemaphorePermit, Semaphore};
 
 pub(crate) const QUEUE_CAPACITY: usize = 64;
-const RESERVED_WRITE_CAPACITY: usize = 8;
+pub(crate) const RESERVED_WRITE_CAPACITY: usize = 8;
+const READ_CAPACITY: usize = QUEUE_CAPACITY - RESERVED_WRITE_CAPACITY;
+const READ_BURST: u8 = 8;
 const COMMAND_DEADLINE: Duration = Duration::from_secs(5);
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(5);
 const OWNTRACKS_RATE_BURST: u8 = 5;
@@ -39,11 +41,11 @@ const OWNTRACKS_RATE_KEYS_MAXIMUM: usize = 64;
 const OWNTRACKS_RATE_STATE_TTL: Duration = Duration::from_mins(15);
 
 macro_rules! submit {
-    ($executor:expr, $is_write:expr, $build:expr) => {{
+    ($executor:expr, $build:expr) => {{
         let deadline = Instant::now() + $executor.command_deadline();
         let lifecycle = Arc::new(CommandLifecycle::new());
         let (reply, result) = oneshot::channel();
-        match $executor.try_submit($is_write, $build(reply), deadline, Arc::clone(&lifecycle)) {
+        match $executor.try_submit($build(reply), deadline, Arc::clone(&lifecycle)) {
             Ok(()) => await_command_result($executor, result, lifecycle, deadline).await,
             Err(error) => Err(error),
         }
@@ -106,6 +108,31 @@ pub(super) enum Command {
     Panic {
         reply: oneshot::Sender<Result<(), StoreExecutorError>>,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommandClass {
+    Read,
+    Write,
+}
+
+impl Command {
+    fn class(&self) -> CommandClass {
+        match self {
+            Self::RootCount { .. }
+            | Self::Read { .. }
+            | Self::ReadOne { .. }
+            | Self::GetTimeline { .. } => CommandClass::Read,
+            Self::AdmitOwnTracksIngress { .. }
+            | Self::AdmitGeoLocation { .. }
+            | Self::Purge { .. }
+            | Self::Create { .. }
+            | Self::Append { .. }
+            | Self::AppendIdentified { .. } => CommandClass::Write,
+            #[cfg(test)]
+            Self::Panic { .. } => CommandClass::Write,
+        }
+    }
 }
 
 trait GeoLocationGatewayStore: EventStore + GeoLocationAdmissionStore {}
@@ -283,6 +310,9 @@ impl CommandLifecycle {
 
 struct ExecutorControl {
     tx: mpsc::Sender<CommandEnvelope>,
+    global_budget: Arc<Semaphore>,
+    read_budget: Arc<Semaphore>,
+    next_admission_ordinal: Mutex<u64>,
     state: Arc<Mutex<LifecycleState>>,
     shutdown: Arc<Notify>,
     join: Mutex<Option<JoinHandle<()>>>,
@@ -295,6 +325,10 @@ struct ExecutorControl {
 pub(crate) struct CommandEnvelope {
     deadline: Instant,
     lifecycle: Arc<CommandLifecycle>,
+    class: CommandClass,
+    admission_ordinal: u64,
+    global_permit: OwnedSemaphorePermit,
+    read_permit: Option<OwnedSemaphorePermit>,
     command: Command,
 }
 
@@ -350,6 +384,9 @@ impl StoreExecutor {
         let (join_completion, _join_receiver) = watch::channel(None);
         let control = Arc::new(ExecutorControl {
             tx,
+            global_budget: Arc::new(Semaphore::new(QUEUE_CAPACITY)),
+            read_budget: Arc::new(Semaphore::new(READ_CAPACITY)),
+            next_admission_ordinal: Mutex::new(0),
             state: Arc::new(Mutex::new(LifecycleState::Open)),
             shutdown: Arc::new(Notify::new()),
             join: Mutex::new(None),
@@ -406,6 +443,9 @@ impl StoreExecutor {
         Self {
             control: Arc::new(ExecutorControl {
                 tx,
+                global_budget: Arc::new(Semaphore::new(QUEUE_CAPACITY)),
+                read_budget: Arc::new(Semaphore::new(READ_CAPACITY)),
+                next_admission_ordinal: Mutex::new(0),
                 state: Arc::new(Mutex::new(LifecycleState::Open)),
                 shutdown: Arc::new(Notify::new()),
                 join: Mutex::new(None),
@@ -438,7 +478,6 @@ impl StoreExecutor {
 
     fn try_submit(
         &self,
-        is_write: bool,
         command: Command,
         deadline: Instant,
         lifecycle: Arc<CommandLifecycle>,
@@ -454,15 +493,47 @@ impl StoreExecutor {
             }
             LifecycleState::Unhealthy { .. } => return Err(StoreExecutorError::Unhealthy),
         }
-        if !is_write && self.control.tx.capacity() <= RESERVED_WRITE_CAPACITY {
-            return Err(StoreExecutorError::Saturated);
-        }
+
+        let class = command.class();
+        let global_permit = self
+            .control
+            .global_budget
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| StoreExecutorError::Saturated)?;
+        let read_permit = match class {
+            CommandClass::Read => Some(
+                self.control
+                    .read_budget
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| StoreExecutorError::Saturated)?,
+            ),
+            CommandClass::Write => None,
+        };
+        let admission_ordinal = match self.control.next_admission_ordinal.lock() {
+            Ok(ordinal) => *ordinal,
+            Err(poisoned) => *poisoned.into_inner(),
+        };
         match self.control.tx.try_send(CommandEnvelope {
             deadline,
             lifecycle,
+            class,
+            admission_ordinal,
+            global_permit,
+            read_permit,
             command,
         }) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                let mut ordinal = match self.control.next_admission_ordinal.lock() {
+                    Ok(ordinal) => ordinal,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                *ordinal = ordinal
+                    .checked_add(1)
+                    .expect("StoreExecutor admission ordinal overflow");
+                Ok(())
+            }
             Err(mpsc::error::TrySendError::Full(_)) => Err(StoreExecutorError::Saturated),
             Err(mpsc::error::TrySendError::Closed(_)) => Err(StoreExecutorError::Closed),
         }
@@ -598,7 +669,7 @@ impl StoreExecutor {
 
     #[cfg(test)]
     async fn panic_for_test(&self) -> Result<(), StoreExecutorError> {
-        let result = submit!(self, true, |reply| Command::Panic { reply });
+        let result = submit!(self, |reply| Command::Panic { reply });
         let _ = tokio::time::timeout(Duration::from_secs(1), async {
             while self.is_ready() {
                 tokio::task::yield_now().await;
@@ -612,16 +683,13 @@ impl StoreExecutor {
         &self,
         limit: NonZeroUsize,
     ) -> Result<PurgeOutcome, StoreExecutorError> {
-        submit!(self, true, |reply| Command::Purge { limit, reply })
+        submit!(self, |reply| Command::Purge { limit, reply })
     }
     pub(crate) async fn admit_geo_location(
         &self,
         request: GeoLocationAdmissionRequestV1,
     ) -> Result<GeoLocationAdmissionOutcome, StoreExecutorError> {
-        submit!(self, true, |reply| Command::AdmitGeoLocation {
-            request,
-            reply
-        })
+        submit!(self, |reply| Command::AdmitGeoLocation { request, reply })
     }
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn admit_owntracks_ingress(
@@ -630,7 +698,7 @@ impl StoreExecutor {
         basic_secret: [u8; 32],
         payload: pos_core::CanonicalBytes,
     ) -> Result<OwnTracksIngressOutcome, StoreExecutorError> {
-        submit!(self, true, |reply| Command::AdmitOwnTracksIngress {
+        submit!(self, |reply| Command::AdmitOwnTracksIngress {
             basic_handle,
             basic_secret,
             payload,
@@ -638,10 +706,10 @@ impl StoreExecutor {
         })
     }
     pub(crate) async fn root_count(&self, maximum: usize) -> Result<usize, StoreExecutorError> {
-        submit!(self, false, |reply| Command::RootCount { maximum, reply })
+        submit!(self, |reply| Command::RootCount { maximum, reply })
     }
     pub(crate) async fn create(&self, name: String) -> Result<Timeline, StoreExecutorError> {
-        submit!(self, true, |reply| Command::Create { name, reply })
+        submit!(self, |reply| Command::Create { name, reply })
     }
     pub(crate) async fn read(
         &self,
@@ -649,7 +717,7 @@ impl StoreExecutor {
         range: SeqRange,
         bounds: EventReadBounds,
     ) -> Result<Vec<Event>, StoreExecutorError> {
-        submit!(self, false, |reply| Command::Read {
+        submit!(self, |reply| Command::Read {
             timeline,
             range,
             bounds,
@@ -661,7 +729,7 @@ impl StoreExecutor {
         timeline: TimelineId,
         event: EventId,
     ) -> Result<Option<Event>, StoreExecutorError> {
-        submit!(self, false, |reply| Command::ReadOne {
+        submit!(self, |reply| Command::ReadOne {
             timeline,
             event,
             reply,
@@ -673,7 +741,7 @@ impl StoreExecutor {
         drafts: Vec<EventDraft>,
         maximum: Option<u64>,
     ) -> Result<Vec<Event>, StoreExecutorError> {
-        submit!(self, true, |reply| Command::Append {
+        submit!(self, |reply| Command::Append {
             timeline,
             drafts,
             maximum,
@@ -687,7 +755,7 @@ impl StoreExecutor {
         intent: AppendIntent,
         maximum: u64,
     ) -> Result<Option<AppendOrDuplicateOutcome>, StoreExecutorError> {
-        submit!(self, true, |reply| Command::AppendIdentified {
+        submit!(self, |reply| Command::AppendIdentified {
             timeline,
             identity,
             intent,
@@ -699,10 +767,7 @@ impl StoreExecutor {
         &self,
         timeline: TimelineId,
     ) -> Result<Option<Timeline>, StoreExecutorError> {
-        submit!(self, false, |reply| Command::GetTimeline {
-            timeline,
-            reply
-        })
+        submit!(self, |reply| Command::GetTimeline { timeline, reply })
     }
 }
 
@@ -790,40 +855,118 @@ async fn worker_loop_async(
             buckets: HashMap::new(),
         },
     };
+    let mut pending = VecDeque::new();
     let mut draining = false;
+    let mut disconnected = false;
+    let mut reads_since_write = 0;
     loop {
-        let envelope = if draining {
-            receiver.try_recv().ok()
-        } else {
-            tokio::select! {
-                biased;
-                envelope = receiver.recv() => envelope,
-                () = shutdown.notified() => {
-                    draining = true;
-                    continue;
+        if pending.is_empty() && !disconnected {
+            if draining {
+                match receiver.try_recv() {
+                    Ok(envelope) => pending.push_back(envelope),
+                    Err(
+                        mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected,
+                    ) => {
+                        break;
+                    }
+                }
+            } else if let Some(envelope) = {
+                tokio::select! {
+                    biased;
+                    envelope = receiver.recv() => envelope,
+                    () = shutdown.notified() => {
+                        draining = true;
+                        continue;
+                    }
+                }
+            } {
+                pending.push_back(envelope);
+            } else {
+                disconnected = true;
+                continue;
+            }
+        }
+
+        if !pending.is_empty() {
+            disconnected |= drain_available(receiver, &mut pending);
+            let Some(index) = select_pending_index(&pending, reads_since_write) else {
+                continue;
+            };
+            let envelope = pending
+                .remove(index)
+                .expect("selected pending envelope remains present");
+            let class = envelope.class;
+            let _permit_owners = (&envelope.global_permit, &envelope.read_permit);
+            if !envelope.lifecycle.claim_for_execution(envelope.deadline) {
+                expire_command(envelope.command);
+                continue;
+            }
+            match class {
+                CommandClass::Read => {
+                    reads_since_write = reads_since_write.saturating_add(1).min(READ_BURST);
+                }
+                CommandClass::Write => reads_since_write = 0,
+            }
+            match catch_unwind(AssertUnwindSafe(|| execute(&mut state, envelope.command))) {
+                Ok(()) => {}
+                Err(payload) => {
+                    set_lifecycle_state(
+                        lifecycle_state.as_ref(),
+                        LifecycleState::Unhealthy {
+                            retryable_shutdown: false,
+                        },
+                    );
+                    std::panic::resume_unwind(payload);
                 }
             }
-        };
-        let Some(envelope) = envelope else {
-            break;
-        };
-        if !envelope.lifecycle.claim_for_execution(envelope.deadline) {
-            expire_command(envelope.command);
             continue;
         }
-        match catch_unwind(AssertUnwindSafe(|| execute(&mut state, envelope.command))) {
-            Ok(()) => {}
-            Err(payload) => {
-                set_lifecycle_state(
-                    lifecycle_state.as_ref(),
-                    LifecycleState::Unhealthy {
-                        retryable_shutdown: false,
-                    },
-                );
-                std::panic::resume_unwind(payload);
-            }
+
+        if draining || disconnected {
+            break;
         }
     }
+}
+
+fn drain_available(
+    receiver: &mut mpsc::Receiver<CommandEnvelope>,
+    pending: &mut VecDeque<CommandEnvelope>,
+) -> bool {
+    loop {
+        match receiver.try_recv() {
+            Ok(envelope) => pending.push_back(envelope),
+            Err(mpsc::error::TryRecvError::Empty) => return false,
+            Err(mpsc::error::TryRecvError::Disconnected) => return true,
+        }
+    }
+}
+
+fn select_pending_index(
+    pending: &VecDeque<CommandEnvelope>,
+    reads_since_write: u8,
+) -> Option<usize> {
+    let preferred = if reads_since_write < READ_BURST {
+        CommandClass::Read
+    } else {
+        CommandClass::Write
+    };
+    let fallback = match preferred {
+        CommandClass::Read => CommandClass::Write,
+        CommandClass::Write => CommandClass::Read,
+    };
+    pending
+        .iter()
+        .enumerate()
+        .filter(|(_, envelope)| envelope.class == preferred)
+        .min_by_key(|(_, envelope)| envelope.admission_ordinal)
+        .or_else(|| {
+            pending
+                .iter()
+                .enumerate()
+                .filter(|(_, envelope)| envelope.class == fallback)
+                .min_by_key(|(_, envelope)| envelope.admission_ordinal)
+        })
+        .map(|(index, _)| index)
 }
 
 fn expire_command(command: Command) {
@@ -1259,6 +1402,70 @@ mod tests {
         }
     }
 
+    struct OrderedStore {
+        inner: MemoryStore,
+        operations: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl EventStore for OrderedStore {
+        fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
+            self.operations
+                .lock()
+                .expect("operation trace lock is healthy")
+                .push("create");
+            self.inner.create_timeline(name)
+        }
+
+        fn append(
+            &mut self,
+            timeline: TimelineId,
+            drafts: &[EventDraft],
+        ) -> Result<Vec<Event>, CoreError> {
+            self.inner.append(timeline, drafts)
+        }
+
+        fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            self.operations
+                .lock()
+                .expect("operation trace lock is healthy")
+                .push("read");
+            self.inner.read(timeline, range)
+        }
+
+        fn fork(
+            &mut self,
+            parent: TimelineId,
+            at_seq: pos_core::Seq,
+            name: &str,
+        ) -> Result<Timeline, CoreError> {
+            self.inner.fork(parent, at_seq, name)
+        }
+
+        fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+            self.inner.list_timelines()
+        }
+
+        fn root_timeline_count_bounded(&self, maximum: usize) -> Result<usize, CoreError> {
+            self.operations
+                .lock()
+                .expect("operation trace lock is healthy")
+                .push("root_count");
+            self.entered.send(()).expect("root-count observer is alive");
+            self.release.recv().expect("root-count release is alive");
+            self.inner.root_timeline_count_bounded(maximum)
+        }
+
+        fn get_timeline(&self, timeline: TimelineId) -> Result<Option<Timeline>, CoreError> {
+            self.operations
+                .lock()
+                .expect("operation trace lock is healthy")
+                .push("read");
+            self.inner.get_timeline(timeline)
+        }
+    }
+
     #[tokio::test]
     async fn shutdown_closes_executor_and_readiness_after_join() {
         let executor = super::StoreExecutor::new(Box::new(MemoryStore::new()));
@@ -1285,7 +1492,6 @@ mod tests {
         let (reply, result) = tokio::sync::oneshot::channel();
         executor
             .try_submit(
-                true,
                 Command::Create {
                     name: "expired".to_owned(),
                     reply,
@@ -1727,7 +1933,6 @@ mod tests {
         let (reply, _result) = tokio::sync::oneshot::channel();
         assert!(executor
             .try_submit(
-                true,
                 Command::Create {
                     name: "poisoned-state".to_owned(),
                     reply,
@@ -1884,11 +2089,10 @@ mod tests {
 
         let deadline = Instant::now() + std::time::Duration::from_secs(1);
 
-        for _ in 0..(super::QUEUE_CAPACITY - super::RESERVED_WRITE_CAPACITY) {
+        for _ in 0..(super::READ_CAPACITY - 1) {
             let (reply, _result) = tokio::sync::oneshot::channel();
             executor
                 .try_submit(
-                    false,
                     Command::GetTimeline {
                         timeline: pos_core::TimelineId::new(),
                         reply,
@@ -1896,13 +2100,12 @@ mod tests {
                     deadline,
                     std::sync::Arc::new(super::CommandLifecycle::new()),
                 )
-                .expect("reads may consume only the non-reserved queue capacity");
+                .expect("reads may consume only the read-class capacity");
         }
 
         let (reply, _result) = tokio::sync::oneshot::channel();
         assert!(matches!(
             executor.try_submit(
-                false,
                 Command::GetTimeline {
                     timeline: pos_core::TimelineId::new(),
                     reply,
@@ -1916,7 +2119,6 @@ mod tests {
         let (reply, result) = tokio::sync::oneshot::channel();
         executor
             .try_submit(
-                true,
                 Command::Create {
                     name: "reserved-write".to_owned(),
                     reply,
@@ -1930,6 +2132,159 @@ mod tests {
         assert!(count.await.expect("root-count task joined").is_ok());
         assert!(result.await.expect("reserved write reply").is_ok());
         executor.shutdown().await.expect("executor shuts down");
+    }
+
+    #[tokio::test]
+    async fn pending_write_is_selected_after_eight_consecutive_reads() {
+        let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let operations = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let executor = super::StoreExecutor::spawn_with_deadlines_for_test(
+            super::ExecutorStore::Generic(Box::new(OrderedStore {
+                inner: MemoryStore::new(),
+                operations: std::sync::Arc::clone(&operations),
+                entered: entered_sender,
+                release: release_receiver,
+            })),
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+        );
+
+        let (root_reply, root_result) = tokio::sync::oneshot::channel();
+        executor
+            .try_submit(
+                Command::RootCount {
+                    maximum: 1,
+                    reply: root_reply,
+                },
+                Instant::now() + std::time::Duration::from_secs(1),
+                std::sync::Arc::new(super::CommandLifecycle::new()),
+            )
+            .expect("initial read is admitted");
+        tokio::task::spawn_blocking(move || {
+            entered_receiver
+                .recv()
+                .expect("initial read entered the worker");
+        })
+        .await
+        .expect("initial read observer joined");
+
+        let deadline = Instant::now() + std::time::Duration::from_secs(1);
+        let mut read_results = Vec::new();
+        for _ in 0..8 {
+            let (reply, result) = tokio::sync::oneshot::channel();
+            executor
+                .try_submit(
+                    Command::GetTimeline {
+                        timeline: TimelineId::new(),
+                        reply,
+                    },
+                    deadline,
+                    std::sync::Arc::new(super::CommandLifecycle::new()),
+                )
+                .expect("read is admitted");
+            read_results.push(result);
+        }
+
+        let (create_reply, create_result) = tokio::sync::oneshot::channel();
+        executor
+            .try_submit(
+                Command::Create {
+                    name: "fair-write".to_owned(),
+                    reply: create_reply,
+                },
+                deadline,
+                std::sync::Arc::new(super::CommandLifecycle::new()),
+            )
+            .expect("write is admitted behind the reads");
+
+        release_sender
+            .send(())
+            .expect("initial read release is alive");
+        assert!(root_result.await.expect("initial read reply").is_ok());
+        assert!(create_result.await.expect("write reply").is_ok());
+        for result in read_results {
+            assert!(result.await.expect("read reply").is_ok());
+        }
+
+        let operations = operations
+            .lock()
+            .expect("operation trace lock is healthy")
+            .clone();
+        assert_eq!(
+            &operations[..10],
+            &[
+                "root_count",
+                "read",
+                "read",
+                "read",
+                "read",
+                "read",
+                "read",
+                "read",
+                "create",
+                "read",
+            ]
+        );
+        executor.shutdown().await.expect("executor shuts down");
+    }
+
+    #[tokio::test]
+    async fn failed_send_releases_admission_permits() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let executor = super::StoreExecutor::from_sender_for_test(sender);
+        let deadline = Instant::now() + std::time::Duration::from_secs(1);
+
+        let (first_reply, _first_result) = tokio::sync::oneshot::channel();
+        executor
+            .try_submit(
+                Command::GetTimeline {
+                    timeline: TimelineId::new(),
+                    reply: first_reply,
+                },
+                deadline,
+                std::sync::Arc::new(super::CommandLifecycle::new()),
+            )
+            .expect("first read is admitted");
+        assert_eq!(
+            executor.control.global_budget.available_permits(),
+            super::QUEUE_CAPACITY - 1
+        );
+        assert_eq!(
+            executor.control.read_budget.available_permits(),
+            super::READ_CAPACITY - 1
+        );
+
+        let (second_reply, _second_result) = tokio::sync::oneshot::channel();
+        assert!(matches!(
+            executor.try_submit(
+                Command::GetTimeline {
+                    timeline: TimelineId::new(),
+                    reply: second_reply,
+                },
+                deadline,
+                std::sync::Arc::new(super::CommandLifecycle::new()),
+            ),
+            Err(super::StoreExecutorError::Saturated)
+        ));
+        assert_eq!(
+            executor.control.global_budget.available_permits(),
+            super::QUEUE_CAPACITY - 1
+        );
+        assert_eq!(
+            executor.control.read_budget.available_permits(),
+            super::READ_CAPACITY - 1
+        );
+
+        drop(receiver.recv().await.expect("accepted envelope is present"));
+        assert_eq!(
+            executor.control.global_budget.available_permits(),
+            super::QUEUE_CAPACITY
+        );
+        assert_eq!(
+            executor.control.read_budget.available_permits(),
+            super::READ_CAPACITY
+        );
     }
 
     #[test]
