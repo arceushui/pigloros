@@ -2382,6 +2382,16 @@ mod tests {
     }
 
     #[test]
+    fn fence_revoking_clock_maps_a_durable_update_error_to_storage() {
+        let database = tempfile::NamedTempFile::new().unwrap();
+        let mut clock = FenceRevokingClock {
+            path: database.path().to_str().unwrap().to_owned(),
+        };
+
+        assert_storage_err(clock.now());
+    }
+
+    #[test]
     fn lifecycle_clock_and_open_errors_fail_closed() {
         assert!(SqliteStore::open_with_clock(
             "/definitely/missing/pigloros/lifecycle.db",
