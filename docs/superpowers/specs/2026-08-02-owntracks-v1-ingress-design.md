@@ -17,11 +17,17 @@ per-binding rate policy, derives opaque dedup inputs, and invokes the existing
 core geographic-admission transaction. The adapter never reads the verifier,
 owner key, enrollment fence, Timeline, or EntityId.
 
+The route is opt-in. Loopback `piglor-gateway serve` gains
+`--owntracks-owner-key <path>` and requires a SQLite store path whenever that
+option is present. Startup validates and loads the existing owner-only key
+once. Omission leaves the route absent; non-loopback deployments remain the
+spectator router regardless of the option.
+
 ```text
 loopback HTTP request
   -> bounded body collection
   -> zero-byte compatibility no-op OR strict V1 parse/minimize
-  -> private ingress capability
+  -> private ingress capability with startup-loaded owner key
        -> constant-time verifier check
        -> ephemeral opaque binding rate state
        -> current enrollment fence + opaque dedup inputs
@@ -31,14 +37,21 @@ loopback HTTP request
 ```
 
 The capability has one request interface: bounded Basic handle/secret plus the
-already-minimized existing V1 `geo.location` canonical bytes. Its result is a
-bounded outcome classification; it never returns the verifier, binding key,
-fence, owner key, raw credentials, Timeline, EntityId, Event ID, or sequence.
+already-minimized existing V1 `geo.location` canonical bytes. The Gateway
+passes the startup-loaded owner key only inside the private executor command,
+where candidate-verifier derivation and constant-time comparison occur. Its
+preparation result contains a private opaque rate key and a fully formed core
+admission request. The executor alone reads the rate key, applies its limiter,
+and immediately submits the request to the existing admission transaction in
+the same queue turn. The result never exposes verifier, fence, owner key, raw
+credentials, Timeline, EntityId, Event ID, or sequence to the HTTP adapter.
 
 ## Request processing
 
 1. The loopback router alone registers `POST /v1/bridges/owntracks`; the
-   spectator/non-loopback router never registers it.
+   spectator/non-loopback router never registers it. The loopback route exists
+   only when `serve --owntracks-owner-key <path>` has validated an existing
+   owner-only key against a SQLite store.
 2. The handler reads the request with `axum::body::to_bytes(body, 65_536)`.
    A body that exceeds 65,536 bytes, including chunked input, returns `413`;
    no complete raw body is retained after any success or error path.
@@ -56,11 +69,14 @@ fence, owner key, raw credentials, Timeline, EntityId, Event ID, or sequence.
    bounded flags. Exact coordinates, source timestamps, raw JSON, headers,
    topics, and device labels do not cross the capability seam.
 6. The private capability constant-time verifies the stored keyed verifier,
-   derives an owner-keyed opaque binding key, applies the fixed one request per
-   second with burst five limit using bounded process-local state, resolves the
-   current enrollment fence, and commits through the existing atomic admission
-   transaction. The opaque limiter key and rate state are neither returned,
-   persisted, logged, nor exposed to the HTTP adapter.
+   using a candidate derived from the startup-loaded owner key, derives an
+   owner-keyed opaque binding key, applies the fixed one request per second
+   with burst five limit using bounded process-local state, resolves the current
+   enrollment fence, and prepares the existing atomic admission request. The
+   executor applies the limiter then submits that request in the same queue
+   turn; the store transaction revalidates the fence at commit. The opaque
+   limiter key and rate state are neither returned, persisted, logged, nor
+   exposed to the HTTP adapter.
 
 ## HTTP outcomes
 
