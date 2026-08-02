@@ -37,7 +37,7 @@ The existing manual `piglor-gateway` parser gains a top-level `owntracks`
 command group:
 
 ```text
-piglor-gateway owntracks pair <sqlite-path> <owner-key-path> <timeline-id> <entity-id>
+piglor-gateway owntracks pair <sqlite-path> <owner-key-path> --consent-policy <path> <timeline-id> <entity-id>
 piglor-gateway owntracks status <sqlite-path>
 piglor-gateway owntracks rotate <sqlite-path> <owner-key-path>
 piglor-gateway owntracks revoke <sqlite-path>
@@ -49,14 +49,25 @@ terminal; it does not write either plaintext value to logs, errors, the
 Timeline, or durable state. `rotate` follows the same generation and one-time
 output rule.
 
-The current command surface has no separately authorized source for the
-current consent and policy fence required by `OwnTracksEnrollmentRequestV1`.
-Until that source is approved, `pair` validates its identifier arguments and
-then returns the bounded `OwnTracks policy configuration is unavailable` error
-before creating an owner key or credential. It must not synthesize placeholder
-consent, policy, revision, or epoch data. `status`, `rotate`, and `revoke`
-remain narrow lifecycle commands for enrollment state created by an authorized
-future pairing source.
+The consent-policy input is one strict UTF-8 TOML artifact with fixed V1
+values: its supplied
+identity and revisions are validated, and its consent hash is derived locally
+from canonical semantic fields. It is read only by `pair`; the artifact itself
+is not persisted or re-read by `status`, `rotate`, `revoke`, or admission.
+
+```toml
+schema_version = 1
+consent_identity = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+consent_revision = 1
+policy_version = 1
+binding_revision = 1
+withdrawn = false
+purpose = "local_pairing"
+precision = "exact"
+source_time_bucket = "minute"
+visibility = "paired_devices_only"
+```
+
 `status` prints only bounded, non-sensitive state: unpaired, active, or
 revoked plus the configured policy version. `rotate` replaces the active
 credential verifier and prints a new secret exactly once. `revoke` makes the

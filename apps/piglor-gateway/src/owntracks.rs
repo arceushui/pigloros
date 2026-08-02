@@ -3,9 +3,13 @@
 //! This module deliberately owns local credentials only. It does not open a
 //! store, register an HTTP route, or append Timeline Events.
 
-use pos_core::{EntityId, OwnTracksEnrollmentStatusV1, OwnTracksEnrollmentStore, TimelineId};
+use pos_core::{
+    EntityId, GeoLocationAdmissionFenceV1, OwnTracksEnrollmentRequestV1,
+    OwnTracksEnrollmentStatusV1, OwnTracksEnrollmentStore, TimelineId,
+};
 use pos_store::open_owntracks_enrollment_store;
 use rand::Rng;
+use serde::Deserialize;
 use std::path::Path;
 use thiserror::Error;
 use ulid::Ulid;
@@ -13,6 +17,7 @@ use ulid::Ulid;
 const OWNER_KEY_BYTES: usize = 32;
 const CREDENTIAL_BYTES: usize = 32;
 const VERIFIER_DOMAIN: &[u8] = b"pigloros/owntracks/verifier/v1\0";
+const CONSENT_DOMAIN: &[u8] = b"pigloros/owntracks/consent/v1\0";
 
 /// A local owner key, never printable by this module.
 pub(crate) type OwnerKey = [u8; OWNER_KEY_BYTES];
@@ -90,13 +95,127 @@ pub(crate) enum OwnTracksCommandError {
     OwnerKey(#[from] OwnTracksMaterialError),
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConsentPolicyToml {
+    schema_version: u8,
+    consent_identity: String,
+    consent_revision: u64,
+    policy_version: u32,
+    binding_revision: u64,
+    withdrawn: bool,
+    purpose: String,
+    precision: String,
+    source_time_bucket: String,
+    visibility: String,
+}
+
+struct ConsentPolicyV1 {
+    consent_identity: [u8; 32],
+    consent_revision: u64,
+    policy_version: u32,
+    binding_revision: u64,
+    consent_hash: [u8; 32],
+}
+
+fn parse_consent_policy(text: &str) -> Result<ConsentPolicyV1, OwnTracksCommandError> {
+    let raw: ConsentPolicyToml =
+        toml::from_str(text).map_err(|_| OwnTracksCommandError::PolicyConfigurationUnavailable)?;
+    if raw.schema_version != 1
+        || raw.consent_revision == 0
+        || raw.policy_version == 0
+        || raw.binding_revision == 0
+        || raw.withdrawn
+        || raw.purpose != "local_pairing"
+        || raw.precision != "exact"
+        || raw.source_time_bucket != "minute"
+        || raw.visibility != "paired_devices_only"
+    {
+        return Err(OwnTracksCommandError::PolicyConfigurationUnavailable);
+    }
+    let consent_identity = decode_lower_hex_32(&raw.consent_identity)?;
+    let canonical = format!(
+        "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+        raw.consent_identity,
+        raw.consent_revision,
+        raw.policy_version,
+        raw.binding_revision,
+        raw.purpose,
+        raw.precision,
+        raw.source_time_bucket,
+        raw.visibility
+    );
+    Ok(ConsentPolicyV1 {
+        consent_identity,
+        consent_revision: raw.consent_revision,
+        policy_version: raw.policy_version,
+        binding_revision: raw.binding_revision,
+        consent_hash: *blake3::hash(&[CONSENT_DOMAIN, canonical.as_bytes()].concat()).as_bytes(),
+    })
+}
+
+fn decode_lower_hex_32(value: &str) -> Result<[u8; 32], OwnTracksCommandError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(OwnTracksCommandError::PolicyConfigurationUnavailable);
+    }
+    let mut decoded = [0; 32];
+    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+        decoded[index] = (hex_nibble(chunk[0])? << 4) | hex_nibble(chunk[1])?;
+    }
+    Ok(decoded)
+}
+
+fn hex_nibble(byte: u8) -> Result<u8, OwnTracksCommandError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        _ => Err(OwnTracksCommandError::PolicyConfigurationUnavailable),
+    }
+}
+
 /// Execute one local `OwnTracks` administration command and return safe terminal output.
 pub(crate) fn execute(arguments: &[String]) -> Result<String, OwnTracksCommandError> {
     match arguments {
-        [command, sqlite_path, owner_key_path, timeline, entity] if command == "pair" => {
-            parse_pair_target(timeline, entity)?;
-            let _ = (sqlite_path, owner_key_path);
-            Err(OwnTracksCommandError::PolicyConfigurationUnavailable)
+        [command, sqlite_path, owner_key_path, option, policy_path, timeline, entity]
+            if command == "pair" && option == "--consent-policy" =>
+        {
+            let (timeline, entity) = parse_pair_target(timeline, entity)?;
+            let policy_text = std::fs::read_to_string(policy_path)
+                .map_err(|_| OwnTracksCommandError::PolicyConfigurationUnavailable)?;
+            let policy = parse_consent_policy(&policy_text)?;
+            let mut store = enrollment_store(sqlite_path)?;
+            if store
+                .owntracks_enrollment_status()
+                .map_err(|_| OwnTracksCommandError::EnrollmentTransitionUnavailable)?
+                .status()
+                == OwnTracksEnrollmentStatusV1::Active
+            {
+                return Err(OwnTracksCommandError::EnrollmentTransitionUnavailable);
+            }
+            let owner_key = create_or_load_owner_key(Path::new(owner_key_path))?;
+            let credential = generate_pairing_credential();
+            let request = OwnTracksEnrollmentRequestV1::new(
+                timeline,
+                entity,
+                GeoLocationAdmissionFenceV1::new(
+                    policy.binding_revision,
+                    (
+                        policy.consent_identity,
+                        policy.consent_revision,
+                        policy.consent_hash,
+                    ),
+                    (policy.policy_version, false, 1),
+                ),
+                derive_owntracks_verifier(&owner_key, &credential),
+            );
+            store
+                .pair_owntracks_enrollment(request)
+                .map_err(|_| OwnTracksCommandError::EnrollmentTransitionUnavailable)?;
+            Ok(credential.terminal_display())
         }
         [command, sqlite_path] if command == "status" => {
             let store = enrollment_store(sqlite_path)?;
@@ -173,13 +292,6 @@ const fn status_label(status: OwnTracksEnrollmentStatusV1) -> &'static str {
 /// On Unix, creation follows the established signing-key policy: every path
 /// component is checked, output creation is atomic and owner-only, and both the
 /// file and containing directory are synchronized before success.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "pair is intentionally unavailable until an authorized policy configuration source exists"
-    )
-)]
 pub(crate) fn create_or_load_owner_key(path: &Path) -> Result<OwnerKey, OwnTracksMaterialError> {
     create_or_load_owner_key_platform(path)
 }
@@ -215,13 +327,6 @@ pub(crate) fn derive_owntracks_verifier(
 }
 
 #[cfg(unix)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "pair is intentionally unavailable until an authorized policy configuration source exists"
-    )
-)]
 fn create_or_load_owner_key_platform(path: &Path) -> Result<OwnerKey, OwnTracksMaterialError> {
     let absolute = validated_owner_key_path(path)?;
     match std::fs::symlink_metadata(&absolute) {
@@ -314,13 +419,6 @@ fn load_existing_owner_key(
 }
 
 #[cfg(unix)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "pair is intentionally unavailable until an authorized policy configuration source exists"
-    )
-)]
 fn create_owner_key(path: &Path) -> Result<OwnerKey, OwnTracksMaterialError> {
     use std::io::Write;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -366,13 +464,6 @@ fn create_owner_key(path: &Path) -> Result<OwnerKey, OwnTracksMaterialError> {
 }
 
 #[cfg(unix)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "pair is intentionally unavailable until an authorized policy configuration source exists"
-    )
-)]
 fn cleanup_owner_key(path: &Path, parent: &std::fs::File) {
     let _ = std::fs::remove_file(path);
     let _ = parent.sync_all();
@@ -458,11 +549,52 @@ mod tests {
     }
 
     #[test]
+    fn consent_policy_is_strict_and_its_hash_is_domain_separated() {
+        let policy = "schema_version = 1\nconsent_identity = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\nconsent_revision = 1\npolicy_version = 1\nbinding_revision = 1\nwithdrawn = false\npurpose = \"local_pairing\"\nprecision = \"exact\"\nsource_time_bucket = \"minute\"\nvisibility = \"paired_devices_only\"\n";
+        let parsed = super::parse_consent_policy(policy).expect("parse V1 consent policy");
+        assert_ne!(parsed.consent_hash, [0; 32]);
+        assert!(super::parse_consent_policy(&format!("{policy}extra = 1\n")).is_err());
+        assert!(super::parse_consent_policy(
+            &policy.replace("withdrawn = false", "withdrawn = true")
+        )
+        .is_err());
+        for invalid in [
+            policy.replace("consent_revision = 1", "consent_revision = 0"),
+            policy.replace("policy_version = 1", "policy_version = 0"),
+            policy.replace("binding_revision = 1", "binding_revision = 0"),
+            policy.replace("purpose = \"local_pairing\"", "purpose = \"other\""),
+            policy.replace("precision = \"exact\"", "precision = \"coarse\""),
+            policy.replace(
+                "source_time_bucket = \"minute\"",
+                "source_time_bucket = \"hour\"",
+            ),
+            policy.replace(
+                "visibility = \"paired_devices_only\"",
+                "visibility = \"public\"",
+            ),
+            policy.replace("0123456789abcdef", "0123456789ABCDEF"),
+        ] {
+            assert!(super::parse_consent_policy(&invalid).is_err());
+        }
+        assert_ne!(
+            parsed.consent_hash,
+            super::parse_consent_policy(
+                &policy.replace("consent_revision = 1", "consent_revision = 2")
+            )
+            .expect("parse changed policy")
+            .consent_hash
+        );
+    }
+
+    #[test]
     fn local_commands_are_bounded_and_pair_fails_before_creating_material_without_policy() {
         let directory = temporary_path("commands");
         std::fs::create_dir(&directory).expect("create private temporary directory");
         let database = directory.join("owntracks.db");
         let key_path = directory.join("owner.key");
+        let policy_path = directory.join("invalid-consent.toml");
+        std::fs::write(&policy_path, "schema_version = 1\ninvalid = true\n")
+            .expect("write invalid policy");
         let database = database.to_str().expect("UTF-8 database path").to_owned();
         let key_path = key_path.to_str().expect("UTF-8 owner key path").to_owned();
         let timeline = TimelineId::new().to_string();
@@ -476,10 +608,12 @@ mod tests {
             "pair".to_owned(),
             database,
             key_path.clone(),
+            "--consent-policy".to_owned(),
+            policy_path.display().to_string(),
             timeline,
             entity,
         ])
-        .expect_err("pair is unavailable without approved policy configuration");
+        .expect_err("invalid policy is rejected before creating material");
         assert_eq!(
             pair_error.to_string(),
             "OwnTracks policy configuration is unavailable"
@@ -490,6 +624,8 @@ mod tests {
             "pair".to_owned(),
             "unused.db".to_owned(),
             key_path.clone(),
+            "--consent-policy".to_owned(),
+            "missing-consent.toml".to_owned(),
             "not-a-timeline".to_owned(),
             "not-an-entity".to_owned(),
         ])
@@ -503,6 +639,55 @@ mod tests {
             .expect_err("missing rotate arguments are rejected");
         assert!(usage.to_string().contains("Usage:"));
 
+        std::fs::remove_dir_all(directory).expect("remove temporary directory");
+    }
+
+    #[test]
+    fn pair_validated_policy_creates_one_active_enrollment() {
+        let directory = temporary_path("pair");
+        std::fs::create_dir(&directory).expect("create private temporary directory");
+        let database = directory.join("owntracks.db");
+        let owner_key = directory.join("owner.key");
+        let policy = directory.join("consent.toml");
+        let timeline = {
+            let mut store = SqliteStore::open(database.to_str().expect("UTF-8 database path"))
+                .expect("open fixture store");
+            store
+                .create_timeline("OwnTracks pair fixture")
+                .expect("create fixture timeline")
+                .id()
+        };
+        std::fs::write(&policy, "schema_version = 1\nconsent_identity = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\nconsent_revision = 1\npolicy_version = 1\nbinding_revision = 1\nwithdrawn = false\npurpose = \"local_pairing\"\nprecision = \"exact\"\nsource_time_bucket = \"minute\"\nvisibility = \"paired_devices_only\"\n").expect("write policy");
+        let output = super::execute(&[
+            "pair".to_owned(),
+            database.display().to_string(),
+            owner_key.display().to_string(),
+            "--consent-policy".to_owned(),
+            policy.display().to_string(),
+            timeline.to_string(),
+            EntityId::new().to_string(),
+        ])
+        .expect("pair");
+        assert!(output.contains("OwnTracks secret:"));
+        assert!(owner_key.is_file());
+        assert_eq!(
+            super::execute(&["status".to_owned(), database.display().to_string()]).expect("status"),
+            "OwnTracks status: active\nPolicy version: 1"
+        );
+        let second_pair = super::execute(&[
+            "pair".to_owned(),
+            database.display().to_string(),
+            owner_key.display().to_string(),
+            "--consent-policy".to_owned(),
+            policy.display().to_string(),
+            timeline.to_string(),
+            EntityId::new().to_string(),
+        ])
+        .expect_err("active enrollment rejects a replacement pair");
+        assert_eq!(
+            second_pair.to_string(),
+            "OwnTracks enrollment transition is unavailable"
+        );
         std::fs::remove_dir_all(directory).expect("remove temporary directory");
     }
 

@@ -74,7 +74,7 @@ fn run_with_args_and_shutdown(
         }
         _ => {
             eprintln!("Usage: piglor-gateway <owntracks|serve [addr] [sqlite-path]|version>");
-            eprintln!("  owntracks pair <sqlite-path> <owner-key-path> <timeline-id> <entity-id>");
+            eprintln!("  owntracks pair <sqlite-path> <owner-key-path> --consent-policy <path> <timeline-id> <entity-id>");
             eprintln!("  owntracks status <sqlite-path>");
             eprintln!("  owntracks rotate <sqlite-path> <owner-key-path>");
             eprintln!("  owntracks revoke <sqlite-path>");
