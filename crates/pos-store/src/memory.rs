@@ -12,13 +12,17 @@ use pos_core::{
     error::CoreError,
     event::{Event, EventDraft, Kind},
     geo_admission::{
-        GeoLocationAdmissionAdmin, GeoLocationAdmissionFenceV1, GeoLocationAdmissionFingerprintV1,
-        GeoLocationAdmissionIntentV1, GeoLocationAdmissionLinkV1, GeoLocationAdmissionOutcome,
-        GeoLocationAdmissionRequestV1, GeoLocationAdmissionSnapshotV1, GeoLocationAdmissionStore,
-        GeoLocationReplayEvidenceV1, GeoLocationReplayVerifier,
+        GeoLocationAdmissionFingerprintV1, GeoLocationAdmissionIntentV1,
+        GeoLocationAdmissionLinkV1, GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1,
+        GeoLocationAdmissionSnapshotV1, GeoLocationAdmissionStore, GeoLocationReplayEvidenceV1,
+        GeoLocationReplayVerifier,
     },
     hasher::Hasher,
-    ids::{EntityId, EventId, TimelineId},
+    ids::{EventId, TimelineId},
+    owntracks_enrollment::{
+        OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStateV1, OwnTracksEnrollmentStatusV1,
+        OwnTracksEnrollmentStore,
+    },
     store::{
         checked_append_identity_expires_at, AppendDedupKey, AppendDedupScope, AppendIdentity,
         AppendIntent, AppendOrDuplicateOutcome, EventReadBounds, EventStore, PurgeOutcome,
@@ -45,8 +49,8 @@ pub struct MemoryStore {
     append_identities: HashMap<AppendDedupKey, AppendIdentityRecord>,
     /// Durable-equivalent marker for Timelines containing protected evidence.
     geographic_timelines: HashSet<TimelineId>,
-    /// Current removable authorization state for protected geographic admission.
-    geographic_admission_fences: HashMap<(TimelineId, EntityId), GeoLocationAdmissionFenceV1>,
+    /// The sole current authorization state for protected geographic admission.
+    owntracks_enrollment: OwnTracksEnrollmentStateV1,
     /// Private keyed deduplication records for protected geographic admission.
     geographic_admission_dedup:
         HashMap<GeoLocationAdmissionFingerprintV1, GeographicAdmissionDedupRecord>,
@@ -162,9 +166,16 @@ fn delete_visible_timeline(store: &mut MemoryStore, id: TimelineId) -> Result<()
             }
             store.append_identities = retained_identities;
             store.geographic_timelines.remove(&id);
-            store
-                .geographic_admission_fences
-                .retain(|(timeline, _), _| *timeline != id);
+            if store
+                .owntracks_enrollment
+                .permits_geographic_admission_target(id)
+            {
+                store.owntracks_enrollment = store
+                    .owntracks_enrollment
+                    .clone()
+                    .revoke()
+                    .unwrap_or_else(|_| OwnTracksEnrollmentStateV1::absent());
+            }
             store
                 .geographic_admission_dedup
                 .retain(|_, record| record.timeline != id);
@@ -231,7 +242,7 @@ impl MemoryStore {
             event_ids: HashSet::new(),
             append_identities: HashMap::new(),
             geographic_timelines: HashSet::new(),
-            geographic_admission_fences: HashMap::new(),
+            owntracks_enrollment: OwnTracksEnrollmentStateV1::absent(),
             geographic_admission_dedup: HashMap::new(),
             geographic_admission_snapshots: HashMap::new(),
             geographic_admission_links: HashMap::new(),
@@ -641,17 +652,33 @@ impl Default for MemoryStore {
     }
 }
 
-impl GeoLocationAdmissionAdmin for MemoryStore {
-    fn set_geo_location_admission_fence(
+impl OwnTracksEnrollmentStore for MemoryStore {
+    fn pair_owntracks_enrollment(
         &mut self,
-        timeline: TimelineId,
-        entity: EntityId,
-        fence: GeoLocationAdmissionFenceV1,
-    ) -> Result<(), CoreError> {
-        self.timeline(timeline)?;
-        self.geographic_admission_fences
-            .insert((timeline, entity), fence);
-        Ok(())
+        request: OwnTracksEnrollmentRequestV1,
+    ) -> Result<OwnTracksEnrollmentStatusV1, CoreError> {
+        self.timeline(request.timeline())?;
+        self.owntracks_enrollment = self.owntracks_enrollment.clone().pair(&request)?;
+        Ok(self.owntracks_enrollment.status())
+    }
+
+    fn owntracks_enrollment_status(
+        &self,
+    ) -> Result<pos_core::OwnTracksEnrollmentStatusViewV1, CoreError> {
+        Ok(self.owntracks_enrollment.status_view())
+    }
+
+    fn rotate_owntracks_enrollment_verifier(
+        &mut self,
+        verifier: [u8; 32],
+    ) -> Result<OwnTracksEnrollmentStatusV1, CoreError> {
+        self.owntracks_enrollment = self.owntracks_enrollment.clone().rotate(verifier)?;
+        Ok(self.owntracks_enrollment.status())
+    }
+
+    fn revoke_owntracks_enrollment(&mut self) -> Result<OwnTracksEnrollmentStatusV1, CoreError> {
+        self.owntracks_enrollment = self.owntracks_enrollment.clone().revoke()?;
+        Ok(self.owntracks_enrollment.status())
     }
 }
 
@@ -665,9 +692,8 @@ impl GeoLocationAdmissionStore for MemoryStore {
         let admitted_at = self.clock.now()?;
         let permits_request = |store: &Self| {
             store
-                .geographic_admission_fences
-                .get(&(timeline, entity))
-                .is_some_and(|fence| fence.permits(&request))
+                .owntracks_enrollment
+                .permits_geographic_admission(&request)
         };
 
         if !permits_request(self) {
@@ -1129,12 +1155,13 @@ mod tests {
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         geo_admission::{
-            GeoLocationAdmissionAdmin, GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1,
+            GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1,
             GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore, GeoLocationReplayEvidenceV1,
             GeoLocationReplayVerifier,
         },
         ids::{EntityId, EventId},
         store::{SeqRange, TimelineExport},
+        OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore,
     };
 
     fn make_draft(entity: EntityId, payload: &[u8]) -> EventDraft {
@@ -1143,6 +1170,19 @@ mod tests {
             Kind::new("test.event"),
             CanonicalBytes::from_vec(payload.to_vec()),
         )
+    }
+
+    fn pair_geographic_enrollment(
+        store: &mut MemoryStore,
+        timeline: TimelineId,
+        entity: EntityId,
+        fence: GeoLocationAdmissionFenceV1,
+    ) {
+        store
+            .pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
+                timeline, entity, fence, [42; 32],
+            ))
+            .unwrap();
     }
 
     struct ErrorClock;
@@ -1199,16 +1239,15 @@ mod tests {
             CanonicalBytes::from_static(b"geo-clock-error"),
             7,
             ([1; 32], 8, [2; 32]),
-            (1, false, 9),
+            (1, false, 10),
             ([4; 32], [5; 32]),
         ));
-        clock_error
-            .set_geo_location_admission_fence(
-                timeline.id(),
-                entity,
-                GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
-            )
-            .unwrap();
+        pair_geographic_enrollment(
+            &mut clock_error,
+            timeline.id(),
+            entity,
+            GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
+        );
         assert!(clock_error.admit_geo_location(request).is_err());
         assert!(clock_error.state(timeline.id()).events.is_empty());
         assert!(clock_error.geographic_admission_dedup.is_empty());
@@ -1226,16 +1265,15 @@ mod tests {
             CanonicalBytes::from_static(b"geo-expiry-overflow"),
             7,
             ([1; 32], 8, [2; 32]),
-            (1, false, 9),
+            (1, false, 10),
             ([4; 32], [5; 32]),
         ));
-        overflow
-            .set_geo_location_admission_fence(
-                timeline.id(),
-                entity,
-                GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
-            )
-            .unwrap();
+        pair_geographic_enrollment(
+            &mut overflow,
+            timeline.id(),
+            entity,
+            GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
+        );
         assert!(overflow.admit_geo_location(request).is_err());
         assert!(overflow.state(timeline.id()).events.is_empty());
         assert!(overflow.geographic_admission_dedup.is_empty());
@@ -1261,13 +1299,13 @@ mod tests {
         let mut store = MemoryStore::default();
 
         assert!(store
-            .set_geo_location_admission_fence(missing_timeline, entity, fence.clone())
+            .pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
+                missing_timeline,
+                entity,
+                fence,
+                [42; 32],
+            ))
             .is_err());
-        assert!(store.geographic_admission_fences.is_empty());
-
-        store
-            .geographic_admission_fences
-            .insert((missing_timeline, entity), fence);
         assert!(store.admit_geo_location(request).is_err());
         assert!(store.geographic_admission_dedup.is_empty());
         assert!(store.geographic_admission_snapshots.is_empty());
@@ -1295,20 +1333,19 @@ mod tests {
             std::mem::discriminant(&error),
             std::mem::discriminant(&CoreError::GeographicAdmissionValidationFailed)
         );
-        store
-            .set_geo_location_admission_fence(
-                timeline.id(),
-                entity,
-                GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
-            )
-            .unwrap();
+        pair_geographic_enrollment(
+            &mut store,
+            timeline.id(),
+            entity,
+            GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
+        );
         let request = GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
             timeline.id(),
             entity,
             CanonicalBytes::from_static(b"existing-v1-geo-location-payload"),
             7,
             ([1; 32], 8, [2; 32]),
-            (1, false, 9),
+            (1, false, 10),
             ([4; 32], [5; 32]),
         ));
 
@@ -1331,13 +1368,13 @@ mod tests {
 
         let retained_timeline = store.create_timeline("retained").unwrap();
         let retained_entity = EntityId::new();
-        store
-            .set_geo_location_admission_fence(
-                retained_timeline.id(),
-                retained_entity,
-                GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
-            )
-            .unwrap();
+        store.revoke_owntracks_enrollment().unwrap();
+        pair_geographic_enrollment(
+            &mut store,
+            retained_timeline.id(),
+            retained_entity,
+            GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
+        );
         let retained_request =
             GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
                 retained_timeline.id(),
@@ -1345,7 +1382,7 @@ mod tests {
                 CanonicalBytes::from_static(b"retained-v1-geo-location-payload"),
                 7,
                 ([1; 32], 8, [2; 32]),
-                (1, false, 9),
+                (1, false, 12),
                 ([6; 32], [7; 32]),
             ));
         let retained_event_id = store
@@ -1371,7 +1408,10 @@ mod tests {
             .insert((timeline.id(), retained_event_id), retained_event_link);
 
         delete_visible_timeline(&mut store, timeline.id()).unwrap();
-        assert_eq!(store.geographic_admission_fences.len(), 1);
+        assert_eq!(
+            store.owntracks_enrollment.status(),
+            OwnTracksEnrollmentStatusV1::Active
+        );
         assert_eq!(store.geographic_admission_dedup.len(), 1);
         assert_eq!(store.geographic_admission_snapshots.len(), 1);
         assert_eq!(store.geographic_admission_links.len(), 1);
@@ -1410,13 +1450,12 @@ mod tests {
         let mut store = MemoryStore::default();
         let timeline = store.create_timeline("replay-verifier").unwrap();
         let entity = EntityId::new();
-        store
-            .set_geo_location_admission_fence(
-                timeline.id(),
-                entity,
-                GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
-            )
-            .unwrap();
+        pair_geographic_enrollment(
+            &mut store,
+            timeline.id(),
+            entity,
+            GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
+        );
         let accepted = store
             .admit_geo_location(GeoLocationAdmissionRequestV1::from_input(
                 GeoLocationAdmissionInputV1::new(
@@ -1425,7 +1464,7 @@ mod tests {
                     CanonicalBytes::from_static(b"existing-v1-geo-location-payload"),
                     7,
                     ([1; 32], 8, [2; 32]),
-                    (1, false, 9),
+                    (1, false, 10),
                     ([4; 32], [5; 32]),
                 ),
             ))
@@ -1468,14 +1507,7 @@ mod tests {
                 fixture.evidence(fixture.event_hash, fixture.snapshot_hash,)
             )
             .is_ok());
-        fixture
-            .store
-            .set_geo_location_admission_fence(
-                fixture.timeline,
-                fixture.entity,
-                GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, true, 10)),
-            )
-            .unwrap();
+        fixture.store.revoke_owntracks_enrollment().unwrap();
         fixture.store.clock = Box::new(ErrorClock);
         assert!(fixture
             .store

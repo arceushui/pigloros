@@ -5,6 +5,7 @@
 //! may admit it. Generic event storage has no geographic-admission API.
 
 use crate::{CanonicalBytes, CoreError, EntityId, EventId, Hash, Seq, TimelineId};
+use serde::{Deserialize, Serialize};
 
 /// Already-minimized gateway input for one V1 geographic admission attempt.
 ///
@@ -56,7 +57,7 @@ impl GeoLocationAdmissionInputV1 {
 }
 
 /// Immutable consent state captured at the geographic admission fence.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeoLocationConsentStateV1 {
     identity: [u8; 32],
     revision: u64,
@@ -112,7 +113,7 @@ pub struct GeoLocationAdmissionSnapshotV1 {
 /// This operational state is not retained with accepted evidence. A backend
 /// compares it to the request snapshot before deduplication and again while
 /// holding its commit fence.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeoLocationAdmissionFenceV1 {
     binding_revision: u64,
     consent: GeoLocationConsentStateV1,

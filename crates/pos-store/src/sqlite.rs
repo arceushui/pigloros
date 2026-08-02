@@ -11,12 +11,15 @@ use pos_core::{
     clock::{AdmissionClock, Seq, SystemAdmissionClock, WallTime},
     event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
     geo_admission::{
-        GeoLocationAdmissionAdmin, GeoLocationAdmissionFenceV1, GeoLocationAdmissionOutcome,
-        GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore, GeoLocationReplayEvidenceV1,
-        GeoLocationReplayVerifier,
+        GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore,
+        GeoLocationReplayEvidenceV1, GeoLocationReplayVerifier,
     },
     hasher::Hasher,
     ids::{EntityId, EventId, TimelineId},
+    owntracks_enrollment::{
+        OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStateV1, OwnTracksEnrollmentStatusV1,
+        OwnTracksEnrollmentStatusViewV1, OwnTracksEnrollmentStore,
+    },
     store::{
         checked_append_identity_expires_at, AppendDedupScope, AppendIdentity, AppendIntent,
         AppendOrDuplicateOutcome, EventReadBounds, EventStore, PurgeOutcome, SeqRange,
@@ -336,17 +339,9 @@ impl SqliteStore {
                  timeline_id TEXT PRIMARY KEY,
                  has_evidence INTEGER NOT NULL CHECK (has_evidence = 1)
              );
-             CREATE TABLE IF NOT EXISTS geographic_admission_fences (
-                 timeline_id TEXT NOT NULL,
-                 entity_id TEXT NOT NULL,
-                 binding_revision INTEGER NOT NULL,
-                 consent_identity BLOB NOT NULL CHECK (length(consent_identity) = 32),
-                 consent_revision INTEGER NOT NULL,
-                 consent_hash BLOB NOT NULL CHECK (length(consent_hash) = 32),
-                 policy_version INTEGER NOT NULL,
-                 withdrawn INTEGER NOT NULL CHECK (withdrawn IN (0, 1)),
-                 admission_epoch INTEGER NOT NULL,
-                 PRIMARY KEY (timeline_id, entity_id)
+             CREATE TABLE IF NOT EXISTS owntracks_enrollment (
+                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                 state_cbor BLOB NOT NULL
              );
              CREATE TABLE IF NOT EXISTS geographic_admission_snapshots (
                  event_id TEXT PRIMARY KEY,
@@ -376,68 +371,37 @@ impl SqliteStore {
         &self,
         request: &GeoLocationAdmissionRequestV1,
     ) -> Result<bool, CoreError> {
-        let snapshot = request.snapshot();
-        let consent = snapshot.consent();
-        if consent.withdrawn() {
-            return Ok(false);
-        }
-        self.conn
+        let persisted = self
+            .conn
             .query_row(
-                "SELECT EXISTS (
-                    SELECT 1 FROM geographic_admission_fences
-                    WHERE timeline_id = ?1 AND entity_id = ?2
-                      AND binding_revision = ?3
-                      AND consent_identity = ?4 AND consent_revision = ?5
-                      AND consent_hash = ?6 AND policy_version = ?7
-                      AND withdrawn = 0 AND admission_epoch = ?8
-                      AND admission_epoch != 0
-                )",
-                params![
-                    request.timeline().to_string(),
-                    request.entity().to_string(),
-                    i64::try_from(snapshot.binding_revision()).unwrap_or(i64::MAX),
-                    consent.identity().as_slice(),
-                    i64::try_from(consent.revision()).unwrap_or(i64::MAX),
-                    consent.hash().as_slice(),
-                    i64::from(consent.policy_version()),
-                    i64::try_from(consent.admission_epoch()).unwrap_or(i64::MAX),
-                ],
-                |row| row.get::<_, i64>(0),
+                "SELECT state_cbor FROM owntracks_enrollment WHERE singleton = 1",
+                [],
+                |row| row.get::<_, Vec<u8>>(0),
             )
-            .map(|exists| exists == 1)
-            .map_err(|error| CoreError::Storage(error.to_string()))
+            .optional()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        persisted.map_or(Ok(false), |bytes| {
+            OwnTracksEnrollmentStateV1::from_persistence_bytes(&bytes)
+                .map(|state| state.permits_geographic_admission(request))
+        })
     }
 
     fn geographic_fence_permits_in_transaction(
         tx: &rusqlite::Transaction<'_>,
         request: &GeoLocationAdmissionRequestV1,
     ) -> Result<bool, CoreError> {
-        let snapshot = request.snapshot();
-        let consent = snapshot.consent();
-        tx.query_row(
-            "SELECT EXISTS (
-                SELECT 1 FROM geographic_admission_fences
-                WHERE timeline_id = ?1 AND entity_id = ?2
-                  AND binding_revision = ?3
-                  AND consent_identity = ?4 AND consent_revision = ?5
-                  AND consent_hash = ?6 AND policy_version = ?7
-                  AND withdrawn = 0 AND admission_epoch = ?8
-                  AND admission_epoch != 0
-            )",
-            params![
-                request.timeline().to_string(),
-                request.entity().to_string(),
-                i64::try_from(snapshot.binding_revision()).unwrap_or(i64::MAX),
-                consent.identity().as_slice(),
-                i64::try_from(consent.revision()).unwrap_or(i64::MAX),
-                consent.hash().as_slice(),
-                i64::from(consent.policy_version()),
-                i64::try_from(consent.admission_epoch()).unwrap_or(i64::MAX),
-            ],
-            |row| row.get::<_, i64>(0),
-        )
-        .map(|exists| exists == 1)
-        .map_err(|error| CoreError::Storage(error.to_string()))
+        let persisted = tx
+            .query_row(
+                "SELECT state_cbor FROM owntracks_enrollment WHERE singleton = 1",
+                [],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        persisted.map_or(Ok(false), |bytes| {
+            OwnTracksEnrollmentStateV1::from_persistence_bytes(&bytes)
+                .map(|state| state.permits_geographic_admission(request))
+        })
     }
 
     fn geographic_dedup_outcome(
@@ -1302,13 +1266,12 @@ impl SqliteStore {
     }
 }
 
-impl GeoLocationAdmissionAdmin for SqliteStore {
-    fn set_geo_location_admission_fence(
+impl OwnTracksEnrollmentStore for SqliteStore {
+    fn pair_owntracks_enrollment(
         &mut self,
-        timeline: TimelineId,
-        entity: EntityId,
-        fence: GeoLocationAdmissionFenceV1,
-    ) -> Result<(), CoreError> {
+        request: OwnTracksEnrollmentRequestV1,
+    ) -> Result<OwnTracksEnrollmentStatusV1, CoreError> {
+        let timeline = request.timeline();
         let exists = self
             .conn
             .query_row(
@@ -1320,35 +1283,90 @@ impl GeoLocationAdmissionAdmin for SqliteStore {
         if exists != 1 {
             return Err(CoreError::TimelineNotFound(timeline));
         }
-        let consent = fence.consent();
-        self.conn
-            .execute(
-                "INSERT INTO geographic_admission_fences (
-                    timeline_id, entity_id, binding_revision, consent_identity,
-                    consent_revision, consent_hash, policy_version, withdrawn, admission_epoch
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                 ON CONFLICT(timeline_id, entity_id) DO UPDATE SET
-                    binding_revision = excluded.binding_revision,
-                    consent_identity = excluded.consent_identity,
-                    consent_revision = excluded.consent_revision,
-                    consent_hash = excluded.consent_hash,
-                    policy_version = excluded.policy_version,
-                    withdrawn = excluded.withdrawn,
-                    admission_epoch = excluded.admission_epoch",
-                params![
-                    timeline.to_string(),
-                    entity.to_string(),
-                    i64::try_from(fence.binding_revision()).unwrap_or(i64::MAX),
-                    consent.identity().as_slice(),
-                    i64::try_from(consent.revision()).unwrap_or(i64::MAX),
-                    consent.hash().as_slice(),
-                    i64::from(consent.policy_version()),
-                    i64::from(u8::from(consent.withdrawn())),
-                    i64::try_from(consent.admission_epoch()).unwrap_or(i64::MAX),
-                ],
-            )
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let current = Self::enrollment_state_in_transaction(&tx)?;
+        let next = current.pair(&request)?;
+        Self::write_enrollment_state(&tx, &next)?;
+        tx.commit()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        Ok(next.status())
+    }
+
+    fn owntracks_enrollment_status(&self) -> Result<OwnTracksEnrollmentStatusViewV1, CoreError> {
+        let state = self
+            .conn
+            .query_row(
+                "SELECT state_cbor FROM owntracks_enrollment WHERE singleton = 1",
+                [],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(|error| CoreError::Storage(error.to_string()))?
+            .map_or(Ok(OwnTracksEnrollmentStateV1::absent()), |bytes| {
+                OwnTracksEnrollmentStateV1::from_persistence_bytes(&bytes)
+            })?;
+        Ok(state.status_view())
+    }
+
+    fn rotate_owntracks_enrollment_verifier(
+        &mut self,
+        verifier: [u8; 32],
+    ) -> Result<OwnTracksEnrollmentStatusV1, CoreError> {
+        self.transition_enrollment_state(|state| state.rotate(verifier))
+    }
+
+    fn revoke_owntracks_enrollment(&mut self) -> Result<OwnTracksEnrollmentStatusV1, CoreError> {
+        self.transition_enrollment_state(OwnTracksEnrollmentStateV1::revoke)
+    }
+}
+
+impl SqliteStore {
+    fn enrollment_state_in_transaction(
+        tx: &rusqlite::Transaction<'_>,
+    ) -> Result<OwnTracksEnrollmentStateV1, CoreError> {
+        tx.query_row(
+            "SELECT state_cbor FROM owntracks_enrollment WHERE singleton = 1",
+            [],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(|error| CoreError::Storage(error.to_string()))?
+        .map_or(Ok(OwnTracksEnrollmentStateV1::absent()), |bytes| {
+            OwnTracksEnrollmentStateV1::from_persistence_bytes(&bytes)
+        })
+    }
+
+    fn write_enrollment_state(
+        tx: &rusqlite::Transaction<'_>,
+        state: &OwnTracksEnrollmentStateV1,
+    ) -> Result<(), CoreError> {
+        tx.execute(
+            "INSERT INTO owntracks_enrollment (singleton, state_cbor) VALUES (1, ?1)
+             ON CONFLICT(singleton) DO UPDATE SET state_cbor = excluded.state_cbor",
+            params![state.persistence_bytes()?],
+        )
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
         Ok(())
+    }
+
+    fn transition_enrollment_state(
+        &mut self,
+        transition: impl FnOnce(
+            OwnTracksEnrollmentStateV1,
+        ) -> Result<OwnTracksEnrollmentStateV1, CoreError>,
+    ) -> Result<OwnTracksEnrollmentStatusV1, CoreError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let next = transition(Self::enrollment_state_in_transaction(&tx)?)?;
+        Self::write_enrollment_state(&tx, &next)?;
+        tx.commit()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        Ok(next.status())
     }
 }
 
@@ -2036,11 +2054,10 @@ impl EventStore for SqliteStore {
                 params![id_str],
             )
             .map_err(|e| CoreError::Storage(e.to_string()))?;
-            tx.execute(
-                "DELETE FROM geographic_admission_fences WHERE timeline_id = ?1",
-                params![id_str],
-            )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+            let enrollment = Self::enrollment_state_in_transaction(&tx)?;
+            if enrollment.permits_geographic_admission_target(id) {
+                Self::write_enrollment_state(&tx, &enrollment.revoke()?)?;
+            }
             tx.execute("DELETE FROM events WHERE timeline_id = ?1", params![id_str])
                 .map_err(|e| CoreError::Storage(e.to_string()))?;
             tx.execute(
@@ -2265,9 +2282,11 @@ mod tests {
     use super::*;
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
+        geo_admission::GeoLocationAdmissionFenceV1,
         ids::{EntityId, EventId},
         store::{EventReadBounds, SeqRange},
-        CoreError,
+        CoreError, OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStatusV1,
+        OwnTracksEnrollmentStore,
     };
 
     fn read_bounds(max_payload_bytes: usize) -> EventReadBounds {
@@ -2287,6 +2306,37 @@ mod tests {
         SqliteStore::open_in_memory().unwrap()
     }
 
+    /// Local setup shim for pre-ADR-054 adapter tests. It is deliberately
+    /// confined to this test module; production exposes no fence setter.
+    trait EnrollmentTestSetup {
+        fn set_geo_location_admission_fence(
+            &mut self,
+            timeline: TimelineId,
+            entity: EntityId,
+            fence: GeoLocationAdmissionFenceV1,
+        ) -> Result<(), CoreError>;
+    }
+
+    impl EnrollmentTestSetup for SqliteStore {
+        fn set_geo_location_admission_fence(
+            &mut self,
+            timeline: TimelineId,
+            entity: EntityId,
+            fence: GeoLocationAdmissionFenceV1,
+        ) -> Result<(), CoreError> {
+            if self.owntracks_enrollment_status()?.status() == OwnTracksEnrollmentStatusV1::Active {
+                self.revoke_owntracks_enrollment()?;
+            }
+            if fence.consent().withdrawn() {
+                return Ok(());
+            }
+            self.pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
+                timeline, entity, fence, [42; 32],
+            ))
+            .map(|_| ())
+        }
+    }
+
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn geographic_request(timeline: TimelineId, entity: EntityId) -> GeoLocationAdmissionRequestV1 {
         GeoLocationAdmissionRequestV1::from_input(
@@ -2296,7 +2346,7 @@ mod tests {
                 CanonicalBytes::from_static(b"geographic-commit-outcome"),
                 7,
                 ([1; 32], 8, [2; 32]),
-                (1, false, 9),
+                (1, false, 10),
                 ([4; 32], [5; 32]),
             ),
         )
@@ -2339,9 +2389,7 @@ mod tests {
     impl AdmissionClock for FenceDroppingClock {
         fn now(&mut self) -> Result<WallTime, CoreError> {
             Connection::open(&self.path)
-                .and_then(|connection| {
-                    connection.execute_batch("DROP TABLE geographic_admission_fences")
-                })
+                .and_then(|connection| connection.execute_batch("DROP TABLE owntracks_enrollment"))
                 .map_err(|error| CoreError::Storage(error.to_string()))?;
             Ok(WallTime::from_micros(1))
         }
@@ -2354,10 +2402,7 @@ mod tests {
     impl AdmissionClock for FenceRevokingClock {
         fn now(&mut self) -> Result<WallTime, CoreError> {
             Connection::open(&self.path)
-                .and_then(|connection| {
-                    connection
-                        .execute_batch("UPDATE geographic_admission_fences SET admission_epoch = 0")
-                })
+                .and_then(|connection| connection.execute_batch("DELETE FROM owntracks_enrollment"))
                 .map_err(|error| CoreError::Storage(error.to_string()))
                 .map(|()| WallTime::from_micros(1))
         }
@@ -2564,9 +2609,6 @@ mod tests {
             )
             .unwrap();
         let request = geographic_request(timeline.id(), entity);
-        store
-            .set_geo_location_admission_fence(timeline.id(), entity, geographic_fence())
-            .unwrap();
         let outcome = store.admit_geo_location(request.clone()).unwrap();
         let event_id = outcome.event_id().unwrap();
         let event_seq = outcome.event_seq().unwrap();
@@ -5488,7 +5530,7 @@ mod tests {
             .unwrap();
         store
             .conn
-            .execute_batch("DROP TABLE geographic_admission_fences")
+            .execute_batch("DROP TABLE owntracks_enrollment")
             .unwrap();
         assert_storage_err(
             store
@@ -5594,7 +5636,7 @@ mod tests {
         store
             .conn
             .execute_batch(
-                "CREATE TRIGGER deny_geographic_fence BEFORE INSERT ON geographic_admission_fences
+                "CREATE TRIGGER deny_geographic_fence BEFORE INSERT ON owntracks_enrollment
                  BEGIN SELECT RAISE(ABORT, 'deny geographic fence'); END;",
             )
             .unwrap();
@@ -5661,7 +5703,6 @@ mod tests {
             "geographic_admission_dedup",
             "geographic_admission_links",
             "geographic_admission_snapshots",
-            "geographic_admission_fences",
             "geographic_presence",
         ] {
             let mut store = new_store();

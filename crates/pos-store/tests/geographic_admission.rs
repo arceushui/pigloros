@@ -9,11 +9,11 @@ use std::{
 
 use pos_core::{
     geo_admission::{
-        GeoLocationAdmissionAdmin, GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1,
-        GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore,
+        GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1,
+        GeoLocationAdmissionStore,
     },
-    AdmissionClock, CanonicalBytes, CoreError, EntityId, EventStore, TimelineId, WallTime,
-    APPEND_IDENTITY_RETENTION_MICROS,
+    AdmissionClock, CanonicalBytes, CoreError, EntityId, EventStore, OwnTracksEnrollmentRequestV1,
+    OwnTracksEnrollmentStore, TimelineId, WallTime, APPEND_IDENTITY_RETENTION_MICROS,
 };
 use pos_store::memory::MemoryStore;
 use pos_store::sqlite::SqliteStore;
@@ -23,7 +23,7 @@ fn request(
     entity: EntityId,
     dedup: ([u8; 32], [u8; 32]),
 ) -> GeoLocationAdmissionRequestV1 {
-    request_with_epoch(timeline, entity, 9, dedup)
+    request_with_epoch(timeline, entity, 10, dedup)
 }
 
 fn request_with_epoch(
@@ -50,12 +50,6 @@ struct AdmissionState {
     policy: (u32, bool, u64),
 }
 
-impl AdmissionState {
-    fn fence(self) -> GeoLocationAdmissionFenceV1 {
-        GeoLocationAdmissionFenceV1::new(self.binding_revision, self.consent, self.policy)
-    }
-}
-
 fn request_with_admission_state(
     timeline: TimelineId,
     entity: EntityId,
@@ -73,21 +67,44 @@ fn request_with_admission_state(
     ))
 }
 
-fn fence() -> GeoLocationAdmissionFenceV1 {
-    GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9))
-}
-
 fn initial_admission_state() -> AdmissionState {
     AdmissionState {
         binding_revision: 7,
         consent: ([1; 32], 8, [2; 32]),
-        policy: (1, false, 9),
+        policy: (1, false, 10),
     }
+}
+
+fn pair_state<S>(store: &mut S, timeline: TimelineId, entity: EntityId, state: AdmissionState)
+where
+    S: OwnTracksEnrollmentStore,
+{
+    let epoch = state.policy.2.checked_sub(1).unwrap();
+    store
+        .pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
+            timeline,
+            entity,
+            GeoLocationAdmissionFenceV1::new(
+                state.binding_revision,
+                state.consent,
+                (state.policy.0, state.policy.1, epoch),
+            ),
+            [42; 32],
+        ))
+        .unwrap();
+}
+
+fn replace_state<S>(store: &mut S, timeline: TimelineId, entity: EntityId, state: AdmissionState)
+where
+    S: OwnTracksEnrollmentStore,
+{
+    store.revoke_owntracks_enrollment().unwrap();
+    pair_state(store, timeline, entity, state);
 }
 
 fn assert_admission_contract<S>(store: &mut S)
 where
-    S: EventStore + GeoLocationAdmissionAdmin + GeoLocationAdmissionStore,
+    S: EventStore + GeoLocationAdmissionStore + OwnTracksEnrollmentStore,
 {
     let unfenced_timeline = store.create_timeline("unfenced-geo-admission").unwrap();
     let unfenced_entity = EntityId::new();
@@ -109,9 +126,7 @@ where
 
     let timeline = store.create_timeline("geo-admission").unwrap();
     let entity = EntityId::new();
-    store
-        .set_geo_location_admission_fence(timeline.id(), entity, fence())
-        .unwrap();
+    pair_state(store, timeline.id(), entity, initial_admission_state());
 
     let accepted = store
         .admit_geo_location(request(timeline.id(), entity, ([4; 32], [5; 32])))
@@ -132,13 +147,7 @@ where
         .unwrap();
     assert!(conflict.is_conflict());
 
-    store
-        .set_geo_location_admission_fence(
-            timeline.id(),
-            entity,
-            GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, true, 10)),
-        )
-        .unwrap();
+    store.revoke_owntracks_enrollment().unwrap();
     let denied = store
         .admit_geo_location(request(timeline.id(), entity, ([4; 32], [5; 32])))
         .unwrap_err();
@@ -171,7 +180,7 @@ struct FenceReplacingClock {
     store: SqliteStore,
     timeline: TimelineId,
     entity: EntityId,
-    replacement: GeoLocationAdmissionFenceV1,
+    replacement: AdmissionState,
     replaced: Arc<AtomicBool>,
 }
 
@@ -180,7 +189,7 @@ impl FenceReplacingClock {
         path: &str,
         timeline: TimelineId,
         entity: EntityId,
-        replacement: GeoLocationAdmissionFenceV1,
+        replacement: AdmissionState,
         replaced: Arc<AtomicBool>,
     ) -> Self {
         Self {
@@ -196,11 +205,13 @@ impl FenceReplacingClock {
 impl AdmissionClock for FenceReplacingClock {
     fn now(&mut self) -> Result<WallTime, CoreError> {
         if !self.replaced.load(Ordering::Relaxed) {
-            self.store.set_geo_location_admission_fence(
+            self.store.revoke_owntracks_enrollment()?;
+            pair_state(
+                &mut self.store,
                 self.timeline,
                 self.entity,
-                self.replacement.clone(),
-            )?;
+                self.replacement,
+            );
             self.replaced.store(true, Ordering::Relaxed);
         }
         Ok(WallTime::from_micros(1))
@@ -218,13 +229,11 @@ impl AdmissionClock for CountingFixedClock {
 
 fn assert_expired_dedup_allows_one_new_admission<S>(store: &mut S)
 where
-    S: EventStore + GeoLocationAdmissionAdmin + GeoLocationAdmissionStore,
+    S: EventStore + GeoLocationAdmissionStore + OwnTracksEnrollmentStore,
 {
     let timeline = store.create_timeline("dedup-expiry").unwrap();
     let entity = EntityId::new();
-    store
-        .set_geo_location_admission_fence(timeline.id(), entity, fence())
-        .unwrap();
+    pair_state(store, timeline.id(), entity, initial_admission_state());
     let first = store
         .admit_geo_location(request(timeline.id(), entity, ([4; 32], [5; 32])))
         .unwrap();
@@ -238,21 +247,21 @@ where
 
 fn assert_replaced_fence_rejects_stale_epoch<S>(store: &mut S)
 where
-    S: EventStore + GeoLocationAdmissionAdmin + GeoLocationAdmissionStore,
+    S: EventStore + GeoLocationAdmissionStore + OwnTracksEnrollmentStore,
 {
     let timeline = store.create_timeline("re-pair").unwrap();
     let entity = EntityId::new();
-    store
-        .set_geo_location_admission_fence(timeline.id(), entity, fence())
-        .unwrap();
+    pair_state(store, timeline.id(), entity, initial_admission_state());
     let stale = request(timeline.id(), entity, ([4; 32], [5; 32]));
-    store
-        .set_geo_location_admission_fence(
-            timeline.id(),
-            entity,
-            GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 10)),
-        )
-        .unwrap();
+    replace_state(
+        store,
+        timeline.id(),
+        entity,
+        AdmissionState {
+            policy: (1, false, 12),
+            ..initial_admission_state()
+        },
+    );
 
     assert!(matches!(
         store.admit_geo_location(stale),
@@ -262,7 +271,7 @@ where
         .admit_geo_location(request_with_epoch(
             timeline.id(),
             entity,
-            10,
+            12,
             ([4; 32], [5; 32]),
         ))
         .unwrap()
@@ -271,7 +280,7 @@ where
 
 fn assert_each_reconsent_field_rejects_stale_admission<S>(store: &mut S)
 where
-    S: EventStore + GeoLocationAdmissionAdmin + GeoLocationAdmissionStore,
+    S: EventStore + GeoLocationAdmissionStore + OwnTracksEnrollmentStore,
 {
     let initial = initial_admission_state();
     let replacements = [
@@ -309,17 +318,23 @@ where
         ([16; 32], [17; 32]),
     ];
 
-    for (replacement, dedup) in replacements.into_iter().zip(replacement_dedups) {
+    for (index, (replacement, dedup)) in
+        replacements.into_iter().zip(replacement_dedups).enumerate()
+    {
         let timeline = store.create_timeline("re-consent-field").unwrap();
         let entity = EntityId::new();
-        store
-            .set_geo_location_admission_fence(timeline.id(), entity, initial.fence())
-            .unwrap();
+        pair_state(store, timeline.id(), entity, initial);
         let stale =
             request_with_admission_state(timeline.id(), entity, initial, ([4; 32], [5; 32]));
-        store
-            .set_geo_location_admission_fence(timeline.id(), entity, replacement.fence())
-            .unwrap();
+        let replacement = AdmissionState {
+            policy: (
+                replacement.policy.0,
+                replacement.policy.1,
+                12 + u64::try_from(index).unwrap() * 4,
+            ),
+            ..replacement
+        };
+        replace_state(store, timeline.id(), entity, replacement);
 
         assert!(matches!(
             store.admit_geo_location(stale),
@@ -334,6 +349,7 @@ where
             ))
             .unwrap()
             .is_accepted());
+        store.revoke_owntracks_enrollment().unwrap();
     }
 }
 
@@ -370,12 +386,9 @@ fn sqlite_rejects_a_withdrawn_request_before_writing_an_event() {
     let timeline = store.create_timeline("withdrawn-request").unwrap();
     let entity = EntityId::new();
     let withdrawn = AdmissionState {
-        policy: (1, true, 9),
+        policy: (1, true, 10),
         ..initial_admission_state()
     };
-    store
-        .set_geo_location_admission_fence(timeline.id(), entity, withdrawn.fence())
-        .unwrap();
 
     assert!(matches!(
         store.admit_geo_location(request_with_admission_state(
@@ -393,12 +406,17 @@ fn sqlite_rejects_a_withdrawn_request_before_writing_an_event() {
 }
 
 #[test]
-fn sqlite_refuses_to_set_a_geographic_fence_for_an_unknown_timeline() {
+fn sqlite_refuses_to_pair_an_unknown_timeline() {
     let mut store = SqliteStore::open_in_memory().unwrap();
     let timeline = TimelineId::new();
 
     assert!(matches!(
-        store.set_geo_location_admission_fence(timeline, EntityId::new(), fence()),
+        store.pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
+            timeline,
+            EntityId::new(),
+            GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
+            [42; 32],
+        )),
         Err(CoreError::TimelineNotFound(id)) if id == timeline
     ));
 }
@@ -412,9 +430,7 @@ fn sqlite_rechecks_a_revoked_fence_before_committing_geographic_admission() {
     let original_timeline = timeline.clone();
     let entity = EntityId::new();
     let revoked = Arc::new(AtomicBool::new(false));
-    setup
-        .set_geo_location_admission_fence(timeline.id(), entity, fence())
-        .unwrap();
+    pair_state(&mut setup, timeline.id(), entity, initial_admission_state());
     drop(setup);
 
     let mut store = SqliteStore::open_with_clock(
@@ -423,7 +439,10 @@ fn sqlite_rechecks_a_revoked_fence_before_committing_geographic_admission() {
             path,
             timeline.id(),
             entity,
-            GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, true, 10)),
+            AdmissionState {
+                policy: (1, false, 12),
+                ..initial_admission_state()
+            },
             Arc::clone(&revoked),
         )),
     )
@@ -461,9 +480,7 @@ fn sqlite_rechecks_a_reconsented_fence_before_committing_geographic_admission() 
     let original_timeline = timeline.clone();
     let entity = EntityId::new();
     let replaced = Arc::new(AtomicBool::new(false));
-    setup
-        .set_geo_location_admission_fence(timeline.id(), entity, fence())
-        .unwrap();
+    pair_state(&mut setup, timeline.id(), entity, initial_admission_state());
     drop(setup);
 
     let replacement = AdmissionState {
@@ -477,7 +494,7 @@ fn sqlite_rechecks_a_reconsented_fence_before_committing_geographic_admission() 
             path,
             timeline.id(),
             entity,
-            replacement.fence(),
+            replacement,
             Arc::clone(&replaced),
         )),
     )
@@ -549,9 +566,7 @@ fn sqlite_rejects_invalid_or_unreadable_geographic_dedup_records() {
     let timeline = store.create_timeline("dedup-corruption").unwrap();
     let entity = EntityId::new();
     let admission = request(timeline.id(), entity, ([4; 32], [5; 32]));
-    store
-        .set_geo_location_admission_fence(timeline.id(), entity, fence())
-        .unwrap();
+    pair_state(&mut store, timeline.id(), entity, initial_admission_state());
     assert!(store
         .admit_geo_location(admission.clone())
         .unwrap()
@@ -591,9 +606,7 @@ fn sqlite_admission_rolls_back_every_artifact_when_link_write_fails() {
     let mut store = SqliteStore::open(path).unwrap();
     let timeline = store.create_timeline("rollback-geo-admission").unwrap();
     let entity = EntityId::new();
-    store
-        .set_geo_location_admission_fence(timeline.id(), entity, fence())
-        .unwrap();
+    pair_state(&mut store, timeline.id(), entity, initial_admission_state());
     let inspection = rusqlite::Connection::open(path).unwrap();
     inspection
         .execute_batch(
@@ -641,9 +654,7 @@ fn sqlite_rejects_a_preexisting_unlinked_geographic_marker_before_deduplication(
     let mut store = SqliteStore::open(path).unwrap();
     let timeline = store.create_timeline("unlinked-geographic-state").unwrap();
     let entity = EntityId::new();
-    store
-        .set_geo_location_admission_fence(timeline.id(), entity, fence())
-        .unwrap();
+    pair_state(&mut store, timeline.id(), entity, initial_admission_state());
     rusqlite::Connection::open(path)
         .unwrap()
         .execute(
@@ -670,9 +681,7 @@ fn sqlite_rejects_an_orphaned_geographic_snapshot_before_deduplication() {
         .create_timeline("orphaned-geographic-snapshot")
         .unwrap();
     let entity = EntityId::new();
-    store
-        .set_geo_location_admission_fence(timeline.id(), entity, fence())
-        .unwrap();
+    pair_state(&mut store, timeline.id(), entity, initial_admission_state());
     rusqlite::Connection::open(path)
         .unwrap()
         .execute(

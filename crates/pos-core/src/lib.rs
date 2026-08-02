@@ -41,6 +41,7 @@ pub use ids::{CorrelationId, EntityId, EventId, PluginId, RelationshipId, Timeli
 pub use manifest::{AdapterRecord, ReproManifest};
 pub use owntracks_enrollment::{
     OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStateV1, OwnTracksEnrollmentStatusV1,
+    OwnTracksEnrollmentStatusViewV1, OwnTracksEnrollmentStore,
 };
 pub use plugin::{Capability, Plugin};
 pub use state::{Reducer, State, StateRegistry};

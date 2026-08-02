@@ -1,10 +1,9 @@
 use pos_core::{
     geo_admission::{
-        GeoLocationAdmissionAdmin, GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1,
-        GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore, GeoLocationReplayEvidenceV1,
-        GeoLocationReplayVerifier,
+        GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1,
+        GeoLocationAdmissionStore, GeoLocationReplayEvidenceV1, GeoLocationReplayVerifier,
     },
-    CanonicalBytes, EntityId, EventStore,
+    CanonicalBytes, EntityId, EventStore, OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore,
 };
 use pos_store::sqlite::SqliteStore;
 
@@ -19,13 +18,24 @@ fn request(
         CanonicalBytes::from_static(b"existing-v1-geo-location-payload"),
         7,
         ([1; 32], 8, [2; 32]),
-        (1, false, 9),
+        (1, false, 10),
         dedup,
     ))
 }
 
 fn fence() -> GeoLocationAdmissionFenceV1 {
     GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9))
+}
+
+fn pair(store: &mut SqliteStore, timeline: pos_core::TimelineId, entity: EntityId) {
+    store
+        .pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
+            timeline,
+            entity,
+            fence(),
+            [42; 32],
+        ))
+        .unwrap();
 }
 
 fn assert_replay_verifier_rejects_durable_corruption(
@@ -91,9 +101,7 @@ fn sqlite_replay_verifier_accepts_only_the_exact_durable_snapshot_link() {
     let mut store = SqliteStore::open(path).unwrap();
     let timeline = store.create_timeline("replay-verifier").unwrap();
     let entity = EntityId::new();
-    store
-        .set_geo_location_admission_fence(timeline.id(), entity, fence())
-        .unwrap();
+    pair(&mut store, timeline.id(), entity);
     let accepted = store
         .admit_geo_location(request(timeline.id(), entity, ([4; 32], [5; 32])))
         .unwrap();
@@ -126,13 +134,7 @@ fn sqlite_replay_verifier_accepts_only_the_exact_durable_snapshot_link() {
         )
     };
 
-    store
-        .set_geo_location_admission_fence(
-            timeline.id(),
-            entity,
-            GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, true, 10)),
-        )
-        .unwrap();
+    store.revoke_owntracks_enrollment().unwrap();
     assert!(store
         .verify_v1_event_snapshot_link(evidence(event_seq, event_hash, snapshot_hash))
         .is_ok());

@@ -1,12 +1,37 @@
 //! Core values for the one V1 `OwnTracks` enrollment.
 
-use crate::{CoreError, EntityId, GeoLocationAdmissionFenceV1, TimelineId};
+use crate::{
+    geo_admission::GeoLocationAdmissionRequestV1, CoreError, EntityId, GeoLocationAdmissionFenceV1,
+    TimelineId,
+};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+const OWNTRACKS_ENROLLMENT_SCHEMA_VERSION: u8 = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OwnTracksEnrollmentStatusV1 {
     Absent,
     Active,
     Revoked,
+}
+
+/// Bounded enrollment status for local administration and diagnostics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OwnTracksEnrollmentStatusViewV1 {
+    status: OwnTracksEnrollmentStatusV1,
+    policy_version: Option<u32>,
+}
+
+impl OwnTracksEnrollmentStatusViewV1 {
+    #[must_use]
+    pub const fn status(&self) -> OwnTracksEnrollmentStatusV1 {
+        self.status
+    }
+
+    #[must_use]
+    pub const fn policy_version(&self) -> Option<u32> {
+        self.policy_version
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,10 +57,16 @@ impl OwnTracksEnrollmentRequestV1 {
             verifier,
         }
     }
+
+    #[must_use]
+    pub const fn timeline(&self) -> TimelineId {
+        self.timeline
+    }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnTracksEnrollmentStateV1 {
+    schema_version: u8,
     status: OwnTracksEnrollmentStatusV1,
     timeline: Option<TimelineId>,
     entity: Option<EntityId>,
@@ -43,10 +74,44 @@ pub struct OwnTracksEnrollmentStateV1 {
     verifier: Option<[u8; 32]>,
 }
 
+/// Narrow storage capability for the one local `OwnTracks` enrollment.
+pub trait OwnTracksEnrollmentStore {
+    /// Pair the single local device and return its bounded resulting status.
+    ///
+    /// # Errors
+    /// Returns an error when the active enrollment cannot be replaced safely.
+    fn pair_owntracks_enrollment(
+        &mut self,
+        request: OwnTracksEnrollmentRequestV1,
+    ) -> Result<OwnTracksEnrollmentStatusV1, CoreError>;
+
+    /// Report bounded enrollment status without exposing its verifier.
+    ///
+    /// # Errors
+    /// Returns a storage error when the enrollment state is unavailable.
+    fn owntracks_enrollment_status(&self) -> Result<OwnTracksEnrollmentStatusViewV1, CoreError>;
+
+    /// Replace the active pairing verifier and invalidate prior admission.
+    ///
+    /// # Errors
+    /// Returns an error unless the enrollment is active and durable replacement succeeds.
+    fn rotate_owntracks_enrollment_verifier(
+        &mut self,
+        verifier: [u8; 32],
+    ) -> Result<OwnTracksEnrollmentStatusV1, CoreError>;
+
+    /// Revoke the active enrollment and invalidate prior admission.
+    ///
+    /// # Errors
+    /// Returns an error unless the enrollment is active and durable replacement succeeds.
+    fn revoke_owntracks_enrollment(&mut self) -> Result<OwnTracksEnrollmentStatusV1, CoreError>;
+}
+
 impl OwnTracksEnrollmentStateV1 {
     #[must_use]
     pub const fn absent() -> Self {
         Self {
+            schema_version: OWNTRACKS_ENROLLMENT_SCHEMA_VERSION,
             status: OwnTracksEnrollmentStatusV1::Absent,
             timeline: None,
             entity: None,
@@ -58,6 +123,44 @@ impl OwnTracksEnrollmentStateV1 {
     pub const fn status(&self) -> OwnTracksEnrollmentStatusV1 {
         self.status
     }
+
+    /// Return the bounded status representation safe for administration.
+    #[must_use]
+    pub fn status_view(&self) -> OwnTracksEnrollmentStatusViewV1 {
+        OwnTracksEnrollmentStatusViewV1 {
+            status: self.status,
+            policy_version: self
+                .fence
+                .as_ref()
+                .map(|fence| fence.consent().policy_version()),
+        }
+    }
+
+    /// Encode the opaque, versioned durable state for a trusted storage adapter.
+    ///
+    /// # Errors
+    /// Returns a bounded storage error if serialization fails.
+    pub fn persistence_bytes(&self) -> Result<Vec<u8>, CoreError> {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(self, &mut bytes)
+            .map_err(|_| CoreError::Storage("invalid OwnTracks enrollment state".to_owned()))?;
+        Ok(bytes)
+    }
+
+    /// Decode and validate the opaque durable state from a trusted storage adapter.
+    ///
+    /// # Errors
+    /// Returns a bounded storage error for invalid or unsupported persisted state.
+    pub fn from_persistence_bytes(bytes: &[u8]) -> Result<Self, CoreError> {
+        let state: Self = ciborium::from_reader(bytes)
+            .map_err(|_| CoreError::Storage("invalid OwnTracks enrollment state".to_owned()))?;
+        if state.schema_version != OWNTRACKS_ENROLLMENT_SCHEMA_VERSION || !state.is_valid() {
+            return Err(CoreError::Storage(
+                "invalid OwnTracks enrollment state".to_owned(),
+            ));
+        }
+        Ok(state)
+    }
     #[must_use]
     pub const fn has_pairing_verifier(&self) -> bool {
         self.verifier.is_some()
@@ -67,6 +170,24 @@ impl OwnTracksEnrollmentStateV1 {
         self.fence
             .as_ref()
             .map_or(0, |fence| fence.consent().admission_epoch())
+    }
+
+    /// Check whether this enrollment remains the authority for an admission request.
+    #[must_use]
+    pub fn permits_geographic_admission(&self, request: &GeoLocationAdmissionRequestV1) -> bool {
+        self.status == OwnTracksEnrollmentStatusV1::Active
+            && self.timeline == Some(request.timeline())
+            && self.entity == Some(request.entity())
+            && self
+                .fence
+                .as_ref()
+                .is_some_and(|fence| fence.permits(request))
+    }
+
+    /// Whether this active enrollment targets `timeline`.
+    #[must_use]
+    pub fn permits_geographic_admission_target(&self, timeline: TimelineId) -> bool {
+        self.status == OwnTracksEnrollmentStatusV1::Active && self.timeline == Some(timeline)
     }
     /// Activate an absent or revoked enrollment.
     ///
@@ -81,12 +202,14 @@ impl OwnTracksEnrollmentStateV1 {
         if consent.withdrawn() || consent.admission_epoch() == 0 {
             return Err(CoreError::GeographicAdmissionValidationFailed);
         }
-        let epoch = consent
+        let epoch = self
             .admission_epoch()
+            .max(consent.admission_epoch())
             .checked_add(1)
             .filter(|epoch| *epoch != 0)
             .ok_or(CoreError::GeographicAdmissionValidationFailed)?;
         Ok(Self {
+            schema_version: OWNTRACKS_ENROLLMENT_SCHEMA_VERSION,
             status: OwnTracksEnrollmentStatusV1::Active,
             timeline: Some(request.timeline),
             entity: Some(request.entity),
@@ -129,6 +252,30 @@ impl OwnTracksEnrollmentStateV1 {
         self.fence
             .as_ref()
             .ok_or(CoreError::GeographicAdmissionValidationFailed)
+    }
+
+    fn is_valid(&self) -> bool {
+        match self.status {
+            OwnTracksEnrollmentStatusV1::Absent => {
+                self.timeline.is_none()
+                    && self.entity.is_none()
+                    && self.fence.is_none()
+                    && self.verifier.is_none()
+            }
+            OwnTracksEnrollmentStatusV1::Active => self.fence.as_ref().is_some_and(|fence| {
+                self.timeline.is_some()
+                    && self.entity.is_some()
+                    && self.verifier.is_some()
+                    && !fence.consent().withdrawn()
+                    && fence.consent().admission_epoch() != 0
+            }),
+            OwnTracksEnrollmentStatusV1::Revoked => self.fence.as_ref().is_some_and(|fence| {
+                self.timeline.is_some()
+                    && self.entity.is_some()
+                    && self.verifier.is_none()
+                    && fence.consent().admission_epoch() != 0
+            }),
+        }
     }
 
     fn advance_epoch(
