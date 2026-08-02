@@ -349,7 +349,7 @@ its lifecycle tests were implemented.
 The implementation is recorded in commits `a0d80d4`, `e245601`, `52801b1`,
 `bcaaca2`, and `569f58f`; CTO final review is `APPROVE` with no remaining
 findings. Capability-dropped repository CI passed through `CI gates OK` at
-99.03% lines, 99.12% regions, and 99.32% functions; local cargo-deny was not
+99.04% lines, 99.12% regions, and 99.34% functions; local cargo-deny was not
 installed and was reported as skipped by the repository script.
 Before merge, run the exact repository gates:
 `cargo fmt --all -- --check`; and the `scripts/ci.sh` test step, which runs
