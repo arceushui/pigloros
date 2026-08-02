@@ -1470,7 +1470,11 @@ mod tests {
         CanonicalBytes, CoreError, EntityId, EventId, Kind, OwnTracksIngressRateKeyV1, TimelineId,
     };
     use pos_store::memory::MemoryStore;
-    use std::{collections::HashMap, num::NonZeroUsize, time::Instant};
+    use std::{
+        collections::HashMap,
+        num::NonZeroUsize,
+        time::{Duration, Instant},
+    };
 
     struct BlockingRootCountStore {
         inner: MemoryStore,
@@ -3737,12 +3741,15 @@ mod tests {
         let executor = super::StoreExecutor::new(Box::new(MemoryStore::new()));
         assert!(executor.create("completed".to_owned()).await.is_ok());
         assert!(executor.timeline(TimelineId::new()).await.is_ok());
-        for _ in 0..10 {
-            if executor.control.global_budget.available_permits() == super::QUEUE_CAPACITY {
-                break;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while executor.control.global_budget.available_permits() != super::QUEUE_CAPACITY
+                || executor.control.read_budget.available_permits() != super::READ_CAPACITY
+            {
+                tokio::task::yield_now().await;
             }
-            tokio::task::yield_now().await;
-        }
+        })
+        .await
+        .expect("normal command completion releases admission permits");
         assert_eq!(
             executor.control.global_budget.available_permits(),
             super::QUEUE_CAPACITY
