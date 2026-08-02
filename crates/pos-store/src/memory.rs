@@ -2341,13 +2341,19 @@ mod tests {
         let child = store.fork(root.id(), Seq::from_u64(1), "child").unwrap();
 
         let err = store.delete_timeline(root.id()).unwrap_err();
-        assert!(matches!(err, CoreError::Storage(_)));
+        assert_eq!(
+            std::mem::discriminant(&err),
+            std::mem::discriminant(&CoreError::Storage(String::new()))
+        );
 
         store.delete_timeline(child.id()).unwrap();
         store.delete_timeline(root.id()).unwrap();
         assert!(store.get_timeline(root.id()).unwrap().is_none());
         let err = store.delete_timeline(root.id()).unwrap_err();
-        assert!(matches!(err, CoreError::TimelineNotFound(_)));
+        assert_eq!(
+            std::mem::discriminant(&err),
+            std::mem::discriminant(&CoreError::TimelineNotFound(TimelineId::new()))
+        );
     }
 
     #[test]
