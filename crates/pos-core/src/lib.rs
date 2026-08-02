@@ -26,6 +26,7 @@ pub mod plugin;
 pub mod state;
 pub mod store;
 pub mod timeline;
+pub mod world_transform;
 
 // Re-export commonly used types at the crate root.
 pub use clock::{
@@ -58,3 +59,8 @@ pub use store::{
     EventStore, PurgeOutcome, SeqRange, TimelineExport, APPEND_IDENTITY_RETENTION_MICROS,
 };
 pub use timeline::{Timeline, TimelineMeta, TimelineMode};
+pub use world_transform::{
+    Wgs84PositionV1, WorldCoordinateV1, WorldGeographicEvidenceCapabilityV1,
+    WorldOriginReferenceV1, WorldOriginRegistryV1, WorldOriginV1, WorldTransformError,
+    WorldTransformV1,
+};
