@@ -7,7 +7,9 @@
 
 The predecessor lifecycle/supervision work in Redmine #165 is complete and
 squash-merged to `main` at `9473f32f67498564db24b1c33b15148d930e6d55`; #167 is
-the local scheduler follow-up.
+the local scheduler follow-up. This design authorizes no production work by
+itself: #165 is the implemented baseline, #167 is the proposed fairness
+amendment, and #166/#168 remain separately deferred and unauthorized.
 
 ## Problem
 
@@ -24,7 +26,10 @@ started semantics, graceful shutdown, and existing bounded-read guarantees.
 
 ## Decision
 
-Keep one bounded inbound channel and add a bounded worker-local pending queue.
+Keep one bounded inbound channel and add a bounded worker-local pending queue
+with capacity for at least the full 64-envelope admission bound. Normal
+draining never drops or requeues an accepted envelope because the pending queue
+is full.
 The channel remains a transport bound, while a shared 64-permit admission
 budget is the authoritative total-capacity bound. Every accepted envelope owns
 one global permit while it is in the channel, pending queue, or currently
@@ -58,7 +63,11 @@ machine is:
 ```text
 Unowned
    | Write: acquire global; Read: acquire global then read permit
-   | any acquisition failure -> release every permit acquired in this attempt
+   v
+Admitting
+   | reserve candidate ordinal; try_send under the lifecycle admission lock
+   | full/closed send -> release every acquired permit and return failure
+   | successful send -> commit ordinal and transfer intact envelope
    v
 Owned(Channel)
    | worker receives envelope (initial blocking recv or nonblocking drain)
@@ -77,19 +86,25 @@ Owned(Channel) or Owned(Pending)
 Released
 ```
 
-The transition from `Unowned` to `Owned(Channel)` is all-or-nothing: a failed
-read-permit acquisition releases the already-acquired global permit, and a full
-or closed `try_send` releases the global permit plus the optional read permit.
-Writes never acquire a read permit. Expiry releases directly from
+Admission is an `Admitting` rollback state before the envelope becomes
+accepted work. A failed read-permit acquisition releases the already-acquired
+global permit; a full or closed `try_send` releases the global permit plus the
+optional read permit and commits neither the envelope nor its candidate
+ordinal. The candidate ordinal is placed in the envelope before `try_send` and
+becomes the committed admission ordinal only after that send succeeds. Writes
+never acquire a read permit. Expiry releases directly from
 `Owned(Channel)` or `Owned(Pending)` when the worker removes the envelope; an
 executing envelope releases both of its permits only after the synchronous
 store call returns or unwinds. No caller cancellation or deadline path releases
 an owned permit while its envelope is still in the channel, pending queue, or
 synchronous store call. Moving between owned states does not acquire or
 release capacity. Exactly one owner performs the terminal drop on normal
-completion, queued/pending expiry, or worker unwind; a
-failed admission never enters an owned state. Shutdown never discards accepted
-work; it drains it through the common scheduler before terminal release. Tests
+completion, queued/pending expiry, or worker unwind; a failed admission is
+rolled back before it enters accepted-work ownership. Every accepted command
+receives exactly one terminal outcome: a result, a queued-expiry error, or an
+explicit unhealthy/failure error. Normal shutdown never drops an accepted
+envelope without a reply; it drains accepted work through the common scheduler
+before terminal release. Tests
 must exercise
 global-acquisition failure, read-acquisition rollback, full and closed send
 rollback, execution completion, expiry removal, and unwind release for both
@@ -151,9 +166,9 @@ ordinal nor a permit-bearing envelope.
 
 Admission is one transaction serialized by the lifecycle lock: while the
 executor is `Open`, `try_submit` acquires the required permits, classifies the
-command, performs `try_send`, and records the successful-send admission ordinal
-at its linearization point while holding that lock. Shutdown takes the same
-lock before transitioning to `Draining` and
+command, reserves a candidate ordinal in the envelope, performs `try_send`,
+and commits that ordinal only after the send succeeds while holding that lock.
+Shutdown takes the same lock before transitioning to `Draining` and
 notifying the worker. Thus a submission cannot be accepted after shutdown has
 observed the transition, and a failed send releases all permits immediately.
 The test-only producer trace publication is nonblocking and occurs outside this
@@ -171,7 +186,8 @@ envelopes can arrive; while `pending` is nonempty, the worker continues
 drain-completed/controller/select turns and services or expires pending
 envelopes. It terminates only after pending work is terminally serviced or
 expired. Direct cleanup is reserved for worker unwind; normal shutdown never
-discards an accepted envelope. The global and optional read permits remain owned
+discards an accepted envelope or omits its terminal reply. The global and
+optional read permits remain owned
 by the envelope through the complete synchronous store call, then release on
 normal completion, queued expiry, or worker unwind. Expired envelopes are
 still rejected through the existing atomic lifecycle claim before execution;
@@ -228,8 +244,8 @@ state and has no lifecycle authority. Selected.
   any store call. Expired queued commands never execute.
 - A started command keeps its existing authoritative-result behavior, including
   writes that finish after their caller deadline.
-- Shutdown drains accepted commands and retains the existing join/readiness
-  guarantees.
+- Shutdown drains accepted commands, gives each accepted command exactly one
+  terminal outcome, and retains the existing join/readiness guarantees.
 - No persistent schema, EventStore trait, HTTP contract, or public command API
   changes.
 
@@ -247,7 +263,8 @@ Proposed, production implementation requires both core-team acceptance of the
 V8 ADR-052 clarification and explicit implementation authorization. A #167
 journal note may record review and discussion, but cannot independently
 authorize the ordering change. This design proposal is not itself
-authorization. No distributed or cross-process ordering claim is introduced.
+authorization. #166 and #168 remain separately deferred and unauthorized; no
+distributed or cross-process ordering claim is introduced.
 
 ## Test design
 
