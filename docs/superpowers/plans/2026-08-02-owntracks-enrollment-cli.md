@@ -58,12 +58,12 @@
 - Modify: `crates/pos-store/src/lib.rs`
 - Create: `crates/pos-store/tests/owntracks_enrollment.rs`
 
-**Produces:** both store adapters implement `OwnTracksEnrollmentStore`; SQLite creates the current pre-launch enrollment table directly and Memory maintains the same state transitions. The geographic-admission fence can be derived only from the same durable enrollment state.
+**Produces:** both store adapters implement `OwnTracksEnrollmentStore`; SQLite replaces #169's `geographic_admission_fences` table with the current pre-launch enrollment table and Memory replaces its fence map with the same state transitions. The geographic-admission fence is derived only from the same durable enrollment state.
 
 - [ ] Write failing cross-adapter tests for pair/status/rotate/revoke/re-pair, verifier deletion on revoke, and unchanged state after each rejected transition.
 - [ ] Run `cargo test -p pos-store --test owntracks_enrollment --locked`; confirm failure because no adapter capability exists.
-- [ ] Implement the Memory state map and SQLite current-schema table/transaction without a migration path.
-- [ ] Derive the `GeoLocationAdmissionFenceV1` from active enrollment only; missing, revoked, or withdrawn enrollment fails closed.
+- [ ] Replace the Memory geographic-fence map and SQLite `geographic_admission_fences` table/setter with enrollment state, without a migration path.
+- [ ] Derive the `GeoLocationAdmissionFenceV1` from active enrollment only; missing, revoked, or withdrawn enrollment fails closed, and no parallel fence state remains.
 - [ ] Re-run the focused integration test, then `cargo test -p pos-store --locked`, and commit the parity implementation and tests.
 
 ### Task 4: Add owner-key and credential helpers in the Gateway binary
