@@ -814,6 +814,7 @@ dependencies = [
  "ciborium",
  "piglor-ledger",
  "pos-core",
+ "pos-plugin-geo",
  "pos-plugin-ledger",
  "pos-plugin-society",
  "pos-plugin-world",

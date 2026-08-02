@@ -64,6 +64,17 @@ pub fn router(state: AppState) -> Router {
     build_router(state, MAX_HTTP_BODY_BYTES)
 }
 
+/// Build the loopback router with the explicit local `OwnTracks` route enabled.
+pub fn router_with_owntracks(state: AppState, owner_key: [u8; 32]) -> Router {
+    let gateway = state.gateway.clone();
+    build_router(state, MAX_HTTP_BODY_BYTES).route(
+        "/v1/bridges/owntracks",
+        post(move |headers, body| {
+            crate::owntracks_http::post_owntracks(gateway, owner_key, headers, body)
+        }),
+    )
+}
+
 /// Build the public spectator router for a non-loopback Gateway deployment.
 ///
 /// Until #68 adds an authentication boundary, this exposes only the public

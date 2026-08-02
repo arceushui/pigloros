@@ -9,8 +9,9 @@
 mod executor;
 mod http;
 mod ledger_config;
+mod owntracks_http;
 
-pub use http::{router, spectator_router, AppState};
+pub use http::{router, router_with_owntracks, spectator_router, AppState};
 pub use ledger_config::{LedgerConfig, LedgerGateway, LedgerWriteMode};
 
 use pos_core::{
