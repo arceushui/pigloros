@@ -332,6 +332,9 @@ pub const MAX_FORK_DEPTH: usize = 64;
 /// Maximum serialized JSON size for one Event polling response (1 MiB).
 pub const MAX_EVENTS_RESPONSE_BYTES: usize = 1024 * 1024;
 
+/// Maximum synchronous store time budget for one bounded Event poll (5 seconds).
+pub const MAX_EVENTS_READ_TIME_MICROS: u64 = 5_000_000;
+
 /// Maximum number of Timeline events returned by one poll.
 pub const MAX_EVENTS_PER_POLL: usize = 100;
 
@@ -434,6 +437,9 @@ pub enum GatewayError {
     /// A single stored Event cannot fit in a bounded response.
     #[error("event response exceeds maximum of {maximum} bytes")]
     EventResponseTooLarge { maximum: usize },
+    /// A bounded Event read exceeded its synchronous store time budget.
+    #[error("event read exceeded maximum elapsed time of {maximum_micros} microseconds")]
+    EventReadTimeExceeded { maximum_micros: u64 },
     /// The deprecated aggregate-style read would silently truncate Events.
     #[error("compatibility read exceeds its bounded page of {maximum} events")]
     CompatibilityReadTruncated { maximum: usize },
@@ -446,6 +452,12 @@ pub enum GatewayError {
     /// The `StoreExecutor` is no longer accepting commands.
     #[error("store executor closed")]
     StoreExecutorClosed,
+    /// A store command exceeded its bounded execution deadline.
+    #[error("store executor command deadline exceeded")]
+    StoreExecutorDeadlineExceeded,
+    /// The supervised store worker is unhealthy.
+    #[error("store executor unhealthy")]
+    StoreExecutorUnhealthy,
     /// Underlying store failure.
     #[error(transparent)]
     Store(#[from] CoreError),
@@ -577,6 +589,8 @@ impl From<executor::StoreExecutorError> for GatewayError {
         match error {
             executor::StoreExecutorError::Saturated => Self::StoreExecutorSaturated,
             executor::StoreExecutorError::Closed => Self::StoreExecutorClosed,
+            executor::StoreExecutorError::DeadlineExceeded => Self::StoreExecutorDeadlineExceeded,
+            executor::StoreExecutorError::Unhealthy => Self::StoreExecutorUnhealthy,
             executor::StoreExecutorError::Store(error) => Self::Store(error),
         }
     }
@@ -733,6 +747,21 @@ impl Gateway {
         self.bus.subscribe()
     }
 
+    /// Report whether the supervised `StoreExecutor` is open and ready to accept commands.
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.store.is_ready()
+    }
+
+    /// Drain queued store commands and join the dedicated worker.
+    ///
+    /// # Errors
+    /// Returns a typed executor lifecycle error when the worker cannot drain,
+    /// join, or complete within its bounded shutdown deadline.
+    pub async fn shutdown(&self) -> Result<(), GatewayError> {
+        self.store.shutdown().await.map_err(Into::into)
+    }
+
     /// Run one bounded deduplication-maintenance pass.
     ///
     /// The server lifecycle supervisor owns scheduling and readiness; this
@@ -799,11 +828,13 @@ impl Gateway {
             from: Seq::from_u64(first_seq),
             to: Some(Seq::from_u64(last_seq)),
         };
-        let bounds = EventReadBounds::new(
+        let bounds = EventReadBounds::new_with_total_bytes_and_elapsed(
             MAX_EVENT_PAYLOAD_BYTES,
             MAX_EVENT_TYPE_BYTES,
             MAX_FORK_DEPTH,
             limit + 1,
+            MAX_EVENTS_RESPONSE_BYTES,
+            MAX_EVENTS_READ_TIME_MICROS,
         );
         let mut events = match self.store.read(id, range, bounds).await {
             Ok(events) => events,
@@ -824,6 +855,19 @@ impl Gateway {
             Err(executor::StoreExecutorError::Store(CoreError::ForkDepthTooLarge { .. })) => {
                 return Err(GatewayError::ForkDepthTooLarge {
                     maximum: MAX_FORK_DEPTH,
+                })
+            }
+            Err(executor::StoreExecutorError::Store(CoreError::ReadBytesTooLarge { .. })) => {
+                return Err(GatewayError::EventResponseTooLarge {
+                    maximum: MAX_EVENTS_RESPONSE_BYTES,
+                })
+            }
+            Err(
+                executor::StoreExecutorError::Store(CoreError::ReadTimeTooLarge { .. })
+                | executor::StoreExecutorError::DeadlineExceeded,
+            ) => {
+                return Err(GatewayError::EventReadTimeExceeded {
+                    maximum_micros: MAX_EVENTS_READ_TIME_MICROS,
                 })
             }
             Err(error) => return Err(error.into()),
@@ -1517,9 +1561,10 @@ mod tests {
 
     #[tokio::test]
     async fn closed_executor_is_typed_at_gateway_seam() {
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(9);
         let _ = std::thread::spawn(move || drop(rx.blocking_recv()));
-        let gateway = Gateway::with_executor_for_test(executor::StoreExecutor { tx });
+        let gateway =
+            Gateway::with_executor_for_test(executor::StoreExecutor::from_sender_for_test(tx));
 
         assert!(matches!(
             gateway.create_timeline("closed").await,
@@ -1529,9 +1574,10 @@ mod tests {
 
     #[tokio::test]
     async fn closed_queue_is_typed_at_gateway_seam() {
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let (tx, rx) = tokio::sync::mpsc::channel(9);
         drop(rx);
-        let gateway = Gateway::with_executor_for_test(executor::StoreExecutor { tx });
+        let gateway =
+            Gateway::with_executor_for_test(executor::StoreExecutor::from_sender_for_test(tx));
 
         assert!(matches!(
             gateway.create_timeline("closed-queue").await,
@@ -1566,7 +1612,7 @@ mod tests {
             let queued_gateway = gateway.clone();
             queued.push(tokio::spawn(async move {
                 queued_gateway
-                    .create_timeline("fill-store-executor-queue")
+                    .purge_expired_ingress_identities(std::num::NonZeroUsize::new(1).unwrap())
                     .await
             }));
             tokio::task::yield_now().await;
@@ -1585,7 +1631,8 @@ mod tests {
 
         assert!(matches!(error, GatewayError::StoreExecutorSaturated));
         release_tx.send(()).unwrap();
-        assert!(blocker.await.unwrap().is_ok());
+        let blocker_result = blocker.await.unwrap();
+        assert!(blocker_result.is_ok(), "blocker result: {blocker_result:?}");
         for request in queued {
             assert!(request.await.is_ok());
         }
@@ -2780,6 +2827,19 @@ mod tests {
             maximum: MAX_EVENTS_PER_POLL,
         };
         assert!(e.to_string().contains("compatibility"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn executor_lifecycle_errors_map_to_gateway_errors() {
+        assert!(matches!(
+            GatewayError::from(executor::StoreExecutorError::DeadlineExceeded),
+            GatewayError::StoreExecutorDeadlineExceeded
+        ));
+        assert!(matches!(
+            GatewayError::from(executor::StoreExecutorError::Unhealthy),
+            GatewayError::StoreExecutorUnhealthy
+        ));
     }
 
     #[test]

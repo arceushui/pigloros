@@ -302,8 +302,27 @@ mod tests {
         )
         .unwrap();
         assert_ne!(first, second);
+        assert!(minimize_location(br#"{"_type":"waypoint","lat":0,"lon":0,"tst":1}"#).is_err());
         assert!(minimize_location(br#"{"_type":"location","lat":91,"lon":0,"tst":1}"#).is_err());
         assert!(minimize_location(br#"{"_type":"location","lat":0,"lon":0,"tst":1.5}"#).is_err());
+    }
+
+    #[test]
+    fn decoders_cover_hex_base64_alphabets_and_padding() {
+        assert_eq!(super::hex_nibble(b'a'), Some(10));
+        assert_eq!(super::hex_nibble(b'X'), None);
+        assert_eq!(super::decode_hex_32(&[b'0'; 64]), Some([0; 32]));
+        assert_eq!(super::decode_hex_32(&[b'0'; 63]), None);
+
+        assert_eq!(super::decode_base64("YWJj"), Some(b"abc".to_vec()));
+        assert_eq!(super::decode_base64("YWJjZA=="), Some(b"abcd".to_vec()));
+        assert!(super::decode_base64("YQ==YQ==").is_none());
+        assert!(super::decode_base64("YQ=A").is_none());
+        assert_eq!(super::base64_value(b'a'), Some(26));
+        assert_eq!(super::base64_value(b'0'), Some(52));
+        assert_eq!(super::base64_value(b'+'), Some(62));
+        assert_eq!(super::base64_value(b'/'), Some(63));
+        assert_eq!(super::base64_value(b'?'), None);
     }
 
     #[tokio::test]
@@ -400,7 +419,9 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(1);
         drop(rx);
-        let gateway = Gateway::with_executor_for_test(crate::executor::StoreExecutor { tx });
+        let gateway = Gateway::with_executor_for_test(
+            crate::executor::StoreExecutor::from_sender_for_test(tx),
+        );
         let response = post_owntracks(
             gateway,
             authenticated_headers("application/json"),

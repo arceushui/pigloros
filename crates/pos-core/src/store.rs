@@ -181,6 +181,8 @@ pub struct EventReadBounds {
     event_type_bytes: usize,
     fork_depth: usize,
     events: usize,
+    total_bytes: usize,
+    max_elapsed_micros: u64,
 }
 
 impl EventReadBounds {
@@ -191,11 +193,49 @@ impl EventReadBounds {
         max_fork_depth: usize,
         max_events: usize,
     ) -> Self {
+        Self::new_with_total_bytes(
+            max_payload_bytes,
+            max_event_type_bytes,
+            max_fork_depth,
+            max_events,
+            usize::MAX,
+        )
+    }
+
+    #[must_use]
+    pub const fn new_with_total_bytes(
+        max_payload_bytes: usize,
+        max_event_type_bytes: usize,
+        max_fork_depth: usize,
+        max_events: usize,
+        max_total_bytes: usize,
+    ) -> Self {
         Self {
             payload_bytes: max_payload_bytes,
             event_type_bytes: max_event_type_bytes,
             fork_depth: max_fork_depth,
             events: max_events,
+            total_bytes: max_total_bytes,
+            max_elapsed_micros: u64::MAX,
+        }
+    }
+
+    #[must_use]
+    pub const fn new_with_total_bytes_and_elapsed(
+        max_payload_bytes: usize,
+        max_event_type_bytes: usize,
+        max_fork_depth: usize,
+        max_events: usize,
+        max_total_bytes: usize,
+        max_elapsed_micros: u64,
+    ) -> Self {
+        Self {
+            payload_bytes: max_payload_bytes,
+            event_type_bytes: max_event_type_bytes,
+            fork_depth: max_fork_depth,
+            events: max_events,
+            total_bytes: max_total_bytes,
+            max_elapsed_micros,
         }
     }
 
@@ -217,6 +257,24 @@ impl EventReadBounds {
     #[must_use]
     pub const fn max_events(self) -> usize {
         self.events
+    }
+
+    #[must_use]
+    pub const fn max_total_bytes(self) -> usize {
+        self.total_bytes
+    }
+
+    #[must_use]
+    pub const fn with_max_total_bytes(self, max_total_bytes: usize) -> Self {
+        Self {
+            total_bytes: max_total_bytes,
+            ..self
+        }
+    }
+
+    #[must_use]
+    pub const fn max_elapsed_micros(self) -> u64 {
+        self.max_elapsed_micros
     }
 }
 
@@ -405,7 +463,8 @@ pub trait EventStore: Send {
     /// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist.
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError>;
 
-    /// Read events while refusing any selected variable field outside `bounds`.
+    /// Read events while refusing any selected variable field or aggregate byte
+    /// budget outside `bounds`.
     ///
     /// Implementations that support this capability must seek to `range.from`,
     /// examine and materialise no more than [`EventReadBounds::max_events`],
@@ -418,6 +477,8 @@ pub trait EventStore: Send {
     /// # Errors
     /// Returns [`CoreError::PayloadTooLarge`],
     /// [`CoreError::EventMetadataTooLarge`], or
+    /// [`CoreError::ReadBytesTooLarge`], or
+    /// [`CoreError::ReadTimeTooLarge`], or
     /// [`CoreError::ForkDepthTooLarge`] when a selected request exceeds a
     /// bound; [`CoreError::Storage`] when the adapter does not implement bounded
     /// reads; or the same errors as [`Self::read`].

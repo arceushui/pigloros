@@ -4,7 +4,10 @@
 //! Reading from a forked child transparently stitches parent[`0..fork_seq`] + child events.
 //! Multi-level fork chains are supported: a child of a child walks the chain recursively.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Instant,
+};
 
 use pos_core::{
     clock::{AdmissionClock, Seq, SystemAdmissionClock, WallTime},
@@ -39,6 +42,68 @@ use pos_core::{
 thread_local! {
     /// Test-only evidence that bounded reads inspect only selected Event slots.
     static BOUNDED_EVENTS_EXAMINED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Test-only delay used to prove the elapsed bound covers Event materialization.
+    static BOUNDED_CLONE_DELAY_MILLIS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Test-only delay used to exercise the planning elapsed guard.
+    static BOUNDED_PLAN_DELAY_MILLIS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Test-only delay used to exercise the fork-chain elapsed guard.
+    static BOUNDED_CHAIN_DELAY_MILLIS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Test-only delay used to exercise the per-Event planning elapsed guard.
+    static BOUNDED_EVENT_DELAY_MILLIS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Test-only delay used to exercise the materialization-start elapsed guard.
+    static BOUNDED_MATERIALIZE_START_DELAY_MILLIS: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+    /// Test-only delay used to exercise the final materialization elapsed guard.
+    static BOUNDED_MATERIALIZE_FINAL_DELAY_MILLIS: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn bounded_clone_delay_for_test() {
+    let delay_millis = BOUNDED_CLONE_DELAY_MILLIS.with(std::cell::Cell::get);
+    if delay_millis != 0 {
+        std::thread::sleep(std::time::Duration::from_millis(delay_millis));
+    }
+}
+
+#[cfg(test)]
+fn bounded_plan_delay_for_test() {
+    let delay_millis = BOUNDED_PLAN_DELAY_MILLIS.with(std::cell::Cell::get);
+    if delay_millis != 0 {
+        std::thread::sleep(std::time::Duration::from_millis(delay_millis));
+    }
+}
+
+#[cfg(test)]
+fn bounded_chain_delay_for_test() {
+    let delay_millis = BOUNDED_CHAIN_DELAY_MILLIS.with(std::cell::Cell::get);
+    if delay_millis != 0 {
+        std::thread::sleep(std::time::Duration::from_millis(delay_millis));
+    }
+}
+
+#[cfg(test)]
+fn bounded_event_delay_for_test() {
+    let delay_millis = BOUNDED_EVENT_DELAY_MILLIS.with(std::cell::Cell::get);
+    if delay_millis != 0 {
+        std::thread::sleep(std::time::Duration::from_millis(delay_millis));
+    }
+}
+
+#[cfg(test)]
+fn bounded_materialize_start_delay_for_test() {
+    let delay_millis = BOUNDED_MATERIALIZE_START_DELAY_MILLIS.with(std::cell::Cell::get);
+    if delay_millis != 0 {
+        std::thread::sleep(std::time::Duration::from_millis(delay_millis));
+    }
+}
+
+#[cfg(test)]
+fn bounded_materialize_final_delay_for_test() {
+    let delay_millis = BOUNDED_MATERIALIZE_FINAL_DELAY_MILLIS.with(std::cell::Cell::get);
+    if delay_millis != 0 {
+        std::thread::sleep(std::time::Duration::from_millis(delay_millis));
+    }
 }
 
 /// In-memory event store. Thread-unsafe — intended for single-threaded tests and benchmarks.
@@ -63,6 +128,32 @@ pub struct MemoryStore {
     geographic_admission_links: HashMap<(TimelineId, EventId), GeoLocationAdmissionLinkV1>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
+}
+
+#[derive(Clone, Copy)]
+struct BoundedSegmentPage {
+    timeline: TimelineId,
+    raw_start: u64,
+    take: usize,
+    logical_offset: u64,
+}
+
+struct BoundedSegmentRequest<'a> {
+    chain: &'a [TimelineId],
+    index: usize,
+    timeline: TimelineId,
+    logical_offset: u64,
+    from: u64,
+    to: u64,
+    remaining: usize,
+    bounds: EventReadBounds,
+    started: Instant,
+    total_bytes: &'a mut usize,
+}
+
+fn bounded_elapsed_error(started: Instant, maximum_micros: u64) -> Option<CoreError> {
+    let elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    (elapsed_micros > maximum_micros).then_some(CoreError::ReadTimeTooLarge { elapsed_micros })
 }
 
 #[inline(never)]
@@ -452,87 +543,198 @@ impl MemoryStore {
         range: SeqRange,
         bounds: EventReadBounds,
     ) -> Result<Vec<Event>, CoreError> {
-        let chain = self.fork_chain_bounded(timeline_id, bounds.max_fork_depth())?;
+        let started = Instant::now();
+        if bounds.max_elapsed_micros() == 0 {
+            return Err(CoreError::ReadTimeTooLarge { elapsed_micros: 0 });
+        }
+        let chain = self.fork_chain_bounded(
+            timeline_id,
+            bounds.max_fork_depth(),
+            started,
+            bounds.max_elapsed_micros(),
+        )?;
+        self.plan_bounded_events(&chain, range, bounds, started)
+            .and_then(|plans| self.materialize_bounded_events(&plans, bounds, started))
+    }
+
+    fn plan_bounded_events(
+        &self,
+        chain: &[TimelineId],
+        range: SeqRange,
+        bounds: EventReadBounds,
+        started: Instant,
+    ) -> Result<Vec<BoundedSegmentPage>, CoreError> {
         let from = range.from.as_u64().max(1);
         let to = range.to.map_or(u64::MAX, Seq::as_u64);
         let mut logical_offset = 0_u64;
         let mut remaining = bounds.max_events();
-        let mut selected = Vec::new();
+        let mut total_bytes = 0_usize;
+        let mut plans = Vec::new();
 
         for (index, timeline) in chain.iter().enumerate() {
-            let state = self.state(*timeline);
-            let events = &state.events;
-            // `fork_chain_bounded` has already verified every Timeline in this chain.
-            let head = state.timeline.head.as_u64();
-            let event_count = u64::try_from(events.len()).unwrap_or(u64::MAX);
-            let boundary_is_valid = if events.is_empty() {
-                head == 0
-            } else {
-                head == event_count
-                    && events[0].seq == Seq::from_u64(1)
-                    && events[events.len() - 1].seq == Seq::from_u64(event_count)
-            };
-            if !boundary_is_valid {
-                return Err(CoreError::Storage(format!(
-                    "timeline {timeline} violates the contiguous Event sequence invariant"
-                )));
+            let planned = self.plan_bounded_segment(BoundedSegmentRequest {
+                chain,
+                index,
+                timeline: *timeline,
+                logical_offset,
+                from,
+                to,
+                remaining,
+                bounds,
+                started,
+                total_bytes: &mut total_bytes,
+            })?;
+            if let Some(plan) = planned {
+                remaining -= plan.take;
+                plans.push(plan);
             }
-            let fork_cap = chain.get(index + 1).map(|child| {
-                // A successor appears in the chain only when its Fork metadata
-                // names this Timeline, as verified by `fork_chain_bounded`.
-                self.timelines[child]
-                    .timeline
-                    .meta
-                    .fork_point
-                    .map(|(_, seq)| seq)
-            });
-            let fork_cap = fork_cap.flatten();
-            if fork_cap.is_some_and(|cap| cap.as_u64() > event_count) {
-                return Err(CoreError::Storage(format!(
-                    "Fork point exceeds parent Event head for timeline {timeline}"
-                )));
-            }
-            let segment_len = fork_cap.map_or(event_count, Seq::as_u64);
-            if let Some(plan) =
-                crate::stitch::plan_page(logical_offset, segment_len, from, to, remaining)
-            {
-                let raw_start = plan.raw_start;
-                let take = plan.take;
-                let start_index = usize::try_from(raw_start - 1).unwrap_or(usize::MAX);
-                let end_index = start_index.saturating_add(take);
-                let slice = &events[start_index..end_index];
-
-                for (offset, event) in slice.iter().enumerate() {
-                    #[cfg(test)]
-                    BOUNDED_EVENTS_EXAMINED.with(|count| count.set(count.get().saturating_add(1)));
-                    let raw_seq =
-                        raw_start.saturating_add(u64::try_from(offset).unwrap_or(u64::MAX));
-                    if event.seq != Seq::from_u64(raw_seq) {
-                        return Err(CoreError::Storage(format!(
-                            "timeline {timeline} violates the contiguous Event sequence invariant"
-                        )));
-                    }
-                    let payload_size = event.payload.as_slice().len();
-                    if payload_size > bounds.max_payload_bytes() {
-                        return Err(CoreError::PayloadTooLarge { size: payload_size });
-                    }
-                    let event_type_size = event.event_type.as_str().len();
-                    if event_type_size > bounds.max_event_type_bytes() {
-                        return Err(CoreError::EventMetadataTooLarge {
-                            field: "event_type",
-                            size: event_type_size,
-                        });
-                    }
-                    let mut event = event.clone();
-                    event.seq = Seq::from_u64(logical_offset.saturating_add(raw_seq));
-                    selected.push(event);
-                }
-                remaining -= take;
-            }
+            let segment_len = self.bounded_segment_length(chain, index, *timeline)?;
             logical_offset = logical_offset.saturating_add(segment_len);
             if remaining == 0 || logical_offset >= to {
                 break;
             }
+        }
+        Ok(plans)
+    }
+
+    fn plan_bounded_segment(
+        &self,
+        request: BoundedSegmentRequest<'_>,
+    ) -> Result<Option<BoundedSegmentPage>, CoreError> {
+        let BoundedSegmentRequest {
+            chain,
+            index,
+            timeline,
+            logical_offset,
+            from,
+            to,
+            remaining,
+            bounds,
+            started,
+            total_bytes,
+        } = request;
+        #[cfg(test)]
+        bounded_plan_delay_for_test();
+        if let Some(error) = bounded_elapsed_error(started, bounds.max_elapsed_micros()) {
+            return Err(error);
+        }
+        let state = self.state(timeline);
+        let events = &state.events;
+        let event_count = u64::try_from(events.len()).unwrap_or(u64::MAX);
+        let boundary_is_valid = if events.is_empty() {
+            state.timeline.head == Seq::ZERO
+        } else {
+            state.timeline.head.as_u64() == event_count
+                && events[0].seq == Seq::from_u64(1)
+                && events[events.len() - 1].seq == Seq::from_u64(event_count)
+        };
+        if !boundary_is_valid {
+            return Err(CoreError::Storage(format!(
+                "timeline {timeline} violates the contiguous Event sequence invariant"
+            )));
+        }
+        let segment_len = self.bounded_segment_length(chain, index, timeline)?;
+        let Some(page) = crate::stitch::plan_page(logical_offset, segment_len, from, to, remaining)
+        else {
+            return Ok(None);
+        };
+        let start_index = usize::try_from(page.raw_start - 1).unwrap_or(usize::MAX);
+        let end_index = start_index.saturating_add(page.take);
+        let slice = &events[start_index..end_index];
+        for (offset, event) in slice.iter().enumerate() {
+            #[cfg(test)]
+            bounded_event_delay_for_test();
+            if let Some(error) = bounded_elapsed_error(started, bounds.max_elapsed_micros()) {
+                return Err(error);
+            }
+            #[cfg(test)]
+            BOUNDED_EVENTS_EXAMINED.with(|count| count.set(count.get().saturating_add(1)));
+            let raw_seq = page
+                .raw_start
+                .saturating_add(u64::try_from(offset).unwrap_or(u64::MAX));
+            if event.seq != Seq::from_u64(raw_seq) {
+                return Err(CoreError::Storage(format!(
+                    "timeline {timeline} violates the contiguous Event sequence invariant"
+                )));
+            }
+            let payload_size = event.payload.as_slice().len();
+            if payload_size > bounds.max_payload_bytes() {
+                return Err(CoreError::PayloadTooLarge { size: payload_size });
+            }
+            let event_type_size = event.event_type.as_str().len();
+            if event_type_size > bounds.max_event_type_bytes() {
+                return Err(CoreError::EventMetadataTooLarge {
+                    field: "event_type",
+                    size: event_type_size,
+                });
+            }
+            *total_bytes =
+                (*total_bytes).saturating_add(payload_size.saturating_add(event_type_size));
+            if *total_bytes > bounds.max_total_bytes() {
+                return Err(CoreError::ReadBytesTooLarge { size: *total_bytes });
+            }
+        }
+        Ok(Some(BoundedSegmentPage {
+            timeline,
+            raw_start: page.raw_start,
+            take: page.take,
+            logical_offset,
+        }))
+    }
+
+    fn bounded_segment_length(
+        &self,
+        chain: &[TimelineId],
+        index: usize,
+        timeline: TimelineId,
+    ) -> Result<u64, CoreError> {
+        let event_count = u64::try_from(self.state(timeline).events.len()).unwrap_or(u64::MAX);
+        let fork_cap = chain.get(index + 1).and_then(|child| {
+            self.timelines[child]
+                .timeline
+                .meta
+                .fork_point
+                .map(|(_, seq)| seq)
+        });
+        if fork_cap.is_some_and(|cap| cap.as_u64() > event_count) {
+            return Err(CoreError::Storage(format!(
+                "Fork point exceeds parent Event head for timeline {timeline}"
+            )));
+        }
+        Ok(fork_cap.map_or(event_count, Seq::as_u64))
+    }
+
+    fn materialize_bounded_events(
+        &self,
+        plans: &[BoundedSegmentPage],
+        bounds: EventReadBounds,
+        started: Instant,
+    ) -> Result<Vec<Event>, CoreError> {
+        let mut selected = Vec::new();
+        for plan in plans {
+            #[cfg(test)]
+            bounded_materialize_start_delay_for_test();
+            if let Some(error) = bounded_elapsed_error(started, bounds.max_elapsed_micros()) {
+                return Err(error);
+            }
+            let events = &self.state(plan.timeline).events;
+            let start_index = usize::try_from(plan.raw_start - 1).unwrap_or(usize::MAX);
+            let end_index = start_index.saturating_add(plan.take);
+            for event in &events[start_index..end_index] {
+                let mut event = event.clone();
+                #[cfg(test)]
+                bounded_clone_delay_for_test();
+                event.seq = Seq::from_u64(plan.logical_offset.saturating_add(event.seq.as_u64()));
+                selected.push(event);
+                if let Some(error) = bounded_elapsed_error(started, bounds.max_elapsed_micros()) {
+                    return Err(error);
+                }
+            }
+        }
+        #[cfg(test)]
+        bounded_materialize_final_delay_for_test();
+        if let Some(error) = bounded_elapsed_error(started, bounds.max_elapsed_micros()) {
+            return Err(error);
         }
         Ok(selected)
     }
@@ -572,12 +774,19 @@ impl MemoryStore {
         &self,
         timeline_id: TimelineId,
         max_depth: usize,
+        started: Instant,
+        max_elapsed_micros: u64,
     ) -> Result<Vec<TimelineId>, CoreError> {
         let mut chain = Vec::new();
         let mut visited = HashSet::new();
         let mut current = timeline_id;
         let mut depth = 0_usize;
         loop {
+            #[cfg(test)]
+            bounded_chain_delay_for_test();
+            if let Some(error) = bounded_elapsed_error(started, max_elapsed_micros) {
+                return Err(error);
+            }
             if !visited.insert(current) {
                 return Err(CoreError::Storage(format!(
                     "fork ancestry contains a cycle at timeline {current}"
@@ -1738,6 +1947,119 @@ mod tests {
             )
             .unwrap();
         assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bounded_read_rejects_aggregate_event_bytes_before_clone() {
+        let mut store = MemoryStore::new();
+        let timeline = store.create_timeline("aggregate-bytes").unwrap();
+        let entity = EntityId::new();
+        store
+            .append(
+                timeline.id(),
+                &[
+                    EventDraft::new(entity, Kind::new("x"), CanonicalBytes::from_static(b"1234")),
+                    EventDraft::new(entity, Kind::new("x"), CanonicalBytes::from_static(b"5678")),
+                ],
+            )
+            .unwrap();
+
+        let error = store
+            .read_bounded(
+                timeline.id(),
+                SeqRange::all(),
+                EventReadBounds::new_with_total_bytes(4, 1, usize::MAX, 2, 9),
+            )
+            .unwrap_err();
+        assert!(matches!(error, CoreError::ReadBytesTooLarge { size: 10 }));
+
+        let events = store
+            .read_bounded(
+                timeline.id(),
+                SeqRange::all(),
+                EventReadBounds::new_with_total_bytes(4, 1, usize::MAX, 2, 10),
+            )
+            .unwrap();
+        assert_eq!(events.len(), 2);
+
+        let time_error = store
+            .read_bounded(
+                timeline.id(),
+                SeqRange::all(),
+                EventReadBounds::new_with_total_bytes_and_elapsed(4, 1, usize::MAX, 2, 10, 0),
+            )
+            .unwrap_err();
+        assert!(matches!(time_error, CoreError::ReadTimeTooLarge { .. }));
+
+        BOUNDED_CLONE_DELAY_MILLIS.with(|delay| delay.set(20));
+        let time_error = store
+            .read_bounded(
+                timeline.id(),
+                SeqRange::all(),
+                EventReadBounds::new_with_total_bytes_and_elapsed(4, 1, usize::MAX, 2, 10, 1_000),
+            )
+            .unwrap_err();
+        BOUNDED_CLONE_DELAY_MILLIS.with(|delay| delay.set(0));
+        assert!(matches!(time_error, CoreError::ReadTimeTooLarge { .. }));
+
+        BOUNDED_PLAN_DELAY_MILLIS.with(|delay| delay.set(20));
+        let time_error = store
+            .read_bounded(
+                timeline.id(),
+                SeqRange::all(),
+                EventReadBounds::new_with_total_bytes_and_elapsed(4, 1, usize::MAX, 2, 10, 1_000),
+            )
+            .unwrap_err();
+        BOUNDED_PLAN_DELAY_MILLIS.with(|delay| delay.set(0));
+        assert!(matches!(time_error, CoreError::ReadTimeTooLarge { .. }));
+
+        let child = store
+            .fork(timeline.id(), Seq::from_u64(2), "bounded-time-child")
+            .unwrap();
+        BOUNDED_CHAIN_DELAY_MILLIS.with(|delay| delay.set(20));
+        let time_error = store
+            .read_bounded(
+                child.id(),
+                SeqRange::all(),
+                EventReadBounds::new_with_total_bytes_and_elapsed(4, 1, usize::MAX, 2, 10, 1_000),
+            )
+            .unwrap_err();
+        BOUNDED_CHAIN_DELAY_MILLIS.with(|delay| delay.set(0));
+        assert!(matches!(time_error, CoreError::ReadTimeTooLarge { .. }));
+
+        BOUNDED_EVENT_DELAY_MILLIS.with(|delay| delay.set(20));
+        let time_error = store
+            .read_bounded(
+                timeline.id(),
+                SeqRange::all(),
+                EventReadBounds::new_with_total_bytes_and_elapsed(4, 1, usize::MAX, 2, 10, 1_000),
+            )
+            .unwrap_err();
+        BOUNDED_EVENT_DELAY_MILLIS.with(|delay| delay.set(0));
+        assert!(matches!(time_error, CoreError::ReadTimeTooLarge { .. }));
+
+        BOUNDED_MATERIALIZE_START_DELAY_MILLIS.with(|delay| delay.set(20));
+        let time_error = store
+            .read_bounded(
+                timeline.id(),
+                SeqRange::all(),
+                EventReadBounds::new_with_total_bytes_and_elapsed(4, 1, usize::MAX, 2, 10, 1_000),
+            )
+            .unwrap_err();
+        BOUNDED_MATERIALIZE_START_DELAY_MILLIS.with(|delay| delay.set(0));
+        assert!(matches!(time_error, CoreError::ReadTimeTooLarge { .. }));
+
+        BOUNDED_MATERIALIZE_FINAL_DELAY_MILLIS.with(|delay| delay.set(20));
+        let time_error = store
+            .read_bounded(
+                timeline.id(),
+                SeqRange::all(),
+                EventReadBounds::new_with_total_bytes_and_elapsed(4, 1, usize::MAX, 2, 10, 1_000),
+            )
+            .unwrap_err();
+        BOUNDED_MATERIALIZE_FINAL_DELAY_MILLIS.with(|delay| delay.set(0));
+        assert!(matches!(time_error, CoreError::ReadTimeTooLarge { .. }));
     }
 
     #[test]
