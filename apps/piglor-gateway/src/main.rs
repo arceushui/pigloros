@@ -5,8 +5,7 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use piglor_gateway::{
-    router, router_with_owntracks, spectator_router, AppState, Gateway, LedgerConfig,
-    LedgerWriteMode,
+    router_for_addr, AppState, Gateway, LedgerConfig, LedgerWriteMode, OwnTracksOwnerKey,
 };
 use piglor_ledger::LedgerView;
 use pos_store::{open_store, StoreConfig};
@@ -140,23 +139,6 @@ fn is_spectator_deployment(addr: SocketAddr) -> bool {
     !addr.ip().is_loopback()
 }
 
-fn router_for_addr(
-    addr: SocketAddr,
-    state: AppState,
-    owntracks_owner_key: Option<[u8; 32]>,
-) -> axum::Router {
-    if is_spectator_deployment(addr) {
-        eprintln!(
-            "piglor-gateway serving public Prediction Ledger routes only at {addr}; Timeline and write routes require loopback until #68 authentication exists"
-        );
-        spectator_router(state)
-    } else if let Some(owner_key) = owntracks_owner_key {
-        router_with_owntracks(state, owner_key)
-    } else {
-        router(state)
-    }
-}
-
 fn load_ledger() -> Result<(LedgerView, LedgerWriteMode), pos_plugin_ledger::LedgerError> {
     let source = std::env::var_os("LEDGER_SOURCE").map(PathBuf::from);
     LedgerConfig::new(
@@ -202,13 +184,14 @@ async fn serve_with_owntracks(
         None
     } else {
         owntracks_owner_key_path
-            .map(owntracks::load_owner_key)
+            .map(OwnTracksOwnerKey::load)
             .transpose()?
     };
-    let gateway = match (owntracks_owner_key, sqlite_path) {
-        (Some(_), Some(path)) => {
-            Gateway::new_with_owntracks_ingress(pos_store::sqlite::SqliteStore::open(path)?)
-        }
+    let gateway = match (owntracks_owner_key.as_ref(), sqlite_path) {
+        (Some(owner_key), Some(path)) => Gateway::new_with_owntracks_ingress(
+            pos_store::sqlite::SqliteStore::open(path)?,
+            owner_key,
+        ),
         (None, _) => Gateway::new(open_store(config)?),
         (Some(_), None) => return Err("OwnTracks ingress requires an SQLite path".into()),
     };
@@ -217,7 +200,7 @@ async fn serve_with_owntracks(
         ledger_view,
         ledger_write,
     };
-    let app = router_for_addr(addr, state, owntracks_owner_key);
+    let app = router_for_addr(addr, state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     eprintln!("piglor-gateway listening on http://{addr}");
     axum::serve(listener, app)
@@ -328,6 +311,20 @@ mod tests {
         ])
         .unwrap_err();
         assert!(repeated.to_string().contains("once"));
+    }
+
+    #[test]
+    fn owntracks_argument_parser_rejects_missing_path_and_extra_positionals() {
+        let missing_path = parse_serve_args(&["--owntracks-owner-key".to_owned()]).unwrap_err();
+        assert!(missing_path.to_string().contains("path is required"));
+
+        let too_many = parse_serve_args(&[
+            "127.0.0.1:0".to_owned(),
+            "one.db".to_owned(),
+            "extra".to_owned(),
+        ])
+        .unwrap_err();
+        assert!(too_many.to_string().contains("at most"));
     }
 
     async fn serve_http_requests(bind_ip: IpAddr, requests: &[&str]) -> Vec<String> {

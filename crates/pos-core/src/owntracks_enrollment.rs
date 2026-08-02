@@ -111,8 +111,8 @@ pub trait OwnTracksEnrollmentStore {
 impl OwnTracksEnrollmentStateV1 {
     /// Bind authenticated ingress material to the current active enrollment.
     ///
-    /// This keeps verifier and fence details within core while an adapter owns
-    /// keyed derivation and durable enrollment lookup.
+    /// This keeps verifier and fence details within core while the private
+    /// executor owns keyed derivation and the adapter owns durable lookup.
     ///
     /// # Errors
     /// Returns a bounded validation error unless this is an active enrollment
@@ -120,9 +120,6 @@ impl OwnTracksEnrollmentStateV1 {
     pub fn prepare_owntracks_ingress(
         &self,
         input: &OwnTracksIngressInputV1,
-        candidate_verifier: [u8; 32],
-        rate_key: [u8; 32],
-        dedup: ([u8; 32], [u8; 32]),
     ) -> Result<PreparedOwnTracksIngressV1, CoreError> {
         let (timeline, entity, fence, verifier) = match (
             self.timeline,
@@ -135,17 +132,17 @@ impl OwnTracksEnrollmentStateV1 {
             {
                 (timeline, entity, fence, verifier)
             }
-            _ => return Err(CoreError::GeographicAdmissionValidationFailed),
+            _ => return Err(CoreError::GeographicAdmissionAuthenticationFailed),
         };
-        if !constant_time_equal(&verifier, &candidate_verifier) {
-            return Err(CoreError::GeographicAdmissionValidationFailed);
+        if !constant_time_equal(&verifier, input.candidate_verifier()) {
+            return Err(CoreError::GeographicAdmissionAuthenticationFailed);
         }
         let consent = fence.consent();
         if consent.withdrawn() || consent.admission_epoch() == 0 {
             return Err(CoreError::GeographicAdmissionValidationFailed);
         }
         Ok(PreparedOwnTracksIngressV1::from_authenticated_parts(
-            rate_key,
+            *input.rate_key(),
             GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
                 timeline,
                 entity,
@@ -157,7 +154,7 @@ impl OwnTracksEnrollmentStateV1 {
                     consent.withdrawn(),
                     consent.admission_epoch(),
                 ),
-                dedup,
+                (*input.intent(), *input.fingerprint()),
             )),
         ))
     }

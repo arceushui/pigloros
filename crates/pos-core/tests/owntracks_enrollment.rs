@@ -52,3 +52,15 @@ fn withdrawn_consent_cannot_pair_an_enrollment() {
 
     assert!(result.is_err());
 }
+
+#[test]
+fn absent_enrollment_persistence_round_trips_and_garbage_is_rejected() {
+    let absent = OwnTracksEnrollmentStateV1::absent();
+    let bytes = absent
+        .persistence_bytes()
+        .expect("encode absent enrollment");
+    let restored = OwnTracksEnrollmentStateV1::from_persistence_bytes(&bytes)
+        .expect("decode absent enrollment");
+    assert_eq!(restored.status(), OwnTracksEnrollmentStatusV1::Absent);
+    assert!(OwnTracksEnrollmentStateV1::from_persistence_bytes(&[0xff]).is_err());
+}

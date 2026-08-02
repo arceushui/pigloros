@@ -5,41 +5,50 @@ use crate::{geo_admission::GeoLocationAdmissionRequestV1, CanonicalBytes, CoreEr
 /// Bounded input passed from the private gateway executor to a store adapter.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OwnTracksIngressInputV1 {
-    owner_key: [u8; 32],
-    basic_handle: [u8; 32],
-    basic_secret: [u8; 32],
+    candidate_verifier: [u8; 32],
+    rate_key: [u8; 32],
+    intent: [u8; 32],
+    fingerprint: [u8; 32],
     payload: CanonicalBytes,
 }
 
 impl OwnTracksIngressInputV1 {
+    /// Build an ingress value from executor-derived opaque material.
     #[must_use]
     pub const fn new(
-        owner_key: [u8; 32],
-        basic_handle: [u8; 32],
-        basic_secret: [u8; 32],
+        candidate_verifier: [u8; 32],
+        rate_key: [u8; 32],
+        intent: [u8; 32],
+        fingerprint: [u8; 32],
         payload: CanonicalBytes,
     ) -> Self {
         Self {
-            owner_key,
-            basic_handle,
-            basic_secret,
+            candidate_verifier,
+            rate_key,
+            intent,
+            fingerprint,
             payload,
         }
     }
 
     #[must_use]
-    pub const fn owner_key(&self) -> &[u8; 32] {
-        &self.owner_key
+    pub const fn candidate_verifier(&self) -> &[u8; 32] {
+        &self.candidate_verifier
     }
 
     #[must_use]
-    pub const fn basic_handle(&self) -> &[u8; 32] {
-        &self.basic_handle
+    pub const fn rate_key(&self) -> &[u8; 32] {
+        &self.rate_key
     }
 
     #[must_use]
-    pub const fn basic_secret(&self) -> &[u8; 32] {
-        &self.basic_secret
+    pub const fn intent(&self) -> &[u8; 32] {
+        &self.intent
+    }
+
+    #[must_use]
+    pub const fn fingerprint(&self) -> &[u8; 32] {
+        &self.fingerprint
     }
 
     #[must_use]
@@ -51,6 +60,14 @@ impl OwnTracksIngressInputV1 {
 /// Opaque per-enrollment key used only by the executor's in-memory rate limiter.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct OwnTracksIngressRateKeyV1(pub(crate) [u8; 32]);
+
+impl OwnTracksIngressRateKeyV1 {
+    /// Reconstitute an opaque rate key from a trusted executor boundary.
+    #[must_use]
+    pub const fn from_owner_keyed_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
 
 /// Authenticated ingress that is ready for the executor to rate-limit and admit.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,7 +88,7 @@ impl PreparedOwnTracksIngressV1 {
     }
 
     #[must_use]
-    pub fn from_authenticated_parts(
+    pub(crate) fn from_authenticated_parts(
         rate_key: [u8; 32],
         admission_request: GeoLocationAdmissionRequestV1,
     ) -> Self {

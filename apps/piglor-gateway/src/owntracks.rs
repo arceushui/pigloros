@@ -123,7 +123,7 @@ fn parse_consent_policy(text: &str) -> Result<ConsentPolicyV1, OwnTracksCommandE
         toml::from_str(text).map_err(|_| OwnTracksCommandError::PolicyConfigurationUnavailable)?;
     if raw.schema_version != 1
         || raw.consent_revision == 0
-        || raw.policy_version == 0
+        || raw.policy_version != 1
         || raw.binding_revision == 0
         || raw.withdrawn
         || raw.purpose != "local_pairing"
@@ -480,6 +480,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::{create_or_load_owner_key, derive_owntracks_verifier, generate_pairing_credential};
     use pos_core::{

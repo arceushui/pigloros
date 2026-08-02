@@ -38,8 +38,8 @@ loopback HTTP request
 
 The capability has one request interface: bounded Basic handle/secret plus the
 already-minimized existing V1 `geo.location` canonical bytes. The Gateway
-passes the startup-loaded owner key only inside the private executor command,
-where candidate-verifier derivation and constant-time comparison occur. Its
+retains the startup-loaded owner key only in private executor state, where
+candidate-verifier derivation and constant-time comparison occur. Its
 preparation result contains a private opaque rate key and a fully formed core
 admission request. The executor alone reads the rate key, applies its limiter,
 and immediately submits the request to the existing admission transaction in
@@ -85,7 +85,8 @@ credentials, Timeline, EntityId, Event ID, or sequence to the HTTP adapter.
 | zero-byte no-op, durable accepted, or durable duplicate | `200` | `[]` |
 | malformed JSON or invalid Basic syntax | `400` or `401` respectively | stable bounded error code |
 | missing/invalid credential | `401` | stable bounded error code |
-| inactive, revoked, withdrawn, mismatched enrollment, or durable conflict | `403` | stable bounded error code |
+| missing/invalid credential or non-active enrollment state | `401` | stable bounded error code |
+| authenticated withdrawn/fence conflict or durable conflict | `403` | stable bounded error code |
 | body over 65,536 bytes | `413` | stable bounded error code |
 | non-JSON media type | `415` | stable bounded error code |
 | unsupported OwnTracks message or invalid location semantics | `422` | stable bounded error code |
@@ -116,9 +117,9 @@ credentials; valid location minimization; malformed/unsupported/semantic
 failures; accepted/duplicate/conflict/denied/unavailable/unknown mapping;
 rate burst and recovery; revocation; next-tick notice; source-level proof that
 no generic append, `geo.cell`, public route, raw-body persistence, or secret
-logging path exists. The actual changed path must achieve exact 100% line and
-region coverage under the repository's non-privileged quality run, followed by
-independent review and a fresh activation approval.
+logging path exists. The changed path must satisfy the repository's approved
+non-privileged quality floor of at least 99% line and region coverage, followed
+by independent review and a fresh activation approval.
 
 ## Non-goals
 

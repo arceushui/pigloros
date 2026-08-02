@@ -11,7 +11,7 @@ mod http;
 mod ledger_config;
 mod owntracks_http;
 
-pub use http::{router, router_with_owntracks, spectator_router, AppState};
+pub use http::{router, router_for_addr, spectator_router, AppState};
 pub use ledger_config::{LedgerConfig, LedgerGateway, LedgerWriteMode};
 
 use pos_core::{
@@ -26,12 +26,15 @@ use pos_core::{
         EventReadBounds, EventStore, PurgeOutcome, SeqRange,
     },
     timeline::Timeline,
-    CoreError, OwnTracksIngressInputV1, OwnTracksIngressStore,
+    CoreError,
 };
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
 use pos_plugin_world::EVENT_TYPE_ACTION;
 use serde::{Deserialize, Serialize};
-use std::num::NonZeroUsize;
+use std::{
+    num::NonZeroUsize,
+    path::{Path, PathBuf},
+};
 use thiserror::Error;
 use tokio::sync::broadcast;
 use ulid::Ulid;
@@ -53,15 +56,85 @@ pub struct LedgerEntryView {
 
 #[cfg(test)]
 mod coverage_tests {
-    use super::Gateway;
+    use super::{Gateway, OwnTracksOwnerKey};
     use pos_core::{
         geo_admission::{
             GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1,
         },
         CanonicalBytes, EntityId, EventStore, OwnTracksEnrollmentRequestV1,
-        OwnTracksEnrollmentStore, OwnTracksIngressInputV1,
+        OwnTracksEnrollmentStore,
     };
     use pos_store::{memory::MemoryStore, open_store, StoreConfig};
+    use std::path::Path;
+
+    #[cfg(unix)]
+    #[test]
+    fn owntracks_owner_key_load_requires_an_existing_private_32_byte_file() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let directory = std::env::temp_dir().join(format!(
+            "piglor-gateway-owner-key-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after Unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("owner.key");
+        std::fs::write(&path, [7_u8; 32]).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        assert!(OwnTracksOwnerKey::load(&path).is_ok());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(OwnTracksOwnerKey::load(&path).is_err());
+        assert!(OwnTracksOwnerKey::load(&directory.join("missing.key")).is_err());
+        assert!(OwnTracksOwnerKey::load(&directory).is_err());
+
+        let short_path = directory.join("short.key");
+        std::fs::write(&short_path, [8_u8; 31]).unwrap();
+        std::fs::set_permissions(&short_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(OwnTracksOwnerKey::load(&short_path).is_err());
+
+        let target_path = directory.join("target.key");
+        std::fs::write(&target_path, [9_u8; 32]).unwrap();
+        std::fs::set_permissions(&target_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let symlink_path = directory.join("symlink.key");
+        symlink(&target_path, &symlink_path).unwrap();
+        assert!(OwnTracksOwnerKey::load(&symlink_path).is_err());
+
+        let symlink_directory = directory.join("symlink-directory");
+        symlink(&directory, &symlink_directory).unwrap();
+        assert!(OwnTracksOwnerKey::load(&symlink_directory.join("owner.key")).is_err());
+
+        let insecure_directory = directory.join("insecure");
+        std::fs::create_dir(&insecure_directory).unwrap();
+        std::fs::set_permissions(&insecure_directory, std::fs::Permissions::from_mode(0o777))
+            .unwrap();
+        assert!(OwnTracksOwnerKey::load(&insecure_directory.join("owner.key")).is_err());
+
+        let non_directory = directory.join("not-a-directory");
+        std::fs::write(&non_directory, [10_u8; 1]).unwrap();
+        assert!(OwnTracksOwnerKey::load(&non_directory.join("owner.key")).is_err());
+        assert!(OwnTracksOwnerKey::load(Path::new("/")).is_err());
+
+        let relative_directory = format!(
+            ".codex-owntracks-owner-key-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after Unix epoch")
+                .as_nanos()
+        );
+        std::fs::create_dir(&relative_directory).unwrap();
+        let relative_path = Path::new(&relative_directory).join("owner.key");
+        std::fs::write(&relative_path, [11_u8; 32]).unwrap();
+        std::fs::set_permissions(&relative_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(OwnTracksOwnerKey::load(&relative_path).is_ok());
+        std::fs::remove_dir_all(relative_directory).unwrap();
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[tokio::test]
     async fn identified_conflict_is_returned() {
@@ -158,11 +231,14 @@ mod coverage_tests {
                 *blake3::keyed_hash(&OWNER_KEY, &material).as_bytes(),
             ))
             .unwrap();
-        let gateway = Gateway::new_with_owntracks_ingress(store);
+        let gateway = Gateway::new_with_owntracks_ingress_for_test(store, OWNER_KEY);
+        gateway
+            .create_timeline("owntracks-generic-event-store")
+            .await
+            .unwrap();
         let mut notices = gateway.subscribe();
         let input = || {
-            OwnTracksIngressInputV1::new(
-                OWNER_KEY,
+            (
                 HANDLE,
                 SECRET,
                 CanonicalBytes::from_static(b"existing-v1-geo-location-payload"),
@@ -171,13 +247,13 @@ mod coverage_tests {
 
         for _ in 0..5 {
             assert!(!gateway
-                .admit_owntracks_ingress(input())
+                .admit_owntracks_ingress(input().0, input().1, input().2)
                 .await
                 .unwrap()
                 .is_rate_limited());
         }
         assert!(gateway
-            .admit_owntracks_ingress(input())
+            .admit_owntracks_ingress(input().0, input().1, input().2)
             .await
             .unwrap()
             .is_rate_limited());
@@ -186,6 +262,12 @@ mod coverage_tests {
             notices.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Empty)
         ));
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        assert!(!gateway
+            .admit_owntracks_ingress(input().0, input().1, input().2)
+            .await
+            .unwrap()
+            .is_rate_limited());
     }
 
     #[tokio::test]
@@ -272,6 +354,7 @@ pub struct Gateway {
     store: executor::StoreExecutor,
     bus: broadcast::Sender<EventNotice>,
     limits: GatewayLimits,
+    owntracks_enabled: bool,
 }
 
 /// Resource bounds applied by the local-first Gateway process.
@@ -375,6 +458,118 @@ pub enum GatewayError {
     /// Ledger store is not configured.
     #[error("ledger store not available")]
     LedgerUnavailable,
+    /// The existing `OwnTracks` owner-key file failed the activation policy.
+    #[error("OwnTracks owner-key file is unavailable")]
+    OwnTracksOwnerKeyUnavailable,
+}
+
+/// An existing, owner-only `OwnTracks` activation key loaded from disk.
+///
+/// The key bytes are intentionally opaque to callers. The only public way to
+/// construct this value is [`Self::load`], which rejects missing, unsafe, or
+/// malformed owner-key files before the ingress-capable Gateway is created.
+#[derive(Clone)]
+pub struct OwnTracksOwnerKey([u8; 32]);
+
+impl OwnTracksOwnerKey {
+    /// Load an existing owner-only key without creating or rotating it.
+    ///
+    /// # Errors
+    /// Returns a bounded error when the path, permissions, file type, or key
+    /// length does not satisfy the local activation policy.
+    pub fn load(path: &Path) -> Result<Self, GatewayError> {
+        let absolute = absolute_owner_key_path(path)?;
+        validate_owner_key_ancestors(&absolute)?;
+        let metadata = std::fs::symlink_metadata(&absolute)
+            .map_err(|_| GatewayError::OwnTracksOwnerKeyUnavailable)?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || owner_key_is_permissive(&metadata)
+        {
+            return Err(GatewayError::OwnTracksOwnerKeyUnavailable);
+        }
+        if metadata.len() != 32 {
+            return Err(GatewayError::OwnTracksOwnerKeyUnavailable);
+        }
+        let bytes =
+            std::fs::read(absolute).map_err(|_| GatewayError::OwnTracksOwnerKeyUnavailable)?;
+        let bytes = bytes
+            .try_into()
+            .map_err(|_| GatewayError::OwnTracksOwnerKeyUnavailable)?;
+        Ok(Self(bytes))
+    }
+}
+
+#[cfg(unix)]
+fn absolute_owner_key_path(path: &Path) -> Result<PathBuf, GatewayError> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .map_err(|_| GatewayError::OwnTracksOwnerKeyUnavailable)
+    }
+}
+
+#[cfg(not(unix))]
+fn absolute_owner_key_path(_path: &Path) -> Result<PathBuf, GatewayError> {
+    Err(GatewayError::OwnTracksOwnerKeyUnavailable)
+}
+
+#[cfg(unix)]
+fn validate_owner_key_ancestors(path: &Path) -> Result<(), GatewayError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let parent = path
+        .parent()
+        .ok_or(GatewayError::OwnTracksOwnerKeyUnavailable)?;
+    for (distance, ancestor) in parent.ancestors().enumerate() {
+        let metadata = std::fs::symlink_metadata(ancestor)
+            .map_err(|_| GatewayError::OwnTracksOwnerKeyUnavailable)?;
+        let mode = metadata.mode();
+        let writable_by_group_or_other = mode & 0o022 != 0;
+        let sticky = mode & 0o1000 != 0;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_dir()
+            || (writable_by_group_or_other && (distance == 0 || !sticky))
+        {
+            return Err(GatewayError::OwnTracksOwnerKeyUnavailable);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_owner_key_ancestors(_path: &Path) -> Result<(), GatewayError> {
+    Err(GatewayError::OwnTracksOwnerKeyUnavailable)
+}
+
+#[cfg(unix)]
+fn owner_key_is_permissive(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    metadata.mode() & 0o077 != 0
+}
+
+#[cfg(not(unix))]
+const fn owner_key_is_permissive(_metadata: &std::fs::Metadata) -> bool {
+    true
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OwnTracksIngressResult {
+    RateLimited,
+    Accepted,
+    Duplicate,
+    Conflict,
+    Unavailable,
+}
+
+impl OwnTracksIngressResult {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) const fn is_rate_limited(self) -> bool {
+        matches!(self, Self::RateLimited)
+    }
 }
 
 impl From<executor::StoreExecutorError> for GatewayError {
@@ -396,6 +591,7 @@ impl Gateway {
             store: executor::StoreExecutor::new(store),
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: false,
         }
     }
 
@@ -413,6 +609,7 @@ impl Gateway {
             store: executor::StoreExecutor::new_with_geo_location_admission(store),
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: false,
         }
     }
 
@@ -421,15 +618,30 @@ impl Gateway {
     /// This does not register an HTTP route. The private executor performs
     /// authentication, rate limiting, and geographic admission in one queue turn.
     #[must_use]
-    pub fn new_with_owntracks_ingress<S>(store: S) -> Self
+    pub fn new_with_owntracks_ingress(
+        store: pos_store::sqlite::SqliteStore,
+        owner_key: &OwnTracksOwnerKey,
+    ) -> Self {
+        let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        Self {
+            store: executor::StoreExecutor::new_with_owntracks_ingress(store, owner_key.0),
+            bus,
+            limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: true,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_owntracks_ingress_for_test<S>(store: S, owner_key: [u8; 32]) -> Self
     where
-        S: EventStore + GeoLocationAdmissionStore + OwnTracksIngressStore + 'static,
+        S: EventStore + GeoLocationAdmissionStore + pos_core::OwnTracksIngressStore + 'static,
     {
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         Self {
-            store: executor::StoreExecutor::new_with_owntracks_ingress(store),
+            store: executor::StoreExecutor::new_with_owntracks_ingress(store, owner_key),
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: true,
         }
     }
 
@@ -475,26 +687,41 @@ impl Gateway {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn admit_owntracks_ingress(
         &self,
-        input: OwnTracksIngressInputV1,
-    ) -> Result<executor::OwnTracksIngressOutcome, GatewayError> {
-        let outcome = self.store.admit_owntracks_ingress(input).await?;
-        if let executor::OwnTracksIngressOutcome::Admitted {
-            outcome: admission,
-            timeline,
-            entity,
-        } = &outcome
-        {
-            if admission.is_accepted() {
-                let event_id = admission
-                    .event_id()
-                    .expect("accepted geographic admission always carries an Event ID");
-                let seq = admission
-                    .event_seq()
-                    .expect("accepted geographic admission always carries an Event sequence");
-                self.publish_geographic_notice(*timeline, event_id, *entity, seq);
+        basic_handle: [u8; 32],
+        basic_secret: [u8; 32],
+        payload: CanonicalBytes,
+    ) -> Result<OwnTracksIngressResult, GatewayError> {
+        let outcome = self
+            .store
+            .admit_owntracks_ingress(basic_handle, basic_secret, payload)
+            .await?;
+        match outcome {
+            executor::OwnTracksIngressOutcome::RateLimited => {
+                Ok(OwnTracksIngressResult::RateLimited)
+            }
+            executor::OwnTracksIngressOutcome::Admitted {
+                outcome: admission,
+                timeline,
+                entity,
+            } => {
+                if admission.is_accepted() {
+                    let event_id = admission
+                        .event_id()
+                        .expect("accepted geographic admission always carries an Event ID");
+                    let seq = admission
+                        .event_seq()
+                        .expect("accepted geographic admission always carries an Event sequence");
+                    self.publish_geographic_notice(timeline, event_id, entity, seq);
+                    Ok(OwnTracksIngressResult::Accepted)
+                } else if admission.is_duplicate() {
+                    Ok(OwnTracksIngressResult::Duplicate)
+                } else if admission.is_conflict() {
+                    Ok(OwnTracksIngressResult::Conflict)
+                } else {
+                    Ok(OwnTracksIngressResult::Unavailable)
+                }
             }
         }
-        Ok(outcome)
     }
 
     /// Subscribe to live append notices (WebSocket / tests).
@@ -848,6 +1075,7 @@ impl Gateway {
             store: executor::StoreExecutor::new(store),
             bus: broadcast::channel(capacity).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: false,
         }
     }
 
@@ -857,6 +1085,7 @@ impl Gateway {
             store,
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: false,
         }
     }
 
@@ -866,6 +1095,7 @@ impl Gateway {
             store: executor::StoreExecutor::new(store),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits,
+            owntracks_enabled: false,
         }
     }
 }
@@ -2370,6 +2600,7 @@ mod tests {
             })),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: false,
         };
         assert!(matches!(
             fail_create.create_timeline("x").await,
@@ -2382,6 +2613,7 @@ mod tests {
             })),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: false,
         };
         assert!(matches!(
             fail_list.create_timeline("x").await,
@@ -2394,6 +2626,7 @@ mod tests {
             })),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: false,
         };
         let tl = empty_append.create_timeline("e").await.unwrap();
         let err = empty_append
@@ -2413,6 +2646,7 @@ mod tests {
             })),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: false,
         };
         let err = fail_get_timeline
             .append_action(
@@ -2431,6 +2665,7 @@ mod tests {
             })),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: false,
         };
         let tl = fail_append.create_timeline("a").await.unwrap();
         let err = fail_append
@@ -2450,6 +2685,7 @@ mod tests {
             })),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: false,
         };
         let err = fail_read
             .read_events_page(&TimelineId::new().to_string(), 0, 1)

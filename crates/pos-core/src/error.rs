@@ -46,6 +46,9 @@ pub enum CoreError {
     #[error("geographic admission validation failed")]
     GeographicAdmissionValidationFailed,
 
+    #[error("geographic admission authentication failed")]
+    GeographicAdmissionAuthenticationFailed,
+
     #[error("geographic admission unavailable")]
     GeographicAdmissionUnavailable,
 

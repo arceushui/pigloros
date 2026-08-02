@@ -1,32 +1,19 @@
 //! Strict local HTTP decoding for V1 `OwnTracks` ingress.
 
-use crate::{executor::OwnTracksIngressOutcome, Gateway, GatewayError};
+use crate::{Gateway, GatewayError, OwnTracksIngressResult};
 use axum::{
     body::{to_bytes, Body},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use pos_core::{CanonicalBytes, CoreError, OwnTracksIngressInputV1};
-use pos_plugin_geo::{GeoLocationPayload, SpatialCloaker, Wgs84Point};
-use serde::Deserialize;
-
+use pos_core::{CanonicalBytes, CoreError};
+use pos_plugin_geo::{
+    CompactLocationMetadata, CompactLocationObservation, SourceTimeBucket, V1SpatialCloaker,
+    Wgs84Point,
+};
 pub(crate) const OWNTRACKS_MAX_BODY_BYTES: usize = 65_536;
 
-#[derive(Deserialize)]
-struct LocationV1 {
-    #[serde(rename = "_type")]
-    kind: String,
-    lat: f64,
-    lon: f64,
-    tst: serde_json::Number,
-}
-
-pub(crate) async fn post_owntracks(
-    gateway: Gateway,
-    owner_key: [u8; 32],
-    headers: HeaderMap,
-    body: Body,
-) -> Response {
+pub(crate) async fn post_owntracks(gateway: Gateway, headers: HeaderMap, body: Body) -> Response {
     let Ok(bytes) = to_bytes(body, OWNTRACKS_MAX_BODY_BYTES).await else {
         return error(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large");
     };
@@ -39,16 +26,20 @@ pub(crate) async fn post_owntracks(
     let Some((handle, secret)) = basic_credentials(&headers) else {
         return error(StatusCode::UNAUTHORIZED, "unauthorized");
     };
-    let Some(payload) = minimize_location(&bytes) else {
-        return error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_location");
+    let payload = match minimize_location(&bytes) {
+        Ok(payload) => payload,
+        Err(LocationDecodeError::MalformedJson) => {
+            return error(StatusCode::BAD_REQUEST, "malformed_json");
+        }
+        Err(LocationDecodeError::InvalidLocation) => {
+            return error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_location");
+        }
     };
     match gateway
-        .admit_owntracks_ingress(OwnTracksIngressInputV1::new(
-            owner_key, handle, secret, payload,
-        ))
+        .admit_owntracks_ingress(handle, secret, payload)
         .await
     {
-        Ok(OwnTracksIngressOutcome::RateLimited) => {
+        Ok(OwnTracksIngressResult::RateLimited) => {
             let mut response = error(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
             response.headers_mut().insert(
                 header::RETRY_AFTER,
@@ -56,14 +47,18 @@ pub(crate) async fn post_owntracks(
             );
             response
         }
-        Ok(OwnTracksIngressOutcome::Admitted { outcome, .. })
-            if outcome.is_accepted() || outcome.is_duplicate() =>
-        {
+        Ok(OwnTracksIngressResult::Accepted | OwnTracksIngressResult::Duplicate) => {
             (StatusCode::OK, "[]").into_response()
         }
-        Ok(OwnTracksIngressOutcome::Admitted { .. })
+        Ok(OwnTracksIngressResult::Conflict)
         | Err(GatewayError::Store(CoreError::GeographicAdmissionValidationFailed)) => {
             error(StatusCode::FORBIDDEN, "forbidden")
+        }
+        Ok(OwnTracksIngressResult::Unavailable) => {
+            error(StatusCode::SERVICE_UNAVAILABLE, "unavailable")
+        }
+        Err(GatewayError::Store(CoreError::GeographicAdmissionAuthenticationFailed)) => {
+            error(StatusCode::UNAUTHORIZED, "unauthorized")
         }
         Err(_) => error(StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
     }
@@ -87,23 +82,39 @@ fn basic_credentials(headers: &HeaderMap) -> Option<([u8; 32], [u8; 32])> {
     Some((decode_hex_32(handle)?, decode_hex_32(secret)?))
 }
 
-fn minimize_location(bytes: &[u8]) -> Option<CanonicalBytes> {
-    let location: LocationV1 = serde_json::from_slice(bytes).ok()?;
-    if location.kind != "location"
-        || (location.tst.as_i64().is_none() && location.tst.as_u64().is_none())
-    {
-        return None;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LocationDecodeError {
+    MalformedJson,
+    InvalidLocation,
+}
+
+fn minimize_location(bytes: &[u8]) -> Result<CanonicalBytes, LocationDecodeError> {
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| LocationDecodeError::MalformedJson)?;
+    let object = value
+        .as_object()
+        .ok_or(LocationDecodeError::InvalidLocation)?;
+    if object.get("_type").and_then(serde_json::Value::as_str) != Some("location") {
+        return Err(LocationDecodeError::InvalidLocation);
     }
-    let point = Wgs84Point::new(location.lat, location.lon).ok()?;
-    let cell = SpatialCloaker::new(0.1).ok()?.cloak(point);
-    let payload = GeoLocationPayload {
-        cell_lat: cell.latitude(),
-        cell_lng: cell.longitude(),
-        resolution: 0.1,
-    };
-    let mut canonical = Vec::new();
-    ciborium::into_writer(&payload, &mut canonical).ok()?;
-    Some(CanonicalBytes::from_vec(canonical))
+    let latitude = object
+        .get("lat")
+        .and_then(serde_json::Value::as_f64)
+        .ok_or(LocationDecodeError::InvalidLocation)?;
+    let longitude = object
+        .get("lon")
+        .and_then(serde_json::Value::as_f64)
+        .ok_or(LocationDecodeError::InvalidLocation)?;
+    let source_time = object
+        .get("tst")
+        .and_then(serde_json::Value::as_i64)
+        .ok_or(LocationDecodeError::InvalidLocation)?;
+    let point =
+        Wgs84Point::new(latitude, longitude).map_err(|_| LocationDecodeError::InvalidLocation)?;
+    let cell = V1SpatialCloaker::new().cloak(point);
+    let metadata =
+        CompactLocationMetadata::v1(SourceTimeBucket::new(source_time.div_euclid(15 * 60)));
+    Ok(CompactLocationObservation::new(cell, metadata).canonical_bytes())
 }
 
 fn decode_hex_32(value: &[u8]) -> Option<[u8; 32]> {
@@ -175,6 +186,7 @@ fn error(status: StatusCode, code: &'static str) -> Response {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::{basic_credentials, minimize_location, post_owntracks};
     use crate::Gateway;
@@ -186,8 +198,8 @@ mod tests {
         EntityId, EventStore, GeoLocationAdmissionFenceV1, OwnTracksEnrollmentRequestV1,
         OwnTracksEnrollmentStore,
     };
-    use pos_plugin_geo::GeoLocationPayload;
-    use pos_store::{open_store, StoreConfig};
+    use pos_store::{memory::MemoryStore, open_store, StoreConfig};
+    use tokio::sync::mpsc;
 
     #[test]
     fn basic_credentials_reject_malformed_values() {
@@ -243,24 +255,61 @@ mod tests {
         encoded
     }
 
+    fn authenticated_headers(content_type: &'static str) -> HeaderMap {
+        let credential = format!("{}:{}", "0".repeat(64), "1".repeat(64));
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Basic {}", base64_encode(&credential))).unwrap(),
+        );
+        headers
+    }
+
+    fn location_body() -> Body {
+        Body::from(&br#"{"_type":"location","lat":37.7749,"lon":-122.4194,"tst":1}"#[..])
+    }
+
+    fn enrolled_store() -> MemoryStore {
+        const OWNER_KEY: [u8; 32] = [7; 32];
+        let handle = [0; 32];
+        let secret = [17; 32];
+        let mut material = Vec::with_capacity(96);
+        material.extend_from_slice(b"pigloros/owntracks/verifier/v1\0");
+        material.extend_from_slice(&handle);
+        material.extend_from_slice(&secret);
+        let mut store = MemoryStore::new();
+        let timeline = store.create_timeline("owntracks-http-test").unwrap();
+        store
+            .pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
+                timeline.id(),
+                EntityId::new(),
+                GeoLocationAdmissionFenceV1::new(1, ([1; 32], 2, [2; 32]), (1, false, 3)),
+                *blake3::keyed_hash(&OWNER_KEY, &material).as_bytes(),
+            ))
+            .unwrap();
+        store
+    }
+
     #[test]
     fn minimization_discards_extra_telemetry_and_rejects_invalid_locations() {
-        let payload = minimize_location(
+        let first = minimize_location(
             br#"{"_type":"location","lat":37.7749,"lon":-122.4194,"tst":1,"acc":2,"tid":"x"}"#,
         )
         .unwrap();
-        let location: GeoLocationPayload = ciborium::from_reader(payload.as_slice()).unwrap();
-        assert!((location.resolution - 0.1).abs() < f64::EPSILON);
-        assert!((location.cell_lat - 37.7749).abs() > f64::EPSILON);
-        assert!(minimize_location(br#"{"_type":"location","lat":91,"lon":0,"tst":1}"#).is_none());
-        assert!(minimize_location(br#"{"_type":"location","lat":0,"lon":0,"tst":1.5}"#).is_none());
+        let second = minimize_location(
+            br#"{"_type":"location","lat":37.7749,"lon":-122.4194,"tst":901,"acc":2,"tid":"x"}"#,
+        )
+        .unwrap();
+        assert_ne!(first, second);
+        assert!(minimize_location(br#"{"_type":"location","lat":91,"lon":0,"tst":1}"#).is_err());
+        assert!(minimize_location(br#"{"_type":"location","lat":0,"lon":0,"tst":1.5}"#).is_err());
     }
 
     #[tokio::test]
     async fn empty_body_is_the_only_unauthenticated_success() {
         let response = post_owntracks(
             Gateway::new(open_store(StoreConfig::Memory).unwrap()),
-            [0; 32],
             HeaderMap::new(),
             Body::empty(),
         )
@@ -273,10 +322,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_unsupported_media_type_unauthorized_and_invalid_location() {
+        let gateway = Gateway::new(open_store(StoreConfig::Memory).unwrap());
+        let response = post_owntracks(gateway.clone(), HeaderMap::new(), location_body()).await;
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+        let mut json_headers = HeaderMap::new();
+        json_headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json; charset=utf-8"),
+        );
+        let response = post_owntracks(gateway.clone(), json_headers, location_body()).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let malformed_headers = authenticated_headers("application/json");
+        let response = post_owntracks(
+            gateway.clone(),
+            malformed_headers,
+            Body::from(&br#"{"_type":"location""#[..]),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let response = post_owntracks(
+            gateway,
+            authenticated_headers("application/json"),
+            Body::from(&br#"{"_type":"location","lat":91,"lon":0,"tst":1}"#[..]),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn rejects_unauthorized_location_and_closed_executor() {
+        const OWNER_KEY: [u8; 32] = [7; 32];
+        const HANDLE: [u8; 32] = [0; 32];
+        const SECRET: [u8; 32] = [17; 32];
+        let response = post_owntracks(
+            Gateway::new_with_owntracks_ingress_for_test(
+                pos_store::memory::MemoryStore::new(),
+                [0; 32],
+            ),
+            authenticated_headers("application/json"),
+            location_body(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let mut material = Vec::with_capacity(96);
+        material.extend_from_slice(b"pigloros/owntracks/verifier/v1\0");
+        material.extend_from_slice(&HANDLE);
+        material.extend_from_slice(&SECRET);
+        let mut store = pos_store::memory::MemoryStore::new();
+        let timeline = store.create_timeline("owntracks-auth-status").unwrap();
+        store
+            .pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
+                timeline.id(),
+                EntityId::new(),
+                GeoLocationAdmissionFenceV1::new(1, ([1; 32], 2, [2; 32]), (1, false, 3)),
+                *blake3::keyed_hash(&OWNER_KEY, &material).as_bytes(),
+            ))
+            .unwrap();
+        let mut invalid_headers = authenticated_headers("application/json");
+        let invalid_credential = format!("{}:{}", "0".repeat(64), "2".repeat(64));
+        invalid_headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Basic {}", base64_encode(&invalid_credential)))
+                .unwrap(),
+        );
+        let response = post_owntracks(
+            Gateway::new_with_owntracks_ingress_for_test(store, OWNER_KEY),
+            invalid_headers,
+            location_body(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let gateway = Gateway::with_executor_for_test(crate::executor::StoreExecutor { tx });
+        let response = post_owntracks(
+            gateway,
+            authenticated_headers("application/json"),
+            location_body(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
     async fn oversized_body_is_rejected_before_authentication() {
         let response = post_owntracks(
             Gateway::new(open_store(StoreConfig::Memory).unwrap()),
-            [0; 32],
             HeaderMap::new(),
             Body::from(vec![0; super::OWNTRACKS_MAX_BODY_BYTES + 1]),
         )
@@ -303,20 +440,11 @@ mod tests {
                 *blake3::keyed_hash(&OWNER_KEY, &material).as_bytes(),
             ))
             .unwrap();
-        let credential = format!("{}:{}", "0".repeat(64), "1".repeat(64));
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
-        headers.insert(
-            header::AUTHORIZATION,
-            HeaderValue::from_str(&format!("Basic {}", base64_encode(&credential))).unwrap(),
-        );
+        let gateway = Gateway::new_with_owntracks_ingress_for_test(store, OWNER_KEY);
+        let mut notices = gateway.subscribe();
         let response = post_owntracks(
-            Gateway::new_with_owntracks_ingress(store),
-            OWNER_KEY,
-            headers,
+            gateway.clone(),
+            authenticated_headers("application/json"),
             Body::from(
                 &br#"{"_type":"location","lat":37.7749,"lon":-122.4194,"tst":1,"batt":90}"#[..],
             ),
@@ -327,5 +455,91 @@ mod tests {
             to_bytes(response.into_body(), 1024).await.unwrap().as_ref(),
             b"[]"
         );
+        assert_eq!(notices.recv().await.unwrap().event_type, "geo.location");
+
+        let response = post_owntracks(
+            gateway,
+            authenticated_headers("application/json"),
+            Body::from(
+                &br#"{"_type":"location","lat":37.7749,"lon":-122.4194,"tst":901,"batt":90}"#[..],
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(notices.recv().await.unwrap().event_type, "geo.location");
+    }
+
+    #[tokio::test]
+    async fn duplicate_is_successful_without_a_second_notice_and_revocation_denies() {
+        const OWNER_KEY: [u8; 32] = [7; 32];
+        let gateway = Gateway::new_with_owntracks_ingress_for_test(enrolled_store(), OWNER_KEY);
+        let mut notices = gateway.subscribe();
+        let response = post_owntracks(
+            gateway.clone(),
+            authenticated_headers("application/json"),
+            location_body(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(notices.recv().await.unwrap().event_type, "geo.location");
+
+        let response = post_owntracks(
+            gateway,
+            authenticated_headers("application/json"),
+            location_body(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(notices.try_recv().is_err());
+
+        let mut revoked_store = enrolled_store();
+        revoked_store.revoke_owntracks_enrollment().unwrap();
+        let response = post_owntracks(
+            Gateway::new_with_owntracks_ingress_for_test(revoked_store, OWNER_KEY),
+            authenticated_headers("application/json"),
+            location_body(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn rate_limit_response_is_retryable_after_authentication() {
+        const OWNER_KEY: [u8; 32] = [7; 32];
+        let handle = [0; 32];
+        let secret = [17; 32];
+        let mut material = Vec::with_capacity(96);
+        material.extend_from_slice(b"pigloros/owntracks/verifier/v1\0");
+        material.extend_from_slice(&handle);
+        material.extend_from_slice(&secret);
+        let mut store = pos_store::memory::MemoryStore::new();
+        let timeline = store.create_timeline("owntracks-rate-http").unwrap();
+        store
+            .pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
+                timeline.id(),
+                EntityId::new(),
+                GeoLocationAdmissionFenceV1::new(1, ([1; 32], 2, [2; 32]), (1, false, 3)),
+                *blake3::keyed_hash(&OWNER_KEY, &material).as_bytes(),
+            ))
+            .unwrap();
+        let gateway = Gateway::new_with_owntracks_ingress_for_test(store, OWNER_KEY);
+
+        for _ in 0..5 {
+            let response = post_owntracks(
+                gateway.clone(),
+                authenticated_headers("application/json"),
+                location_body(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let response = post_owntracks(
+            gateway,
+            authenticated_headers("application/json"),
+            location_body(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()[header::RETRY_AFTER], "1");
     }
 }

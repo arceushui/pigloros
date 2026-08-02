@@ -28,6 +28,7 @@ use tokio::sync::{mpsc, oneshot};
 pub(crate) const QUEUE_CAPACITY: usize = 64;
 const OWNTRACKS_RATE_BURST: u8 = 5;
 const OWNTRACKS_RATE_KEYS_MAXIMUM: usize = 64;
+const OWNTRACKS_RATE_STATE_TTL: Duration = Duration::from_mins(15);
 
 macro_rules! submit {
     ($executor:expr, $build:expr) => {{
@@ -49,7 +50,9 @@ macro_rules! submit {
 pub(super) enum Command {
     #[allow(dead_code)]
     AdmitOwnTracksIngress {
-        input: OwnTracksIngressInputV1,
+        basic_handle: [u8; 32],
+        basic_secret: [u8; 32],
+        payload: pos_core::CanonicalBytes,
         reply: oneshot::Sender<Result<OwnTracksIngressOutcome, CoreError>>,
     },
     AdmitGeoLocation {
@@ -135,13 +138,6 @@ pub(crate) enum OwnTracksIngressOutcome {
     RateLimited,
 }
 
-impl OwnTracksIngressOutcome {
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) const fn is_rate_limited(&self) -> bool {
-        matches!(self, Self::RateLimited)
-    }
-}
-
 struct OwnTracksRateLimiter {
     buckets: HashMap<OwnTracksIngressRateKeyV1, OwnTracksTokenBucket>,
 }
@@ -154,6 +150,8 @@ struct OwnTracksTokenBucket {
 impl OwnTracksRateLimiter {
     fn allow(&mut self, key: OwnTracksIngressRateKeyV1) -> bool {
         let now = Instant::now();
+        self.buckets
+            .retain(|_, bucket| now.duration_since(bucket.last_refill) < OWNTRACKS_RATE_STATE_TTL);
         if !self.buckets.contains_key(&key) && self.buckets.len() == OWNTRACKS_RATE_KEYS_MAXIMUM {
             if let Some(oldest) = self
                 .buckets
@@ -191,6 +189,7 @@ impl OwnTracksRateLimiter {
 
 struct ExecutorState {
     store: ExecutorStore,
+    owntracks_owner_key: Option<[u8; 32]>,
     owntracks_rate_limiter: OwnTracksRateLimiter,
 }
 
@@ -208,30 +207,31 @@ pub(crate) struct StoreExecutor {
 
 impl StoreExecutor {
     pub(crate) fn new(store: Box<dyn EventStore>) -> Self {
-        Self::spawn(ExecutorStore::Generic(store))
+        Self::spawn(ExecutorStore::Generic(store), None)
     }
 
     pub(crate) fn new_with_geo_location_admission<S>(store: S) -> Self
     where
         S: EventStore + GeoLocationAdmissionStore + 'static,
     {
-        Self::spawn(ExecutorStore::GeoLocation(Box::new(store)))
+        Self::spawn(ExecutorStore::GeoLocation(Box::new(store)), None)
     }
 
-    pub(crate) fn new_with_owntracks_ingress<S>(store: S) -> Self
+    pub(crate) fn new_with_owntracks_ingress<S>(store: S, owner_key: [u8; 32]) -> Self
     where
         S: EventStore + GeoLocationAdmissionStore + OwnTracksIngressStore + 'static,
     {
-        Self::spawn(ExecutorStore::OwnTracks(Box::new(store)))
+        Self::spawn(ExecutorStore::OwnTracks(Box::new(store)), Some(owner_key))
     }
 
-    fn spawn(store: ExecutorStore) -> Self {
+    fn spawn(store: ExecutorStore, owntracks_owner_key: Option<[u8; 32]>) -> Self {
         let (tx, mut rx) = mpsc::channel(QUEUE_CAPACITY);
         let _ = thread::Builder::new()
             .name("piglor-store-executor".to_owned())
             .spawn(move || {
                 let mut state = ExecutorState {
                     store,
+                    owntracks_owner_key,
                     owntracks_rate_limiter: OwnTracksRateLimiter {
                         buckets: HashMap::new(),
                     },
@@ -258,10 +258,14 @@ impl StoreExecutor {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn admit_owntracks_ingress(
         &self,
-        input: OwnTracksIngressInputV1,
+        basic_handle: [u8; 32],
+        basic_secret: [u8; 32],
+        payload: pos_core::CanonicalBytes,
     ) -> Result<OwnTracksIngressOutcome, StoreExecutorError> {
         submit!(self, |reply| Command::AdmitOwnTracksIngress {
-            input,
+            basic_handle,
+            basic_secret,
+            payload,
             reply
         })
     }
@@ -333,11 +337,17 @@ impl StoreExecutor {
 
 fn execute_owntracks_ingress(
     state: &mut ExecutorState,
-    input: OwnTracksIngressInputV1,
+    basic_handle: [u8; 32],
+    basic_secret: [u8; 32],
+    payload: pos_core::CanonicalBytes,
 ) -> Result<OwnTracksIngressOutcome, CoreError> {
     let ExecutorStore::OwnTracks(store) = &mut state.store else {
         return Err(CoreError::GeographicAdmissionUnavailable);
     };
+    let Some(owner_key) = state.owntracks_owner_key else {
+        return Err(CoreError::GeographicAdmissionUnavailable);
+    };
+    let input = owntracks_input(owner_key, basic_handle, basic_secret, payload);
     let prepared = store.prepare_owntracks_ingress(input)?;
     if !state.owntracks_rate_limiter.allow(prepared.rate_key()) {
         return Ok(OwnTracksIngressOutcome::RateLimited);
@@ -353,10 +363,71 @@ fn execute_owntracks_ingress(
     })
 }
 
+fn owntracks_input(
+    owner_key: [u8; 32],
+    basic_handle: [u8; 32],
+    basic_secret: [u8; 32],
+    payload: pos_core::CanonicalBytes,
+) -> OwnTracksIngressInputV1 {
+    let mut verifier_material = Vec::with_capacity(96);
+    verifier_material.extend_from_slice(b"pigloros/owntracks/verifier/v1\0");
+    verifier_material.extend_from_slice(&basic_handle);
+    verifier_material.extend_from_slice(&basic_secret);
+    let candidate_verifier = *blake3::keyed_hash(&owner_key, &verifier_material).as_bytes();
+    let rate_key = owntracks_key(
+        &owner_key,
+        b"pigloros/owntracks/rate/v1\0",
+        basic_handle,
+        basic_secret,
+        &payload,
+        false,
+    );
+    let intent = owntracks_key(
+        &owner_key,
+        b"pigloros/owntracks/intent/v1\0",
+        basic_handle,
+        basic_secret,
+        &payload,
+        true,
+    );
+    let fingerprint = owntracks_key(
+        &owner_key,
+        b"pigloros/owntracks/fingerprint/v1\0",
+        basic_handle,
+        basic_secret,
+        &payload,
+        true,
+    );
+    OwnTracksIngressInputV1::new(candidate_verifier, rate_key, intent, fingerprint, payload)
+}
+
+fn owntracks_key(
+    owner_key: &[u8; 32],
+    domain: &[u8],
+    basic_handle: [u8; 32],
+    basic_secret: [u8; 32],
+    payload: &pos_core::CanonicalBytes,
+    includes_payload: bool,
+) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new_keyed(owner_key);
+    hasher.update(domain);
+    hasher.update(&basic_handle);
+    if includes_payload {
+        hasher.update(&basic_secret);
+        hasher.update(payload.as_slice());
+    }
+    *hasher.finalize().as_bytes()
+}
+
 fn execute(state: &mut ExecutorState, command: Command) {
     match command {
-        Command::AdmitOwnTracksIngress { input, reply } => {
-            let result = execute_owntracks_ingress(state, input);
+        Command::AdmitOwnTracksIngress {
+            basic_handle,
+            basic_secret,
+            payload,
+            reply,
+        } => {
+            let result = execute_owntracks_ingress(state, basic_handle, basic_secret, payload);
             let _ = reply.send(result);
         }
         Command::AdmitGeoLocation { request, reply } => {
@@ -440,5 +511,52 @@ fn execute(state: &mut ExecutorState, command: Command) {
         Command::GetTimeline { timeline, reply } => {
             let _ = reply.send(state.store.event_store().get_timeline(timeline));
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::{execute_owntracks_ingress, ExecutorState, ExecutorStore, OwnTracksRateLimiter};
+    use pos_core::{CanonicalBytes, CoreError, OwnTracksIngressRateKeyV1};
+    use pos_store::memory::MemoryStore;
+    use std::{collections::HashMap, time::Instant};
+
+    #[test]
+    fn owntracks_ingress_fails_closed_for_a_generic_store() {
+        let mut state = ExecutorState {
+            store: ExecutorStore::Generic(Box::new(MemoryStore::new())),
+            owntracks_owner_key: None,
+            owntracks_rate_limiter: OwnTracksRateLimiter {
+                buckets: HashMap::new(),
+            },
+        };
+        let error = execute_owntracks_ingress(
+            &mut state,
+            [1; 32],
+            [2; 32],
+            CanonicalBytes::from_static(b"payload"),
+        )
+        .unwrap_err();
+        assert!(matches!(error, CoreError::GeographicAdmissionUnavailable));
+    }
+
+    #[test]
+    fn owntracks_rate_state_expires_without_reaching_the_cardinality_limit() {
+        let key = OwnTracksIngressRateKeyV1::from_owner_keyed_bytes([1; 32]);
+        let mut limiter = OwnTracksRateLimiter {
+            buckets: HashMap::from([(
+                key,
+                super::OwnTracksTokenBucket {
+                    tokens: 0,
+                    last_refill: Instant::now()
+                        .checked_sub(super::OWNTRACKS_RATE_STATE_TTL)
+                        .expect("current instant is after the rate-state TTL"),
+                },
+            )]),
+        };
+        assert!(limiter.allow(OwnTracksIngressRateKeyV1::from_owner_keyed_bytes([2; 32],)));
+        assert_eq!(limiter.buckets.len(), 1);
+        assert!(!limiter.buckets.contains_key(&key));
     }
 }

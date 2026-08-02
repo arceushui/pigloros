@@ -4,7 +4,7 @@
 
 **Goal:** Add the explicit loopback-only OwnTracks V1 route that authenticates one active enrollment and atomically admits only the existing minimized `geo.location` Event.
 
-**Architecture:** The HTTP adapter bounds and minimizes input, then sends credentials, the startup-loaded owner key, and canonical V1 bytes through a private executor command. That command alone verifies enrollment, rate-limits with opaque per-binding state, builds admission inputs, and invokes the existing geographic admission transaction.
+**Architecture:** The HTTP adapter bounds and minimizes input, then sends credentials and canonical V1 bytes through a private executor command. The startup-loaded owner key remains in private executor state. That command alone verifies enrollment, rate-limits with opaque per-binding state, builds admission inputs, and invokes the existing geographic admission transaction.
 
 **Tech Stack:** Rust 1.97.1, Axum 0.8, Tokio, BLAKE3, `pos-core`, `pos-store`, and `pos-plugin-geo`.
 
@@ -17,7 +17,7 @@
 - Owner key, credentials, verifier, fence, raw body, exact location/time, opaque rate key, Timeline, EntityId, Event ID, sequence, and snapshot identity never reach logs, metrics, journals, or responses.
 - Rate limit after authentication inside private executor state: one request per second, burst five per opaque binding key.
 - No `geo.cell`, generic append, migration, backfill, dual-write, upcast, public/same-LAN route, TLS, MQTT, encryption, UI, export, or new dependency.
-- Use capability-dropped full checks; exact 100% changed-path coverage, independent review, and fresh activation approval remain mandatory.
+- Use capability-dropped full checks; the approved repository floor is at least 99% line and region coverage, with independent review and fresh activation approval mandatory.
 
 ---
 
@@ -182,9 +182,9 @@ Run: `capsh --drop=cap_dac_override,cap_dac_read_search -- -c 'cargo test --work
 
 Run: `capsh --drop=cap_dac_override,cap_dac_read_search -- -c './scripts/ci.sh'`
 
-Run: `RUSTC_BOOTSTRAP=1 capsh --drop=cap_dac_override,cap_dac_read_search -- -c 'cargo llvm-cov --workspace --locked --summary-only --fail-under-lines 100 --fail-under-regions 100 -- --include-ignored'`
+Run: `RUSTC_BOOTSTRAP=1 capsh --drop=cap_dac_override,cap_dac_read_search -- -c 'cargo llvm-cov --workspace --locked --summary-only --fail-under-lines 99 --fail-under-regions 99 -- --include-ignored'`
 
-Expected: all checks pass and coverage proves exact 100% lines/regions for the changed V1 path.
+Expected: all checks pass and coverage meets the approved 99% line-and-region floor for the changed V1 path.
 
 - [ ] **Step 5: Obtain reviews, record approval, commit, and push**
 

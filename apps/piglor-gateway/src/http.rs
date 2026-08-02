@@ -19,6 +19,7 @@ use piglor_ledger::{render_html, LedgerView};
 use pos_core::{clock::Seq, CoreError};
 use pos_plugin_ledger::NewPrediction;
 use serde_json::json;
+use std::net::SocketAddr;
 
 /// Shared axum state.
 #[derive(Clone)]
@@ -65,14 +66,23 @@ pub fn router(state: AppState) -> Router {
 }
 
 /// Build the loopback router with the explicit local `OwnTracks` route enabled.
-pub fn router_with_owntracks(state: AppState, owner_key: [u8; 32]) -> Router {
+fn router_with_owntracks(state: AppState) -> Router {
     let gateway = state.gateway.clone();
     build_router(state, MAX_HTTP_BODY_BYTES).route(
         "/v1/bridges/owntracks",
-        post(move |headers, body| {
-            crate::owntracks_http::post_owntracks(gateway, owner_key, headers, body)
-        }),
+        post(move |headers, body| crate::owntracks_http::post_owntracks(gateway, headers, body)),
     )
+}
+
+/// Build the only route table that can activate the local `OwnTracks` bridge.
+pub fn router_for_addr(addr: SocketAddr, state: AppState) -> Router {
+    if !addr.ip().is_loopback() {
+        spectator_router(state)
+    } else if state.gateway.owntracks_enabled {
+        router_with_owntracks(state)
+    } else {
+        router(state)
+    }
 }
 
 /// Build the public spectator router for a non-loopback Gateway deployment.
@@ -321,9 +331,9 @@ impl IntoResponse for GatewayError {
             | GatewayError::Store(CoreError::TimelineNotFound(_)) => StatusCode::NOT_FOUND,
             GatewayError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
             GatewayError::LedgerWriteDisabled => StatusCode::FORBIDDEN,
-            GatewayError::StoreExecutorClosed | GatewayError::LedgerUnavailable => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
+            GatewayError::StoreExecutorClosed
+            | GatewayError::LedgerUnavailable
+            | GatewayError::OwnTracksOwnerKeyUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             GatewayError::Ledger(le) => match le {
                 pos_plugin_ledger::LedgerError::InvalidPrediction(_) => {
                     StatusCode::UNPROCESSABLE_ENTITY
@@ -382,6 +392,29 @@ mod tests {
             ledger_view: LedgerView::default(),
             ledger_write: LedgerWriteMode::Disabled,
         })
+    }
+
+    #[tokio::test]
+    async fn owntracks_route_is_enabled_only_by_the_explicit_router() {
+        let state = AppState {
+            gateway: Gateway::new_with_owntracks_ingress_for_test(
+                pos_store::memory::MemoryStore::new(),
+                [0; 32],
+            ),
+            ledger_view: LedgerView::default(),
+            ledger_write: LedgerWriteMode::Disabled,
+        };
+        let response = router_for_addr("127.0.0.1:0".parse().unwrap(), state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/bridges/owntracks")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     fn test_app_with_ledger_view(ledger_view: LedgerView) -> Router {
@@ -1104,6 +1137,7 @@ mod tests {
             store: crate::executor::StoreExecutor::new(Box::new(FailCreate)),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: crate::GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: false,
         };
         let app = router(AppState {
             gateway: gw,

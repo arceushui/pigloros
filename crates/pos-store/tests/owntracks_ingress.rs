@@ -12,12 +12,51 @@ const BASIC_HANDLE: [u8; 32] = [23; 32];
 const BASIC_SECRET: [u8; 32] = [29; 32];
 
 fn input(owner_key: [u8; 32], basic_secret: [u8; 32]) -> OwnTracksIngressInputV1 {
-    OwnTracksIngressInputV1::new(
-        owner_key,
-        BASIC_HANDLE,
+    let payload = CanonicalBytes::from_static(b"owntracks-v1-minimized-geo-location");
+    let mut verifier_material = Vec::with_capacity(96);
+    verifier_material.extend_from_slice(b"pigloros/owntracks/verifier/v1\0");
+    verifier_material.extend_from_slice(&BASIC_HANDLE);
+    verifier_material.extend_from_slice(&basic_secret);
+    let candidate_verifier = *blake3::keyed_hash(&owner_key, &verifier_material).as_bytes();
+    let rate_key = owntracks_key(
+        &owner_key,
+        b"pigloros/owntracks/rate/v1\0",
         basic_secret,
-        CanonicalBytes::from_static(b"owntracks-v1-minimized-geo-location"),
-    )
+        &payload,
+        false,
+    );
+    let intent = owntracks_key(
+        &owner_key,
+        b"pigloros/owntracks/intent/v1\0",
+        basic_secret,
+        &payload,
+        true,
+    );
+    let fingerprint = owntracks_key(
+        &owner_key,
+        b"pigloros/owntracks/fingerprint/v1\0",
+        basic_secret,
+        &payload,
+        true,
+    );
+    OwnTracksIngressInputV1::new(candidate_verifier, rate_key, intent, fingerprint, payload)
+}
+
+fn owntracks_key(
+    owner_key: &[u8; 32],
+    domain: &[u8],
+    basic_secret: [u8; 32],
+    payload: &CanonicalBytes,
+    includes_payload: bool,
+) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new_keyed(owner_key);
+    hasher.update(domain);
+    hasher.update(&BASIC_HANDLE);
+    if includes_payload {
+        hasher.update(&basic_secret);
+        hasher.update(payload.as_slice());
+    }
+    *hasher.finalize().as_bytes()
 }
 
 fn verifier() -> [u8; 32] {

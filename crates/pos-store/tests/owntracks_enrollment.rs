@@ -85,3 +85,28 @@ fn memory_enrollment_contract() {
 fn sqlite_enrollment_contract() {
     assert_enrollment_contract(&mut SqliteStore::open_in_memory().unwrap());
 }
+
+fn assert_deleting_enrolled_timeline_revokes<S>(store: &mut S)
+where
+    S: EventStore + OwnTracksEnrollmentStore,
+{
+    let timeline = store.create_timeline("delete-enrolled").unwrap();
+    store
+        .pair_owntracks_enrollment(request(timeline.id(), EntityId::new(), 3, [8; 32]))
+        .unwrap();
+    store.delete_timeline(timeline.id()).unwrap();
+    assert_eq!(
+        store.owntracks_enrollment_status().unwrap().status(),
+        OwnTracksEnrollmentStatusV1::Revoked
+    );
+}
+
+#[test]
+fn deleting_memory_enrolled_timeline_revokes_enrollment() {
+    assert_deleting_enrolled_timeline_revokes(&mut MemoryStore::new());
+}
+
+#[test]
+fn deleting_sqlite_enrolled_timeline_revokes_enrollment() {
+    assert_deleting_enrolled_timeline_revokes(&mut SqliteStore::open_in_memory().unwrap());
+}
