@@ -2620,6 +2620,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_unwind_releases_envelope_arriving_in_channel() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        let global_budget = std::sync::Arc::new(super::Semaphore::new(2));
+        let read_budget = std::sync::Arc::new(super::Semaphore::new(1));
+        let (observer, records) = super::SchedulerObserver::new(8);
+        let (gate_sender, gate_receiver) = std::sync::mpsc::channel();
+        observer.install_gate(gate_receiver);
+        let deadline = Instant::now() + std::time::Duration::from_secs(1);
+        let (panic_reply, panic_result) = tokio::sync::oneshot::channel();
+        sender
+            .send(super::CommandEnvelope {
+                deadline,
+                lifecycle: std::sync::Arc::new(super::CommandLifecycle::new()),
+                class: super::CommandClass::Read,
+                admission_ordinal: 0,
+                global_permit: global_budget
+                    .clone()
+                    .try_acquire_owned()
+                    .expect("panic global permit is available"),
+                read_permit: Some(
+                    read_budget
+                        .clone()
+                        .try_acquire_owned()
+                        .expect("panic read permit is available"),
+                ),
+                command: Command::PanicRead { reply: panic_reply },
+            })
+            .await
+            .expect("panic envelope is accepted");
+        let lifecycle = std::sync::Arc::new(std::sync::Mutex::new(super::LifecycleState::Open));
+        let worker_lifecycle = std::sync::Arc::clone(&lifecycle);
+        let worker = tokio::task::spawn_blocking(move || {
+            super::worker_loop(
+                &worker_lifecycle,
+                std::sync::Arc::new(tokio::sync::Notify::new()),
+                &mut receiver,
+                super::ExecutorStore::Generic(Box::new(MemoryStore::new())),
+                None,
+                Some(observer),
+            );
+        });
+        assert!(matches!(
+            records.recv().expect("drain trace is alive"),
+            super::SchedulerTrace::DrainCompleted {
+                pending: 1,
+                disconnected: false,
+            }
+        ));
+
+        let (channel_reply, _channel_result) = tokio::sync::oneshot::channel();
+        sender
+            .send(super::CommandEnvelope {
+                deadline,
+                lifecycle: std::sync::Arc::new(super::CommandLifecycle::new()),
+                class: super::CommandClass::Write,
+                admission_ordinal: 1,
+                global_permit: global_budget
+                    .clone()
+                    .try_acquire_owned()
+                    .expect("channel write permit is available"),
+                read_permit: None,
+                command: Command::Create {
+                    name: "channel-unwind".to_owned(),
+                    reply: channel_reply,
+                },
+            })
+            .await
+            .expect("channel envelope is accepted");
+        drop(sender);
+        gate_sender
+            .send(())
+            .expect("scheduler gate releases the panic");
+        worker.await.expect("channel-unwind worker joined");
+        assert!(matches!(
+            panic_result.await.expect("panic terminal reply"),
+            Err(super::StoreExecutorError::Unhealthy)
+        ));
+        assert!(matches!(
+            *lifecycle.lock().expect("worker lifecycle lock is healthy"),
+            super::LifecycleState::Unhealthy { .. }
+        ));
+        assert_eq!(global_budget.available_permits(), 2);
+        assert_eq!(read_budget.available_permits(), 1);
+    }
+
+    #[tokio::test]
     async fn read_admission_preserves_reserved_write_capacity_with_live_worker() {
         let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
@@ -2818,6 +2904,74 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(selected, (0..=10).collect::<Vec<_>>());
+        executor.shutdown().await.expect("executor shuts down");
+    }
+
+    #[tokio::test]
+    async fn queued_write_is_selected_immediately_without_pending_reads() {
+        let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let (observer, records) = super::SchedulerObserver::new(16);
+        let executor = super::StoreExecutor::spawn_with_observer_for_test(
+            super::ExecutorStore::Generic(Box::new(BlockingRootCountStore {
+                inner: MemoryStore::new(),
+                entered: entered_sender,
+                release: release_receiver,
+            })),
+            observer,
+        );
+        let (root_reply, root_result) = tokio::sync::oneshot::channel();
+        executor
+            .try_submit(
+                Command::RootCount {
+                    maximum: 1,
+                    reply: root_reply,
+                },
+                Instant::now() + std::time::Duration::from_secs(1),
+                std::sync::Arc::new(super::CommandLifecycle::new()),
+            )
+            .expect("initial read is admitted");
+        tokio::task::spawn_blocking(move || {
+            entered_receiver
+                .recv()
+                .expect("initial read entered the worker");
+        })
+        .await
+        .expect("initial read observer joined");
+
+        let (write_reply, write_result) = tokio::sync::oneshot::channel();
+        executor
+            .try_submit(
+                Command::Create {
+                    name: "immediate-write".to_owned(),
+                    reply: write_reply,
+                },
+                Instant::now() + std::time::Duration::from_secs(1),
+                std::sync::Arc::new(super::CommandLifecycle::new()),
+            )
+            .expect("write is admitted");
+        release_sender.send(()).expect("worker release is alive");
+        assert!(root_result.await.expect("initial read reply").is_ok());
+        assert!(write_result.await.expect("write reply").is_ok());
+        let selected = records
+            .try_iter()
+            .filter_map(|record| match record {
+                super::SchedulerTrace::Selected {
+                    ordinal,
+                    class,
+                    reads_since_write,
+                } => Some((ordinal, class, reads_since_write)),
+                super::SchedulerTrace::Admitted { .. }
+                | super::SchedulerTrace::DrainCompleted { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            selected,
+            vec![
+                (0, super::CommandClass::Read, 0),
+                (1, super::CommandClass::Write, 1)
+            ]
+        );
         executor.shutdown().await.expect("executor shuts down");
     }
 
