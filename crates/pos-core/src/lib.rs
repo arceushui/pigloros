@@ -20,6 +20,7 @@ pub mod geo_admission;
 pub mod hasher;
 pub mod ids;
 pub mod manifest;
+pub mod owntracks_enrollment;
 pub mod plugin;
 pub mod state;
 pub mod store;
@@ -34,9 +35,13 @@ pub use entity::{Entity, EntityKind, Relationship, RelationshipKind};
 pub use error::CoreError;
 pub use event::{CanonicalBytes, Determinism, Event, EventDraft, Kind, RunMode, SchemaVersion};
 pub use geo_access::{is_geographic_event_type, GEOGRAPHIC_CELL_EVENT_TYPE, GEOGRAPHIC_EVENT_TYPE};
+pub use geo_admission::GeoLocationAdmissionFenceV1;
 pub use hasher::Hasher;
 pub use ids::{CorrelationId, EntityId, EventId, PluginId, RelationshipId, TimelineId};
 pub use manifest::{AdapterRecord, ReproManifest};
+pub use owntracks_enrollment::{
+    OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStateV1, OwnTracksEnrollmentStatusV1,
+};
 pub use plugin::{Capability, Plugin};
 pub use state::{Reducer, State, StateRegistry};
 pub use store::{
