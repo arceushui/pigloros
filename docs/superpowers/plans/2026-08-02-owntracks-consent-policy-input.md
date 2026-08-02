@@ -46,4 +46,4 @@
 - [x] Update ADR-055 and the CLI design document with the final artifact example and exact argument form.
 - [x] Run formatter, non-privileged `cargo test --workspace --locked -- --include-ignored`, pedantic clippy, and `./scripts/ci.sh`.
 - [x] Obtain CTO review and journal Redmine #146 and Notion.
-- [ ] Commit and push.
+- [x] Commit and push.
