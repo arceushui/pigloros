@@ -6062,7 +6062,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_committed_preserves_optional_ids() {
         use pos_core::ids::CorrelationId;
         use pos_core::store::{export_timeline, import_timeline_with_id};
