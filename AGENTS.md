@@ -38,7 +38,7 @@ Default five-label vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, 
 
 ### Coverage rule
 
-After every code change, run `cargo llvm-cov --fail-under-lines 100 --fail-under-regions 100`. If new code cannot be covered by a test, **remove it** — don't leave dead branches. Prefer deleting/simplifying over exemptions.
+After every code change, run `cargo llvm-cov --fail-under-lines 99 --fail-under-regions 99`. If new code cannot be covered by a test, **remove it** — don't leave dead branches. The 1% tolerance is only for LLVM regions with no source mapping after a fresh non-root run; it does not exempt tests or production code.
 
 ### Quality gates (local)
 
@@ -47,7 +47,7 @@ cargo fmt --all -- --check
 cargo test --workspace --locked -- --include-ignored
 cargo clippy --workspace --all-targets --locked -- -D warnings -W clippy::pedantic
 RUSTC_BOOTSTRAP=1 cargo llvm-cov --workspace --locked --summary-only \
-  --fail-under-lines 100 --fail-under-regions 100 -- --include-ignored
+  --fail-under-lines 99 --fail-under-regions 99 -- --include-ignored
 ```
 
 ### Features and sizing

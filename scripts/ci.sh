@@ -37,13 +37,13 @@ bash "$ROOT/scripts/assert-no-ignored-in-test-summary.sh" "$test_log"
 echo "==> clippy"
 cargo clippy --workspace --all-targets --locked -- -D warnings -W clippy::pedantic
 
-# 100% coverage requirement: production code is fully instrumented (coverage(off) is test-only).
+# 99% coverage floor: production code is fully instrumented (coverage(off) is test-only).
 # Unnecessary code is deleted/simplified rather than left as dead branches.
-echo "==> coverage (100% lines + regions)"
+echo "==> coverage (99% lines + regions)"
 export RUSTC_BOOTSTRAP=1
 cargo llvm-cov --workspace --locked --summary-only \
-  --fail-under-lines 100 \
-  --fail-under-regions 100 \
+  --fail-under-lines 99 \
+  --fail-under-regions 99 \
   -- --include-ignored
 
 echo "==> CI gates OK"

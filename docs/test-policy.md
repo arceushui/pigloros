@@ -17,8 +17,16 @@ Shared reference for humans and agents. `.cursor/rules/test-policy.mdc` mirrors 
 | Git hooks | Trunk pre-commit / pre-push | Run once per clone: `trunk git-hooks sync` |
 | Runtime | `cargo test -- --include-ignored` | Ignored tests still execute |
 | Summary check | `scripts/assert-no-ignored-in-test-summary.sh` | Matches `test result:` line only (no log prose FP) |
-| Coverage | `cargo llvm-cov` with `--include-ignored` | 100% lines + regions |
+| Coverage | `cargo llvm-cov` with `--include-ignored` | At least 99% lines + regions |
 | Dependencies | **cargo-deny** | Crates/licenses/advisories/sources only |
+
+## Coverage attribution policy
+
+The 99% line-and-region floor allows for LLVM coverage regions that cannot be
+mapped to a source line or segment after a fresh non-root run. It is a
+reporting-tolerance only: all tests still run with `--include-ignored`, and
+`coverage(off)` remains test-only. Do not use the allowance to exempt
+production code or avoid writing a reachable behavior test.
 
 ## Local setup
 

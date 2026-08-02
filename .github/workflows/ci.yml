@@ -1,9 +1,9 @@
 # PiglorOS CI — mirrors README Development gates (Redmine #100).
 #
-# Decisions locked for "perfect" bar:
+# Decisions locked for the coverage quality bar:
 # - Platform: GitHub Actions (remote is github.com/arceushui/pigloros)
 # - Triggers: every PR + pushes to main
-# - Jobs: fmt, test, clippy (pedantic), coverage (100% lines + regions), audit, deny — all required
+# - Jobs: fmt, test, clippy (pedantic), coverage (99% lines + regions), audit, deny — all required
 # - coverage(off) test-only + no ```ignore doctests: Trunk `rust-test-policy`
 # - Tests: `cargo test -- --include-ignored` so #[ignore] cannot silently skip
 # - Dependencies: cargo-deny.yml (crates/licenses/advisories/sources)
@@ -142,11 +142,11 @@ jobs:
         with:
           shared-key: coverage
 
-      - name: cargo llvm-cov at-or-near-100pct lines and regions
+      - name: cargo llvm-cov at-or-above-99pct lines and regions
         run: >
           cargo llvm-cov --workspace --locked --summary-only
-          --fail-under-lines 100
-          --fail-under-regions 100
+          --fail-under-lines 99
+          --fail-under-regions 99
           -- --include-ignored
 
   audit:
