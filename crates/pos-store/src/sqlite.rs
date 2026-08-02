@@ -6,6 +6,7 @@
 //! Child reads stitch parent events up to `fork_seq` with child events.
 
 use rusqlite::{params, types::ToSql, Connection, OpenFlags, TransactionBehavior};
+use std::time::Instant;
 
 use pos_core::{
     clock::{AdmissionClock, Seq, SystemAdmissionClock, WallTime},
@@ -51,10 +52,30 @@ thread_local! {
     static BOUNDED_METADATA_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Test-only count of full Event rows fetched by bounded reads.
     static BOUNDED_EVENT_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Test-only delay used to prove the elapsed bound covers final materialization.
+    static BOUNDED_MATERIALIZATION_DELAY_MILLIS: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+    /// Test-only phase delay used to cover each bounded-read elapsed guard.
+    static BOUNDED_READ_DELAY_PHASE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
     /// Test-only fault injection for the open-time sequence validation query.
     static FAIL_SEQUENCE_VALIDATION_QUERY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Test-only fault injection for bounded fork-chain reads.
     static FAIL_BOUNDED_CHAIN_QUERY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn bounded_materialization_delay_for_test() {
+    let delay_millis = BOUNDED_MATERIALIZATION_DELAY_MILLIS.with(std::cell::Cell::get);
+    if delay_millis != 0 {
+        std::thread::sleep(std::time::Duration::from_millis(delay_millis));
+    }
+}
+
+#[cfg(test)]
+fn bounded_read_delay_for_test(phase: u8) {
+    if BOUNDED_READ_DELAY_PHASE.with(std::cell::Cell::get) == phase {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 pub struct SqliteStore {
@@ -608,7 +629,7 @@ impl SqliteStore {
         from: Seq,
         to: Option<Seq>,
     ) -> Result<Vec<Event>, CoreError> {
-        Self::read_own_events_limited_on(conn, timeline_id, from, to, None)
+        Self::read_own_events_limited_on(conn, timeline_id, from, to, None, None, u64::MAX)
     }
 
     fn read_own_events_limited_on(
@@ -617,6 +638,8 @@ impl SqliteStore {
         from: Seq,
         to: Option<Seq>,
         limit: Option<usize>,
+        started: Option<Instant>,
+        max_elapsed_micros: u64,
     ) -> Result<Vec<Event>, CoreError> {
         const SQL: &str = "SELECT seq, event_id, entity_id, event_type, payload, wall_time,
                                 causation_id, correlation_id, schema_version, payload_hash, signature
@@ -640,6 +663,15 @@ impl SqliteStore {
         };
         let mut events = Vec::new();
         loop {
+            #[cfg(test)]
+            bounded_read_delay_for_test(1);
+            if let Some(started) = started {
+                let elapsed_micros =
+                    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+                if elapsed_micros > max_elapsed_micros {
+                    return Err(CoreError::ReadTimeTooLarge { elapsed_micros });
+                }
+            }
             #[cfg(test)]
             if FAIL_ROWS_NEXT.with(std::cell::Cell::get) {
                 return Err(CoreError::Storage(
@@ -699,17 +731,27 @@ impl SqliteStore {
             });
         }
 
+        #[cfg(test)]
+        bounded_read_delay_for_test(2);
+        if let Some(started) = started {
+            let elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+            if elapsed_micros > max_elapsed_micros {
+                return Err(CoreError::ReadTimeTooLarge { elapsed_micros });
+            }
+        }
+
         Ok(events)
     }
 
-    fn read_own_events_bounded(
+    fn validate_own_events_bounded(
         conn: &Connection,
         timeline_id: TimelineId,
         from: Seq,
         to: Seq,
         max_events: usize,
         bounds: EventReadBounds,
-    ) -> Result<Vec<Event>, CoreError> {
+        started: Instant,
+    ) -> Result<usize, CoreError> {
         const SQL: &str = "SELECT seq, typeof(payload), length(CAST(payload AS BLOB)),
                                 length(CAST(event_type AS BLOB))
                          FROM events
@@ -735,6 +777,12 @@ impl SqliteStore {
         };
         let mut field_sizes: Vec<(String, i64, i64)> = Vec::new();
         loop {
+            #[cfg(test)]
+            bounded_read_delay_for_test(3);
+            let elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+            if elapsed_micros > bounds.max_elapsed_micros() {
+                return Err(CoreError::ReadTimeTooLarge { elapsed_micros });
+            }
             #[cfg(test)]
             if FAIL_ROWS_NEXT.with(std::cell::Cell::get) {
                 return Err(CoreError::Storage(
@@ -768,33 +816,57 @@ impl SqliteStore {
             }
         }
 
+        #[cfg(test)]
+        bounded_read_delay_for_test(4);
+        let elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        if elapsed_micros > bounds.max_elapsed_micros() {
+            return Err(CoreError::ReadTimeTooLarge { elapsed_micros });
+        }
         if field_sizes.len() != max_events {
             return Err(CoreError::Storage(format!(
                 "timeline {timeline_id} violates the contiguous Event sequence invariant"
             )));
         }
+        let total_bytes = Self::validate_bounded_event_metadata(&field_sizes, bounds, started)?;
+
+        Ok(total_bytes)
+    }
+
+    fn validate_bounded_event_metadata(
+        field_sizes: &[(String, i64, i64)],
+        bounds: EventReadBounds,
+        started: Instant,
+    ) -> Result<usize, CoreError> {
+        let mut total_bytes = 0_usize;
         for (payload_storage_class, stored_payload_size, stored_event_type_size) in field_sizes {
+            #[cfg(test)]
+            bounded_read_delay_for_test(9);
+            let elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+            if elapsed_micros > bounds.max_elapsed_micros() {
+                return Err(CoreError::ReadTimeTooLarge { elapsed_micros });
+            }
             if payload_storage_class != "blob" {
                 return Err(CoreError::Storage(format!(
                     "event payload has SQLite storage class {payload_storage_class}; BLOB is required for bounded reads"
                 )));
             }
-            let payload_size = sqlite_usize_or_max(stored_payload_size);
+            let payload_size = sqlite_usize_or_max(*stored_payload_size);
             if payload_size > bounds.max_payload_bytes() {
                 return Err(CoreError::PayloadTooLarge { size: payload_size });
             }
-            let event_type_size = sqlite_usize_or_max(stored_event_type_size);
+            let event_type_size = sqlite_usize_or_max(*stored_event_type_size);
             if event_type_size > bounds.max_event_type_bytes() {
                 return Err(CoreError::EventMetadataTooLarge {
                     field: "event_type",
                     size: event_type_size,
                 });
             }
+            total_bytes = total_bytes.saturating_add(payload_size.saturating_add(event_type_size));
+            if total_bytes > bounds.max_total_bytes() {
+                return Err(CoreError::ReadBytesTooLarge { size: total_bytes });
+            }
         }
-
-        #[cfg(test)]
-        BOUNDED_EVENT_QUERIES.with(|queries| queries.set(queries.get() + 1));
-        Self::read_own_events_limited_on(conn, timeline_id, from, Some(to), Some(max_events))
+        Ok(total_bytes)
     }
 
     fn read_logical_bounded(
@@ -802,19 +874,45 @@ impl SqliteStore {
         timeline_id: TimelineId,
         range: SeqRange,
         bounds: EventReadBounds,
+        started: Instant,
     ) -> Result<Vec<Event>, CoreError> {
         let tx = match self.conn.unchecked_transaction() {
             Ok(tx) => tx,
             Err(error) => return Err(CoreError::Storage(error.to_string())),
         };
-        let chain = Self::fork_chain_bounded_on(&tx, timeline_id, bounds.max_fork_depth())?;
+        let chain = Self::fork_chain_bounded_on(
+            &tx,
+            timeline_id,
+            bounds.max_fork_depth(),
+            started,
+            bounds.max_elapsed_micros(),
+        )?;
         let from = range.from.as_u64().max(1);
         let to = range.to.map_or(u64::MAX, Seq::as_u64);
+        Self::plan_bounded_pages(&tx, &chain, from, to, bounds, started)
+            .and_then(|plans| Self::materialize_bounded_pages(&tx, &plans, bounds, started))
+    }
+
+    fn plan_bounded_pages(
+        conn: &rusqlite::Transaction<'_>,
+        chain: &[BoundedForkSegment],
+        from: u64,
+        to: u64,
+        bounds: EventReadBounds,
+        started: Instant,
+    ) -> Result<Vec<BoundedSegmentPage>, CoreError> {
         let mut logical_offset = 0_u64;
         let mut remaining = bounds.max_events();
-        let mut selected = Vec::new();
+        let mut total_bytes = 0_usize;
+        let mut plans = Vec::new();
 
         for (index, segment) in chain.iter().enumerate() {
+            #[cfg(test)]
+            bounded_read_delay_for_test(5);
+            let elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+            if elapsed_micros > bounds.max_elapsed_micros() {
+                return Err(CoreError::ReadTimeTooLarge { elapsed_micros });
+            }
             let segment_cap = chain.get(index + 1).and_then(|next| next.fork);
             if segment_cap.is_some_and(|cap| cap.as_u64() > segment.head) {
                 return Err(CoreError::Storage(format!(
@@ -833,18 +931,85 @@ impl SqliteStore {
                         .as_u64()
                         .saturating_add(u64::try_from(take - 1).unwrap_or(u64::MAX)),
                 );
-                let mut events =
-                    Self::read_own_events_bounded(&tx, segment.id, raw_from, raw_to, take, bounds)?;
-                for event in &mut events {
-                    event.seq = Seq::from_u64(logical_offset.saturating_add(event.seq.as_u64()));
-                }
-                selected.extend(events);
+                let segment_bounds = bounds
+                    .with_max_total_bytes(bounds.max_total_bytes().saturating_sub(total_bytes));
+                let segment_bytes = match Self::validate_own_events_bounded(
+                    conn,
+                    segment.id,
+                    raw_from,
+                    raw_to,
+                    take,
+                    segment_bounds,
+                    started,
+                ) {
+                    Ok(bytes) => bytes,
+                    Err(CoreError::ReadBytesTooLarge { size }) => {
+                        return Err(CoreError::ReadBytesTooLarge {
+                            size: total_bytes.saturating_add(size),
+                        })
+                    }
+                    Err(error) => return Err(error),
+                };
+                total_bytes = total_bytes.saturating_add(segment_bytes);
+                plans.push(BoundedSegmentPage {
+                    id: segment.id,
+                    raw_from,
+                    raw_to,
+                    take,
+                    logical_offset,
+                    bounds: segment_bounds,
+                });
                 remaining -= take;
             }
             logical_offset = logical_offset.saturating_add(segment_len);
             if remaining == 0 || logical_offset >= to {
                 break;
             }
+        }
+        Ok(plans)
+    }
+
+    fn materialize_bounded_pages(
+        conn: &rusqlite::Transaction<'_>,
+        plans: &[BoundedSegmentPage],
+        bounds: EventReadBounds,
+        started: Instant,
+    ) -> Result<Vec<Event>, CoreError> {
+        let mut selected = Vec::new();
+        for plan in plans {
+            #[cfg(test)]
+            bounded_read_delay_for_test(6);
+            let elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+            if elapsed_micros > bounds.max_elapsed_micros() {
+                return Err(CoreError::ReadTimeTooLarge { elapsed_micros });
+            }
+            #[cfg(test)]
+            BOUNDED_EVENT_QUERIES.with(|queries| queries.set(queries.get() + 1));
+            let mut events = Self::read_own_events_limited_on(
+                conn,
+                plan.id,
+                plan.raw_from,
+                Some(plan.raw_to),
+                Some(plan.take),
+                Some(started),
+                plan.bounds.max_elapsed_micros(),
+            )?;
+            for event in &mut events {
+                event.seq = Seq::from_u64(plan.logical_offset.saturating_add(event.seq.as_u64()));
+            }
+            selected.extend(events);
+            #[cfg(test)]
+            bounded_materialization_delay_for_test();
+            let elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+            if elapsed_micros > bounds.max_elapsed_micros() {
+                return Err(CoreError::ReadTimeTooLarge { elapsed_micros });
+            }
+        }
+        #[cfg(test)]
+        bounded_read_delay_for_test(7);
+        let elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        if elapsed_micros > bounds.max_elapsed_micros() {
+            return Err(CoreError::ReadTimeTooLarge { elapsed_micros });
         }
         Ok(selected)
     }
@@ -900,11 +1065,19 @@ impl SqliteStore {
         conn: &Connection,
         timeline_id: TimelineId,
         max_depth: usize,
+        started: Instant,
+        max_elapsed_micros: u64,
     ) -> Result<Vec<BoundedForkSegment>, CoreError> {
         let mut chain = Vec::new();
         let mut current = timeline_id;
         let mut depth = 0_usize;
         loop {
+            #[cfg(test)]
+            bounded_read_delay_for_test(8);
+            let elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+            if elapsed_micros > max_elapsed_micros {
+                return Err(CoreError::ReadTimeTooLarge { elapsed_micros });
+            }
             let chain_query = {
                 #[cfg(test)]
                 if FAIL_BOUNDED_CHAIN_QUERY.with(std::cell::Cell::get) {
@@ -970,6 +1143,16 @@ struct BoundedForkSegment {
     id: TimelineId,
     fork: Option<Seq>,
     head: u64,
+}
+
+#[derive(Clone, Copy)]
+struct BoundedSegmentPage {
+    id: TimelineId,
+    raw_from: Seq,
+    raw_to: Seq,
+    take: usize,
+    logical_offset: u64,
+    bounds: EventReadBounds,
 }
 
 #[derive(Debug)]
@@ -1662,6 +1845,8 @@ impl EventStore for SqliteStore {
                 Seq::from_u64(u64::try_from(seq).unwrap_or(0)),
                 Some(Seq::from_u64(u64::try_from(seq).unwrap_or(0))),
                 Some(1),
+                None,
+                u64::MAX,
             )?;
             Ok(events.pop())
         })
@@ -1744,8 +1929,12 @@ impl EventStore for SqliteStore {
         range: SeqRange,
         bounds: EventReadBounds,
     ) -> Result<Vec<Event>, CoreError> {
+        let started = Instant::now();
+        if bounds.max_elapsed_micros() == 0 {
+            return Err(CoreError::ReadTimeTooLarge { elapsed_micros: 0 });
+        }
         self.ensure_generic_timeline_visibility(timeline)
-            .and_then(|()| self.read_logical_bounded(timeline, range, bounds))
+            .and_then(|()| self.read_logical_bounded(timeline, range, bounds, started))
     }
 
     fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
@@ -3327,6 +3516,25 @@ mod tests {
             .unwrap_err();
         let _: CoreError = error;
 
+        let mut materialization_store = new_store();
+        let timeline = materialization_store
+            .create_timeline("invalid-event-row")
+            .unwrap();
+        materialization_store
+            .append(timeline.id(), &[make_draft(EntityId::new(), b"x")])
+            .unwrap();
+        materialization_store
+            .conn
+            .execute(
+                "UPDATE events SET event_id = 'not-a-ulid' WHERE timeline_id = ?1",
+                params![timeline.id().to_string()],
+            )
+            .unwrap();
+        let error = materialization_store
+            .read_bounded(timeline.id(), SeqRange::all(), read_bounds(1))
+            .unwrap_err();
+        assert!(matches!(error, CoreError::Serialization(_)));
+
         let mut chain_store = new_store();
         let timeline = chain_store.create_timeline("missing-timelines").unwrap();
         chain_store
@@ -3444,6 +3652,92 @@ mod tests {
             )
             .unwrap();
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bounded_read_rejects_aggregate_event_bytes_before_full_event_query() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("aggregate-bytes").unwrap();
+        let entity = EntityId::new();
+        store
+            .append(
+                timeline.id(),
+                &[
+                    EventDraft::new(entity, Kind::new("x"), CanonicalBytes::from_static(b"1234")),
+                    EventDraft::new(entity, Kind::new("x"), CanonicalBytes::from_static(b"5678")),
+                ],
+            )
+            .unwrap();
+
+        BOUNDED_EVENT_QUERIES.with(|queries| queries.set(0));
+        let error = store
+            .read_bounded(
+                timeline.id(),
+                SeqRange::all(),
+                EventReadBounds::new_with_total_bytes(4, 1, usize::MAX, 2, 9),
+            )
+            .unwrap_err();
+        assert!(matches!(error, CoreError::ReadBytesTooLarge { size: 10 }));
+        BOUNDED_EVENT_QUERIES.with(|queries| assert_eq!(queries.get(), 0));
+
+        let events = store
+            .read_bounded(
+                timeline.id(),
+                SeqRange::all(),
+                EventReadBounds::new_with_total_bytes(4, 1, usize::MAX, 2, 10),
+            )
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        BOUNDED_EVENT_QUERIES.with(|queries| assert_eq!(queries.get(), 1));
+
+        let time_error = store
+            .read_bounded(
+                timeline.id(),
+                SeqRange::all(),
+                EventReadBounds::new_with_total_bytes_and_elapsed(4, 1, usize::MAX, 2, 10, 0),
+            )
+            .unwrap_err();
+        assert!(matches!(time_error, CoreError::ReadTimeTooLarge { .. }));
+
+        BOUNDED_MATERIALIZATION_DELAY_MILLIS.with(|delay| delay.set(20));
+        let time_error = store
+            .read_bounded(
+                timeline.id(),
+                SeqRange::all(),
+                EventReadBounds::new_with_total_bytes_and_elapsed(4, 1, usize::MAX, 2, 10, 1_000),
+            )
+            .unwrap_err();
+        BOUNDED_MATERIALIZATION_DELAY_MILLIS.with(|delay| delay.set(0));
+        assert!(matches!(time_error, CoreError::ReadTimeTooLarge { .. }));
+
+        let child = store
+            .fork(timeline.id(), Seq::from_u64(2), "bounded-time-child")
+            .unwrap();
+        for phase in 1..=9 {
+            BOUNDED_READ_DELAY_PHASE.with(|current| current.set(phase));
+            let read_timeline = if phase == 8 {
+                child.id()
+            } else {
+                timeline.id()
+            };
+            let time_error = store
+                .read_bounded(
+                    read_timeline,
+                    SeqRange::all(),
+                    EventReadBounds::new_with_total_bytes_and_elapsed(
+                        4,
+                        1,
+                        usize::MAX,
+                        2,
+                        10,
+                        1_000,
+                    ),
+                )
+                .unwrap_err();
+            BOUNDED_READ_DELAY_PHASE.with(|current| current.set(0));
+            assert!(matches!(time_error, CoreError::ReadTimeTooLarge { .. }));
+        }
     }
 
     #[test]
@@ -5025,6 +5319,8 @@ mod tests {
             Seq::ZERO,
             None,
             None,
+            None,
+            u64::MAX,
         )
         .unwrap_err();
         assert!(error.to_string().contains("storage error"));
@@ -5034,13 +5330,14 @@ mod tests {
     fn bounded_metadata_query_preparation_errors_are_storage_errors() {
         let store = new_store();
         store.conn.execute("DROP TABLE events", []).unwrap();
-        let error = SqliteStore::read_own_events_bounded(
+        let error = SqliteStore::validate_own_events_bounded(
             &store.conn,
             TimelineId::new(),
             Seq::ZERO,
             Seq::ZERO,
             1,
             read_bounds(1),
+            Instant::now(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("storage error"));

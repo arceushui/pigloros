@@ -34,6 +34,12 @@ pub enum CoreError {
     #[error("event metadata field {field} too large: {size} bytes")]
     EventMetadataTooLarge { field: &'static str, size: usize },
 
+    #[error("bounded event read exceeds aggregate byte limit: {size} bytes")]
+    ReadBytesTooLarge { size: usize },
+
+    #[error("bounded event read exceeds elapsed-time limit: {elapsed_micros} microseconds")]
+    ReadTimeTooLarge { elapsed_micros: u64 },
+
     #[error("fork depth too large: {depth}")]
     ForkDepthTooLarge { depth: usize },
 
@@ -95,6 +101,20 @@ mod tests {
     fn storage_error_displays() {
         let e = CoreError::Storage("disk full".to_owned());
         assert!(e.to_string().contains("disk full"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bounded_read_byte_error_displays() {
+        let e = CoreError::ReadBytesTooLarge { size: 10 };
+        assert!(e.to_string().contains("10"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bounded_read_time_error_displays() {
+        let e = CoreError::ReadTimeTooLarge { elapsed_micros: 10 };
+        assert!(e.to_string().contains("10"));
     }
 
     #[test]

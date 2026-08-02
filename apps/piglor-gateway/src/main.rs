@@ -196,17 +196,28 @@ async fn serve_with_owntracks(
         (Some(_), None) => return Err("OwnTracks ingress requires an SQLite path".into()),
     };
     let state = AppState {
-        gateway,
+        gateway: gateway.clone(),
         ledger_view,
         ledger_write,
     };
     let app = router_for_addr(addr, state);
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            let _ = gateway.shutdown().await;
+            return Err(Box::new(error));
+        }
+    };
     eprintln!("piglor-gateway listening on http://{addr}");
-    axum::serve(listener, app)
+    let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
-        .await
-        .map_err(Into::into)
+        .await;
+    let shutdown_result = gateway.shutdown().await;
+    match (serve_result, shutdown_result) {
+        (Err(error), _) => Err(Box::new(error)),
+        (Ok(()), Err(error)) => Err(Box::new(error)),
+        (Ok(()), Ok(())) => Ok(()),
+    }
 }
 
 #[cfg(test)]

@@ -129,8 +129,15 @@ async fn ledger_page(State(state): State<AppState>) -> impl IntoResponse {
     response
 }
 
-async fn health() -> impl IntoResponse {
-    Json(json!({ "ok": true }))
+async fn health(State(state): State<AppState>) -> impl IntoResponse {
+    if state.gateway.is_ready() {
+        (StatusCode::OK, Json(json!({ "ok": true })))
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "ok": false, "error": "store executor not ready" })),
+        )
+    }
 }
 
 async fn get_ledger(State(state): State<AppState>) -> impl IntoResponse {
@@ -324,6 +331,7 @@ impl IntoResponse for GatewayError {
             | GatewayError::EventMetadataTooLarge { .. }
             | GatewayError::ForkDepthTooLarge { .. }
             | GatewayError::EventResponseTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+            GatewayError::EventReadTimeExceeded { .. } => StatusCode::GATEWAY_TIMEOUT,
             GatewayError::CompatibilityReadTruncated { .. } | GatewayError::IngressConflict => {
                 StatusCode::CONFLICT
             }
@@ -332,6 +340,8 @@ impl IntoResponse for GatewayError {
             GatewayError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
             GatewayError::LedgerWriteDisabled => StatusCode::FORBIDDEN,
             GatewayError::StoreExecutorClosed
+            | GatewayError::StoreExecutorDeadlineExceeded
+            | GatewayError::StoreExecutorUnhealthy
             | GatewayError::LedgerUnavailable
             | GatewayError::OwnTracksOwnerKeyUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             GatewayError::Ledger(le) => match le {
@@ -638,6 +648,21 @@ mod tests {
         let (status, json) = json_request(test_app(), "GET", "/health", None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["ok"], true);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn health_reports_executor_unready_after_shutdown() {
+        let gateway = Gateway::new(open_store(StoreConfig::Memory).unwrap());
+        gateway.shutdown().await.unwrap();
+        let app = router(AppState {
+            gateway,
+            ledger_view: LedgerView::default(),
+            ledger_write: LedgerWriteMode::Disabled,
+        });
+        let (status, json) = json_request(app, "GET", "/health", None).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json["ok"], false);
     }
 
     #[tokio::test]
@@ -1223,6 +1248,8 @@ mod tests {
         assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
         let r = GatewayError::EventResponseTooLarge { maximum: 1 }.into_response();
         assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let r = GatewayError::EventReadTimeExceeded { maximum_micros: 1 }.into_response();
+        assert_eq!(r.status(), StatusCode::GATEWAY_TIMEOUT);
         let r = GatewayError::CompatibilityReadTruncated { maximum: 1 }.into_response();
         assert_eq!(r.status(), StatusCode::CONFLICT);
         let r = GatewayError::ResourceUnavailable.into_response();
