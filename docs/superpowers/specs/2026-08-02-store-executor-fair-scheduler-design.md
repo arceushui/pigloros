@@ -35,7 +35,10 @@ new permits: every accepted envelope already owns its permit, and moving that
 envelope from the inbound channel to local pending does not change the total
 accepted-work count. Each envelope carries its `CommandClass` so worker
 selection does not depend on the admission-only boolean currently passed to
-`try_submit`.
+`try_submit`. The envelope retains its global and optional read permits until
+the worker removes it from the channel or pending queue and the envelope is
+dropped. A caller-side deadline expiry only marks the lifecycle expired; it
+never releases admission capacity while the envelope remains accepted work.
 
 Use a fixed `READ_BURST` of 8. The selection policy is:
 
@@ -62,11 +65,16 @@ Reads remain FIFO relative to other reads, and writes remain FIFO relative to
 other writes. Cross-class FIFO is intentionally replaced by bounded read-burst
 selection, which is the explicitly requested fairness behavior. It does not
 change the order in which writes receive store-assigned sequence numbers.
+“Oldest” and write-arrival order mean the order of successful admission at the
+channel send linearization point, not task-start order or wall-clock order.
 
 The same policy applies while draining. Shutdown first stops accepting new
 commands, drains accepted channel messages into the bounded pending queue, and
-then services all pending commands using the scheduler. Expired envelopes are
-still rejected through the existing atomic lifecycle claim before execution.
+then services all pending commands using the scheduler. The worker exits only
+after the executing command has returned, the inbound channel is empty, and
+the pending queue is empty. Expired envelopes are still rejected through the
+existing atomic lifecycle claim before execution; the worker then drops their
+permits so capacity is reclaimed exactly once.
 
 ## Alternatives considered
 
@@ -94,11 +102,13 @@ scheduler state owned by the existing worker. Selected.
 - At most one worker owns and mutates the EventStore.
 - A shared permit budget bounds channel, pending, and current envelopes to
   `QUEUE_CAPACITY`; moving a message between channel and pending cannot create
-  additional accepted work.
+  additional accepted work. Caller-side expiry cannot release a permit before
+  the worker removes the corresponding envelope.
 - Reads can hold at most `QUEUE_CAPACITY - RESERVED_WRITE_CAPACITY` permits.
 - Writes are never reordered with other writes.
 - Reads are never reordered with other reads.
-- `CommandClass::Read` maps `RootCount`, `Read`, `ReadOne`, and `GetTimeline`;
+- `Command::class()` is the exhaustive single source of truth:
+  `CommandClass::Read` maps `RootCount`, `Read`, `ReadOne`, and `GetTimeline`;
   `CommandClass::Write` maps `AdmitOwnTracksIngress`, `AdmitGeoLocation`,
   `Purge`, `Create`, `Append`, `AppendIdentified`, and test-only `Panic`.
 - No read is preempted; bounded read chunks limit the maximum work before the
@@ -116,13 +126,16 @@ scheduler state owned by the existing worker. Selected.
 
 ADR-052 contains both an early description of a single global FIFO and a later
 normative fairness rule requiring bounded read bursts and write priority. This
-ticket implements the later rule and supersedes the earlier cross-class FIFO
-sentence for the local V1 executor. FIFO remains guaranteed within each class,
-and write sequence assignment remains deterministic in write-arrival order;
-callers must not rely on a read being ordered ahead of a write merely because
-it entered the channel first. The Proposed ADR-052 text should carry this
-clarification when that ADR reaches acceptance. No distributed or cross-process
-ordering claim is introduced.
+ticket proposes to implement the later rule and supersede the earlier
+cross-class FIFO sentence for the local V1 executor. FIFO remains guaranteed
+within each class, and write sequence assignment remains deterministic in
+write-arrival order; callers must not rely on a read being ordered ahead of a
+write merely because it entered the channel first. Because ADR-052 is still
+Proposed, production implementation is gated on one of these explicit
+authorizations: (a) amend and accept ADR-052 with this clarification, or (b)
+record core-team approval on #167 that explicitly authorizes this local
+ordering change. This design proposal is not itself that authorization. No
+distributed or cross-process ordering claim is introduced.
 
 ## Test design
 
@@ -145,7 +158,19 @@ test stores and deterministic synchronization primitives:
   their commit result after deadline.
 - Commands expired while locally pending release their permits and never call
   the store.
-- Shutdown drains both pending reads and writes and leaves readiness closed.
+- A caller-expired envelope continues to consume its permits until the worker
+  removes it; saturation is observed before the worker sweep and capacity is
+  available only after the sweep drops the envelope.
+- An expired read at `reads_since_write == 7` does not consume the eighth-read
+  slot, and an expired write at saturation does not reset priority ahead of a
+  live write.
+- With no pending read and `reads_since_write < READ_BURST`, queued writes are
+  selected immediately and retain FIFO order.
+- Oldest selection is admission-order deterministic for concurrent producers.
+- Shutdown timeout/cancellation with one executing command, channel work, and
+  local pending work is retried after release; replies are delivered exactly
+  once, readiness is closed during draining, and post-transition submissions
+  are rejected.
 
 The first scheduler test will be written and run red before production changes.
 Focused gateway tests, workspace tests with ignored tests included, pedantic
