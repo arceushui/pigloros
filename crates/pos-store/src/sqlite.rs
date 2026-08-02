@@ -5389,7 +5389,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn geographic_admission_maps_durable_read_and_transaction_failures() {
         let mut store = new_store();
         let timeline = store.create_timeline("missing-fence-table").unwrap();
@@ -5440,7 +5439,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn geographic_admission_maps_durable_dedup_and_fence_failures() {
         let mut store = new_store();
         let timeline = store.create_timeline("malformed-dedup-event").unwrap();

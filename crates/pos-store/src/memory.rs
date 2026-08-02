@@ -1244,7 +1244,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn geographic_admission_rejects_unknown_timeline_and_stale_internal_fence() {
         let entity = EntityId::new();
         let missing_timeline = TimelineId::new();
