@@ -2347,6 +2347,22 @@ mod tests {
         }
     }
 
+    struct FenceRevokingClock {
+        path: String,
+    }
+
+    impl AdmissionClock for FenceRevokingClock {
+        fn now(&mut self) -> Result<WallTime, CoreError> {
+            Connection::open(&self.path)
+                .and_then(|connection| {
+                    connection
+                        .execute_batch("UPDATE geographic_admission_fences SET admission_epoch = 0")
+                })
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            Ok(WallTime::from_micros(1))
+        }
+    }
+
     #[test]
     fn fence_dropping_clock_maps_a_durable_connection_error_to_storage() {
         let mut clock = FenceDroppingClock {
@@ -2497,6 +2513,37 @@ mod tests {
         let mut store = new_store();
         let timeline = store.create_timeline("replay-row").unwrap();
         let entity = EntityId::new();
+        let missing_fence_error = store
+            .admit_geo_location(geographic_request(timeline.id(), entity))
+            .unwrap_err();
+        assert_eq!(
+            std::mem::discriminant(&missing_fence_error),
+            std::mem::discriminant(&CoreError::GeographicAdmissionValidationFailed)
+        );
+        store
+            .set_geo_location_admission_fence(timeline.id(), entity, geographic_fence())
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO geographic_presence (timeline_id, has_evidence) VALUES (?1, 1)",
+                params![timeline.id().to_string()],
+            )
+            .unwrap();
+        let integrity_error = store
+            .admit_geo_location(geographic_request(timeline.id(), entity))
+            .unwrap_err();
+        assert_eq!(
+            std::mem::discriminant(&integrity_error),
+            std::mem::discriminant(&CoreError::GeographicAdmissionValidationFailed)
+        );
+        store
+            .conn
+            .execute(
+                "DELETE FROM geographic_presence WHERE timeline_id = ?1",
+                params![timeline.id().to_string()],
+            )
+            .unwrap();
         let request = geographic_request(timeline.id(), entity);
         store
             .set_geo_location_admission_fence(timeline.id(), entity, geographic_fence())
@@ -2519,6 +2566,29 @@ mod tests {
         );
 
         assert!(store.verify_v1_event_snapshot_link(evidence).is_ok());
+    }
+
+    #[test]
+    fn geographic_admission_rechecks_a_revoked_fence_in_the_transaction() {
+        let database = tempfile::NamedTempFile::new().unwrap();
+        let path = database.path().to_str().unwrap().to_owned();
+        let mut store = SqliteStore::open_with_clock(
+            &path,
+            Box::new(FenceRevokingClock { path: path.clone() }),
+        )
+        .unwrap();
+        let timeline = store.create_timeline("revoked-fence").unwrap();
+        let entity = EntityId::new();
+        store
+            .set_geo_location_admission_fence(timeline.id(), entity, geographic_fence())
+            .unwrap();
+        let error = store
+            .admit_geo_location(geographic_request(timeline.id(), entity))
+            .unwrap_err();
+        assert_eq!(
+            std::mem::discriminant(&error),
+            std::mem::discriminant(&CoreError::GeographicAdmissionValidationFailed)
+        );
     }
 
     #[test]
