@@ -26,6 +26,7 @@ pub mod plugin;
 pub mod state;
 pub mod store;
 pub mod timeline;
+pub mod world_transform;
 
 // Re-export commonly used types at the crate root.
 pub use clock::{
