@@ -2352,7 +2352,6 @@ mod tests {
     }
 
     impl AdmissionClock for FenceRevokingClock {
-        #[cfg_attr(coverage_nightly, coverage(off))]
         fn now(&mut self) -> Result<WallTime, CoreError> {
             Connection::open(&self.path)
                 .and_then(|connection| {
