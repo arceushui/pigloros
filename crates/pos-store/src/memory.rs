@@ -1279,6 +1279,22 @@ mod tests {
         let mut store = MemoryStore::default();
         let timeline = store.create_timeline("protected").unwrap();
         let entity = EntityId::new();
+        let missing_fence_entity = EntityId::new();
+        let missing_fence_request =
+            GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
+                timeline.id(),
+                missing_fence_entity,
+                CanonicalBytes::from_static(b"missing-fence"),
+                7,
+                ([1; 32], 8, [2; 32]),
+                (1, false, 9),
+                ([4; 32], [5; 32]),
+            ));
+        let error = store.admit_geo_location(missing_fence_request).unwrap_err();
+        assert_eq!(
+            std::mem::discriminant(&error),
+            std::mem::discriminant(&CoreError::GeographicAdmissionValidationFailed)
+        );
         store
             .set_geo_location_admission_fence(
                 timeline.id(),
