@@ -487,7 +487,7 @@ impl WorldTransformV1 {
         for _ in 0..INVERSE_ITERATIONS {
             let prime_radius = prime_vertical_radius(latitude);
             let cosine = latitude.cos();
-            if !prime_radius.is_finite() || cosine.to_bits() == 0 {
+            if !prime_radius.is_finite() {
                 return Err(WorldTransformError::NonConvergent);
             }
             let height = horizontal_distance / cosine - prime_radius;
@@ -499,9 +499,6 @@ impl WorldTransformV1 {
                 horizontal_distance
                     * (1.0 - FIRST_ECCENTRICITY_SQUARED * prime_radius / denominator),
             );
-            if !next.is_finite() {
-                return Err(WorldTransformError::NonConvergent);
-            }
             last_delta = (next - latitude).abs();
             latitude = next;
         }
@@ -511,7 +508,7 @@ impl WorldTransformV1 {
         let cosine = latitude.cos();
         let prime_radius = prime_vertical_radius(latitude);
         let height = horizontal_distance / cosine - prime_radius;
-        if !cosine.is_finite() || cosine.to_bits() == 0 || !height.is_finite() {
+        if !height.is_finite() {
             return Err(WorldTransformError::NonConvergent);
         }
         let position = Wgs84PositionV1::new(
@@ -520,9 +517,13 @@ impl WorldTransformV1 {
             height,
         )?;
         let recovered = geodetic_to_ecef(position)?;
-        if !within_residual(recovered[0], ecef_x)
-            || !within_residual(recovered[1], ecef_y)
-            || !within_residual(recovered[2], ecef_z)
+        if [
+            (recovered[0], ecef_x),
+            (recovered[1], ecef_y),
+            (recovered[2], ecef_z),
+        ]
+        .iter()
+        .any(|(actual, expected)| !within_residual(*actual, *expected))
         {
             return Err(WorldTransformError::NonConvergent);
         }
@@ -804,6 +805,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn position_normalizes_longitude_and_rejects_poles() {
         let position =
             Wgs84PositionV1::new(10.0, 540.0, -20.0).expect("finite longitude normalizes");
@@ -835,6 +837,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn origin_definition_digest_fixture_is_stable() {
         let capability = capability();
         let origin = origin(&capability, 10_000.0);
@@ -849,6 +852,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn forward_origin_is_zero_and_repeated_forward_is_deterministic() {
         let capability = capability();
         let origin = origin(&capability, 10_000.0);
@@ -876,6 +880,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn forward_covers_hemispheres_height_antimeridian_and_radius() {
         let capability = capability();
         let equator = WorldOriginV1::new(
@@ -937,6 +942,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn inverse_round_trip_and_near_pole_policy_are_deterministic() {
         let capability = capability();
         let transform = WorldTransformV1::new(&capability, origin(&capability, 10_000.0))
@@ -965,6 +971,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn invalid_radius_digest_and_translation_are_rejected() {
         let capability = capability();
         let position = Wgs84PositionV1::new(35.0, -120.0, 100.0).expect("fixture is valid");
@@ -997,9 +1004,205 @@ mod tests {
             coordinate.translated_by(f64::INFINITY, 0.0, 0.0),
             Err(WorldTransformError::NonFiniteCoordinate)
         ));
+        assert!(matches!(
+            WorldCoordinateV1::from_components(f64::NAN, 0.0, 0.0),
+            Err(WorldTransformError::NonFiniteCoordinate)
+        ));
+
+        let transform = WorldTransformV1::new(&capability, origin).expect("origin is valid");
+        let huge_position =
+            Wgs84PositionV1::new(0.0, 0.0, f64::MAX).expect("finite height is accepted");
+        assert!(matches!(
+            transform.forward(&capability, huge_position),
+            Err(WorldTransformError::NonFiniteCoordinate)
+        ));
+        let huge_coordinate = WorldCoordinateV1::from_components(f64::MAX, 0.0, 0.0)
+            .expect("finite coordinate is valid");
+        assert!(matches!(
+            transform.inverse(&capability, huge_coordinate),
+            Err(WorldTransformError::NonFiniteCoordinate)
+        ));
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_identity_accessors_and_registry_fail_closed() {
+        let capability = capability();
+        let origin = origin(&capability, 10_000.0);
+        let reference = origin.reference();
+        assert_eq!(origin.world_id(), [1; 16]);
+        assert_eq!(origin.origin_id(), [2; 16]);
+        assert_eq!(origin.origin_revision(), 1);
+        assert_eq!(origin.provenance(), [3; 32]);
+        assert_eq!(reference.world_id(), [1; 16]);
+        assert_eq!(reference.origin_id(), [2; 16]);
+        assert_eq!(reference.origin_revision(), 1);
+        assert_eq!(
+            reference.origin_definition_digest(),
+            origin.origin_definition_digest()
+        );
+
+        let mut registry = WorldOriginRegistryV1::default();
+        registry
+            .register(&capability, origin)
+            .expect("origin registers");
+        let unavailable = WorldOriginReferenceV1::new([90; 16], [91; 16], 1, [92; 32]);
+        assert!(matches!(
+            registry.resolve(&capability, &unavailable),
+            Err(WorldTransformError::OriginUnavailable)
+        ));
+        assert!(matches!(
+            registry.retire(&capability, &unavailable),
+            Err(WorldTransformError::OriginUnavailable)
+        ));
+
+        let invalid_digest = WorldOriginReferenceV1::new(
+            reference.world_id(),
+            reference.origin_id(),
+            reference.origin_revision(),
+            [93; 32],
+        );
+        assert!(matches!(
+            registry.resolve(&capability, &invalid_digest),
+            Err(WorldTransformError::InvalidOriginDigest)
+        ));
+        assert!(matches!(
+            registry.retire(&capability, &invalid_digest),
+            Err(WorldTransformError::InvalidOriginDigest)
+        ));
+
+        let revision_two = WorldOriginV1::new(
+            &capability,
+            [94; 16],
+            [95; 16],
+            2,
+            Wgs84PositionV1::new(10.0, 20.0, 0.0).expect("revision two is valid"),
+            [96; 32],
+            100.0,
+        )
+        .expect("revision two is valid");
+        let revision_one = WorldOriginV1::new(
+            &capability,
+            [94; 16],
+            [95; 16],
+            1,
+            Wgs84PositionV1::new(10.0, 20.0, 0.0).expect("revision one is valid"),
+            [97; 32],
+            100.0,
+        )
+        .expect("revision one is valid");
+        assert!(matches!(
+            WorldOriginRegistryV1::default().restore(&capability, vec![revision_two, revision_one]),
+            Err(WorldTransformError::OriginRevisionConflict)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn inverse_rejects_exact_polar_axis() {
+        let capability = capability();
+        let polar_origin = WorldOriginV1::new(
+            &capability,
+            [98; 16],
+            [99; 16],
+            1,
+            Wgs84PositionV1::new(89.999_999, 0.0, 0.0).expect("near-pole origin is valid"),
+            [100; 32],
+            10_000.0,
+        )
+        .expect("near-pole origin is valid");
+        let transform =
+            WorldTransformV1::new(&capability, polar_origin).expect("near-pole transform is valid");
+        let dx = -polar_origin.origin_ecef[0];
+        let dy = -polar_origin.origin_ecef[1];
+        let dz = SEMI_MAJOR_AXIS_METRES * (1.0 - FLATTENING) - polar_origin.origin_ecef[2];
+        let (latitude, longitude) = radians(polar_origin.position);
+        let polar_coordinate = WorldCoordinateV1::from_components(
+            -longitude.sin() * dx + longitude.cos() * dy,
+            -latitude.sin() * longitude.cos() * dx - latitude.sin() * longitude.sin() * dy
+                + latitude.cos() * dz,
+            latitude.cos() * longitude.cos() * dx
+                + latitude.cos() * longitude.sin() * dy
+                + latitude.sin() * dz,
+        )
+        .expect("polar coordinate is finite");
+        let result = transform.inverse(&capability, polar_coordinate);
+        assert!(matches!(result, Err(WorldTransformError::PoleUnsupported)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn defensive_numeric_paths_are_fail_closed() {
+        let capability = capability();
+        let origin = origin(&capability, 10_000.0);
+        let translated = WorldCoordinateV1::from_components(1.0, 2.0, 3.0)
+            .expect("finite coordinate is valid")
+            .translated_by(4.0, 5.0, 6.0)
+            .expect("finite translation is valid");
+        assert_eq!(translated.east_metres().to_bits(), 5.0f64.to_bits());
+        assert_eq!(translated.north_metres().to_bits(), 7.0f64.to_bits());
+        assert_eq!(translated.up_metres().to_bits(), 9.0f64.to_bits());
+
+        let mut overflow_transform =
+            WorldTransformV1::new(&capability, origin).expect("fixture transform is valid");
+        overflow_transform.origin.origin_ecef = [0.0, 0.0, 0.0];
+        overflow_transform.origin_sin_latitude = 0.0;
+        overflow_transform.origin_cos_latitude = 1.0;
+        overflow_transform.origin_sin_longitude = 0.0;
+        overflow_transform.origin_cos_longitude = f64::MAX;
+        let boundary_coordinate =
+            WorldCoordinateV1::from_components(0.0, 0.0, 10_000.0).expect("coordinate is valid");
+        assert!(matches!(
+            overflow_transform.inverse(&capability, boundary_coordinate),
+            Err(WorldTransformError::NonFiniteCoordinate)
+        ));
+
+        let mut infinite_horizontal_transform =
+            WorldTransformV1::new(&capability, origin).expect("fixture transform is valid");
+        infinite_horizontal_transform.origin.origin_ecef = [f64::MAX, f64::MAX, 0.0];
+        let zero_coordinate =
+            WorldCoordinateV1::from_components(0.0, 0.0, 0.0).expect("coordinate is valid");
+        assert!(matches!(
+            infinite_horizontal_transform.inverse(&capability, zero_coordinate),
+            Err(WorldTransformError::PoleUnsupported)
+        ));
+
+        let mut non_convergent_transform =
+            WorldTransformV1::new(&capability, origin).expect("fixture transform is valid");
+        non_convergent_transform.origin.origin_ecef = [1.0, 0.0, 1.0];
+        assert!(matches!(
+            non_convergent_transform.inverse(&capability, zero_coordinate),
+            Err(WorldTransformError::NonConvergent)
+        ));
+
+        let invalid_position = Wgs84PositionV1 {
+            latitude_degrees: f64::NAN,
+            longitude_degrees: 0.0,
+            ellipsoidal_height_metres: 0.0,
+        };
+        assert!(matches!(
+            geodetic_to_ecef(invalid_position),
+            Err(WorldTransformError::NonFiniteCoordinate)
+        ));
+
+        let mut overflowing_inverse =
+            WorldTransformV1::new(&capability, origin).expect("fixture transform is valid");
+        overflowing_inverse.origin.origin_ecef = [f64::MAX, 0.0, f64::MAX];
+        assert!(matches!(
+            overflowing_inverse.inverse(&capability, zero_coordinate),
+            Err(WorldTransformError::NonConvergent)
+        ));
+        let mut polar_inverse =
+            WorldTransformV1::new(&capability, origin).expect("fixture transform is valid");
+        polar_inverse.origin.origin_ecef = [1.0, 0.0, f64::MAX];
+        assert!(matches!(
+            polar_inverse.inverse(&capability, zero_coordinate),
+            Err(WorldTransformError::PoleUnsupported)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn origin_registry_rejects_duplicates_and_restores_atomically() {
         let capability = capability();
         let first = origin(&capability, 10_000.0);

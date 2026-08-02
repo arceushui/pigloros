@@ -526,6 +526,9 @@ mod tests {
             )
             .expect("fixture position is in range");
         let body = WorldCoordinateBody::new(EntityId::new(), position, 1.5, -2.0, 0.25);
+        assert!((body.position().east_metres() - position.east_metres()).abs() < f64::EPSILON);
+        assert!((body.position().north_metres() - position.north_metres()).abs() < f64::EPSILON);
+        assert!((body.position().up_metres() - position.up_metres()).abs() < f64::EPSILON);
 
         let mut backend = SimpleKinematicBackend::new();
         let observations = backend
@@ -717,6 +720,7 @@ mod tests {
             vy: 0.0,
         };
         let mut driver = WorldDriver::new(vec![body], Box::new(UnknownEntityBackend));
+        assert_eq!(UnknownEntityBackend.name(), "unknown-entity");
         let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
         assert_eq!(out.drafts.len(), 1);
         assert!((driver.entities[0].x - 1.0).abs() < f64::EPSILON);
@@ -739,6 +743,7 @@ mod tests {
         };
         let mut driver =
             WorldDriver::new(vec![body], Box::new(MixedEntityBackend { extra: unknown }));
+        assert_eq!(MixedEntityBackend { extra: unknown }.name(), "mixed-entity");
         driver.step(tl.id(), ObservationView::empty()).unwrap();
         assert!((driver.entities[0].x - 1.0).abs() < f64::EPSILON);
         assert!((driver.entities[0].y - 2.0).abs() < f64::EPSILON);
