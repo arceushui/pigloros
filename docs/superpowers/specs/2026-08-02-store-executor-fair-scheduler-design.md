@@ -5,6 +5,10 @@
 **Date:** 2026-08-02
 **Parent decision:** ADR-052, V1 StoreExecutor and synchronous EventStore isolation
 
+The predecessor lifecycle/supervision work in Redmine #165 is complete and
+squash-merged to `main` at `9473f32f67498564db24b1c33b15148d930e6d55`; #167 is
+the local scheduler follow-up.
+
 ## Problem
 
 The merged StoreExecutor owns one synchronous EventStore behind a bounded Tokio
@@ -62,19 +66,31 @@ Use a fixed `READ_BURST` of 8. The selection policy is:
    selection continues for the next pending envelope.
 
 Reads remain FIFO relative to other reads, and writes remain FIFO relative to
-other writes. Cross-class FIFO is intentionally replaced by bounded read-burst
-selection, which is the explicitly requested fairness behavior. It does not
-change the order in which writes receive store-assigned sequence numbers.
+other writes after filtering envelopes that have already expired. Cross-class
+FIFO is intentionally replaced by bounded read-burst selection, which is the
+explicitly requested fairness behavior. For an event-producing write command
+on the same Timeline, store-assigned sequence numbers retain successful
+admission order; non-event writes such as `Purge` do not participate in that
+sequence claim.
 “Oldest” and write-arrival order mean the order of successful admission at the
 channel send linearization point, not task-start order or wall-clock order.
+
+Admission is one transaction serialized by the lifecycle lock: while the
+executor is `Open`, `try_submit` acquires the required permits, classifies the
+command, and performs `try_send` while holding that lock. Shutdown takes the
+same lock before transitioning to `Draining` and notifying the worker. Thus a
+submission cannot be accepted after shutdown has observed the transition, and
+a failed send releases all permits immediately.
 
 The same policy applies while draining. Shutdown first stops accepting new
 commands, drains accepted channel messages into the bounded pending queue, and
 then services all pending commands using the scheduler. The worker exits only
 after the executing command has returned, the inbound channel is empty, and
-the pending queue is empty. Expired envelopes are still rejected through the
-existing atomic lifecycle claim before execution; the worker then drops their
-permits so capacity is reclaimed exactly once.
+the pending queue is empty. The global and optional read permits remain owned
+by the envelope through the complete synchronous store call, then release on
+normal completion, queued expiry, or worker unwind. Expired envelopes are
+still rejected through the existing atomic lifecycle claim before execution;
+the worker then drops their permits so capacity is reclaimed exactly once.
 
 ## Alternatives considered
 
@@ -103,7 +119,8 @@ scheduler state owned by the existing worker. Selected.
 - A shared permit budget bounds channel, pending, and current envelopes to
   `QUEUE_CAPACITY`; moving a message between channel and pending cannot create
   additional accepted work. Caller-side expiry cannot release a permit before
-  the worker removes the corresponding envelope.
+  the worker removes the corresponding envelope, and permits remain held
+  through the complete synchronous store call.
 - Reads can hold at most `QUEUE_CAPACITY - RESERVED_WRITE_CAPACITY` permits.
 - Writes are never reordered with other writes.
 - Reads are never reordered with other reads.
@@ -113,6 +130,10 @@ scheduler state owned by the existing worker. Selected.
   `Purge`, `Create`, `Append`, `AppendIdentified`, and test-only `Panic`.
 - No read is preempted; bounded read chunks limit the maximum work before the
   next scheduling decision.
+- If a write is pending at a scheduling boundary, at most `READ_BURST`
+  successfully claimed reads may execute consecutively before a write is
+  selected; the currently executing command is not preempted. Expired reads do
+  not consume this bound.
 - A command is claimed with the existing queued-to-started deadline CAS before
   any store call. Expired queued commands never execute.
 - A started command keeps its existing authoritative-result behavior, including
@@ -128,14 +149,15 @@ ADR-052 contains both an early description of a single global FIFO and a later
 normative fairness rule requiring bounded read bursts and write priority. This
 ticket proposes to implement the later rule and supersede the earlier
 cross-class FIFO sentence for the local V1 executor. FIFO remains guaranteed
-within each class, and write sequence assignment remains deterministic in
-write-arrival order; callers must not rely on a read being ordered ahead of a
+within each class after filtering expired envelopes, and event-producing write
+sequence assignment remains deterministic in successful admission order for
+the same Timeline; callers must not rely on a read being ordered ahead of a
 write merely because it entered the channel first. Because ADR-052 is still
-Proposed, production implementation is gated on one of these explicit
-authorizations: (a) amend and accept ADR-052 with this clarification, or (b)
-record core-team approval on #167 that explicitly authorizes this local
-ordering change. This design proposal is not itself that authorization. No
-distributed or cross-process ordering claim is introduced.
+Proposed, production implementation is gated solely on core-team acceptance
+of the V7 ADR-052 clarification. A #167 journal note may record review and
+discussion, but cannot independently authorize the ordering change. This
+design proposal is not itself authorization. No distributed or cross-process
+ordering claim is introduced.
 
 ## Test design
 
@@ -167,6 +189,9 @@ test stores and deterministic synchronization primitives:
 - With no pending read and `reads_since_write < READ_BURST`, queued writes are
   selected immediately and retain FIFO order.
 - Oldest selection is admission-order deterministic for concurrent producers.
+- A test-only admission-order seam records the sequence assigned while the
+  lifecycle lock linearizes successful submissions; scheduler-order assertions
+  use that seam rather than task-start timing or wall-clock order.
 - Shutdown timeout/cancellation with one executing command, channel work, and
   local pending work is retried after release; replies are delivered exactly
   once, readiness is closed during draining, and post-transition submissions
@@ -184,3 +209,11 @@ This ticket does not add a distributed scheduler, a second EventStore owner,
 wall-clock ordering, a configurable runtime fairness policy, metrics with
 unbounded labels, or changes to ADR-032/#143 coordinate work. Digital-twin
 bridge work remains the subsequent #60 milestone.
+
+## Review evidence
+
+The primary workspace verified canonical Redmine ADR-052 version 7 on
+2026-08-02: status `Proposed`, parent `ADR`, no malformed literal newline
+sequence, the #165 merge/resolution reconciliation, and this proposed #167
+clarification. The private Redmine host is not reachable from the CTO review
+sandbox, so that sandbox result is not treated as live-state evidence.
