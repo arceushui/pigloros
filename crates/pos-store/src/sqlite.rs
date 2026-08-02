@@ -2358,8 +2358,8 @@ mod tests {
                     connection
                         .execute_batch("UPDATE geographic_admission_fences SET admission_epoch = 0")
                 })
-                .map_err(|error| CoreError::Storage(error.to_string()))?;
-            Ok(WallTime::from_micros(1))
+                .map_err(|error| CoreError::Storage(error.to_string()))
+                .map(|()| WallTime::from_micros(1))
         }
     }
 
