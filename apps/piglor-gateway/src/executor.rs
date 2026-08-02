@@ -9,19 +9,25 @@ use pos_core::{
     geo_admission::{
         GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore,
     },
-    ids::{EventId, TimelineId},
+    ids::{EntityId, EventId, TimelineId},
     store::{
         AppendIdentity, AppendIntent, AppendOrDuplicateOutcome, EventReadBounds, EventStore,
         PurgeOutcome, SeqRange,
     },
     timeline::Timeline,
-    CoreError,
+    CoreError, OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1, OwnTracksIngressStore,
 };
-use std::num::NonZeroUsize;
 use std::thread;
+use std::{
+    collections::HashMap,
+    num::NonZeroUsize,
+    time::{Duration, Instant},
+};
 use tokio::sync::{mpsc, oneshot};
 
 pub(crate) const QUEUE_CAPACITY: usize = 64;
+const OWNTRACKS_RATE_BURST: u8 = 5;
+const OWNTRACKS_RATE_KEYS_MAXIMUM: usize = 64;
 
 macro_rules! submit {
     ($executor:expr, $build:expr) => {{
@@ -41,6 +47,11 @@ macro_rules! submit {
 }
 
 pub(super) enum Command {
+    #[allow(dead_code)]
+    AdmitOwnTracksIngress {
+        input: OwnTracksIngressInputV1,
+        reply: oneshot::Sender<Result<OwnTracksIngressOutcome, CoreError>>,
+    },
     AdmitGeoLocation {
         request: GeoLocationAdmissionRequestV1,
         reply: oneshot::Sender<Result<GeoLocationAdmissionOutcome, CoreError>>,
@@ -91,9 +102,17 @@ trait GeoLocationGatewayStore: EventStore + GeoLocationAdmissionStore {}
 
 impl<T> GeoLocationGatewayStore for T where T: EventStore + GeoLocationAdmissionStore {}
 
+trait OwnTracksGatewayStore: EventStore + GeoLocationAdmissionStore + OwnTracksIngressStore {}
+
+impl<T> OwnTracksGatewayStore for T where
+    T: EventStore + GeoLocationAdmissionStore + OwnTracksIngressStore
+{
+}
+
 enum ExecutorStore {
     Generic(Box<dyn EventStore>),
     GeoLocation(Box<dyn GeoLocationGatewayStore>),
+    OwnTracks(Box<dyn OwnTracksGatewayStore>),
 }
 
 impl ExecutorStore {
@@ -101,8 +120,78 @@ impl ExecutorStore {
         match self {
             Self::Generic(store) => store.as_mut(),
             Self::GeoLocation(store) => store.as_mut(),
+            Self::OwnTracks(store) => store.as_mut(),
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum OwnTracksIngressOutcome {
+    Admitted {
+        outcome: GeoLocationAdmissionOutcome,
+        timeline: TimelineId,
+        entity: EntityId,
+    },
+    RateLimited,
+}
+
+impl OwnTracksIngressOutcome {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) const fn is_rate_limited(&self) -> bool {
+        matches!(self, Self::RateLimited)
+    }
+}
+
+struct OwnTracksRateLimiter {
+    buckets: HashMap<OwnTracksIngressRateKeyV1, OwnTracksTokenBucket>,
+}
+
+struct OwnTracksTokenBucket {
+    tokens: u8,
+    last_refill: Instant,
+}
+
+impl OwnTracksRateLimiter {
+    fn allow(&mut self, key: OwnTracksIngressRateKeyV1) -> bool {
+        let now = Instant::now();
+        if !self.buckets.contains_key(&key) && self.buckets.len() == OWNTRACKS_RATE_KEYS_MAXIMUM {
+            if let Some(oldest) = self
+                .buckets
+                .iter()
+                .min_by_key(|(_, bucket)| bucket.last_refill)
+                .map(|(key, _)| *key)
+            {
+                self.buckets.remove(&oldest);
+            }
+        }
+        let bucket = self.buckets.entry(key).or_insert(OwnTracksTokenBucket {
+            tokens: OWNTRACKS_RATE_BURST,
+            last_refill: now,
+        });
+        let replenished = u8::try_from(
+            now.duration_since(bucket.last_refill)
+                .as_secs()
+                .min(u64::from(OWNTRACKS_RATE_BURST)),
+        )
+        .expect("OwnTracks rate refill is bounded by the burst");
+        if replenished != 0 {
+            bucket.tokens = bucket
+                .tokens
+                .saturating_add(replenished)
+                .min(OWNTRACKS_RATE_BURST);
+            bucket.last_refill += Duration::from_secs(u64::from(replenished));
+        }
+        if bucket.tokens == 0 {
+            return false;
+        }
+        bucket.tokens -= 1;
+        true
+    }
+}
+
+struct ExecutorState {
+    store: ExecutorStore,
+    owntracks_rate_limiter: OwnTracksRateLimiter,
 }
 
 #[derive(Debug)]
@@ -129,14 +218,26 @@ impl StoreExecutor {
         Self::spawn(ExecutorStore::GeoLocation(Box::new(store)))
     }
 
+    pub(crate) fn new_with_owntracks_ingress<S>(store: S) -> Self
+    where
+        S: EventStore + GeoLocationAdmissionStore + OwnTracksIngressStore + 'static,
+    {
+        Self::spawn(ExecutorStore::OwnTracks(Box::new(store)))
+    }
+
     fn spawn(store: ExecutorStore) -> Self {
         let (tx, mut rx) = mpsc::channel(QUEUE_CAPACITY);
         let _ = thread::Builder::new()
             .name("piglor-store-executor".to_owned())
             .spawn(move || {
-                let mut store = store;
+                let mut state = ExecutorState {
+                    store,
+                    owntracks_rate_limiter: OwnTracksRateLimiter {
+                        buckets: HashMap::new(),
+                    },
+                };
                 while let Some(command) = rx.blocking_recv() {
-                    execute(&mut store, command);
+                    execute(&mut state, command);
                 }
             });
         Self { tx }
@@ -153,6 +254,16 @@ impl StoreExecutor {
         request: GeoLocationAdmissionRequestV1,
     ) -> Result<GeoLocationAdmissionOutcome, StoreExecutorError> {
         submit!(self, |reply| Command::AdmitGeoLocation { request, reply })
+    }
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn admit_owntracks_ingress(
+        &self,
+        input: OwnTracksIngressInputV1,
+    ) -> Result<OwnTracksIngressOutcome, StoreExecutorError> {
+        submit!(self, |reply| Command::AdmitOwnTracksIngress {
+            input,
+            reply
+        })
     }
     pub(crate) async fn root_count(&self, maximum: usize) -> Result<usize, StoreExecutorError> {
         submit!(self, |reply| Command::RootCount { maximum, reply })
@@ -220,27 +331,60 @@ impl StoreExecutor {
     }
 }
 
-fn execute(store: &mut ExecutorStore, command: Command) {
+fn execute_owntracks_ingress(
+    state: &mut ExecutorState,
+    input: OwnTracksIngressInputV1,
+) -> Result<OwnTracksIngressOutcome, CoreError> {
+    let ExecutorStore::OwnTracks(store) = &mut state.store else {
+        return Err(CoreError::GeographicAdmissionUnavailable);
+    };
+    let prepared = store.prepare_owntracks_ingress(input)?;
+    if !state.owntracks_rate_limiter.allow(prepared.rate_key()) {
+        return Ok(OwnTracksIngressOutcome::RateLimited);
+    }
+    let request = prepared.into_admission_request();
+    let timeline = request.timeline();
+    let entity = request.entity();
+    let outcome = store.admit_geo_location(request)?;
+    Ok(OwnTracksIngressOutcome::Admitted {
+        outcome,
+        timeline,
+        entity,
+    })
+}
+
+fn execute(state: &mut ExecutorState, command: Command) {
     match command {
+        Command::AdmitOwnTracksIngress { input, reply } => {
+            let result = execute_owntracks_ingress(state, input);
+            let _ = reply.send(result);
+        }
         Command::AdmitGeoLocation { request, reply } => {
-            let result = match store {
+            let result = match &mut state.store {
                 ExecutorStore::GeoLocation(store) => store.admit_geo_location(request),
+                ExecutorStore::OwnTracks(store) => store.admit_geo_location(request),
                 ExecutorStore::Generic(_) => Err(CoreError::GeographicAdmissionUnavailable),
             };
             let _ = reply.send(result);
         }
         Command::Purge { limit, reply } => {
             let _ = reply.send(
-                store
+                state
+                    .store
                     .event_store()
                     .purge_expired_append_identities_bounded(limit),
             );
         }
         Command::RootCount { maximum, reply } => {
-            let _ = reply.send(store.event_store().root_timeline_count_bounded(maximum));
+            let _ = reply.send(
+                state
+                    .store
+                    .event_store()
+                    .root_timeline_count_bounded(maximum),
+            );
         }
         Command::Create { name, reply } => {
-            let _ = reply.send(store.event_store().create_timeline(&name));
+            let _ = reply.send(state.store.event_store().create_timeline(&name));
         }
         Command::Read {
             timeline,
@@ -248,14 +392,19 @@ fn execute(store: &mut ExecutorStore, command: Command) {
             bounds,
             reply,
         } => {
-            let _ = reply.send(store.event_store().read_bounded(timeline, range, bounds));
+            let _ = reply.send(
+                state
+                    .store
+                    .event_store()
+                    .read_bounded(timeline, range, bounds),
+            );
         }
         Command::ReadOne {
             timeline,
             event,
             reply,
         } => {
-            let _ = reply.send(store.event_store().read_event_by_id(timeline, event));
+            let _ = reply.send(state.store.event_store().read_event_by_id(timeline, event));
         }
         Command::Append {
             timeline,
@@ -263,7 +412,7 @@ fn execute(store: &mut ExecutorStore, command: Command) {
             maximum,
             reply,
         } => {
-            let store = store.event_store();
+            let store = state.store.event_store();
             let result = store.get_timeline(timeline).and_then(|meta| {
                 if let (Some(maximum), Some(meta)) = (maximum, meta) {
                     if meta.head.as_u64() >= maximum {
@@ -282,13 +431,14 @@ fn execute(store: &mut ExecutorStore, command: Command) {
             reply,
         } => {
             let _ = reply.send(
-                store
+                state
+                    .store
                     .event_store()
                     .append_intent_or_duplicate_bounded(timeline, identity, intent, maximum),
             );
         }
         Command::GetTimeline { timeline, reply } => {
-            let _ = reply.send(store.event_store().get_timeline(timeline));
+            let _ = reply.send(state.store.event_store().get_timeline(timeline));
         }
     }
 }

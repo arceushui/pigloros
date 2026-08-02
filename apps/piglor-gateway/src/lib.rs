@@ -25,7 +25,7 @@ use pos_core::{
         EventReadBounds, EventStore, PurgeOutcome, SeqRange,
     },
     timeline::Timeline,
-    CoreError,
+    CoreError, OwnTracksIngressInputV1, OwnTracksIngressStore,
 };
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
 use pos_plugin_world::EVENT_TYPE_ACTION;
@@ -58,7 +58,7 @@ mod coverage_tests {
             GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1,
         },
         CanonicalBytes, EntityId, EventStore, OwnTracksEnrollmentRequestV1,
-        OwnTracksEnrollmentStore,
+        OwnTracksEnrollmentStore, OwnTracksIngressInputV1,
     };
     use pos_store::{memory::MemoryStore, open_store, StoreConfig};
 
@@ -129,6 +129,58 @@ mod coverage_tests {
             .await
             .unwrap()
             .is_duplicate());
+        assert!(matches!(
+            notices.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn owntracks_ingress_rate_limits_after_authentication_and_notifies_only_acceptance() {
+        const OWNER_KEY: [u8; 32] = [17; 32];
+        const HANDLE: [u8; 32] = [23; 32];
+        const SECRET: [u8; 32] = [29; 32];
+
+        let mut store = MemoryStore::default();
+        let timeline = store.create_timeline("owntracks-rate-limit").unwrap();
+        let entity = EntityId::new();
+        let mut material = Vec::with_capacity(96);
+        material.extend_from_slice(b"pigloros/owntracks/verifier/v1\0");
+        material.extend_from_slice(&HANDLE);
+        material.extend_from_slice(&SECRET);
+        store
+            .pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
+                timeline.id(),
+                entity,
+                GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
+                *blake3::keyed_hash(&OWNER_KEY, &material).as_bytes(),
+            ))
+            .unwrap();
+        let gateway = Gateway::new_with_owntracks_ingress(store);
+        let mut notices = gateway.subscribe();
+        let input = || {
+            OwnTracksIngressInputV1::new(
+                OWNER_KEY,
+                HANDLE,
+                SECRET,
+                CanonicalBytes::from_static(b"existing-v1-geo-location-payload"),
+            )
+        };
+
+        for _ in 0..5 {
+            assert!(!gateway
+                .admit_owntracks_ingress(input())
+                .await
+                .unwrap()
+                .is_rate_limited());
+        }
+        assert!(gateway
+            .admit_owntracks_ingress(input())
+            .await
+            .unwrap()
+            .is_rate_limited());
+        assert_eq!(notices.recv().await.unwrap().event_type, "geo.location");
         assert!(matches!(
             notices.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Empty)
@@ -363,6 +415,23 @@ impl Gateway {
         }
     }
 
+    /// Construct the Gateway shape that accepts authenticated local `OwnTracks` ingress.
+    ///
+    /// This does not register an HTTP route. The private executor performs
+    /// authentication, rate limiting, and geographic admission in one queue turn.
+    #[must_use]
+    pub fn new_with_owntracks_ingress<S>(store: S) -> Self
+    where
+        S: EventStore + GeoLocationAdmissionStore + OwnTracksIngressStore + 'static,
+    {
+        let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        Self {
+            store: executor::StoreExecutor::new_with_owntracks_ingress(store),
+            bus,
+            limits: GatewayLimits::LOCAL_DEFAULT,
+        }
+    }
+
     /// Submit one already-authorized core geographic admission request.
     ///
     /// The generic Gateway action and HTTP paths cannot construct this command.
@@ -389,6 +458,40 @@ impl Gateway {
                 .event_seq()
                 .expect("accepted geographic admission always carries an Event sequence");
             self.publish_geographic_notice(timeline, event_id, entity, seq);
+        }
+        Ok(outcome)
+    }
+
+    /// Authenticate, rate-limit, and admit one minimized `OwnTracks` update.
+    ///
+    /// A notice is published only for a definite newly accepted Event.
+    ///
+    /// # Errors
+    /// Returns a bounded executor or store error when ingress cannot run.
+    ///
+    /// # Panics
+    /// Panics only if a core outcome violates its accepted-event invariant.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn admit_owntracks_ingress(
+        &self,
+        input: OwnTracksIngressInputV1,
+    ) -> Result<executor::OwnTracksIngressOutcome, GatewayError> {
+        let outcome = self.store.admit_owntracks_ingress(input).await?;
+        if let executor::OwnTracksIngressOutcome::Admitted {
+            outcome: admission,
+            timeline,
+            entity,
+        } = &outcome
+        {
+            if admission.is_accepted() {
+                let event_id = admission
+                    .event_id()
+                    .expect("accepted geographic admission always carries an Event ID");
+                let seq = admission
+                    .event_seq()
+                    .expect("accepted geographic admission always carries an Event sequence");
+                self.publish_geographic_notice(*timeline, event_id, *entity, seq);
+            }
         }
         Ok(outcome)
     }
