@@ -154,7 +154,7 @@ sequence assignment remains deterministic in successful admission order for
 the same Timeline; callers must not rely on a read being ordered ahead of a
 write merely because it entered the channel first. Because ADR-052 is still
 Proposed, production implementation is gated solely on core-team acceptance
-of the V7 ADR-052 clarification. A #167 journal note may record review and
+of the V8 ADR-052 clarification. A #167 journal note may record review and
 discussion, but cannot independently authorize the ordering change. This
 design proposal is not itself authorization. No distributed or cross-process
 ordering claim is introduced.
@@ -212,7 +212,7 @@ bridge work remains the subsequent #60 milestone.
 
 ## Review evidence
 
-The primary workspace verified canonical Redmine ADR-052 version 7 on
+The primary workspace verified canonical Redmine ADR-052 version 8 on
 2026-08-02: status `Proposed`, parent `ADR`, no malformed literal newline
 sequence, the #165 merge/resolution reconciliation, and this proposed #167
 clarification. The private Redmine host is not reachable from the CTO review
