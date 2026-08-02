@@ -14,6 +14,7 @@ use pos_core::{
     ids::{EntityId, PluginId, TimelineId},
     plugin::{Capability, Plugin},
     state::{Reducer, State},
+    WorldCoordinateV1, WorldTransformError,
 };
 use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 use serde::{Deserialize, Serialize};
@@ -60,6 +61,69 @@ pub struct WorldObservation {
     pub y: f64,
 }
 
+/// A world body represented by a core-owned named ENU coordinate.
+#[derive(Clone, Copy, PartialEq)]
+pub struct WorldCoordinateBody {
+    entity_id: EntityId,
+    position: WorldCoordinateV1,
+    east_velocity_metres_per_step: f64,
+    north_velocity_metres_per_step: f64,
+    up_velocity_metres_per_step: f64,
+}
+
+impl WorldCoordinateBody {
+    /// Construct a body with one-step East/North/Up velocity components.
+    #[must_use]
+    pub const fn new(
+        entity_id: EntityId,
+        position: WorldCoordinateV1,
+        east_velocity_metres_per_step: f64,
+        north_velocity_metres_per_step: f64,
+        up_velocity_metres_per_step: f64,
+    ) -> Self {
+        Self {
+            entity_id,
+            position,
+            east_velocity_metres_per_step,
+            north_velocity_metres_per_step,
+            up_velocity_metres_per_step,
+        }
+    }
+
+    /// Return the entity identifier.
+    #[must_use]
+    pub const fn entity_id(self) -> EntityId {
+        self.entity_id
+    }
+
+    /// Return the current named world coordinate.
+    #[must_use]
+    pub const fn position(self) -> WorldCoordinateV1 {
+        self.position
+    }
+}
+
+/// A world-body observation represented by a named ENU coordinate.
+#[derive(Clone, Copy, PartialEq)]
+pub struct WorldCoordinateObservation {
+    entity_id: EntityId,
+    position: WorldCoordinateV1,
+}
+
+impl WorldCoordinateObservation {
+    /// Return the observed entity identifier.
+    #[must_use]
+    pub const fn entity_id(self) -> EntityId {
+        self.entity_id
+    }
+
+    /// Return the observed named world coordinate.
+    #[must_use]
+    pub const fn position(self) -> WorldCoordinateV1 {
+        self.position
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Built-in backend: SimpleKinematicBackend
 // ---------------------------------------------------------------------------
@@ -72,6 +136,32 @@ impl SimpleKinematicBackend {
     #[must_use]
     pub const fn new() -> Self {
         Self
+    }
+
+    /// Advance named ENU bodies by one step.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorldTransformError::NonFiniteCoordinate`] when a velocity
+    /// component or translated coordinate is not finite.
+    pub fn step_coordinates(
+        &mut self,
+        bodies: &[WorldCoordinateBody],
+    ) -> Result<Vec<WorldCoordinateObservation>, WorldTransformError> {
+        bodies
+            .iter()
+            .map(|body| {
+                let position = body.position.translated_by(
+                    body.east_velocity_metres_per_step,
+                    body.north_velocity_metres_per_step,
+                    body.up_velocity_metres_per_step,
+                )?;
+                Ok(WorldCoordinateObservation {
+                    entity_id: body.entity_id,
+                    position,
+                })
+            })
+            .collect()
     }
 }
 
@@ -410,6 +500,84 @@ mod tests {
         assert!((observations[0].y - 0.0).abs() < f64::EPSILON);
         assert!((observations[1].x - 9.0).abs() < f64::EPSILON);
         assert!((observations[1].y - 9.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn simple_kinematic_backend_steps_named_world_coordinates() {
+        let capability = pos_core::WorldGeographicEvidenceCapabilityV1::for_trusted_core();
+        let origin = pos_core::WorldOriginV1::new(
+            &capability,
+            [21; 16],
+            [22; 16],
+            1,
+            pos_core::Wgs84PositionV1::new(35.0, -120.0, 100.0).expect("fixture origin is valid"),
+            [23; 32],
+            10_000.0,
+        )
+        .expect("fixture origin is valid");
+        let transform = pos_core::WorldTransformV1::new(&capability, origin)
+            .expect("fixture transform is valid");
+        let position = transform
+            .forward(
+                &capability,
+                pos_core::Wgs84PositionV1::new(35.001, -119.999, 120.0)
+                    .expect("fixture position is valid"),
+            )
+            .expect("fixture position is in range");
+        let body = WorldCoordinateBody::new(EntityId::new(), position, 1.5, -2.0, 0.25);
+
+        let mut backend = SimpleKinematicBackend::new();
+        let observations = backend
+            .step_coordinates(&[body])
+            .expect("named coordinate step is finite");
+
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].entity_id(), body.entity_id());
+        assert!(
+            (observations[0].position().east_metres() - (position.east_metres() + 1.5)).abs()
+                < f64::EPSILON
+        );
+        assert!(
+            (observations[0].position().north_metres() - (position.north_metres() - 2.0)).abs()
+                < f64::EPSILON
+        );
+        assert!(
+            (observations[0].position().up_metres() - (position.up_metres() + 0.25)).abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn simple_kinematic_backend_rejects_non_finite_coordinate_steps() {
+        let capability = pos_core::WorldGeographicEvidenceCapabilityV1::for_trusted_core();
+        let origin = pos_core::WorldOriginV1::new(
+            &capability,
+            [24; 16],
+            [25; 16],
+            1,
+            pos_core::Wgs84PositionV1::new(35.0, -120.0, 100.0).expect("fixture is valid"),
+            [26; 32],
+            10_000.0,
+        )
+        .expect("fixture origin is valid");
+        let transform = pos_core::WorldTransformV1::new(&capability, origin)
+            .expect("fixture transform is valid");
+        let position = transform
+            .forward(
+                &capability,
+                pos_core::Wgs84PositionV1::new(35.001, -119.999, 120.0)
+                    .expect("fixture position is valid"),
+            )
+            .expect("fixture position is in range");
+        let body = WorldCoordinateBody::new(EntityId::new(), position, f64::INFINITY, 0.0, 0.0);
+        let mut backend = SimpleKinematicBackend::new();
+
+        assert!(matches!(
+            backend.step_coordinates(&[body]),
+            Err(WorldTransformError::NonFiniteCoordinate)
+        ));
     }
 
     #[test]
