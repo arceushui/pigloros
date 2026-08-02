@@ -55,10 +55,11 @@ mod coverage_tests {
     use super::Gateway;
     use pos_core::{
         geo_admission::{
-            GeoLocationAdmissionAdmin, GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1,
+            GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1,
             GeoLocationAdmissionRequestV1,
         },
-        CanonicalBytes, EntityId, EventStore,
+        CanonicalBytes, EntityId, EventStore, OwnTracksEnrollmentRequestV1,
+        OwnTracksEnrollmentStore,
     };
     use pos_store::{memory::MemoryStore, open_store, StoreConfig};
 
@@ -97,11 +98,12 @@ mod coverage_tests {
         let timeline = store.create_timeline("geo-gateway").unwrap();
         let entity = EntityId::new();
         store
-            .set_geo_location_admission_fence(
+            .pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
                 timeline.id(),
                 entity,
                 GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
-            )
+                [42; 32],
+            ))
             .unwrap();
         let gateway = Gateway::new_with_geo_location_admission(store);
         let mut notices = gateway.subscribe();
@@ -112,7 +114,7 @@ mod coverage_tests {
                 CanonicalBytes::from_static(b"existing-v1-geo-location-payload"),
                 7,
                 ([1; 32], 8, [2; 32]),
-                (1, false, 9),
+                (1, false, 10),
                 ([4; 32], [5; 32]),
             ))
         };
