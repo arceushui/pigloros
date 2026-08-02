@@ -6069,19 +6069,25 @@ mod tests {
         let mut src = new_store();
         let tl = src.create_timeline("shared").unwrap();
         let entity = EntityId::new();
-        let mut drafts = vec![make_draft(entity, b"one")];
+        let mut drafts = vec![make_draft(entity, b"one"), make_draft(entity, b"two")];
         drafts[0].causation_id = Some(EventId::new());
         drafts[0].correlation_id = Some(CorrelationId::new());
+        assert_eq!(drafts[1].causation_id, None);
+        assert_eq!(drafts[1].correlation_id, None);
         src.append(tl.id(), &drafts).unwrap();
         let export = export_timeline(&src, tl.id()).unwrap();
         assert!(export.events[0].causation_id.is_some());
         assert!(export.events[0].correlation_id.is_some());
+        assert_eq!(export.events[1].causation_id, None);
+        assert_eq!(export.events[1].correlation_id, None);
 
         let mut dst = new_store();
         let imported = import_timeline_with_id(&mut dst, export).unwrap();
         let events = dst.read(imported.id(), SeqRange::all()).unwrap();
         assert!(events[0].causation_id.is_some());
         assert!(events[0].correlation_id.is_some());
+        assert_eq!(events[1].causation_id, None);
+        assert_eq!(events[1].correlation_id, None);
     }
 
     #[test]

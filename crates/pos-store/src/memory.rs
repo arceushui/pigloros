@@ -2348,7 +2348,7 @@ mod tests {
 
         store.delete_timeline(child.id()).unwrap();
         store.delete_timeline(root.id()).unwrap();
-        assert!(store.get_timeline(root.id()).unwrap().is_none());
+        assert_eq!(store.get_timeline(root.id()).unwrap(), None);
         let err = store.delete_timeline(root.id()).unwrap_err();
         assert_eq!(
             std::mem::discriminant(&err),
