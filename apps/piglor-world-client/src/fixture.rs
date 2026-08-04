@@ -164,9 +164,9 @@ mod tests {
     use super::*;
     use pos_core::{
         clock::{Seq, WallTime},
-        crypto::Hash,
+        crypto::{Hash, Signature},
         event::{Kind, SchemaVersion},
-        ids::{EntityId, EventId, TimelineId},
+        ids::{CorrelationId, EntityId, EventId, TimelineId},
         timeline::TimelineMode,
     };
     use ulid::Ulid;
@@ -253,6 +253,20 @@ mod tests {
     }
 
     #[test]
+    fn wrong_timeline_head_is_rejected() {
+        let mut export = decoded_fixture();
+        export.timeline.head = Seq::from_u64(1);
+        assert!(decode_fixture(&encode(&export)).is_err());
+    }
+
+    #[test]
+    fn wrong_event_count_is_rejected() {
+        let mut export = decoded_fixture();
+        export.events.pop();
+        assert!(decode_fixture(&encode(&export)).is_err());
+    }
+
+    #[test]
     fn fork_metadata_on_root_is_rejected() {
         let mut export = decoded_fixture();
         export.timeline.meta.fork_point = Some((export.timeline.meta.id, Seq::from_u64(1)));
@@ -288,6 +302,34 @@ mod tests {
     }
 
     #[test]
+    fn non_none_causation_id_is_rejected() {
+        let mut export = decoded_fixture();
+        export.events[0].causation_id = Some(EventId::from_ulid(Ulid::from(4u128)));
+        assert!(decode_fixture(&encode(&export)).is_err());
+    }
+
+    #[test]
+    fn non_none_correlation_id_is_rejected() {
+        let mut export = decoded_fixture();
+        export.events[0].correlation_id = Some(CorrelationId::from_ulid(Ulid::from(4u128)));
+        assert!(decode_fixture(&encode(&export)).is_err());
+    }
+
+    #[test]
+    fn non_none_signature_is_rejected() {
+        let mut export = decoded_fixture();
+        export.events[0].signature = Some(Signature::from_bytes([7u8; 64]));
+        assert!(decode_fixture(&encode(&export)).is_err());
+    }
+
+    #[test]
+    fn non_v1_schema_version_is_rejected() {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&2u8, &mut bytes).unwrap();
+        assert!(ciborium::from_reader::<SchemaVersion, _>(bytes.as_slice()).is_err());
+    }
+
+    #[test]
     fn wrong_payload_hash_is_rejected() {
         let mut export = decoded_fixture();
         export.events[0].payload_hash = Hash::from_bytes([99u8; 32]);
@@ -314,6 +356,14 @@ mod tests {
     fn invalid_signal_value_is_rejected() {
         let mut export = decoded_fixture();
         export.events[0].payload = signal_payload_for_test("trust", 2.0, None, None);
+        export.events[0].payload_hash = payload_hash(export.events[0].payload.as_slice());
+        assert!(decode_fixture(&encode(&export)).is_err());
+    }
+
+    #[test]
+    fn non_finite_signal_value_is_rejected() {
+        let mut export = decoded_fixture();
+        export.events[0].payload = signal_payload_for_test("trust", f64::NAN, None, None);
         export.events[0].payload_hash = payload_hash(export.events[0].payload.as_slice());
         assert!(decode_fixture(&encode(&export)).is_err());
     }
