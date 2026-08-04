@@ -166,7 +166,8 @@ mod tests {
         clock::{Seq, WallTime},
         crypto::Hash,
         event::{Kind, SchemaVersion},
-        ids::{EntityId, TimelineId},
+        ids::{EntityId, EventId, TimelineId},
+        timeline::TimelineMode,
     };
     use ulid::Ulid;
 
@@ -195,6 +196,10 @@ mod tests {
         );
         assert_eq!(export.events[1].entity, export.events[0].entity);
         for (index, event) in export.events.iter().enumerate() {
+            assert_eq!(
+                event.id,
+                EventId::from_ulid(Ulid::from((index + 2) as u128))
+            );
             assert_eq!(event.event_type, Kind::new("society.signal"));
             assert_eq!(event.schema_version, SchemaVersion::V1);
             assert_eq!(event.signature, None);
@@ -206,6 +211,11 @@ mod tests {
                 event.payload_hash,
                 Hash::from_bytes(*blake3::hash(event.payload.as_slice()).as_bytes())
             );
+            let signal: Signal = ciborium::from_reader(event.payload.as_slice()).unwrap();
+            assert_eq!(signal.dimension, "trust");
+            assert!((signal.value - [0.5, 1.0][index]).abs() <= f64::EPSILON);
+            assert_eq!(signal.subject, None);
+            assert_eq!(signal.object, None);
         }
     }
 
@@ -233,6 +243,112 @@ mod tests {
         let mut export = decoded_fixture();
         export.timeline.meta.id = TimelineId::from_ulid(Ulid::from(99u128));
         assert!(decode_fixture(&encode(&export)).is_err());
+    }
+
+    #[test]
+    fn wrong_root_mode_is_rejected() {
+        let mut export = decoded_fixture();
+        export.timeline.meta.mode = TimelineMode::Historical;
+        assert!(decode_fixture(&encode(&export)).is_err());
+    }
+
+    #[test]
+    fn fork_metadata_on_root_is_rejected() {
+        let mut export = decoded_fixture();
+        export.timeline.meta.fork_point = Some((export.timeline.meta.id, Seq::from_u64(1)));
+        assert!(decode_fixture(&encode(&export)).is_err());
+    }
+
+    #[test]
+    fn parent_fork_hash_on_root_is_rejected() {
+        let mut export = decoded_fixture();
+        export.parent_fork_hash = Some(Hash::from_bytes([1u8; 32]));
+        assert!(decode_fixture(&encode(&export)).is_err());
+    }
+
+    #[test]
+    fn wrong_event_id_is_rejected() {
+        let mut export = decoded_fixture();
+        export.events[0].id = EventId::from_ulid(Ulid::from(99u128));
+        assert!(decode_fixture(&encode(&export)).is_err());
+    }
+
+    #[test]
+    fn wrong_event_entity_is_rejected() {
+        let mut export = decoded_fixture();
+        export.events[0].entity = EntityId::from_ulid(Ulid::from(99u128));
+        assert!(decode_fixture(&encode(&export)).is_err());
+    }
+
+    #[test]
+    fn wrong_event_wall_time_is_rejected() {
+        let mut export = decoded_fixture();
+        export.events[0].wall_time = WallTime::from_micros(99);
+        assert!(decode_fixture(&encode(&export)).is_err());
+    }
+
+    #[test]
+    fn wrong_payload_hash_is_rejected() {
+        let mut export = decoded_fixture();
+        export.events[0].payload_hash = Hash::from_bytes([99u8; 32]);
+        assert!(decode_fixture(&encode(&export)).is_err());
+    }
+
+    #[test]
+    fn malformed_signal_payload_is_rejected() {
+        let mut export = decoded_fixture();
+        export.events[0].payload = CanonicalBytes::from_vec(vec![0xff, 0x00]);
+        export.events[0].payload_hash = payload_hash(export.events[0].payload.as_slice());
+        assert!(decode_fixture(&encode(&export)).is_err());
+    }
+
+    #[test]
+    fn invalid_signal_dimension_is_rejected() {
+        let mut export = decoded_fixture();
+        export.events[0].payload = signal_payload_for_test("opinion", 0.5, None, None);
+        export.events[0].payload_hash = payload_hash(export.events[0].payload.as_slice());
+        assert!(decode_fixture(&encode(&export)).is_err());
+    }
+
+    #[test]
+    fn invalid_signal_value_is_rejected() {
+        let mut export = decoded_fixture();
+        export.events[0].payload = signal_payload_for_test("trust", 2.0, None, None);
+        export.events[0].payload_hash = payload_hash(export.events[0].payload.as_slice());
+        assert!(decode_fixture(&encode(&export)).is_err());
+    }
+
+    #[test]
+    fn invalid_signal_subject_is_rejected() {
+        let mut export = decoded_fixture();
+        export.events[0].payload = signal_payload_for_test("trust", 0.5, Some("subject"), None);
+        export.events[0].payload_hash = payload_hash(export.events[0].payload.as_slice());
+        assert!(decode_fixture(&encode(&export)).is_err());
+    }
+
+    #[test]
+    fn invalid_signal_object_is_rejected() {
+        let mut export = decoded_fixture();
+        export.events[0].payload = signal_payload_for_test("trust", 0.5, None, Some("object"));
+        export.events[0].payload_hash = payload_hash(export.events[0].payload.as_slice());
+        assert!(decode_fixture(&encode(&export)).is_err());
+    }
+
+    fn signal_payload_for_test(
+        dimension: &str,
+        value: f64,
+        subject: Option<&str>,
+        object: Option<&str>,
+    ) -> CanonicalBytes {
+        let signal = Signal {
+            dimension: dimension.to_owned(),
+            value,
+            subject: subject.map(str::to_owned),
+            object: object.map(str::to_owned),
+        };
+        let mut payload = Vec::new();
+        ciborium::into_writer(&signal, &mut payload).unwrap();
+        CanonicalBytes::from_vec(payload)
     }
 
     #[test]
