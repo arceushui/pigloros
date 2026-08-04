@@ -21,18 +21,30 @@ grep -Fqx 'wasm-pack build apps/piglor-world-client --target web --release -- --
 grep -Fqx 'wasm-pack test apps/piglor-world-client --headless --chrome -- --locked' "$script" \
   || fail 'script is missing the locked headless Chrome wasm-pack test'
 
-grep -Fq 'world-client-wasm:' "$workflow" \
-  || fail 'CI is missing the additive world-client-wasm job'
-grep -Fq 'toolchain: 1.97.1' "$workflow" \
-  || fail 'world-client-wasm job is missing Rust 1.97.1'
-grep -Fq 'rustup target add wasm32-unknown-unknown' "$workflow" \
-  || fail 'world-client-wasm job is missing the wasm32 target'
-grep -Fq 'tool: wasm-pack' "$workflow" \
-  || fail 'world-client-wasm job is missing wasm-pack installation'
-grep -Fq 'setup-chrome' "$workflow" \
-  || fail 'world-client-wasm job is missing Chrome setup'
-grep -Fq 'bash scripts/check-world-client-wasm.sh' "$workflow" \
-  || fail 'world-client-wasm job does not invoke the packaging script'
+job_block="$(awk '
+  /^  world-client-wasm:/ { in_job = 1 }
+  in_job && /^  [[:alnum:]_-]+:/ && $0 !~ /^  world-client-wasm:/ { exit }
+  in_job { print }
+' "$workflow")"
+[[ -n "$job_block" ]] || fail 'CI is missing the additive world-client-wasm job'
+
+assert_job_contains() {
+  grep -Fq "$1" <<<"$job_block" || fail "world-client-wasm job is missing: $1"
+}
+
+assert_job_contains 'toolchain: 1.97.1'
+assert_job_contains 'rustup target add wasm32-unknown-unknown'
+assert_job_contains 'tool: wasm-pack'
+assert_job_contains 'chrome-version: stable'
+assert_job_contains 'install-chromedriver: true'
+assert_job_contains 'bash scripts/check-world-client-wasm.sh'
+
+action_lines="$(grep -E '^[[:space:]]*-[[:space:]]+uses:' <<<"$job_block" || true)"
+[[ -n "$action_lines" ]] || fail 'world-client-wasm job has no action steps'
+while IFS= read -r action_line; do
+  [[ "$action_line" =~ uses:[[:space:]]+[^[:space:]]+@[0-9a-f]{40}([[:space:]]|$) ]] \
+    || fail "world-client-wasm action is not pinned to a 40-character SHA: $action_line"
+done <<<"$action_lines"
 
 grep -Fq 'features = ["3d", "webgl2"]' "$manifest" \
   || fail 'world-client manifest is not explicitly WebGL2-only'
