@@ -127,6 +127,22 @@ impl GeoCellV1 {
         Ok(canonical::encode(&wire).expect("GeoCellV1 wire fields always encode canonically"))
     }
 
+    /// Cross the neutral core boundary after this plugin has completed H3 validation.
+    ///
+    /// The core revalidates the complete ADR-031 wire shape and retains only the
+    /// canonical bytes; it never depends on this plugin or its H3 implementation.
+    pub fn into_core_value(
+        &self,
+    ) -> Result<
+        pos_core::geo_cell_admission::ValidatedGeoCellV1,
+        pos_core::geo_cell_admission::GeoCellAdmissionError,
+    > {
+        let bytes = self
+            .encode_v1()
+            .map_err(|_| pos_core::geo_cell_admission::GeoCellAdmissionError::InvalidCell)?;
+        pos_core::geo_cell_admission::ValidatedGeoCellV1::from_adr031_bytes(&bytes)
+    }
+
     /// Decode and strictly validate one exact `GeoCellV1` CBOR value.
     ///
     /// # Errors
@@ -444,6 +460,14 @@ mod tests {
         assert_eq!(cell.index(), KNOWN_INDEX);
         assert_eq!(cell.index.bytes, *b"8928308280fffff");
         assert_eq!(cell.resolution().value(), 9);
+    }
+
+    #[test]
+    fn validated_cell_crosses_the_neutral_core_boundary() {
+        let cell = H3ReferenceCloaker::new().parse(KNOWN_INDEX).unwrap();
+        let core_cell = cell.into_core_value().unwrap();
+        assert_eq!(core_cell.as_bytes().as_slice(), KNOWN_BYTES);
+        assert_eq!(core_cell.resolution(), 9);
     }
 
     #[test]
