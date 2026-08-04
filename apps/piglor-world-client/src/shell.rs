@@ -112,14 +112,14 @@ fn fixture_digest() -> Result<ProjectionDigest, ClientError> {
     decode_fixture(&fixture_bytes()).and_then(|export| project_fixture(&export))
 }
 
-// Bevy ECS system extractors require owned `Res<T>` parameters here.
-#[allow(clippy::needless_pass_by_value)]
 fn setup_scene(
     mut commands: Commands,
     projection: Res<ShellProjection>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    let projection = projection.into_inner();
+
     commands.spawn((
         Camera3d::default(),
         FirstPersonCamera {
@@ -155,14 +155,14 @@ fn setup_scene(
     ));
 }
 
-// Bevy ECS system extractors require owned `Res<T>` parameters here.
-#[allow(clippy::needless_pass_by_value)]
 fn move_camera(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     mut cameras: Query<(&mut Transform, &FirstPersonCamera)>,
 ) {
-    let movement = movement_vector(&keys);
+    let time = time.into_inner();
+    let keys = keys.into_inner();
+    let movement = movement_vector(keys);
     if movement == Vec3::ZERO {
         return;
     }
@@ -173,12 +173,11 @@ fn move_camera(
     }
 }
 
-// Bevy ECS system extractors require owned `Res<T>` parameters here.
-#[allow(clippy::needless_pass_by_value)]
 fn look_camera(
     mouse_motion: Res<AccumulatedMouseMotion>,
     mut cameras: Query<(&mut Transform, &mut FirstPersonCamera)>,
 ) {
+    let mouse_motion = mouse_motion.into_inner();
     if mouse_motion.delta == Vec2::ZERO {
         return;
     }
@@ -194,13 +193,13 @@ fn look_camera(
     }
 }
 
-// Bevy ECS system extractors require owned `Res<T>` parameters here.
-#[allow(clippy::needless_pass_by_value)]
 fn update_cursor(
     mut cursor: Single<&mut CursorOptions>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
 ) {
+    let mouse = mouse.into_inner();
+    let keys = keys.into_inner();
     let current = match cursor.grab_mode {
         CursorGrabMode::Locked | CursorGrabMode::Confined => CursorState::Locked,
         CursorGrabMode::None => CursorState::Released,
