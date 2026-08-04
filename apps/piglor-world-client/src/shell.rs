@@ -74,7 +74,6 @@ pub fn cursor_state(current: CursorState, left_click: bool, escape: bool) -> Cur
 }
 
 /// Build the native or WebGL2 Bevy application around a pure projection.
-#[must_use]
 pub fn build_app(digest: ProjectionDigest) -> App {
     let mut app = App::new();
     app.insert_resource(ShellProjection(digest))
@@ -92,6 +91,11 @@ pub fn build_app(digest: ProjectionDigest) -> App {
 }
 
 /// Run the fixture-backed client on a native target.
+///
+/// # Errors
+///
+/// Returns [`ClientError`] when the embedded fixture cannot be decoded or
+/// projected into a [`ProjectionDigest`].
 pub fn run_native() -> Result<(), ClientError> {
     let digest = fixture_digest()?;
     build_app(digest).run();
@@ -108,6 +112,8 @@ fn fixture_digest() -> Result<ProjectionDigest, ClientError> {
     decode_fixture(&fixture_bytes()).and_then(|export| project_fixture(&export))
 }
 
+// Bevy ECS system extractors require owned `Res<T>` parameters here.
+#[allow(clippy::needless_pass_by_value)]
 fn setup_scene(
     mut commands: Commands,
     projection: Res<ShellProjection>,
@@ -149,6 +155,8 @@ fn setup_scene(
     ));
 }
 
+// Bevy ECS system extractors require owned `Res<T>` parameters here.
+#[allow(clippy::needless_pass_by_value)]
 fn move_camera(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -165,6 +173,8 @@ fn move_camera(
     }
 }
 
+// Bevy ECS system extractors require owned `Res<T>` parameters here.
+#[allow(clippy::needless_pass_by_value)]
 fn look_camera(
     mouse_motion: Res<AccumulatedMouseMotion>,
     mut cameras: Query<(&mut Transform, &mut FirstPersonCamera)>,
@@ -184,6 +194,8 @@ fn look_camera(
     }
 }
 
+// Bevy ECS system extractors require owned `Res<T>` parameters here.
+#[allow(clippy::needless_pass_by_value)]
 fn update_cursor(
     mut cursor: Single<&mut CursorOptions>,
     mouse: Res<ButtonInput<MouseButton>>,
@@ -238,8 +250,14 @@ mod tests {
 
     #[test]
     fn pitch_is_clamped_to_just_under_half_turn() {
-        assert_eq!(clamp_pitch(10.0), std::f32::consts::FRAC_PI_2 - 0.01);
-        assert_eq!(clamp_pitch(-10.0), -std::f32::consts::FRAC_PI_2 + 0.01);
+        assert_eq!(
+            clamp_pitch(10.0).to_bits(),
+            (std::f32::consts::FRAC_PI_2 - 0.01).to_bits()
+        );
+        assert_eq!(
+            clamp_pitch(-10.0).to_bits(),
+            (-std::f32::consts::FRAC_PI_2 + 0.01).to_bits()
+        );
     }
 
     #[test]
