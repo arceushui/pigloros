@@ -14,9 +14,15 @@ path = "src/lib.rs"
 blake3 = { workspace = true }
 ciborium = { workspace = true }
 pos-core = { path = "../../crates/pos-core" }
+pos-state = { path = "../../crates/pos-state" }
+pos-plugin-society = { path = "../../plugins/society" }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 ulid = { workspace = true }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
 
 [lints]
 workspace = true
