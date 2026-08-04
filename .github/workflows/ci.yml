@@ -88,6 +88,9 @@ jobs:
         with:
           shared-key: test
 
+      - name: cargo check --workspace --no-default-features --locked
+        run: cargo check --workspace --all-targets --no-default-features --locked
+
       - name: cargo test --workspace --all-features --locked -- --include-ignored
         run: |
           set -euo pipefail

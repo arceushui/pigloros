@@ -35,7 +35,7 @@
 - Exports geo_cell only under cfg(feature = "h3").
 - Makes test, clippy, and coverage gates run the feature-enabled workspace so the new seam is not unverified.
 
-- [ ] Step 1: Add exactly this dependency shape:
+- [x] Step 1: Add exactly this dependency shape:
 
 ~~~toml
 [features]
@@ -48,20 +48,21 @@ h3o = { version = "=0.10.0", default-features = false, optional = true }
 
 Do not enable std, serde, geo, tools, or typed_floats.
 
-- [ ] Step 2: Add cfg(feature = "h3") pub mod geo_cell and feature-gated re-exports. Do not register geo.cell or change any existing Plugin capability.
+- [x] Step 2: Add cfg(feature = "h3") pub mod geo_cell and feature-gated re-exports. Do not register geo.cell or change any existing Plugin capability.
 
-- [ ] Step 3: Make authoritative local and GitHub Rust test, clippy, and coverage commands include --all-features while preserving --workspace, --locked, --include-ignored, and the 99% line/region thresholds. Keep dependency policy behavior unchanged.
+- [x] Step 3: Make authoritative local and GitHub Rust test, clippy, and coverage commands include --all-features while preserving --workspace, --locked, --include-ignored, and the 99% line/region thresholds. Keep dependency policy behavior unchanged.
 
-- [ ] Step 4: Run:
+- [x] Step 4: Run:
 
 ~~~bash
 CARGO_TARGET_DIR=/root/pigloros/target cargo check -p pos-plugin-geo --no-default-features --locked
+CARGO_TARGET_DIR=/root/pigloros/target cargo check --workspace --all-targets --no-default-features --locked
 CARGO_TARGET_DIR=/root/pigloros/target cargo tree -e features --locked --features h3 -i h3o
 ~~~
 
 Expected: no-default check succeeds without the optional adapter; the feature tree shows h3o 0.10.0 with no std, serde, geo, tools, or typed_floats feature.
 
-- [ ] Step 5: Commit:
+- [x] Step 5: Commit:
 
 ~~~bash
 git add plugins/geo/Cargo.toml plugins/geo/src/lib.rs scripts/ci.sh .github/workflows/ci.yml .github/workflows/trunk-check.yml
@@ -78,7 +79,7 @@ git commit -m "build: gate h3 codec feature in geo plugin"
 - Consumes Wgs84Point, CanonicalBytes, and h3o from Task 1.
 - Produces failing tests defining H3Resolution, GeoCellV1, H3ReferenceCloaker, GeoCellError, exact bytes, and strict decode behavior.
 
-- [ ] Step 1: Add the known-answer contract:
+- [x] Step 1: Add the known-answer contract:
 
 ~~~rust
 let cloaker = H3ReferenceCloaker::new();
@@ -89,11 +90,11 @@ assert_eq!(cell.encode_v1().unwrap().as_slice(), EXPECTED_FIXTURE);
 assert_eq!(GeoCellV1::decode_v1(&cell.encode_v1().unwrap()).unwrap(), cell);
 ~~~
 
-- [ ] Step 2: Add tests for repeated deterministic encodes, all resolutions 0–15, invalid resolution 16, invalid/non-cell/uppercase/prefixed/wrong-length indexes, missing/unknown/duplicate/wrong-type fields, trailing bytes, nonminimal CBOR, indefinite maps, resolution mismatch, unsupported format/system, and finer parent requests.
+- [x] Step 2: Add tests for repeated deterministic encodes, all resolutions 0–15, invalid resolution 16, invalid/non-cell/uppercase/prefixed/wrong-length indexes, missing/unknown/duplicate/wrong-type fields, trailing bytes, nonminimal CBOR, indefinite maps, resolution mismatch, unsupported format/system, and finer parent requests.
 
-- [ ] Step 3: Add ordinary H3 Core known answers, negative zero, +180 versus -180, both poles, points immediately around a captured boundary, equal parent, coarser parent, refusal to refine, and unchanged Wgs84Point validation.
+- [x] Step 3: Add ordinary H3 Core known answers, negative zero, +180 versus -180, both poles, points immediately around a captured boundary, equal parent, coarser parent, refusal to refine, and unchanged Wgs84Point validation.
 
-- [ ] Step 4: Run:
+- [x] Step 4: Run:
 
 ~~~bash
 CARGO_TARGET_DIR=/root/pigloros/target cargo test -p pos-plugin-geo --all-features geo_cell --locked
@@ -101,7 +102,7 @@ CARGO_TARGET_DIR=/root/pigloros/target cargo test -p pos-plugin-geo --all-featur
 
 Expected: compile or assertion failures because implementation does not yet exist.
 
-- [ ] Step 5: Commit the RED tests:
+- [x] Step 5: Commit the RED tests:
 
 ~~~bash
 git add plugins/geo/src/geo_cell.rs
@@ -117,13 +118,13 @@ git commit -m "test: define h3 cell codec contract"
 - Consumes the RED tests and existing canonical encoder.
 - Produces validated public values, exact canonical bytes, strict one-item decoding, and stable typed errors.
 
-- [ ] Step 1: Implement H3Resolution and private validated address storage using a u8 resolution newtype and fixed [u8; 15] lowercase ASCII address buffer. Expose only index and resolution accessors.
+- [x] Step 1: Implement H3Resolution and private validated address storage using a u8 resolution newtype and fixed [u8; 15] lowercase ASCII address buffer. Expose only index and resolution accessors.
 
-- [ ] Step 2: Implement the canonical wire representation with an internal serializable V1 wire struct containing cell_format, system, index, and resolution; use pos_crypto::canonical::encode and map failures to a bounded GeoCellError category.
+- [x] Step 2: Implement the canonical wire representation with an internal serializable V1 wire struct containing cell_format, system, index, and resolution; use pos_crypto::canonical::encode and retain invariant-only failure handling for the fixed serializer shape per CTO review.
 
-- [ ] Step 3: Decode into ciborium::value::Value through a Cursor, require exactly one item and cursor position equal to input length, match exactly four text-keyed fields, reject duplicates and alternate types, validate the index and derived resolution, canonical re-encode, and compare bytes.
+- [x] Step 3: Decode into ciborium::value::Value through a Cursor, require exactly one item and cursor position equal to input length, match exactly four text-keyed fields, reject duplicates and alternate types, validate the index and derived resolution, canonical re-encode, and compare bytes.
 
-- [ ] Step 4: Run focused tests and formatting:
+- [x] Step 4: Run focused tests and formatting:
 
 ~~~bash
 CARGO_TARGET_DIR=/root/pigloros/target cargo test -p pos-plugin-geo --all-features geo_cell --locked
@@ -132,7 +133,7 @@ cargo fmt --all
 
 Expected: all codec tests pass; remaining failures identify adapter or fixture behavior.
 
-- [ ] Step 5: Commit:
+- [x] Step 5: Commit:
 
 ~~~bash
 git add plugins/geo/src/geo_cell.rs
@@ -149,13 +150,13 @@ git commit -m "feat: add strict versioned geo cell codec"
 - Consumes validated Wgs84Point, H3Resolution, and private value constructors.
 - Produces deterministic WGS84-to-H3 conversion, canonical parsing, and coarsening without leaking h3o types.
 
-- [ ] Step 1: Normalize only at the adapter boundary: -0.0 to 0.0, +180.0 to -180.0, and pole longitude to 0.0. Pass finite values to h3o::LatLng::new and convert with to_cell.
+- [x] Step 1: Normalize only at the adapter boundary: -0.0 to 0.0, +180.0 to -180.0, and pole longitude to 0.0. Pass finite values to h3o::LatLng::new and convert with to_cell.
 
-- [ ] Step 2: Require exactly 15 lowercase ASCII hex characters before str::parse::<h3o::CellIndex>(); compare CellIndex::to_string() to the input and reject mismatch. Derive stored resolution from CellIndex::resolution.
+- [x] Step 2: Require exactly 15 lowercase ASCII hex characters before str::parse::<h3o::CellIndex>(); compare CellIndex::to_string() to the input and reject mismatch. Derive stored resolution from CellIndex::resolution.
 
-- [ ] Step 3: Map equal/coarser H3Resolution targets to h3o::Resolution, call CellIndex::parent, format the result, and construct a new value. Return a stable finer-parent error for a target above source resolution.
+- [x] Step 3: Map equal/coarser H3Resolution targets to h3o::Resolution, call CellIndex::parent, format the result, and construct a new value. Return a stable finer-parent error for a target above source resolution.
 
-- [ ] Step 4: Run:
+- [x] Step 4: Run:
 
 ~~~bash
 CARGO_TARGET_DIR=/root/pigloros/target cargo test -p pos-plugin-geo --all-features --locked
@@ -164,7 +165,7 @@ CARGO_TARGET_DIR=/root/pigloros/target cargo tree -e features --locked --feature
 
 Expected: ordinary, boundary, parent, pentagon, and invalid-input tests pass; h3o optional features remain disabled.
 
-- [ ] Step 5: Commit:
+- [x] Step 5: Commit:
 
 ~~~bash
 git add plugins/geo/src/geo_cell.rs plugins/geo/src/lib.rs
@@ -175,7 +176,7 @@ git commit -m "feat: add private h3 reference cloaker"
 
 **Files:** none unless verification finds a defect.
 
-- [ ] Step 1: Run:
+- [x] Step 1: Run:
 
 ~~~bash
 cd /root/pigloros-ticket-142-h3-cell-codec
@@ -184,7 +185,7 @@ CARGO_TARGET_DIR=/root/pigloros/target ./scripts/ci.sh 2>&1 | tee /tmp/pigloros-
 
 Require CI gates OK, zero ignored tests, no policy violations, clean formatting, pedantic Clippy, and at least 99% line and region coverage. Record unavailable local tools separately; remote CI is authoritative.
 
-- [ ] Step 2: Verify scope:
+- [x] Step 2: Verify scope:
 
 ~~~bash
 git diff origin/main...HEAD --stat
@@ -194,13 +195,13 @@ rg -n 'geo.cell|EventStore|append|Capability|Gateway|migration|upcast|dual.?writ
 
 Confirm no Event admission or disclosure path and no changes to the reserved boundary outside feature-enabled CI execution.
 
-- [ ] Step 3: Commit any narrowly scoped verification correction and rerun focused plus full gates.
+- [x] Step 3: Commit any narrowly scoped verification correction and rerun focused plus full gates.
 
 ### Task 6: CTO review, rebase, publish, and merge
 
-- [ ] Step 1: Send Harvey the branch diff, exact gate output, feature-tree output, and inertness checklist. Do not publish or merge after REQUEST_CHANGES.
+- [x] Step 1: Send Harvey the branch diff, exact gate output, feature-tree output, and inertness checklist. Do not publish or merge after REQUEST_CHANGES.
 
-- [ ] Step 2: For every finding, add or adjust a test first, implement the minimal correction, rerun focused gates, then rerun the full CI script.
+- [x] Step 2: For every finding, add or adjust a test first, implement the minimal correction, rerun focused gates, then rerun the full CI script.
 
 - [ ] Step 3: Refresh and rebase the complete branch history:
 
@@ -229,4 +230,3 @@ Resolve conflicts without destructive reset commands; rerun full gates after the
 ## Self-review
 
 Every ADR-031 value/adapter requirement is covered by Tasks 2–4. Inertness and no-activation are covered by Tasks 1 and 5. The disabled-by-default feature is exercised by explicit all-feature gates. No task adds migration, Event admission, disclosure, or database migration. Every production behavior has focused tests and full-gate verification.
-

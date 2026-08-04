@@ -89,7 +89,7 @@ impl H3Resolution {
 /// A validated, versioned H3 cell value with no enclosing Event semantics.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GeoCellV1 {
-    index: String,
+    index: CanonicalH3Index,
     resolution: H3Resolution,
 }
 
@@ -97,7 +97,7 @@ impl GeoCellV1 {
     /// Return the canonical lowercase H3 cell address.
     #[must_use]
     pub fn index(&self) -> &str {
-        &self.index
+        self.index.as_str()
     }
 
     /// Return the resolution derived from the validated H3 index.
@@ -121,7 +121,7 @@ impl GeoCellV1 {
         let wire = GeoCellWireV1 {
             cell_format: GEO_CELL_FORMAT_V1,
             system: GEO_CELL_SYSTEM_H3_V4,
-            index: &self.index,
+            index: self.index(),
             resolution: self.resolution.value(),
         };
         Ok(canonical::encode(&wire).expect("GeoCellV1 wire fields always encode canonically"))
@@ -210,12 +210,32 @@ impl GeoCellV1 {
     }
 
     fn from_h3o(index: h3o::CellIndex) -> Self {
+        let resolution = H3Resolution::new(index.resolution().into())
+            .expect("h3o cell resolutions are always in 0..=15");
         let text = index.to_string();
-        Self {
-            index: text,
-            resolution: H3Resolution::new(index.resolution().into())
-                .expect("h3o cell resolutions are always in 0..=15"),
-        }
+        let index = CanonicalH3Index::new(text);
+        Self { index, resolution }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CanonicalH3Index {
+    bytes: [u8; 15],
+    text: String,
+}
+
+impl CanonicalH3Index {
+    fn new(text: String) -> Self {
+        let bytes = text
+            .as_bytes()
+            .try_into()
+            .expect("h3o always formats a 15-byte canonical cell index");
+        Self { bytes, text }
+    }
+
+    fn as_str(&self) -> &str {
+        debug_assert_eq!(self.bytes.as_slice(), self.text.as_bytes());
+        &self.text
     }
 }
 
@@ -272,6 +292,9 @@ impl H3ReferenceCloaker {
             return Err(GeoCellError::NonCanonicalH3Index);
         }
         let parsed = h3o::CellIndex::from_str(index).map_err(|_| GeoCellError::InvalidH3Index)?;
+        if parsed.to_string() != index {
+            return Err(GeoCellError::NonCanonicalH3Index);
+        }
         Ok(GeoCellV1::from_h3o(parsed))
     }
 
@@ -358,6 +381,7 @@ mod tests {
     use super::*;
     use ciborium::value::Value;
     use pos_core::CanonicalBytes;
+    use serde::Serialize;
     use std::io::Cursor;
 
     const KNOWN_INDEX: &str = "8928308280fffff";
@@ -391,6 +415,22 @@ mod tests {
         panic!("test map could not be padded to 61 bytes");
     }
 
+    #[derive(Serialize)]
+    struct WireA {
+        index: &'static str,
+        system: &'static str,
+        resolution: u8,
+        cell_format: u8,
+    }
+
+    #[derive(Serialize)]
+    struct WireB {
+        cell_format: u8,
+        resolution: u8,
+        system: &'static str,
+        index: &'static str,
+    }
+
     #[test]
     fn resolution_accepts_h3_range() {
         assert_eq!(H3Resolution::new(0).unwrap().value(), 0);
@@ -402,6 +442,7 @@ mod tests {
     fn parses_and_exposes_a_canonical_cell() {
         let cell = H3ReferenceCloaker::new().parse(KNOWN_INDEX).unwrap();
         assert_eq!(cell.index(), KNOWN_INDEX);
+        assert_eq!(cell.index.bytes, *b"8928308280fffff");
         assert_eq!(cell.resolution().value(), 9);
     }
 
@@ -447,6 +488,38 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_negative_zero_and_south_pole_inputs_for_h3() {
+        let cloaker = H3ReferenceCloaker::new();
+        assert_eq!(
+            cloaker
+                .from_wgs84(wgs84(-0.0, -0.0), resolution(9))
+                .unwrap(),
+            cloaker.from_wgs84(wgs84(0.0, 0.0), resolution(9)).unwrap()
+        );
+
+        assert_eq!(
+            cloaker
+                .from_wgs84(wgs84(-90.0, 180.0), resolution(9))
+                .unwrap(),
+            cloaker
+                .from_wgs84(wgs84(-90.0, 0.0), resolution(9))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn converts_coordinates_on_an_h3_cell_boundary() {
+        let cloaker = H3ReferenceCloaker::new();
+        let index = h3o::CellIndex::from_str(KNOWN_INDEX).unwrap();
+        for vertex in index.boundary().iter().take(2) {
+            let cell = cloaker
+                .from_wgs84(wgs84(vertex.lat(), vertex.lng()), resolution(9))
+                .unwrap();
+            assert_eq!(cell.index().len(), 15);
+        }
+    }
+
+    #[test]
     fn supports_every_h3_resolution() {
         let cloaker = H3ReferenceCloaker::new();
         for value in 0..=15 {
@@ -484,6 +557,10 @@ mod tests {
     fn returns_coarser_parent_and_rejects_refinement() {
         let cloaker = H3ReferenceCloaker::new();
         let cell = cloaker.parse(KNOWN_INDEX).unwrap();
+        assert_eq!(
+            cloaker.parent(cell.clone(), cell.resolution()).unwrap(),
+            cell
+        );
         let parent = cloaker.parent(cell.clone(), resolution(5)).unwrap();
         assert_eq!(parent.resolution().value(), 5);
         assert!(cloaker.parent(cell, resolution(10)).is_err());
@@ -495,7 +572,26 @@ mod tests {
         let bytes = cell.encode_v1().unwrap();
         assert_eq!(bytes.as_slice(), KNOWN_BYTES);
         assert_eq!(GeoCellV1::decode_v1(&bytes).unwrap(), cell);
-        assert_eq!(cell.encode_v1().unwrap(), bytes);
+        for _ in 0..3 {
+            assert_eq!(cell.encode_v1().unwrap(), bytes);
+        }
+
+        let a = WireA {
+            index: KNOWN_INDEX,
+            system: GEO_CELL_SYSTEM_H3_V4,
+            resolution: 9,
+            cell_format: GEO_CELL_FORMAT_V1,
+        };
+        let b = WireB {
+            cell_format: GEO_CELL_FORMAT_V1,
+            resolution: 9,
+            system: GEO_CELL_SYSTEM_H3_V4,
+            index: KNOWN_INDEX,
+        };
+        assert_eq!(
+            canonical::encode(&a).unwrap(),
+            canonical::encode(&b).unwrap()
+        );
     }
 
     #[test]
@@ -515,6 +611,21 @@ mod tests {
         assert_eq!(
             GeoCellV1::decode_v1(&CanonicalBytes::from_vec(vec![0xff; 61])),
             Err(GeoCellError::MalformedCbor)
+        );
+
+        let mut indefinite_map = KNOWN_BYTES.to_vec();
+        indefinite_map[0] = 0xbf;
+        indefinite_map.push(0xff);
+        assert_eq!(
+            GeoCellV1::decode_v1(&CanonicalBytes::from_vec(indefinite_map)),
+            Err(GeoCellError::PayloadSizeMismatch(62))
+        );
+
+        let mut nonminimal_integer = KNOWN_BYTES[..KNOWN_BYTES.len() - 1].to_vec();
+        nonminimal_integer.extend([0x18, 0x01]);
+        assert_eq!(
+            GeoCellV1::decode_v1(&CanonicalBytes::from_vec(nonminimal_integer)),
+            Err(GeoCellError::PayloadSizeMismatch(62))
         );
     }
 

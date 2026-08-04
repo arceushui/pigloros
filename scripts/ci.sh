@@ -24,6 +24,9 @@ else
   echo "WARNING: cargo-deny not on PATH; skipping (install: cargo install cargo-deny)"
 fi
 
+echo "==> disabled feature isolation"
+cargo check --workspace --all-targets --no-default-features --locked
+
 echo "==> fmt"
 cargo fmt --all -- --check
 

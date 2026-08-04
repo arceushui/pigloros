@@ -52,6 +52,14 @@ impl H3ReferenceCloaker {
 
 GeoCellV1 is constructible only through the adapter or strict decoder, so a caller cannot create a public value with a non-cell H3 mode, invalid reserved bits, a noncanonical address, or a mismatched resolution.
 
+The private representation keeps a fixed 15-byte lowercase ASCII identity buffer and
+an immutable textual view required by the public accessor. The adapter and decoder
+validate the identity before construction. Invariant-only conversions from a
+validated `Wgs84Point`, validated H3 index/resolution, and fixed serializable wire
+shape retain documented internal `expect` checks; Harvey's CTO review confirmed
+these are unreachable implementation-invariant failures rather than public input
+error categories.
+
 ## Coordinate contract
 
 Wgs84Point remains unchanged and is the only public coordinate input. Immediately before conversion, the adapter creates a private normalized input:
@@ -104,4 +112,3 @@ No h3o default or optional feature is enabled. Feature-enabled tests compare the
 GeoCellError has stable typed categories for invalid resolution, invalid/noncanonical H3 index, payload-size mismatch, malformed CBOR, noncanonical CBOR, missing/duplicate/unexpected/wrong fields, unsupported format/system, resolution mismatch, and finer-parent requests. It does not expose h3o types or backend diagnostic strings.
 
 Tests cover the exact fixture, deterministic repeated encodes, declaration-order independence, strict malformed CBOR, all input boundaries, H3 Core known answers, all resolutions, pentagons, parent rules, and disabled-feature dependency isolation. Feature-enabled tests are included in local and GitHub quality gates rather than existing only in an unexecuted feature configuration.
-
