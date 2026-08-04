@@ -20,6 +20,13 @@ use pos_core::{
         GeoLocationAdmissionSnapshotV1, GeoLocationAdmissionStore, GeoLocationReplayEvidenceV1,
         GeoLocationReplayVerifier,
     },
+    geo_cell_admission::{
+        AdmissionConsentRecordV1, AdmissionEntitlementSnapshotV1, AdmissionSnapshotHash,
+        AdmissionSnapshotId, GeoCellAdmissionFenceV1, GeographicAdmissionAdmin,
+        GeographicAdmissionConsentResolver, GeographicAdmissionOutcome, GeographicAdmissionStore,
+        GeographicObservationV1, GeographicReplayEvidenceV1, GeographicReplayVerifier,
+        ValidatedGeographicAdmissionV1,
+    },
     hasher::Hasher,
     ids::{EventId, TimelineId},
     owntracks_enrollment::{
@@ -126,6 +133,17 @@ pub struct MemoryStore {
     geographic_admission_snapshots: HashMap<EventId, GeoLocationAdmissionSnapshotV1>,
     /// Immutable Event-to-snapshot links, uniquely keyed by `(TimelineId, EventId)`.
     geographic_admission_links: HashMap<(TimelineId, EventId), GeoLocationAdmissionLinkV1>,
+    /// Current core-owned binding/consent/entitlement fences for `geo.cell`.
+    geographic_cell_fences: HashMap<(TimelineId, pos_core::EntityId), GeoCellAdmissionFenceV1>,
+    /// Typed local adapter view of the authoritative immutable consent resolver.
+    geographic_cell_consent_records: HashMap<(AdmissionSnapshotId, u64), AdmissionConsentRecordV1>,
+    /// Private seven-day exact-intent deduplication for `geo.cell`.
+    geographic_cell_dedup:
+        HashMap<pos_core::GeographicAdmissionFingerprintV1, GeographicCellDedupRecord>,
+    /// Immutable `geo.cell` admission snapshots keyed by their canonical ID.
+    geographic_cell_snapshots: HashMap<AdmissionSnapshotId, AdmissionEntitlementSnapshotV1>,
+    /// Immutable `geo.cell` Event-to-snapshot links.
+    geographic_cell_links: HashMap<(TimelineId, EventId), GeographicCellLink>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
 }
@@ -279,6 +297,20 @@ fn delete_visible_timeline(store: &mut MemoryStore, id: TimelineId) -> Result<()
             store
                 .geographic_admission_links
                 .retain(|(timeline, event_id), _| *timeline != id && !event_ids.contains(event_id));
+            store
+                .geographic_cell_fences
+                .retain(|(timeline, _), _| *timeline != id);
+            store
+                .geographic_cell_dedup
+                .retain(|_, record| record.timeline != id);
+            store
+                .geographic_cell_snapshots
+                .retain(|_, snapshot| snapshot.timeline() != id);
+            // Consent records are authoritative resolver state. Their lifecycle
+            // is owned by the ADR-034 resolver, not by Timeline sidecar cleanup.
+            store
+                .geographic_cell_links
+                .retain(|(timeline, event_id), _| *timeline != id && !event_ids.contains(event_id));
         })
 }
 
@@ -289,6 +321,26 @@ struct AppendIdentityRecord {
     event_id: EventId,
     expires_at: WallTime,
     retained_content: RetainedAppendContent,
+}
+
+#[derive(Clone)]
+struct GeographicCellDedupRecord {
+    timeline: TimelineId,
+    entity: pos_core::EntityId,
+    intent: pos_core::GeographicAdmissionIntentV1,
+    event_id: EventId,
+    event_seq: Seq,
+    snapshot_id: AdmissionSnapshotId,
+    snapshot_hash: AdmissionSnapshotHash,
+    expires_at: WallTime,
+}
+
+#[derive(Clone)]
+#[allow(clippy::struct_field_names)]
+struct GeographicCellLink {
+    snapshot_id: AdmissionSnapshotId,
+    snapshot_hash: AdmissionSnapshotHash,
+    snapshot_cbor: pos_core::CanonicalBytes,
 }
 
 /// Comparison material retained only with an opaque append identity.
@@ -307,6 +359,7 @@ struct ForkChain {
     fork_seqs: Vec<Seq>,
 }
 
+#[derive(Clone)]
 struct TimelineState {
     timeline: Timeline,
     events: Vec<Event>,
@@ -340,6 +393,11 @@ impl MemoryStore {
             geographic_admission_dedup: HashMap::new(),
             geographic_admission_snapshots: HashMap::new(),
             geographic_admission_links: HashMap::new(),
+            geographic_cell_fences: HashMap::new(),
+            geographic_cell_consent_records: HashMap::new(),
+            geographic_cell_dedup: HashMap::new(),
+            geographic_cell_snapshots: HashMap::new(),
+            geographic_cell_links: HashMap::new(),
             hasher,
             clock: Box::new(SystemAdmissionClock),
         }
@@ -1027,6 +1085,309 @@ impl GeoLocationReplayVerifier for MemoryStore {
     }
 }
 
+impl GeographicAdmissionAdmin for MemoryStore {
+    fn set_geo_cell_admission_consent_record(
+        &mut self,
+        record: AdmissionConsentRecordV1,
+    ) -> Result<(), CoreError> {
+        if AdmissionSnapshotId::from_canonical(record.id().as_str()).is_err()
+            || record.revision() == 0
+        {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        }
+        let key = (record.id().clone(), record.revision());
+        if let Some(existing) = self.geographic_cell_consent_records.get(&key) {
+            if existing != &record {
+                return Err(CoreError::GeographicAdmissionValidationFailed);
+            }
+            return Ok(());
+        }
+        self.geographic_cell_consent_records.insert(key, record);
+        Ok(())
+    }
+
+    fn set_geo_cell_admission_fence(
+        &mut self,
+        timeline: TimelineId,
+        entity: pos_core::EntityId,
+        fence: GeoCellAdmissionFenceV1,
+    ) -> Result<(), CoreError> {
+        if !self.timelines.contains_key(&timeline) {
+            return Err(CoreError::TimelineNotFound(timeline));
+        }
+        if fence.draft().timeline() != timeline || fence.draft().entity() != entity {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        }
+        self.geographic_cell_fences
+            .insert((timeline, entity), fence);
+        Ok(())
+    }
+}
+
+impl GeographicAdmissionConsentResolver for MemoryStore {
+    fn resolve_admission_consent(
+        &self,
+        consent_record_id: &AdmissionSnapshotId,
+        consent_revision: u64,
+    ) -> Result<AdmissionConsentRecordV1, CoreError> {
+        let record = self
+            .geographic_cell_consent_records
+            .get(&(consent_record_id.clone(), consent_revision))
+            .cloned()
+            .ok_or(CoreError::GeographicAdmissionValidationFailed)?;
+        Ok(record)
+    }
+}
+
+impl GeographicAdmissionStore for MemoryStore {
+    #[allow(clippy::too_many_lines)]
+    fn admit(
+        &mut self,
+        request: ValidatedGeographicAdmissionV1,
+    ) -> Result<GeographicAdmissionOutcome, CoreError> {
+        let timeline = request.timeline();
+        let entity = request.entity();
+        let Ok(admitted_at) = self.clock.now() else {
+            return Ok(GeographicAdmissionOutcome::Unavailable);
+        };
+        let Some(fence) = self.geographic_cell_fences.get(&(timeline, entity)) else {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        };
+        if !fence.permits(&request) {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        }
+        let consent_record = self.resolve_admission_consent(
+            request.fence().draft().consent_record_id(),
+            request.fence().draft().consent_revision(),
+        )?;
+        if !consent_record.matches_draft(request.fence().draft()) {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        }
+        let mut staged_dedup = self.geographic_cell_dedup.clone();
+        staged_dedup.retain(|_, record| record.expires_at > admitted_at);
+        if let Some(record) = staged_dedup
+            .get(&request.fingerprint())
+            .filter(|record| record.expires_at > admitted_at)
+            .cloned()
+        {
+            if record.intent.as_persistence_bytes() != request.intent().as_persistence_bytes() {
+                self.geographic_cell_dedup = staged_dedup;
+                return Ok(GeographicAdmissionOutcome::Conflict);
+            }
+            let outcome = self
+                .verified_geo_cell_duplicate(&record)
+                .unwrap_or(GeographicAdmissionOutcome::OutcomeUnknown);
+            if !outcome.is_outcome_unknown() {
+                self.geographic_cell_dedup = staged_dedup;
+            }
+            return Ok(outcome);
+        }
+        let Ok(expires_at) = pos_core::checked_append_identity_expires_at(admitted_at) else {
+            return Ok(GeographicAdmissionOutcome::Unavailable);
+        };
+        let Some(existing_state) = self.timelines.get(&timeline) else {
+            return Err(CoreError::TimelineNotFound(timeline));
+        };
+        let mut staged_state = existing_state.clone();
+        let event_id = EventId::new();
+        let event_seq = staged_state.timeline.head.next();
+        let snapshot_id = AdmissionSnapshotId::new();
+        let snapshot =
+            AdmissionEntitlementSnapshotV1::new(snapshot_id.clone(), &request, event_id, event_seq);
+        let snapshot_cbor = snapshot.canonical_bytes();
+        let snapshot_hash = snapshot.hash();
+        let observation = request.payload(snapshot_id.clone(), snapshot_hash);
+        let payload = observation.encode();
+        let payload_hash = self.hasher.hash_payload(&payload);
+        let event_id_bytes = event_id.to_string();
+        let next_chain_head = self.hasher.hash_event(
+            &staged_state.chain_head,
+            event_id_bytes.as_bytes(),
+            &payload,
+        );
+        let event = Event {
+            id: event_id,
+            entity,
+            event_type: Kind::new(pos_core::GEOGRAPHIC_CELL_EVENT_TYPE),
+            payload,
+            wall_time: admitted_at,
+            seq: event_seq,
+            causation_id: None,
+            correlation_id: None,
+            schema_version: pos_core::SchemaVersion::V1,
+            signature: None,
+            payload_hash,
+        };
+        staged_state.timeline.head = event_seq;
+        staged_state.chain_head = next_chain_head;
+        staged_state.events.push(event.clone());
+        let link = GeographicCellLink {
+            snapshot_id: snapshot_id.clone(),
+            snapshot_hash,
+            snapshot_cbor: snapshot_cbor.clone(),
+        };
+        if event.event_type.as_str() != pos_core::GEOGRAPHIC_CELL_EVENT_TYPE
+            || event.schema_version != pos_core::SchemaVersion::V1
+            || GeographicObservationV1::decode(&event.payload).is_err()
+            || self.hasher.hash_payload(&event.payload) != event.payload_hash
+        {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        }
+        let dedup = GeographicCellDedupRecord {
+            timeline,
+            entity,
+            intent: request.intent().clone(),
+            event_id: event.id,
+            event_seq: event.seq,
+            snapshot_id: snapshot_id.clone(),
+            snapshot_hash,
+            expires_at,
+        };
+        self.timelines.insert(timeline, staged_state);
+        self.event_ids.insert(event.id);
+        self.geographic_timelines.insert(timeline);
+        self.geographic_cell_snapshots
+            .insert(snapshot_id.clone(), snapshot);
+        self.geographic_cell_links
+            .insert((timeline, event.id), link);
+        staged_dedup.insert(request.fingerprint(), dedup);
+        self.geographic_cell_dedup = staged_dedup;
+        Ok(GeographicAdmissionOutcome::Accepted {
+            persisted_event: Box::new(event.clone()),
+            event_id: event.id,
+            event_seq: event.seq,
+            snapshot_id,
+            snapshot_hash,
+        })
+    }
+}
+
+impl MemoryStore {
+    fn verified_geo_cell_duplicate(
+        &self,
+        record: &GeographicCellDedupRecord,
+    ) -> Option<GeographicAdmissionOutcome> {
+        let state = self.timelines.get(&record.timeline)?;
+        let event = state
+            .events
+            .iter()
+            .find(|event| event.id == record.event_id)?;
+        if event.entity != record.entity
+            || event.seq != record.event_seq
+            || event.event_type.as_str() != pos_core::GEOGRAPHIC_CELL_EVENT_TYPE
+            || event.schema_version != pos_core::SchemaVersion::V1
+            || self.hasher.hash_payload(&event.payload) != event.payload_hash
+        {
+            return None;
+        }
+        let observation =
+            pos_core::geo_cell_admission::GeographicObservationV1::decode(&event.payload).ok()?;
+        if observation.snapshot_id() != &record.snapshot_id
+            || observation.snapshot_hash() != record.snapshot_hash
+        {
+            return None;
+        }
+        let snapshot = self.geographic_cell_snapshots.get(&record.snapshot_id)?;
+        let snapshot_cbor = snapshot.canonical_bytes();
+        if snapshot.hash() != record.snapshot_hash
+            || snapshot.event_id() != record.event_id
+            || snapshot.event_seq() != record.event_seq
+        {
+            return None;
+        }
+        let linkage = snapshot.linkage();
+        let consent = self
+            .resolve_admission_consent(linkage.consent_record_id(), linkage.consent_revision())
+            .ok()?;
+        if !consent.matches_linkage(&linkage) {
+            return None;
+        }
+        let link = self
+            .geographic_cell_links
+            .get(&(record.timeline, record.event_id))?;
+        if link.snapshot_id != record.snapshot_id
+            || link.snapshot_hash != record.snapshot_hash
+            || link.snapshot_cbor != snapshot_cbor
+        {
+            return None;
+        }
+        Some(GeographicAdmissionOutcome::Duplicate {
+            event_id: record.event_id,
+            event_seq: record.event_seq,
+            snapshot_id: record.snapshot_id.clone(),
+            snapshot_hash: record.snapshot_hash,
+        })
+    }
+}
+
+impl GeographicReplayVerifier for MemoryStore {
+    fn verify_geo_cell_event(&self, evidence: GeographicReplayEvidenceV1) -> Result<(), CoreError> {
+        let fail = || Err(CoreError::GeographicAdmissionValidationFailed);
+        let Some(state) = self.timelines.get(&evidence.timeline()) else {
+            return fail();
+        };
+        let Some(event) = state
+            .events
+            .iter()
+            .find(|event| event.id == evidence.event_id())
+        else {
+            return fail();
+        };
+        if event.seq != evidence.event_seq()
+            || event.event_type.as_str() != pos_core::GEOGRAPHIC_CELL_EVENT_TYPE
+            || event.schema_version != pos_core::SchemaVersion::V1
+            || event.payload_hash != evidence.event_payload_hash()
+            || self.hasher.hash_payload(&event.payload) != event.payload_hash
+        {
+            return fail();
+        }
+        let Ok(observation) =
+            pos_core::geo_cell_admission::GeographicObservationV1::decode(&event.payload)
+        else {
+            return fail();
+        };
+        if observation.snapshot_id() != evidence.snapshot_id()
+            || observation.snapshot_hash() != evidence.snapshot_hash()
+        {
+            return fail();
+        }
+        let Some(snapshot) = self.geographic_cell_snapshots.get(evidence.snapshot_id()) else {
+            return fail();
+        };
+        let snapshot_cbor = snapshot.canonical_bytes();
+        if snapshot.hash() != evidence.snapshot_hash()
+            || snapshot.event_id() != evidence.event_id()
+            || snapshot.event_seq() != evidence.event_seq()
+            || snapshot.timeline() != evidence.timeline()
+            || snapshot.entity() != event.entity
+        {
+            return fail();
+        }
+        let linkage = snapshot.linkage();
+        let Ok(consent) =
+            self.resolve_admission_consent(linkage.consent_record_id(), linkage.consent_revision())
+        else {
+            return fail();
+        };
+        if !consent.matches_linkage(&linkage) {
+            return fail();
+        }
+        let Some(link) = self
+            .geographic_cell_links
+            .get(&(evidence.timeline(), evidence.event_id()))
+        else {
+            return fail();
+        };
+        if link.snapshot_id != *evidence.snapshot_id()
+            || link.snapshot_hash != evidence.snapshot_hash()
+            || link.snapshot_cbor != snapshot_cbor
+        {
+            return fail();
+        }
+        Ok(())
+    }
+}
+
 impl EventStore for MemoryStore {
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
         let meta = TimelineMeta::root(name);
@@ -1380,6 +1741,13 @@ mod tests {
             GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore, GeoLocationReplayEvidenceV1,
             GeoLocationReplayVerifier,
         },
+        geo_cell_admission::{
+            hash_admission_consent_record_bytes, AdmissionConsentRecordV1,
+            AdmissionEntitlementDraftV1, AdmissionEntitlementSnapshotV1, AdmissionSnapshotHash,
+            AdmissionSnapshotId, GeoCellAdmissionFenceV1, GeoCellAdmissionInputV1,
+            GeoCellAdmissionRequestV1, GeographicAdmissionAdmin, GeographicAdmissionStore,
+            ValidatedGeoCellV1,
+        },
         ids::{EntityId, EventId},
         store::{SeqRange, TimelineExport},
         OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore,
@@ -1391,6 +1759,44 @@ mod tests {
             Kind::new("test.event"),
             CanonicalBytes::from_vec(payload.to_vec()),
         )
+    }
+
+    fn geo_cell_consent_record(id: AdmissionSnapshotId, revision: u64) -> AdmissionConsentRecordV1 {
+        AdmissionConsentRecordV1::from_persistence_parts(
+            id,
+            revision,
+            CanonicalBytes::from_static(b"\xa1frecordggeo-cell"),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn geo_cell_draft(
+        timeline: TimelineId,
+        entity: EntityId,
+        consent_record_id: AdmissionSnapshotId,
+        consent_revision: u64,
+        purpose: &str,
+        entitled_principals: Vec<EntityId>,
+        visibility_scope: &str,
+        maximum_h3_resolution: u8,
+        admission_policy_version: u32,
+        admission_epoch: u64,
+    ) -> AdmissionEntitlementDraftV1 {
+        let record = geo_cell_consent_record(consent_record_id.clone(), consent_revision);
+        AdmissionEntitlementDraftV1::new(
+            timeline,
+            entity,
+            consent_record_id,
+            consent_revision,
+            hash_admission_consent_record_bytes(record.canonical_bytes()),
+            purpose,
+            entitled_principals,
+            visibility_scope,
+            maximum_h3_resolution,
+            admission_policy_version,
+            admission_epoch,
+        )
+        .unwrap()
     }
 
     fn pair_geographic_enrollment(
@@ -1500,6 +1906,493 @@ mod tests {
         assert!(overflow.geographic_admission_dedup.is_empty());
         assert!(overflow.geographic_admission_snapshots.is_empty());
         assert!(overflow.geographic_admission_links.is_empty());
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn geo_cell_duplicate_verifier_rejects_private_corruption() {
+        let mut store = MemoryStore::new();
+        let timeline = store
+            .create_timeline("geo-cell-private-corruption")
+            .unwrap();
+        let entity = EntityId::new();
+        let cell = ValidatedGeoCellV1::from_adr031_bytes(&CanonicalBytes::from_static(
+            b"\xa4eindexo8928308280fffff\x66systemeh3-v4\x6aresolution\x09kcell_format\x01",
+        ))
+        .unwrap();
+        let draft = geo_cell_draft(
+            timeline.id(),
+            entity,
+            AdmissionSnapshotId::from_canonical("01ARZ3NDEKTSV4RRFFQ69G5FAZ").unwrap(),
+            12,
+            "private-corruption",
+            vec![entity],
+            "private",
+            9,
+            1,
+            13,
+        );
+        let request = GeoCellAdmissionRequestV1::from_input(GeoCellAdmissionInputV1::new(
+            cell,
+            pos_core::SourceTimeBucket::new(123),
+            GeoCellAdmissionFenceV1::new(draft, [7; 32], 11, false),
+            pos_core::GeographicAdmissionFingerprintV1::from_ingress([8; 32]),
+        ))
+        .unwrap();
+        store
+            .set_geo_cell_admission_consent_record(geo_cell_consent_record(
+                request.fence().draft().consent_record_id().clone(),
+                request.fence().draft().consent_revision(),
+            ))
+            .unwrap();
+        assert!(store
+            .set_geo_cell_admission_consent_record(
+                AdmissionConsentRecordV1::from_persistence_parts(
+                    request.fence().draft().consent_record_id().clone(),
+                    0,
+                    CanonicalBytes::from_static(b"zero-revision"),
+                )
+            )
+            .is_err());
+        assert!(store
+            .set_geo_cell_admission_consent_record(
+                AdmissionConsentRecordV1::from_persistence_parts(
+                    request.fence().draft().consent_record_id().clone(),
+                    request.fence().draft().consent_revision(),
+                    CanonicalBytes::from_static(b"different-consent"),
+                )
+            )
+            .is_err());
+        store
+            .set_geo_cell_admission_fence(timeline.id(), entity, request.fence().clone())
+            .unwrap();
+        let accepted = store.admit(request.clone()).unwrap();
+        let event_id = accepted.event_id().expect("accepted geo.cell event id");
+        let event_seq = accepted
+            .event_seq()
+            .expect("accepted geo.cell event sequence");
+        let snapshot_id = accepted
+            .snapshot_id()
+            .expect("accepted geo.cell snapshot id")
+            .clone();
+        let snapshot_hash = accepted
+            .snapshot_hash()
+            .expect("accepted geo.cell snapshot hash");
+        let fingerprint = request.fingerprint();
+        let valid = store.geographic_cell_dedup[&fingerprint].clone();
+        assert!(store.verified_geo_cell_duplicate(&valid).is_some());
+
+        let consent_key = (
+            request.fence().draft().consent_record_id().clone(),
+            request.fence().draft().consent_revision(),
+        );
+        let consent = store
+            .geographic_cell_consent_records
+            .remove(&consent_key)
+            .unwrap();
+        assert!(store.admit(request.clone()).is_err());
+        assert!(store.verified_geo_cell_duplicate(&valid).is_none());
+        store
+            .geographic_cell_consent_records
+            .insert(consent_key.clone(), consent.clone());
+        let alternate = AdmissionConsentRecordV1::from_persistence_parts(
+            consent_key.0.clone(),
+            consent_key.1,
+            CanonicalBytes::from_static(b"different-consent"),
+        );
+        store
+            .geographic_cell_consent_records
+            .insert(consent_key.clone(), alternate);
+        assert!(store.admit(request.clone()).is_err());
+        assert!(store.verified_geo_cell_duplicate(&valid).is_none());
+        store
+            .geographic_cell_consent_records
+            .insert(consent_key.clone(), consent);
+
+        let dedup_record = store.geographic_cell_dedup.remove(&fingerprint).unwrap();
+        let timeline_state = store.timelines.remove(&timeline.id()).unwrap();
+        assert!(store.admit(request.clone()).is_err());
+        store.timelines.insert(timeline.id(), timeline_state);
+        store
+            .geographic_cell_dedup
+            .insert(fingerprint, dedup_record);
+
+        let draft = geo_cell_draft(
+            timeline.id(),
+            entity,
+            AdmissionSnapshotId::from_canonical("01ARZ3NDEKTSV4RRFFQ69G5FB0").unwrap(),
+            request.fence().draft().consent_revision(),
+            "different-intent",
+            request.fence().draft().entitled_principals().to_vec(),
+            request.fence().draft().visibility_scope(),
+            request.fence().draft().maximum_h3_resolution(),
+            request.fence().draft().admission_policy_version(),
+            request.fence().draft().admission_epoch(),
+        );
+        let conflict = GeoCellAdmissionRequestV1::from_input(GeoCellAdmissionInputV1::new(
+            request.cell().clone(),
+            request.source_time_bucket(),
+            GeoCellAdmissionFenceV1::new(
+                draft,
+                *request.fence().binding_identity(),
+                request.fence().binding_revision(),
+                false,
+            ),
+            pos_core::GeographicAdmissionFingerprintV1::from_ingress([8; 32]),
+        ))
+        .unwrap();
+        store
+            .set_geo_cell_admission_consent_record(geo_cell_consent_record(
+                conflict.fence().draft().consent_record_id().clone(),
+                conflict.fence().draft().consent_revision(),
+            ))
+            .unwrap();
+        store
+            .set_geo_cell_admission_fence(timeline.id(), entity, conflict.fence().clone())
+            .unwrap();
+        assert!(store.admit(conflict).unwrap().is_conflict());
+        store
+            .geographic_cell_dedup
+            .insert(fingerprint, valid.clone());
+        store
+            .set_geo_cell_admission_consent_record(geo_cell_consent_record(
+                request.fence().draft().consent_record_id().clone(),
+                request.fence().draft().consent_revision(),
+            ))
+            .unwrap();
+        store
+            .set_geo_cell_admission_fence(timeline.id(), entity, request.fence().clone())
+            .unwrap();
+
+        let timeline_state = store.timelines.remove(&timeline.id()).unwrap();
+        assert!(store.verified_geo_cell_duplicate(&valid).is_none());
+        store
+            .timelines
+            .insert(timeline.id(), timeline_state.clone());
+        let mut empty_timeline_state = timeline_state.clone();
+        empty_timeline_state.events.clear();
+        store.timelines.insert(timeline.id(), empty_timeline_state);
+        assert!(store.verified_geo_cell_duplicate(&valid).is_none());
+        store.timelines.insert(timeline.id(), timeline_state);
+
+        let mut bad = valid.clone();
+        bad.timeline = TimelineId::new();
+        assert!(store.verified_geo_cell_duplicate(&bad).is_none());
+        bad = valid.clone();
+        bad.entity = EntityId::new();
+        assert!(store.verified_geo_cell_duplicate(&bad).is_none());
+        bad = valid.clone();
+        bad.event_id = EventId::new();
+        assert!(store.verified_geo_cell_duplicate(&bad).is_none());
+        bad = valid.clone();
+        bad.event_seq = Seq::from_u64(event_seq.as_u64() + 1);
+        assert!(store.verified_geo_cell_duplicate(&bad).is_none());
+        bad = valid.clone();
+        bad.snapshot_id = AdmissionSnapshotId::new();
+        assert!(store.verified_geo_cell_duplicate(&bad).is_none());
+        bad = valid.clone();
+        bad.snapshot_hash = AdmissionSnapshotHash::from_bytes([0xff; 32]);
+        assert!(store.verified_geo_cell_duplicate(&bad).is_none());
+
+        let original_event = store.timelines.get(&timeline.id()).unwrap().events[0].clone();
+        let mut corrupt_event = original_event.clone();
+        corrupt_event.payload_hash = Hash::zero();
+        store.timelines.get_mut(&timeline.id()).unwrap().events[0] = corrupt_event;
+        assert!(store.verified_geo_cell_duplicate(&valid).is_none());
+        assert!(store.admit(request.clone()).unwrap().is_outcome_unknown());
+        store.timelines.get_mut(&timeline.id()).unwrap().events[0] = original_event.clone();
+        let mut corrupt_event = original_event.clone();
+        corrupt_event.payload = CanonicalBytes::from_static(b"not-a-geo-cell");
+        corrupt_event.payload_hash = store.hasher.hash_payload(&corrupt_event.payload);
+        store.timelines.get_mut(&timeline.id()).unwrap().events[0] = corrupt_event;
+        assert!(store.verified_geo_cell_duplicate(&valid).is_none());
+        store.timelines.get_mut(&timeline.id()).unwrap().events[0] = original_event.clone();
+        let replacement_id = AdmissionSnapshotId::new();
+        let replacement_hash = AdmissionSnapshotHash::from_bytes([31; 32]);
+        let replacement_payload = request.payload(replacement_id, replacement_hash).encode();
+        let mut corrupt_event = original_event.clone();
+        corrupt_event.payload = replacement_payload.clone();
+        corrupt_event.payload_hash = store.hasher.hash_payload(&replacement_payload);
+        store.timelines.get_mut(&timeline.id()).unwrap().events[0] = corrupt_event;
+        assert!(store.verified_geo_cell_duplicate(&valid).is_none());
+        store.timelines.get_mut(&timeline.id()).unwrap().events[0] = original_event.clone();
+
+        let snapshot = store
+            .geographic_cell_snapshots
+            .remove(&snapshot_id)
+            .unwrap();
+        assert!(store.verified_geo_cell_duplicate(&valid).is_none());
+        store
+            .geographic_cell_snapshots
+            .insert(snapshot_id.clone(), snapshot.clone());
+        let bad_snapshot = AdmissionEntitlementSnapshotV1::new(
+            snapshot_id.clone(),
+            &request,
+            EventId::new(),
+            event_seq,
+        );
+        store
+            .geographic_cell_snapshots
+            .insert(snapshot_id.clone(), bad_snapshot.clone());
+        assert!(store.verified_geo_cell_duplicate(&valid).is_none());
+        let bad_snapshot = AdmissionEntitlementSnapshotV1::new(
+            snapshot_id.clone(),
+            &request,
+            event_id,
+            event_seq.next(),
+        );
+        store
+            .geographic_cell_snapshots
+            .insert(snapshot_id.clone(), bad_snapshot);
+        assert!(store.verified_geo_cell_duplicate(&valid).is_none());
+        store
+            .geographic_cell_snapshots
+            .insert(snapshot_id.clone(), snapshot);
+
+        let link = store
+            .geographic_cell_links
+            .remove(&(timeline.id(), event_id))
+            .unwrap();
+        assert!(store.verified_geo_cell_duplicate(&valid).is_none());
+        store
+            .geographic_cell_links
+            .insert((timeline.id(), event_id), link.clone());
+        let mut bad_link = link.clone();
+        bad_link.snapshot_id = AdmissionSnapshotId::new();
+        store
+            .geographic_cell_links
+            .insert((timeline.id(), event_id), bad_link);
+        assert!(store.verified_geo_cell_duplicate(&valid).is_none());
+        let mut bad_link = link.clone();
+        bad_link.snapshot_hash = AdmissionSnapshotHash::from_bytes([0xee; 32]);
+        store
+            .geographic_cell_links
+            .insert((timeline.id(), event_id), bad_link);
+        assert!(store.verified_geo_cell_duplicate(&valid).is_none());
+        let mut bad_link = link.clone();
+        bad_link.snapshot_cbor = CanonicalBytes::from_static(b"bad-snapshot");
+        store
+            .geographic_cell_links
+            .insert((timeline.id(), event_id), bad_link);
+        assert!(store.verified_geo_cell_duplicate(&valid).is_none());
+        store
+            .geographic_cell_links
+            .insert((timeline.id(), event_id), link);
+
+        let evidence = GeographicReplayEvidenceV1::new(
+            timeline.id(),
+            event_id,
+            event_seq,
+            original_event.payload_hash,
+            snapshot_id.clone(),
+            snapshot_hash,
+        );
+        assert!(store.verify_geo_cell_event(evidence.clone()).is_ok());
+
+        let consent_key = (
+            request.fence().draft().consent_record_id().clone(),
+            request.fence().draft().consent_revision(),
+        );
+        let consent = store
+            .geographic_cell_consent_records
+            .remove(&consent_key)
+            .unwrap();
+        assert!(store.verify_geo_cell_event(evidence.clone()).is_err());
+        store
+            .geographic_cell_consent_records
+            .insert(consent_key.clone(), consent.clone());
+        store.geographic_cell_consent_records.insert(
+            consent_key.clone(),
+            AdmissionConsentRecordV1::from_persistence_parts(
+                consent_key.0.clone(),
+                consent_key.1,
+                CanonicalBytes::from_static(b"different-consent"),
+            ),
+        );
+        assert!(store.verify_geo_cell_event(evidence.clone()).is_err());
+        store
+            .geographic_cell_consent_records
+            .insert(consent_key, consent);
+
+        assert!(store
+            .verify_geo_cell_event(GeographicReplayEvidenceV1::new(
+                TimelineId::new(),
+                event_id,
+                event_seq,
+                original_event.payload_hash,
+                snapshot_id.clone(),
+                snapshot_hash,
+            ))
+            .is_err());
+        assert!(store
+            .verify_geo_cell_event(GeographicReplayEvidenceV1::new(
+                timeline.id(),
+                EventId::new(),
+                event_seq,
+                original_event.payload_hash,
+                snapshot_id.clone(),
+                snapshot_hash,
+            ))
+            .is_err());
+        assert!(store
+            .verify_geo_cell_event(GeographicReplayEvidenceV1::new(
+                timeline.id(),
+                event_id,
+                event_seq.next(),
+                original_event.payload_hash,
+                snapshot_id.clone(),
+                snapshot_hash,
+            ))
+            .is_err());
+        assert!(store
+            .verify_geo_cell_event(GeographicReplayEvidenceV1::new(
+                timeline.id(),
+                event_id,
+                event_seq,
+                Hash::zero(),
+                snapshot_id.clone(),
+                snapshot_hash,
+            ))
+            .is_err());
+        let original_link = store
+            .geographic_cell_links
+            .get(&(timeline.id(), event_id))
+            .unwrap()
+            .clone();
+        let mut bad_event = original_event.clone();
+        bad_event.event_type = Kind::new("other.event");
+        store.timelines.get_mut(&timeline.id()).unwrap().events[0] = bad_event;
+        assert!(store.verify_geo_cell_event(evidence.clone()).is_err());
+        store.timelines.get_mut(&timeline.id()).unwrap().events[0] = original_event.clone();
+        let mut bad_event = original_event.clone();
+        bad_event.payload = CanonicalBytes::from_static(b"not-a-geo-cell");
+        bad_event.payload_hash = store.hasher.hash_payload(&bad_event.payload);
+        store.timelines.get_mut(&timeline.id()).unwrap().events[0] = bad_event;
+        assert!(store
+            .verify_geo_cell_event(GeographicReplayEvidenceV1::new(
+                timeline.id(),
+                event_id,
+                event_seq,
+                store.timelines[&timeline.id()].events[0].payload_hash,
+                snapshot_id.clone(),
+                snapshot_hash,
+            ))
+            .is_err());
+        store.timelines.get_mut(&timeline.id()).unwrap().events[0] = original_event;
+        let original_snapshot = store
+            .geographic_cell_snapshots
+            .get(&snapshot_id)
+            .unwrap()
+            .clone();
+        store.geographic_cell_snapshots.insert(
+            snapshot_id.clone(),
+            snapshot_id_snapshot(&request, snapshot_id.clone(), EventId::new(), event_seq),
+        );
+        assert!(store.verify_geo_cell_event(evidence.clone()).is_err());
+        store
+            .geographic_cell_snapshots
+            .insert(snapshot_id.clone(), original_snapshot);
+        let removed_link = store
+            .geographic_cell_links
+            .remove(&(timeline.id(), event_id))
+            .unwrap();
+        assert!(store.verify_geo_cell_event(evidence.clone()).is_err());
+        store
+            .geographic_cell_links
+            .insert((timeline.id(), event_id), removed_link);
+        store.geographic_cell_snapshots.remove(&snapshot_id);
+        assert!(store.verify_geo_cell_event(evidence.clone()).is_err());
+        let previous_snapshot = store.geographic_cell_snapshots.insert(
+            snapshot_id.clone(),
+            snapshot_id_snapshot(&request, snapshot_id.clone(), event_id, event_seq),
+        );
+        assert!(previous_snapshot.is_none());
+        let mut bad_link = original_link.clone();
+        bad_link.snapshot_id = AdmissionSnapshotId::new();
+        store
+            .geographic_cell_links
+            .insert((timeline.id(), event_id), bad_link);
+        assert!(store.verify_geo_cell_event(evidence.clone()).is_err());
+        store
+            .geographic_cell_links
+            .insert((timeline.id(), event_id), original_link.clone());
+        let mut bad_link = original_link;
+        bad_link.snapshot_hash = AdmissionSnapshotHash::from_bytes([0xdd; 32]);
+        store
+            .geographic_cell_links
+            .insert((timeline.id(), event_id), bad_link);
+        assert!(store.verify_geo_cell_event(evidence).is_err());
+
+        let retained_link = store
+            .geographic_cell_links
+            .values()
+            .next()
+            .expect("geo.cell link exists")
+            .clone();
+        store
+            .geographic_cell_links
+            .insert((TimelineId::new(), event_id), retained_link);
+        delete_visible_timeline(&mut store, timeline.id()).unwrap();
+    }
+
+    #[test]
+    fn geo_cell_expiry_purge_is_atomic_when_later_admission_work_fails() {
+        let mut store = MemoryStore::new();
+        let timeline = store
+            .create_timeline("geo-cell-expiry-purge-atomicity")
+            .unwrap();
+        let entity = EntityId::new();
+        let draft = geo_cell_draft(
+            timeline.id(),
+            entity,
+            AdmissionSnapshotId::from_canonical("01ARZ3NDEKTSV4RRFFQ69G5FAZ").unwrap(),
+            12,
+            "expiry-purge",
+            vec![entity],
+            "private",
+            9,
+            1,
+            13,
+        );
+        let request = GeoCellAdmissionRequestV1::from_input(GeoCellAdmissionInputV1::new(
+            ValidatedGeoCellV1::from_adr031_bytes(&CanonicalBytes::from_static(
+                b"\xa4eindexo8928308280fffff\x66systemeh3-v4\x6aresolution\x09kcell_format\x01",
+            ))
+            .unwrap(),
+            pos_core::SourceTimeBucket::new(123),
+            GeoCellAdmissionFenceV1::new(draft, [7; 32], 11, false),
+            pos_core::GeographicAdmissionFingerprintV1::from_ingress([8; 32]),
+        ))
+        .unwrap();
+        store
+            .set_geo_cell_admission_consent_record(geo_cell_consent_record(
+                request.fence().draft().consent_record_id().clone(),
+                request.fence().draft().consent_revision(),
+            ))
+            .unwrap();
+        store
+            .set_geo_cell_admission_fence(timeline.id(), entity, request.fence().clone())
+            .unwrap();
+        assert!(store.admit(request.clone()).unwrap().is_accepted());
+        let fingerprint = request.fingerprint();
+        store
+            .geographic_cell_dedup
+            .get_mut(&fingerprint)
+            .unwrap()
+            .expires_at = WallTime::from_micros(0);
+        store.timelines.remove(&timeline.id()).unwrap();
+
+        assert!(store.admit(request).is_err());
+        assert!(store.geographic_cell_dedup.contains_key(&fingerprint));
+    }
+
+    fn snapshot_id_snapshot(
+        request: &GeoCellAdmissionRequestV1,
+        snapshot_id: AdmissionSnapshotId,
+        event_id: EventId,
+        event_seq: Seq,
+    ) -> AdmissionEntitlementSnapshotV1 {
+        AdmissionEntitlementSnapshotV1::new(snapshot_id, request, event_id, event_seq)
     }
 
     #[test]
