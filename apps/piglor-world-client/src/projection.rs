@@ -1,4 +1,4 @@
-use pos_core::{ids::EntityId, state::State, TimelineExport};
+use pos_core::{event::Event, ids::EntityId, state::State, TimelineExport};
 use pos_plugin_society::SocietyReducer;
 use pos_state::ProjectionRegistry;
 use ulid::Ulid;
@@ -38,8 +38,7 @@ impl ProjectionDigest {
 /// Returns [`crate::ClientError::Invalid`] when the timeline cannot produce a
 /// finite, bounded trust projection for the fixed fixture entity.
 pub fn project_fixture(export: &TimelineExport) -> Result<ProjectionDigest, crate::ClientError> {
-    let mut events = export.events.clone();
-    events.sort_by_key(|event| event.seq.as_u64());
+    let events = sorted_events(&export.events);
 
     let mut registry = ProjectionRegistry::new();
     registry.register("society", Box::new(SocietyReducer));
@@ -50,6 +49,12 @@ pub fn project_fixture(export: &TimelineExport) -> Result<ProjectionDigest, crat
         .state_for_reducer("society", &entity)
         .ok_or_else(|| crate::ClientError::Invalid("missing fixed entity state".to_owned()))?;
     digest_from_state(state)
+}
+
+fn sorted_events(events: &[Event]) -> Vec<Event> {
+    let mut sorted = events.to_vec();
+    sorted.sort_by_key(|event| event.seq.as_u64());
+    sorted
 }
 
 fn digest_from_state(state: &State) -> Result<ProjectionDigest, crate::ClientError> {
@@ -91,7 +96,8 @@ fn digest_from_values(
 #[cfg(test)]
 mod tests {
     use super::super::{decode_fixture, fixture_bytes, project_fixture};
-    use super::{digest_from_state, digest_from_values};
+    use super::{digest_from_state, digest_from_values, sorted_events};
+    use crate::ClientError;
     use pos_core::state::State;
     use serde_json::json;
 
@@ -125,8 +131,11 @@ mod tests {
         let mut export = decode_fixture(&fixture_bytes()).unwrap();
         export.events.reverse();
 
-        let digest = project_fixture(&export).unwrap();
+        let events = sorted_events(&export.events);
+        assert_eq!(events[0].seq.as_u64(), 1);
+        assert_eq!(events[1].seq.as_u64(), 2);
 
+        let digest = project_fixture(&export).unwrap();
         assert_eq!(digest.trust_mean_bits, 0.75f64.to_bits());
         assert_eq!(digest.landmark_x_bits, 1.0f64.to_bits());
     }
@@ -138,14 +147,14 @@ mod tests {
 
         let error = project_fixture(&export).unwrap_err();
 
-        assert!(error.to_string().contains("missing fixed entity state"));
+        assert_invalid(error, "missing fixed entity state");
     }
 
     #[test]
     fn rejects_missing_signals() {
         let error = digest_from_state(&State::new()).unwrap_err();
 
-        assert!(error.to_string().contains("missing society signal count"));
+        assert_invalid(error, "missing society signal count");
     }
 
     #[test]
@@ -155,7 +164,7 @@ mod tests {
 
         let error = digest_from_state(&state).unwrap_err();
 
-        assert!(error.to_string().contains("missing trust mean"));
+        assert_invalid(error, "missing trust mean");
     }
 
     #[test]
@@ -166,17 +175,35 @@ mod tests {
 
         let error = digest_from_state(&state).unwrap_err();
 
-        assert!(error.to_string().contains("missing society signal count"));
+        assert_invalid(error, "missing society signal count");
     }
 
     #[test]
     fn rejects_non_finite_and_out_of_range_projection_values() {
         for trust_mean in [f64::NAN, -0.1, 1.1] {
             let error = digest_from_values(2, trust_mean, 1.0).unwrap_err();
-            assert!(error.to_string().contains("trust mean is outside [0, 1]"));
+            assert_invalid(error, "trust mean is outside [0, 1]");
         }
 
         let error = digest_from_values(2, 0.75, f64::NAN).unwrap_err();
-        assert!(error.to_string().contains("landmark is not finite"));
+        assert_invalid(error, "landmark is not finite");
+    }
+
+    #[test]
+    #[should_panic(expected = "expected ClientError::Invalid")]
+    fn invalid_assertion_rejects_decode_errors() {
+        assert_invalid(
+            ClientError::Decode("decode failed".to_owned()),
+            "decode failed",
+        );
+    }
+
+    fn assert_invalid(error: ClientError, expected: &str) {
+        match error {
+            ClientError::Invalid(message) => assert_eq!(message, expected),
+            ClientError::Decode(message) => {
+                panic!("expected ClientError::Invalid, got Decode({message})")
+            }
+        }
     }
 }
