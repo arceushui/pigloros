@@ -1,4 +1,4 @@
-use pos_core::{ids::EntityId, TimelineExport};
+use pos_core::{ids::EntityId, state::State, TimelineExport};
 use pos_plugin_society::SocietyReducer;
 use pos_state::ProjectionRegistry;
 use ulid::Ulid;
@@ -16,11 +16,9 @@ pub struct ProjectionDigest {
 impl ProjectionDigest {
     /// Return the projected landmark coordinate as an `f32` for the renderer.
     #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
     pub fn landmark_x(self) -> f32 {
-        f64::from_bits(self.landmark_x_bits)
-            .to_string()
-            .parse()
-            .unwrap_or_default()
+        f64::from_bits(self.landmark_x_bits) as f32
     }
 
     /// Return a deterministic BLAKE3 digest of the canonical field layout.
@@ -51,6 +49,10 @@ pub fn project_fixture(export: &TimelineExport) -> Result<ProjectionDigest, crat
     let state = registry
         .state_for_reducer("society", &entity)
         .ok_or_else(|| crate::ClientError::Invalid("missing fixed entity state".to_owned()))?;
+    digest_from_state(state)
+}
+
+fn digest_from_state(state: &State) -> Result<ProjectionDigest, crate::ClientError> {
     let signals = state
         .get("signals")
         .and_then(serde_json::Value::as_u64)
@@ -59,12 +61,20 @@ pub fn project_fixture(export: &TimelineExport) -> Result<ProjectionDigest, crat
         .get("mean.trust")
         .and_then(serde_json::Value::as_f64)
         .ok_or_else(|| crate::ClientError::Invalid("missing trust mean".to_owned()))?;
+    let landmark_x = trust_mean.mul_add(4.0, -2.0);
+    digest_from_values(signals, trust_mean, landmark_x)
+}
+
+fn digest_from_values(
+    signals: u64,
+    trust_mean: f64,
+    landmark_x: f64,
+) -> Result<ProjectionDigest, crate::ClientError> {
     if !trust_mean.is_finite() || !(0.0..=1.0).contains(&trust_mean) {
         return Err(crate::ClientError::Invalid(
             "trust mean is outside [0, 1]".to_owned(),
         ));
     }
-    let landmark_x = trust_mean.mul_add(4.0, -2.0);
     if !landmark_x.is_finite() {
         return Err(crate::ClientError::Invalid(
             "landmark is not finite".to_owned(),
@@ -81,6 +91,9 @@ pub fn project_fixture(export: &TimelineExport) -> Result<ProjectionDigest, crat
 #[cfg(test)]
 mod tests {
     use super::super::{decode_fixture, fixture_bytes, project_fixture};
+    use super::{digest_from_state, digest_from_values};
+    use pos_core::state::State;
+    use serde_json::json;
 
     #[test]
     fn projects_fixture_to_stable_digest() {
@@ -98,5 +111,72 @@ mod tests {
             ]
         );
         assert_eq!(digest.landmark_x().to_bits(), 1.0f32.to_bits());
+        assert!(super::ProjectionDigest {
+            signals: 2,
+            trust_mean_bits: 0.75f64.to_bits(),
+            landmark_x_bits: f64::NAN.to_bits(),
+        }
+        .landmark_x()
+        .is_nan());
+    }
+
+    #[test]
+    fn projects_events_in_sequence_order() {
+        let mut export = decode_fixture(&fixture_bytes()).unwrap();
+        export.events.reverse();
+
+        let digest = project_fixture(&export).unwrap();
+
+        assert_eq!(digest.trust_mean_bits, 0.75f64.to_bits());
+        assert_eq!(digest.landmark_x_bits, 1.0f64.to_bits());
+    }
+
+    #[test]
+    fn rejects_missing_fixed_entity_state() {
+        let mut export = decode_fixture(&fixture_bytes()).unwrap();
+        export.events.clear();
+
+        let error = project_fixture(&export).unwrap_err();
+
+        assert!(error.to_string().contains("missing fixed entity state"));
+    }
+
+    #[test]
+    fn rejects_missing_signals() {
+        let error = digest_from_state(&State::new()).unwrap_err();
+
+        assert!(error.to_string().contains("missing society signal count"));
+    }
+
+    #[test]
+    fn rejects_missing_trust_mean() {
+        let mut state = State::new();
+        state.set("signals", json!(2));
+
+        let error = digest_from_state(&state).unwrap_err();
+
+        assert!(error.to_string().contains("missing trust mean"));
+    }
+
+    #[test]
+    fn rejects_non_numeric_signals() {
+        let mut state = State::new();
+        state.set("signals", json!("two"));
+        state.set("mean.trust", json!(0.75));
+
+        let error = digest_from_state(&state).unwrap_err();
+
+        assert!(error.to_string().contains("missing society signal count"));
+    }
+
+    #[test]
+    fn rejects_non_finite_and_out_of_range_projection_values() {
+        for trust_mean in [f64::NAN, -0.1, 1.1] {
+            let error = digest_from_values(2, trust_mean, 1.0).unwrap_err();
+            assert!(error.to_string().contains("trust mean is outside [0, 1]"));
+        }
+
+        let error = digest_from_values(2, 0.75, f64::NAN).unwrap_err();
+        assert!(error.to_string().contains("landmark is not finite"));
     }
 }
