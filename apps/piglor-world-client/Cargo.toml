@@ -1,0 +1,22 @@
+[package]
+name = "piglor-world-client"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "piglor_world_client"
+path = "src/lib.rs"
+
+[dependencies]
+blake3 = { workspace = true }
+ciborium = { workspace = true }
+pos-core = { path = "../../crates/pos-core" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+ulid = { workspace = true }
+
+[lints]
+workspace = true
