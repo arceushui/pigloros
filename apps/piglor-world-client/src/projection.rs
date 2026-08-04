@@ -16,7 +16,10 @@ pub struct ProjectionDigest {
 impl ProjectionDigest {
     /// Return the projected landmark coordinate as an `f32` for the renderer.
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "The bounded projection crosses the renderer's f64-to-f32 boundary."
+    )]
     pub fn landmark_x(self) -> f32 {
         f64::from_bits(self.landmark_x_bits) as f32
     }
