@@ -35,6 +35,12 @@ cargo run -p piglor-ledger --locked -- predict --source toml:./seed/predictions 
 docker compose up -d
 curl http://localhost:8080/health
 curl http://localhost:8080/v1/ledger
+
+# 3D world client (native)
+CARGO_TARGET_DIR=/root/pigloros/target cargo run -p piglor-world-client --release --locked
+
+# 3D world client (WASM build + headless Chrome test)
+CARGO_TARGET_DIR=/root/pigloros/target bash scripts/check-world-client-wasm.sh
 ```
 
 `piglor-ledger keygen` is supported on Unix platforms, where it creates a
