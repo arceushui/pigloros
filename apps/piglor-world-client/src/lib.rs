@@ -4,6 +4,8 @@
 
 pub mod fixture;
 pub mod projection;
+pub mod shell;
 
 pub use fixture::{decode_fixture, fixture_bytes, ClientError};
 pub use projection::{project_fixture, ProjectionDigest};
+pub use shell::{build_app, run_native};
