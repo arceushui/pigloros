@@ -24,6 +24,9 @@ else
   echo "WARNING: cargo-deny not on PATH; skipping (install: cargo install cargo-deny)"
 fi
 
+echo "==> disabled feature isolation"
+cargo check --workspace --all-targets --no-default-features --locked
+
 echo "==> fmt"
 cargo fmt --all -- --check
 
@@ -31,17 +34,17 @@ echo "==> test (--include-ignored)"
 # Run ignored tests too so #[ignore] cannot silently skip a path.
 test_log="$(mktemp)"
 trap 'rm -f "$test_log"' EXIT
-cargo test --workspace --locked -- --include-ignored 2>&1 | tee "$test_log"
+cargo test --workspace --all-features --locked -- --include-ignored 2>&1 | tee "$test_log"
 bash "$ROOT/scripts/assert-no-ignored-in-test-summary.sh" "$test_log"
 
 echo "==> clippy"
-cargo clippy --workspace --all-targets --locked -- -D warnings -W clippy::pedantic
+cargo clippy --workspace --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
 
 # 99% coverage floor: production code is fully instrumented (coverage(off) is test-only).
 # Unnecessary code is deleted/simplified rather than left as dead branches.
 echo "==> coverage (99% lines + regions)"
 export RUSTC_BOOTSTRAP=1
-cargo llvm-cov --workspace --locked --summary-only \
+cargo llvm-cov --workspace --all-features --locked --summary-only \
   --fail-under-lines 99 \
   --fail-under-regions 99 \
   -- --include-ignored

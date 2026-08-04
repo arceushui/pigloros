@@ -5,7 +5,7 @@
 # - Triggers: every PR + pushes to main
 # - Jobs: fmt, test, clippy (pedantic), coverage (99% lines + regions), audit, deny — all required
 # - coverage(off) test-only + no ```ignore doctests: Trunk `rust-test-policy`
-# - Tests: `cargo test -- --include-ignored` so #[ignore] cannot silently skip
+# - Tests: `cargo test --all-features -- --include-ignored` so #[ignore] cannot silently skip and feature-gated code is exercised
 # - Dependencies: cargo-deny.yml (crates/licenses/advisories/sources)
 # - Coverage: RUSTC_BOOTSTRAP=1 so cfg(coverage_nightly) can enable feature(coverage_attribute).
 #   Unnecessary code is deleted/simplified rather than left as dead branches.
@@ -88,10 +88,13 @@ jobs:
         with:
           shared-key: test
 
-      - name: cargo test --workspace --locked -- --include-ignored
+      - name: cargo check --workspace --no-default-features --locked
+        run: cargo check --workspace --all-targets --no-default-features --locked
+
+      - name: cargo test --workspace --all-features --locked -- --include-ignored
         run: |
           set -euo pipefail
-          cargo test --workspace --locked -- --include-ignored 2>&1 | tee /tmp/cargo-test.log
+          cargo test --workspace --all-features --locked -- --include-ignored 2>&1 | tee /tmp/cargo-test.log
           bash scripts/assert-no-ignored-in-test-summary.sh /tmp/cargo-test.log
 
   clippy:
@@ -112,9 +115,9 @@ jobs:
         with:
           shared-key: clippy
 
-      - name: cargo clippy (pedantic, deny warnings)
+      - name: cargo clippy (all features, pedantic, deny warnings)
         run: >
-          cargo clippy --workspace --all-targets --locked --
+          cargo clippy --workspace --all-features --all-targets --locked --
           -D warnings -W clippy::pedantic
 
   coverage:
@@ -142,9 +145,9 @@ jobs:
         with:
           shared-key: coverage
 
-      - name: cargo llvm-cov at-or-above-99pct lines and regions
+      - name: cargo llvm-cov (all features) at-or-above-99pct lines and regions
         run: >
-          cargo llvm-cov --workspace --locked --summary-only
+          cargo llvm-cov --workspace --all-features --locked --summary-only
           --fail-under-lines 99
           --fail-under-regions 99
           -- --include-ignored
@@ -188,8 +191,8 @@ jobs:
       - uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2
         with:
           tool: cargo-geiger
-      - name: cargo geiger
-        run: cargo geiger --locked --workspace 2>&1 | tee /tmp/geiger.log
+      - name: cargo geiger (all features)
+        run: cargo geiger --all-features --locked --workspace 2>&1 | tee /tmp/geiger.log
       - name: assert no unsafe in own crates
         run: '! grep -E "^(crates|apps|plugins)/" /tmp/geiger.log | grep -v "0 unsafe"'
 
@@ -213,7 +216,7 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1:detect_odr_violation=0
         run: >
           RUSTFLAGS="-Z sanitizer=address"
-          cargo +nightly test --locked -Z build-std --target x86_64-unknown-linux-gnu --workspace --tests
+          cargo +nightly test --all-features --locked -Z build-std --target x86_64-unknown-linux-gnu --workspace --tests
 
   docker-build:
     name: docker-build

@@ -15,6 +15,9 @@
 //! (e.g., 0.1 degree cells), preventing exact location tracking.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
+#[cfg(feature = "h3")]
+pub mod geo_cell;
+
 #[cfg(test)]
 use pos_core::{
     event::Event,
@@ -711,9 +714,13 @@ mod tests {
         let cell = cloaker.cloak(wgs84_point(0.0, 0.0));
         let metadata = CompactLocationMetadata::v1(SourceTimeBucket::new(2));
         let location = CompactLocationObservation::new(cell, metadata);
+        assert!((location.cell_latitude() - 0.0).abs() < f64::EPSILON);
+        assert!((location.cell_longitude() - 0.0).abs() < f64::EPSILON);
         assert_eq!(location.source_time_bucket().value(), 2);
         assert_eq!(location.schema_version(), CompactLocationSchemaVersion::V1);
+        assert_eq!(location.schema_version().value(), 1);
         assert_eq!(location.policy_version(), CompactLocationPolicyVersion::V1);
+        assert_eq!(location.policy_version().value(), 1);
         assert_eq!(location.quality_flags(), CompactLocationQualityFlags::NONE);
         assert_eq!(location.quality_flags().bits(), 0);
         assert_eq!(

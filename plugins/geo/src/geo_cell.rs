@@ -1,0 +1,929 @@
+use ciborium::value::Value;
+use pos_core::CanonicalBytes;
+use pos_crypto::canonical;
+use serde::Serialize;
+use std::{io::Cursor, str::FromStr};
+
+use crate::Wgs84Point;
+
+/// The stable nested value format for the inert H3 cell seam.
+pub const GEO_CELL_FORMAT_V1: u8 = 1;
+
+/// The H3 v4-compatible cell-index universe selected by ADR-031.
+pub const GEO_CELL_SYSTEM_H3_V4: &str = "h3-v4";
+
+/// Errors returned by the strict `GeoCellV1` value boundary.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum GeoCellError {
+    /// A requested H3 resolution is outside the inclusive H3 range.
+    #[error("H3 resolution must be in 0..=15: {0}")]
+    InvalidResolution(u8),
+    /// The address is not a valid H3 cell index.
+    #[error("invalid H3 cell index")]
+    InvalidH3Index,
+    /// The address is valid only in a noncanonical textual form.
+    #[error("noncanonical H3 cell index")]
+    NonCanonicalH3Index,
+    /// The payload is not the exact V1 length.
+    #[error("GeoCellV1 payload must be exactly 61 bytes: {0}")]
+    PayloadSizeMismatch(usize),
+    /// The CBOR root or item stream is malformed.
+    #[error("malformed GeoCellV1 CBOR")]
+    MalformedCbor,
+    /// The value is valid CBOR but not the canonical V1 byte representation.
+    #[error("noncanonical GeoCellV1 CBOR")]
+    NonCanonicalCbor,
+    /// A required field is absent.
+    #[error("missing GeoCellV1 field: {0}")]
+    MissingField(&'static str),
+    /// A field occurs more than once.
+    #[error("duplicate GeoCellV1 field: {0}")]
+    DuplicateField(&'static str),
+    /// A field name is not part of the V1 shape.
+    #[error("unexpected GeoCellV1 field")]
+    UnexpectedField,
+    /// A field has the wrong CBOR type.
+    #[error("wrong CBOR type for GeoCellV1 field: {0}")]
+    WrongFieldType(&'static str),
+    /// The nested value format is unsupported.
+    #[error("unsupported GeoCellV1 format: {0}")]
+    UnsupportedCellFormat(u64),
+    /// The cell system tag is unsupported.
+    #[error("unsupported GeoCellV1 system")]
+    UnsupportedCellSystem,
+    /// The redundant declared resolution disagrees with the H3 index.
+    #[error("GeoCellV1 resolution mismatch: index={index}, declared={declared}")]
+    ResolutionMismatch { index: u8, declared: u8 },
+    /// A parent request attempted to refine a cell.
+    #[error("cannot request finer H3 parent: source={source_resolution}, target={target}")]
+    FinerParent { source_resolution: u8, target: u8 },
+}
+
+/// A validated H3 resolution in the inclusive range 0 through 15.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct H3Resolution(u8);
+
+impl H3Resolution {
+    /// Construct a valid H3 resolution.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GeoCellError::InvalidResolution`] when `value` is greater than 15.
+    pub fn new(value: u8) -> Result<Self, GeoCellError> {
+        (value <= 15)
+            .then_some(Self(value))
+            .ok_or(GeoCellError::InvalidResolution(value))
+    }
+
+    /// Return the numeric H3 resolution.
+    #[must_use]
+    pub const fn value(self) -> u8 {
+        self.0
+    }
+
+    fn as_h3o(self) -> h3o::Resolution {
+        h3o::Resolution::try_from(self.0).expect("validated H3 resolution is representable")
+    }
+}
+
+/// A validated, versioned H3 cell value with no enclosing Event semantics.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GeoCellV1 {
+    index: CanonicalH3Index,
+    resolution: H3Resolution,
+}
+
+impl GeoCellV1 {
+    /// Return the canonical lowercase H3 cell address.
+    #[must_use]
+    pub fn index(&self) -> &str {
+        self.index.as_str()
+    }
+
+    /// Return the resolution derived from the validated H3 index.
+    #[must_use]
+    pub const fn resolution(&self) -> H3Resolution {
+        self.resolution
+    }
+
+    /// Encode the exact four-field `GeoCellV1` CBOR value.
+    ///
+    /// # Errors
+    ///
+    /// The result type is retained for symmetry with decoding; the validated V1
+    /// fields currently make encoding infallible.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the invariant-safe V1 wire fields cannot be canonically
+    /// encoded, which would indicate a repository serializer invariant failure.
+    pub fn encode_v1(&self) -> Result<CanonicalBytes, GeoCellError> {
+        let wire = GeoCellWireV1 {
+            cell_format: GEO_CELL_FORMAT_V1,
+            system: GEO_CELL_SYSTEM_H3_V4,
+            index: self.index(),
+            resolution: self.resolution.value(),
+        };
+        Ok(canonical::encode(&wire).expect("GeoCellV1 wire fields always encode canonically"))
+    }
+
+    /// Decode and strictly validate one exact `GeoCellV1` CBOR value.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed [`GeoCellError`] for malformed, noncanonical, or
+    /// semantically invalid input.
+    pub fn decode_v1(bytes: &CanonicalBytes) -> Result<Self, GeoCellError> {
+        if bytes.len() != 61 {
+            return Err(GeoCellError::PayloadSizeMismatch(bytes.len()));
+        }
+
+        let mut cursor = Cursor::new(bytes.as_slice());
+        let value: Value =
+            ciborium::from_reader(&mut cursor).map_err(|_| GeoCellError::MalformedCbor)?;
+        if cursor.position() != bytes.len() as u64 {
+            return Err(GeoCellError::MalformedCbor);
+        }
+
+        let Value::Map(entries) = value else {
+            return Err(GeoCellError::MalformedCbor);
+        };
+        let mut cell_format = None;
+        let mut system = None;
+        let mut index = None;
+        let mut resolution = None;
+
+        for (key, value) in entries {
+            let Value::Text(key) = key else {
+                return Err(GeoCellError::UnexpectedField);
+            };
+            match key.as_str() {
+                "cell_format" => {
+                    if cell_format.replace(value).is_some() {
+                        return Err(GeoCellError::DuplicateField("cell_format"));
+                    }
+                }
+                "system" => {
+                    if system.replace(value).is_some() {
+                        return Err(GeoCellError::DuplicateField("system"));
+                    }
+                }
+                "index" => {
+                    if index.replace(value).is_some() {
+                        return Err(GeoCellError::DuplicateField("index"));
+                    }
+                }
+                "resolution" => {
+                    if resolution.replace(value).is_some() {
+                        return Err(GeoCellError::DuplicateField("resolution"));
+                    }
+                }
+                _ => return Err(GeoCellError::UnexpectedField),
+            }
+        }
+
+        let cell_format = unsigned_field(cell_format.as_ref(), "cell_format")?;
+        let system = text_field(system, "system")?;
+        let index = text_field(index, "index")?;
+        let declared = unsigned_field(resolution.as_ref(), "resolution")?
+            .try_into()
+            .map_err(|_| GeoCellError::WrongFieldType("resolution"))?;
+        let declared = H3Resolution::new(declared)?;
+        if cell_format != u64::from(GEO_CELL_FORMAT_V1) {
+            return Err(GeoCellError::UnsupportedCellFormat(cell_format));
+        }
+
+        let cell = H3ReferenceCloaker::new().parse(&index)?;
+        if system != GEO_CELL_SYSTEM_H3_V4 {
+            return Err(GeoCellError::UnsupportedCellSystem);
+        }
+        if cell.resolution != declared {
+            return Err(GeoCellError::ResolutionMismatch {
+                index: cell.resolution.value(),
+                declared: declared.value(),
+            });
+        }
+        if cell.encode_v1()?.as_slice() != bytes.as_slice() {
+            return Err(GeoCellError::NonCanonicalCbor);
+        }
+        Ok(cell)
+    }
+
+    fn from_h3o(index: h3o::CellIndex) -> Self {
+        let resolution = H3Resolution::new(index.resolution().into())
+            .expect("h3o cell resolutions are always in 0..=15");
+        let text = index.to_string();
+        let index = CanonicalH3Index::new(text);
+        Self { index, resolution }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CanonicalH3Index {
+    bytes: [u8; 15],
+    text: String,
+}
+
+impl CanonicalH3Index {
+    fn new(text: String) -> Self {
+        let bytes = text
+            .as_bytes()
+            .try_into()
+            .expect("h3o always formats a 15-byte canonical cell index");
+        Self { bytes, text }
+    }
+
+    fn as_str(&self) -> &str {
+        debug_assert_eq!(self.bytes.as_slice(), self.text.as_bytes());
+        &self.text
+    }
+}
+
+#[derive(Serialize)]
+struct GeoCellWireV1<'a> {
+    index: &'a str,
+    system: &'static str,
+    resolution: u8,
+    cell_format: u8,
+}
+
+/// Pure-Rust H3 reference adapter. It exposes no h3o types.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct H3ReferenceCloaker;
+
+impl H3ReferenceCloaker {
+    /// Construct the stateless reference adapter.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+
+    /// Convert one validated WGS84 point to its containing H3 cell.
+    ///
+    /// # Errors
+    ///
+    /// The result type is retained for the stable adapter seam; validated
+    /// coordinates and resolutions currently make this conversion infallible.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if a validated [`Wgs84Point`] is rejected by the h3o
+    /// coordinate constructor, which would indicate a validation invariant
+    /// failure.
+    pub fn from_wgs84(
+        &self,
+        point: Wgs84Point,
+        resolution: H3Resolution,
+    ) -> Result<GeoCellV1, GeoCellError> {
+        let (latitude, longitude) = normalize_h3_input(point);
+        let point = h3o::LatLng::new(latitude, longitude)
+            .expect("validated Wgs84Point coordinates are finite");
+        Ok(GeoCellV1::from_h3o(point.to_cell(resolution.as_h3o())))
+    }
+
+    /// Parse one canonical lowercase 15-character H3 cell address.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GeoCellError::NonCanonicalH3Index`] for noncanonical text and
+    /// [`GeoCellError::InvalidH3Index`] for a canonical-shaped invalid cell.
+    pub fn parse(&self, index: &str) -> Result<GeoCellV1, GeoCellError> {
+        if index.len() != 15 || !is_lower_hex(index.as_bytes()) {
+            return Err(GeoCellError::NonCanonicalH3Index);
+        }
+        let parsed = h3o::CellIndex::from_str(index).map_err(|_| GeoCellError::InvalidH3Index)?;
+        if parsed.to_string() != index {
+            return Err(GeoCellError::NonCanonicalH3Index);
+        }
+        Ok(GeoCellV1::from_h3o(parsed))
+    }
+
+    /// Return an equal or coarser logical H3 ancestor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GeoCellError::FinerParent`] when `target` is finer than the
+    /// source cell.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if a validated cell cannot be reparsed or coarsened by h3o,
+    /// which would indicate an internal validation invariant failure.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn parent(&self, cell: GeoCellV1, target: H3Resolution) -> Result<GeoCellV1, GeoCellError> {
+        if target > cell.resolution {
+            return Err(GeoCellError::FinerParent {
+                source_resolution: cell.resolution.value(),
+                target: target.value(),
+            });
+        }
+        let parsed = h3o::CellIndex::from_str(cell.index())
+            .expect("GeoCellV1 stores only valid H3 cell indexes");
+        let parent = parsed
+            .parent(target.as_h3o())
+            .expect("a valid equal or coarser H3 parent always exists");
+        Ok(GeoCellV1::from_h3o(parent))
+    }
+}
+
+#[allow(clippy::float_cmp)]
+fn normalize_h3_input(point: Wgs84Point) -> (f64, f64) {
+    let latitude = if point.latitude() == 0.0 {
+        0.0
+    } else {
+        point.latitude()
+    };
+    let mut longitude = if point.longitude() == 0.0 {
+        0.0
+    } else {
+        point.longitude()
+    };
+    if longitude == 180.0 {
+        longitude = -180.0;
+    }
+    if latitude.abs() == 90.0 {
+        longitude = 0.0;
+    }
+    (latitude, longitude)
+}
+
+fn is_lower_hex(bytes: &[u8]) -> bool {
+    bytes
+        .iter()
+        .all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase() && byte.is_ascii_hexdigit())
+}
+
+fn unsigned_field(value: Option<&Value>, field: &'static str) -> Result<u64, GeoCellError> {
+    let Some(Value::Integer(value)) = value else {
+        return Err(if value.is_some() {
+            GeoCellError::WrongFieldType(field)
+        } else {
+            GeoCellError::MissingField(field)
+        });
+    };
+    u64::try_from(*value).map_err(|_| GeoCellError::WrongFieldType(field))
+}
+
+fn text_field(value: Option<Value>, field: &'static str) -> Result<String, GeoCellError> {
+    let Some(Value::Text(value)) = value else {
+        return Err(if value.is_some() {
+            GeoCellError::WrongFieldType(field)
+        } else {
+            GeoCellError::MissingField(field)
+        });
+    };
+    Ok(value)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use ciborium::value::Value;
+    use pos_core::CanonicalBytes;
+    use serde::Serialize;
+    use std::io::Cursor;
+
+    const KNOWN_INDEX: &str = "8928308280fffff";
+    const KNOWN_BYTES: &[u8] =
+        b"\xa4eindexo8928308280fffff\x66systemeh3-v4\x6aresolution\x09kcell_format\x01";
+
+    fn resolution(value: u8) -> H3Resolution {
+        H3Resolution::new(value).unwrap()
+    }
+
+    fn wgs84(latitude: f64, longitude: f64) -> Wgs84Point {
+        Wgs84Point::new(latitude, longitude).unwrap()
+    }
+
+    fn map_bytes(entries: Vec<(Value, Value)>) -> CanonicalBytes {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&Value::Map(entries), &mut bytes).unwrap();
+        CanonicalBytes::from_vec(bytes)
+    }
+
+    fn exact_len_map<F>(make_entries: F) -> CanonicalBytes
+    where
+        F: Fn(usize) -> Vec<(Value, Value)>,
+    {
+        for padding in 0..=128 {
+            let bytes = map_bytes(make_entries(padding));
+            if bytes.len() == 61 {
+                return bytes;
+            }
+        }
+        panic!("test map could not be padded to 61 bytes");
+    }
+
+    #[derive(Serialize)]
+    struct WireA {
+        index: &'static str,
+        system: &'static str,
+        resolution: u8,
+        cell_format: u8,
+    }
+
+    #[derive(Serialize)]
+    struct WireB {
+        cell_format: u8,
+        resolution: u8,
+        system: &'static str,
+        index: &'static str,
+    }
+
+    #[test]
+    fn resolution_accepts_h3_range() {
+        assert_eq!(H3Resolution::new(0).unwrap().value(), 0);
+        assert_eq!(H3Resolution::new(15).unwrap().value(), 15);
+        assert!(H3Resolution::new(16).is_err());
+    }
+
+    #[test]
+    fn parses_and_exposes_a_canonical_cell() {
+        let cell = H3ReferenceCloaker::new().parse(KNOWN_INDEX).unwrap();
+        assert_eq!(cell.index(), KNOWN_INDEX);
+        assert_eq!(cell.index.bytes, *b"8928308280fffff");
+        assert_eq!(cell.resolution().value(), 9);
+    }
+
+    #[test]
+    fn rejects_noncanonical_or_invalid_h3_addresses() {
+        let cloaker = H3ReferenceCloaker::new();
+        for index in [
+            "8928308280FFFFF",
+            "0x8928308280fffff",
+            "8928308280ffff",
+            "8928308280ffffff",
+            "ffffffffffffffff",
+            "1828308280fffff",
+        ] {
+            assert!(cloaker.parse(index).is_err(), "accepted {index}");
+        }
+    }
+
+    #[test]
+    fn converts_wgs84_to_the_h3_core_known_answer() {
+        let cell = H3ReferenceCloaker::new()
+            .from_wgs84(wgs84(45.0, 40.0), resolution(2))
+            .unwrap();
+        assert_eq!(cell.index(), "822d57fffffffff");
+    }
+
+    #[test]
+    fn normalizes_antimeridian_and_pole_inputs_for_h3() {
+        let cloaker = H3ReferenceCloaker::new();
+        let east = cloaker
+            .from_wgs84(wgs84(0.0, 180.0), resolution(9))
+            .unwrap();
+        let west = cloaker
+            .from_wgs84(wgs84(0.0, -180.0), resolution(9))
+            .unwrap();
+        assert_eq!(east, west);
+
+        let north = cloaker
+            .from_wgs84(wgs84(90.0, 180.0), resolution(9))
+            .unwrap();
+        let north_zero = cloaker.from_wgs84(wgs84(90.0, 0.0), resolution(9)).unwrap();
+        assert_eq!(north, north_zero);
+    }
+
+    #[test]
+    fn normalizes_negative_zero_and_south_pole_inputs_for_h3() {
+        let cloaker = H3ReferenceCloaker::new();
+        assert_eq!(
+            cloaker
+                .from_wgs84(wgs84(-0.0, -0.0), resolution(9))
+                .unwrap(),
+            cloaker.from_wgs84(wgs84(0.0, 0.0), resolution(9)).unwrap()
+        );
+
+        assert_eq!(
+            cloaker
+                .from_wgs84(wgs84(-90.0, 180.0), resolution(9))
+                .unwrap(),
+            cloaker
+                .from_wgs84(wgs84(-90.0, 0.0), resolution(9))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn converts_coordinates_on_an_h3_cell_boundary() {
+        let cloaker = H3ReferenceCloaker::new();
+        let index = h3o::CellIndex::from_str(KNOWN_INDEX).unwrap();
+        for vertex in index.boundary().iter().take(2) {
+            let cell = cloaker
+                .from_wgs84(wgs84(vertex.lat(), vertex.lng()), resolution(9))
+                .unwrap();
+            assert_eq!(cell.index().len(), 15);
+        }
+    }
+
+    #[test]
+    fn supports_every_h3_resolution() {
+        let cloaker = H3ReferenceCloaker::new();
+        for value in 0..=15 {
+            let cell = cloaker
+                .from_wgs84(wgs84(37.769_377, -122.388_903), resolution(value))
+                .unwrap();
+            assert_eq!(cell.resolution().value(), value);
+            assert_eq!(cloaker.parse(cell.index()).unwrap(), cell);
+        }
+    }
+
+    #[test]
+    fn round_trips_all_pentagons_at_every_resolution() {
+        let cloaker = H3ReferenceCloaker::new();
+        let pentagons = h3o::CellIndex::base_cells()
+            .filter(|cell| cell.is_pentagon())
+            .collect::<Vec<_>>();
+        assert_eq!(pentagons.len(), 12);
+
+        for base in pentagons {
+            for value in 0..=15 {
+                let h3_resolution = h3o::Resolution::try_from(value).unwrap();
+                let index = base.center_child(h3_resolution).unwrap().to_string();
+                let cell = cloaker.parse(&index).unwrap();
+                assert_eq!(cell.resolution().value(), value);
+                assert_eq!(
+                    GeoCellV1::decode_v1(&cell.encode_v1().unwrap()).unwrap(),
+                    cell
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn returns_coarser_parent_and_rejects_refinement() {
+        let cloaker = H3ReferenceCloaker::new();
+        let cell = cloaker.parse(KNOWN_INDEX).unwrap();
+        assert_eq!(
+            cloaker.parent(cell.clone(), cell.resolution()).unwrap(),
+            cell
+        );
+        let parent = cloaker.parent(cell.clone(), resolution(5)).unwrap();
+        assert_eq!(parent.resolution().value(), 5);
+        assert!(cloaker.parent(cell, resolution(10)).is_err());
+    }
+
+    #[test]
+    fn encodes_the_exact_v1_fixture_and_round_trips() {
+        let cell = H3ReferenceCloaker::new().parse(KNOWN_INDEX).unwrap();
+        let bytes = cell.encode_v1().unwrap();
+        assert_eq!(bytes.as_slice(), KNOWN_BYTES);
+        assert_eq!(GeoCellV1::decode_v1(&bytes).unwrap(), cell);
+        for _ in 0..3 {
+            assert_eq!(cell.encode_v1().unwrap(), bytes);
+        }
+
+        let a = WireA {
+            index: KNOWN_INDEX,
+            system: GEO_CELL_SYSTEM_H3_V4,
+            resolution: 9,
+            cell_format: GEO_CELL_FORMAT_V1,
+        };
+        let b = WireB {
+            cell_format: GEO_CELL_FORMAT_V1,
+            resolution: 9,
+            system: GEO_CELL_SYSTEM_H3_V4,
+            index: KNOWN_INDEX,
+        };
+        assert_eq!(
+            canonical::encode(&a).unwrap(),
+            canonical::encode(&b).unwrap()
+        );
+    }
+
+    #[test]
+    fn decoder_rejects_wrong_size_and_trailing_data() {
+        let mut trailing = KNOWN_BYTES.to_vec();
+        trailing.push(0);
+        assert!(GeoCellV1::decode_v1(&CanonicalBytes::from_vec(trailing)).is_err());
+        assert!(
+            GeoCellV1::decode_v1(&CanonicalBytes::from_vec(KNOWN_BYTES[..60].to_vec())).is_err()
+        );
+
+        let mut empty_map_with_trailing_data = vec![0xa0];
+        empty_map_with_trailing_data.resize(61, 0);
+        assert!(
+            GeoCellV1::decode_v1(&CanonicalBytes::from_vec(empty_map_with_trailing_data)).is_err()
+        );
+        assert_eq!(
+            GeoCellV1::decode_v1(&CanonicalBytes::from_vec(vec![0xff; 61])),
+            Err(GeoCellError::MalformedCbor)
+        );
+
+        let mut indefinite_map = KNOWN_BYTES.to_vec();
+        indefinite_map[0] = 0xbf;
+        indefinite_map.push(0xff);
+        assert_eq!(
+            GeoCellV1::decode_v1(&CanonicalBytes::from_vec(indefinite_map)),
+            Err(GeoCellError::PayloadSizeMismatch(62))
+        );
+
+        let mut nonminimal_integer = KNOWN_BYTES[..KNOWN_BYTES.len() - 1].to_vec();
+        nonminimal_integer.extend([0x18, 0x01]);
+        assert_eq!(
+            GeoCellV1::decode_v1(&CanonicalBytes::from_vec(nonminimal_integer)),
+            Err(GeoCellError::PayloadSizeMismatch(62))
+        );
+    }
+
+    #[test]
+    fn decoder_rejects_duplicate_unknown_and_wrong_fields() {
+        let text = |value: &str| Value::Text(value.to_owned());
+        let valid = |key, value| (text(key), value);
+        let duplicate = map_bytes(vec![
+            valid("index", text(KNOWN_INDEX)),
+            valid("index", text(KNOWN_INDEX)),
+            valid("system", text("h3-v4")),
+            valid("resolution", Value::Integer(9.into())),
+            valid("cell_format", Value::Integer(1.into())),
+        ]);
+        assert!(GeoCellV1::decode_v1(&duplicate).is_err());
+
+        let unknown = map_bytes(vec![
+            valid("index", text(KNOWN_INDEX)),
+            valid("system", text("h3-v4")),
+            valid("resolution", Value::Integer(9.into())),
+            valid("cell_format", Value::Integer(1.into())),
+            valid("extra", text("nope")),
+        ]);
+        assert!(GeoCellV1::decode_v1(&unknown).is_err());
+
+        let wrong_type = map_bytes(vec![
+            valid("index", Value::Integer(1.into())),
+            valid("system", text("h3-v4")),
+            valid("resolution", Value::Integer(9.into())),
+            valid("cell_format", Value::Integer(1.into())),
+        ]);
+        assert!(GeoCellV1::decode_v1(&wrong_type).is_err());
+    }
+
+    #[test]
+    fn decoder_rejects_missing_fields_and_non_map_roots() {
+        let text = |value: &str| Value::Text(value.to_owned());
+        let missing = map_bytes(vec![
+            (text("index"), text(KNOWN_INDEX)),
+            (text("system"), text("h3-v4")),
+            (text("resolution"), Value::Integer(9.into())),
+        ]);
+        assert!(GeoCellV1::decode_v1(&missing).is_err());
+
+        let mut non_map = Vec::new();
+        ciborium::into_writer(&Value::Text("x".repeat(59)), &mut non_map).unwrap();
+        assert_eq!(non_map.len(), 61);
+        assert!(GeoCellV1::decode_v1(&CanonicalBytes::from_vec(non_map)).is_err());
+    }
+
+    #[test]
+    fn decoder_rejects_wrong_format_system_and_resolution() {
+        let text = |value: &str| Value::Text(value.to_owned());
+        let make = |format: u8, system: &str, declared: u8| {
+            map_bytes(vec![
+                (text("index"), text(KNOWN_INDEX)),
+                (text("system"), text(system)),
+                (text("resolution"), Value::Integer(declared.into())),
+                (text("cell_format"), Value::Integer(format.into())),
+            ])
+        };
+        assert!(GeoCellV1::decode_v1(&make(2, "h3-v4", 9)).is_err());
+        assert!(GeoCellV1::decode_v1(&make(1, "s2-v1", 9)).is_err());
+        assert!(GeoCellV1::decode_v1(&make(1, "h3-v4", 8)).is_err());
+    }
+
+    #[test]
+    fn decoder_rejects_noncanonical_cbor_ordering() {
+        let text = |value: &str| Value::Text(value.to_owned());
+        let noncanonical = map_bytes(vec![
+            (text("system"), text("h3-v4")),
+            (text("index"), text(KNOWN_INDEX)),
+            (text("resolution"), Value::Integer(9.into())),
+            (text("cell_format"), Value::Integer(1.into())),
+        ]);
+        let mut cursor = Cursor::new(noncanonical.as_slice());
+        assert!(ciborium::from_reader::<Value, _>(&mut cursor).is_ok());
+        assert!(GeoCellV1::decode_v1(&noncanonical).is_err());
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn decoder_reports_each_strict_shape_error() {
+        let text = |value: &str| Value::Text(value.to_owned());
+        let valid = |key, value| (text(key), value);
+
+        let nontext_key =
+            exact_len_map(|padding| vec![(Value::Integer(1.into()), text(&"x".repeat(padding)))]);
+        assert_eq!(
+            GeoCellV1::decode_v1(&nontext_key),
+            Err(GeoCellError::UnexpectedField)
+        );
+
+        for (field, entries) in [
+            (
+                "cell_format",
+                exact_len_map(|padding| {
+                    vec![
+                        valid("cell_format", Value::Integer(1.into())),
+                        valid("cell_format", Value::Integer(1.into())),
+                        valid("system", text(&"x".repeat(padding))),
+                    ]
+                }),
+            ),
+            (
+                "system",
+                exact_len_map(|padding| {
+                    vec![
+                        valid("system", text("h3-v4")),
+                        valid("system", text("h3-v4")),
+                        valid("index", text(&"x".repeat(padding))),
+                    ]
+                }),
+            ),
+            (
+                "index",
+                exact_len_map(|padding| {
+                    vec![
+                        valid("index", text(KNOWN_INDEX)),
+                        valid("index", text(KNOWN_INDEX)),
+                        valid("system", text(&"x".repeat(padding))),
+                    ]
+                }),
+            ),
+            (
+                "resolution",
+                exact_len_map(|padding| {
+                    vec![
+                        valid("resolution", Value::Integer(9.into())),
+                        valid("resolution", Value::Integer(9.into())),
+                        valid("system", text(&"x".repeat(padding))),
+                    ]
+                }),
+            ),
+        ] {
+            assert_eq!(
+                GeoCellV1::decode_v1(&entries),
+                Err(GeoCellError::DuplicateField(field))
+            );
+        }
+
+        let unknown =
+            exact_len_map(|padding| vec![valid("unexpected", text(&"x".repeat(padding)))]);
+        assert_eq!(
+            GeoCellV1::decode_v1(&unknown),
+            Err(GeoCellError::UnexpectedField)
+        );
+
+        let missing_cell_format = exact_len_map(|padding| {
+            vec![
+                valid("system", text(&"x".repeat(padding))),
+                valid("index", text(KNOWN_INDEX)),
+                valid("resolution", Value::Integer(9.into())),
+            ]
+        });
+        assert_eq!(
+            GeoCellV1::decode_v1(&missing_cell_format),
+            Err(GeoCellError::MissingField("cell_format"))
+        );
+
+        let wrong_cell_format_type = exact_len_map(|padding| {
+            vec![
+                valid("cell_format", text("wrong")),
+                valid("system", text(&"x".repeat(padding))),
+                valid("index", text(KNOWN_INDEX)),
+                valid("resolution", Value::Integer(9.into())),
+            ]
+        });
+        assert_eq!(
+            GeoCellV1::decode_v1(&wrong_cell_format_type),
+            Err(GeoCellError::WrongFieldType("cell_format"))
+        );
+
+        let negative_cell_format = exact_len_map(|padding| {
+            vec![
+                valid("cell_format", Value::Integer((-1).into())),
+                valid("system", text(&"x".repeat(padding))),
+                valid("index", text(KNOWN_INDEX)),
+                valid("resolution", Value::Integer(9.into())),
+            ]
+        });
+        assert_eq!(
+            GeoCellV1::decode_v1(&negative_cell_format),
+            Err(GeoCellError::WrongFieldType("cell_format"))
+        );
+
+        let missing_system = exact_len_map(|padding| {
+            vec![
+                valid("index", text(&"x".repeat(padding))),
+                valid("resolution", Value::Integer(9.into())),
+                valid("cell_format", Value::Integer(1.into())),
+            ]
+        });
+        assert_eq!(
+            GeoCellV1::decode_v1(&missing_system),
+            Err(GeoCellError::MissingField("system"))
+        );
+
+        let wrong_system_type = exact_len_map(|padding| {
+            vec![
+                valid("system", Value::Integer(1.into())),
+                valid("index", text(&"x".repeat(padding))),
+                valid("resolution", Value::Integer(9.into())),
+                valid("cell_format", Value::Integer(1.into())),
+            ]
+        });
+        assert_eq!(
+            GeoCellV1::decode_v1(&wrong_system_type),
+            Err(GeoCellError::WrongFieldType("system"))
+        );
+
+        let missing_index = exact_len_map(|padding| {
+            vec![
+                valid("system", text(&"x".repeat(padding))),
+                valid("resolution", Value::Integer(9.into())),
+                valid("cell_format", Value::Integer(1.into())),
+            ]
+        });
+        assert_eq!(
+            GeoCellV1::decode_v1(&missing_index),
+            Err(GeoCellError::MissingField("index"))
+        );
+
+        let wrong_index_type = exact_len_map(|padding| {
+            vec![
+                valid("index", Value::Integer(1.into())),
+                valid("system", text(&"x".repeat(padding))),
+                valid("resolution", Value::Integer(9.into())),
+                valid("cell_format", Value::Integer(1.into())),
+            ]
+        });
+        assert_eq!(
+            GeoCellV1::decode_v1(&wrong_index_type),
+            Err(GeoCellError::WrongFieldType("index"))
+        );
+
+        let invalid_index = exact_len_map(|padding| {
+            vec![
+                valid("index", text("1828308280fffff")),
+                valid("system", text(&"x".repeat(padding))),
+                valid("resolution", Value::Integer(9.into())),
+                valid("cell_format", Value::Integer(1.into())),
+            ]
+        });
+        assert_eq!(
+            GeoCellV1::decode_v1(&invalid_index),
+            Err(GeoCellError::InvalidH3Index)
+        );
+
+        let missing_resolution = exact_len_map(|padding| {
+            vec![
+                valid("index", text(KNOWN_INDEX)),
+                valid("system", text(&"x".repeat(padding))),
+                valid("cell_format", Value::Integer(1.into())),
+            ]
+        });
+        assert_eq!(
+            GeoCellV1::decode_v1(&missing_resolution),
+            Err(GeoCellError::MissingField("resolution"))
+        );
+
+        let wrong_resolution_type = exact_len_map(|padding| {
+            vec![
+                valid("index", text(KNOWN_INDEX)),
+                valid("system", text(&"x".repeat(padding))),
+                valid("resolution", text("wrong")),
+                valid("cell_format", Value::Integer(1.into())),
+            ]
+        });
+        assert_eq!(
+            GeoCellV1::decode_v1(&wrong_resolution_type),
+            Err(GeoCellError::WrongFieldType("resolution"))
+        );
+
+        let too_large_resolution = exact_len_map(|padding| {
+            vec![
+                valid("index", text(KNOWN_INDEX)),
+                valid("system", text(&"x".repeat(padding))),
+                valid("resolution", Value::Integer(256.into())),
+                valid("cell_format", Value::Integer(1.into())),
+            ]
+        });
+        assert_eq!(
+            GeoCellV1::decode_v1(&too_large_resolution),
+            Err(GeoCellError::WrongFieldType("resolution"))
+        );
+
+        let invalid_resolution = exact_len_map(|padding| {
+            vec![
+                valid("index", text(KNOWN_INDEX)),
+                valid("system", text(&"x".repeat(padding))),
+                valid("resolution", Value::Integer(16.into())),
+                valid("cell_format", Value::Integer(1.into())),
+            ]
+        });
+        assert_eq!(
+            GeoCellV1::decode_v1(&invalid_resolution),
+            Err(GeoCellError::InvalidResolution(16))
+        );
+    }
+}
