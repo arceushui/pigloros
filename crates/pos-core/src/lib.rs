@@ -17,6 +17,7 @@ pub mod error;
 pub mod event;
 pub mod geo_access;
 pub mod geo_admission;
+pub mod geo_cell_admission;
 pub mod hasher;
 pub mod ids;
 pub mod manifest;
@@ -38,6 +39,16 @@ pub use error::CoreError;
 pub use event::{CanonicalBytes, Determinism, Event, EventDraft, Kind, RunMode, SchemaVersion};
 pub use geo_access::{is_geographic_event_type, GEOGRAPHIC_CELL_EVENT_TYPE, GEOGRAPHIC_EVENT_TYPE};
 pub use geo_admission::GeoLocationAdmissionFenceV1;
+pub use geo_cell_admission::{
+    hash_admission_consent_record_bytes, hash_admission_snapshot_bytes, AdmissionConsentRecordV1,
+    AdmissionEntitlementDraftV1, AdmissionEntitlementSnapshotV1, AdmissionSnapshotHash,
+    AdmissionSnapshotId, AdmissionSnapshotLinkageV1, ConsentRecordHash, GeoCellAdmissionFenceV1,
+    GeoCellAdmissionInputV1, GeoCellAdmissionRequestV1, GeoCellObservationPolicyVersion,
+    GeographicAdmissionAdmin, GeographicAdmissionConsentResolver, GeographicAdmissionFingerprintV1,
+    GeographicAdmissionIntentV1, GeographicAdmissionOutcome, GeographicAdmissionStore,
+    GeographicObservationV1, GeographicReplayEvidenceV1, GeographicReplayVerifier,
+    SourceTimeBucket, ValidatedGeoCellV1, ValidatedGeographicAdmissionV1,
+};
 pub use hasher::Hasher;
 pub use ids::{CorrelationId, EntityId, EventId, PluginId, RelationshipId, TimelineId};
 pub use manifest::{AdapterRecord, ReproManifest};

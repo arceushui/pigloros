@@ -50,8 +50,10 @@ pub use pos_core::store::{
     APPEND_IDENTITY_RETENTION_MICROS,
 };
 pub use pos_core::{
-    CanonicalBytes, CoreError, CorrelationId, EntityId, Event, EventDraft, EventId, Kind,
-    OwnTracksEnrollmentStore, TimelineId, WallTime,
+    CanonicalBytes, CoreError, CorrelationId, EntityId, Event, EventDraft, EventId,
+    GeographicAdmissionAdmin, GeographicAdmissionOutcome, GeographicAdmissionStore,
+    GeographicReplayEvidenceV1, GeographicReplayVerifier, Kind, OwnTracksEnrollmentStore,
+    TimelineId, ValidatedGeographicAdmissionV1, WallTime,
 };
 
 /// Resolve a generic-adapter visibility check without exposing protected Timeline state.
@@ -114,9 +116,9 @@ pub(crate) fn ensure_non_geographic_drafts(
 }
 
 /// Refuse committed sensitive Events before a generic import or append path can
-/// mutate a Timeline. Geographic admission is available only through the
-/// disabled core-owned capability seam until ADR-034's snapshot transaction is
-/// implemented.
+/// mutate a Timeline. `geo.cell` admission is available only through the
+/// dedicated core-owned capability seam; generic import and append remain
+/// closed even though the backend transaction is implemented.
 pub(crate) fn ensure_non_geographic_events(
     events: &[Event],
     timeline: TimelineId,

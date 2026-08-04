@@ -15,6 +15,14 @@ use pos_core::{
         GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore,
         GeoLocationReplayEvidenceV1, GeoLocationReplayVerifier,
     },
+    geo_cell_admission::{
+        hash_admission_snapshot_bytes, AdmissionConsentRecordV1, AdmissionEntitlementSnapshotV1,
+        AdmissionSnapshotHash, AdmissionSnapshotId, ConsentRecordHash, GeoCellAdmissionFenceV1,
+        GeographicAdmissionAdmin, GeographicAdmissionConsentResolver,
+        GeographicAdmissionFingerprintV1, GeographicAdmissionOutcome, GeographicAdmissionStore,
+        GeographicObservationV1, GeographicReplayEvidenceV1, GeographicReplayVerifier,
+        ValidatedGeographicAdmissionV1,
+    },
     hasher::Hasher,
     ids::{EntityId, EventId, TimelineId},
     owntracks_enrollment::{
@@ -85,6 +93,50 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
+    fn geo_cell_consent_in_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        consent_record_id: &AdmissionSnapshotId,
+        consent_revision: u64,
+    ) -> Result<AdmissionConsentRecordV1, CoreError> {
+        let row = tx
+            .query_row(
+                "SELECT consent_revision, consent_record_hash, consent_record_cbor
+                 FROM geographic_cell_admission_consent_records
+                 WHERE consent_record_id = ?1 AND consent_revision = ?2",
+                params![
+                    consent_record_id.as_str(),
+                    i64::try_from(consent_revision).unwrap_or(i64::MAX)
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| CoreError::Storage(error.to_string()))?
+            .ok_or(CoreError::GeographicAdmissionValidationFailed)?;
+        let stored_revision =
+            u64::try_from(row.0).map_err(|_| CoreError::GeographicAdmissionValidationFailed)?;
+        let stored_hash: [u8; 32] = row
+            .1
+            .try_into()
+            .map_err(|_| CoreError::GeographicAdmissionValidationFailed)?;
+        let record = AdmissionConsentRecordV1::from_persistence_parts(
+            consent_record_id.clone(),
+            stored_revision,
+            CanonicalBytes::from_vec(row.2),
+        );
+        if stored_revision != consent_revision
+            || record.hash() != ConsentRecordHash::from_bytes(stored_hash)
+        {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        }
+        Ok(record)
+    }
+
     fn append_one_in_transaction(
         tx: &rusqlite::Transaction<'_>,
         hasher: &dyn Hasher,
@@ -319,6 +371,7 @@ impl SqliteStore {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn init_schema(&self) -> Result<(), CoreError> {
         self.conn
             .execute_batch(
@@ -386,7 +439,53 @@ impl SqliteStore {
                  expires_at INTEGER NOT NULL
              );
              CREATE INDEX IF NOT EXISTS idx_geographic_admission_dedup_expiry
-             ON geographic_admission_dedup(expires_at);",
+             ON geographic_admission_dedup(expires_at);
+             CREATE TABLE IF NOT EXISTS geographic_cell_admission_fences (
+                 timeline_id TEXT NOT NULL,
+                 entity_id TEXT NOT NULL,
+                 fence_cbor BLOB NOT NULL,
+                 PRIMARY KEY (timeline_id, entity_id)
+             );
+             CREATE TABLE IF NOT EXISTS geographic_cell_admission_snapshots (
+                 snapshot_id TEXT PRIMARY KEY,
+                 snapshot_hash BLOB NOT NULL CHECK (length(snapshot_hash) = 32),
+                 timeline_id TEXT NOT NULL,
+                 entity_id TEXT NOT NULL,
+                 event_id TEXT NOT NULL,
+                 event_seq INTEGER NOT NULL,
+                 snapshot_cbor BLOB NOT NULL
+             );
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_geo_cell_snapshots_event
+             ON geographic_cell_admission_snapshots(timeline_id, event_id);
+             CREATE TABLE IF NOT EXISTS geographic_cell_admission_links (
+                 timeline_id TEXT NOT NULL,
+                 event_id TEXT NOT NULL,
+                 event_seq INTEGER NOT NULL,
+                 snapshot_id TEXT NOT NULL,
+                 snapshot_hash BLOB NOT NULL CHECK (length(snapshot_hash) = 32),
+                 snapshot_cbor BLOB NOT NULL,
+                 PRIMARY KEY (timeline_id, event_id)
+             );
+             CREATE TABLE IF NOT EXISTS geographic_cell_admission_dedup (
+                 fingerprint BLOB PRIMARY KEY CHECK (length(fingerprint) = 32),
+                 timeline_id TEXT NOT NULL,
+                 entity_id TEXT NOT NULL,
+                 intent BLOB NOT NULL,
+                 event_id TEXT NOT NULL,
+                 event_seq INTEGER NOT NULL,
+                 snapshot_id TEXT NOT NULL,
+                 snapshot_hash BLOB NOT NULL CHECK (length(snapshot_hash) = 32),
+                 expires_at INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_geo_cell_admission_dedup_expiry
+             ON geographic_cell_admission_dedup(expires_at);
+             CREATE TABLE IF NOT EXISTS geographic_cell_admission_consent_records (
+                 consent_record_id TEXT NOT NULL,
+                 consent_revision INTEGER NOT NULL,
+                 consent_record_hash BLOB NOT NULL CHECK (length(consent_record_hash) = 32),
+                 consent_record_cbor BLOB NOT NULL,
+                 PRIMARY KEY (consent_record_id, consent_revision)
+             );",
             )
             .map_err(|error| Self::storage_error(&error))
     }
@@ -1226,6 +1325,16 @@ struct TimelineRow {
     head_seq: i64,
 }
 
+struct GeographicCellDedupRow {
+    timeline: TimelineId,
+    entity: EntityId,
+    intent: Vec<u8>,
+    event_id: EventId,
+    event_seq: Seq,
+    snapshot_id: AdmissionSnapshotId,
+    snapshot_hash: AdmissionSnapshotHash,
+}
+
 fn read_first_i64(row: &rusqlite::Row<'_>) -> rusqlite::Result<i64> {
     row.get(0)
 }
@@ -1569,6 +1678,691 @@ impl SqliteStore {
         tx.commit()
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         Ok(next.status())
+    }
+}
+
+impl SqliteStore {
+    fn geo_cell_fence_in_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        timeline: TimelineId,
+        entity: EntityId,
+    ) -> Result<Option<GeoCellAdmissionFenceV1>, CoreError> {
+        let bytes = tx
+            .query_row(
+                "SELECT fence_cbor FROM geographic_cell_admission_fences
+                 WHERE timeline_id = ?1 AND entity_id = ?2",
+                params![timeline.to_string(), entity.to_string()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        bytes
+            .map(|bytes| GeoCellAdmissionFenceV1::from_persistence_bytes(&bytes))
+            .transpose()
+    }
+
+    fn append_geo_cell_in_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        hasher: &dyn Hasher,
+        timeline: TimelineId,
+        entity: EntityId,
+        event_id: EventId,
+        payload: CanonicalBytes,
+        wall_time: WallTime,
+    ) -> Result<Event, CoreError> {
+        let (head_seq, chain_head): (i64, Vec<u8>) = tx
+            .query_row(
+                "SELECT head_seq, chain_head FROM timelines WHERE id = ?1",
+                params![timeline.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| Self::storage_error(&error))?;
+        let chain_head: [u8; 32] = chain_head
+            .try_into()
+            .map_err(|_| CoreError::Serialization("bad hash length".to_owned()))?;
+        let seq = Seq::from_u64(u64::try_from(head_seq).unwrap_or(0)).next();
+        let payload_hash = hasher.hash_payload(&payload);
+        let event_id_text = event_id.to_string();
+        let next_chain_head = hasher.hash_event(
+            &Hash::from_bytes(chain_head),
+            event_id_text.as_bytes(),
+            &payload,
+        );
+        tx.execute(
+            "INSERT INTO events
+             (timeline_id, seq, event_id, entity_id, event_type, payload, wall_time,
+              causation_id, correlation_id, schema_version, payload_hash, signature)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, 1, ?8, NULL)",
+            params![
+                timeline.to_string(),
+                i64::try_from(seq.as_u64()).unwrap_or(i64::MAX),
+                event_id_text,
+                entity.to_string(),
+                pos_core::GEOGRAPHIC_CELL_EVENT_TYPE,
+                payload.as_slice(),
+                i64::try_from(wall_time.as_micros()).unwrap_or(i64::MAX),
+                payload_hash.as_bytes().as_slice(),
+            ],
+        )
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
+        tx.execute(
+            "UPDATE timelines SET head_seq = ?1, chain_head = ?2 WHERE id = ?3",
+            params![
+                i64::try_from(seq.as_u64()).unwrap_or(i64::MAX),
+                next_chain_head.as_bytes().as_slice(),
+                timeline.to_string(),
+            ],
+        )
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
+        Ok(Event {
+            id: event_id,
+            entity,
+            event_type: Kind::new(pos_core::GEOGRAPHIC_CELL_EVENT_TYPE),
+            payload,
+            wall_time,
+            seq,
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash,
+        })
+    }
+
+    fn read_geo_cell_dedup(
+        tx: &rusqlite::Transaction<'_>,
+        fingerprint: GeographicAdmissionFingerprintV1,
+    ) -> Result<Option<GeographicCellDedupRow>, CoreError> {
+        let row = tx
+            .query_row(
+                "SELECT timeline_id, entity_id, intent, event_id, event_seq,
+                        snapshot_id, snapshot_hash
+                 FROM geographic_cell_admission_dedup WHERE fingerprint = ?1",
+                params![fingerprint.as_bytes().as_slice()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, Vec<u8>>(6)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let Some((timeline, entity, intent, event_id, event_seq, snapshot_id, snapshot_hash)) = row
+        else {
+            return Ok(None);
+        };
+        let snapshot_hash: [u8; 32] = snapshot_hash.try_into().map_err(|_| {
+            CoreError::Storage("geo.cell dedup has invalid snapshot hash length".to_owned())
+        })?;
+        Ok(Some(GeographicCellDedupRow {
+            timeline: parse_timeline_id(&timeline)?,
+            entity: parse_entity_id(&entity)?,
+            intent,
+            event_id: parse_event_id(&event_id)?,
+            event_seq: Seq::from_u64(u64::try_from(event_seq).unwrap_or(0)),
+            snapshot_id: AdmissionSnapshotId::from_canonical(&snapshot_id)
+                .map_err(|_| CoreError::GeographicAdmissionValidationFailed)?,
+            snapshot_hash: AdmissionSnapshotHash::from_bytes(snapshot_hash),
+        }))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn verify_geo_cell_dedup_row(
+        tx: &rusqlite::Transaction<'_>,
+        hasher: &dyn Hasher,
+        row: &GeographicCellDedupRow,
+        request: &ValidatedGeographicAdmissionV1,
+    ) -> Result<bool, CoreError> {
+        if row.timeline != request.timeline()
+            || row.entity != request.entity()
+            || row.intent.as_slice() != request.intent().as_persistence_bytes().as_slice()
+        {
+            return Ok(false);
+        }
+        let event = tx
+            .query_row(
+                "SELECT entity_id, seq, event_type, schema_version, payload, payload_hash
+                 FROM events WHERE timeline_id = ?1 AND event_id = ?2",
+                params![row.timeline.to_string(), row.event_id.to_string()],
+                |query| {
+                    Ok((
+                        query.get::<_, String>(0)?,
+                        query.get::<_, i64>(1)?,
+                        query.get::<_, String>(2)?,
+                        query.get::<_, i64>(3)?,
+                        query.get::<_, Vec<u8>>(4)?,
+                        query.get::<_, Vec<u8>>(5)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let Some((entity, seq, event_type, schema_version, payload, payload_hash)) = event else {
+            return Ok(false);
+        };
+        let payload_hash: [u8; 32] = match payload_hash.try_into() {
+            Ok(value) => value,
+            Err(_) => return Ok(false),
+        };
+        let payload = CanonicalBytes::from_vec(payload);
+        let Ok(observation) = GeographicObservationV1::decode(&payload) else {
+            return Ok(false);
+        };
+        if parse_entity_id(&entity)? != row.entity
+            || u64::try_from(seq).unwrap_or(0) != row.event_seq.as_u64()
+            || event_type != pos_core::GEOGRAPHIC_CELL_EVENT_TYPE
+            || schema_version != 1
+            || hasher.hash_payload(&payload).as_bytes() != &payload_hash
+            || observation.snapshot_id() != &row.snapshot_id
+            || observation.snapshot_hash() != row.snapshot_hash
+        {
+            return Ok(false);
+        }
+        let snapshot = tx
+            .query_row(
+                "SELECT snapshot_hash, timeline_id, entity_id, event_id, event_seq, snapshot_cbor
+                 FROM geographic_cell_admission_snapshots WHERE snapshot_id = ?1",
+                params![row.snapshot_id.as_str()],
+                |query| {
+                    Ok((
+                        query.get::<_, Vec<u8>>(0)?,
+                        query.get::<_, String>(1)?,
+                        query.get::<_, String>(2)?,
+                        query.get::<_, String>(3)?,
+                        query.get::<_, i64>(4)?,
+                        query.get::<_, Vec<u8>>(5)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let Some((stored_hash, timeline, entity, event_id, event_seq, snapshot_cbor)) = snapshot
+        else {
+            return Ok(false);
+        };
+        let stored_hash: [u8; 32] = match stored_hash.try_into() {
+            Ok(value) => value,
+            Err(_) => return Ok(false),
+        };
+        let snapshot_cbor = CanonicalBytes::from_vec(snapshot_cbor);
+        let Ok(linkage) = AdmissionEntitlementSnapshotV1::canonical_linkage(&snapshot_cbor) else {
+            return Ok(false);
+        };
+        if AdmissionSnapshotHash::from_bytes(stored_hash) != row.snapshot_hash
+            || hash_admission_snapshot_bytes(&snapshot_cbor) != row.snapshot_hash
+            || linkage.snapshot_id() != &row.snapshot_id
+            || linkage.timeline() != row.timeline
+            || linkage.entity() != row.entity
+            || linkage.event_id() != row.event_id
+            || linkage.event_seq() != row.event_seq
+            || parse_timeline_id(&timeline)? != row.timeline
+            || parse_entity_id(&entity)? != row.entity
+            || parse_event_id(&event_id)? != row.event_id
+            || u64::try_from(event_seq).unwrap_or(0) != row.event_seq.as_u64()
+        {
+            return Ok(false);
+        }
+        let consent_record = Self::geo_cell_consent_in_transaction(
+            tx,
+            linkage.consent_record_id(),
+            linkage.consent_revision(),
+        )?;
+        if !consent_record.matches_linkage(&linkage) {
+            return Ok(false);
+        }
+        let link = tx
+            .query_row(
+                "SELECT event_seq, snapshot_id, snapshot_hash, snapshot_cbor
+                 FROM geographic_cell_admission_links
+                 WHERE timeline_id = ?1 AND event_id = ?2",
+                params![row.timeline.to_string(), row.event_id.to_string()],
+                |query| {
+                    Ok((
+                        query.get::<_, i64>(0)?,
+                        query.get::<_, String>(1)?,
+                        query.get::<_, Vec<u8>>(2)?,
+                        query.get::<_, Vec<u8>>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let Some((event_seq, snapshot_id, snapshot_hash, link_cbor)) = link else {
+            return Ok(false);
+        };
+        let link_hash: [u8; 32] = match snapshot_hash.try_into() {
+            Ok(value) => value,
+            Err(_) => return Ok(false),
+        };
+        Ok(
+            u64::try_from(event_seq).unwrap_or(0) == row.event_seq.as_u64()
+                && AdmissionSnapshotId::from_canonical(&snapshot_id)
+                    .is_ok_and(|id| id == row.snapshot_id)
+                && AdmissionSnapshotHash::from_bytes(link_hash) == row.snapshot_hash
+                && link_cbor == snapshot_cbor.as_slice(),
+        )
+    }
+}
+
+impl GeographicAdmissionAdmin for SqliteStore {
+    fn set_geo_cell_admission_consent_record(
+        &mut self,
+        record: AdmissionConsentRecordV1,
+    ) -> Result<(), CoreError> {
+        if AdmissionSnapshotId::from_canonical(record.id().as_str()).is_err()
+            || record.revision() == 0
+        {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let record_hash = record.hash().as_bytes();
+        tx.execute(
+            "INSERT INTO geographic_cell_admission_consent_records
+             (consent_record_id, consent_revision, consent_record_hash, consent_record_cbor)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(consent_record_id, consent_revision) DO NOTHING",
+            params![
+                record.id().as_str(),
+                i64::try_from(record.revision()).unwrap_or(i64::MAX),
+                record_hash.as_slice(),
+                record.canonical_bytes().as_slice(),
+            ],
+        )
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let stored = tx
+            .query_row(
+                "SELECT consent_record_hash, consent_record_cbor
+                 FROM geographic_cell_admission_consent_records
+                 WHERE consent_record_id = ?1 AND consent_revision = ?2",
+                params![
+                    record.id().as_str(),
+                    i64::try_from(record.revision()).unwrap_or(i64::MAX),
+                ],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        if stored.0.as_slice() != record_hash.as_slice()
+            || stored.1.as_slice() != record.canonical_bytes().as_slice()
+        {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        }
+        tx.commit()
+            .map_err(|error| CoreError::Storage(error.to_string()))
+    }
+
+    fn set_geo_cell_admission_fence(
+        &mut self,
+        timeline: TimelineId,
+        entity: EntityId,
+        fence: GeoCellAdmissionFenceV1,
+    ) -> Result<(), CoreError> {
+        if fence.draft().timeline() != timeline || fence.draft().entity() != entity {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        }
+        let bytes = fence.persistence_bytes();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let exists = tx
+            .query_row(
+                "SELECT 1 FROM timelines WHERE id = ?1",
+                params![timeline.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        if exists.is_none() {
+            return Err(CoreError::TimelineNotFound(timeline));
+        }
+        tx.execute(
+            "INSERT INTO geographic_cell_admission_fences (timeline_id, entity_id, fence_cbor)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(timeline_id, entity_id) DO UPDATE SET fence_cbor = excluded.fence_cbor",
+            params![timeline.to_string(), entity.to_string(), bytes.as_slice()],
+        )
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
+        tx.commit()
+            .map_err(|error| CoreError::Storage(error.to_string()))
+    }
+}
+
+impl GeographicAdmissionConsentResolver for SqliteStore {
+    fn resolve_admission_consent(
+        &self,
+        consent_record_id: &AdmissionSnapshotId,
+        consent_revision: u64,
+    ) -> Result<AdmissionConsentRecordV1, CoreError> {
+        self.conn
+            .query_row(
+                "SELECT consent_revision, consent_record_hash, consent_record_cbor
+                 FROM geographic_cell_admission_consent_records
+                 WHERE consent_record_id = ?1 AND consent_revision = ?2",
+                params![
+                    consent_record_id.as_str(),
+                    i64::try_from(consent_revision).unwrap_or(i64::MAX)
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    CoreError::GeographicAdmissionValidationFailed
+                }
+                other => CoreError::Storage(other.to_string()),
+            })
+            .and_then(|(revision, hash, bytes)| {
+                let revision = u64::try_from(revision)
+                    .map_err(|_| CoreError::GeographicAdmissionValidationFailed)?;
+                let stored_hash: [u8; 32] = hash
+                    .try_into()
+                    .map_err(|_| CoreError::GeographicAdmissionValidationFailed)?;
+                let record = AdmissionConsentRecordV1::from_persistence_parts(
+                    consent_record_id.clone(),
+                    revision,
+                    CanonicalBytes::from_vec(bytes),
+                );
+                if revision != consent_revision
+                    || record.hash() != ConsentRecordHash::from_bytes(stored_hash)
+                {
+                    return Err(CoreError::GeographicAdmissionValidationFailed);
+                }
+                Ok(record)
+            })
+    }
+}
+
+impl GeographicAdmissionStore for SqliteStore {
+    #[allow(clippy::too_many_lines)]
+    fn admit(
+        &mut self,
+        request: ValidatedGeographicAdmissionV1,
+    ) -> Result<GeographicAdmissionOutcome, CoreError> {
+        let Ok(admitted_at) = self.clock.now() else {
+            return Ok(GeographicAdmissionOutcome::Unavailable);
+        };
+        let Ok(expires_at) = checked_append_identity_expires_at(admitted_at) else {
+            return Ok(GeographicAdmissionOutcome::Unavailable);
+        };
+        let Ok(tx) = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+        else {
+            return Ok(GeographicAdmissionOutcome::Unavailable);
+        };
+        let Some(fence) =
+            Self::geo_cell_fence_in_transaction(&tx, request.timeline(), request.entity())?
+        else {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        };
+        if !fence.permits(&request) {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        }
+        let consent_record = Self::geo_cell_consent_in_transaction(
+            &tx,
+            request.fence().draft().consent_record_id(),
+            request.fence().draft().consent_revision(),
+        )?;
+        if !consent_record.matches_draft(request.fence().draft()) {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        }
+        tx.execute(
+            "DELETE FROM geographic_cell_admission_dedup WHERE expires_at <= ?1",
+            params![i64::try_from(admitted_at.as_micros()).unwrap_or(i64::MAX)],
+        )
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
+        if let Some(row) = Self::read_geo_cell_dedup(&tx, request.fingerprint())? {
+            if row.intent.as_slice() != request.intent().as_persistence_bytes().as_slice() {
+                return Ok(GeographicAdmissionOutcome::Conflict);
+            }
+            let verified =
+                Self::verify_geo_cell_dedup_row(&tx, self.hasher.as_ref(), &row, &request)?;
+            return if verified {
+                if tx.commit().is_err() {
+                    return Ok(GeographicAdmissionOutcome::OutcomeUnknown);
+                }
+                Ok(GeographicAdmissionOutcome::Duplicate {
+                    event_id: row.event_id,
+                    event_seq: row.event_seq,
+                    snapshot_id: row.snapshot_id,
+                    snapshot_hash: row.snapshot_hash,
+                })
+            } else {
+                Ok(GeographicAdmissionOutcome::OutcomeUnknown)
+            };
+        }
+
+        let event_id = EventId::new();
+        let event_seq = tx
+            .query_row(
+                "SELECT head_seq FROM timelines WHERE id = ?1",
+                params![request.timeline().to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))
+            .map(|head| Seq::from_u64(u64::try_from(head).unwrap_or(0)).next())?;
+        let snapshot_id = AdmissionSnapshotId::new();
+        let snapshot =
+            AdmissionEntitlementSnapshotV1::new(snapshot_id.clone(), &request, event_id, event_seq);
+        let snapshot_cbor = snapshot.canonical_bytes();
+        let snapshot_hash = snapshot.hash();
+        let payload = request.payload(snapshot_id.clone(), snapshot_hash).encode();
+        let event = Self::append_geo_cell_in_transaction(
+            &tx,
+            self.hasher.as_ref(),
+            request.timeline(),
+            request.entity(),
+            event_id,
+            payload,
+            admitted_at,
+        )?;
+        tx.execute(
+            "INSERT INTO geographic_cell_admission_snapshots
+             (snapshot_id, snapshot_hash, timeline_id, entity_id, event_id, event_seq, snapshot_cbor)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                snapshot_id.as_str(),
+                snapshot_hash.as_bytes().as_slice(),
+                request.timeline().to_string(),
+                request.entity().to_string(),
+                event.id.to_string(),
+                i64::try_from(event.seq.as_u64()).unwrap_or(i64::MAX),
+                snapshot_cbor.as_slice(),
+            ],
+        )
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
+        tx.execute(
+            "INSERT INTO geographic_cell_admission_links
+             (timeline_id, event_id, event_seq, snapshot_id, snapshot_hash, snapshot_cbor)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                request.timeline().to_string(),
+                event.id.to_string(),
+                i64::try_from(event.seq.as_u64()).unwrap_or(i64::MAX),
+                snapshot_id.as_str(),
+                snapshot_hash.as_bytes().as_slice(),
+                snapshot_cbor.as_slice(),
+            ],
+        )
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
+        tx.execute(
+            "INSERT INTO geographic_presence (timeline_id, has_evidence) VALUES (?1, 1)
+             ON CONFLICT(timeline_id) DO UPDATE SET has_evidence = 1",
+            params![request.timeline().to_string()],
+        )
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
+        tx.execute(
+            "INSERT INTO geographic_cell_admission_dedup
+             (fingerprint, timeline_id, entity_id, intent, event_id, event_seq,
+              snapshot_id, snapshot_hash, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                request.fingerprint().as_bytes().as_slice(),
+                request.timeline().to_string(),
+                request.entity().to_string(),
+                request.intent().as_persistence_bytes().as_slice(),
+                event.id.to_string(),
+                i64::try_from(event.seq.as_u64()).unwrap_or(i64::MAX),
+                snapshot_id.as_str(),
+                snapshot_hash.as_bytes().as_slice(),
+                i64::try_from(expires_at.as_micros()).unwrap_or(i64::MAX),
+            ],
+        )
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let row = GeographicCellDedupRow {
+            timeline: request.timeline(),
+            entity: request.entity(),
+            intent: request.intent().as_persistence_bytes().as_slice().to_vec(),
+            event_id: event.id,
+            event_seq: event.seq,
+            snapshot_id: snapshot_id.clone(),
+            snapshot_hash,
+        };
+        if !Self::verify_geo_cell_dedup_row(&tx, self.hasher.as_ref(), &row, &request)? {
+            return Ok(GeographicAdmissionOutcome::OutcomeUnknown);
+        }
+        if tx.commit().is_err() {
+            return Ok(GeographicAdmissionOutcome::OutcomeUnknown);
+        }
+        Ok(GeographicAdmissionOutcome::Accepted {
+            persisted_event: Box::new(event.clone()),
+            event_id: event.id,
+            event_seq: event.seq,
+            snapshot_id,
+            snapshot_hash,
+        })
+    }
+}
+
+impl GeographicReplayVerifier for SqliteStore {
+    #[allow(clippy::too_many_lines)]
+    fn verify_geo_cell_event(&self, evidence: GeographicReplayEvidenceV1) -> Result<(), CoreError> {
+        let events = Self::read_own_events_on(
+            &self.conn,
+            evidence.timeline(),
+            evidence.event_seq(),
+            Some(evidence.event_seq()),
+        )?;
+        let Some(event) = events
+            .into_iter()
+            .find(|event| event.id == evidence.event_id())
+        else {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        };
+        if event.event_type.as_str() != pos_core::GEOGRAPHIC_CELL_EVENT_TYPE
+            || event.schema_version != SchemaVersion::V1
+            || event.payload_hash != evidence.event_payload_hash()
+            || self.hasher.hash_payload(&event.payload) != event.payload_hash
+        {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        }
+        let observation = GeographicObservationV1::decode(&event.payload)
+            .map_err(|_| CoreError::GeographicAdmissionValidationFailed)?;
+        if observation.snapshot_id() != evidence.snapshot_id()
+            || observation.snapshot_hash() != evidence.snapshot_hash()
+        {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        }
+        let snapshot = self
+            .conn
+            .query_row(
+                "SELECT snapshot_hash, timeline_id, entity_id, event_id, event_seq, snapshot_cbor
+                 FROM geographic_cell_admission_snapshots WHERE snapshot_id = ?1",
+                params![evidence.snapshot_id().as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, Vec<u8>>(5)?,
+                    ))
+                },
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    CoreError::GeographicAdmissionValidationFailed
+                }
+                other => CoreError::Storage(other.to_string()),
+            })?;
+        let snapshot_hash: [u8; 32] = snapshot
+            .0
+            .try_into()
+            .map_err(|_| CoreError::GeographicAdmissionValidationFailed)?;
+        let snapshot_cbor = CanonicalBytes::from_vec(snapshot.5);
+        let linkage = AdmissionEntitlementSnapshotV1::canonical_linkage(&snapshot_cbor)?;
+        if AdmissionSnapshotHash::from_bytes(snapshot_hash) != evidence.snapshot_hash()
+            || hash_admission_snapshot_bytes(&snapshot_cbor).as_bytes() != snapshot_hash
+            || linkage.snapshot_id() != evidence.snapshot_id()
+            || linkage.timeline() != evidence.timeline()
+            || linkage.entity() != event.entity
+            || linkage.event_id() != evidence.event_id()
+            || linkage.event_seq() != evidence.event_seq()
+            || parse_timeline_id(&snapshot.1)? != evidence.timeline()
+            || parse_entity_id(&snapshot.2)? != event.entity
+            || parse_event_id(&snapshot.3)? != evidence.event_id()
+            || u64::try_from(snapshot.4).unwrap_or(0) != evidence.event_seq().as_u64()
+        {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        }
+        let consent_record = self
+            .resolve_admission_consent(linkage.consent_record_id(), linkage.consent_revision())?;
+        if !consent_record.matches_linkage(&linkage) {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        }
+        let link = self
+            .conn
+            .query_row(
+                "SELECT event_seq, snapshot_id, snapshot_hash, snapshot_cbor
+                 FROM geographic_cell_admission_links
+                 WHERE timeline_id = ?1 AND event_id = ?2",
+                params![
+                    evidence.timeline().to_string(),
+                    evidence.event_id().to_string()
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, Vec<u8>>(3)?,
+                    ))
+                },
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    CoreError::GeographicAdmissionValidationFailed
+                }
+                other => CoreError::Storage(other.to_string()),
+            })?;
+        let link_hash: [u8; 32] = link
+            .2
+            .try_into()
+            .map_err(|_| CoreError::GeographicAdmissionValidationFailed)?;
+        if u64::try_from(link.0).unwrap_or(0) != evidence.event_seq().as_u64()
+            || AdmissionSnapshotId::from_canonical(&link.1)
+                .map_or(true, |id| id != *evidence.snapshot_id())
+            || AdmissionSnapshotHash::from_bytes(link_hash) != evidence.snapshot_hash()
+            || link.3 != snapshot_cbor.as_slice()
+        {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        }
+        Ok(())
     }
 }
 
@@ -2262,6 +3056,26 @@ impl EventStore for SqliteStore {
                 params![id_str],
             )
             .map_err(|e| CoreError::Storage(e.to_string()))?;
+            tx.execute(
+                "DELETE FROM geographic_cell_admission_fences WHERE timeline_id = ?1",
+                params![id_str],
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+            tx.execute(
+                "DELETE FROM geographic_cell_admission_dedup WHERE timeline_id = ?1",
+                params![id_str],
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+            tx.execute(
+                "DELETE FROM geographic_cell_admission_links WHERE timeline_id = ?1",
+                params![id_str],
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+            tx.execute(
+                "DELETE FROM geographic_cell_admission_snapshots WHERE timeline_id = ?1",
+                params![id_str],
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
             let enrollment = Self::enrollment_state_in_transaction(&tx)?;
             if enrollment.permits_geographic_admission_target(id) {
                 Self::write_enrollment_state(&tx, &enrollment.revoke()?)?;
@@ -2486,6 +3300,12 @@ fn parse_correlation_id(s: &str) -> Result<pos_core::CorrelationId, CoreError> {
 use rusqlite::OptionalExtension;
 
 #[cfg(test)]
+use pos_core::geo_cell_admission::{
+    hash_admission_consent_record_bytes, AdmissionEntitlementDraftV1, GeoCellAdmissionInputV1,
+    GeoCellAdmissionRequestV1, SourceTimeBucket, ValidatedGeoCellV1,
+};
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use pos_core::{
@@ -2512,6 +3332,80 @@ mod tests {
 
     fn new_store() -> SqliteStore {
         SqliteStore::open_in_memory().unwrap()
+    }
+
+    fn geo_cell_request(
+        timeline: TimelineId,
+        entity: EntityId,
+    ) -> (
+        AdmissionConsentRecordV1,
+        GeoCellAdmissionFenceV1,
+        GeoCellAdmissionRequestV1,
+    ) {
+        let consent_id = AdmissionSnapshotId::from_canonical("01ARZ3NDEKTSV4RRFFQ69G5FAZ").unwrap();
+        let consent = AdmissionConsentRecordV1::from_persistence_parts(
+            consent_id.clone(),
+            12,
+            CanonicalBytes::from_static(b"sqlite-geo-cell-consent"),
+        );
+        let draft = AdmissionEntitlementDraftV1::new(
+            timeline,
+            entity,
+            consent_id,
+            12,
+            hash_admission_consent_record_bytes(consent.canonical_bytes()),
+            "sqlite-geo-cell",
+            vec![entity],
+            "private",
+            9,
+            1,
+            13,
+        )
+        .unwrap();
+        let fence = GeoCellAdmissionFenceV1::new(draft, [7; 32], 11, false);
+        let request = GeoCellAdmissionRequestV1::from_input(GeoCellAdmissionInputV1::new(
+            ValidatedGeoCellV1::from_adr031_bytes(&CanonicalBytes::from_static(
+                b"\xa4eindexo8928308280fffff\x66systemeh3-v4\x6aresolution\x09kcell_format\x01",
+            ))
+            .unwrap(),
+            SourceTimeBucket::new(123),
+            fence.clone(),
+            GeographicAdmissionFingerprintV1::from_ingress([8; 32]),
+        ))
+        .unwrap();
+        (consent, fence, request)
+    }
+
+    #[test]
+    fn geo_cell_commit_uncertainty_returns_recoverable_outcomes() {
+        let mut store = new_store();
+        let timeline = store
+            .create_timeline("geo-cell-commit-uncertainty")
+            .unwrap();
+        let entity = EntityId::new();
+        let (consent, fence, request) = geo_cell_request(timeline.id(), entity);
+        store
+            .set_geo_cell_admission_consent_record(consent)
+            .unwrap();
+        store
+            .set_geo_cell_admission_fence(timeline.id(), entity, fence)
+            .unwrap();
+
+        store.conn.commit_hook(Some(|| true));
+        assert!(matches!(
+            store.admit(request.clone()),
+            Ok(GeographicAdmissionOutcome::OutcomeUnknown)
+        ));
+        store.conn.commit_hook::<fn() -> bool>(None);
+        assert!(store.admit(request.clone()).unwrap().is_accepted());
+
+        store.conn.commit_hook(Some(|| true));
+        assert!(matches!(
+            store.admit(request.clone()),
+            Ok(GeographicAdmissionOutcome::OutcomeUnknown)
+        ));
+        store.conn.commit_hook::<fn() -> bool>(None);
+        assert!(store.admit(request).unwrap().is_duplicate());
     }
 
     /// Local setup shim for pre-ADR-054 adapter tests. It is deliberately
@@ -6124,6 +7018,130 @@ mod tests {
         assert!(store.get_timeline(root.id()).unwrap().is_none());
         let err = store.delete_timeline(root.id()).unwrap_err();
         assert!(matches!(err, CoreError::TimelineNotFound(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn delete_timeline_removes_geo_cell_sidecars() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("geo-cell-sidecars").unwrap();
+        let timeline_id = timeline.id().to_string();
+        let entity_id = EntityId::new().to_string();
+        let event_id = EventId::new().to_string();
+        let snapshot_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let hash = vec![7_u8; 32];
+        store
+            .conn
+            .execute(
+                "INSERT INTO geographic_cell_admission_fences
+                 (timeline_id, entity_id, fence_cbor) VALUES (?1, ?2, ?3)",
+                params![&timeline_id, &entity_id, vec![1_u8]],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO geographic_cell_admission_snapshots
+                 (snapshot_id, snapshot_hash, timeline_id, entity_id, event_id, event_seq, snapshot_cbor)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)",
+                params![snapshot_id, &hash, &timeline_id, &entity_id, &event_id, vec![2_u8]],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO geographic_cell_admission_links
+                 (timeline_id, event_id, event_seq, snapshot_id, snapshot_hash, snapshot_cbor)
+                 VALUES (?1, ?2, 1, ?3, ?4, ?5)",
+                params![&timeline_id, &event_id, snapshot_id, &hash, vec![2_u8]],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO geographic_cell_admission_dedup
+                 (fingerprint, timeline_id, entity_id, intent, event_id, event_seq,
+                  snapshot_id, snapshot_hash, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, 1)",
+                params![
+                    vec![3_u8; 32],
+                    &timeline_id,
+                    &entity_id,
+                    vec![4_u8],
+                    &event_id,
+                    snapshot_id,
+                    &hash
+                ],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO geographic_cell_admission_consent_records
+                 (consent_record_id, consent_revision, consent_record_hash, consent_record_cbor)
+                 VALUES (?1, 12, ?2, ?3)",
+                params![snapshot_id, &hash, vec![5_u8]],
+            )
+            .unwrap();
+
+        store.delete_timeline(timeline.id()).unwrap();
+        for table in [
+            "geographic_cell_admission_fences",
+            "geographic_cell_admission_snapshots",
+            "geographic_cell_admission_links",
+            "geographic_cell_admission_dedup",
+        ] {
+            let count: i64 = store
+                .conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{table} retained deleted timeline state");
+        }
+        let consent_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM geographic_cell_admission_consent_records",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            consent_count, 1,
+            "authoritative consent lifecycle was deleted"
+        );
+    }
+
+    #[test]
+    fn delete_timeline_rolls_back_when_geo_cell_sidecar_cleanup_is_denied() {
+        for table in [
+            "geographic_cell_admission_fences",
+            "geographic_cell_admission_dedup",
+            "geographic_cell_admission_links",
+            "geographic_cell_admission_snapshots",
+        ] {
+            let mut store = new_store();
+            let timeline = store.create_timeline("geo-cell-cleanup-error").unwrap();
+            store
+                .conn
+                .authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
+                    if matches!(
+                        context.action,
+                        rusqlite::hooks::AuthAction::Delete { table_name } if table_name == table
+                    ) {
+                        rusqlite::hooks::Authorization::Deny
+                    } else {
+                        rusqlite::hooks::Authorization::Allow
+                    }
+                }));
+            assert!(store.delete_timeline(timeline.id()).is_err());
+            store.conn.authorizer(
+                None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+            );
+            assert!(store.get_timeline(timeline.id()).unwrap().is_some());
+            store.delete_timeline(timeline.id()).unwrap();
+        }
     }
 
     #[test]

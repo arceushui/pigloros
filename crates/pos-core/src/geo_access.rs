@@ -1,9 +1,9 @@
 //! Core reservation for geographic evidence.
 //!
 //! V1 reserves the geographic Event kinds and rejects them from every generic
-//! admission path. It deliberately has no geographic admission or audit API:
-//! ADR-034 requires a future snapshot-linkage transaction before either can be
-//! exposed safely.
+//! admission path. The dedicated geo.cell admission and replay capabilities
+//! live in `geo_cell_admission`; activation and source routing remain outside
+//! this contract.
 
 use crate::event::Kind;
 
