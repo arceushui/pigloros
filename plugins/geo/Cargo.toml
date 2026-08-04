@@ -5,6 +5,10 @@ edition = "2021"
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+h3 = ["dep:h3o"]
+
 [dependencies]
 pos-core = { path = "../../crates/pos-core" }
 pos-crypto = { path = "../../crates/pos-crypto" }
@@ -13,6 +17,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 ciborium = { workspace = true }
+h3o = { version = "=0.10.0", default-features = false, optional = true }
 
 [dev-dependencies]
 pos-store = { path = "../../crates/pos-store" }

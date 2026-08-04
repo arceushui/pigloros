@@ -15,6 +15,9 @@
 //! (e.g., 0.1 degree cells), preventing exact location tracking.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
+#[cfg(feature = "h3")]
+pub mod geo_cell;
+
 #[cfg(test)]
 use pos_core::{
     event::Event,
