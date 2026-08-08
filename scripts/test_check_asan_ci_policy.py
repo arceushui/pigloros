@@ -59,6 +59,13 @@ class AsanCiPolicyTests(unittest.TestCase):
     def test_rejects_disabled_job(self) -> None:
         self.assert_rejected(lambda workflow: workflow["jobs"]["asan"].update({"if": False}))
 
+    def test_requires_pinned_ubuntu_2404_runner(self) -> None:
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["asan"].update(
+                {"runs-on": "ubuntu-latest"}
+            )
+        )
+
     def test_rejects_disabled_step(self) -> None:
         self.assert_rejected(
             lambda workflow: self.asan_step(workflow).update({"if": False})
@@ -162,28 +169,51 @@ class AsanCiPolicyTests(unittest.TestCase):
 
         self.assert_rejected(float_cargo_selector)
 
-    def test_requires_pinned_symbolizer_archive(self) -> None:
-        def change_symbolizer_digest(workflow: dict) -> None:
-            symbolizer_step = workflow["jobs"]["asan"]["steps"][3]
-            symbolizer_step["env"]["LLVM_ARCHIVE_SHA256"] = "0" * 64
-
-        self.assert_rejected(change_symbolizer_digest)
-
-    def test_requires_symbolizer_archive_cleanup(self) -> None:
-        def remove_archive_cleanup(workflow: dict) -> None:
+    def test_requires_setup_symbolizer_executable_check(self) -> None:
+        def remove_symbolizer_executable_check(workflow: dict) -> None:
             symbolizer_step = workflow["jobs"]["asan"]["steps"][3]
             symbolizer_step["run"] = symbolizer_step["run"].replace(
-                'rm -f "${archive}"\n',
+                'test -x "${symbolizer}"\n',
                 "",
             )
 
-        self.assert_rejected(remove_archive_cleanup)
+        self.assert_rejected(remove_symbolizer_executable_check)
+
+    def test_requires_setup_symbolizer_execution(self) -> None:
+        def remove_symbolizer_execution(workflow: dict) -> None:
+            symbolizer_step = workflow["jobs"]["asan"]["steps"][3]
+            symbolizer_step["run"] = symbolizer_step["run"].replace(
+                'symbolizer_version="$("${symbolizer}" --version)"\n',
+                "",
+            )
+
+        self.assert_rejected(remove_symbolizer_execution)
+
+    def test_requires_exact_symbolizer_version(self) -> None:
+        def change_symbolizer_version(workflow: dict) -> None:
+            symbolizer_step = workflow["jobs"]["asan"]["steps"][3]
+            symbolizer_step["run"] = symbolizer_step["run"].replace(
+                "Ubuntu LLVM version 18.1.3",
+                "Ubuntu LLVM version 18",
+            )
+
+        self.assert_rejected(change_symbolizer_version)
+
+    def test_requires_exact_setup_symbolizer_path(self) -> None:
+        def change_setup_symbolizer_path(workflow: dict) -> None:
+            symbolizer_step = workflow["jobs"]["asan"]["steps"][3]
+            symbolizer_step["run"] = symbolizer_step["run"].replace(
+                "/usr/bin/llvm-symbolizer-18",
+                "/usr/bin/llvm-symbolizer",
+            )
+
+        self.assert_rejected(change_setup_symbolizer_path)
 
     def test_requires_symbolizer_executable_preflight(self) -> None:
         def remove_symbolizer_preflight(workflow: dict) -> None:
             test_step = self.asan_step(workflow)
             test_step["run"] = test_step["run"].replace(
-                'test -x "${RUNNER_TEMP}/llvm-symbolizer/llvm-symbolizer" && ',
+                'test -x "/usr/bin/llvm-symbolizer-18" && ',
                 "",
             )
 
@@ -193,7 +223,7 @@ class AsanCiPolicyTests(unittest.TestCase):
         def change_symbolizer_path(workflow: dict) -> None:
             test_step = self.asan_step(workflow)
             test_step["run"] = test_step["run"].replace(
-                'ASAN_SYMBOLIZER_PATH="${RUNNER_TEMP}/llvm-symbolizer/llvm-symbolizer"',
+                'ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18"',
                 'ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer"',
             )
 

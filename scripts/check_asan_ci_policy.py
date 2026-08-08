@@ -11,8 +11,8 @@ import yaml
 
 EXPECTED_COMMAND = " ".join(
     (
-        'test -x "${RUNNER_TEMP}/llvm-symbolizer/llvm-symbolizer" &&',
-        'ASAN_SYMBOLIZER_PATH="${RUNNER_TEMP}/llvm-symbolizer/llvm-symbolizer"',
+        'test -x "/usr/bin/llvm-symbolizer-18" &&',
+        'ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18"',
         'RUSTFLAGS="-Z sanitizer=address"',
         "cargo +nightly-2026-07-01 test --all-features --locked -Z build-std",
         "--target x86_64-unknown-linux-gnu --workspace --tests",
@@ -38,22 +38,11 @@ EXPECTED_SETUP_STEPS = [
         "with": {"toolchain": "nightly-2026-07-01", "components": "rust-src"},
     },
     {
-        "name": "Install ASan symbolizer",
-        "env": {
-            "LLVM_ARCHIVE_SHA256": (
-                "54ec30358afcc9fb8aa74307db3046f5187f9fb89fb37064cdde906e062ebf36"
-            )
-        },
-        "run": """archive="${RUNNER_TEMP}/llvm-18.1.8.tar.xz"
-symbolizer_dir="${RUNNER_TEMP}/llvm-symbolizer"
-curl --fail --location --retry 3 --output "${archive}" \\
-  "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/clang%2Bllvm-18.1.8-x86_64-linux-gnu-ubuntu-18.04.tar.xz"
-echo "${LLVM_ARCHIVE_SHA256}  ${archive}" | sha256sum --check -
-mkdir -p "${symbolizer_dir}"
-tar -xJf "${archive}" --strip-components=2 -C "${symbolizer_dir}" \\
-  "clang+llvm-18.1.8-x86_64-linux-gnu-ubuntu-18.04/bin/llvm-symbolizer"
-rm -f "${archive}"
-test -x "${symbolizer_dir}/llvm-symbolizer"
+        "name": "Verify ASan symbolizer",
+        "run": """symbolizer="/usr/bin/llvm-symbolizer-18"
+test -x "${symbolizer}"
+symbolizer_version="$("${symbolizer}" --version)"
+grep -Fqx "Ubuntu LLVM version 18.1.3" <<<"${symbolizer_version}"
 """,
     },
     {
@@ -89,7 +78,7 @@ def check_workflow(workflow_path: pathlib.Path) -> None:
     require(isinstance(job, dict), "missing ASan job")
     require(set(job) == EXPECTED_JOB_KEYS, "ASan job graph or metadata changed")
     require(job.get("name") == "asan (address sanitizer)", "ASan check name changed")
-    require(job.get("runs-on") == "ubuntu-latest", "ASan runner changed")
+    require(job.get("runs-on") == "ubuntu-24.04", "ASan runner changed")
     require(job.get("timeout-minutes") == 60, "ASan timeout changed")
     require("if" not in job, "ASan job must be unconditional")
     require("continue-on-error" not in job, "ASan job must fail the workflow")
