@@ -162,18 +162,28 @@ class AsanCiPolicyTests(unittest.TestCase):
 
         self.assert_rejected(float_cargo_selector)
 
-    def test_requires_pinned_symbolizer_installer(self) -> None:
-        def float_symbolizer_installer(workflow: dict) -> None:
+    def test_requires_pinned_symbolizer_archive(self) -> None:
+        def change_symbolizer_digest(workflow: dict) -> None:
             symbolizer_step = workflow["jobs"]["asan"]["steps"][3]
-            symbolizer_step["uses"] = "KyleMayes/install-llvm-action@v2"
+            symbolizer_step["env"]["LLVM_ARCHIVE_SHA256"] = "0" * 64
 
-        self.assert_rejected(float_symbolizer_installer)
+        self.assert_rejected(change_symbolizer_digest)
+
+    def test_requires_symbolizer_archive_cleanup(self) -> None:
+        def remove_archive_cleanup(workflow: dict) -> None:
+            symbolizer_step = workflow["jobs"]["asan"]["steps"][3]
+            symbolizer_step["run"] = symbolizer_step["run"].replace(
+                'rm -f "${archive}"\n',
+                "",
+            )
+
+        self.assert_rejected(remove_archive_cleanup)
 
     def test_requires_symbolizer_executable_preflight(self) -> None:
         def remove_symbolizer_preflight(workflow: dict) -> None:
             test_step = self.asan_step(workflow)
             test_step["run"] = test_step["run"].replace(
-                'test -x "${LLVM_PATH}/bin/llvm-symbolizer" && ',
+                'test -x "${RUNNER_TEMP}/llvm-symbolizer/llvm-symbolizer" && ',
                 "",
             )
 
@@ -183,7 +193,7 @@ class AsanCiPolicyTests(unittest.TestCase):
         def change_symbolizer_path(workflow: dict) -> None:
             test_step = self.asan_step(workflow)
             test_step["run"] = test_step["run"].replace(
-                'ASAN_SYMBOLIZER_PATH="${LLVM_PATH}/bin/llvm-symbolizer"',
+                'ASAN_SYMBOLIZER_PATH="${RUNNER_TEMP}/llvm-symbolizer/llvm-symbolizer"',
                 'ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer"',
             )
 

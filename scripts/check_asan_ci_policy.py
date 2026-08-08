@@ -11,8 +11,8 @@ import yaml
 
 EXPECTED_COMMAND = " ".join(
     (
-        'test -x "${LLVM_PATH}/bin/llvm-symbolizer" &&',
-        'ASAN_SYMBOLIZER_PATH="${LLVM_PATH}/bin/llvm-symbolizer"',
+        'test -x "${RUNNER_TEMP}/llvm-symbolizer/llvm-symbolizer" &&',
+        'ASAN_SYMBOLIZER_PATH="${RUNNER_TEMP}/llvm-symbolizer/llvm-symbolizer"',
         'RUSTFLAGS="-Z sanitizer=address"',
         "cargo +nightly-2026-07-01 test --all-features --locked -Z build-std",
         "--target x86_64-unknown-linux-gnu --workspace --tests",
@@ -38,12 +38,23 @@ EXPECTED_SETUP_STEPS = [
         "with": {"toolchain": "nightly-2026-07-01", "components": "rust-src"},
     },
     {
-        "uses": "KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0",
-        "with": {
-            "version": "18.1.8",
-            "directory": "${{ runner.temp }}/llvm-18.1.8",
-            "env": False,
+        "name": "Install ASan symbolizer",
+        "env": {
+            "LLVM_ARCHIVE_SHA256": (
+                "54ec30358afcc9fb8aa74307db3046f5187f9fb89fb37064cdde906e062ebf36"
+            )
         },
+        "run": """archive="${RUNNER_TEMP}/llvm-18.1.8.tar.xz"
+symbolizer_dir="${RUNNER_TEMP}/llvm-symbolizer"
+curl --fail --location --retry 3 --output "${archive}" \\
+  "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/clang%2Bllvm-18.1.8-x86_64-linux-gnu-ubuntu-18.04.tar.xz"
+echo "${LLVM_ARCHIVE_SHA256}  ${archive}" | sha256sum --check -
+mkdir -p "${symbolizer_dir}"
+tar -xJf "${archive}" --strip-components=2 -C "${symbolizer_dir}" \\
+  "clang+llvm-18.1.8-x86_64-linux-gnu-ubuntu-18.04/bin/llvm-symbolizer"
+rm -f "${archive}"
+test -x "${symbolizer_dir}/llvm-symbolizer"
+""",
     },
     {
         "uses": "Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32",
