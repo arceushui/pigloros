@@ -45,8 +45,12 @@ wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-test = "0.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom = { version = "0.4.3", default-features = false, features = ["wasm_js"] }
-getrandom03 = { package = "getrandom", version = "0.3.4", default-features = false, features = ["wasm_js"] }
+getrandom = { version = "0.4.3", default-features = false, features = [
+  "wasm_js",
+] }
+getrandom03 = { package = "getrandom", version = "0.3.4", default-features = false, features = [
+  "wasm_js",
+] }
 
 [lints]
 workspace = true

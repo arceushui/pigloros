@@ -130,10 +130,28 @@ grep -Fq 'default = ["runtime"]' "$manifest" \
   || fail 'world-client manifest does not default to the runtime feature'
 grep -Fq 'runtime = ["dep:bevy", "dep:wasm-bindgen"]' "$manifest" \
   || fail 'world-client runtime feature does not own the Bevy shell dependencies'
-grep -Fq 'getrandom = { version = "0.4.3", default-features = false, features = ["wasm_js"] }' "$manifest" \
-  || fail 'world-client manifest does not enable getrandom wasm_js support'
-grep -Fq 'getrandom03 = { package = "getrandom", version = "0.3.4", default-features = false, features = ["wasm_js"] }' "$manifest" \
-  || fail 'world-client manifest does not enable getrandom 0.3 wasm_js support'
+manifest_metadata="$(cargo metadata --manifest-path "$root/Cargo.toml" --locked --no-deps --format-version 1)"
+assert_wasm_getrandom_dependency() {
+  local rename="$1"
+  local requirement="$2"
+  jq -e --arg rename "$rename" --arg requirement "$requirement" '
+    .packages[]
+    | select(.name == "piglor-world-client")
+    | .dependencies[]
+    | select(
+        .name == "getrandom"
+        and (.rename // "") == $rename
+        and .req == $requirement
+        and .target == "cfg(target_arch = \"wasm32\")"
+        and .uses_default_features == false
+        and (.features | index("wasm_js")) != null
+      )
+  ' <<<"$manifest_metadata" >/dev/null \
+    || fail "world-client manifest does not configure $rename getrandom for wasm_js"
+}
+
+assert_wasm_getrandom_dependency '' '^0.4.3'
+assert_wasm_getrandom_dependency 'getrandom03' '^0.3.4'
 grep -Fq 'getrandom_backend="wasm_js"' "$script" \
   || fail 'WASM script does not select the getrandom wasm_js backend'
 grep -Fq 'crate-type = ["cdylib", "rlib"]' "$manifest" \
