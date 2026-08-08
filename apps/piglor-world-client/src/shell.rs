@@ -13,7 +13,7 @@ const MOUSE_SENSITIVITY: f32 = 0.002;
 const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CursorState {
+enum CursorState {
     Released,
     Locked,
 }
@@ -28,7 +28,7 @@ struct FirstPersonCamera {
 struct ShellProjection(ProjectionDigest);
 
 #[must_use]
-pub fn movement_vector(keys: &ButtonInput<KeyCode>) -> Vec3 {
+fn movement_vector(keys: &ButtonInput<KeyCode>) -> Vec3 {
     let mut movement = Vec3::ZERO;
     if keys.pressed(KeyCode::KeyW) {
         movement.z -= 1.0;
@@ -50,12 +50,12 @@ pub fn movement_vector(keys: &ButtonInput<KeyCode>) -> Vec3 {
 }
 
 #[must_use]
-pub fn clamp_pitch(pitch: f32) -> f32 {
+fn clamp_pitch(pitch: f32) -> f32 {
     pitch.clamp(-PITCH_LIMIT, PITCH_LIMIT)
 }
 
 #[must_use]
-pub fn mouse_look(current: Vec2, delta: Vec2, sensitivity: f32) -> Vec2 {
+fn mouse_look(current: Vec2, delta: Vec2, sensitivity: f32) -> Vec2 {
     Vec2::new(
         current.x + delta.x * sensitivity,
         clamp_pitch(current.y + delta.y * sensitivity),
@@ -63,7 +63,7 @@ pub fn mouse_look(current: Vec2, delta: Vec2, sensitivity: f32) -> Vec2 {
 }
 
 #[must_use]
-pub fn cursor_state(current: CursorState, left_click: bool, escape: bool) -> CursorState {
+fn cursor_state(current: CursorState, left_click: bool, escape: bool) -> CursorState {
     if escape {
         CursorState::Released
     } else if left_click {
@@ -74,20 +74,39 @@ pub fn cursor_state(current: CursorState, left_click: bool, escape: bool) -> Cur
 }
 
 /// Build the native or WebGL2 Bevy application around a pure projection.
+#[rustfmt::skip]
 pub fn build_app(digest: ProjectionDigest) -> App {
     let mut app = App::new();
-    app.insert_resource(ShellProjection(digest))
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                canvas: Some("#piglor-world".to_owned()),
-                fit_canvas_to_parent: true,
-                ..default()
-            }),
+    add_default_plugins(&mut app);
+    install_shell(&mut app, digest);
+    app
+}
+
+#[rustfmt::skip]
+fn add_default_plugins(app: &mut App) {
+    let plugins = DefaultPlugins.set(window_plugin());
+    #[cfg(test)]
+    let plugins = plugins.disable::<bevy::winit::WinitPlugin>();
+    app.add_plugins(plugins);
+    #[cfg(test)]
+    app.set_runner(|_| bevy::app::AppExit::Success);
+}
+
+fn window_plugin() -> WindowPlugin {
+    WindowPlugin {
+        primary_window: Some(Window {
+            canvas: Some("#piglor-world".to_owned()),
+            fit_canvas_to_parent: true,
             ..default()
-        }))
+        }),
+        ..default()
+    }
+}
+
+fn install_shell(app: &mut App, digest: ProjectionDigest) {
+    app.insert_resource(ShellProjection(digest))
         .add_systems(Startup, setup_scene)
         .add_systems(Update, (move_camera, look_camera, update_cursor).chain());
-    app
 }
 
 /// Run the fixture-backed client on a native target.
@@ -96,10 +115,15 @@ pub fn build_app(digest: ProjectionDigest) -> App {
 ///
 /// Returns [`ClientError`] when the embedded fixture cannot be decoded or
 /// projected into a [`ProjectionDigest`].
+#[rustfmt::skip]
 pub fn run_native() -> Result<(), ClientError> {
     let digest = fixture_digest()?;
-    build_app(digest).run();
+    run_app(build_app(digest));
     Ok(())
+}
+
+fn run_app(mut app: App) {
+    app.run();
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -222,11 +246,188 @@ fn update_cursor(
 
 #[cfg(test)]
 mod tests {
-    use bevy::input::keyboard::KeyCode;
-    use bevy::input::ButtonInput;
-    use bevy::math::{Vec2, Vec3};
+    use std::time::Duration;
 
-    use super::{clamp_pitch, cursor_state, mouse_look, movement_vector, CursorState};
+    use bevy::{
+        app::{App, Startup, Update},
+        asset::Assets,
+        ecs::schedule::IntoScheduleConfigs,
+        input::{
+            keyboard::KeyCode,
+            mouse::{AccumulatedMouseMotion, MouseButton},
+            ButtonInput,
+        },
+        math::{Vec2, Vec3},
+        prelude::{Camera3d, Mesh, StandardMaterial, Time, Transform},
+        window::{CursorGrabMode, CursorOptions},
+    };
+
+    use super::{
+        build_app, clamp_pitch, cursor_state, fixture_digest, install_shell, look_camera,
+        mouse_look, move_camera, movement_vector, run_native, setup_scene, update_cursor,
+        window_plugin, CursorState, FirstPersonCamera, ShellProjection, MOUSE_SENSITIVITY,
+    };
+
+    #[test]
+    fn install_shell_registers_fixture_shell_resources_and_systems() {
+        let digest = fixture_digest().expect("embedded fixture should project");
+        let mut app = App::new();
+        install_shell(&mut app, digest);
+
+        assert_eq!(app.world().resource::<ShellProjection>().0, digest);
+    }
+
+    #[test]
+    fn public_builder_installs_default_plugins_and_fixture_shell() {
+        let digest = fixture_digest().expect("embedded fixture should project");
+        let app = build_app(digest);
+
+        assert_eq!(app.world().resource::<ShellProjection>().0, digest);
+    }
+
+    #[test]
+    fn window_plugin_targets_the_world_canvas() {
+        let plugin = window_plugin();
+        let window = plugin
+            .primary_window
+            .expect("world client should configure a primary window");
+
+        assert_eq!(window.canvas.as_deref(), Some("#piglor-world"));
+        assert!(window.fit_canvas_to_parent);
+    }
+
+    #[test]
+    fn public_native_runner_projects_and_starts_the_app() {
+        run_native().expect("embedded fixture should project");
+    }
+
+    #[test]
+    fn setup_scene_builds_fixture_backed_camera_and_landmark() {
+        let digest = fixture_digest().expect("embedded fixture should project");
+        let mut app = App::new();
+        app.insert_resource(ShellProjection(digest))
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .add_systems(Startup, setup_scene);
+
+        app.update();
+
+        let mut cameras = app.world_mut().query::<&Camera3d>();
+        assert_eq!(cameras.iter(app.world()).count(), 1);
+        let mut transforms = app.world_mut().query::<&Transform>();
+        assert!(transforms
+            .iter(app.world())
+            .any(|transform| transform.translation == Vec3::new(digest.landmark_x(), 1.0, -3.0)));
+    }
+
+    #[test]
+    fn camera_systems_apply_movement_and_mouse_look() {
+        let mut app = App::new();
+        let camera = app
+            .world_mut()
+            .spawn((
+                Transform::default(),
+                FirstPersonCamera {
+                    yaw: 0.0,
+                    pitch: 0.0,
+                },
+            ))
+            .id();
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(ButtonInput::<KeyCode>::default())
+            .insert_resource(AccumulatedMouseMotion::default())
+            .add_systems(Update, (move_camera, look_camera).chain());
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyW);
+        app.world_mut()
+            .resource_mut::<AccumulatedMouseMotion>()
+            .delta = Vec2::new(1.0, 2.0);
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs(1));
+
+        app.update();
+
+        let mut cameras = app.world_mut().query::<(&Transform, &FirstPersonCamera)>();
+        let (transform, camera_state) = cameras
+            .get(app.world(), camera)
+            .expect("camera should remain in the world");
+        assert_eq!(transform.translation.y.to_bits(), 1.5f32.to_bits());
+        assert!(transform.translation.z < 0.0);
+        assert_eq!(camera_state.yaw.to_bits(), MOUSE_SENSITIVITY.to_bits());
+        assert_eq!(
+            camera_state.pitch.to_bits(),
+            (2.0 * MOUSE_SENSITIVITY).to_bits()
+        );
+    }
+
+    #[test]
+    fn camera_systems_ignore_idle_input() {
+        let mut app = App::new();
+        let camera = app
+            .world_mut()
+            .spawn((
+                Transform::default(),
+                FirstPersonCamera {
+                    yaw: 0.0,
+                    pitch: 0.0,
+                },
+            ))
+            .id();
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(ButtonInput::<KeyCode>::default())
+            .insert_resource(AccumulatedMouseMotion::default())
+            .add_systems(Update, (move_camera, look_camera).chain());
+
+        app.update();
+
+        let mut cameras = app.world_mut().query::<(&Transform, &FirstPersonCamera)>();
+        let (transform, camera_state) = cameras
+            .get(app.world(), camera)
+            .expect("camera should remain in the world");
+        assert_eq!(transform.translation, Vec3::ZERO);
+        assert_eq!(camera_state.yaw.to_bits(), 0.0f32.to_bits());
+        assert_eq!(camera_state.pitch.to_bits(), 0.0f32.to_bits());
+    }
+
+    #[test]
+    fn cursor_system_locks_on_click_and_releases_on_escape() {
+        let mut app = App::new();
+        let cursor_entity = app.world_mut().spawn(CursorOptions::default()).id();
+        app.insert_resource(ButtonInput::<MouseButton>::default())
+            .insert_resource(ButtonInput::<KeyCode>::default())
+            .add_systems(Update, update_cursor);
+
+        app.update();
+        let mut cursors = app.world_mut().query::<&CursorOptions>();
+        assert_eq!(
+            cursors.single(app.world()).unwrap().grab_mode,
+            CursorGrabMode::None
+        );
+        app.world_mut()
+            .get_mut::<CursorOptions>(cursor_entity)
+            .unwrap()
+            .grab_mode = CursorGrabMode::Confined;
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        app.update();
+        let cursor = cursors.single(app.world()).unwrap();
+        assert!(!cursor.visible);
+        assert_eq!(cursor.grab_mode, CursorGrabMode::Locked);
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .clear();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Escape);
+        app.update();
+        let cursor = cursors.single(app.world()).unwrap();
+        assert!(cursor.visible);
+        assert_eq!(cursor.grab_mode, CursorGrabMode::None);
+    }
 
     #[test]
     fn movement_vectors_follow_wasd_axes_and_normalize_diagonals() {
@@ -238,6 +439,10 @@ mod tests {
             movement_vector(&keys),
             Vec3::new(1.0, 0.0, -1.0).normalize()
         );
+
+        keys.press(KeyCode::KeyS);
+        keys.press(KeyCode::KeyA);
+        assert_eq!(movement_vector(&keys), Vec3::ZERO);
     }
 
     #[test]
@@ -279,6 +484,14 @@ mod tests {
     fn escape_requests_released_cursor() {
         assert_eq!(
             cursor_state(CursorState::Locked, false, true),
+            CursorState::Released
+        );
+        assert_eq!(
+            cursor_state(CursorState::Released, false, false),
+            CursorState::Released
+        );
+        assert_eq!(
+            cursor_state(CursorState::Released, true, true),
             CursorState::Released
         );
     }

@@ -13,6 +13,10 @@ else
   bash "$ROOT/scripts/check-test-policy.sh"
 fi
 
+echo "==> world-client WASM contract and packaging/browser gate"
+bash "$ROOT/scripts/test-check-world-client-wasm.sh"
+bash "$ROOT/scripts/check-world-client-wasm.sh"
+
 echo "==> pinned dependency policy"
 bash "$ROOT/scripts/check-pinned-dependencies.sh"
 bash "$ROOT/scripts/test-check-pinned-dependencies.sh"

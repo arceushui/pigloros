@@ -6,21 +6,13 @@ use pos_core::{
     timeline::{Timeline, TimelineMeta, TimelineMode},
     TimelineExport,
 };
-use serde::{Deserialize, Serialize};
+use pos_plugin_society::{decode_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
 use ulid::Ulid;
 
 const TIMELINE_ID: u128 = 1;
 const ENTITY_ID: u128 = 2;
 const FIRST_EVENT_ID: u128 = 2;
 const SECOND_EVENT_ID: u128 = 3;
-
-#[derive(Serialize, Deserialize)]
-struct Signal {
-    dimension: String,
-    value: f64,
-    subject: Option<String>,
-    object: Option<String>,
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -77,7 +69,7 @@ fn fixture_event(id: Ulid, seq: u64, value: f64) -> Event {
     Event {
         id: EventId::from_ulid(id),
         entity: EntityId::from_ulid(fixed_ulid(ENTITY_ID)),
-        event_type: Kind::new("society.signal"),
+        event_type: Kind::new(EVENT_TYPE_SIGNAL),
         payload: CanonicalBytes::from_vec(payload.clone()),
         wall_time: WallTime::from_micros(seq),
         seq: Seq::from_u64(seq),
@@ -90,8 +82,8 @@ fn fixture_event(id: Ulid, seq: u64, value: f64) -> Event {
 }
 
 fn signal_payload(value: f64) -> Vec<u8> {
-    let signal = Signal {
-        dimension: "trust".to_owned(),
+    let signal = SocietySignal {
+        dimension: SocietyDimension::Trust,
         value,
         subject: None,
         object: None,
@@ -132,7 +124,7 @@ fn validate_export(export: &TimelineExport) -> Result<(), ClientError> {
         };
         if event.id != expected_id
             || event.entity != EntityId::from_ulid(fixed_ulid(ENTITY_ID))
-            || event.event_type != Kind::new("society.signal")
+            || event.event_type != Kind::new(EVENT_TYPE_SIGNAL)
             || event.seq != expected_seq
             || event.wall_time != WallTime::from_micros((index + 1) as u64)
             || event.causation_id.is_some()
@@ -143,10 +135,10 @@ fn validate_export(export: &TimelineExport) -> Result<(), ClientError> {
         {
             return Err(ClientError::Invalid("event fields".to_owned()));
         }
-        let signal: Signal = ciborium::from_reader(event.payload.as_slice())
+        let signal = decode_signal(event.payload.as_slice())
             .map_err(|error| ClientError::Invalid(format!("signal payload: {error}")))?;
         let expected_value = if index == 0 { 0.5 } else { 1.0 };
-        if signal.dimension != "trust"
+        if signal.dimension != SocietyDimension::Trust
             || !signal.value.is_finite()
             || (signal.value - expected_value).abs() > f64::EPSILON
             || signal.subject.is_some()
@@ -169,7 +161,17 @@ mod tests {
         ids::{CorrelationId, EntityId, EventId, TimelineId},
         timeline::TimelineMode,
     };
+    use pos_plugin_society::{decode_signal, SocietyDimension, EVENT_TYPE_SIGNAL};
+    use serde::Serialize;
     use ulid::Ulid;
+
+    #[derive(Serialize)]
+    struct RawSignal<'a> {
+        dimension: &'a str,
+        value: f64,
+        subject: Option<&'a str>,
+        object: Option<&'a str>,
+    }
 
     fn encode(export: &TimelineExport) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -200,7 +202,7 @@ mod tests {
                 event.id,
                 EventId::from_ulid(Ulid::from((index + 2) as u128))
             );
-            assert_eq!(event.event_type, Kind::new("society.signal"));
+            assert_eq!(event.event_type, Kind::new(EVENT_TYPE_SIGNAL));
             assert_eq!(event.schema_version, SchemaVersion::V1);
             assert_eq!(event.signature, None);
             assert_eq!(event.causation_id, None);
@@ -211,8 +213,8 @@ mod tests {
                 event.payload_hash,
                 Hash::from_bytes(*blake3::hash(event.payload.as_slice()).as_bytes())
             );
-            let signal: Signal = ciborium::from_reader(event.payload.as_slice()).unwrap();
-            assert_eq!(signal.dimension, "trust");
+            let signal = decode_signal(event.payload.as_slice()).unwrap();
+            assert_eq!(signal.dimension, SocietyDimension::Trust);
             assert!((signal.value - [0.5, 1.0][index]).abs() <= f64::EPSILON);
             assert_eq!(signal.subject, None);
             assert_eq!(signal.object, None);
@@ -390,11 +392,11 @@ mod tests {
         subject: Option<&str>,
         object: Option<&str>,
     ) -> CanonicalBytes {
-        let signal = Signal {
-            dimension: dimension.to_owned(),
+        let signal = RawSignal {
+            dimension,
             value,
-            subject: subject.map(str::to_owned),
-            object: object.map(str::to_owned),
+            subject,
+            object,
         };
         let mut payload = Vec::new();
         ciborium::into_writer(&signal, &mut payload).unwrap();

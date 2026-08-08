@@ -6,12 +6,17 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = ["runtime"]
+runtime = ["dep:bevy", "dep:wasm-bindgen"]
+
 [lib]
 name = "piglor_world_client"
 path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-bevy = { version = "=0.19.0", default-features = false, features = ["3d", "webgl2"] }
+bevy = { version = "=0.19.0", default-features = false, features = ["3d", "webgl2"], optional = true }
 blake3 = { workspace = true }
 ciborium = { workspace = true }
 pos-core = { path = "../../crates/pos-core" }
@@ -21,10 +26,14 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 ulid = { workspace = true }
-wasm-bindgen = "0.2"
+wasm-bindgen = { version = "0.2", optional = true }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4.3", default-features = false, features = ["wasm_js"] }
+getrandom03 = { package = "getrandom", version = "0.3.4", default-features = false, features = ["wasm_js"] }
 
 [lints]
 workspace = true

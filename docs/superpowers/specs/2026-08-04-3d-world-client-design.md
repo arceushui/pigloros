@@ -1,7 +1,9 @@
 # ADR-018 Bevy World Client — Approved Thin-Slice Design
 
-**Redmine:** #115  
-**Canonical decision:** ADR-018 version 7, Accepted  
+**Redmine:** #115
+
+**Canonical decision:** ADR-018 version 7, Accepted
+
 **CTO gate:** fresh `gpt-5.6-sol` review, APPROVE
 
 ## Goal
@@ -56,7 +58,7 @@ cargo test -p piglor-world-client --locked
 cargo run -p piglor-world-client --release --locked
 cargo check -p piglor-world-client --target wasm32-unknown-unknown --locked --no-default-features
 wasm-pack build apps/piglor-world-client --target web --release -- --locked
-wasm-pack test apps/piglor-world-client --headless --chrome -- --locked
+wasm-pack test --headless --chrome apps/piglor-world-client --locked --no-default-features --test wasm_parity
 scripts/ci.sh
 ```
 

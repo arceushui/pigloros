@@ -60,7 +60,7 @@
 
 **Files:** Create `scripts/check-world-client-wasm.sh`. Modify `.github/workflows/ci.yml` and `README.md`.
 
-**Interfaces:** The script must run `cargo check -p piglor-world-client --target wasm32-unknown-unknown --locked --no-default-features`, `wasm-pack build apps/piglor-world-client --target web --release -- --locked`, and `wasm-pack test apps/piglor-world-client --headless --chrome -- --locked`. The new CI job is named `world-client-wasm`, uses Rust 1.97.1, installs the WASM target/tool, and leaves existing CI jobs unchanged.
+**Interfaces:** The script must run `cargo check -p piglor-world-client --target wasm32-unknown-unknown --locked --no-default-features`, `wasm-pack build apps/piglor-world-client --target web --release -- --locked`, and `wasm-pack test --headless --chrome apps/piglor-world-client --locked --no-default-features --test wasm_parity`. The browser flags precede the crate path because `wasm-pack` 0.15 treats the path and all following tokens as Cargo arguments. The focused browser command runs only the reducer parity integration target without the optional Bevy runtime; the preceding optimized web build separately compiles the complete Bevy/WebGL2 shell. The new CI job is named `world-client-wasm`, uses Rust 1.97.1, installs the WASM target/tool, and leaves existing CI jobs unchanged.
 
 - [ ] Write a failing shell-contract test checking the WASM target, WebGL2 package path, and Chrome headless invocation.
 - [ ] Run it and verify the script/job are absent.
