@@ -53,6 +53,13 @@ can exhaust the runner's available resources and crash with `SIGBUS` before any
 test executes. Serialization changes throughput only: it does not remove a
 package, feature, test target, sanitizer, or coverage requirement.
 
+The job uses the dated `nightly-2026-07-01` toolchain rather than a floating
+nightly. The 2026-08-07 nightly (`rustc 1.99.0-nightly`) crashed its bundled
+lld with `SIGBUS` both with concurrent links and after Cargo serialization,
+before any test executed. The available pinned Rust 1.98 nightly candidate
+makes the sanitizer toolchain reproducible and avoids silently adopting that
+linker; a fresh remote run must still prove the candidate and complete gate.
+
 `scripts/check-asan-ci-policy.sh` enforces both the serialization setting and
 the unchanged ASan workspace test command by parsing the workflow's executable
 YAML semantics. Adversarial fixtures prove that disabled/non-failing steps,

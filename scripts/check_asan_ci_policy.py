@@ -12,7 +12,7 @@ import yaml
 EXPECTED_COMMAND = " ".join(
     (
         'RUSTFLAGS="-Z sanitizer=address"',
-        "cargo +nightly test --all-features --locked -Z build-std",
+        "cargo +nightly-2026-07-01 test --all-features --locked -Z build-std",
         "--target x86_64-unknown-linux-gnu --workspace --tests",
     )
 )
@@ -31,11 +31,11 @@ EXPECTED_SETUP_STEPS = [
     {"run": "rm -f rust-toolchain.toml"},
     {
         "uses": "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c",
-        "with": {"toolchain": "nightly", "components": "rust-src"},
+        "with": {"toolchain": "nightly-2026-07-01", "components": "rust-src"},
     },
     {
         "uses": "Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32",
-        "with": {"shared-key": "asan"},
+        "with": {"shared-key": "asan-nightly-2026-07-01"},
     },
 ]
 

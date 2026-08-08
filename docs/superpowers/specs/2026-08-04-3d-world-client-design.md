@@ -2,7 +2,7 @@
 
 **Redmine:** #115
 
-**Canonical decision:** ADR-018 version 20, Accepted
+**Canonical decision:** ADR-018 version 22, Accepted
 
 **CTO gate:** fresh `gpt-5.6-sol` review, APPROVE
 
@@ -88,6 +88,15 @@ instrumentation, unchanged test scope, and the exact pinned setup-step/job
 graph. The final test step accepts only its exact `name`, `env`, and `run`
 fields, so no prerequisite, environment-writing step, custom working directory,
 or nested Cargo configuration can bypass execution.
+
+Serialization alone did not resolve the failure: the floating 2026-08-07
+nightly (`rustc 1.99.0-nightly`) crashed one isolated lld link with the same
+`SIGBUS`. The ASan gate therefore pins `nightly-2026-07-01` (Rust 1.98 nightly)
+and uses a toolchain-specific cache key. This makes the unstable sanitizer
+toolchain reproducible and avoids silently adopting the observed crashing
+linker. The full command, scope, sanitizer flags, and serial execution remain
+unchanged apart from the dated toolchain selector, and fresh remote success is
+required.
 
 ## Rollback
 

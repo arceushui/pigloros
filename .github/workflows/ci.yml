@@ -211,11 +211,11 @@ jobs:
       - run: rm -f rust-toolchain.toml
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-07-01
           components: rust-src
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: asan
+          shared-key: asan-nightly-2026-07-01
       - name: cargo test with ASan
         env:
           RUSTC_BOOTSTRAP: "1"
@@ -225,7 +225,7 @@ jobs:
           CARGO_BUILD_JOBS: "1"
         run: >
           RUSTFLAGS="-Z sanitizer=address"
-          cargo +nightly test --all-features --locked -Z build-std --target x86_64-unknown-linux-gnu --workspace --tests
+          cargo +nightly-2026-07-01 test --all-features --locked -Z build-std --target x86_64-unknown-linux-gnu --workspace --tests
 
   docker-build:
     name: docker-build
