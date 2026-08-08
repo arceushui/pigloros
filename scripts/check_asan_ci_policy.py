@@ -11,6 +11,8 @@ import yaml
 
 EXPECTED_COMMAND = " ".join(
     (
+        'test -x "${LLVM_PATH}/bin/llvm-symbolizer" &&',
+        'ASAN_SYMBOLIZER_PATH="${LLVM_PATH}/bin/llvm-symbolizer"',
         'RUSTFLAGS="-Z sanitizer=address"',
         "cargo +nightly-2026-07-01 test --all-features --locked -Z build-std",
         "--target x86_64-unknown-linux-gnu --workspace --tests",
@@ -34,6 +36,14 @@ EXPECTED_SETUP_STEPS = [
     {
         "uses": "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c",
         "with": {"toolchain": "nightly-2026-07-01", "components": "rust-src"},
+    },
+    {
+        "uses": "KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0",
+        "with": {
+            "version": "18.1.8",
+            "directory": "${{ runner.temp }}/llvm-18.1.8",
+            "env": False,
+        },
     },
     {
         "uses": "Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32",
@@ -77,9 +87,9 @@ def check_workflow(workflow_path: pathlib.Path) -> None:
 
     steps = job.get("steps")
     require(isinstance(steps, list), "ASan job steps must be a list")
-    require(len(steps) == 5, "ASan job must contain the exact trusted step sequence")
+    require(len(steps) == 6, "ASan job must contain the exact trusted step sequence")
     require(
-        steps[:4] == EXPECTED_SETUP_STEPS,
+        steps[:5] == EXPECTED_SETUP_STEPS,
         "ASan setup steps must match the exact pinned trusted sequence",
     )
     test_steps = [
@@ -89,7 +99,7 @@ def check_workflow(workflow_path: pathlib.Path) -> None:
     ]
     require(len(test_steps) == 1, "ASan job must contain exactly one named test step")
     step = test_steps[0]
-    require(step is steps[4], "ASan test must be the final trusted step")
+    require(step is steps[5], "ASan test must be the final trusted step")
     require(
         set(step) == {"name", "env", "run"},
         "ASan test step must contain exactly name, env, and run",

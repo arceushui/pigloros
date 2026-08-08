@@ -162,9 +162,36 @@ class AsanCiPolicyTests(unittest.TestCase):
 
         self.assert_rejected(float_cargo_selector)
 
+    def test_requires_pinned_symbolizer_installer(self) -> None:
+        def float_symbolizer_installer(workflow: dict) -> None:
+            symbolizer_step = workflow["jobs"]["asan"]["steps"][3]
+            symbolizer_step["uses"] = "KyleMayes/install-llvm-action@v2"
+
+        self.assert_rejected(float_symbolizer_installer)
+
+    def test_requires_symbolizer_executable_preflight(self) -> None:
+        def remove_symbolizer_preflight(workflow: dict) -> None:
+            test_step = self.asan_step(workflow)
+            test_step["run"] = test_step["run"].replace(
+                'test -x "${LLVM_PATH}/bin/llvm-symbolizer" && ',
+                "",
+            )
+
+        self.assert_rejected(remove_symbolizer_preflight)
+
+    def test_requires_pinned_symbolizer_path(self) -> None:
+        def change_symbolizer_path(workflow: dict) -> None:
+            test_step = self.asan_step(workflow)
+            test_step["run"] = test_step["run"].replace(
+                'ASAN_SYMBOLIZER_PATH="${LLVM_PATH}/bin/llvm-symbolizer"',
+                'ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer"',
+            )
+
+        self.assert_rejected(change_symbolizer_path)
+
     def test_rejects_undated_cache_key(self) -> None:
         def remove_cache_date(workflow: dict) -> None:
-            cache_step = workflow["jobs"]["asan"]["steps"][3]
+            cache_step = workflow["jobs"]["asan"]["steps"][4]
             cache_step["with"]["shared-key"] = "asan"
 
         self.assert_rejected(remove_cache_date)
