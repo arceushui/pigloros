@@ -6,13 +6,13 @@
 
 **Architecture:** Add `apps/piglor-world-client` as a Bevy `=0.19.0` app with a pure library boundary. The library decodes a fixed `TimelineExport`, folds complete `Event` values through `pos-state::ProjectionRegistry` with the existing society reducer, and returns a stable `ProjectionDigest`; the Bevy shell renders one landmark and owns camera/input/window behavior. The first slice makes no HTTP request and does not depend on `pos-store`.
 
-**Tech Stack:** Rust workspace, Bevy `=0.19.0` (`3d` + `webgl2`, no `webgpu`), `pos-core`, `pos-state`, `pos-plugin-society`, `ciborium`, `blake3`, `wasm-bindgen`, `wasm-bindgen-test`, `wasm-pack`, headless Chrome.
+**Tech Stack:** Rust workspace, Bevy `=0.19.0` (explicit `3d` rendering/app composition + `x11` + `webgl2`, no Wayland or `webgpu`), `pos-core`, `pos-state`, `pos-plugin-society`, `ciborium`, `blake3`, `wasm-bindgen`, `wasm-bindgen-test`, `wasm-pack`, headless Chrome.
 
 ## Global Constraints
 
 - Work only in `/root/pigloros-ticket-115-3d-world-client` on `ticket-115-3d-world-client`; preserve the separate #169 worktree.
 - Do not add `pos-store`, SQLite, browser HTTP, EventView protocol changes, Gateway routes, Event schemas, migrations, backfills, dual-writes, auth capabilities, physics, or presence.
-- Pin `bevy = { version = "=0.19.0", default-features = false, features = ["3d", "webgl2"] }`; do not select `webgpu`.
+- Pin Bevy `=0.19.0`; compose the accepted 3D app explicitly with X11/WebGL2 so the broad `3d` convenience feature cannot pull unsupported Wayland. Do not select `webgpu` or ignore dependency advisories.
 - Every production behavior starts with a failing test; run the focused test after each red/green cycle.
 - Do not use production `coverage(off)`; all new production branches need tests and the workspace floor remains at least 99% lines and regions.
 - Use shared `CARGO_TARGET_DIR=/root/pigloros/target` to avoid duplicate Rust artifacts and disk exhaustion.
@@ -60,7 +60,7 @@
 
 **Files:** Create `scripts/check-world-client-wasm.sh`. Modify `.github/workflows/ci.yml` and `README.md`.
 
-**Interfaces:** The script must run `cargo check -p piglor-world-client --target wasm32-unknown-unknown --locked --no-default-features`, `wasm-pack build apps/piglor-world-client --target web --release -- --locked`, and `wasm-pack test --headless --chrome apps/piglor-world-client --locked --no-default-features --test wasm_parity`. The browser flags precede the crate path because `wasm-pack` 0.15 treats the path and all following tokens as Cargo arguments. The focused browser command runs only the reducer parity integration target without the optional Bevy runtime; the preceding optimized web build separately compiles the complete Bevy/WebGL2 shell. The new CI job is named `world-client-wasm`, uses Rust 1.97.1, installs the WASM target/tool, and leaves existing CI jobs unchanged.
+**Interfaces:** The script must run `cargo check -p piglor-world-client --target wasm32-unknown-unknown --locked --no-default-features`, `wasm-pack build apps/piglor-world-client --target web --release -- --locked`, and `wasm-pack test --headless --chrome apps/piglor-world-client --locked --no-default-features --test wasm_parity`. The browser flags precede the crate path because `wasm-pack` 0.15 treats the path and all following tokens as Cargo arguments. The focused browser command runs only the reducer parity integration target without the optional Bevy runtime; the preceding optimized web build separately compiles the complete Bevy/WebGL2 shell. The script defaults to `all` locally and exposes `package` and `browser` modes so required CI jobs `world-client-wasm` and `world-client-browser-parity` run on independent fresh runners. Both use Rust 1.97.1 and install the WASM target/tool; the browser job additionally installs pinned Chrome/ChromeDriver.
 
 - [ ] Write a failing shell-contract test checking the WASM target, WebGL2 package path, and Chrome headless invocation.
 - [ ] Run it and verify the script/job are absent.

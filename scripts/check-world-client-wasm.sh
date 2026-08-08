@@ -19,6 +19,20 @@ fi
 wasm_rustflags+='--cfg getrandom_backend="wasm_js"'
 export RUSTFLAGS="$wasm_rustflags"
 
-cargo check -p piglor-world-client --target wasm32-unknown-unknown --locked --no-default-features
-wasm-pack build apps/piglor-world-client --target web --release -- --locked
-wasm-pack test --headless --chrome apps/piglor-world-client --locked --no-default-features --test wasm_parity
+mode="${1:-all}"
+case "$mode" in
+  all | package | browser) ;;
+  *)
+    printf 'usage: %s [all|package|browser]\n' "$0" >&2
+    exit 2
+    ;;
+esac
+
+if [[ "$mode" == "all" || "$mode" == "package" ]]; then
+  cargo check -p piglor-world-client --target wasm32-unknown-unknown --locked --no-default-features
+  wasm-pack build apps/piglor-world-client --target web --release -- --locked
+fi
+
+if [[ "$mode" == "all" || "$mode" == "browser" ]]; then
+  wasm-pack test --headless --chrome apps/piglor-world-client --locked --no-default-features --test wasm_parity
+fi

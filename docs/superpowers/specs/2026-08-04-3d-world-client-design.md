@@ -12,7 +12,7 @@ Add the smallest walkable, game-like 3D client that proves PiglorOS can render a
 
 ## Hard boundaries
 
-- Pin Bevy to `=0.19.0` with `3d` and `webgl2` features. Do not enable `webgpu`.
+- Pin Bevy to `=0.19.0` with the `3d` feature's rendering/app composition expressed explicitly, plus `webgl2` and the X11 native smoke backend. Do not enable `webgpu` or the unsupported Wayland backend.
 - Use complete, fixed `pos_core::TimelineExport`/`Event` values as the first-slice fixture. Do not consume the gateway JSON `EventView`, because it omits fields required to reconstruct `pos_core::Event`.
 - Keep fold/projection logic pure Rust and shared with the existing `pos-core`/`pos-state`/plugin reducer boundary. The browser must not open `pos-store` or any database.
 - Do not add browser HTTP, a public spectator-router route, a new Event type, Timeline schema, migration, backfill, dual-write, gateway write route, authentication capability, physics backend, or presence protocol.
@@ -37,6 +37,10 @@ pure fixture adapter -> shared reducer registry -> ProjectionDigest
 The fixture adapter owns construction/validation of the complete Event values and provides a deterministic sequence to the reducer registry. The projection maps one selected domain signal to a stable landmark/geometry value. The Bevy shell consumes the projection and owns only camera, movement, pointer lock, input, scene setup, and rendering. No platform API is used by the reducer or projection modules.
 
 The browser test and native test call the same pure projection function with the same fixture bytes and assert one stable digest. This proves cross-target domain/projection parity; it does not claim that gateway transport is implemented.
+
+The convenience `3d` feature is not selected directly because Bevy 0.19 couples it to `default_platform`, which enables both X11 and Wayland. The product target is WebGL2 and the native verification target is X11; retaining Wayland would add an unmaintained `ttf-parser` chain (`RUSTSEC-2026-0192`) and require native Wayland development packages in every Rust CI job. The manifest therefore selects `3d_bevy_render`, `default_app`, `scene`, `picking`, the required runtime facilities, `bevy_winit`, `x11`, and `webgl2` explicitly. This changes neither the 3D shell nor the accepted browser scope. The dependency policy permits the SPDX `MIT-0` license used by Bevy's `encase` crates; advisory enforcement remains unchanged and no advisory is ignored.
+
+Remote CI runs the optimized full-shell package and the real-Chrome parity test as independent required jobs. The first combined-run evidence showed the package succeeding before ChromeDriver was OOM-killed on the reused runner. A fresh browser-parity runner isolates that lightweight test from the full Bevy optimizer while the local script's default `all` mode continues to run both stages sequentially.
 
 ## Initial user-visible slice
 
