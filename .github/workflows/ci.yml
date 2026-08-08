@@ -223,6 +223,10 @@ jobs:
           # ASan + build-std produces unusually large links. Serialize them so
           # hosted-runner memory pressure cannot crash concurrent lld workers.
           CARGO_BUILD_JOBS: "1"
+          # Policy-lock the toolchain action's no-incremental default and use
+          # line-level backtraces to reduce full-debug artifact storage.
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_TEST_DEBUG: line-tables-only
         run: >
           RUSTFLAGS="-Z sanitizer=address"
           cargo +nightly-2026-07-01 test --all-features --locked -Z build-std --target x86_64-unknown-linux-gnu --workspace --tests

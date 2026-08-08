@@ -169,6 +169,20 @@ class AsanCiPolicyTests(unittest.TestCase):
 
         self.assert_rejected(remove_cache_date)
 
+    def test_requires_incremental_artifacts_disabled(self) -> None:
+        self.assert_rejected(
+            lambda workflow: self.asan_step(workflow)["env"].pop(
+                "CARGO_INCREMENTAL", None
+            )
+        )
+
+    def test_requires_line_table_debuginfo(self) -> None:
+        self.assert_rejected(
+            lambda workflow: self.asan_step(workflow)["env"].pop(
+                "CARGO_PROFILE_TEST_DEBUG", None
+            )
+        )
+
     def test_rejects_no_run(self) -> None:
         self.assert_rejected(
             lambda workflow: self.append_to_command(workflow, " --no-run")

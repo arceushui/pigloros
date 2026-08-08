@@ -24,6 +24,8 @@ EXPECTED_STEP_ENV = {
     "RUSTC_BOOTSTRAP": "1",
     "ASAN_OPTIONS": "detect_leaks=1:detect_odr_violation=0",
     "CARGO_BUILD_JOBS": "1",
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "line-tables-only",
 }
 EXPECTED_JOB_KEYS = {"name", "runs-on", "timeout-minutes", "steps"}
 EXPECTED_SETUP_STEPS = [

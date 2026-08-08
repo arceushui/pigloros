@@ -2,7 +2,7 @@
 
 **Redmine:** #115
 
-**Canonical decision:** ADR-018 version 22, Accepted
+**Canonical decision:** ADR-018 version 24, Accepted
 
 **CTO gate:** fresh `gpt-5.6-sol` review, APPROVE
 
@@ -97,6 +97,16 @@ toolchain reproducible and avoids silently adopting the observed crashing
 linker. The full command, scope, sanitizer flags, and serial execution remain
 unchanged apart from the dated toolchain selector, and fresh remote success is
 required.
+
+The dated candidate exposed the definitive hosted-runner cause: its check
+annotation reported `No space left on device`. The ASan step therefore disables
+incremental artifacts and selects `line-tables-only` for the Cargo test profile.
+The pinned toolchain action already exported `CARGO_INCREMENTAL=0` in the failed
+run; declaring it in the step only policy-locks that existing behavior. The new
+storage-reduction candidate is `line-tables-only`, which preserves filename/line
+backtraces while removing full type/variable debug metadata. Sanitizer flags,
+debug assertions, packages, features, test targets, and execution scope remain
+unchanged; fresh remote success is required.
 
 ## Rollback
 

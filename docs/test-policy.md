@@ -60,6 +60,16 @@ before any test executed. The available pinned Rust 1.98 nightly candidate
 makes the sanitizer toolchain reproducible and avoids silently adopting that
 linker; a fresh remote run must still prove the candidate and complete gate.
 
+The dated candidate reached a definitive hosted-runner failure annotation:
+`No space left on device`. ASan did not report a product defect, and no test
+failed. The pinned toolchain action already exported `CARGO_INCREMENTAL=0` in
+the failed run, so the explicit step setting policy-locks existing behavior; it
+is not credited as a new size reduction. The new candidate is the test profile's
+`line-tables-only` debuginfo, which Cargo documents as retaining filename/line
+backtraces without full type and variable metadata. This changes artifact size
+only; sanitizer instrumentation, debug assertions, packages, features, test
+targets, and execution scope remain.
+
 `scripts/check-asan-ci-policy.sh` enforces both the serialization setting and
 the unchanged ASan workspace test command by parsing the workflow's executable
 YAML semantics. Adversarial fixtures prove that disabled/non-failing steps,
