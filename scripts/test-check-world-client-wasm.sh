@@ -58,8 +58,12 @@ assert_browser_job_contains() {
 assert_browser_job_contains 'toolchain: 1.97.1'
 assert_browser_job_contains 'rustup target add wasm32-unknown-unknown'
 assert_browser_job_contains 'tool: wasm-pack@0.15.0'
+assert_browser_job_contains 'id: setup-chrome'
 assert_browser_job_contains 'chrome-version: 151.0.7922.47'
 assert_browser_job_contains 'install-chromedriver: true'
+assert_browser_job_contains 'steps.setup-chrome.outputs.chrome-path'
+assert_browser_job_contains '"goog:chromeOptions": {"binary": $binary}'
+assert_browser_job_contains 'WASM_BINDGEN_TEST_WEBDRIVER_JSON:'
 assert_browser_job_contains 'bash scripts/check-world-client-wasm.sh browser'
 
 grep -Fq 'bash "$ROOT/scripts/check-world-client-wasm.sh"' "$local_ci" \

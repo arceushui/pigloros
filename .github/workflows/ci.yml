@@ -369,10 +369,21 @@ jobs:
           tool: wasm-pack@0.15.0
 
       - name: Install Chrome and ChromeDriver
+        id: setup-chrome
         uses: browser-actions/setup-chrome@2e1d749697dd1612b833dba4a722266286fbefcd # v2.1.2
         with:
           chrome-version: 151.0.7922.47
           install-chromedriver: true
 
+      - name: Configure Chrome binary for wasm-bindgen
+        env:
+          CHROME_PATH: ${{ steps.setup-chrome.outputs.chrome-path }}
+          WEBDRIVER_CONFIG: ${{ runner.temp }}/world-client-webdriver.json
+        run: |
+          jq -n --arg binary "$CHROME_PATH" \
+            '{"goog:chromeOptions": {"binary": $binary}}' > "$WEBDRIVER_CONFIG"
+
       - name: Check world-client browser parity
+        env:
+          WASM_BINDGEN_TEST_WEBDRIVER_JSON: ${{ runner.temp }}/world-client-webdriver.json
         run: bash scripts/check-world-client-wasm.sh browser
