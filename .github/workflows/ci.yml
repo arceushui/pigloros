@@ -55,6 +55,12 @@ jobs:
       - name: Test pinned dependency checker
         run: bash scripts/test-check-pinned-dependencies.sh
 
+      - name: Check ASan CI policy
+        run: bash scripts/check-asan-ci-policy.sh
+
+      - name: Test ASan CI policy checker
+        run: python scripts/test_check_asan_ci_policy.py
+
   fmt:
     name: fmt
     runs-on: ubuntu-latest
@@ -214,6 +220,9 @@ jobs:
         env:
           RUSTC_BOOTSTRAP: "1"
           ASAN_OPTIONS: detect_leaks=1:detect_odr_violation=0
+          # ASan + build-std produces unusually large links. Serialize them so
+          # hosted-runner memory pressure cannot crash concurrent lld workers.
+          CARGO_BUILD_JOBS: "1"
         run: >
           RUSTFLAGS="-Z sanitizer=address"
           cargo +nightly test --all-features --locked -Z build-std --target x86_64-unknown-linux-gnu --workspace --tests

@@ -2,7 +2,7 @@
 
 **Redmine:** #115
 
-**Canonical decision:** ADR-018 version 15, Accepted
+**Canonical decision:** ADR-018 version 20, Accepted
 
 **CTO gate:** fresh `gpt-5.6-sol` review, APPROVE
 
@@ -75,6 +75,19 @@ Bevy `DefaultPlugins` but uses Bevy's documented no-renderer configuration
 test runner. No test is ignored and no production line is excluded from
 coverage. The optimized WASM package compiles the full production renderer;
 the separate browser-parity job exercises the client contract in real Chrome.
+
+The full-workspace ASan job keeps its complete `--all-features --workspace
+--tests` scope and address-sanitizer instrumentation. Because ASan with
+`build-std` creates unusually large native links, Cargo build/link concurrency
+is fixed at one on hosted runners. This mitigates the observed concurrent lld
+`SIGBUS` by reducing peak link pressure; a fresh remote ASan run must prove the
+checkpoint. It is a throughput control, not a test waiver. A parsed-YAML policy
+check and adversarial fixtures verify serialization, unconditional failure
+semantics, exact effective environment and command structure, sanitizer
+instrumentation, unchanged test scope, and the exact pinned setup-step/job
+graph. The final test step accepts only its exact `name`, `env`, and `run`
+fields, so no prerequisite, environment-writing step, custom working directory,
+or nested Cargo configuration can bypass execution.
 
 ## Rollback
 

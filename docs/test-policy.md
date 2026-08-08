@@ -44,6 +44,24 @@ disabling Winit. The optimized WASM package gate compiles the full production
 renderer, and browser parity executes in real headless Chrome. Native GPU
 device creation itself is not portable on GitHub's hosted GPU-less runners.
 
+## Resource-intensive sanitizer jobs
+
+The complete workspace ASan gate retains `--all-features`, `--workspace`, and
+`--tests`, but serializes Cargo build/link jobs on hosted runners. ASan plus
+`build-std` produces unusually large test-binary links; concurrent lld workers
+can exhaust the runner's available resources and crash with `SIGBUS` before any
+test executes. Serialization changes throughput only: it does not remove a
+package, feature, test target, sanitizer, or coverage requirement.
+
+`scripts/check-asan-ci-policy.sh` enforces both the serialization setting and
+the unchanged ASan workspace test command by parsing the workflow's executable
+YAML semantics. Adversarial fixtures prove that disabled/non-failing steps,
+environment-based test runners, detached sanitizer flags, `--no-run`, shell
+success overrides, skipped prerequisites, injected setup steps, and test-skip
+arguments are rejected. The ASan job graph and pinned setup-step sequence must
+match exactly, and the final test step may contain only `name`, `env`, and
+`run` so it cannot select a nested Cargo configuration.
+
 ## Local setup
 
 ```bash
