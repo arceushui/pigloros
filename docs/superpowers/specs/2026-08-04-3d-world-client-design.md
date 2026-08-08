@@ -2,7 +2,7 @@
 
 **Redmine:** #115
 
-**Canonical decision:** ADR-018 version 7, Accepted
+**Canonical decision:** ADR-018 version 15, Accepted
 
 **CTO gate:** fresh `gpt-5.6-sol` review, APPROVE
 
@@ -67,6 +67,14 @@ scripts/ci.sh
 ```
 
 The repository remains at least 99% line and region coverage, with no production coverage exemptions. Existing workspace `--all-features` CI remains authoritative; the client dependency does not expose a WebGPU feature, so `--all-features` cannot select it.
+
+Native unit and coverage jobs execute the public builder and runner without
+requiring hosted-runner GPU hardware. Under `cfg(test)`, the client retains
+Bevy `DefaultPlugins` but uses Bevy's documented no-renderer configuration
+(`WgpuSettings { backends: None }`), disables Winit, and installs a terminating
+test runner. No test is ignored and no production line is excluded from
+coverage. The optimized WASM package compiles the full production renderer;
+the separate browser-parity job exercises the client contract in real Chrome.
 
 ## Rollback
 

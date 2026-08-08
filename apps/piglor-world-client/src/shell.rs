@@ -86,7 +86,16 @@ pub fn build_app(digest: ProjectionDigest) -> App {
 fn add_default_plugins(app: &mut App) {
     let plugins = DefaultPlugins.set(window_plugin());
     #[cfg(test)]
-    let plugins = plugins.disable::<bevy::winit::WinitPlugin>();
+    let plugins = plugins
+        .set(bevy::render::RenderPlugin {
+            render_creation: bevy::render::settings::WgpuSettings {
+                backends: None,
+                ..default()
+            }
+            .into(),
+            ..default()
+        })
+        .disable::<bevy::winit::WinitPlugin>();
     app.add_plugins(plugins);
     #[cfg(test)]
     app.set_runner(|_| bevy::app::AppExit::Success);

@@ -28,6 +28,22 @@ reporting-tolerance only: all tests still run with `--include-ignored`, and
 `coverage(off)` remains test-only. Do not use the allowance to exempt
 production code or avoid writing a reachable behavior test.
 
+## Hardware-dependent startup
+
+Portable unit and coverage jobs must not require a physical GPU, display server,
+audio device, or other host hardware. Tests still execute the public startup
+path, but hardware adapters must use the framework's supported headless or
+no-device configuration under `cfg(test)`. This is not a skipped test or a
+coverage exemption: production code remains instrumented, the package/build
+gate compiles the production adapter, and a real-device integration gate must
+exercise behavior where CI can provide that device.
+
+For the Bevy world client, unit/coverage builds retain `DefaultPlugins` while
+using Bevy's documented no-renderer `WgpuSettings { backends: None }` setup and
+disabling Winit. The optimized WASM package gate compiles the full production
+renderer, and browser parity executes in real headless Chrome. Native GPU
+device creation itself is not portable on GitHub's hosted GPU-less runners.
+
 ## Local setup
 
 ```bash
