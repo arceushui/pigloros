@@ -44,17 +44,17 @@ def report(*rows: str) -> str:
 class LsanSuppressionReportTests(unittest.TestCase):
     def test_accepts_one_approved_row_and_returns_measurements(self) -> None:
         self.assertEqual(
-            CHECKER.check_report(report(f"    370      38078 {TEMPLATE}")),
-            (370, 38_078),
+            CHECKER.check_report(report(f"    754      93042 {TEMPLATE}")),
+            (754, 93_042),
         )
 
     def test_ignores_numeric_test_output_outside_the_suppression_table(self) -> None:
         self.assertEqual(
             CHECKER.check_report(
                 "123 456 unrelated test output\n"
-                + report(f"    370      38078 {TEMPLATE}")
+                + report(f"    754      93042 {TEMPLATE}")
             ),
-            (370, 38_078),
+            (754, 93_042),
         )
 
     def test_rejects_missing_table(self) -> None:
@@ -62,7 +62,7 @@ class LsanSuppressionReportTests(unittest.TestCase):
             CHECKER.check_report("test result: ok")
 
     def test_rejects_duplicate_table(self) -> None:
-        table = report(f"    370      38078 {TEMPLATE}")
+        table = report(f"    754      93042 {TEMPLATE}")
         with self.assertRaises(CHECKER.ReportError):
             CHECKER.check_report(f"{table}\n{table}")
 
@@ -70,7 +70,7 @@ class LsanSuppressionReportTests(unittest.TestCase):
         with self.assertRaises(CHECKER.ReportError):
             CHECKER.check_report(
                 report(
-                    f"    370      38078 {TEMPLATE}",
+                    f"    754      93042 {TEMPLATE}",
                     "      1       1234 unrelated::*",
                 )
             )
@@ -83,8 +83,16 @@ class LsanSuppressionReportTests(unittest.TestCase):
         with self.assertRaises(CHECKER.ReportError):
             CHECKER.check_report(report(f"      0          0 {TEMPLATE}"))
 
+    def test_rejects_type_info_root_count_drift(self) -> None:
+        with self.assertRaises(CHECKER.ReportError):
+            CHECKER.check_report(report(f"    753      93042 {TEMPLATE}"))
+
+    def test_rejects_type_info_byte_count_drift(self) -> None:
+        with self.assertRaises(CHECKER.ReportError):
+            CHECKER.check_report(report(f"    754      93041 {TEMPLATE}"))
+
     def test_pipefail_propagates_a_failing_sanitizer_process(self) -> None:
-        valid_report = report(f"    370      38078 {TEMPLATE}")
+        valid_report = report(f"    754      93042 {TEMPLATE}")
         producer = shlex.join(
             [
                 sys.executable,

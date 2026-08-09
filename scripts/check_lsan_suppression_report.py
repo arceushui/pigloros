@@ -12,6 +12,8 @@ EXPECTED_TEMPLATE = (
     "^<bevy_reflect::utility::GenericTypeCell<"
     "bevy_reflect::type_info::TypeInfo>>::get_or_insert_by_type_id::*$"
 )
+EXPECTED_COUNT = 754
+EXPECTED_BYTES = 93_042
 ROW = re.compile(r"^\s*(\d+)\s+(\d+)\s+(.+?)\s*$", re.MULTILINE)
 
 
@@ -39,8 +41,12 @@ def check_report(report: str) -> tuple[int, int]:
     count, size, template = rows[0]
     if template != EXPECTED_TEMPLATE:
         raise ReportError("suppression template changed")
-    if count <= 0 or size <= 0:
-        raise ReportError("suppression measurements must be positive")
+    if (count, size) != (EXPECTED_COUNT, EXPECTED_BYTES):
+        raise ReportError(
+            "TypeInfo suppression measurement drift: "
+            f"expected count={EXPECTED_COUNT} bytes={EXPECTED_BYTES}, "
+            f"got count={count} bytes={size}"
+        )
     return count, size
 
 
