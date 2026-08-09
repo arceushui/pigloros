@@ -48,10 +48,16 @@ class AsanCiPolicyTests(unittest.TestCase):
         CHECKER.check_workflow(ROOT / ".github" / "workflows" / "ci.yml")
 
     def test_repository_has_only_the_two_approved_suppressions(self) -> None:
-        self.assertEqual(
-            SUPPRESSION_PATH.read_text(encoding="utf-8"),
-            EXPECTED_SUPPRESSION,
-        )
+        CHECKER.check_suppression_file(SUPPRESSION_PATH)
+
+    def test_policy_checker_rejects_changed_suppression_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            suppression = pathlib.Path(directory) / "bevy-reflect.lsan"
+            suppression.write_text(
+                EXPECTED_SUPPRESSION + "leak:GenericTypeCell*\n", encoding="utf-8"
+            )
+            with self.assertRaises(CHECKER.PolicyError):
+                CHECKER.check_suppression_file(suppression)
 
     def test_repository_has_the_intentional_leak_fixture(self) -> None:
         self.assertEqual(

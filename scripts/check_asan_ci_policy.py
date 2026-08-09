@@ -9,6 +9,12 @@ import sys
 import yaml
 
 
+EXPECTED_SUPPRESSION = (
+    "leak:^<bevy_reflect::utility::GenericTypeCell<"
+    "bevy_reflect::type_info::TypeInfo>>::get_or_insert_by_type_id::*$\n"
+    "leak:^<bevy_reflect::utility::GenericTypeCell<"
+    "bevy_reflect::utility::TypePathComponent>>::get_or_insert_by_type_id::*$\n"
+).encode()
 EXPECTED_COMMAND = """set -euo pipefail
 test -x "/usr/bin/llvm-symbolizer-18"
 ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \\
@@ -92,7 +98,17 @@ def require(condition: bool, message: str) -> None:
         raise PolicyError(message)
 
 
+def check_suppression_file(suppression_path: pathlib.Path) -> None:
+    require(
+        suppression_path.read_bytes() == EXPECTED_SUPPRESSION,
+        "LSan suppression file must contain exactly the two approved anchored lines",
+    )
+
+
 def check_workflow(workflow_path: pathlib.Path) -> None:
+    check_suppression_file(
+        pathlib.Path(__file__).resolve().parent / "asan" / "bevy-reflect.lsan"
+    )
     with workflow_path.open(encoding="utf-8") as stream:
         workflow = yaml.safe_load(stream)
 

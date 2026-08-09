@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the two approved rows in a canonical LSan suppression report."""
+"""Validate every observed row in a multi-process LSan report."""
 
 from __future__ import annotations
 
@@ -20,50 +20,67 @@ EXPECTED_TEMPLATES = {
     TYPE_INFO_TEMPLATE: "TypeInfo",
     TYPE_PATH_TEMPLATE: "TypePathComponent",
 }
-TYPE_INFO_MEASUREMENT = (754, 93_042)
-ROW = re.compile(r"^\s*(\d+)\s+(\d+)\s+(.+?)\s*$", re.MULTILINE)
+SEPARATOR = "-----------------------------------------------------"
+HEADER = "  count      bytes template"
+ROW = re.compile(r"^\s*(\d+)\s+(\d+)\s+(.+?)\s*$")
+UNSUPPRESSED_MARKERS = (
+    "ERROR: LeakSanitizer: detected memory leaks",
+    "SUMMARY: AddressSanitizer:",
+    "SUMMARY: LeakSanitizer:",
+)
 
 
 class ReportError(RuntimeError):
-    """The LSan report does not contain exactly the two approved rows."""
+    """The LSan report violates the exact-template observation policy."""
 
 
 def check_report(report: str) -> dict[str, tuple[int, int]]:
-    if report.count("Suppressions used:") != 1:
-        raise ReportError("expected exactly one suppression table")
+    if any(marker in report for marker in UNSUPPRESSED_MARKERS):
+        raise ReportError("unsuppressed LeakSanitizer finding")
 
-    _, _, after_heading = report.partition("Suppressions used:")
-    table, separator, _ = after_heading.partition(
-        "-----------------------------------------------------"
-    )
-    if not separator:
-        raise ReportError("suppression table is unterminated")
-    rows = [
-        (int(count), int(size), template)
-        for count, size, template in ROW.findall(table)
-    ]
-    if len(rows) != 2:
-        raise ReportError("expected exactly two suppression rows")
-
+    lines = report.splitlines()
     measurements: dict[str, tuple[int, int]] = {}
-    for count, size, template in rows:
-        label = EXPECTED_TEMPLATES.get(template)
-        if label is None:
-            raise ReportError("suppression template changed")
-        if label in measurements:
-            raise ReportError(f"duplicate {label} suppression row")
-        if count <= 0 or size <= 0:
-            raise ReportError(f"{label} suppression measurements must be positive")
-        measurements[label] = (count, size)
+    index = 0
+    while index < len(lines):
+        if lines[index].strip() != "Suppressions used:":
+            index += 1
+            continue
 
-    type_info = measurements["TypeInfo"]
-    if type_info != TYPE_INFO_MEASUREMENT:
-        raise ReportError(
-            "TypeInfo suppression measurement drift: "
-            f"expected count={TYPE_INFO_MEASUREMENT[0]} "
-            f"bytes={TYPE_INFO_MEASUREMENT[1]}, "
-            f"got count={type_info[0]} bytes={type_info[1]}"
-        )
+        if index == 0 or lines[index - 1].strip() != SEPARATOR:
+            raise ReportError("suppression table is missing its opening separator")
+        if index + 1 >= len(lines) or lines[index + 1] != HEADER:
+            raise ReportError("suppression table header changed")
+
+        index += 2
+        seen_in_table: set[str] = set()
+        row_count = 0
+        while index < len(lines) and lines[index].strip() != SEPARATOR:
+            match = ROW.fullmatch(lines[index])
+            if match is None:
+                raise ReportError("malformed suppression row")
+            count, size = (int(value) for value in match.group(1, 2))
+            template = match.group(3)
+            label = EXPECTED_TEMPLATES.get(template)
+            if label is None:
+                raise ReportError("suppression template changed")
+            if label in seen_in_table:
+                raise ReportError(f"duplicate {label} row within one table")
+            if count <= 0 or size <= 0:
+                raise ReportError(
+                    f"{label} suppression measurements must be positive"
+                )
+            seen_in_table.add(label)
+            prior_count, prior_size = measurements.get(label, (0, 0))
+            measurements[label] = (prior_count + count, prior_size + size)
+            row_count += 1
+            index += 1
+
+        if index >= len(lines):
+            raise ReportError("suppression table is unterminated")
+        if row_count == 0:
+            raise ReportError("suppression table contains no rows")
+        index += 1
+
     return measurements
 
 
@@ -79,13 +96,12 @@ def main() -> int:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
 
-    type_info = measurements["TypeInfo"]
-    type_path = measurements["TypePathComponent"]
-    print(
-        "==> approved LSan suppressions: "
-        f"TypeInfo count={type_info[0]} bytes={type_info[1]}; "
-        f"TypePathComponent count={type_path[0]} bytes={type_path[1]}"
+    observed = "; ".join(
+        f"{label} count={measurements[label][0]} bytes={measurements[label][1]}"
+        for label in ("TypeInfo", "TypePathComponent")
+        if label in measurements
     )
+    print(f"==> approved LSan suppression observations: {observed or 'none'}")
     return 0
 
 

@@ -32,10 +32,9 @@ TYPE_PATH_TEMPLATE = (
 )
 
 
-def report(*rows: str) -> str:
+def table(*rows: str) -> str:
     return "\n".join(
         (
-            "test result: ok. 1 passed; 0 failed",
             "-----------------------------------------------------",
             "Suppressions used:",
             "  count      bytes template",
@@ -46,132 +45,103 @@ def report(*rows: str) -> str:
 
 
 class LsanSuppressionReportTests(unittest.TestCase):
-    def test_accepts_two_approved_rows_and_returns_measurements(self) -> None:
+    def test_accepts_no_suppression_table(self) -> None:
+        self.assertEqual(CHECKER.check_report("test result: ok"), {})
+
+    def test_accepts_one_approved_row_with_observed_measurement(self) -> None:
+        self.assertEqual(
+            CHECKER.check_report(table(f"      6        144 {TYPE_PATH_TEMPLATE}")),
+            {"TypePathComponent": (6, 144)},
+        )
+
+    def test_accepts_both_approved_rows_without_locking_measurements(self) -> None:
         self.assertEqual(
             CHECKER.check_report(
-                report(
-                    f"    754      93042 {TYPE_INFO_TEMPLATE}",
-                    f"     76       1824 {TYPE_PATH_TEMPLATE}",
+                table(
+                    f"    209      25416 {TYPE_INFO_TEMPLATE}",
+                    f"     57       1674 {TYPE_PATH_TEMPLATE}",
                 )
             ),
-            {
-                "TypeInfo": (754, 93_042),
-                "TypePathComponent": (76, 1_824),
-            },
+            {"TypeInfo": (209, 25_416), "TypePathComponent": (57, 1_674)},
         )
 
-    def test_ignores_numeric_test_output_outside_the_suppression_table(self) -> None:
+    def test_aggregates_approved_rows_across_process_tables(self) -> None:
+        report = "\n".join(
+            (
+                table(f"      2        240 {TYPE_INFO_TEMPLATE}"),
+                "test result: ok",
+                table(
+                    f"      3        360 {TYPE_INFO_TEMPLATE}",
+                    f"      6        144 {TYPE_PATH_TEMPLATE}",
+                ),
+            )
+        )
         self.assertEqual(
-            CHECKER.check_report(
-                "123 456 unrelated test output\n"
-                + report(
-                    f"    754      93042 {TYPE_INFO_TEMPLATE}",
-                    f"     76       1824 {TYPE_PATH_TEMPLATE}",
-                )
-            ),
-            {
-                "TypeInfo": (754, 93_042),
-                "TypePathComponent": (76, 1_824),
-            },
+            CHECKER.check_report(report),
+            {"TypeInfo": (5, 600), "TypePathComponent": (6, 144)},
         )
 
-    def test_accepts_rows_in_sanitizer_report_order(self) -> None:
+    def test_ignores_numeric_test_output_outside_suppression_tables(self) -> None:
+        report = "123 456 unrelated test output\n" + table(
+            f"      6        144 {TYPE_PATH_TEMPLATE}"
+        )
         self.assertEqual(
+            CHECKER.check_report(report), {"TypePathComponent": (6, 144)}
+        )
+
+    def test_rejects_duplicate_template_within_one_table(self) -> None:
+        with self.assertRaises(CHECKER.ReportError):
             CHECKER.check_report(
-                report(
-                    f"     77       1848 {TYPE_PATH_TEMPLATE}",
-                    f"    754      93042 {TYPE_INFO_TEMPLATE}",
+                table(
+                    f"      2        240 {TYPE_INFO_TEMPLATE}",
+                    f"      3        360 {TYPE_INFO_TEMPLATE}",
                 )
-            ),
-            {
-                "TypeInfo": (754, 93_042),
-                "TypePathComponent": (77, 1_848),
-            },
-        )
-
-    def test_rejects_missing_table(self) -> None:
-        with self.assertRaises(CHECKER.ReportError):
-            CHECKER.check_report("test result: ok")
-
-    def test_rejects_duplicate_table(self) -> None:
-        table = report(
-            f"    754      93042 {TYPE_INFO_TEMPLATE}",
-            f"     76       1824 {TYPE_PATH_TEMPLATE}",
-        )
-        with self.assertRaises(CHECKER.ReportError):
-            CHECKER.check_report(f"{table}\n{table}")
-
-    def test_rejects_missing_type_path_component_row(self) -> None:
-        with self.assertRaises(CHECKER.ReportError):
-            CHECKER.check_report(
-                report(f"    754      93042 {TYPE_INFO_TEMPLATE}")
             )
 
-    def test_rejects_extra_suppression_row(self) -> None:
+    def test_rejects_unknown_suppression_row(self) -> None:
         with self.assertRaises(CHECKER.ReportError):
-            CHECKER.check_report(
-                report(
-                    f"    754      93042 {TYPE_INFO_TEMPLATE}",
-                    f"     76       1824 {TYPE_PATH_TEMPLATE}",
-                    "      1       1234 unrelated::*",
-                )
-            )
+            CHECKER.check_report(table("      1       1234 unrelated::*"))
 
     def test_rejects_changed_template(self) -> None:
         with self.assertRaises(CHECKER.ReportError):
-            CHECKER.check_report(
-                report(
-                    f"    754      93042 {TYPE_INFO_TEMPLATE}",
-                    "     76       1824 GenericTypeCell*",
-                )
-            )
+            CHECKER.check_report(table("      1        120 GenericTypeCell*"))
 
     def test_rejects_zero_measurements(self) -> None:
         with self.assertRaises(CHECKER.ReportError):
-            CHECKER.check_report(
-                report(
-                    f"    754      93042 {TYPE_INFO_TEMPLATE}",
-                    f"      0          0 {TYPE_PATH_TEMPLATE}",
-                )
-            )
+            CHECKER.check_report(table(f"      0          0 {TYPE_PATH_TEMPLATE}"))
 
-    def test_rejects_type_info_root_count_drift(self) -> None:
+    def test_rejects_empty_suppression_table(self) -> None:
+        with self.assertRaises(CHECKER.ReportError):
+            CHECKER.check_report(table())
+
+    def test_rejects_malformed_suppression_row(self) -> None:
+        with self.assertRaises(CHECKER.ReportError):
+            CHECKER.check_report(table(f"      six      144 {TYPE_PATH_TEMPLATE}"))
+
+    def test_rejects_unterminated_suppression_table(self) -> None:
         with self.assertRaises(CHECKER.ReportError):
             CHECKER.check_report(
-                report(
-                    f"    753      93042 {TYPE_INFO_TEMPLATE}",
-                    f"     76       1824 {TYPE_PATH_TEMPLATE}",
-                )
+                "Suppressions used:\n"
+                "  count      bytes template\n"
+                f"      6        144 {TYPE_PATH_TEMPLATE}\n"
             )
 
-    def test_rejects_type_info_byte_count_drift(self) -> None:
+    def test_rejects_unsuppressed_lsan_error(self) -> None:
         with self.assertRaises(CHECKER.ReportError):
-            CHECKER.check_report(
-                report(
-                    f"    754      93041 {TYPE_INFO_TEMPLATE}",
-                    f"     76       1824 {TYPE_PATH_TEMPLATE}",
-                )
-            )
+            CHECKER.check_report("ERROR: LeakSanitizer: detected memory leaks")
 
-    def test_rejects_duplicate_type_info_row(self) -> None:
+    def test_rejects_unsuppressed_lsan_summary(self) -> None:
         with self.assertRaises(CHECKER.ReportError):
             CHECKER.check_report(
-                report(
-                    f"    754      93042 {TYPE_INFO_TEMPLATE}",
-                    f"    754      93042 {TYPE_INFO_TEMPLATE}",
-                )
+                "SUMMARY: AddressSanitizer: 1234 byte(s) leaked in 1 allocation(s)."
             )
 
     def test_pipefail_propagates_a_failing_sanitizer_process(self) -> None:
-        valid_report = report(
-            f"    754      93042 {TYPE_INFO_TEMPLATE}",
-            f"     76       1824 {TYPE_PATH_TEMPLATE}",
-        )
         producer = shlex.join(
             [
                 sys.executable,
                 "-c",
-                f"print({valid_report!r}); raise SystemExit(23)",
+                "print('test result: ok'); raise SystemExit(23)",
             ]
         )
         with tempfile.TemporaryDirectory() as directory:

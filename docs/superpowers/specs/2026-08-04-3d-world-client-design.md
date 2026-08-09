@@ -2,7 +2,7 @@
 
 **Redmine:** #115
 
-**Canonical decision:** ADR-018 version 31, Accepted
+**Canonical decision:** ADR-018 version 32, Accepted
 
 **CTO gate:** fresh `gpt-5.6-sol` review, APPROVE
 
