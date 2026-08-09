@@ -14,6 +14,12 @@ import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CHECKER_PATH = ROOT / "scripts" / "check_asan_ci_policy.py"
+SUPPRESSION_PATH = ROOT / "scripts" / "asan" / "bevy-reflect.lsan"
+NEGATIVE_CONTROL_PATH = ROOT / "scripts" / "asan" / "intentional-leak.rs"
+EXPECTED_SUPPRESSION = (
+    "leak:^<bevy_reflect::utility::GenericTypeCell<"
+    "bevy_reflect::type_info::TypeInfo>>::get_or_insert_by_type_id::*$\n"
+)
 SPEC = importlib.util.spec_from_file_location("check_asan_ci_policy", CHECKER_PATH)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError(f"cannot load {CHECKER_PATH}")
@@ -38,6 +44,95 @@ class AsanCiPolicyTests(unittest.TestCase):
 
     def test_repository_workflow_passes(self) -> None:
         CHECKER.check_workflow(ROOT / ".github" / "workflows" / "ci.yml")
+
+    def test_repository_has_only_the_approved_suppression(self) -> None:
+        self.assertEqual(
+            SUPPRESSION_PATH.read_text(encoding="utf-8"),
+            EXPECTED_SUPPRESSION,
+        )
+
+    def test_repository_has_the_intentional_leak_fixture(self) -> None:
+        self.assertEqual(
+            NEGATIVE_CONTROL_PATH.read_text(encoding="utf-8"),
+            "fn main() {\n"
+            "    let leaked = Box::leak(Box::new([0_u8; 1_234]));\n"
+            "    std::hint::black_box(leaked);\n"
+            "}\n",
+        )
+
+    def test_requires_leak_detection_and_suppression_reporting(self) -> None:
+        self.assert_rejected(
+            lambda workflow: self.asan_step(workflow)["env"].pop("LSAN_OPTIONS")
+        )
+
+    def test_requires_exact_suppression_path(self) -> None:
+        def change_suppression_path(workflow: dict) -> None:
+            env = self.asan_step(workflow)["env"]
+            env["LSAN_OPTIONS"] = env["LSAN_OPTIONS"].replace(
+                "scripts/asan/bevy-reflect.lsan",
+                "scripts/asan/other.lsan",
+            )
+
+        self.assert_rejected(change_suppression_path)
+
+    def test_requires_canonical_suppression_report_validation(self) -> None:
+        def remove_report_validation(workflow: dict) -> None:
+            step = self.asan_step(workflow)
+            step["run"] = step["run"].replace(
+                'python scripts/check_lsan_suppression_report.py "${RUNNER_TEMP}/asan.log"',
+                "true",
+            )
+
+        self.assert_rejected(remove_report_validation)
+
+    def test_canonical_step_requires_pipefail(self) -> None:
+        def remove_pipefail(workflow: dict) -> None:
+            step = self.asan_step(workflow)
+            step["run"] = step["run"].replace("set -euo pipefail\n", "")
+
+        self.assert_rejected(remove_pipefail)
+
+    def test_requires_intentional_leak_negative_control(self) -> None:
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["asan"]["steps"].pop(5)
+        )
+
+    def test_negative_control_must_use_the_same_lsan_options(self) -> None:
+        self.assert_rejected(
+            lambda workflow: self.negative_control_step(workflow)["env"].update(
+                {"LSAN_OPTIONS": "print_suppressions=1"}
+            )
+        )
+
+    def test_negative_control_must_require_nonzero_exit(self) -> None:
+        def remove_failure_assertion(workflow: dict) -> None:
+            step = self.negative_control_step(workflow)
+            step["run"] = step["run"].replace(
+                'test "${status}" -ne 0',
+                "true",
+            )
+
+        self.assert_rejected(remove_failure_assertion)
+
+    def test_negative_control_must_require_exact_leak_summary(self) -> None:
+        def weaken_summary(workflow: dict) -> None:
+            step = self.negative_control_step(workflow)
+            step["run"] = step["run"].replace(
+                'grep -Fqx "SUMMARY: AddressSanitizer: 1234 byte(s) leaked in 1 allocation(s)."',
+                'grep -F "AddressSanitizer"',
+            )
+
+        self.assert_rejected(weaken_summary)
+
+    def test_negative_control_must_reject_bevy_suppression_match(self) -> None:
+        def remove_match_assertion(workflow: dict) -> None:
+            step = self.negative_control_step(workflow)
+            step["run"] = step["run"].replace(
+                '! grep -F "bevy_reflect::utility::GenericTypeCell" "${log}"\n',
+                "",
+            )
+
+        self.assert_rejected(remove_match_assertion)
 
     def test_rejects_missing_serialization(self) -> None:
         self.assert_rejected(
@@ -91,7 +186,10 @@ class AsanCiPolicyTests(unittest.TestCase):
     def test_rejects_newline_between_rustflags_and_cargo(self) -> None:
         def insert_newline(workflow: dict) -> None:
             step = self.asan_step(workflow)
-            step["run"] = step["run"].replace('" cargo +nightly', '"\ncargo +nightly')
+            step["run"] = step["run"].replace(
+                'RUSTFLAGS="-Z sanitizer=address" \\\n  cargo +nightly',
+                'RUSTFLAGS="-Z sanitizer=address"\ncargo +nightly',
+            )
 
         self.assert_rejected(insert_newline)
 
@@ -213,7 +311,7 @@ class AsanCiPolicyTests(unittest.TestCase):
         def remove_symbolizer_preflight(workflow: dict) -> None:
             test_step = self.asan_step(workflow)
             test_step["run"] = test_step["run"].replace(
-                'test -x "/usr/bin/llvm-symbolizer-18" && ',
+                'test -x "/usr/bin/llvm-symbolizer-18"\n',
                 "",
             )
 
@@ -271,6 +369,14 @@ class AsanCiPolicyTests(unittest.TestCase):
             step
             for step in workflow["jobs"]["asan"]["steps"]
             if step.get("name") == "cargo test with ASan"
+        )
+
+    @staticmethod
+    def negative_control_step(workflow: dict) -> dict:
+        return next(
+            step
+            for step in workflow["jobs"]["asan"]["steps"]
+            if step.get("name") == "Prove unrelated leaks still fail LSan"
         )
 
     @classmethod

@@ -59,7 +59,9 @@ jobs:
         run: bash scripts/check-asan-ci-policy.sh
 
       - name: Test ASan CI policy checker
-        run: python scripts/test_check_asan_ci_policy.py
+        run: |
+          python scripts/test_check_asan_ci_policy.py
+          python scripts/test_check_lsan_suppression_report.py
 
   fmt:
     name: fmt
@@ -222,10 +224,32 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: asan-nightly-2026-07-01
+      - name: Prove unrelated leaks still fail LSan
+        env:
+          ASAN_OPTIONS: detect_leaks=1:detect_odr_violation=0
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/scripts/asan/bevy-reflect.lsan:print_suppressions=1
+        run: |
+          set -euo pipefail
+          binary="${RUNNER_TEMP}/asan-intentional-leak"
+          log="${RUNNER_TEMP}/asan-intentional-leak.log"
+          trap 'rm -f "${binary}" "${log}"' EXIT
+          rustc +nightly-2026-07-01 -Z sanitizer=address -C debuginfo=1 \
+            --target x86_64-unknown-linux-gnu \
+            scripts/asan/intentional-leak.rs -o "${binary}"
+          set +e
+          ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \
+            "${binary}" 2>&1 | tee "${log}"
+          status=${PIPESTATUS[0]}
+          set -e
+          test "${status}" -ne 0
+          grep -Fqx "SUMMARY: AddressSanitizer: 1234 byte(s) leaked in 1 allocation(s)." "${log}"
+          ! grep -F "Suppressions used:" "${log}"
+          ! grep -F "bevy_reflect::utility::GenericTypeCell" "${log}"
       - name: cargo test with ASan
         env:
           RUSTC_BOOTSTRAP: "1"
           ASAN_OPTIONS: detect_leaks=1:detect_odr_violation=0
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/scripts/asan/bevy-reflect.lsan:print_suppressions=1
           # ASan + build-std produces unusually large links. Serialize them so
           # hosted-runner memory pressure cannot crash concurrent lld workers.
           CARGO_BUILD_JOBS: "1"
@@ -233,11 +257,15 @@ jobs:
           # line-level backtraces to reduce full-debug artifact storage.
           CARGO_INCREMENTAL: "0"
           CARGO_PROFILE_TEST_DEBUG: line-tables-only
-        run: >
-          test -x "/usr/bin/llvm-symbolizer-18" &&
-          ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18"
-          RUSTFLAGS="-Z sanitizer=address"
-          cargo +nightly-2026-07-01 test --all-features --locked -Z build-std --target x86_64-unknown-linux-gnu --workspace --tests
+        run: |
+          set -euo pipefail
+          test -x "/usr/bin/llvm-symbolizer-18"
+          ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \
+            RUSTFLAGS="-Z sanitizer=address" \
+            cargo +nightly-2026-07-01 test --all-features --locked -Z build-std \
+              --target x86_64-unknown-linux-gnu --workspace --tests 2>&1 | \
+            tee "${RUNNER_TEMP}/asan.log"
+          python scripts/check_lsan_suppression_report.py "${RUNNER_TEMP}/asan.log"
 
   docker-build:
     name: docker-build

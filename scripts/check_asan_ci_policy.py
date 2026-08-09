@@ -9,15 +9,15 @@ import sys
 import yaml
 
 
-EXPECTED_COMMAND = " ".join(
-    (
-        'test -x "/usr/bin/llvm-symbolizer-18" &&',
-        'ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18"',
-        'RUSTFLAGS="-Z sanitizer=address"',
-        "cargo +nightly-2026-07-01 test --all-features --locked -Z build-std",
-        "--target x86_64-unknown-linux-gnu --workspace --tests",
-    )
-)
+EXPECTED_COMMAND = """set -euo pipefail
+test -x "/usr/bin/llvm-symbolizer-18"
+ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \\
+  RUSTFLAGS="-Z sanitizer=address" \\
+  cargo +nightly-2026-07-01 test --all-features --locked -Z build-std \\
+    --target x86_64-unknown-linux-gnu --workspace --tests 2>&1 | \\
+  tee "${RUNNER_TEMP}/asan.log"
+python scripts/check_lsan_suppression_report.py "${RUNNER_TEMP}/asan.log"
+"""
 EXPECTED_WORKFLOW_ENV = {
     "CARGO_TERM_COLOR": "always",
     "RUSTFLAGS": "-D warnings",
@@ -25,6 +25,10 @@ EXPECTED_WORKFLOW_ENV = {
 EXPECTED_STEP_ENV = {
     "RUSTC_BOOTSTRAP": "1",
     "ASAN_OPTIONS": "detect_leaks=1:detect_odr_violation=0",
+    "LSAN_OPTIONS": (
+        "suppressions=${{ github.workspace }}/scripts/asan/bevy-reflect.lsan:"
+        "print_suppressions=1"
+    ),
     "CARGO_BUILD_JOBS": "1",
     "CARGO_INCREMENTAL": "0",
     "CARGO_PROFILE_TEST_DEBUG": "line-tables-only",
@@ -50,6 +54,33 @@ grep -Fqx "Ubuntu LLVM version 18.1.3" <<<"${symbolizer_version}"
         "with": {"shared-key": "asan-nightly-2026-07-01"},
     },
 ]
+EXPECTED_NEGATIVE_CONTROL_STEP = {
+    "name": "Prove unrelated leaks still fail LSan",
+    "env": {
+        "ASAN_OPTIONS": "detect_leaks=1:detect_odr_violation=0",
+        "LSAN_OPTIONS": (
+            "suppressions=${{ github.workspace }}/scripts/asan/bevy-reflect.lsan:"
+            "print_suppressions=1"
+        ),
+    },
+    "run": """set -euo pipefail
+binary="${RUNNER_TEMP}/asan-intentional-leak"
+log="${RUNNER_TEMP}/asan-intentional-leak.log"
+trap 'rm -f "${binary}" "${log}"' EXIT
+rustc +nightly-2026-07-01 -Z sanitizer=address -C debuginfo=1 \\
+  --target x86_64-unknown-linux-gnu \\
+  scripts/asan/intentional-leak.rs -o "${binary}"
+set +e
+ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \\
+  "${binary}" 2>&1 | tee "${log}"
+status=${PIPESTATUS[0]}
+set -e
+test "${status}" -ne 0
+grep -Fqx "SUMMARY: AddressSanitizer: 1234 byte(s) leaked in 1 allocation(s)." "${log}"
+! grep -F "Suppressions used:" "${log}"
+! grep -F "bevy_reflect::utility::GenericTypeCell" "${log}"
+""",
+}
 
 
 class PolicyError(RuntimeError):
@@ -87,10 +118,14 @@ def check_workflow(workflow_path: pathlib.Path) -> None:
 
     steps = job.get("steps")
     require(isinstance(steps, list), "ASan job steps must be a list")
-    require(len(steps) == 6, "ASan job must contain the exact trusted step sequence")
+    require(len(steps) == 7, "ASan job must contain the exact trusted step sequence")
     require(
         steps[:5] == EXPECTED_SETUP_STEPS,
         "ASan setup steps must match the exact pinned trusted sequence",
+    )
+    require(
+        steps[5] == EXPECTED_NEGATIVE_CONTROL_STEP,
+        "ASan negative control must match the exact trusted step",
     )
     test_steps = [
         step
@@ -99,7 +134,7 @@ def check_workflow(workflow_path: pathlib.Path) -> None:
     ]
     require(len(test_steps) == 1, "ASan job must contain exactly one named test step")
     step = test_steps[0]
-    require(step is steps[5], "ASan test must be the final trusted step")
+    require(step is steps[6], "ASan test must be the final trusted step")
     require(
         set(step) == {"name", "env", "run"},
         "ASan test step must contain exactly name, env, and run",
@@ -116,7 +151,7 @@ def check_workflow(workflow_path: pathlib.Path) -> None:
 
     command = step.get("run")
     require(isinstance(command, str), "ASan test step must have a run command")
-    require(command == f"{EXPECTED_COMMAND}\n", "ASan test command changed")
+    require(command == EXPECTED_COMMAND, "ASan test command changed")
 
 
 def main() -> int:
