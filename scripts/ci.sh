@@ -13,9 +13,17 @@ else
   bash "$ROOT/scripts/check-test-policy.sh"
 fi
 
+echo "==> world-client WASM contract and packaging/browser gate"
+bash "$ROOT/scripts/test-check-world-client-wasm.sh"
+bash "$ROOT/scripts/check-world-client-wasm.sh"
+
 echo "==> pinned dependency policy"
 bash "$ROOT/scripts/check-pinned-dependencies.sh"
 bash "$ROOT/scripts/test-check-pinned-dependencies.sh"
+
+echo "==> ASan CI policy"
+bash "$ROOT/scripts/check-asan-ci-policy.sh"
+python3 "$ROOT/scripts/test_check_asan_ci_policy.py"
 
 echo "==> cargo deny (dependency policy)"
 if command -v cargo-deny >/dev/null 2>&1; then

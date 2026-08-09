@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Piglor World</title>
+    <style>
+      html, body { height: 100%; margin: 0; }
+      #piglor-world { display: block; width: 100%; height: 100%; }
+      #piglor-world-status {
+        position: fixed;
+        inset: 1rem auto auto 1rem;
+        z-index: 1;
+        padding: 0.5rem 0.75rem;
+        color: #fff;
+        background: rgb(0 0 0 / 70%);
+        font: 1rem system-ui, sans-serif;
+      }
+      #piglor-world-status[data-state="error"] { background: #8b1e1e; }
+    </style>
+  </head>
+  <body>
+    <div id="piglor-world-status" role="status">Loading Piglor World…</div>
+    <canvas id="piglor-world"></canvas>
+    <script type="module">
+      const status = document.getElementById("piglor-world-status");
+      const showError = (error) => {
+        if (status) {
+          status.hidden = false;
+          status.dataset.state = "error";
+          status.textContent = `Piglor World could not start: ${error}`;
+        }
+      };
+
+      window.addEventListener("error", (event) => {
+        showError(event.error ?? event.message);
+      });
+      window.addEventListener("unhandledrejection", (event) => {
+        showError(event.reason);
+      });
+
+      const hasWebGl2 = Boolean(
+        document.createElement("canvas").getContext("webgl2"),
+      );
+      if (!hasWebGl2) {
+        showError("WebGL2 is unavailable.");
+      } else {
+        import("./pkg/piglor_world_client.js")
+          .then(({ default: init }) => init())
+          .then(() => {
+            if (status) status.hidden = true;
+          })
+          .catch(showError);
+      }
+    </script>
+  </body>
+</html>

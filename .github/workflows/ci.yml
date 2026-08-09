@@ -55,6 +55,14 @@ jobs:
       - name: Test pinned dependency checker
         run: bash scripts/test-check-pinned-dependencies.sh
 
+      - name: Check ASan CI policy
+        run: bash scripts/check-asan-ci-policy.sh
+
+      - name: Test ASan CI policy checker
+        run: |
+          python scripts/test_check_asan_ci_policy.py
+          python scripts/test_check_lsan_suppression_report.py
+
   fmt:
     name: fmt
     runs-on: ubuntu-latest
@@ -198,25 +206,66 @@ jobs:
 
   asan:
     name: asan (address sanitizer)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - run: rm -f rust-toolchain.toml
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-07-01
           components: rust-src
+      - name: Verify ASan symbolizer
+        run: |
+          symbolizer="/usr/bin/llvm-symbolizer-18"
+          test -x "${symbolizer}"
+          symbolizer_version="$("${symbolizer}" --version)"
+          grep -Fqx "Ubuntu LLVM version 18.1.3" <<<"${symbolizer_version}"
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: asan
+          shared-key: asan-nightly-2026-07-01
+      - name: Prove unrelated leaks still fail LSan
+        env:
+          ASAN_OPTIONS: detect_leaks=1:detect_odr_violation=0
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/scripts/asan/bevy-reflect.lsan:print_suppressions=1
+        run: |
+          set -euo pipefail
+          binary="${RUNNER_TEMP}/asan-intentional-leak"
+          log="${RUNNER_TEMP}/asan-intentional-leak.log"
+          trap 'rm -f "${binary}" "${log}"' EXIT
+          rustc +nightly-2026-07-01 -Z sanitizer=address -C debuginfo=1 \
+            --target x86_64-unknown-linux-gnu \
+            scripts/asan/intentional-leak.rs -o "${binary}"
+          set +e
+          ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \
+            "${binary}" 2>&1 | tee "${log}"
+          status=${PIPESTATUS[0]}
+          set -e
+          test "${status}" -ne 0
+          grep -Fqx "SUMMARY: AddressSanitizer: 1234 byte(s) leaked in 1 allocation(s)." "${log}"
+          ! grep -F "Suppressions used:" "${log}"
+          ! grep -F "bevy_reflect::utility::GenericTypeCell" "${log}"
       - name: cargo test with ASan
         env:
           RUSTC_BOOTSTRAP: "1"
           ASAN_OPTIONS: detect_leaks=1:detect_odr_violation=0
-        run: >
-          RUSTFLAGS="-Z sanitizer=address"
-          cargo +nightly test --all-features --locked -Z build-std --target x86_64-unknown-linux-gnu --workspace --tests
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/scripts/asan/bevy-reflect.lsan:print_suppressions=1
+          # ASan + build-std produces unusually large links. Serialize them so
+          # hosted-runner memory pressure cannot crash concurrent lld workers.
+          CARGO_BUILD_JOBS: "1"
+          # Policy-lock the toolchain action's no-incremental default and use
+          # line-level backtraces to reduce full-debug artifact storage.
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_TEST_DEBUG: line-tables-only
+        run: |
+          set -euo pipefail
+          test -x "/usr/bin/llvm-symbolizer-18"
+          ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \
+            RUSTFLAGS="-Z sanitizer=address" \
+            cargo +nightly-2026-07-01 test --all-features --locked -Z build-std \
+              --target x86_64-unknown-linux-gnu --workspace --tests 2>&1 | \
+            tee "${RUNNER_TEMP}/asan.log"
+          python scripts/check_lsan_suppression_report.py "${RUNNER_TEMP}/asan.log"
 
   docker-build:
     name: docker-build
@@ -321,3 +370,69 @@ jobs:
         with:
           name: depgraph
           path: artifacts/depgraph.svg
+
+  world-client-wasm:
+    name: world-client-wasm
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: 1.97.1
+
+      - name: Install wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2
+        with:
+          tool: wasm-pack@0.15.0
+
+      - name: Check world-client WASM contract
+        run: bash scripts/test-check-world-client-wasm.sh
+
+      - name: Check world-client WASM packaging
+        run: bash scripts/check-world-client-wasm.sh package
+
+  world-client-browser-parity:
+    name: world-client-browser-parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: 1.97.1
+
+      - name: Install wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2
+        with:
+          tool: wasm-pack@0.15.0
+
+      - name: Install Chrome and ChromeDriver
+        id: setup-chrome
+        uses: browser-actions/setup-chrome@2e1d749697dd1612b833dba4a722266286fbefcd # v2.1.2
+        with:
+          chrome-version: 151.0.7922.47
+          install-chromedriver: true
+
+      - name: Configure Chrome binary for wasm-bindgen
+        env:
+          CHROME_PATH: ${{ steps.setup-chrome.outputs.chrome-path }}
+          WEBDRIVER_CONFIG: ${{ runner.temp }}/world-client-webdriver.json
+        run: |
+          jq -n --arg binary "$CHROME_PATH" \
+            '{"goog:chromeOptions": {"binary": $binary}}' > "$WEBDRIVER_CONFIG"
+
+      - name: Check world-client browser parity
+        env:
+          WASM_BINDGEN_TEST_WEBDRIVER_JSON: ${{ runner.temp }}/world-client-webdriver.json
+        run: bash scripts/check-world-client-wasm.sh browser

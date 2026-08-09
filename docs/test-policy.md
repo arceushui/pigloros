@@ -28,6 +28,79 @@ reporting-tolerance only: all tests still run with `--include-ignored`, and
 `coverage(off)` remains test-only. Do not use the allowance to exempt
 production code or avoid writing a reachable behavior test.
 
+## Hardware-dependent startup
+
+Portable unit and coverage jobs must not require a physical GPU, display server,
+audio device, or other host hardware. Tests still execute the public startup
+path, but hardware adapters must use the framework's supported headless or
+no-device configuration under `cfg(test)`. This is not a skipped test or a
+coverage exemption: production code remains instrumented, the package/build
+gate compiles the production adapter, and a real-device integration gate must
+exercise behavior where CI can provide that device.
+
+For the Bevy world client, unit/coverage builds retain `DefaultPlugins` while
+using Bevy's documented no-renderer `WgpuSettings { backends: None }` setup and
+disabling Winit. The optimized WASM package gate compiles the full production
+renderer, and browser parity executes in real headless Chrome. Native GPU
+device creation itself is not portable on GitHub's hosted GPU-less runners.
+
+## Resource-intensive sanitizer jobs
+
+The complete workspace ASan gate retains `--all-features`, `--workspace`, and
+`--tests`, but serializes Cargo build/link jobs on hosted runners. ASan plus
+`build-std` produces unusually large test-binary links; concurrent lld workers
+can exhaust the runner's available resources and crash with `SIGBUS` before any
+test executes. Serialization changes throughput only: it does not remove a
+package, feature, test target, sanitizer, or coverage requirement.
+
+The job uses the dated `nightly-2026-07-01` toolchain rather than a floating
+nightly. The 2026-08-07 nightly (`rustc 1.99.0-nightly`) crashed its bundled
+lld with `SIGBUS` both with concurrent links and after Cargo serialization,
+before any test executed. The available pinned Rust 1.98 nightly candidate
+makes the sanitizer toolchain reproducible and avoids silently adopting that
+linker; a fresh remote run must still prove the candidate and complete gate.
+
+The dated candidate reached a definitive hosted-runner failure annotation:
+`No space left on device`. ASan did not report a product defect, and no test
+failed. The pinned toolchain action already exported `CARGO_INCREMENTAL=0` in
+the failed run, so the explicit step setting policy-locks existing behavior; it
+is not credited as a new size reduction. The new candidate is the test profile's
+`line-tables-only` debuginfo, which Cargo documents as retaining filename/line
+backtraces without full type and variable metadata. This changes artifact size
+only; sanitizer instrumentation, debug assertions, packages, features, test
+targets, and execution scope remain.
+
+`scripts/check-asan-ci-policy.sh` enforces both the serialization setting and
+the unchanged ASan workspace test command by parsing the workflow's executable
+YAML semantics. Adversarial fixtures prove that disabled/non-failing steps,
+environment-based test runners, detached sanitizer flags, `--no-run`, shell
+success overrides, skipped prerequisites, injected setup steps, and test-skip
+arguments are rejected. The ASan job graph and pinned setup-step sequence must
+match exactly, and the final test step may contain only `name`, `env`, and
+`run` so it cannot select a nested Cargo configuration.
+
+### Controlled Bevy reflection metadata roots
+
+ADR-018 authorizes exactly two anchored LeakSanitizer templates for Bevy
+0.19's deliberate application-lifetime `GenericTypeCell` metadata caches:
+`TypeInfo` and `TypePathComponent`. The suppression file may contain only
+those two exact lines; a broader `GenericTypeCell<*>` wildcard is forbidden.
+The production policy checker locks the file's exact bytes. Runtime output may
+contain zero or more process-local suppression tables. Every emitted row must
+match one approved template and have positive counters; repeated rows across
+different process tables are aggregated only for diagnostics. Root and byte
+counts are not cross-run invariants because LSan evaluates reachability and
+records matched suppressions separately in each test process.
+
+The complete workspace/all-features/all-test-target ASan command and
+`detect_leaks=1` remain unchanged. A separate 1,234-byte intentional leak runs
+under the same sanitizer, symbolizer, suppression file, and options; it must
+exit nonzero, report exactly one allocation, and match neither approved rule.
+Any unexpected or malformed suppression row/table, duplicate template within
+one process table, zero measurement, unrelated leak, or negative-control
+success fails CI. Bevy, Rust nightly, LLVM, sanitizer, or runner-image upgrades
+require an unsuppressed audit and removal review for both rules.
+
 ## Local setup
 
 ```bash
