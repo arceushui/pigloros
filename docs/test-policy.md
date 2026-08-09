@@ -79,6 +79,26 @@ arguments are rejected. The ASan job graph and pinned setup-step sequence must
 match exactly, and the final test step may contain only `name`, `env`, and
 `run` so it cannot select a nested Cargo configuration.
 
+### Controlled Bevy reflection metadata roots
+
+ADR-018 authorizes exactly two anchored LeakSanitizer templates for Bevy
+0.19's deliberate application-lifetime `GenericTypeCell` metadata caches:
+`TypeInfo` and `TypePathComponent`. The suppression file may contain only
+those two exact lines; a broader `GenericTypeCell<*>` wildcard is forbidden.
+The canonical report must contain exactly the corresponding two rows and no
+others. The `TypeInfo` row is locked at 754 roots and 93,042 bytes. The first
+successful two-template run establishes the `TypePathComponent` root and byte
+counts, which must then be locked in a follow-up commit.
+
+The complete workspace/all-features/all-test-target ASan command and
+`detect_leaks=1` remain unchanged. A separate 1,234-byte intentional leak runs
+under the same sanitizer, symbolizer, suppression file, and options; it must
+exit nonzero, report exactly one allocation, and match neither approved rule.
+Any unexpected suppression row, measurement drift, unrelated leak, or
+negative-control success fails CI. Bevy, Rust nightly, LLVM, sanitizer, or
+runner-image upgrades require an unsuppressed audit and removal review for
+both rules.
+
 ## Local setup
 
 ```bash

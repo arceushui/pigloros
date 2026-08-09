@@ -19,6 +19,8 @@ NEGATIVE_CONTROL_PATH = ROOT / "scripts" / "asan" / "intentional-leak.rs"
 EXPECTED_SUPPRESSION = (
     "leak:^<bevy_reflect::utility::GenericTypeCell<"
     "bevy_reflect::type_info::TypeInfo>>::get_or_insert_by_type_id::*$\n"
+    "leak:^<bevy_reflect::utility::GenericTypeCell<"
+    "bevy_reflect::utility::TypePathComponent>>::get_or_insert_by_type_id::*$\n"
 )
 SPEC = importlib.util.spec_from_file_location("check_asan_ci_policy", CHECKER_PATH)
 if SPEC is None or SPEC.loader is None:
@@ -45,7 +47,7 @@ class AsanCiPolicyTests(unittest.TestCase):
     def test_repository_workflow_passes(self) -> None:
         CHECKER.check_workflow(ROOT / ".github" / "workflows" / "ci.yml")
 
-    def test_repository_has_only_the_approved_suppression(self) -> None:
+    def test_repository_has_only_the_two_approved_suppressions(self) -> None:
         self.assertEqual(
             SUPPRESSION_PATH.read_text(encoding="utf-8"),
             EXPECTED_SUPPRESSION,
