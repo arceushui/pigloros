@@ -6,7 +6,7 @@
 //! Child reads stitch parent events up to `fork_seq` with child events.
 
 use rusqlite::{params, types::ToSql, Connection, OpenFlags, TransactionBehavior};
-use std::time::Instant;
+use std::{collections::HashSet, time::Instant};
 
 use pos_core::{
     clock::{AdmissionClock, Seq, SystemAdmissionClock, WallTime},
@@ -350,12 +350,6 @@ impl SqliteStore {
 
     fn storage_error(error: &rusqlite::Error) -> CoreError {
         CoreError::Storage(error.to_string())
-    }
-
-    fn optional_sequence_query(
-        result: rusqlite::Result<Option<i64>>,
-    ) -> Result<Option<i64>, CoreError> {
-        result.map_err(|error| CoreError::Storage(error.to_string()))
     }
 
     fn require_utf8_encoding(conn: &Connection) -> Result<(), CoreError> {
@@ -1012,14 +1006,24 @@ impl SqliteStore {
             if elapsed_micros > bounds.max_elapsed_micros() {
                 return Err(CoreError::ReadTimeTooLarge { elapsed_micros });
             }
-            let segment_cap = chain.get(index + 1).and_then(|next| next.fork);
-            if segment_cap.is_some_and(|cap| cap.as_u64() > segment.head) {
+            let segment_prefix = segment.fork.map_or(0, Seq::as_u64);
+            let segment_len = chain.get(index + 1).and_then(|next| next.fork).map_or(
+                Ok(segment.head),
+                |cap| {
+                    cap.as_u64().checked_sub(segment_prefix).ok_or_else(|| {
+                        CoreError::Storage(format!(
+                            "Fork point precedes inherited history for timeline {}",
+                            segment.id
+                        ))
+                    })
+                },
+            )?;
+            if segment_len > segment.head {
                 return Err(CoreError::Storage(format!(
-                    "Fork point exceeds parent Event head for timeline {}",
+                    "Fork point exceeds parent logical Event head for timeline {}",
                     segment.id
                 )));
             }
-            let segment_len = segment_cap.map_or(segment.head, Seq::as_u64);
             if let Some(plan) =
                 crate::stitch::plan_page(logical_offset, segment_len, from, to, remaining)
             {
@@ -1126,8 +1130,14 @@ impl SqliteStore {
         timeline_id: TimelineId,
     ) -> Result<Vec<(TimelineId, Option<Seq>)>, CoreError> {
         let mut chain = Vec::new();
+        let mut visited = HashSet::new();
         let mut current = timeline_id;
         loop {
+            if !visited.insert(current) {
+                return Err(CoreError::Storage(format!(
+                    "fork ancestry contains a cycle at timeline {current}"
+                )));
+            }
             let row = match conn
                 .query_row(
                     "SELECT parent_id, fork_seq, head_seq FROM timelines WHERE id = ?1",
@@ -1158,6 +1168,33 @@ impl SqliteStore {
         }
         chain.reverse();
         Ok(chain)
+    }
+
+    fn logical_segment_length(
+        &self,
+        chain: &[(TimelineId, Option<Seq>)],
+        index: usize,
+        timeline: TimelineId,
+    ) -> Result<u64, CoreError> {
+        let prefix = chain[index].1.map_or(0, Seq::as_u64);
+        let local_head = self.get_head_seq(timeline)?.as_u64();
+        let length =
+            chain
+                .get(index + 1)
+                .and_then(|(_, fork)| *fork)
+                .map_or(Ok(local_head), |fork| {
+                    fork.as_u64().checked_sub(prefix).ok_or_else(|| {
+                        CoreError::Storage(format!(
+                            "Fork point precedes inherited history for timeline {timeline}"
+                        ))
+                    })
+                })?;
+        if length > local_head {
+            return Err(CoreError::Storage(format!(
+                "Fork point exceeds parent logical Event head for timeline {timeline}"
+            )));
+        }
+        Ok(length)
     }
 
     fn fork_chain_bounded_on(
@@ -1415,6 +1452,7 @@ impl SqliteStore {
         draft: &EventDraft,
         max_owned_events: Option<u64>,
     ) -> Result<Option<AppendOrDuplicateOutcome>, CoreError> {
+        let logical_prefix = self.logical_prefix(timeline)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1483,7 +1521,8 @@ impl SqliteStore {
         .map_err(|error| CoreError::Storage(error.to_string()))?;
         tx.commit()
             .map_err(|error| CoreError::Storage(error.to_string()))?;
-        Ok(Some(AppendOrDuplicateOutcome::Appended(Box::new(event))))
+        Self::logical_event(logical_prefix, event)
+            .map(|event| Some(AppendOrDuplicateOutcome::Appended(Box::new(event))))
     }
 }
 
@@ -1542,6 +1581,7 @@ impl SqliteStore {
         if drafts.is_empty() {
             return Ok(Vec::new());
         }
+        let logical_prefix = self.logical_prefix(timeline)?;
         let mut committed = Vec::with_capacity(drafts.len());
         let tx = self
             .conn
@@ -1557,7 +1597,29 @@ impl SqliteStore {
         }
         tx.commit()
             .map_err(|error| CoreError::Storage(error.to_string()))?;
-        Ok(committed)
+        committed
+            .into_iter()
+            .map(|event| Self::logical_event(logical_prefix, event))
+            .collect()
+    }
+
+    fn logical_prefix(&self, timeline: TimelineId) -> Result<u64, CoreError> {
+        self.get_timeline(timeline)?
+            .ok_or(CoreError::TimelineNotFound(timeline))
+            .map(|timeline| {
+                timeline
+                    .meta
+                    .fork_point
+                    .map_or(0, |(_, fork)| fork.as_u64())
+            })
+    }
+
+    fn logical_event(prefix: u64, mut event: Event) -> Result<Event, CoreError> {
+        event.seq =
+            Seq::from_u64(prefix.checked_add(event.seq.as_u64()).ok_or_else(|| {
+                CoreError::Storage("logical Timeline sequence overflow".to_owned())
+            })?);
+        Ok(event)
     }
 }
 
@@ -2612,38 +2674,50 @@ impl EventStore for SqliteStore {
         timeline: TimelineId,
         event_id: EventId,
     ) -> Result<Option<Event>, CoreError> {
-        let timeline_exists = match self.get_timeline(timeline) {
-            Ok(Some(_)) => true,
-            Ok(None) => false,
-            Err(error) => return Err(error),
+        self.ensure_generic_timeline_visibility(timeline)?;
+        let chain = self.fork_chain(timeline)?;
+        let located = self
+            .conn
+            .query_row(
+                "SELECT timeline_id, seq FROM events WHERE event_id = ?1",
+                params![event_id.to_string()],
+                |row| {
+                    row.get::<_, String>(0)
+                        .and_then(|timeline| row.get::<_, i64>(1).map(|seq| (timeline, seq)))
+                },
+            )
+            .optional()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let Some((owner, local_seq)) = located else {
+            return Ok(None);
         };
-        if !timeline_exists {
-            return Err(CoreError::TimelineNotFound(timeline));
+        let owner = parse_timeline_id(&owner)?;
+        let Some(index) = chain.iter().position(|(id, _)| *id == owner) else {
+            return Ok(None);
+        };
+        let prefix = chain[index].1.map_or(0, Seq::as_u64);
+        let local_limit = self.logical_segment_length(&chain, index, owner)?;
+        let local_seq = u64::try_from(local_seq).map_err(|_| {
+            CoreError::Storage(format!("timeline {owner} has a negative Event sequence"))
+        })?;
+        if local_seq > local_limit {
+            return Ok(None);
         }
-        Self::optional_sequence_query(
-            self.conn
-                .query_row(
-                    "SELECT seq FROM events WHERE timeline_id = ?1 AND event_id = ?2",
-                    params![timeline.to_string(), event_id.to_string()],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional(),
-        )
-        .and_then(|seq| {
-            let Some(seq) = seq else {
-                return Ok(None);
-            };
+        {
             let mut events = Self::read_own_events_limited_on(
                 &self.conn,
-                timeline,
-                Seq::from_u64(u64::try_from(seq).unwrap_or(0)),
-                Some(Seq::from_u64(u64::try_from(seq).unwrap_or(0))),
+                owner,
+                Seq::from_u64(local_seq),
+                Some(Seq::from_u64(local_seq)),
                 Some(1),
                 None,
                 u64::MAX,
             )?;
-            Ok(events.pop())
-        })
+            events
+                .pop()
+                .map(|event| Self::logical_event(prefix, event))
+                .transpose()
+        }
     }
 
     fn purge_expired_append_identities_bounded(
@@ -2698,13 +2772,27 @@ impl EventStore for SqliteStore {
                 let mut all: Vec<Event> = Vec::new();
 
                 for (i, &(tid, _)) in chain.iter().enumerate() {
+                    let logical_prefix = chain[i].1.map_or(0, Seq::as_u64);
                     if i + 1 < chain.len() {
-                        // Parent: all own events up to the child's fork_seq (raw local seq).
-                        // fork_seq is always Some for non-root chain entries (enforced by fork()).
-                        let fork_seq = chain[i + 1]
+                        let logical_fork = chain[i + 1]
                             .1
                             .expect("non-root chain entry always has fork_seq");
-                        let events = self.read_own_events(tid, Seq::ZERO, Some(fork_seq))?;
+                        let local_limit = logical_fork
+                            .as_u64()
+                            .checked_sub(logical_prefix)
+                            .ok_or_else(|| {
+                                CoreError::Storage(format!(
+                                    "Fork point precedes inherited history for timeline {tid}"
+                                ))
+                            })?;
+                        let local_head = self.get_head_seq(tid)?.as_u64();
+                        if local_limit > local_head {
+                            return Err(CoreError::Storage(format!(
+                                "Fork point exceeds parent logical Event head for timeline {tid}"
+                            )));
+                        }
+                        let events =
+                            self.read_own_events(tid, Seq::ZERO, Some(Seq::from_u64(local_limit)))?;
                         all.extend(events);
                     } else {
                         // Leaf: all own events; range applied after logical renumber.
@@ -2745,7 +2833,7 @@ impl EventStore for SqliteStore {
     fn fork(&mut self, parent: TimelineId, at_seq: Seq, name: &str) -> Result<Timeline, CoreError> {
         self.ensure_generic_timeline_visibility(parent)
             .and_then(|()| {
-                let head = self.get_head_seq(parent)?;
+                let head = self.logical_head(parent)?;
                 if at_seq > head {
                     return Err(CoreError::ForkBeyondHead {
                         fork_seq: at_seq.as_u64(),
@@ -2893,19 +2981,29 @@ impl EventStore for SqliteStore {
         }
     }
 
+    fn logical_head(&self, id: TimelineId) -> Result<Seq, CoreError> {
+        self.ensure_generic_timeline_visibility(id)?;
+        let chain = self.fork_chain(id)?;
+        let mut logical_head = 0_u64;
+        for (index, (timeline, _)) in chain.iter().enumerate() {
+            logical_head = logical_head
+                .checked_add(self.logical_segment_length(&chain, index, *timeline)?)
+                .ok_or_else(|| CoreError::Storage("logical Timeline head overflow".to_owned()))?;
+        }
+        Ok(Seq::from_u64(logical_head))
+    }
+
     fn create_timeline_with_meta(&mut self, meta: TimelineMeta) -> Result<Timeline, CoreError> {
         let id = meta.id;
         // Resolve fork parent before the duplicate-id check so storage failures on the
         // parent lookup are exercised (and fail closed before INSERT).
         let chain_head = match meta.fork_point {
             Some((parent, at_seq)) => {
-                let parent_tl = self
-                    .get_timeline(parent)?
-                    .ok_or(CoreError::TimelineNotFound(parent))?;
-                if at_seq > parent_tl.head {
+                let parent_head = self.logical_head(parent)?;
+                if at_seq > parent_head {
                     return Err(CoreError::ForkBeyondHead {
                         fork_seq: at_seq.as_u64(),
-                        head: parent_tl.head.as_u64(),
+                        head: parent_head.as_u64(),
                     });
                 }
                 self.compute_chain_hash_at(parent, at_seq)?
@@ -3207,29 +3305,22 @@ impl SqliteStore {
         timeline: TimelineId,
         at_seq: Seq,
     ) -> Result<pos_core::Hash, CoreError> {
-        let chain = self.fork_chain(timeline)?;
+        let logical_head = self.logical_head(timeline)?;
+        if at_seq > logical_head {
+            return Err(CoreError::ForkBeyondHead {
+                fork_seq: at_seq.as_u64(),
+                head: logical_head.as_u64(),
+            });
+        }
         let mut hash = self.hasher.genesis_hash();
-
-        for (i, &(tid, _)) in chain.iter().enumerate() {
-            // For non-target ancestors: limit = child's fork_seq (always has next element).
-            // For the target: limit = at_seq.
-            let limit = if tid == timeline {
-                at_seq
-            } else {
-                chain[i + 1]
-                    .1
-                    .expect("ancestor always has a successor in chain")
-            };
-            let events = self.read_own_events(tid, Seq::ZERO, Some(limit))?;
-            for event in events {
-                let id_str = event.id.to_string();
-                hash = self
-                    .hasher
-                    .hash_event(&hash, id_str.as_bytes(), &event.payload);
-            }
-            if tid == timeline {
-                break;
-            }
+        if at_seq == Seq::ZERO {
+            return Ok(hash);
+        }
+        for event in self.read(timeline, SeqRange::bounded(Seq::from_u64(1), at_seq))? {
+            let id_str = event.id.to_string();
+            hash = self
+                .hasher
+                .hash_event(&hash, id_str.as_bytes(), &event.payload);
         }
         Ok(hash)
     }
@@ -3830,21 +3921,6 @@ mod tests {
     }
 
     #[test]
-    fn optional_sequence_query_maps_all_result_variants() {
-        assert_eq!(
-            SqliteStore::optional_sequence_query(Ok(Some(7))).unwrap(),
-            Some(7)
-        );
-        assert_eq!(
-            SqliteStore::optional_sequence_query(Ok(None)).unwrap(),
-            None
-        );
-        let error =
-            SqliteStore::optional_sequence_query(Err(rusqlite::Error::InvalidQuery)).unwrap_err();
-        assert!(error.to_string().contains("storage error"));
-    }
-
-    #[test]
     fn read_event_by_id_rejects_an_unknown_timeline() {
         let store = new_store();
         let timeline = TimelineId::new();
@@ -4371,6 +4447,231 @@ mod tests {
         assert_eq!(child_events.len(), 2); // p1 + c1
         assert_eq!(child_events[0].payload.as_slice(), b"p1");
         assert_eq!(child_events[1].payload.as_slice(), b"c1");
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nested_forks_expose_one_logical_sequence() {
+        let mut store = new_store();
+        let root = store.create_timeline("root").unwrap();
+        let entity = EntityId::new();
+        store
+            .append(
+                root.id(),
+                &[
+                    make_draft(entity, b"r1"),
+                    make_draft(entity, b"r2"),
+                    make_draft(entity, b"r3"),
+                ],
+            )
+            .unwrap();
+        let child = store.fork(root.id(), Seq::from_u64(2), "child").unwrap();
+        let child_event = store
+            .append(child.id(), &[make_draft(entity, b"c1")])
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(child.head, Seq::ZERO);
+        assert_eq!(child_event.seq, Seq::from_u64(3));
+        assert_eq!(store.logical_head(child.id()).unwrap(), Seq::from_u64(3));
+
+        let grandchild = store
+            .fork(child.id(), Seq::from_u64(3), "grandchild")
+            .unwrap();
+        let grandchild_event = store
+            .append(grandchild.id(), &[make_draft(entity, b"g1")])
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(grandchild_event.seq, Seq::from_u64(4));
+        assert_eq!(
+            store.logical_head(grandchild.id()).unwrap(),
+            Seq::from_u64(4)
+        );
+        assert_eq!(
+            store
+                .read(grandchild.id(), SeqRange::all())
+                .unwrap()
+                .iter()
+                .map(|event| (event.seq, event.payload.as_slice()))
+                .collect::<Vec<_>>(),
+            vec![
+                (Seq::from_u64(1), b"r1".as_slice()),
+                (Seq::from_u64(2), b"r2".as_slice()),
+                (Seq::from_u64(3), b"c1".as_slice()),
+                (Seq::from_u64(4), b"g1".as_slice()),
+            ]
+        );
+        assert_eq!(
+            store
+                .read_event_by_id(grandchild.id(), grandchild_event.id)
+                .unwrap()
+                .unwrap()
+                .seq,
+            Seq::from_u64(4)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn logical_sequence_lookup_integrity_failures_are_fail_closed() {
+        let mut store = new_store();
+        let root = store.create_timeline("integrity-root").unwrap();
+        let entity = EntityId::new();
+        let event = store
+            .append(root.id(), &[make_draft(entity, b"root")])
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(matches!(
+            SqliteStore::logical_event(u64::MAX, event),
+            Err(CoreError::Storage(_))
+        ));
+        assert!(matches!(
+            store.chain_hash_at(root.id(), Seq::from_u64(2)),
+            Err(CoreError::ForkBeyondHead { .. })
+        ));
+
+        let unrelated = store.create_timeline("unrelated").unwrap();
+        let unrelated_event = store
+            .append(unrelated.id(), &[make_draft(entity, b"unrelated")])
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(store
+            .read_event_by_id(root.id(), unrelated_event.id)
+            .unwrap()
+            .is_none());
+
+        let child = store.fork(root.id(), Seq::from_u64(1), "child").unwrap();
+        let hidden = store
+            .append(root.id(), &[make_draft(entity, b"after-fork")])
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(store
+            .read_event_by_id(child.id(), hidden.id)
+            .unwrap()
+            .is_none());
+
+        let mut negative = new_store();
+        let negative_root = negative.create_timeline("negative").unwrap();
+        let negative_event = negative
+            .append(negative_root.id(), &[make_draft(entity, b"negative")])
+            .unwrap()
+            .pop()
+            .unwrap();
+        negative
+            .conn
+            .execute(
+                "UPDATE events SET seq = -1 WHERE event_id = ?1",
+                params![negative_event.id.to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            negative.read_event_by_id(negative_root.id(), negative_event.id),
+            Err(CoreError::Storage(_))
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn malformed_logical_fork_ranges_fail_closed() {
+        let entity = EntityId::new();
+        let mut underflow = new_store();
+        let underflow_root = underflow.create_timeline("underflow-root").unwrap();
+        underflow
+            .append(underflow_root.id(), &[make_draft(entity, b"root")])
+            .unwrap();
+        let underflow_child = underflow
+            .fork(underflow_root.id(), Seq::from_u64(1), "underflow-child")
+            .unwrap();
+        let child_event = underflow
+            .append(underflow_child.id(), &[make_draft(entity, b"child")])
+            .unwrap()
+            .pop()
+            .unwrap();
+        let grandchild = underflow
+            .fork(
+                underflow_child.id(),
+                Seq::from_u64(2),
+                "underflow-grandchild",
+            )
+            .unwrap();
+        underflow
+            .conn
+            .execute(
+                "UPDATE timelines SET fork_seq = 0 WHERE id = ?1",
+                params![grandchild.id().to_string()],
+            )
+            .unwrap();
+        assert!(underflow.read(grandchild.id(), SeqRange::all()).is_err());
+        assert!(underflow
+            .read_bounded(grandchild.id(), SeqRange::all(), read_bounds(16))
+            .is_err());
+        assert!(underflow
+            .read_event_by_id(grandchild.id(), child_event.id)
+            .is_err());
+
+        let mut exceeding = new_store();
+        let exceeding_root = exceeding.create_timeline("exceeding-root").unwrap();
+        exceeding
+            .append(exceeding_root.id(), &[make_draft(entity, b"root")])
+            .unwrap();
+        let exceeding_child = exceeding
+            .fork(exceeding_root.id(), Seq::from_u64(1), "exceeding-child")
+            .unwrap();
+        exceeding
+            .conn
+            .execute(
+                "UPDATE timelines SET fork_seq = 2 WHERE id = ?1",
+                params![exceeding_child.id().to_string()],
+            )
+            .unwrap();
+        assert!(exceeding
+            .read(exceeding_child.id(), SeqRange::all())
+            .is_err());
+        assert!(exceeding
+            .read_bounded(exceeding_child.id(), SeqRange::all(), read_bounds(16))
+            .is_err());
+        assert!(exceeding.logical_head(exceeding_child.id()).is_err());
+        let root_event = exceeding
+            .read_event_by_id(
+                exceeding_root.id(),
+                exceeding
+                    .read(exceeding_root.id(), SeqRange::all())
+                    .unwrap()[0]
+                    .id,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(exceeding
+            .read_event_by_id(exceeding_child.id(), root_event.id)
+            .is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn cyclic_fork_ancestry_fails_closed() {
+        let mut store = new_store();
+        let root = store.create_timeline("cycle-root").unwrap();
+        store
+            .append(root.id(), &[make_draft(EntityId::new(), b"root")])
+            .unwrap();
+        let child = store
+            .fork(root.id(), Seq::from_u64(1), "cycle-child")
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE timelines SET parent_id = ?1, fork_seq = 1 WHERE id = ?1",
+                params![child.id().to_string()],
+            )
+            .unwrap();
+
+        assert!(store.logical_head(child.id()).is_err());
+        assert!(store.read(child.id(), SeqRange::all()).is_err());
+        assert!(store.read_event_by_id(child.id(), EventId::new()).is_err());
     }
 
     #[test]
@@ -5330,9 +5631,9 @@ mod tests {
             )
             .unwrap();
 
-        // Fork child at seq 1 to get grandchild.
+        // Fork child at logical seq 3 (r1, r2, c1) to get grandchild.
         let grandchild = store
-            .fork(child.id(), Seq::from_u64(1), "grandchild")
+            .fork(child.id(), Seq::from_u64(3), "grandchild")
             .unwrap();
 
         // Append to grandchild.
@@ -6069,7 +6370,10 @@ mod tests {
     fn fork_fails_for_unknown_parent_timeline() {
         let mut store = new_store();
         let unknown = TimelineId::new();
-        assert_storage_err(store.fork(unknown, Seq::ZERO, "branch").map(|_| ()));
+        assert!(matches!(
+            store.fork(unknown, Seq::ZERO, "branch"),
+            Err(CoreError::TimelineNotFound(id)) if id == unknown
+        ));
     }
 
     #[test]

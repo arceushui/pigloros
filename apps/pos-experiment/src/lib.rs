@@ -107,7 +107,7 @@ impl RunResult {
                     self.timeline_id
                 ))
             })?;
-        let forked = store.fork(timeline.id(), timeline.head, name)?;
+        let forked = store.fork(timeline.id(), store.logical_head(timeline.id())?, name)?;
         Ok(forked)
     }
 
@@ -123,7 +123,7 @@ impl RunResult {
 
 /// The closed experiment host loop.
 ///
-/// tick loop: `step_all()` → `validate_batch()` → `append()` → fold projections
+/// tick loop: pre-fold → `step_all()` → `validate_batch()` → `append()` → post-fold
 pub struct Experiment {
     config: ExperimentConfig,
     registry: PluginRegistry,
@@ -144,6 +144,46 @@ pub struct ExperimentSession {
     ticks: u64,
     total_events: u64,
     complete: bool,
+    health: SessionHealth,
+    boundary: TickBoundaryCoordinator,
+}
+
+/// Result of one interactive tick-boundary attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TickOutcome {
+    /// Persisted Events were folded or driver Events were emitted.
+    Advanced {
+        /// Events newly folded into projections, regardless of origin.
+        folded_events: u64,
+        /// Driver Events appended during this boundary.
+        emitted_events: u64,
+    },
+    /// The boundary completed without folding or emitting an Event.
+    Quiescent,
+    /// The configured stop condition had already been reached.
+    Stopped,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionHealth {
+    Healthy,
+    Faulted,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TickBoundaryCoordinator {
+    folded_through: pos_core::clock::Seq,
+}
+
+enum TickAdvance {
+    Advanced { folded_events: u64 },
+    Quiescent,
+}
+
+struct CapturedRange {
+    through: pos_core::clock::Seq,
+    events: Vec<pos_core::Event>,
+    timeline: Timeline,
 }
 
 type ForkRegistryFactory =
@@ -166,47 +206,95 @@ pub enum ExperimentError {
     SharedStoreLockPoisoned,
     #[error("the fresh PluginRegistry is incompatible with the parent plugin composition")]
     IncompatibleForkRegistry,
+    #[error("the experiment session is faulted; rebuild it from persisted Timeline history")]
+    SessionFaulted,
 }
 
 // ---------------------------------------------------------------------------
 // Private helpers: shared tick and completion pipeline
 // ---------------------------------------------------------------------------
 
-/// Run all store-backed work for one tick and return its committed events.
-fn commit_tick(
+fn capture_pending_range(
+    store: &dyn pos_core::store::EventStore,
+    timeline_id: pos_core::ids::TimelineId,
+    folded_through: pos_core::clock::Seq,
+) -> Result<CapturedRange, ExperimentError> {
+    let through = store.logical_head(timeline_id)?;
+    if through < folded_through {
+        return Err(pos_core::CoreError::Storage(format!(
+            "logical Timeline head {} precedes fold cursor {}",
+            through.as_u64(),
+            folded_through.as_u64()
+        ))
+        .into());
+    }
+    let timeline = store
+        .get_timeline(timeline_id)?
+        .ok_or(pos_core::CoreError::TimelineNotFound(timeline_id))?;
+    let events = if through == folded_through {
+        Vec::new()
+    } else {
+        let from = pos_core::clock::Seq::from_u64(folded_through.as_u64() + 1);
+        store.read(timeline_id, pos_store::SeqRange::bounded(from, through))?
+    };
+    validate_captured_range(folded_through, through, &events)?;
+    Ok(CapturedRange {
+        through,
+        events,
+        timeline,
+    })
+}
+
+fn validate_captured_range(
+    folded_through: pos_core::clock::Seq,
+    through: pos_core::clock::Seq,
+    events: &[pos_core::Event],
+) -> Result<(), ExperimentError> {
+    let expected_len = through.as_u64() - folded_through.as_u64();
+    if u64::try_from(events.len()).unwrap_or(u64::MAX) != expected_len {
+        return Err(pos_core::CoreError::Storage(
+            "captured Timeline range does not contain every expected Event".to_owned(),
+        )
+        .into());
+    }
+    let mut expected = folded_through.as_u64();
+    for event in events {
+        expected += 1;
+        if event.seq.as_u64() != expected {
+            return Err(pos_core::CoreError::Storage(
+                "captured Timeline range is not contiguous in logical sequence order".to_owned(),
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn fold_captured_range(
+    boundary: &mut TickBoundaryCoordinator,
+    registry: &mut PluginRegistry,
+    captured: &CapturedRange,
+) -> u64 {
+    registry.projections.fold_events(&captured.events);
+    boundary.folded_through = captured.through;
+    u64::try_from(captured.events.len()).unwrap_or(u64::MAX)
+}
+
+fn append_driver_drafts(
     store: &mut dyn pos_core::store::EventStore,
     timeline_id: pos_core::ids::TimelineId,
     registry: &mut PluginRegistry,
-) -> Result<Option<Vec<pos_core::Event>>, ExperimentError> {
-    registry
-        .step_all(timeline_id)
-        .map_err(ExperimentError::from)
-        .and_then(|drafts| {
-            if drafts.is_empty() {
-                Ok(None)
-            } else {
-                registry
-                    .schemas
-                    .validate_batch(&drafts)
-                    .map_err(ExperimentError::from)
-                    .and_then(|()| {
-                        store
-                            .append(timeline_id, &drafts)
-                            .map(Some)
-                            .map_err(ExperimentError::from)
-                    })
-            }
-        })
-}
-
-/// Fold a batch only after its `EventStore` append has completed.
-fn fold_committed_events(
-    registry: &mut PluginRegistry,
-    committed: &[pos_core::Event],
-) -> (pos_core::clock::Seq, u64) {
-    let last_seq = committed[committed.len() - 1].seq;
-    registry.projections.fold_events(committed);
-    (last_seq, committed.len() as u64)
+) -> Result<u64, ExperimentError> {
+    let drafts = registry.step_all(timeline_id)?;
+    registry.schemas.validate_batch(&drafts)?;
+    if drafts.is_empty() {
+        Ok(0)
+    } else {
+        store
+            .append(timeline_id, &drafts)
+            .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
+            .map_err(ExperimentError::from)
+    }
 }
 
 /// Advance exactly one complete tick through the experiment pipeline.
@@ -214,9 +302,19 @@ fn advance_tick(
     store: &mut dyn pos_core::store::EventStore,
     timeline_id: pos_core::ids::TimelineId,
     registry: &mut PluginRegistry,
-) -> Result<Option<(pos_core::clock::Seq, u64)>, ExperimentError> {
-    commit_tick(store, timeline_id, registry)
-        .map(|committed| committed.map(|events| fold_committed_events(registry, &events)))
+    boundary: &mut TickBoundaryCoordinator,
+) -> Result<(TickAdvance, Timeline), ExperimentError> {
+    let before = capture_pending_range(store, timeline_id, boundary.folded_through)?;
+    let mut folded_events = fold_captured_range(boundary, registry, &before);
+    let emitted_events = append_driver_drafts(store, timeline_id, registry)?;
+    let after = capture_pending_range(store, timeline_id, boundary.folded_through)?;
+    folded_events = folded_events.saturating_add(fold_captured_range(boundary, registry, &after));
+    let outcome = if folded_events == 0 && emitted_events == 0 {
+        TickAdvance::Quiescent
+    } else {
+        TickAdvance::Advanced { folded_events }
+    };
+    Ok((outcome, after.timeline))
 }
 
 fn chain_head(
@@ -250,10 +348,17 @@ fn lock_store(
 fn read_events(
     store: &Mutex<Box<dyn pos_core::store::EventStore>>,
     timeline_id: pos_core::ids::TimelineId,
+    through: pos_core::clock::Seq,
 ) -> Result<Vec<pos_core::Event>, ExperimentError> {
+    if through == pos_core::clock::Seq::ZERO {
+        return Ok(Vec::new());
+    }
     lock_store(store).and_then(|store| {
         store
-            .read(timeline_id, pos_store::SeqRange::all())
+            .read(
+                timeline_id,
+                pos_store::SeqRange::bounded(pos_core::clock::Seq::from_u64(1), through),
+            )
             .map_err(ExperimentError::from)
     })
 }
@@ -273,21 +378,26 @@ fn run_experiment_on_store(
     timeline_id: pos_core::ids::TimelineId,
     stop: &StopCondition,
     registry: &mut PluginRegistry,
+    folded_through: pos_core::clock::Seq,
 ) -> Result<(u64, u64, Hash), ExperimentError> {
     let mut ticks: u64 = 0;
     let mut total_events: u64 = 0;
+    let mut boundary = TickBoundaryCoordinator { folded_through };
 
     loop {
         if stop.reached(ticks, total_events) {
             break;
         }
 
-        match advance_tick(store, timeline_id, registry) {
-            Ok(Some((_, committed_count))) => {
-                total_events += committed_count;
+        match advance_tick(store, timeline_id, registry, &mut boundary) {
+            Ok((TickAdvance::Advanced { folded_events }, _)) => {
+                total_events = total_events.saturating_add(folded_events);
                 ticks += 1;
             }
-            Ok(None) => break,
+            Ok((TickAdvance::Quiescent, _)) => {
+                ticks += 1;
+                break;
+            }
             Err(error) => return Err(error),
         }
     }
@@ -368,16 +478,64 @@ impl Experiment {
             ticks: 0,
             total_events: 0,
             complete: false,
+            health: SessionHealth::Healthy,
+            boundary: TickBoundaryCoordinator {
+                folded_through: pos_core::clock::Seq::ZERO,
+            },
+        })
+    }
+
+    /// Resume an existing durable Timeline with fresh runtime state.
+    ///
+    /// Persisted Events are validated and folded in logical sequence order.
+    /// Driver state starts fresh, making this the recovery path after a faulted
+    /// live session whose final append outcome may be ambiguous.
+    ///
+    /// # Errors
+    /// Returns a store error when the Timeline cannot be opened or its logical
+    /// history is invalid.
+    pub fn resume(
+        mut self,
+        timeline_id: pos_core::ids::TimelineId,
+    ) -> Result<ExperimentSession, ExperimentError> {
+        let parent_composition = self.registry.composition();
+        let store = open_store(self.config.store_config.clone())?;
+        let timeline = store
+            .get_timeline(timeline_id)?
+            .ok_or(pos_core::CoreError::TimelineNotFound(timeline_id))?;
+        let folded_through = store.logical_head(timeline_id)?;
+        let events = if folded_through == pos_core::clock::Seq::ZERO {
+            Vec::new()
+        } else {
+            store.read(
+                timeline_id,
+                pos_store::SeqRange::bounded(pos_core::clock::Seq::from_u64(1), folded_through),
+            )?
+        };
+        validate_captured_range(pos_core::clock::Seq::ZERO, folded_through, &events)?;
+        hydrate_projections(&mut self.registry, &events);
+        Ok(ExperimentSession {
+            config: self.config,
+            registry: self.registry,
+            parent_composition,
+            store: Arc::new(Mutex::new(store)),
+            fork_registry_factory: self.fork_registry_factory,
+            timeline,
+            ticks: 0,
+            total_events: folded_through.as_u64(),
+            complete: false,
+            health: SessionHealth::Healthy,
+            boundary: TickBoundaryCoordinator { folded_through },
         })
     }
 
     /// Run the experiment to completion and return a [`RunResult`].
     ///
     /// The closed tick loop:
-    /// 1. `step_all()` — call all registered drivers
-    /// 2. `validate_batch()` — reject unknown event types
-    /// 3. `append()` — write to store
-    /// 4. fold projections — `apply_event` for each committed event
+    /// 1. capture, validate, and fold every persisted Event through the boundary
+    /// 2. `step_all()` — call all registered drivers against one immutable snapshot
+    /// 3. `validate_batch()` and `append()` — atomically persist the driver batch
+    /// 4. capture, validate, and fold every Event through the post-step boundary
     ///
     /// # Errors
     /// Returns [`ExperimentError::Runtime`] on driver or schema errors,
@@ -409,7 +567,7 @@ impl Experiment {
                 ))
             })?;
 
-        let forked = store.fork(timeline.id(), timeline.head, name)?;
+        let forked = store.fork(timeline.id(), store.logical_head(timeline.id())?, name)?;
         Ok(forked)
     }
 }
@@ -427,34 +585,106 @@ impl ExperimentSession {
 
     /// Advance one complete tick.
     ///
-    /// Returns `true` when a batch was committed and folded, or `false` once
-    /// the stop condition or an empty driver batch completes the session.
+    /// Compatibility wrapper around [`Self::step_tick`]. Returns `true` when
+    /// the boundary advanced persisted state and `false` for quiescence or a
+    /// reached stop condition. Quiescence does not disable a later call.
     ///
     /// # Errors
     /// Returns runtime or store errors from the atomic tick pipeline.
     pub fn step(&mut self) -> Result<bool, ExperimentError> {
+        self.step_tick()
+            .map(|outcome| matches!(outcome, TickOutcome::Advanced { .. }))
+    }
+
+    /// Advance one complete interactive Tick Boundary.
+    ///
+    /// The host folds a captured contiguous range, steps every driver against
+    /// one immutable snapshot, appends the driver batch, then folds the complete
+    /// post-step range. A [`TickOutcome::Quiescent`] session remains resumable.
+    ///
+    /// # Errors
+    /// Pre-boundary read errors are retryable. Any error after projection or
+    /// driver mutation faults the session and subsequent calls return
+    /// [`ExperimentError::SessionFaulted`].
+    pub fn step_tick(&mut self) -> Result<TickOutcome, ExperimentError> {
+        if self.health == SessionHealth::Faulted {
+            return Err(ExperimentError::SessionFaulted);
+        }
         if self.complete || self.reached_stop_condition() {
             self.complete = true;
-            return Ok(false);
+            return Ok(TickOutcome::Stopped);
         }
 
-        lock_store(&self.store)
-            .and_then(|mut store| {
-                commit_tick(store.as_mut(), self.timeline.id(), &mut self.registry)
-            })
-            .map(|committed| {
-                if let Some(events) = committed {
-                    let (last_seq, committed_count) =
-                        fold_committed_events(&mut self.registry, &events);
-                    self.timeline.head = last_seq;
-                    self.total_events += committed_count;
-                    self.ticks += 1;
-                    true
-                } else {
-                    self.complete = true;
-                    false
+        let before = lock_store(&self.store).and_then(|store| {
+            capture_pending_range(
+                store.as_ref(),
+                self.timeline.id(),
+                self.boundary.folded_through,
+            )
+        })?;
+        let mut folded_events =
+            fold_captured_range(&mut self.boundary, &mut self.registry, &before);
+
+        let drafts = match self.registry.step_all(self.timeline.id()) {
+            Ok(drafts) => drafts,
+            Err(error) => {
+                self.health = SessionHealth::Faulted;
+                return Err(error.into());
+            }
+        };
+        if let Err(error) = self.registry.schemas.validate_batch(&drafts) {
+            self.health = SessionHealth::Faulted;
+            return Err(error.into());
+        }
+        let emitted_events = if drafts.is_empty() {
+            0
+        } else {
+            match lock_store(&self.store)
+                .and_then(|mut store| {
+                    store
+                        .append(self.timeline.id(), &drafts)
+                        .map_err(ExperimentError::from)
+                })
+                .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
+            {
+                Ok(count) => count,
+                Err(error) => {
+                    self.health = SessionHealth::Faulted;
+                    return Err(error);
                 }
+            }
+        };
+
+        let after = match lock_store(&self.store).and_then(|store| {
+            capture_pending_range(
+                store.as_ref(),
+                self.timeline.id(),
+                self.boundary.folded_through,
+            )
+        }) {
+            Ok(captured) => captured,
+            Err(error) => {
+                self.health = SessionHealth::Faulted;
+                return Err(error);
+            }
+        };
+        folded_events = folded_events.saturating_add(fold_captured_range(
+            &mut self.boundary,
+            &mut self.registry,
+            &after,
+        ));
+        self.timeline = after.timeline;
+        self.total_events = self.total_events.saturating_add(folded_events);
+        self.ticks = self.ticks.saturating_add(1);
+
+        if folded_events == 0 && emitted_events == 0 {
+            Ok(TickOutcome::Quiescent)
+        } else {
+            Ok(TickOutcome::Advanced {
+                folded_events,
+                emitted_events,
             })
+        }
     }
 
     /// Fork the active Timeline at its most recently completed tick boundary.
@@ -468,6 +698,9 @@ impl ExperimentSession {
     /// [`ExperimentError::Store`] if history hydration or forking fails, or
     /// [`ExperimentError::SharedStoreLockPoisoned`] if the shared store is poisoned.
     pub fn fork(&mut self, name: &str) -> Result<Self, ExperimentError> {
+        if self.health == SessionHealth::Faulted {
+            return Err(ExperimentError::SessionFaulted);
+        }
         let factory = self
             .fork_registry_factory
             .as_ref()
@@ -476,7 +709,16 @@ impl ExperimentSession {
         if registry.composition() != self.parent_composition {
             return Err(ExperimentError::IncompatibleForkRegistry);
         }
-        let events = read_events(&self.store, self.timeline.id())?;
+        let events = read_events(
+            &self.store,
+            self.timeline.id(),
+            self.boundary.folded_through,
+        )?;
+        validate_captured_range(
+            pos_core::clock::Seq::ZERO,
+            self.boundary.folded_through,
+            &events,
+        )?;
         hydrate_projections(&mut registry, &events);
         let config = ExperimentConfig {
             name: name.to_owned(),
@@ -487,7 +729,7 @@ impl ExperimentSession {
         lock_store(&self.store)
             .and_then(|mut store| {
                 store
-                    .fork(self.timeline.id(), self.timeline.head, name)
+                    .fork(self.timeline.id(), self.boundary.folded_through, name)
                     .map_err(ExperimentError::from)
             })
             .map(|timeline| Self {
@@ -498,8 +740,12 @@ impl ExperimentSession {
                 fork_registry_factory: Some(Arc::clone(factory)),
                 timeline,
                 ticks: self.ticks,
-                total_events: self.total_events,
+                total_events: self.boundary.folded_through.as_u64(),
                 complete: false,
+                health: SessionHealth::Healthy,
+                boundary: TickBoundaryCoordinator {
+                    folded_through: self.boundary.folded_through,
+                },
             })
     }
 
@@ -643,15 +889,15 @@ impl BacktestRunner {
 
         let mut train_registry = (self.registry_factory)();
         let train_stop = StopCondition::MaxTicks(self.config.train_ticks);
-        let (train_ticks, train_events, train_chain_head) =
-            run_experiment_on_store(store, train_tl_id, &train_stop, &mut train_registry)?;
+        let (train_ticks, train_events, train_chain_head) = run_experiment_on_store(
+            store,
+            train_tl_id,
+            &train_stop,
+            &mut train_registry,
+            pos_core::clock::Seq::ZERO,
+        )?;
 
-        // Find train head seq from the store's timeline list.
-        let train_head_seq = store
-            .list_timelines()?
-            .into_iter()
-            .find(|t| t.id() == train_tl_id)
-            .map_or(pos_core::clock::Seq::ZERO, |t| t.head);
+        let train_head_seq = store.logical_head(train_tl_id)?;
 
         // --- Fork train timeline to eval ---
         let eval_name = format!("{}-eval", self.config.experiment_name);
@@ -660,9 +906,24 @@ impl BacktestRunner {
 
         // --- Eval phase (same store, forked timeline) ---
         let mut eval_registry = (self.registry_factory)();
+        let inherited = if train_head_seq == pos_core::clock::Seq::ZERO {
+            Vec::new()
+        } else {
+            store.read(
+                eval_tl_id,
+                pos_store::SeqRange::bounded(pos_core::clock::Seq::from_u64(1), train_head_seq),
+            )?
+        };
+        validate_captured_range(pos_core::clock::Seq::ZERO, train_head_seq, &inherited)?;
+        hydrate_projections(&mut eval_registry, &inherited);
         let eval_stop = StopCondition::MaxTicks(self.config.eval_ticks);
-        let (eval_ticks, eval_events, eval_chain_head) =
-            run_experiment_on_store(store, eval_tl_id, &eval_stop, &mut eval_registry)?;
+        let (eval_ticks, eval_events, eval_chain_head) = run_experiment_on_store(
+            store,
+            eval_tl_id,
+            &eval_stop,
+            &mut eval_registry,
+            train_head_seq,
+        )?;
 
         // --- Lift metrics ---
         // Convert u64 counts to f64 via u32 to avoid precision-loss lint;
@@ -740,9 +1001,9 @@ mod tests {
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         ids::{EntityId, PluginId},
-        Capability, Event, Plugin, Reducer, State,
+        Capability, CoreError, Event, EventStore, Plugin, Reducer, State,
     };
-    use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
+    use pos_runtime::{Driver, ObservationView, ProjectionKey, RuntimeError, StepOutput};
     use pos_store::StoreConfig;
 
     // ── Inline test helpers ───────────────────────────────────────────────
@@ -914,6 +1175,99 @@ mod tests {
         }
     }
 
+    struct RecordingDriver {
+        subscriptions: Vec<ProjectionKey>,
+        seen_counts: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl RecordingDriver {
+        fn new(entity: EntityId, seen_counts: Arc<Mutex<Vec<u64>>>) -> Self {
+            Self {
+                subscriptions: vec![ProjectionKey::new(entity)],
+                seen_counts,
+            }
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl Driver for RecordingDriver {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+
+        fn subscriptions(&self) -> &[ProjectionKey] {
+            &self.subscriptions
+        }
+
+        fn step(
+            &mut self,
+            _: pos_core::ids::TimelineId,
+            observations: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            let count = observations
+                .state_for(&self.subscriptions[0])
+                .and_then(|state| state.get("n"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            self.seen_counts.lock().unwrap().push(count);
+            Ok(StepOutput::empty())
+        }
+    }
+
+    struct InterleavingDriver {
+        path: String,
+        entity: EntityId,
+        subscriptions: Vec<ProjectionKey>,
+        seen_counts: Arc<Mutex<Vec<u64>>>,
+        injected: bool,
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl Driver for InterleavingDriver {
+        fn name(&self) -> &'static str {
+            "interleaving"
+        }
+
+        fn subscriptions(&self) -> &[ProjectionKey] {
+            &self.subscriptions
+        }
+
+        fn step(
+            &mut self,
+            timeline: pos_core::ids::TimelineId,
+            observations: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            let count = observations
+                .state_for(&self.subscriptions[0])
+                .and_then(|state| state.get("n"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            self.seen_counts.lock().unwrap().push(count);
+            if self.injected {
+                return Ok(StepOutput::empty());
+            }
+            self.injected = true;
+            let mut gateway_store =
+                pos_store::sqlite::SqliteStore::open(&self.path).map_err(RuntimeError::Store)?;
+            let mut human = EventDraft::new(
+                self.entity,
+                Kind::new("world.action"),
+                CanonicalBytes::from_vec(b"human".to_vec()),
+            );
+            human.wall_time = Some(WallTime::from_micros(200));
+            gateway_store
+                .append(timeline, &[human])
+                .map_err(RuntimeError::Store)?;
+            let mut ai = EventDraft::new(
+                self.entity,
+                Kind::new("agent.decision"),
+                CanonicalBytes::from_vec(b"ai".to_vec()),
+            );
+            ai.wall_time = Some(WallTime::from_micros(100));
+            Ok(StepOutput::new(vec![ai]))
+        }
+    }
+
     struct LockInspectingReducer {
         store: Arc<Mutex<Option<SharedEventStore>>>,
         saw_unlocked_store: Arc<std::sync::atomic::AtomicBool>,
@@ -1002,8 +1356,654 @@ mod tests {
 
         // Should terminate quickly, not loop forever
         let result = exp.run().unwrap();
-        assert_eq!(result.ticks, 0);
+        assert_eq!(result.ticks, 1);
         assert_eq!(result.total_events, 0);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn interactive_session_folds_actions_before_one_shared_snapshot_and_resumes_after_quiescence() {
+        let entity = EntityId::new();
+        let seen_counts = Arc::new(Mutex::new(Vec::new()));
+        let plugin = make_plugin_with_reducer("actions", &["world.action"]);
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "next-tick-action".to_owned(),
+            stop: StopCondition::MaxTicks(10),
+            store_config: StoreConfig::Memory,
+        });
+        experiment
+            .register(
+                &plugin,
+                Some(Box::new(CountReducer)),
+                Some(Box::new(RecordingDriver::new(
+                    entity,
+                    Arc::clone(&seen_counts),
+                ))),
+            )
+            .unwrap();
+        let mut session = experiment.start().unwrap();
+        let timeline = session.timeline().id();
+        lock_store(&session.store)
+            .unwrap()
+            .append(
+                timeline,
+                &[EventDraft::new(
+                    entity,
+                    Kind::new("world.action"),
+                    CanonicalBytes::from_vec(b"first".to_vec()),
+                )],
+            )
+            .unwrap();
+
+        assert_eq!(
+            session.step_tick().unwrap(),
+            TickOutcome::Advanced {
+                folded_events: 1,
+                emitted_events: 0,
+            }
+        );
+        assert_eq!(session.step_tick().unwrap(), TickOutcome::Quiescent);
+        lock_store(&session.store)
+            .unwrap()
+            .append(
+                timeline,
+                &[EventDraft::new(
+                    entity,
+                    Kind::new("world.action"),
+                    CanonicalBytes::from_vec(b"second".to_vec()),
+                )],
+            )
+            .unwrap();
+        assert!(matches!(
+            session.step_tick().unwrap(),
+            TickOutcome::Advanced {
+                folded_events: 1,
+                emitted_events: 0
+            }
+        ));
+        assert_eq!(*seen_counts.lock().unwrap(), vec![1, 1, 2]);
+        assert_eq!(session.total_events, 2);
+        assert_eq!(session.ticks, 3);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn action_appended_during_step_waits_for_the_post_step_logical_fold() {
+        let database = tempfile::NamedTempFile::new().unwrap();
+        let path = database.path().to_str().unwrap().to_owned();
+        let entity = EntityId::new();
+        let seen_counts = Arc::new(Mutex::new(Vec::new()));
+        let plugin = make_plugin_with_reducer("interleaving", &["world.action", "agent.decision"]);
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "interleaved-action".to_owned(),
+            stop: StopCondition::MaxTicks(10),
+            store_config: StoreConfig::Sqlite { path: path.clone() },
+        });
+        experiment
+            .register(
+                &plugin,
+                Some(Box::new(CountReducer)),
+                Some(Box::new(InterleavingDriver {
+                    path,
+                    entity,
+                    subscriptions: vec![ProjectionKey::new(entity)],
+                    seen_counts: Arc::clone(&seen_counts),
+                    injected: false,
+                })),
+            )
+            .unwrap();
+        let mut session = experiment.start().unwrap();
+        assert_eq!(
+            session.step_tick().unwrap(),
+            TickOutcome::Advanced {
+                folded_events: 2,
+                emitted_events: 1,
+            }
+        );
+        assert_eq!(session.step_tick().unwrap(), TickOutcome::Quiescent);
+        assert_eq!(*seen_counts.lock().unwrap(), vec![0, 2]);
+
+        let timeline = session.timeline().id();
+        let store = lock_store(&session.store).unwrap();
+        let events = store.read(timeline, pos_store::SeqRange::all()).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| (event.seq.as_u64(), event.wall_time.as_micros()))
+                .collect::<Vec<_>>(),
+            vec![(1, 200), (2, 100)]
+        );
+        let mut replayed = pos_state::ProjectionRegistry::new();
+        replayed.register("interleaving", Box::new(CountReducer));
+        pos_time::replay(store.as_ref(), timeline, &mut replayed).unwrap();
+        assert_eq!(
+            replayed.state_for(&entity).and_then(|state| state.get("n")),
+            session
+                .registry
+                .projections
+                .state_for(&entity)
+                .and_then(|state| state.get("n"))
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn stateful_tick_failure_faults_until_fresh_timeline_resume() {
+        struct UnknownDraftDriver {
+            entity: EntityId,
+        }
+
+        #[cfg_attr(coverage_nightly, coverage(off))]
+        impl Driver for UnknownDraftDriver {
+            fn name(&self) -> &'static str {
+                "unknown-draft"
+            }
+
+            fn step(
+                &mut self,
+                _: pos_core::ids::TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                Ok(StepOutput::new(vec![EventDraft::new(
+                    self.entity,
+                    Kind::new("unknown.event"),
+                    CanonicalBytes::from_vec(Vec::new()),
+                )]))
+            }
+        }
+
+        let database = tempfile::NamedTempFile::new().unwrap();
+        let path = database.path().to_str().unwrap().to_owned();
+        let entity = EntityId::new();
+        let plugin = make_plugin_with_reducer("faulting", &["world.action"]);
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "fault-and-resume".to_owned(),
+            stop: StopCondition::MaxTicks(10),
+            store_config: StoreConfig::Sqlite { path: path.clone() },
+        });
+        experiment
+            .register(
+                &plugin,
+                Some(Box::new(CountReducer)),
+                Some(Box::new(UnknownDraftDriver { entity })),
+            )
+            .unwrap();
+        let mut session = experiment.start().unwrap();
+        let timeline = session.timeline().id();
+        lock_store(&session.store)
+            .unwrap()
+            .append(
+                timeline,
+                &[EventDraft::new(
+                    entity,
+                    Kind::new("world.action"),
+                    CanonicalBytes::from_vec(b"persisted".to_vec()),
+                )],
+            )
+            .unwrap();
+        assert!(matches!(
+            session.step_tick(),
+            Err(ExperimentError::Runtime(RuntimeError::UnknownEventType(_)))
+        ));
+        assert!(matches!(
+            session.step_tick(),
+            Err(ExperimentError::SessionFaulted)
+        ));
+        assert!(matches!(
+            session.fork("faulted-child"),
+            Err(ExperimentError::SessionFaulted)
+        ));
+        drop(session);
+
+        let seen_counts = Arc::new(Mutex::new(Vec::new()));
+        let recovery_plugin = make_plugin_with_reducer("recovery", &["world.action"]);
+        let mut recovery = Experiment::new(ExperimentConfig {
+            name: "recovered".to_owned(),
+            stop: StopCondition::MaxTicks(10),
+            store_config: StoreConfig::Sqlite { path },
+        });
+        recovery
+            .register(
+                &recovery_plugin,
+                Some(Box::new(CountReducer)),
+                Some(Box::new(RecordingDriver::new(
+                    entity,
+                    Arc::clone(&seen_counts),
+                ))),
+            )
+            .unwrap();
+        let mut resumed = recovery.resume(timeline).unwrap();
+        assert_eq!(resumed.total_events, 1);
+        assert_eq!(resumed.step_tick().unwrap(), TickOutcome::Quiescent);
+        assert_eq!(*seen_counts.lock().unwrap(), vec![1]);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn empty_durable_timeline_resumes_and_stops_after_one_quiescent_tick() {
+        let database = tempfile::NamedTempFile::new().unwrap();
+        let path = database.path().to_str().unwrap().to_owned();
+        let config = StoreConfig::Sqlite { path: path.clone() };
+        let timeline = {
+            let mut store = open_store(config.clone()).unwrap();
+            store.create_timeline("empty-resume").unwrap().id()
+        };
+        let mut session = Experiment::new(ExperimentConfig {
+            name: "resumed-empty".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: config,
+        })
+        .resume(timeline)
+        .unwrap();
+
+        assert_eq!(session.step_tick().unwrap(), TickOutcome::Quiescent);
+        assert_eq!(session.step_tick().unwrap(), TickOutcome::Stopped);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn durable_resume_propagates_open_and_missing_timeline_failures() {
+        let directory = tempfile::tempdir().unwrap();
+        let directory_config = ExperimentConfig {
+            name: "resume-open-failure".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Sqlite {
+                path: directory.path().to_str().unwrap().to_owned(),
+            },
+        };
+        assert!(Experiment::new(directory_config)
+            .resume(pos_core::ids::TimelineId::new())
+            .is_err());
+
+        let missing_database = tempfile::NamedTempFile::new().unwrap();
+        let missing_path = missing_database.path().to_str().unwrap().to_owned();
+        drop(
+            open_store(StoreConfig::Sqlite {
+                path: missing_path.clone(),
+            })
+            .unwrap(),
+        );
+        assert!(Experiment::new(ExperimentConfig {
+            name: "resume-missing".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Sqlite { path: missing_path },
+        })
+        .resume(pos_core::ids::TimelineId::new())
+        .is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn durable_resume_propagates_metadata_and_event_read_failures() {
+        let metadata_database = tempfile::NamedTempFile::new().unwrap();
+        let metadata_path = metadata_database.path().to_str().unwrap().to_owned();
+        let metadata_timeline = {
+            let mut store = open_store(StoreConfig::Sqlite {
+                path: metadata_path.clone(),
+            })
+            .unwrap();
+            store.create_timeline("resume-metadata").unwrap().id()
+        };
+        rusqlite::Connection::open(&metadata_path)
+            .unwrap()
+            .execute(
+                "UPDATE timelines SET name = X'FF' WHERE id = ?1",
+                rusqlite::params![metadata_timeline.to_string()],
+            )
+            .unwrap();
+        assert!(Experiment::new(ExperimentConfig {
+            name: "resume-metadata".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Sqlite {
+                path: metadata_path,
+            },
+        })
+        .resume(metadata_timeline)
+        .is_err());
+
+        let read_database = tempfile::NamedTempFile::new().unwrap();
+        let read_path = read_database.path().to_str().unwrap().to_owned();
+        let read_timeline = {
+            let mut store = open_store(StoreConfig::Sqlite {
+                path: read_path.clone(),
+            })
+            .unwrap();
+            let timeline = store.create_timeline("resume-read").unwrap();
+            store
+                .append(
+                    timeline.id(),
+                    &[EventDraft::new(
+                        EntityId::new(),
+                        Kind::new("resume.event"),
+                        CanonicalBytes::from_vec(Vec::new()),
+                    )],
+                )
+                .unwrap();
+            timeline.id()
+        };
+        rusqlite::Connection::open(&read_path)
+            .unwrap()
+            .execute("DROP TABLE events", [])
+            .unwrap();
+        assert!(Experiment::new(ExperimentConfig {
+            name: "resume-read".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Sqlite { path: read_path },
+        })
+        .resume(read_timeline)
+        .is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn durable_resume_propagates_malformed_ancestry_failure() {
+        let head_database = tempfile::NamedTempFile::new().unwrap();
+        let head_path = head_database.path().to_str().unwrap().to_owned();
+        let malformed_head_timeline = {
+            let mut store = pos_store::sqlite::SqliteStore::open(&head_path).unwrap();
+            let root = store.create_timeline("resume-head-root").unwrap();
+            store
+                .append(
+                    root.id(),
+                    &[EventDraft::new(
+                        EntityId::new(),
+                        Kind::new("resume.event"),
+                        CanonicalBytes::from_vec(Vec::new()),
+                    )],
+                )
+                .unwrap();
+            let child = store
+                .fork(
+                    root.id(),
+                    pos_core::clock::Seq::from_u64(1),
+                    "resume-head-child",
+                )
+                .unwrap();
+            store
+                .append(
+                    child.id(),
+                    &[EventDraft::new(
+                        EntityId::new(),
+                        Kind::new("resume.event"),
+                        CanonicalBytes::from_vec(Vec::new()),
+                    )],
+                )
+                .unwrap();
+            store
+                .fork(
+                    child.id(),
+                    pos_core::clock::Seq::from_u64(2),
+                    "resume-head-grandchild",
+                )
+                .unwrap()
+                .id()
+        };
+        let missing_parent = pos_core::ids::TimelineId::new();
+        rusqlite::Connection::open(&head_path)
+            .unwrap()
+            .execute(
+                "UPDATE timelines SET parent_id = ?2 WHERE id = ?1",
+                rusqlite::params![
+                    malformed_head_timeline.to_string(),
+                    missing_parent.to_string()
+                ],
+            )
+            .unwrap();
+        assert!(Experiment::new(ExperimentConfig {
+            name: "resume-head".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Sqlite { path: head_path },
+        })
+        .resume(malformed_head_timeline)
+        .is_err());
+    }
+
+    #[derive(Clone, Copy)]
+    enum CaptureFault {
+        LogicalHead,
+        SecondLogicalHead,
+        GetTimeline,
+        MissingTimeline,
+        Read,
+        EmptyRead,
+    }
+
+    struct CaptureFaultStore {
+        base: pos_store::memory::MemoryStore,
+        fault: CaptureFault,
+        head_calls: std::cell::Cell<u8>,
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl EventStore for CaptureFaultStore {
+        fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
+            self.base.create_timeline(name)
+        }
+
+        fn append(
+            &mut self,
+            timeline: pos_core::ids::TimelineId,
+            drafts: &[EventDraft],
+        ) -> Result<Vec<Event>, CoreError> {
+            self.base.append(timeline, drafts)
+        }
+
+        fn read(
+            &self,
+            timeline: pos_core::ids::TimelineId,
+            range: pos_core::store::SeqRange,
+        ) -> Result<Vec<Event>, CoreError> {
+            match self.fault {
+                CaptureFault::Read => Err(CoreError::Storage("injected read failure".to_owned())),
+                CaptureFault::EmptyRead => Ok(Vec::new()),
+                _ => self.base.read(timeline, range),
+            }
+        }
+
+        fn fork(
+            &mut self,
+            parent: pos_core::ids::TimelineId,
+            at_seq: pos_core::clock::Seq,
+            name: &str,
+        ) -> Result<Timeline, CoreError> {
+            self.base.fork(parent, at_seq, name)
+        }
+
+        fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+            self.base.list_timelines()
+        }
+
+        fn get_timeline(
+            &self,
+            id: pos_core::ids::TimelineId,
+        ) -> Result<Option<Timeline>, CoreError> {
+            match self.fault {
+                CaptureFault::GetTimeline => {
+                    Err(CoreError::Storage("injected metadata failure".to_owned()))
+                }
+                CaptureFault::MissingTimeline => Ok(None),
+                _ => self.base.get_timeline(id),
+            }
+        }
+
+        fn logical_head(
+            &self,
+            id: pos_core::ids::TimelineId,
+        ) -> Result<pos_core::clock::Seq, CoreError> {
+            match self.fault {
+                CaptureFault::LogicalHead => {
+                    Err(CoreError::Storage("injected head failure".to_owned()))
+                }
+                CaptureFault::SecondLogicalHead => {
+                    let calls = self.head_calls.get();
+                    self.head_calls.set(calls.saturating_add(1));
+                    if calls == 0 {
+                        self.base.logical_head(id)
+                    } else {
+                        Err(CoreError::Storage(
+                            "injected second head failure".to_owned(),
+                        ))
+                    }
+                }
+                _ => self.base.logical_head(id),
+            }
+        }
+    }
+
+    struct CaptureFailDriver;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl Driver for CaptureFailDriver {
+        fn name(&self) -> &'static str {
+            "capture-fail"
+        }
+
+        fn step(
+            &mut self,
+            _: pos_core::ids::TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            Err(RuntimeError::UnknownEventType(
+                "capture.driver.failure".to_owned(),
+            ))
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn captured_ranges_propagate_each_store_and_integrity_failure() {
+        for fault in [
+            CaptureFault::LogicalHead,
+            CaptureFault::GetTimeline,
+            CaptureFault::MissingTimeline,
+            CaptureFault::Read,
+            CaptureFault::EmptyRead,
+        ] {
+            let mut store = CaptureFaultStore {
+                base: pos_store::memory::MemoryStore::new(),
+                fault,
+                head_calls: std::cell::Cell::new(0),
+            };
+            let timeline = store.create_timeline("capture-fault").unwrap();
+            store
+                .append(
+                    timeline.id(),
+                    &[EventDraft::new(
+                        EntityId::new(),
+                        Kind::new("capture.event"),
+                        CanonicalBytes::from_vec(Vec::new()),
+                    )],
+                )
+                .unwrap();
+
+            assert!(
+                capture_pending_range(&store, timeline.id(), pos_core::clock::Seq::ZERO,).is_err()
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn tick_pipeline_and_branch_propagate_each_boundary_failure() {
+        let mut first_capture_store = CaptureFaultStore {
+            base: pos_store::memory::MemoryStore::new(),
+            fault: CaptureFault::LogicalHead,
+            head_calls: std::cell::Cell::new(0),
+        };
+        let first_timeline = first_capture_store
+            .create_timeline("first-capture")
+            .unwrap();
+        assert!(advance_tick(
+            &mut first_capture_store,
+            first_timeline.id(),
+            &mut PluginRegistry::new(),
+            &mut TickBoundaryCoordinator {
+                folded_through: pos_core::clock::Seq::ZERO,
+            },
+        )
+        .is_err());
+
+        let mut second_capture_store = CaptureFaultStore {
+            base: pos_store::memory::MemoryStore::new(),
+            fault: CaptureFault::SecondLogicalHead,
+            head_calls: std::cell::Cell::new(0),
+        };
+        let second_timeline = second_capture_store
+            .create_timeline("second-capture")
+            .unwrap();
+        assert!(advance_tick(
+            &mut second_capture_store,
+            second_timeline.id(),
+            &mut PluginRegistry::new(),
+            &mut TickBoundaryCoordinator {
+                folded_through: pos_core::clock::Seq::ZERO,
+            },
+        )
+        .is_err());
+
+        let mut driver_store = pos_store::memory::MemoryStore::new();
+        let driver_timeline = driver_store.create_timeline("driver-failure").unwrap();
+        let mut registry = PluginRegistry::new();
+        registry
+            .register(
+                &make_plugin("capture-fail", &[]),
+                None,
+                Some(Box::new(CaptureFailDriver)),
+            )
+            .unwrap();
+        assert!(
+            append_driver_drafts(&mut driver_store, driver_timeline.id(), &mut registry).is_err()
+        );
+
+        let mut branch_store = CaptureFaultStore {
+            base: pos_store::memory::MemoryStore::new(),
+            fault: CaptureFault::LogicalHead,
+            head_calls: std::cell::Cell::new(0),
+        };
+        branch_store.create_timeline("branch-head").unwrap();
+        assert!(Experiment::new(ExperimentConfig {
+            name: "branch-head".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        })
+        .branch("child", &mut branch_store)
+        .is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn captured_ranges_fail_before_fold_when_length_order_or_cursor_is_invalid() {
+        let mut store = pos_store::memory::MemoryStore::new();
+        let timeline = store.create_timeline("range-validation").unwrap();
+        let mut event = store
+            .append(
+                timeline.id(),
+                &[EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("range.event"),
+                    CanonicalBytes::from_vec(Vec::new()),
+                )],
+            )
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(validate_captured_range(
+            pos_core::clock::Seq::ZERO,
+            pos_core::clock::Seq::from_u64(2),
+            std::slice::from_ref(&event),
+        )
+        .is_err());
+        event.seq = pos_core::clock::Seq::from_u64(2);
+        assert!(validate_captured_range(
+            pos_core::clock::Seq::ZERO,
+            pos_core::clock::Seq::from_u64(1),
+            std::slice::from_ref(&event),
+        )
+        .is_err());
+        assert!(
+            capture_pending_range(&store, timeline.id(), pos_core::clock::Seq::from_u64(2),)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1110,6 +2110,17 @@ mod tests {
         let mut session = experiment.start().unwrap();
         assert!(session.step().unwrap());
         assert_eq!(session.timeline().head, pos_core::clock::Seq::from_u64(1));
+        lock_store(&session.store)
+            .unwrap()
+            .append(
+                session.timeline().id(),
+                &[EventDraft::new(
+                    entity,
+                    Kind::new("session.event"),
+                    CanonicalBytes::from_vec(b"pending".to_vec()),
+                )],
+            )
+            .unwrap();
 
         let mut fork = session.fork("session-fork").unwrap();
         assert_eq!(
@@ -1127,7 +2138,7 @@ mod tests {
         assert!(fork.step().unwrap());
         assert!(session.step().unwrap());
         assert_ne!(fork.timeline().id(), session.timeline().id());
-        assert_eq!(session.timeline().head, pos_core::clock::Seq::from_u64(2));
+        assert_eq!(session.timeline().head, pos_core::clock::Seq::from_u64(3));
 
         let fork_result = fork.run_to_completion().unwrap();
         assert_eq!(fork_result.ticks, 2);
@@ -1135,7 +2146,7 @@ mod tests {
 
         let result = session.run_to_completion().unwrap();
         assert_eq!(result.ticks, 2);
-        assert_eq!(result.total_events, 2);
+        assert_eq!(result.total_events, 3);
     }
 
     #[test]
@@ -1516,8 +2527,8 @@ mod tests {
         });
         exp.register(&plugin, None, Some(Box::new(driver))).unwrap();
         let result = exp.run().unwrap();
-        // After 1 tick, driver returns empty → experiment terminates
-        assert_eq!(result.ticks, 1);
+        // One emitting boundary plus one resumable quiescent boundary.
+        assert_eq!(result.ticks, 2);
     }
 
     #[test]
@@ -1630,6 +2641,52 @@ mod tests {
 
         // Clean up
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fork_backed_run_result_branches_at_its_logical_head() {
+        fn registry() -> PluginRegistry {
+            let plugin = make_plugin("nested-result", &["nested.result.event"]);
+            let mut registry = PluginRegistry::new();
+            registry
+                .register(
+                    &plugin,
+                    None,
+                    Some(Box::new(FixedDriver::new(
+                        EntityId::new(),
+                        "nested.result.event",
+                        1,
+                    ))),
+                )
+                .unwrap();
+            registry
+        }
+
+        let database = tempfile::NamedTempFile::new().unwrap();
+        let path = database.path().to_str().unwrap().to_owned();
+        let result = BacktestRunner::new(
+            BacktestConfig {
+                experiment_name: "nested-result-branch".to_owned(),
+                train_ticks: 2,
+                eval_ticks: 1,
+                store_config: StoreConfig::Sqlite { path: path.clone() },
+            },
+            registry,
+        )
+        .run()
+        .unwrap();
+
+        let branch = result.eval_result.branch("nested-result-child").unwrap();
+        assert_eq!(
+            branch.meta.fork_point,
+            Some((
+                result.eval_result.timeline_id,
+                pos_core::clock::Seq::from_u64(3)
+            ))
+        );
+        let store = pos_store::sqlite::SqliteStore::open(&path).unwrap();
+        assert_eq!(store.logical_head(branch.id()).unwrap().as_u64(), 3);
     }
 
     #[test]
@@ -1956,8 +3013,8 @@ mod backtest_tests {
         });
 
         let result = runner.run().unwrap();
-        assert_eq!(result.train_result.ticks, 0);
-        assert_eq!(result.eval_result.ticks, 0);
+        assert_eq!(result.train_result.ticks, 1);
+        assert_eq!(result.eval_result.ticks, 1);
         assert_eq!(result.train_events, 0);
         assert_eq!(result.eval_events, 0);
     }
@@ -2468,9 +3525,71 @@ mod fault_injection_tests {
             )
             .unwrap();
         let mut session = experiment.start().unwrap();
-        drop_table(path.to_str().unwrap(), "events");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_session_append
+                 BEFORE INSERT ON events
+                 BEGIN
+                   SELECT RAISE(FAIL, 'injected append failure');
+                 END;",
+            )
+            .unwrap();
 
         assert!(matches!(session.step(), Err(ExperimentError::Store(_))));
+        assert!(matches!(
+            session.step_tick(),
+            Err(ExperimentError::SessionFaulted)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn live_session_faults_when_post_append_capture_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-post-capture.db");
+        let event_type = Kind::new("session.post-capture");
+        let plugin = FaultPlugin {
+            id: PluginId::new(),
+            event_type: event_type.clone(),
+        };
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "session-post-capture-fault".to_owned(),
+            stop: StopCondition::MaxTicks(2),
+            store_config: StoreConfig::Sqlite {
+                path: path.to_str().unwrap().to_owned(),
+            },
+        });
+        experiment
+            .register(
+                &plugin,
+                None,
+                Some(Box::new(EmitDriver {
+                    entity: EntityId::new(),
+                    event_type,
+                })),
+            )
+            .unwrap();
+        let mut session = experiment.start().unwrap();
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER corrupt_after_session_append
+                 AFTER INSERT ON events
+                 BEGIN
+                   UPDATE timelines SET fork_seq = 0 WHERE id = NEW.timeline_id;
+                 END;",
+            )
+            .unwrap();
+
+        assert!(matches!(
+            session.step_tick(),
+            Err(ExperimentError::Store(_))
+        ));
+        assert!(matches!(
+            session.step_tick(),
+            Err(ExperimentError::SessionFaulted)
+        ));
     }
 
     #[test]
@@ -2742,7 +3861,7 @@ mod fault_injection_tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn backtest_runner_list_timelines_fails_on_corrupt_timeline_row() {
+    fn backtest_runner_ignores_unrelated_corrupt_timeline_metadata() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bt-list.db");
         let path_str = path.to_str().unwrap().to_owned();
@@ -2769,7 +3888,7 @@ mod fault_injection_tests {
             store_config: StoreConfig::Sqlite { path: path_str },
         };
         let runner2 = BacktestRunner::new(config2, registry_with_emit_driver);
-        assert!(runner2.run().is_err());
+        assert!(runner2.run().is_ok());
     }
 
     /// Test that `BacktestRunner::run_on_store` fails when fork returns an error.
@@ -2817,6 +3936,10 @@ mod fault_injection_tests {
 
             fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
                 self.base.get_timeline(id)
+            }
+
+            fn logical_head(&self, id: TimelineId) -> Result<Seq, CoreError> {
+                self.base.logical_head(id)
             }
 
             fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
@@ -2911,6 +4034,13 @@ mod fault_injection_tests {
             id: pos_core::ids::TimelineId,
         ) -> Result<Option<pos_core::timeline::Timeline>, CoreError> {
             self.base.get_timeline(id)
+        }
+
+        fn logical_head(
+            &self,
+            id: pos_core::ids::TimelineId,
+        ) -> Result<pos_core::clock::Seq, CoreError> {
+            self.base.logical_head(id)
         }
 
         fn read(
