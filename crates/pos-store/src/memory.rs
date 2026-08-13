@@ -182,18 +182,22 @@ fn read_event_by_id(
 ) -> Result<Option<Event>, CoreError> {
     store
         .ensure_generic_timeline_visibility(timeline)
-        .and_then(|()| {
-            store
-                .timelines
-                .get(&timeline)
-                .ok_or(CoreError::TimelineNotFound(timeline))
-        })
-        .map(|state| {
-            state
-                .events
-                .iter()
-                .find(|event| event.id == event_id)
-                .cloned()
+        .and_then(|()| store.fork_chain(timeline))
+        .and_then(|chain| {
+            for (index, timeline_id) in chain.timelines.iter().enumerate() {
+                let prefix = chain.segment_prefix(index)?;
+                let limit = chain.segment_length(store, index, *timeline_id)?;
+                if let Some(event) = store
+                    .state(*timeline_id)
+                    .events
+                    .iter()
+                    .find(|event| event.seq.as_u64() <= limit && event.id == event_id)
+                    .cloned()
+                {
+                    return MemoryStore::logical_event(prefix, event).map(Some);
+                }
+            }
+            Ok(None)
         })
 }
 
@@ -359,6 +363,46 @@ struct ForkChain {
     fork_seqs: Vec<Seq>,
 }
 
+impl ForkChain {
+    fn segment_prefix(&self, index: usize) -> Result<u64, CoreError> {
+        if index == 0 {
+            Ok(0)
+        } else {
+            self.fork_seqs
+                .get(index - 1)
+                .copied()
+                .map(Seq::as_u64)
+                .ok_or_else(|| {
+                    CoreError::Storage("Fork chain is missing a logical prefix".to_owned())
+                })
+        }
+    }
+
+    fn segment_length(
+        &self,
+        store: &MemoryStore,
+        index: usize,
+        timeline: TimelineId,
+    ) -> Result<u64, CoreError> {
+        let prefix = self.segment_prefix(index)?;
+        let local_head = store.state(timeline).timeline.head.as_u64();
+        let length = match self.fork_seqs.get(index).copied() {
+            Some(fork) => fork.as_u64().checked_sub(prefix).ok_or_else(|| {
+                CoreError::Storage(format!(
+                    "Fork point precedes inherited history for timeline {timeline}"
+                ))
+            })?,
+            None => local_head,
+        };
+        if length > local_head {
+            return Err(CoreError::Storage(format!(
+                "Fork point exceeds parent logical Event head for timeline {timeline}"
+            )));
+        }
+        Ok(length)
+    }
+}
+
 #[derive(Clone)]
 struct TimelineState {
     timeline: Timeline,
@@ -445,6 +489,7 @@ impl MemoryStore {
         draft: &EventDraft,
         max_owned_events: Option<u64>,
     ) -> Result<Option<AppendOrDuplicateOutcome>, CoreError> {
+        let logical_prefix = self.logical_prefix(timeline)?;
         if let Some(record) = self.append_identities.get(&identity.dedup_key) {
             if record.expires_at > admitted_at {
                 if record.timeline != timeline {
@@ -478,7 +523,7 @@ impl MemoryStore {
                 event
             })
         };
-        event.map(|event| {
+        event.and_then(|event| {
             self.append_identities.insert(
                 identity.dedup_key,
                 AppendIdentityRecord {
@@ -489,7 +534,8 @@ impl MemoryStore {
                     retained_content: Self::retained_content(&event),
                 },
             );
-            Some(AppendOrDuplicateOutcome::Appended(Box::new(event)))
+            Self::logical_event(logical_prefix, event)
+                .map(|event| Some(AppendOrDuplicateOutcome::Appended(Box::new(event))))
         })
     }
 
@@ -498,6 +544,23 @@ impl MemoryStore {
             Some(state) => Ok(&state.timeline),
             None => Err(CoreError::TimelineNotFound(id)),
         }
+    }
+
+    fn logical_prefix(&self, timeline: TimelineId) -> Result<u64, CoreError> {
+        self.timeline(timeline).map(|timeline| {
+            timeline
+                .meta
+                .fork_point
+                .map_or(0, |(_, fork)| fork.as_u64())
+        })
+    }
+
+    fn logical_event(prefix: u64, mut event: Event) -> Result<Event, CoreError> {
+        event.seq =
+            Seq::from_u64(prefix.checked_add(event.seq.as_u64()).ok_or_else(|| {
+                CoreError::Storage("logical Timeline sequence overflow".to_owned())
+            })?);
+        Ok(event)
     }
 
     /// Borrow complete state after the caller has validated the Timeline id.
@@ -579,16 +642,17 @@ impl MemoryStore {
             .iter()
             .enumerate()
             .try_fold(Vec::new(), |mut all, (i, tid)| {
-                self.timeline(*tid).map(|_| {
+                self.timeline(*tid).and_then(|_| {
                     let state = self.state(*tid);
                     let events = &state.events;
-                    if let Some(&fork_seq) = chain.fork_seqs.get(i) {
-                        all.extend(events.iter().filter(|e| e.seq <= fork_seq).cloned());
-                        all
-                    } else {
-                        all.extend(events.iter().cloned());
-                        all
-                    }
+                    let length = chain.segment_length(self, i, *tid)?;
+                    all.extend(
+                        events
+                            .iter()
+                            .filter(|event| event.seq.as_u64() <= length)
+                            .cloned(),
+                    );
+                    Ok(all)
                 })
             })
             .map(|all| crate::stitch::renumber_and_filter(all, range))
@@ -646,7 +710,8 @@ impl MemoryStore {
                 remaining -= plan.take;
                 plans.push(plan);
             }
-            let segment_len = self.bounded_segment_length(chain, index, *timeline)?;
+            let segment_len =
+                self.bounded_segment_length(chain, index, *timeline, logical_offset)?;
             logical_offset = logical_offset.saturating_add(segment_len);
             if remaining == 0 || logical_offset >= to {
                 break;
@@ -691,7 +756,7 @@ impl MemoryStore {
                 "timeline {timeline} violates the contiguous Event sequence invariant"
             )));
         }
-        let segment_len = self.bounded_segment_length(chain, index, timeline)?;
+        let segment_len = self.bounded_segment_length(chain, index, timeline, logical_offset)?;
         let Some(page) = crate::stitch::plan_page(logical_offset, segment_len, from, to, remaining)
         else {
             return Ok(None);
@@ -745,6 +810,7 @@ impl MemoryStore {
         chain: &[TimelineId],
         index: usize,
         timeline: TimelineId,
+        logical_offset: u64,
     ) -> Result<u64, CoreError> {
         let event_count = u64::try_from(self.state(timeline).events.len()).unwrap_or(u64::MAX);
         let fork_cap = chain.get(index + 1).and_then(|child| {
@@ -754,12 +820,19 @@ impl MemoryStore {
                 .fork_point
                 .map(|(_, seq)| seq)
         });
-        if fork_cap.is_some_and(|cap| cap.as_u64() > event_count) {
+        let segment_len = fork_cap.map_or(Ok(event_count), |cap| {
+            cap.as_u64().checked_sub(logical_offset).ok_or_else(|| {
+                CoreError::Storage(format!(
+                    "Fork point precedes inherited history for timeline {timeline}"
+                ))
+            })
+        })?;
+        if segment_len > event_count {
             return Err(CoreError::Storage(format!(
-                "Fork point exceeds parent Event head for timeline {timeline}"
+                "Fork point exceeds parent logical Event head for timeline {timeline}"
             )));
         }
-        Ok(fork_cap.map_or(event_count, Seq::as_u64))
+        Ok(segment_len)
     }
 
     fn materialize_bounded_events(
@@ -891,11 +964,11 @@ impl MemoryStore {
         at_seq: Seq,
         name: &str,
     ) -> Result<Timeline, CoreError> {
-        let parent_tl = &self.state(parent).timeline;
-        if at_seq > parent_tl.head {
+        let parent_head = self.logical_head(parent)?;
+        if at_seq > parent_head {
             return Err(CoreError::ForkBeyondHead {
                 fork_seq: at_seq.as_u64(),
-                head: parent_tl.head.as_u64(),
+                head: parent_head.as_u64(),
             });
         }
 
@@ -1407,6 +1480,7 @@ impl EventStore for MemoryStore {
         crate::ensure_non_geographic_drafts(drafts, timeline)
             .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
             .and_then(|()| {
+                let logical_prefix = self.logical_prefix(timeline)?;
                 let committed = {
                     let (timelines, hasher) = (&mut self.timelines, &self.hasher);
                     mutable_state(timelines, timeline).map(|state| {
@@ -1416,9 +1490,16 @@ impl EventStore for MemoryStore {
                             .collect::<Vec<_>>()
                     })
                 };
-                committed.inspect(|events| {
-                    self.event_ids.extend(events.iter().map(|event| event.id));
-                })
+                committed
+                    .inspect(|events| {
+                        self.event_ids.extend(events.iter().map(|event| event.id));
+                    })
+                    .and_then(|events| {
+                        events
+                            .into_iter()
+                            .map(|event| Self::logical_event(logical_prefix, event))
+                            .collect()
+                    })
             })
     }
 
@@ -1573,16 +1654,29 @@ impl EventStore for MemoryStore {
         }
     }
 
+    fn logical_head(&self, id: TimelineId) -> Result<Seq, CoreError> {
+        self.ensure_generic_timeline_visibility(id)?;
+        let chain = self.fork_chain(id)?;
+        let mut logical_head = 0_u64;
+        for (index, timeline) in chain.timelines.iter().enumerate() {
+            let length = chain.segment_length(self, index, *timeline)?;
+            logical_head = logical_head
+                .checked_add(length)
+                .ok_or_else(|| CoreError::Storage("logical Timeline head overflow".to_owned()))?;
+        }
+        Ok(Seq::from_u64(logical_head))
+    }
+
     fn create_timeline_with_meta(&mut self, meta: TimelineMeta) -> Result<Timeline, CoreError> {
         // Resolve fork parent before duplicate-id check (parity with SqliteStore).
         let chain = if let Some((parent, at_seq)) = meta.fork_point {
             self.ensure_generic_timeline_visibility(parent)
                 .and_then(|()| {
-                    let parent_tl = &self.state(parent).timeline;
-                    if at_seq > parent_tl.head {
+                    let parent_head = self.logical_head(parent)?;
+                    if at_seq > parent_head {
                         Err(CoreError::ForkBeyondHead {
                             fork_seq: at_seq.as_u64(),
-                            head: parent_tl.head.as_u64(),
+                            head: parent_head.as_u64(),
                         })
                     } else {
                         self.compute_chain_hash_at(parent, at_seq)
@@ -1667,30 +1761,24 @@ impl EventStore for MemoryStore {
 impl MemoryStore {
     /// Compute the hash chain value at a specific seq in a timeline.
     fn compute_chain_hash_at(&self, timeline: TimelineId, at_seq: Seq) -> Result<Hash, CoreError> {
-        let chain = self.fork_chain(timeline)?;
+        let logical_head = self.logical_head(timeline)?;
+        if at_seq > logical_head {
+            return Err(CoreError::ForkBeyondHead {
+                fork_seq: at_seq.as_u64(),
+                head: logical_head.as_u64(),
+            });
+        }
         let mut hash = self.hasher.genesis_hash();
-
-        for (i, tid) in chain.timelines.iter().enumerate() {
-            let events = &self.state(*tid).events;
-
-            // Ancestors: limit to the *child's* fork_seq onto this timeline (matches SQLite /
-            // CoW stitch). Target timeline: limit to `at_seq`.
-            let limit = if *tid == timeline {
-                at_seq
-            } else {
-                chain.fork_seqs[i]
-            };
-
-            for event in events.iter().filter(|e| e.seq <= limit) {
-                let id_str = event.id.to_string();
-                hash = self
-                    .hasher
-                    .hash_event(&hash, id_str.as_bytes(), &event.payload);
-            }
-
-            if *tid == timeline {
-                break;
-            }
+        if at_seq == Seq::ZERO {
+            return Ok(hash);
+        }
+        for event in
+            self.collect_events_in_range(timeline, SeqRange::bounded(Seq::from_u64(1), at_seq))?
+        {
+            let id_str = event.id.to_string();
+            hash = self
+                .hasher
+                .hash_event(&hash, id_str.as_bytes(), &event.payload);
         }
         Ok(hash)
     }
@@ -3195,6 +3283,172 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nested_forks_expose_one_logical_sequence() {
+        let mut store = MemoryStore::new();
+        let root = store.create_timeline("root").unwrap();
+        let entity = EntityId::new();
+        store
+            .append(
+                root.id(),
+                &[
+                    make_draft(entity, b"r1"),
+                    make_draft(entity, b"r2"),
+                    make_draft(entity, b"r3"),
+                ],
+            )
+            .unwrap();
+        let child = store.fork(root.id(), Seq::from_u64(2), "child").unwrap();
+        let child_event = store
+            .append(child.id(), &[make_draft(entity, b"c1")])
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(child.head, Seq::ZERO);
+        assert_eq!(child_event.seq, Seq::from_u64(3));
+        assert_eq!(store.logical_head(child.id()).unwrap(), Seq::from_u64(3));
+
+        let grandchild = store
+            .fork(child.id(), Seq::from_u64(3), "grandchild")
+            .unwrap();
+        let grandchild_event = store
+            .append(grandchild.id(), &[make_draft(entity, b"g1")])
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(grandchild_event.seq, Seq::from_u64(4));
+        assert_eq!(
+            store.logical_head(grandchild.id()).unwrap(),
+            Seq::from_u64(4)
+        );
+        assert_eq!(
+            store
+                .read(grandchild.id(), SeqRange::all())
+                .unwrap()
+                .iter()
+                .map(|event| (event.seq, event.payload.as_slice()))
+                .collect::<Vec<_>>(),
+            vec![
+                (Seq::from_u64(1), b"r1".as_slice()),
+                (Seq::from_u64(2), b"r2".as_slice()),
+                (Seq::from_u64(3), b"c1".as_slice()),
+                (Seq::from_u64(4), b"g1".as_slice()),
+            ]
+        );
+        assert_eq!(
+            store
+                .read_event_by_id(grandchild.id(), grandchild_event.id)
+                .unwrap()
+                .unwrap()
+                .seq,
+            Seq::from_u64(4)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn logical_sequence_integrity_failures_are_fail_closed() {
+        let mut store = MemoryStore::new();
+        let root = store.create_timeline("integrity-root").unwrap();
+        let entity = EntityId::new();
+        let event = store
+            .append(root.id(), &[make_draft(entity, b"root")])
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(matches!(
+            MemoryStore::logical_event(u64::MAX, event),
+            Err(CoreError::Storage(_))
+        ));
+        assert!(matches!(
+            store.chain_hash_at(root.id(), Seq::from_u64(2)),
+            Err(CoreError::ForkBeyondHead { .. })
+        ));
+
+        let child = store.fork(root.id(), Seq::from_u64(1), "child").unwrap();
+        let missing_prefix = ForkChain {
+            timelines: vec![root.id(), child.id()],
+            fork_seqs: Vec::new(),
+        };
+        assert!(matches!(
+            missing_prefix.segment_prefix(1),
+            Err(CoreError::Storage(_))
+        ));
+
+        store.timelines.get_mut(&child.id()).unwrap().timeline.head = Seq::from_u64(1);
+        let preceding = ForkChain {
+            timelines: vec![root.id(), child.id(), TimelineId::new()],
+            fork_seqs: vec![Seq::from_u64(1), Seq::ZERO],
+        };
+        assert!(matches!(
+            preceding.segment_length(&store, 1, child.id()),
+            Err(CoreError::Storage(_))
+        ));
+        let exceeding = ForkChain {
+            timelines: vec![root.id(), child.id()],
+            fork_seqs: vec![Seq::from_u64(2)],
+        };
+        assert!(matches!(
+            exceeding.segment_length(&store, 0, root.id()),
+            Err(CoreError::Storage(_))
+        ));
+
+        store.timelines.get_mut(&root.id()).unwrap().timeline.head = Seq::from_u64(u64::MAX);
+        let child_state = store.timelines.get_mut(&child.id()).unwrap();
+        child_state.timeline.meta.fork_point = Some((root.id(), Seq::from_u64(u64::MAX)));
+        child_state.timeline.head = Seq::from_u64(1);
+        assert!(matches!(
+            store.logical_head(child.id()),
+            Err(CoreError::Storage(_))
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bounded_segment_integrity_failures_are_fail_closed() {
+        let mut store = MemoryStore::new();
+        let root = store.create_timeline("bounded-root").unwrap();
+        let child = store.fork(root.id(), Seq::ZERO, "bounded-child").unwrap();
+        let chain = vec![root.id(), child.id()];
+
+        store
+            .timelines
+            .get_mut(&child.id())
+            .unwrap()
+            .timeline
+            .meta
+            .fork_point = Some((root.id(), Seq::ZERO));
+        assert!(matches!(
+            store.bounded_segment_length(&chain, 0, root.id(), 1),
+            Err(CoreError::Storage(_))
+        ));
+
+        store
+            .timelines
+            .get_mut(&child.id())
+            .unwrap()
+            .timeline
+            .meta
+            .fork_point = Some((root.id(), Seq::from_u64(1)));
+        assert!(matches!(
+            store.bounded_segment_length(&chain, 0, root.id(), 0),
+            Err(CoreError::Storage(_))
+        ));
+
+        assert!(store.read_event_by_id(child.id(), EventId::new()).is_err());
+        assert!(store.read(child.id(), SeqRange::all()).is_err());
+        assert!(store
+            .read_bounded(
+                child.id(),
+                SeqRange::all(),
+                EventReadBounds::new(usize::MAX, usize::MAX, 16, 16),
+            )
+            .is_err());
+        assert!(store.logical_head(child.id()).is_err());
+        assert!(store.chain_hash_at(child.id(), Seq::ZERO).is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn parent_events_after_fork_point_invisible_to_child() {
         let mut store = MemoryStore::new();
         let tl = store.create_timeline("main").unwrap();
@@ -3362,9 +3616,9 @@ mod tests {
             )
             .unwrap();
 
-        // Fork child at seq 1 (its own event c1) to get grandchild.
+        // Fork child at logical seq 3 (r1, r2, c1) to get grandchild.
         let grandchild = store
-            .fork(child.id(), Seq::from_u64(1), "grandchild")
+            .fork(child.id(), Seq::from_u64(3), "grandchild")
             .unwrap();
 
         // Append to grandchild.
@@ -3991,7 +4245,7 @@ mod tests {
             .append(root.id(), &[make_draft(entity, b"r3")])
             .unwrap();
 
-        let mut leaf_meta = TimelineMeta::forked_from(mid.id(), Seq::from_u64(1), "leaf");
+        let mut leaf_meta = TimelineMeta::forked_from(mid.id(), Seq::from_u64(2), "leaf");
         leaf_meta.id = TimelineId::new();
         let leaf = store.create_timeline_with_meta(leaf_meta).unwrap();
 
@@ -4012,7 +4266,7 @@ mod tests {
         };
         store.append_committed(leaf.id(), &[ev]).unwrap();
         let stitched = store.read(leaf.id(), SeqRange::all()).unwrap();
-        // leaf @ mid:1 → root[..1]=r1 + mid[..1]=m1 + leaf l1; root's post-fork r3 stays invisible.
+        // leaf @ logical mid:2 → r1 + m1 + leaf l1; root's post-fork r3 stays invisible.
         assert_eq!(stitched.len(), 3);
         assert_eq!(stitched[0].payload.as_slice(), b"r1");
         assert_eq!(stitched[1].payload.as_slice(), b"m1");

@@ -15,6 +15,8 @@ A shared language for humans and agents working on PiglorOS. Use these terms exa
 | Term | Crate / Module | Meaning |
 |---|---|---|
 | **Timeline** | `pos-core`, `pos-store` | An append-only, ULID-identified event log. The atomic unit of shared state. |
+| **Timeline Order** | `pos-core`, `pos-store` | The authoritative logical order of a Timeline's stitched Event history. Public Timeline APIs expose this order through `Event.seq`; fork adapters may persist child-segment-local sequence numbers internally. |
+| **Logical Head** | `pos-core`, `pos-store` | The last logical `seq` visible in a stitched Timeline, including inherited fork history and the Timeline's own segment. Distinct from `Timeline.head`, which is the local segment head. |
 | **Event** | `pos-core` | An immutable record appended to a Timeline. Has `entity_id`, `event_type`, `seq`, and a canonical CBOR payload. |
 | **EntityId** | `pos-core` | A ULID identifying a simulation entity (persona, agent, society aggregate, etc.). |
 | **EventStore** | `pos-store` | The `EventStore` trait abstraction over storage backends (SQLite WAL or in-memory). |
@@ -23,6 +25,9 @@ A shared language for humans and agents working on PiglorOS. Use these terms exa
 | **Merge** | `pos-time` | Rejoining a forked Timeline back into the main branch after comparison. |
 | **Replay** | `pos-time` | Re-running events from a Timeline from a given sequence number to rebuild state. |
 | **Snapshot** | `pos-time` | A point-in-time capture of projected state, used to accelerate Replay. |
+| **Tick Boundary** | `pos-experiment` | The host-owned coordination point that folds one complete contiguous Timeline range before or after an atomic driver step. Events are never folded while `step_all` is active. |
+| **Fold Cursor** | `pos-experiment` | The last logical Timeline sequence incorporated into live projections. It advances only after a complete validated range is folded and is independent of the local Timeline head. |
+| **ObservationSnapshot** | `pos-runtime` | Immutable projection state captured after a tick's pre-step fold and shared by every due Driver for that atomic step. |
 
 ---
 

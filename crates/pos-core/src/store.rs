@@ -544,6 +544,24 @@ pub trait EventStore: Send {
     /// Returns a [`CoreError::Storage`] error on I/O failure.
     fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError>;
 
+    /// Return the last logical sequence visible through a stitched Timeline.
+    ///
+    /// [`Timeline::head`] is the head of that Timeline's own persisted segment.
+    /// For a Fork, this method also includes inherited history and is therefore
+    /// the boundary callers must use with [`Self::read`] and [`Self::fork`].
+    /// Adapters must compute this from bounded metadata rather than materialising
+    /// the Timeline's Events.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::TimelineNotFound`] when `id` is unknown, a storage
+    /// integrity error for malformed Fork ancestry, or a fail-closed unsupported
+    /// error when an adapter has not implemented logical Timeline boundaries.
+    fn logical_head(&self, _id: TimelineId) -> Result<Seq, CoreError> {
+        Err(CoreError::Storage(
+            "logical Timeline heads are unsupported by this EventStore".to_owned(),
+        ))
+    }
+
     /// Create a timeline using caller-supplied metadata (preserves [`TimelineId`]).
     ///
     /// Required for identity-preserving import across shared-world nodes (Wave 6 / #87).
@@ -1264,6 +1282,8 @@ mod tests {
     fn event_store_defaults_fail_closed() {
         let mut store = TrivialStore::new();
         let id = TimelineId::new();
+        let err = store.logical_head(id).unwrap_err();
+        assert!(matches!(err, CoreError::Storage(_)));
         assert!(store.read_own(id, SeqRange::all()).is_ok());
         let err = store
             .create_timeline_with_meta(TimelineMeta::root("x"))

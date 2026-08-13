@@ -61,11 +61,20 @@ mod coverage_tests {
         geo_admission::{
             GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1,
         },
-        CanonicalBytes, EntityId, EventStore, OwnTracksEnrollmentRequestV1,
-        OwnTracksEnrollmentStore,
+        CanonicalBytes, EntityId, EventDraft, EventStore, Kind, OwnTracksEnrollmentRequestV1,
+        OwnTracksEnrollmentStore, Seq,
     };
     use pos_store::{memory::MemoryStore, open_store, StoreConfig};
     use std::path::Path;
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn production_owntracks_constructor_enables_private_ingress() {
+        let store = pos_store::sqlite::SqliteStore::open_in_memory().unwrap();
+        let gateway = Gateway::new_with_owntracks_ingress(store, &OwnTracksOwnerKey([7; 32]));
+
+        assert!(gateway.owntracks_enabled);
+    }
 
     #[cfg(unix)]
     #[test]
@@ -162,6 +171,85 @@ mod coverage_tests {
             )
             .await
             .unwrap_err();
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn fork_action_response_notice_lookup_and_read_share_logical_sequence() {
+        let mut store = MemoryStore::new();
+        let root = store.create_timeline("logical-root").unwrap();
+        let entity = EntityId::new();
+        store
+            .append(
+                root.id(),
+                &[
+                    EventDraft::new(
+                        entity,
+                        Kind::new("world.action"),
+                        CanonicalBytes::from_static(b"r1"),
+                    ),
+                    EventDraft::new(
+                        entity,
+                        Kind::new("world.action"),
+                        CanonicalBytes::from_static(b"r2"),
+                    ),
+                ],
+            )
+            .unwrap();
+        let child = store
+            .fork(root.id(), Seq::from_u64(2), "logical-child")
+            .unwrap();
+        let gateway = Gateway::new(Box::new(store));
+        let mut notices = gateway.subscribe();
+        let appended = gateway
+            .append_action(
+                &child.id().to_string(),
+                &entity.to_string(),
+                "world.action",
+                &serde_json::json!({"choice": "child"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(appended.seq, Seq::from_u64(3));
+        assert_eq!(notices.recv().await.unwrap().seq, 3);
+
+        let identified = gateway
+            .append_identified_action(
+                &child.id().to_string(),
+                &entity.to_string(),
+                "world.action",
+                &serde_json::json!({"choice": "identified"}),
+                "logical-child-action",
+            )
+            .await
+            .unwrap();
+        assert_eq!(identified.event.seq, Seq::from_u64(4));
+        assert!(!identified.duplicate);
+        assert_eq!(notices.recv().await.unwrap().seq, 4);
+        let duplicate = gateway
+            .append_identified_action(
+                &child.id().to_string(),
+                &entity.to_string(),
+                "world.action",
+                &serde_json::json!({"choice": "identified"}),
+                "logical-child-action",
+            )
+            .await
+            .unwrap();
+        assert_eq!(duplicate.event.seq, Seq::from_u64(4));
+        assert!(duplicate.duplicate);
+
+        let page = gateway
+            .read_events_page(&child.id().to_string(), 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.events
+                .iter()
+                .map(|event| event.seq.as_u64())
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
     }
 
     #[tokio::test]
