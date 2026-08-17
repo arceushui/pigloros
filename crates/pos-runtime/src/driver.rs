@@ -58,8 +58,8 @@ pub(crate) struct ObservationSnapshot {
 /// host-owned tick boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SnapshotAnchor {
-    timeline_id: TimelineId,
-    observed_through: Seq,
+    pub timeline_id: TimelineId,
+    pub observed_through: Seq,
 }
 
 impl SnapshotAnchor {
@@ -335,19 +335,15 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn snapshot_anchor_is_shared_and_legacy_driver_hooks_are_noops() {
-        let anchor = SnapshotAnchor::new(TimelineId::new(), Seq::from_u64(7));
-        let snapshot = ObservationSnapshot {
-            anchor: Some(anchor),
-            states: std::collections::HashMap::new(),
-        };
+    fn snapshot_anchor() {
+        let timeline_id = TimelineId::new();
+        let anchor = SnapshotAnchor::new(timeline_id, Seq::from_u64(7));
+        let snapshot =
+            ObservationSnapshot::from_anchored_subscriptions(anchor, std::iter::empty(), |_| None);
 
         assert_eq!(snapshot.view_for(&[]).anchor(), Some(anchor));
-        assert_eq!(
-            anchor.timeline_id(),
-            snapshot.view_for(&[]).anchor().unwrap().timeline_id()
-        );
-        assert_eq!(anchor.observed_through(), Seq::from_u64(7));
+        assert_eq!(anchor.timeline_id, timeline_id);
+        assert_eq!(anchor.observed_through, Seq::from_u64(7));
         assert_eq!(ObservationView::empty().anchor(), None);
 
         let mut legacy = IdleDriver;
