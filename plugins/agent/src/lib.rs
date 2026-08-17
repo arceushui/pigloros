@@ -22,9 +22,11 @@ use std::time::Duration;
 pub mod protocol;
 pub mod provider;
 pub mod provider_driver;
+pub mod replay;
 
 pub use provider::{AgentDecisionProvider, FixtureAgentDecisionProvider, FixtureProviderCallCount};
 pub use provider_driver::ProviderBackedAgentDriver;
+pub use replay::{AgentDecisionReplayVerifier, ReplayCheckpoint, ReplayVerificationError};
 
 /// The entity kind string for AI agents.
 pub const ENTITY_KIND: &str = "ai-agent";
