@@ -830,6 +830,26 @@ mod tests {
             vec![0x9f, 0x5f, 0x58, 0x04, b'P', b'A', b'A', b'1'],
             vec![0x9f, 0x5f, 0x59, 0x00, 0x04, b'P', b'A', b'A', b'1'],
             vec![
+                0x9f, 0x5f, 0x41, b'P', 0x41, b'A', 0x42, b'A', b'1', 0xff, 0xff,
+            ],
+            vec![0xd8, 0x2a, 0x87, 0x44, b'P', b'A', b'A', b'1'],
+            vec![0xd9, 0x00, 0x2a, 0x87, 0x44, b'P', b'A', b'A', b'1'],
+            vec![
+                0xda, 0x00, 0x00, 0x00, 0x2a, 0x87, 0x44, b'P', b'A', b'A', b'1',
+            ],
+            vec![
+                0xdb, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2a, 0x87, 0x44, b'P', b'A', b'A',
+                b'1',
+            ],
+            vec![
+                0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0x87, 0x44, b'P', b'A', b'A', b'1',
+            ],
+            {
+                let mut deeply_tagged = vec![0xc0; 512];
+                deeply_tagged.extend([0x87, 0x44, b'P', b'A', b'A', b'1']);
+                deeply_tagged
+            },
+            vec![
                 0x9f, 0x5f, 0x5a, 0x00, 0x00, 0x00, 0x04, b'P', b'A', b'A', b'1',
             ],
             vec![
@@ -862,7 +882,7 @@ mod tests {
             state
                 .get("action_count")
                 .and_then(serde_json::Value::as_u64),
-            Some(16)
+            Some(23)
         );
         assert_eq!(
             state.get("last_action").and_then(serde_json::Value::as_str),
@@ -881,6 +901,16 @@ mod tests {
             vec![0x87, 0x5f],
             vec![0x9f, 0x00],
             vec![0x9f, 0x5f, 0x00],
+            vec![0x9f, 0x5f, 0x44, b'P'],
+            vec![0x9f, 0x5f, 0x41, b'Q'],
+            vec![0x9f, 0x5f, 0x58, 0x10, b'P'],
+            vec![0x9f, 0x5f, 0x40, 0x40, 0x40, 0x40],
+            vec![
+                0x9f, 0x5f, 0x5b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            ],
+            vec![
+                0x9f, 0x5f, 0x5b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xf6,
+            ],
             vec![0x87, 0x44, b'P', b'A', b'A', b'0'],
         ] {
             assert!(!protocol::is_agent_action_wire(&truncated));

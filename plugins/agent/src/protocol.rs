@@ -822,12 +822,40 @@ impl AgentActionV1 {
 /// candidate. Callers must still use [`AgentActionV1::decode`] to validate it.
 #[must_use]
 pub fn is_agent_action_wire(input: &[u8]) -> bool {
-    let Some(array_header_len) = raw_array_header_len(input) else {
-        return false;
-    };
-    input
-        .get(array_header_len..)
-        .is_some_and(raw_byte_string_starts_with_action_magic)
+    match raw_tagged_array_payload_offset(input) {
+        Ok(Some(array_payload_offset)) => input
+            .get(array_payload_offset..)
+            .is_some_and(raw_byte_string_starts_with_action_magic),
+        Err(()) => true,
+        Ok(None) => false,
+    }
+}
+
+fn raw_tagged_array_payload_offset(input: &[u8]) -> Result<Option<usize>, ()> {
+    let mut offset = 0usize;
+    while offset < MAX_ENCODED_ACTION_BYTES {
+        let Some(remaining) = input.get(offset..) else {
+            return Ok(None);
+        };
+        if let Some(tag_header_len) = raw_tag_header_len(remaining) {
+            offset = offset.checked_add(tag_header_len).ok_or(())?;
+        } else {
+            return Ok(raw_array_header_len(remaining)
+                .and_then(|array_header_len| offset.checked_add(array_header_len)));
+        }
+    }
+    Err(())
+}
+
+fn raw_tag_header_len(input: &[u8]) -> Option<usize> {
+    match input.first().copied() {
+        Some(0xc0..=0xd7) => Some(1),
+        Some(0xd8) if input.len() >= 2 => Some(2),
+        Some(0xd9) if input.len() >= 3 => Some(3),
+        Some(0xda) if input.len() >= 5 => Some(5),
+        Some(0xdb) if input.len() >= 9 => Some(9),
+        _ => None,
+    }
 }
 
 fn raw_array_header_len(input: &[u8]) -> Option<usize> {
@@ -842,25 +870,88 @@ fn raw_array_header_len(input: &[u8]) -> Option<usize> {
 }
 
 fn raw_byte_string_starts_with_action_magic(input: &[u8]) -> bool {
-    match input.first().copied() {
-        Some(0x40..=0x57) => starts_action_magic(&input[1..]),
-        Some(0x58) if input.len() >= 2 => starts_action_magic(&input[2..]),
-        Some(0x59) if input.len() >= 3 => starts_action_magic(&input[3..]),
-        Some(0x5a) if input.len() >= 5 => starts_action_magic(&input[5..]),
-        Some(0x5b) if input.len() >= 9 => starts_action_magic(&input[9..]),
-        Some(0x5f) if input.len() >= 2 => raw_definite_byte_string_starts_with_magic(&input[1..]),
-        _ => false,
+    if input.first() == Some(&0x5f) {
+        raw_indefinite_byte_string_starts_with_magic(input)
+    } else {
+        raw_definite_byte_string_starts_with_magic(input)
     }
 }
 
 fn raw_definite_byte_string_starts_with_magic(input: &[u8]) -> bool {
-    match input.first().copied() {
-        Some(0x40..=0x57) => starts_action_magic(&input[1..]),
-        Some(0x58) if input.len() >= 2 => starts_action_magic(&input[2..]),
-        Some(0x59) if input.len() >= 3 => starts_action_magic(&input[3..]),
-        Some(0x5a) if input.len() >= 5 => starts_action_magic(&input[5..]),
-        Some(0x5b) if input.len() >= 9 => starts_action_magic(&input[9..]),
-        _ => false,
+    raw_definite_byte_string(input).is_some_and(|(header_len, value_len)| {
+        value_len >= ACTION_MAGIC.len()
+            && input
+                .get(header_len..header_len + ACTION_MAGIC.len())
+                .is_some_and(starts_action_magic)
+    })
+}
+
+fn raw_indefinite_byte_string_starts_with_magic(input: &[u8]) -> bool {
+    const MAX_MAGIC_CHUNKS: usize = ACTION_MAGIC.len();
+    let mut offset = 1usize;
+    let mut matched = 0usize;
+    for _ in 0..MAX_MAGIC_CHUNKS {
+        let Some(remaining) = input.get(offset..) else {
+            return false;
+        };
+        let Some((header_len, value_len)) = raw_definite_byte_string(remaining) else {
+            return false;
+        };
+        let needed = ACTION_MAGIC.len() - matched;
+        let compared = value_len.min(needed);
+        let Some(value_prefix) = remaining.get(header_len..header_len + compared) else {
+            return false;
+        };
+        if value_prefix != &ACTION_MAGIC[matched..matched + compared] {
+            return false;
+        }
+        matched += compared;
+        if matched == ACTION_MAGIC.len() {
+            return true;
+        }
+        let Some(chunk_len) = header_len.checked_add(value_len) else {
+            return false;
+        };
+        let Some(next_offset) = offset.checked_add(chunk_len) else {
+            return false;
+        };
+        if next_offset > input.len() {
+            return false;
+        }
+        offset = next_offset;
+    }
+    false
+}
+
+fn raw_definite_byte_string(input: &[u8]) -> Option<(usize, usize)> {
+    match input.first().copied()? {
+        byte @ 0x40..=0x57 => Some((1, usize::from(byte - 0x40))),
+        0x58 => Some((2, usize::from(*input.get(1)?))),
+        0x59 => Some((
+            3,
+            usize::from(u16::from_be_bytes([*input.get(1)?, *input.get(2)?])),
+        )),
+        0x5a => usize::try_from(u32::from_be_bytes([
+            *input.get(1)?,
+            *input.get(2)?,
+            *input.get(3)?,
+            *input.get(4)?,
+        ]))
+        .ok()
+        .map(|length| (5, length)),
+        0x5b => usize::try_from(u64::from_be_bytes([
+            *input.get(1)?,
+            *input.get(2)?,
+            *input.get(3)?,
+            *input.get(4)?,
+            *input.get(5)?,
+            *input.get(6)?,
+            *input.get(7)?,
+            *input.get(8)?,
+        ]))
+        .ok()
+        .map(|length| (9, length)),
+        _ => None,
     }
 }
 

@@ -127,6 +127,7 @@ impl ObservationSnapshot {
         }
         ObservationView {
             snapshot: Some(self),
+            direct_anchor: None,
             len: unique,
         }
     }
@@ -141,6 +142,7 @@ impl ObservationSnapshot {
 /// dependency.
 pub struct ObservationView<'a> {
     snapshot: Option<&'a ObservationSnapshot>,
+    direct_anchor: Option<SnapshotAnchor>,
     len: usize,
 }
 
@@ -149,6 +151,20 @@ impl ObservationView<'_> {
     pub fn empty() -> Self {
         Self {
             snapshot: None,
+            direct_anchor: None,
+            len: 0,
+        }
+    }
+
+    /// Creates an empty view carrying a host-owned snapshot anchor.
+    ///
+    /// This is useful for direct Driver integration and validation. Registry
+    /// hosts continue to construct anchored views from one shared snapshot.
+    #[must_use]
+    pub const fn anchored_empty(anchor: SnapshotAnchor) -> Self {
+        Self {
+            snapshot: None,
+            direct_anchor: Some(anchor),
             len: 0,
         }
     }
@@ -160,7 +176,8 @@ impl ObservationView<'_> {
 
     #[must_use]
     pub fn anchor(&self) -> Option<SnapshotAnchor> {
-        self.snapshot.and_then(|snapshot| snapshot.anchor)
+        self.direct_anchor
+            .or_else(|| self.snapshot.and_then(|snapshot| snapshot.anchor))
     }
 
     #[must_use]
@@ -347,6 +364,9 @@ mod tests {
         assert_eq!(anchor.timeline_id(), timeline_id);
         assert_eq!(anchor.observed_through(), Seq::from_u64(7));
         assert_eq!(ObservationView::empty().anchor(), None);
+        let direct = ObservationView::anchored_empty(anchor);
+        assert_eq!(direct.anchor(), Some(anchor));
+        assert!(direct.is_empty());
 
         let mut legacy = IdleDriver;
         assert!(!legacy.requires_snapshot_anchor());

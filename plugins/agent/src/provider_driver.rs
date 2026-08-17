@@ -365,6 +365,9 @@ mod tests {
         registry: PluginRegistry,
         calls: FixtureProviderCallCount,
         timeline: TimelineId,
+        entity: EntityId,
+        catalogue: ActionCatalogueV1,
+        provenance: AgentProviderProvenanceV1,
     }
 
     fn provenance() -> AgentProviderProvenanceV1 {
@@ -382,10 +385,14 @@ mod tests {
     fn provider_driver(attempts: Vec<ProviderAttempt>) -> DriverFixture {
         let provider = FixtureAgentDecisionProvider::new(attempts);
         let calls = provider.call_count_handle();
+        let entity = EntityId::new();
+        let catalogue =
+            ActionCatalogueV1::try_new(vec!["left".to_owned(), "right".to_owned()]).unwrap();
+        let provenance = provenance();
         let driver = ProviderBackedAgentDriver::new(
-            EntityId::new(),
-            ActionCatalogueV1::try_new(vec!["left".to_owned(), "right".to_owned()]).unwrap(),
-            provenance(),
+            entity,
+            catalogue.clone(),
+            provenance.clone(),
             Box::new(provider),
         );
         let mut registry = PluginRegistry::new();
@@ -394,6 +401,9 @@ mod tests {
             registry,
             calls,
             timeline: TimelineId::new(),
+            entity,
+            catalogue,
+            provenance,
         }
     }
 
@@ -419,11 +429,30 @@ mod tests {
             .unwrap();
         assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
         assert_eq!(drafts[0].event_type.as_str(), RECORDER_EVENT_TYPE);
-        let record = record_from_drafts(&drafts);
+        assert_eq!(drafts[0].entity, fixture.entity);
+        let catalogue_hash = fixture.catalogue.hash().unwrap();
+        let expected_request = AgentDecisionRequestV1::new(
+            fixture.timeline,
+            7,
+            fixture.entity,
+            0,
+            catalogue_hash,
+            fixture.provenance.clone(),
+        );
+        let expected_request_hash = expected_request.hash().unwrap();
+        let expected_record = DecisionRecordV1::new(
+            expected_request,
+            expected_request_hash,
+            expected_digest,
+            expected_result,
+        );
+        let expected_record_bytes = expected_record.encode().unwrap();
         assert_eq!(
             drafts[0].payload.as_slice(),
-            record.encode().unwrap().as_slice()
+            expected_record_bytes.as_slice(),
+            "normalization case {case}"
         );
+        let record = record_from_drafts(&drafts);
         assert_eq!(
             record.result(),
             expected_result,
@@ -438,11 +467,20 @@ mod tests {
         if let Some(expected_action) = expected_action {
             assert_eq!(drafts.len(), 2);
             assert_eq!(drafts[1].event_type.as_str(), EVENT_TYPE_ACTION);
-            let action = AgentActionV1::decode(drafts[1].payload.as_slice()).unwrap();
-            assert_eq!(action.action_id(), expected_action);
-            assert_eq!(action.confidence().get(), 42);
-            assert_eq!(action.decision_record_hash(), record.hash().unwrap());
-            assert_eq!(drafts[1].payload.as_slice(), action.encode().unwrap());
+            assert_eq!(drafts[1].entity, fixture.entity);
+            let expected_action = AgentActionV1::try_new(
+                expected_action.to_owned(),
+                42,
+                0,
+                catalogue_hash,
+                expected_record.hash().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                drafts[1].payload.as_slice(),
+                expected_action.encode().unwrap().as_slice(),
+                "normalization case {case}"
+            );
         } else {
             assert_eq!(drafts.len(), 1);
         }
@@ -688,9 +726,12 @@ mod tests {
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         let actual = TimelineId::new();
-        let mismatch =
-            super::validate_snapshot_anchor(timeline, Some(SnapshotAnchor::new(actual, Seq::ZERO)))
-                .unwrap_err();
+        let mismatch = driver
+            .step(
+                timeline,
+                ObservationView::anchored_empty(SnapshotAnchor::new(actual, Seq::ZERO)),
+            )
+            .unwrap_err();
         assert_eq!(
             mismatch.to_string(),
             format!("snapshot Timeline mismatch: expected {timeline}, got {actual}")
