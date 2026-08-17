@@ -269,15 +269,15 @@ Journal behavior, tests, and ADR-019 v14 linkage.
 - Produces: `AgentDriver::with_tick_interval(Duration) -> AgentDriver`
 - Preserves: default Agent cadence of 100 ms and registration-order draft batches
 
-- [ ] **Step 1: Add failing cadence-overflow tests**
+- [x] **Step 1: Add failing cadence-overflow tests**
 
 Register a driver with `Duration::from_nanos(2)`, tick it at `u128::MAX - 1`, then tick at `u128::MAX`. Assert a named `CadenceOverflow` error and no second driver execution. Add a three-driver test proving due-driver draft order remains registration order when one driver is skipped.
 
-- [ ] **Step 2: Add failing AgentDriver interval tests**
+- [x] **Step 2: Add failing AgentDriver interval tests**
 
 Assert `AgentDriver::new(...).tick_interval() == Duration::from_millis(100)` and the builder returns 200 ms while preserving decision behavior.
 
-- [ ] **Step 3: Run runtime and Agent tests and confirm RED**
+- [x] **Step 3: Run runtime and Agent tests and confirm RED**
 
 Run:
 
@@ -286,7 +286,7 @@ cargo test -p pos-runtime cadence --locked
 cargo test -p pos-plugin-agent tick_interval --locked
 ```
 
-- [ ] **Step 4: Add checked due-time calculation**
+- [x] **Step 4: Add checked due-time calculation**
 
 Before snapshot creation, collect due driver IDs with:
 
@@ -303,7 +303,7 @@ let ready = now_ns >= due_at;
 
 Because eligibility is fully computed before stepping, overflow emits no drafts and mutates no driver.
 
-- [ ] **Step 5: Add AgentDriver interval storage and builder**
+- [x] **Step 5: Add AgentDriver interval storage and builder**
 
 Add `tick_interval: Duration`, initialize it to 100 ms, provide `with_tick_interval`, and override the trait method:
 
@@ -313,7 +313,7 @@ fn tick_interval(&self) -> Duration {
 }
 ```
 
-- [ ] **Step 6: Run targeted crate suites**
+- [x] **Step 6: Run targeted crate suites**
 
 Run:
 
@@ -323,7 +323,7 @@ cargo test -p pos-plugin-agent --all-features --locked
 cargo clippy -p pos-runtime -p pos-plugin-agent --all-targets --all-features --locked -- -D warnings
 ```
 
-- [ ] **Step 7: Commit cadence primitives**
+- [x] **Step 7: Commit cadence primitives**
 
 ```bash
 git add crates/pos-runtime/src/error.rs crates/pos-runtime/src/registry.rs plugins/agent/src/lib.rs
