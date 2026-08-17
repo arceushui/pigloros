@@ -346,15 +346,15 @@ Journal the exact default/override/overflow/order evidence.
 - Produces: `ExperimentError::StepModeMismatch { active: &'static str, requested: &'static str }`
 - Consumes: `PluginRegistry::tick_cadenced` from Task 3
 
-- [ ] **Step 1: Add failing monotonic cadence tests**
+- [x] **Step 1: Add failing monotonic cadence tests**
 
 Register 100 ms and 200 ms counting drivers. Call `step_cadenced(0)`, `step_cadenced(100_000_000)`, and `step_cadenced(200_000_000)`. Assert counts `3` and `2`, exact `TickOutcome` values, and registration-order output.
 
-- [ ] **Step 2: Add failing pre-mutation validation tests**
+- [x] **Step 2: Add failing pre-mutation validation tests**
 
 Cover equal time (allowed), decreasing time (error but session remains usable), `step_tick()` then `step_cadenced()` mismatch, and the reverse mismatch. Capture Timeline head, projection state, driver counts, and tick count before each invalid call; assert all remain unchanged.
 
-- [ ] **Step 3: Add failing projection accessor tests**
+- [x] **Step 3: Add failing projection accessor tests**
 
 Assert a healthy completed boundary exposes reducer-specific state. Inject a driver failure after a pre-fold changed projections, then assert:
 
@@ -364,7 +364,7 @@ assert!(matches!(session.projections(), Err(ExperimentError::SessionFaulted)));
 
 Also assert a resumed fresh session exposes the replay-hydrated projection.
 
-- [ ] **Step 4: Run Experiment tests and confirm RED**
+- [x] **Step 4: Run Experiment tests and confirm RED**
 
 Run:
 
@@ -373,7 +373,7 @@ cargo test -p pos-experiment step_cadenced --locked
 cargo test -p pos-experiment projection_access --locked
 ```
 
-- [ ] **Step 5: Refactor one private Tick Boundary pipeline**
+- [x] **Step 5: Refactor one private Tick Boundary pipeline**
 
 Add private selections:
 
@@ -395,11 +395,11 @@ StepModeMismatch { active: &'static str, requested: &'static str },
 
 `start()`, `resume()`, and the child returned by `fork()` all construct fresh runtime state with `step_mode: None` and `last_cadence_ns: None`. The parent session retains its existing mode/time. This matches the existing fresh-driver semantics for resume and fork; each new live session selects its own stepping mode on its first successful boundary.
 
-- [ ] **Step 6: Validate mode/time before capture and latch only on success**
+- [x] **Step 6: Validate mode/time before capture and latch only on success**
 
 `step_cadenced()` rejects `now_ns < last_cadence_ns` and mode mismatch before `capture_pending_range()`. `step_tick()` performs the same mode check. After a successful boundary, set the mode and cadence timestamp. Errors after projection/driver mutation preserve existing fault semantics.
 
-- [ ] **Step 7: Add the fault-safe projection accessor**
+- [x] **Step 7: Add the fault-safe projection accessor**
 
 ```rust
 pub fn projections(&self) -> Result<&pos_state::ProjectionRegistry, ExperimentError> {
@@ -411,7 +411,7 @@ pub fn projections(&self) -> Result<&pos_state::ProjectionRegistry, ExperimentEr
 }
 ```
 
-- [ ] **Step 8: Run the complete Experiment suite and clippy**
+- [x] **Step 8: Run the complete Experiment suite and clippy**
 
 Run:
 
@@ -420,7 +420,7 @@ cargo test -p pos-experiment --all-features --locked -- --include-ignored
 cargo clippy -p pos-experiment --all-targets --all-features --locked -- -D warnings
 ```
 
-- [ ] **Step 9: Commit the production host**
+- [x] **Step 9: Commit the production host**
 
 ```bash
 git add apps/pos-experiment/src/lib.rs
