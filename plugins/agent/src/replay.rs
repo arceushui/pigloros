@@ -52,6 +52,12 @@ pub struct AgentDecisionReplayVerifier {
     catalogue: ActionCatalogueV1,
 }
 
+#[derive(Clone, Copy, Default)]
+struct ReplayState {
+    expected_driver_tick: u64,
+    last_target_sequence: u64,
+}
+
 impl AgentDecisionReplayVerifier {
     /// Creates a verifier from host-owned identity, provenance, and catalogue values.
     #[must_use]
@@ -92,15 +98,26 @@ impl AgentDecisionReplayVerifier {
                     checkpoint: checkpoint.last_verified.as_u64(),
                 });
             }
+            let prefix_len = usize::try_from(checkpoint.last_verified.as_u64()).map_err(|_| {
+                ReplayVerificationError::MissingCheckpoint {
+                    checkpoint: checkpoint.last_verified.as_u64(),
+                }
+            })?;
+            let state = self.verify_events(&events[..prefix_len], ReplayState::default())?;
+            self.verify_events(&events[prefix_len..], state)?;
+        } else {
+            self.verify_events(events, ReplayState::default())?;
         }
 
-        self.verify_events(events)?;
         Ok(ReplayCheckpoint { last_verified })
     }
 
-    fn verify_events(&self, events: &[Event]) -> Result<(), ReplayVerificationError> {
+    fn verify_events(
+        &self,
+        events: &[Event],
+        mut state: ReplayState,
+    ) -> Result<ReplayState, ReplayVerificationError> {
         let mut index = 0;
-        let mut expected_driver_tick = 0_u64;
         while index < events.len() {
             let event = &events[index];
             if self.is_target_action(event) {
@@ -113,8 +130,8 @@ impl AgentDecisionReplayVerifier {
 
             let record = DecisionRecordV1::decode(event.payload.as_slice())
                 .map_err(|_| ReplayVerificationError::InvalidDecisionRecord)?;
-            self.verify_record(event, &record, expected_driver_tick)?;
-            expected_driver_tick = expected_driver_tick.wrapping_add(1);
+            self.verify_record(event, &record, state)?;
+            state.expected_driver_tick = state.expected_driver_tick.wrapping_add(1);
             match record.result() {
                 DecisionResultV1::Accepted {
                     action_index,
@@ -128,19 +145,23 @@ impl AgentDecisionReplayVerifier {
                         .get(index + 1)
                         .ok_or(ReplayVerificationError::MissingOrMismatchedAcceptedAction)?;
                     self.verify_action(next, &record, action_id, confidence.get())?;
+                    state.last_target_sequence = next.seq.as_u64();
                     index += 2;
                 }
-                DecisionResultV1::NoAction(_) => index += 1,
+                DecisionResultV1::NoAction(_) => {
+                    state.last_target_sequence = event.seq.as_u64();
+                    index += 1;
+                }
             }
         }
-        Ok(())
+        Ok(state)
     }
 
     fn verify_record(
         &self,
         event: &Event,
         record: &DecisionRecordV1,
-        expected_driver_tick: u64,
+        state: ReplayState,
     ) -> Result<(), ReplayVerificationError> {
         let request = record.request();
         let catalogue_hash = self
@@ -148,9 +169,10 @@ impl AgentDecisionReplayVerifier {
             .hash()
             .map_err(|_| ReplayVerificationError::DecisionRecordMismatch)?;
         let matches_host = request.timeline_id() == self.expected_timeline
-            && request.observed_through() == event.seq.as_u64() - 1
+            && request.observed_through() >= state.last_target_sequence
+            && request.observed_through() < event.seq.as_u64()
             && request.agent_id() == self.target_agent
-            && request.driver_tick() == expected_driver_tick
+            && request.driver_tick() == state.expected_driver_tick
             && request.catalogue_hash() == catalogue_hash
             && request.provenance() == &self.provenance;
         let request_hash = request

@@ -1,7 +1,7 @@
 use pos_core::{
     clock::{Seq, WallTime},
     crypto::Hash,
-    event::{CanonicalBytes, Event, Kind, SchemaVersion},
+    event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
     ids::{EntityId, EventId, PluginId, TimelineId},
 };
 use pos_plugin_agent::{
@@ -11,7 +11,10 @@ use pos_plugin_agent::{
     AgentDecisionReplayVerifier, FixtureAgentDecisionProvider, ProviderBackedAgentDriver,
     ReplayCheckpoint, EVENT_TYPE_ACTION,
 };
-use pos_runtime::{recorder::RECORDER_EVENT_TYPE, PluginRegistry};
+use pos_runtime::{
+    recorder::RECORDER_EVENT_TYPE, Driver, ObservationView, PluginRegistry, RuntimeError,
+    StepOutput,
+};
 use std::sync::atomic::Ordering;
 use ulid::Ulid;
 
@@ -346,6 +349,28 @@ fn accepted_events(host: &HostFixture) -> Vec<Event> {
     ]
 }
 
+struct PrecedingDriver {
+    entity: EntityId,
+}
+
+impl Driver for PrecedingDriver {
+    fn step(
+        &mut self,
+        _timeline: TimelineId,
+        _observations: ObservationView<'_>,
+    ) -> Result<StepOutput, RuntimeError> {
+        Ok(StepOutput::new(vec![EventDraft::new(
+            self.entity,
+            Kind::new("world.observation"),
+            CanonicalBytes::from_vec(vec![0x80]),
+        )]))
+    }
+
+    fn name(&self) -> &'static str {
+        "preceding-replay-fixture"
+    }
+}
+
 #[test]
 fn verifier_constructor_has_only_host_owned_replay_inputs() {
     let constructor: fn(
@@ -477,6 +502,24 @@ fn record_anchor_and_driver_tick_must_match_the_source_history() {
                 RECORDER_EVENT_TYPE,
                 wrong_initial_tick.record_bytes(),
             )],
+            None,
+        )
+        .is_err());
+
+    let first = host.record(0, 0, FixtureResult::NoAction { code: 5 });
+    let stale_second_anchor = host.record(0, 1, FixtureResult::NoAction { code: 5 });
+    assert!(host
+        .verifier()
+        .verify(
+            &[
+                event(1, host.agent, RECORDER_EVENT_TYPE, first.record_bytes()),
+                event(
+                    2,
+                    host.agent,
+                    RECORDER_EVENT_TYPE,
+                    stale_second_anchor.record_bytes(),
+                ),
+            ],
             None,
         )
         .is_err());
@@ -708,6 +751,25 @@ fn resume_requires_the_complete_revalidated_prefix_and_matches_one_shot() {
     let absent = host.verifier().verify(&prefix, Some(one_shot));
     assert!(absent.is_err());
 
+    let prior_no_action = host.record(0, 0, FixtureResult::NoAction { code: 5 });
+    let prior_checkpoint = host
+        .verifier()
+        .verify(
+            &[event(
+                1,
+                host.agent,
+                RECORDER_EVENT_TYPE,
+                prior_no_action.record_bytes(),
+            )],
+            None,
+        )
+        .unwrap();
+    let changed_to_accepted = accepted_events(&host);
+    assert!(host
+        .verifier()
+        .verify(&changed_to_accepted, Some(prior_checkpoint))
+        .is_err());
+
     let without_start = vec![full[1].clone(), full[2].clone()];
     assert!(host
         .verifier()
@@ -786,6 +848,9 @@ fn live_driver_provider_call_count_does_not_change_during_replay() {
         Box::new(provider),
     );
     let mut registry = PluginRegistry::new();
+    registry.register_driver(Box::new(PrecedingDriver {
+        entity: host.other_agent,
+    }));
     registry.register_driver(Box::new(driver));
     let drafts = registry
         .step_all_anchored(host.timeline, Seq::ZERO)
@@ -806,7 +871,7 @@ fn live_driver_provider_call_count_does_not_change_during_replay() {
 
     let checkpoint = host.verifier().verify(&events, None).unwrap();
 
-    assert_eq!(checkpoint.last_verified(), Seq::from_u64(2));
+    assert_eq!(checkpoint.last_verified(), Seq::from_u64(3));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     registry.abort_step();
 }
