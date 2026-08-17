@@ -341,6 +341,25 @@ pub trait EventStore: Send {
         drafts: &[EventDraft],
     ) -> Result<Vec<Event>, CoreError>;
 
+    /// Atomically append a complete draft batch when it fits the owned-event ceiling.
+    ///
+    /// `Some` contains every committed Event. `None` means the batch would exceed
+    /// `max_owned_events` and no Event was appended.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the backend does not implement an
+    /// atomic bounded append, or the same errors as [`Self::append`].
+    fn append_bounded(
+        &mut self,
+        _timeline: TimelineId,
+        _drafts: &[EventDraft],
+        _max_owned_events: u64,
+    ) -> Result<Option<Vec<Event>>, CoreError> {
+        Err(CoreError::Storage(
+            "atomic bounded append is unsupported by this EventStore".to_owned(),
+        ))
+    }
+
     /// Atomically append one externally identified draft or report its prior admission.
     ///
     /// Implementations must persist the opaque identity and Event in the same
@@ -1282,6 +1301,19 @@ mod tests {
     fn event_store_defaults_fail_closed() {
         let mut store = TrivialStore::new();
         let id = TimelineId::new();
+        let result = store.append_bounded(
+            TimelineId::new(),
+            &[EventDraft::new(
+                EntityId::new(),
+                Kind::new("test.event"),
+                CanonicalBytes::from_vec(Vec::new()),
+            )],
+            1,
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("atomic bounded append"));
         let err = store.logical_head(id).unwrap_err();
         assert!(matches!(err, CoreError::Storage(_)));
         assert!(store.read_own(id, SeqRange::all()).is_ok());

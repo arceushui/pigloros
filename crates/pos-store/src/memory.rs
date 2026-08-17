@@ -958,6 +958,33 @@ impl MemoryStore {
         )
     }
 
+    fn append_visible(
+        &mut self,
+        timeline: TimelineId,
+        drafts: &[EventDraft],
+    ) -> Result<Vec<Event>, CoreError> {
+        let logical_prefix = self.logical_prefix(timeline)?;
+        let committed = {
+            let (timelines, hasher) = (&mut self.timelines, &self.hasher);
+            mutable_state(timelines, timeline).map(|state| {
+                drafts
+                    .iter()
+                    .map(|draft| Self::append_one_to_state(state, draft, hasher.as_ref()))
+                    .collect::<Vec<_>>()
+            })
+        };
+        committed
+            .inspect(|events| {
+                self.event_ids.extend(events.iter().map(|event| event.id));
+            })
+            .and_then(|events| {
+                events
+                    .into_iter()
+                    .map(|event| Self::logical_event(logical_prefix, event))
+                    .collect()
+            })
+    }
+
     fn fork_visible_timeline(
         &mut self,
         parent: TimelineId,
@@ -1479,27 +1506,30 @@ impl EventStore for MemoryStore {
     ) -> Result<Vec<Event>, CoreError> {
         crate::ensure_non_geographic_drafts(drafts, timeline)
             .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
+            .and_then(|()| self.append_visible(timeline, drafts))
+    }
+
+    fn append_bounded(
+        &mut self,
+        timeline: TimelineId,
+        drafts: &[EventDraft],
+        max_owned_events: u64,
+    ) -> Result<Option<Vec<Event>>, CoreError> {
+        crate::ensure_non_geographic_drafts(drafts, timeline)
+            .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
             .and_then(|()| {
-                let logical_prefix = self.logical_prefix(timeline)?;
-                let committed = {
-                    let (timelines, hasher) = (&mut self.timelines, &self.hasher);
-                    mutable_state(timelines, timeline).map(|state| {
-                        drafts
-                            .iter()
-                            .map(|draft| Self::append_one_to_state(state, draft, hasher.as_ref()))
-                            .collect::<Vec<_>>()
-                    })
-                };
-                committed
-                    .inspect(|events| {
-                        self.event_ids.extend(events.iter().map(|event| event.id));
-                    })
-                    .and_then(|events| {
-                        events
-                            .into_iter()
-                            .map(|event| Self::logical_event(logical_prefix, event))
-                            .collect()
-                    })
+                let owned_head = self.timeline(timeline)?.head.as_u64();
+                let batch_len = u64::try_from(drafts.len()).map_err(|_| {
+                    CoreError::Storage("bounded append batch length overflow".to_owned())
+                })?;
+                let next_head = owned_head.checked_add(batch_len).ok_or_else(|| {
+                    CoreError::Storage("bounded append owned Event head overflow".to_owned())
+                })?;
+                if next_head > max_owned_events {
+                    Ok(None)
+                } else {
+                    self.append_visible(timeline, drafts).map(Some)
+                }
             })
     }
 
@@ -3497,6 +3527,80 @@ mod tests {
         let entity = EntityId::new();
         let result = store.append(unknown, &[make_draft(entity, b"x")]);
         assert!(matches!(result, Err(CoreError::TimelineNotFound(_))));
+    }
+
+    #[test]
+    fn bounded_append_is_all_or_nothing_at_the_owned_event_ceiling() {
+        let mut store = MemoryStore::new();
+        let timeline = store.create_timeline("bounded").unwrap();
+        let entity = EntityId::new();
+        let two_drafts = [make_draft(entity, b"one"), make_draft(entity, b"two")];
+
+        assert_eq!(
+            store.append_bounded(timeline.id(), &two_drafts, 1).unwrap(),
+            None
+        );
+        assert_eq!(
+            store.get_timeline(timeline.id()).unwrap().unwrap().head,
+            Seq::ZERO
+        );
+        assert!(store
+            .read_own(timeline.id(), SeqRange::all())
+            .unwrap()
+            .is_empty());
+
+        let exact_fit = store
+            .append_bounded(timeline.id(), &two_drafts, 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(exact_fit.len(), 2);
+        assert_eq!(exact_fit[0].seq, Seq::from_u64(1));
+        assert_eq!(exact_fit[1].seq, Seq::from_u64(2));
+
+        assert_eq!(
+            store.append_bounded(timeline.id(), &two_drafts, 3).unwrap(),
+            None
+        );
+        assert_eq!(
+            store.get_timeline(timeline.id()).unwrap().unwrap().head,
+            Seq::from_u64(2)
+        );
+        assert_eq!(
+            store
+                .read_own(timeline.id(), SeqRange::all())
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let empty = store
+            .append_bounded(timeline.id(), &[], 2)
+            .unwrap()
+            .unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(
+            store.get_timeline(timeline.id()).unwrap().unwrap().head,
+            Seq::from_u64(2)
+        );
+
+        let fork = store
+            .fork(timeline.id(), Seq::from_u64(2), "bounded-fork")
+            .unwrap();
+        assert_eq!(
+            store
+                .append_bounded(fork.id(), &[make_draft(entity, b"fork")], 1)
+                .unwrap()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .append_bounded(fork.id(), &[make_draft(entity, b"too-many")], 1)
+                .unwrap(),
+            None
+        );
+        assert_eq!(store.read_own(fork.id(), SeqRange::all()).unwrap().len(), 1);
     }
 
     #[test]
