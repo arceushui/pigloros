@@ -333,16 +333,33 @@ fn append_driver_drafts(
     store: &mut dyn pos_core::store::EventStore,
     timeline_id: pos_core::ids::TimelineId,
     registry: &mut PluginRegistry,
+    observed_through: pos_core::clock::Seq,
 ) -> Result<u64, ExperimentError> {
-    let drafts = registry.step_all(timeline_id)?;
-    registry.schemas.validate_batch(&drafts)?;
+    let drafts = match registry.step_all_anchored(timeline_id, observed_through) {
+        Ok(drafts) => drafts,
+        Err(error) => {
+            registry.abort_step();
+            return Err(error.into());
+        }
+    };
+    if let Err(error) = registry.schemas.validate_batch(&drafts) {
+        registry.abort_step();
+        return Err(error.into());
+    }
     if drafts.is_empty() {
+        registry.commit_step();
         Ok(0)
     } else {
-        store
-            .append(timeline_id, &drafts)
-            .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
-            .map_err(ExperimentError::from)
+        match store.append(timeline_id, &drafts) {
+            Ok(events) => {
+                registry.commit_step();
+                Ok(u64::try_from(events.len()).unwrap_or(u64::MAX))
+            }
+            Err(error) => {
+                registry.abort_step();
+                Err(error.into())
+            }
+        }
     }
 }
 
@@ -355,7 +372,8 @@ fn advance_tick(
 ) -> Result<(TickAdvance, Timeline), ExperimentError> {
     let before = capture_pending_range(store, timeline_id, boundary.folded_through)?;
     let mut folded_events = fold_captured_range(boundary, registry, &before);
-    let emitted_events = append_driver_drafts(store, timeline_id, registry)?;
+    let emitted_events =
+        append_driver_drafts(store, timeline_id, registry, boundary.folded_through)?;
     let after = capture_pending_range(store, timeline_id, boundary.folded_through)?;
     folded_events = folded_events.saturating_add(fold_captured_range(boundary, registry, &after));
     let outcome = if folded_events == 0 && emitted_events == 0 {
@@ -745,23 +763,30 @@ impl ExperimentSession {
             fold_captured_range(&mut self.boundary, &mut self.registry, &before);
 
         let selected = match request {
-            StepRequest::AllDrivers => self.registry.step_all(self.timeline.id()),
-            StepRequest::Cadenced(now_ns) => {
-                self.registry.tick_cadenced(self.timeline.id(), now_ns)
-            }
+            StepRequest::AllDrivers => self
+                .registry
+                .step_all_anchored(self.timeline.id(), self.boundary.folded_through),
+            StepRequest::Cadenced(now_ns) => self.registry.tick_cadenced_anchored(
+                self.timeline.id(),
+                now_ns,
+                self.boundary.folded_through,
+            ),
         };
         let drafts = match selected {
             Ok(drafts) => drafts,
             Err(error) => {
+                self.registry.abort_step();
                 self.health = SessionHealth::Faulted;
                 return Err(error.into());
             }
         };
         if let Err(error) = self.registry.schemas.validate_batch(&drafts) {
+            self.registry.abort_step();
             self.health = SessionHealth::Faulted;
             return Err(error.into());
         }
         let emitted_events = if drafts.is_empty() {
+            self.registry.commit_step();
             0
         } else {
             match lock_store(&self.store)
@@ -772,8 +797,12 @@ impl ExperimentSession {
                 })
                 .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
             {
-                Ok(count) => count,
+                Ok(count) => {
+                    self.registry.commit_step();
+                    count
+                }
                 Err(error) => {
+                    self.registry.abort_step();
                     self.health = SessionHealth::Faulted;
                     return Err(error);
                 }
@@ -1242,6 +1271,72 @@ mod tests {
         event_type: Kind,
         events_per_tick: usize,
         ticks_remaining: Option<u64>,
+    }
+
+    #[derive(Default)]
+    struct HostTransactionState {
+        steps: usize,
+        commits: usize,
+        aborts: usize,
+        staged: bool,
+        anchors: Vec<pos_runtime::SnapshotAnchor>,
+    }
+
+    struct HostTransactionalDriver {
+        entity: EntityId,
+        event_type: Option<Kind>,
+        state: Arc<Mutex<HostTransactionState>>,
+    }
+
+    impl Driver for HostTransactionalDriver {
+        fn name(&self) -> &'static str {
+            "host-transactional"
+        }
+
+        fn step(
+            &mut self,
+            _: pos_core::ids::TimelineId,
+            observations: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            let mut state = self.state.lock().unwrap();
+            state.steps += 1;
+            state.staged = true;
+            state
+                .anchors
+                .push(observations.anchor().expect("host must supply anchor"));
+            let drafts = self
+                .event_type
+                .clone()
+                .map(|event_type| {
+                    EventDraft::new(
+                        self.entity,
+                        event_type,
+                        CanonicalBytes::from_static(b"host-transaction"),
+                    )
+                })
+                .into_iter()
+                .collect();
+            Ok(StepOutput::new(drafts))
+        }
+
+        fn requires_snapshot_anchor(&self) -> bool {
+            true
+        }
+
+        fn commit_step(&mut self) {
+            let mut state = self.state.lock().unwrap();
+            assert!(state.staged);
+            state.staged = false;
+            state.commits += 1;
+        }
+
+        fn abort_step(&mut self) {
+            let mut state = self.state.lock().unwrap();
+            if state.staged {
+                state.staged = false;
+                state.aborts += 1;
+            }
+        }
     }
 
     impl FixedDriver {
@@ -2511,9 +2606,13 @@ mod tests {
                 Some(Box::new(CaptureFailDriver)),
             )
             .unwrap();
-        assert!(
-            append_driver_drafts(&mut driver_store, driver_timeline.id(), &mut registry).is_err()
-        );
+        assert!(append_driver_drafts(
+            &mut driver_store,
+            driver_timeline.id(),
+            &mut registry,
+            pos_core::clock::Seq::ZERO,
+        )
+        .is_err());
 
         let mut branch_store = CaptureFaultStore {
             base: pos_store::memory::MemoryStore::new(),
@@ -2528,6 +2627,162 @@ mod tests {
         })
         .branch("child", &mut branch_store)
         .is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn experiment_run_path_commits_an_anchored_driver_after_append() {
+        let mut store = pos_store::memory::MemoryStore::new();
+        let timeline = store.create_timeline("anchored-run-path").unwrap();
+        store
+            .append(
+                timeline.id(),
+                &[EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("external.before"),
+                    CanonicalBytes::from_static(b"before"),
+                )],
+            )
+            .unwrap();
+        let state = Arc::new(Mutex::new(HostTransactionState::default()));
+        let mut registry = PluginRegistry::new();
+        registry
+            .register(
+                &make_plugin("anchored-run", &["anchored.run"]),
+                None,
+                Some(Box::new(HostTransactionalDriver {
+                    entity: EntityId::new(),
+                    event_type: Some(Kind::new("anchored.run")),
+                    state: Arc::clone(&state),
+                })),
+            )
+            .unwrap();
+        let mut boundary = TickBoundaryCoordinator {
+            folded_through: pos_core::clock::Seq::ZERO,
+        };
+
+        let (outcome, _) =
+            advance_tick(&mut store, timeline.id(), &mut registry, &mut boundary).unwrap();
+
+        assert!(matches!(outcome, TickAdvance::Advanced { .. }));
+        let state = state.lock().unwrap();
+        assert_eq!(state.steps, 1);
+        assert_eq!(state.commits, 1);
+        assert_eq!(state.aborts, 0);
+        assert!(!state.staged);
+        assert_eq!(
+            state.anchors,
+            [pos_runtime::SnapshotAnchor::new(
+                timeline.id(),
+                pos_core::clock::Seq::from_u64(1)
+            )]
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn live_session_commits_a_successful_zero_draft_anchored_step() {
+        let state = Arc::new(Mutex::new(HostTransactionState::default()));
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "anchored-zero-draft".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        });
+        experiment
+            .register(
+                &make_plugin("anchored-zero", &[]),
+                None,
+                Some(Box::new(HostTransactionalDriver {
+                    entity: EntityId::new(),
+                    event_type: None,
+                    state: Arc::clone(&state),
+                })),
+            )
+            .unwrap();
+        let mut session = experiment.start().unwrap();
+        let timeline = session.timeline().id();
+
+        assert_eq!(session.step_tick().unwrap(), TickOutcome::Quiescent);
+        let state = state.lock().unwrap();
+        assert_eq!(state.steps, 1);
+        assert_eq!(state.commits, 1);
+        assert_eq!(state.aborts, 0);
+        assert!(!state.staged);
+        assert_eq!(
+            state.anchors,
+            [pos_runtime::SnapshotAnchor::new(
+                timeline,
+                pos_core::clock::Seq::ZERO
+            )]
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn live_session_aborts_anchored_state_on_schema_and_append_failures() {
+        let schema_state = Arc::new(Mutex::new(HostTransactionState::default()));
+        let mut schema_experiment = Experiment::new(ExperimentConfig {
+            name: "anchored-schema-failure".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        });
+        schema_experiment
+            .register(
+                &make_plugin("anchored-schema", &["anchored.known"]),
+                None,
+                Some(Box::new(HostTransactionalDriver {
+                    entity: EntityId::new(),
+                    event_type: Some(Kind::new("anchored.unknown")),
+                    state: Arc::clone(&schema_state),
+                })),
+            )
+            .unwrap();
+        assert!(schema_experiment.start().unwrap().step().is_err());
+        {
+            let state = schema_state.lock().unwrap();
+            assert_eq!(state.commits, 0);
+            assert_eq!(state.aborts, 1);
+            assert!(!state.staged);
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("anchored-append-failure.db");
+        let append_state = Arc::new(Mutex::new(HostTransactionState::default()));
+        let mut append_experiment = Experiment::new(ExperimentConfig {
+            name: "anchored-append-failure".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Sqlite {
+                path: path.to_str().unwrap().to_owned(),
+            },
+        });
+        append_experiment
+            .register(
+                &make_plugin("anchored-append", &["anchored.append"]),
+                None,
+                Some(Box::new(HostTransactionalDriver {
+                    entity: EntityId::new(),
+                    event_type: Some(Kind::new("anchored.append")),
+                    state: Arc::clone(&append_state),
+                })),
+            )
+            .unwrap();
+        let mut session = append_experiment.start().unwrap();
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_anchored_append
+                 BEFORE INSERT ON events
+                 BEGIN
+                   SELECT RAISE(FAIL, 'injected anchored append failure');
+                 END;",
+            )
+            .unwrap();
+
+        assert!(matches!(session.step(), Err(ExperimentError::Store(_))));
+        let state = append_state.lock().unwrap();
+        assert_eq!(state.commits, 0);
+        assert_eq!(state.aborts, 1);
+        assert!(!state.staged);
     }
 
     #[test]

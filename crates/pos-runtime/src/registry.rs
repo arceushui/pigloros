@@ -7,12 +7,12 @@
 
 use indexmap::IndexMap;
 
-use pos_core::{ids::PluginId, Plugin, Reducer};
+use pos_core::{clock::Seq, ids::PluginId, Plugin, Reducer};
 use pos_state::ProjectionRegistry;
 
 use crate::{
     composition::{PluginComposition, RegisteredEventSchema, RegisteredPlugin},
-    driver::{Driver, ObservationSnapshot, ProjectionKey, StepOutput},
+    driver::{Driver, ObservationSnapshot, ProjectionKey, SnapshotAnchor, StepOutput},
     error::RuntimeError,
     recorder::RECORDER_EVENT_TYPE,
     schema::{EventTypeSchema, SchemaRegistry},
@@ -52,6 +52,11 @@ struct PluginEntry {
     last_tick: Option<u128>,
 }
 
+struct PendingStep {
+    driver_ids: Vec<PluginId>,
+    cadence_updates: Vec<(PluginId, u128)>,
+}
+
 /// The central plugin registry.
 ///
 /// Plugins register here; the registry wires their components into the
@@ -62,6 +67,7 @@ pub struct PluginRegistry {
     plugins: IndexMap<PluginId, PluginEntry>,
     pub schemas: SchemaRegistry,
     pub projections: ProjectionRegistry,
+    pending_step: Option<PendingStep>,
 }
 
 impl PluginRegistry {
@@ -134,6 +140,69 @@ impl PluginRegistry {
             plugins: IndexMap::new(),
             schemas,
             projections: ProjectionRegistry::new(),
+            pending_step: None,
+        }
+    }
+
+    fn reject_unanchored_drivers(&self) -> Result<(), RuntimeError> {
+        match self
+            .plugins
+            .values()
+            .filter_map(|entry| entry.driver.as_deref())
+            .find(|driver| driver.requires_snapshot_anchor())
+        {
+            Some(driver) => Err(RuntimeError::MissingSnapshotAnchor {
+                driver: driver.name().to_owned(),
+            }),
+            None => Ok(()),
+        }
+    }
+
+    fn ensure_no_pending_step(&self) -> Result<(), RuntimeError> {
+        if self.pending_step.is_some() {
+            Err(RuntimeError::PendingDriverStep)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn abort_drivers(&mut self, driver_ids: &[PluginId]) {
+        for id in driver_ids {
+            if let Some(driver) = self
+                .plugins
+                .get_mut(id)
+                .and_then(|entry| entry.driver.as_mut())
+            {
+                driver.abort_step();
+            }
+        }
+    }
+
+    /// Commit the Driver and cadence state staged by an anchored step.
+    pub fn commit_step(&mut self) {
+        let Some(pending) = self.pending_step.take() else {
+            return;
+        };
+        for id in &pending.driver_ids {
+            if let Some(driver) = self
+                .plugins
+                .get_mut(id)
+                .and_then(|entry| entry.driver.as_mut())
+            {
+                driver.commit_step();
+            }
+        }
+        for (id, now_ns) in pending.cadence_updates {
+            if let Some(entry) = self.plugins.get_mut(&id) {
+                entry.last_tick = Some(now_ns);
+            }
+        }
+    }
+
+    /// Abort the Driver and cadence state staged by an anchored step.
+    pub fn abort_step(&mut self) {
+        if let Some(pending) = self.pending_step.take() {
+            self.abort_drivers(&pending.driver_ids);
         }
     }
 
@@ -280,6 +349,8 @@ impl PluginRegistry {
         timeline: pos_core::ids::TimelineId,
         now_ns: u128,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
+        self.ensure_no_pending_step()?;
+        self.reject_unanchored_drivers()?;
         let mut all_drafts = Vec::new();
         let mut due_driver_ids = HashSet::new();
         let mut seen_subscriptions = HashSet::new();
@@ -330,6 +401,98 @@ impl PluginRegistry {
         Ok(all_drafts)
     }
 
+    /// Step cadence-ready Drivers against one host-owned immutable-prefix
+    /// anchor, staging Driver and cadence state until commit or abort.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError::PendingDriverStep`] when a prior anchored step is
+    /// still pending, [`RuntimeError::CadenceOverflow`] when cadence arithmetic
+    /// overflows, or propagates a selected Driver or draft validation error.
+    ///
+    /// # Panics
+    /// Panics only if the internally collected due-Driver identifiers stop
+    /// referring to their registered entries without passing through a public API.
+    pub fn tick_cadenced_anchored(
+        &mut self,
+        timeline: pos_core::ids::TimelineId,
+        now_ns: u128,
+        observed_through: Seq,
+    ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
+        self.ensure_no_pending_step()?;
+        let mut due_driver_ids = Vec::new();
+        let mut seen_subscriptions = HashSet::new();
+        let mut due_subscriptions = Vec::new();
+
+        for (id, entry) in &self.plugins {
+            if let Some(driver) = entry.driver.as_deref() {
+                let interval_ns = driver.tick_interval().as_nanos();
+                let ready = match entry.last_tick {
+                    Some(previous_ns) => {
+                        let due_at = previous_ns.checked_add(interval_ns).ok_or_else(|| {
+                            RuntimeError::CadenceOverflow {
+                                driver: entry.name.clone(),
+                                previous_ns,
+                                interval_ns,
+                            }
+                        })?;
+                        now_ns >= due_at
+                    }
+                    None => true,
+                };
+                if ready {
+                    due_driver_ids.push(*id);
+                    extend_unique_subscriptions(
+                        &mut due_subscriptions,
+                        &mut seen_subscriptions,
+                        driver.subscriptions(),
+                    );
+                }
+            }
+        }
+
+        let anchor = SnapshotAnchor::new(timeline, observed_through);
+        let snapshot = ObservationSnapshot::from_anchored_subscriptions(
+            anchor,
+            due_subscriptions.iter(),
+            |key| self.projections.state_for(key.entity_id()).cloned(),
+        );
+        let mut all_drafts = Vec::new();
+        let mut staged_driver_ids = Vec::new();
+        for id in &due_driver_ids {
+            let result = {
+                let entry = self
+                    .plugins
+                    .get_mut(id)
+                    .expect("due IDs refer to registered entries");
+                let driver = entry
+                    .driver
+                    .as_mut()
+                    .expect("due IDs refer to registered drivers");
+                let observations = snapshot.view_for(driver.subscriptions());
+                driver
+                    .step(timeline, observations)
+                    .and_then(|output| reject_geographic_drafts(&output).map(|()| output))
+            };
+            match result {
+                Ok(output) => {
+                    staged_driver_ids.push(*id);
+                    all_drafts.extend(output.drafts);
+                }
+                Err(error) => {
+                    staged_driver_ids.push(*id);
+                    self.abort_drivers(&staged_driver_ids);
+                    return Err(error);
+                }
+            }
+        }
+
+        self.pending_step = Some(PendingStep {
+            driver_ids: staged_driver_ids,
+            cadence_updates: due_driver_ids.into_iter().map(|id| (id, now_ns)).collect(),
+        });
+        Ok(all_drafts)
+    }
+
     /// Number of plugins that have a driver registered.
     #[must_use]
     pub fn driver_count(&self) -> usize {
@@ -347,6 +510,8 @@ impl PluginRegistry {
         &mut self,
         timeline: pos_core::ids::TimelineId,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
+        self.ensure_no_pending_step()?;
+        self.reject_unanchored_drivers()?;
         let mut all_drafts = Vec::new();
         let snapshot = self.snapshot_for_tick();
         for entry in self.plugins.values_mut() {
@@ -357,6 +522,79 @@ impl PluginRegistry {
                 all_drafts.extend(output.drafts);
             }
         }
+        Ok(all_drafts)
+    }
+
+    /// Step every Driver against one host-owned immutable-prefix anchor,
+    /// staging Driver state until commit or abort.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError::PendingDriverStep`] when a prior anchored step is
+    /// still pending, or propagates a Driver or draft validation error.
+    ///
+    /// # Panics
+    /// Panics only if the internally collected Driver identifiers stop
+    /// referring to their registered entries without passing through a public API.
+    pub fn step_all_anchored(
+        &mut self,
+        timeline: pos_core::ids::TimelineId,
+        observed_through: Seq,
+    ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
+        self.ensure_no_pending_step()?;
+        let driver_ids: Vec<_> = self
+            .plugins
+            .iter()
+            .filter_map(|(id, entry)| entry.driver.as_ref().map(|_| *id))
+            .collect();
+        let mut seen = HashSet::new();
+        let mut subscriptions = Vec::new();
+        for id in &driver_ids {
+            let driver = self
+                .plugins
+                .get(id)
+                .and_then(|entry| entry.driver.as_deref())
+                .expect("driver IDs refer to registered drivers");
+            extend_unique_subscriptions(&mut subscriptions, &mut seen, driver.subscriptions());
+        }
+        let anchor = SnapshotAnchor::new(timeline, observed_through);
+        let snapshot =
+            ObservationSnapshot::from_anchored_subscriptions(anchor, subscriptions.iter(), |key| {
+                self.projections.state_for(key.entity_id()).cloned()
+            });
+
+        let mut all_drafts = Vec::new();
+        let mut staged_driver_ids = Vec::new();
+        for id in driver_ids {
+            let result = {
+                let entry = self
+                    .plugins
+                    .get_mut(&id)
+                    .expect("driver IDs refer to registered entries");
+                let driver = entry
+                    .driver
+                    .as_mut()
+                    .expect("driver IDs refer to registered drivers");
+                let observations = snapshot.view_for(driver.subscriptions());
+                driver
+                    .step(timeline, observations)
+                    .and_then(|output| reject_geographic_drafts(&output).map(|()| output))
+            };
+            match result {
+                Ok(output) => {
+                    staged_driver_ids.push(id);
+                    all_drafts.extend(output.drafts);
+                }
+                Err(error) => {
+                    staged_driver_ids.push(id);
+                    self.abort_drivers(&staged_driver_ids);
+                    return Err(error);
+                }
+            }
+        }
+        self.pending_step = Some(PendingStep {
+            driver_ids: staged_driver_ids,
+            cadence_updates: Vec::new(),
+        });
         Ok(all_drafts)
     }
 }
@@ -370,7 +608,7 @@ impl Default for PluginRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::driver::{ObservationView, StepOutput};
+    use crate::driver::{ObservationView, SnapshotAnchor, StepOutput};
     use pos_core::{
         clock::{Seq, WallTime},
         crypto::Hash,
@@ -379,6 +617,10 @@ mod tests {
         Capability, Event, Plugin, Reducer, State,
     };
     use pos_store::{open_store, StoreConfig};
+    use std::{
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
     // ── Test helpers ──────────────────────────────────────────────────────────
 
@@ -450,7 +692,203 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct TransactionState {
+        steps: usize,
+        commits: usize,
+        aborts: usize,
+        staged: bool,
+        anchors: Vec<SnapshotAnchor>,
+    }
+
+    struct TransactionalDriver {
+        name: &'static str,
+        state: Arc<Mutex<TransactionState>>,
+        interval: Duration,
+        fail: bool,
+    }
+
+    impl Driver for TransactionalDriver {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn step(
+            &mut self,
+            _: TimelineId,
+            observations: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            if self.fail {
+                return Err(RuntimeError::NoDriver {
+                    name: self.name.to_owned(),
+                });
+            }
+            let mut state = self.state.lock().unwrap();
+            state.steps += 1;
+            state.staged = true;
+            state.anchors.push(
+                observations
+                    .anchor()
+                    .expect("anchored step supplies anchor"),
+            );
+            Ok(StepOutput::empty())
+        }
+
+        fn tick_interval(&self) -> Duration {
+            self.interval
+        }
+
+        fn requires_snapshot_anchor(&self) -> bool {
+            true
+        }
+
+        fn commit_step(&mut self) {
+            let mut state = self.state.lock().unwrap();
+            assert!(state.staged);
+            state.staged = false;
+            state.commits += 1;
+        }
+
+        fn abort_step(&mut self) {
+            let mut state = self.state.lock().unwrap();
+            if state.staged {
+                state.staged = false;
+                state.aborts += 1;
+            }
+        }
+    }
+
     // ── Tests ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn anchored_step_stages_until_commit_and_rejects_a_second_pending_step() {
+        let timeline = TimelineId::new();
+        let state = Arc::new(Mutex::new(TransactionState::default()));
+        let mut registry = PluginRegistry::new();
+        registry.register_driver(Box::new(TransactionalDriver {
+            name: "transactional",
+            state: Arc::clone(&state),
+            interval: Duration::from_nanos(100),
+            fail: false,
+        }));
+
+        assert!(matches!(
+            registry.step_all(timeline),
+            Err(RuntimeError::MissingSnapshotAnchor { .. })
+        ));
+        assert_eq!(state.lock().unwrap().steps, 0);
+
+        assert!(registry
+            .step_all_anchored(timeline, Seq::from_u64(7))
+            .unwrap()
+            .is_empty());
+        {
+            let observed = state.lock().unwrap();
+            assert_eq!(observed.steps, 1);
+            assert_eq!(observed.commits, 0);
+            assert!(observed.staged);
+            assert_eq!(
+                observed.anchors,
+                [SnapshotAnchor::new(timeline, Seq::from_u64(7))]
+            );
+        }
+        assert!(matches!(
+            registry.step_all_anchored(timeline, Seq::from_u64(7)),
+            Err(RuntimeError::PendingDriverStep)
+        ));
+        assert!(matches!(
+            registry.step_all(timeline),
+            Err(RuntimeError::PendingDriverStep)
+        ));
+        assert!(matches!(
+            registry.tick_cadenced(timeline, 0),
+            Err(RuntimeError::PendingDriverStep)
+        ));
+        assert_eq!(state.lock().unwrap().steps, 1);
+
+        registry.commit_step();
+        assert_eq!(state.lock().unwrap().commits, 1);
+        assert!(!state.lock().unwrap().staged);
+
+        registry
+            .step_all_anchored(timeline, Seq::from_u64(7))
+            .unwrap();
+        registry.abort_step();
+        assert_eq!(state.lock().unwrap().aborts, 1);
+        assert!(!state.lock().unwrap().staged);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn anchored_partial_driver_failure_aborts_earlier_staged_state() {
+        let timeline = TimelineId::new();
+        let first = Arc::new(Mutex::new(TransactionState::default()));
+        let failed = Arc::new(Mutex::new(TransactionState::default()));
+        let mut registry = PluginRegistry::new();
+        registry.register_driver(Box::new(TransactionalDriver {
+            name: "first",
+            state: Arc::clone(&first),
+            interval: Duration::from_nanos(1),
+            fail: false,
+        }));
+        registry.register_driver(Box::new(TransactionalDriver {
+            name: "failed",
+            state: Arc::clone(&failed),
+            interval: Duration::from_nanos(1),
+            fail: true,
+        }));
+
+        assert!(registry.step_all_anchored(timeline, Seq::ZERO).is_err());
+        let first = first.lock().unwrap();
+        assert_eq!(first.steps, 1);
+        assert_eq!(first.aborts, 1);
+        assert!(!first.staged);
+        assert_eq!(failed.lock().unwrap().steps, 0);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn anchored_cadence_is_staged_and_legacy_preflights_all_registered_drivers() {
+        let timeline = TimelineId::new();
+        let state = Arc::new(Mutex::new(TransactionState::default()));
+        let mut registry = PluginRegistry::new();
+        registry.register_driver(Box::new(TransactionalDriver {
+            name: "cadenced-provider",
+            state: Arc::clone(&state),
+            interval: Duration::from_nanos(100),
+            fail: false,
+        }));
+
+        registry
+            .tick_cadenced_anchored(timeline, 0, Seq::ZERO)
+            .unwrap();
+        registry.abort_step();
+        registry
+            .tick_cadenced_anchored(timeline, 0, Seq::ZERO)
+            .unwrap();
+        registry.commit_step();
+        assert_eq!(state.lock().unwrap().steps, 2);
+
+        assert!(matches!(
+            registry.tick_cadenced(timeline, 50),
+            Err(RuntimeError::MissingSnapshotAnchor { .. })
+        ));
+        assert_eq!(state.lock().unwrap().steps, 2);
+
+        assert!(registry
+            .tick_cadenced_anchored(timeline, 50, Seq::ZERO)
+            .unwrap()
+            .is_empty());
+        registry.commit_step();
+        assert_eq!(state.lock().unwrap().steps, 2);
+
+        registry
+            .tick_cadenced_anchored(timeline, 100, Seq::ZERO)
+            .unwrap();
+        registry.commit_step();
+        assert_eq!(state.lock().unwrap().steps, 3);
+    }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]

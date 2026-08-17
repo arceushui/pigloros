@@ -91,6 +91,15 @@ impl ObservationSnapshot {
         Self::capture(None, subscriptions, state_for)
     }
 
+    #[must_use]
+    pub(crate) fn from_anchored_subscriptions<'a>(
+        anchor: SnapshotAnchor,
+        subscriptions: impl IntoIterator<Item = &'a ProjectionKey>,
+        state_for: impl Fn(&ProjectionKey) -> Option<State>,
+    ) -> Self {
+        Self::capture(Some(anchor), subscriptions, state_for)
+    }
+
     fn capture<'a>(
         anchor: Option<SnapshotAnchor>,
         subscriptions: impl IntoIterator<Item = &'a ProjectionKey>,
