@@ -267,8 +267,9 @@ impl PluginRegistry {
     /// will fire. First-tick drivers always fire.
     ///
     /// # Errors
-    /// Propagates any [`RuntimeError`] from drivers.
-    #[cfg_attr(coverage_nightly, coverage(off))]
+    /// Propagates any [`RuntimeError`] from drivers. Returns
+    /// [`RuntimeError::CadenceOverflow`] before snapshot creation or driver mutation
+    /// when a prior tick plus the configured interval cannot fit in `u128` nanoseconds.
     pub fn tick_cadenced(
         &mut self,
         timeline: pos_core::ids::TimelineId,
