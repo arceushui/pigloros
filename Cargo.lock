@@ -4356,8 +4356,10 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "pos-core",
+ "pos-plugin-agent",
  "pos-plugin-eval",
  "pos-plugin-rule-agent",
+ "pos-plugin-society",
  "pos-plugin-synthetic-obs",
  "pos-query",
  "pos-runtime",

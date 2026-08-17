@@ -14,6 +14,29 @@ cargo run -p piglor-gateway --locked -- serve
 cargo run -p piglor-gateway --locked -- serve 127.0.0.1:8080 /tmp/piglor-gw.db
 ```
 
+### Separate deterministic experiment host
+
+The Gateway remains an ingress/store façade; it does not run simulation drivers. For the
+ADR-019 two-process demonstration, start the Gateway with an explicit SQLite file, create a
+Timeline through `POST /v1/timelines`, then run `pos-experiment` against that exact file and
+returned ID:
+
+```bash
+cargo run -p piglor-gateway --locked -- \
+  serve 127.0.0.1:8080 /tmp/piglor-126.db
+
+cargo run -p pos-experiment --locked -- \
+  multi-rate-demo /tmp/piglor-126.db <timeline-id> \
+  --ticks 20 --quantum-ms 100 --pace-ms 100
+```
+
+The experiment is finite and uses caller-supplied simulation time for deterministic driver
+cadence; wall-clock sleep only paces output. Human actions and society signals may be posted
+through this Gateway while it runs. See the
+[`pos-experiment` demo guide](../pos-experiment/README.md) for exact requests, overrides,
+restart guidance, and the same-file requirement. Arbitrary raw-SQL writers remain outside
+the supported multi-process boundary.
+
 Binding a non-loopback address serves only the public Prediction Ledger routes:
 `/`, `/ledger`, `/health`, and `/v1/ledger`. Timeline polling and all mutation
 routes are absent from that public surface until #68 provides authentication.
