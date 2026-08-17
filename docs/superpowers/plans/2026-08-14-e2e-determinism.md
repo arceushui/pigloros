@@ -654,7 +654,7 @@ python3 scripts/test_check_asan_ci_policy.py
 
 Produce a checklist mapping each design section to a file, test name, and expected assertion: atomic ceiling, forced contention, monotonic time, mode latch, fault-safe projections, real HTTP 201 mid-pass, `[0,0,1]`, `3/2`, contiguous sequence, two replays, finite demo, README, ADR-019 v14, CI discovery, no exclusions.
 
-- [ ] **Step 3: Request two-axis code review and final Sol CTO review**
+- [x] **Step 3: Request two-axis code review and final Sol CTO review**
 
 Review `origin/main..HEAD` for repository standards and Redmine #126/spec compliance. The CTO reviewer must explicitly use `gpt-5.6-sol`. Address every evidence-backed blocker in separate exact-file commits, rerun affected tests, then obtain final `APPROVE`. Any new design decision updates ADR-019 before code.
 
