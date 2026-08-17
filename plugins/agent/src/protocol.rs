@@ -818,6 +818,56 @@ impl AgentActionV1 {
     }
 }
 
+/// Returns whether a CBOR value identifies itself as an `AgentAction` V1 wire
+/// candidate. Callers must still use [`AgentActionV1::decode`] to validate it.
+#[must_use]
+pub fn is_agent_action_wire(input: &[u8]) -> bool {
+    let Some(array_header_len) = raw_array_header_len(input) else {
+        return false;
+    };
+    input
+        .get(array_header_len..)
+        .is_some_and(raw_byte_string_starts_with_action_magic)
+}
+
+fn raw_array_header_len(input: &[u8]) -> Option<usize> {
+    match input.first().copied() {
+        Some(0x80..=0x97 | 0x9f) => Some(1),
+        Some(0x98) if input.len() >= 2 => Some(2),
+        Some(0x99) if input.len() >= 3 => Some(3),
+        Some(0x9a) if input.len() >= 5 => Some(5),
+        Some(0x9b) if input.len() >= 9 => Some(9),
+        _ => None,
+    }
+}
+
+fn raw_byte_string_starts_with_action_magic(input: &[u8]) -> bool {
+    match input.first().copied() {
+        Some(0x40..=0x57) => starts_action_magic(&input[1..]),
+        Some(0x58) if input.len() >= 2 => starts_action_magic(&input[2..]),
+        Some(0x59) if input.len() >= 3 => starts_action_magic(&input[3..]),
+        Some(0x5a) if input.len() >= 5 => starts_action_magic(&input[5..]),
+        Some(0x5b) if input.len() >= 9 => starts_action_magic(&input[9..]),
+        Some(0x5f) if input.len() >= 2 => raw_definite_byte_string_starts_with_magic(&input[1..]),
+        _ => false,
+    }
+}
+
+fn raw_definite_byte_string_starts_with_magic(input: &[u8]) -> bool {
+    match input.first().copied() {
+        Some(0x40..=0x57) => starts_action_magic(&input[1..]),
+        Some(0x58) if input.len() >= 2 => starts_action_magic(&input[2..]),
+        Some(0x59) if input.len() >= 3 => starts_action_magic(&input[3..]),
+        Some(0x5a) if input.len() >= 5 => starts_action_magic(&input[5..]),
+        Some(0x5b) if input.len() >= 9 => starts_action_magic(&input[9..]),
+        _ => false,
+    }
+}
+
+fn starts_action_magic(input: &[u8]) -> bool {
+    input.get(..ACTION_MAGIC.len()) == Some(ACTION_MAGIC.as_slice())
+}
+
 fn write_request_fields(output: &mut Vec<u8>, request: &AgentDecisionRequestV1) {
     write_bytes(output, &request.timeline_id.inner().to_bytes());
     write_uint(output, request.observed_through);
