@@ -283,7 +283,16 @@ impl PluginRegistry {
             if let Some(driver) = entry.driver.as_deref() {
                 let interval_ns = driver.tick_interval().as_nanos();
                 let ready = match entry.last_tick {
-                    Some(prev) => now_ns >= prev + interval_ns,
+                    Some(previous_ns) => {
+                        let due_at = previous_ns.checked_add(interval_ns).ok_or_else(|| {
+                            RuntimeError::CadenceOverflow {
+                                driver: entry.name.clone(),
+                                previous_ns,
+                                interval_ns,
+                            }
+                        })?;
+                        now_ns >= due_at
+                    }
                     None => true,
                 };
                 if ready {
@@ -842,6 +851,125 @@ mod tests {
             Some(1)
         );
         assert_eq!(view.state_for(&missing), None);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn cadence_overflow_is_named_and_precedes_every_driver_step() {
+        use std::{
+            sync::{
+                atomic::{AtomicUsize, Ordering},
+                Arc,
+            },
+            time::Duration,
+        };
+
+        struct CadenceDriver {
+            name: &'static str,
+            interval: Duration,
+            steps: Arc<AtomicUsize>,
+        }
+
+        impl Driver for CadenceDriver {
+            fn name(&self) -> &'static str {
+                self.name
+            }
+
+            fn step(
+                &mut self,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                self.steps.fetch_add(1, Ordering::SeqCst);
+                Ok(StepOutput::empty())
+            }
+
+            fn tick_interval(&self) -> Duration {
+                self.interval
+            }
+        }
+
+        let overflow_steps = Arc::new(AtomicUsize::new(0));
+        let untouched_steps = Arc::new(AtomicUsize::new(0));
+        let mut registry = PluginRegistry::new();
+        registry.register_driver(Box::new(CadenceDriver {
+            name: "overflow-driver",
+            interval: Duration::from_nanos(2),
+            steps: Arc::clone(&overflow_steps),
+        }));
+        registry.register_driver(Box::new(CadenceDriver {
+            name: "must-not-step",
+            interval: Duration::from_nanos(1),
+            steps: Arc::clone(&untouched_steps),
+        }));
+
+        let timeline = TimelineId::new();
+        registry.tick_cadenced(timeline, u128::MAX - 1).unwrap();
+        let error = registry.tick_cadenced(timeline, u128::MAX).unwrap_err();
+
+        assert!(matches!(
+            error,
+            RuntimeError::CadenceOverflow {
+                driver,
+                previous_ns,
+                interval_ns: 2,
+            } if driver == "overflow-driver" && previous_ns == u128::MAX - 1
+        ));
+        assert_eq!(overflow_steps.load(Ordering::SeqCst), 1);
+        assert_eq!(untouched_steps.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn cadence_keeps_registration_order_when_a_middle_driver_is_skipped() {
+        use std::time::Duration;
+
+        struct OrderedDriver {
+            name: &'static str,
+            interval: Duration,
+        }
+
+        impl Driver for OrderedDriver {
+            fn name(&self) -> &'static str {
+                self.name
+            }
+
+            fn step(
+                &mut self,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                Ok(StepOutput::new(vec![EventDraft::new(
+                    EntityId::new(),
+                    Kind::new(self.name),
+                    CanonicalBytes::from_static(b"ordered"),
+                )]))
+            }
+
+            fn tick_interval(&self) -> Duration {
+                self.interval
+            }
+        }
+
+        let mut registry = PluginRegistry::new();
+        for (name, interval) in [
+            ("cadence.first", Duration::from_nanos(1)),
+            ("cadence.middle", Duration::from_nanos(2)),
+            ("cadence.third", Duration::from_nanos(1)),
+        ] {
+            registry.register_driver(Box::new(OrderedDriver { name, interval }));
+        }
+
+        let timeline = TimelineId::new();
+        assert_eq!(registry.tick_cadenced(timeline, 0).unwrap().len(), 3);
+        let drafts = registry.tick_cadenced(timeline, 1).unwrap();
+        assert_eq!(
+            drafts
+                .iter()
+                .map(|draft| draft.event_type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cadence.first", "cadence.third"]
+        );
     }
 
     #[test]
