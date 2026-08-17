@@ -686,6 +686,7 @@ fn record_decoder_reaches_every_response_digest_branch() {
     let invalid_utf8 = decode_hex("62c328");
 
     for (name, wire) in [
+        ("digest container scalar", record_with_digest(&[0])),
         (
             "present digest wrong width",
             record_with_digest(&concatenate(&[&[0x82, 1], &bytes_of(31, 0xee)])),
@@ -724,6 +725,14 @@ fn record_decoder_reaches_every_response_digest_branch() {
 #[test]
 fn record_decoder_reaches_every_result_branch() {
     for (name, wire) in [
+        (
+            "accepted under arity",
+            record_with_result(&decode_hex("820000")),
+        ),
+        (
+            "accepted over arity",
+            record_with_result(&decode_hex("8400001a000f424000")),
+        ),
         (
             "accepted index range",
             record_with_result(&decode_hex("830018401a000f4240")),
