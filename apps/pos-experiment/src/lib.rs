@@ -146,6 +146,8 @@ pub struct ExperimentSession {
     complete: bool,
     health: SessionHealth,
     boundary: TickBoundaryCoordinator,
+    step_mode: Option<StepMode>,
+    last_cadence_ns: Option<u128>,
 }
 
 /// Result of one interactive tick-boundary attempt.
@@ -168,6 +170,27 @@ pub enum TickOutcome {
 enum SessionHealth {
     Healthy,
     Faulted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StepMode {
+    AllDrivers,
+    Cadenced,
+}
+
+impl StepMode {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::AllDrivers => "AllDrivers",
+            Self::Cadenced => "Cadenced",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum DriverSelection {
+    AllDrivers,
+    Cadenced(u128),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -208,6 +231,16 @@ pub enum ExperimentError {
     IncompatibleForkRegistry,
     #[error("the experiment session is faulted; rebuild it from persisted Timeline history")]
     SessionFaulted,
+    #[error("cadence time regressed from {previous_ns}ns to {requested_ns}ns")]
+    CadenceTimeRegressed {
+        previous_ns: u128,
+        requested_ns: u128,
+    },
+    #[error("cannot use {requested} stepping after session selected {active} stepping")]
+    StepModeMismatch {
+        active: &'static str,
+        requested: &'static str,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -482,6 +515,8 @@ impl Experiment {
             boundary: TickBoundaryCoordinator {
                 folded_through: pos_core::clock::Seq::ZERO,
             },
+            step_mode: None,
+            last_cadence_ns: None,
         })
     }
 
@@ -526,6 +561,8 @@ impl Experiment {
             complete: false,
             health: SessionHealth::Healthy,
             boundary: TickBoundaryCoordinator { folded_through },
+            step_mode: None,
+            last_cadence_ns: None,
         })
     }
 
@@ -607,9 +644,80 @@ impl ExperimentSession {
     /// driver mutation faults the session and subsequent calls return
     /// [`ExperimentError::SessionFaulted`].
     pub fn step_tick(&mut self) -> Result<TickOutcome, ExperimentError> {
+        self.step_with_mode(StepMode::AllDrivers, DriverSelection::AllDrivers, None)
+    }
+
+    /// Advance one complete Tick Boundary at caller-supplied simulation time.
+    ///
+    /// Due drivers run in registration order against the same immutable snapshot.
+    /// Equal timestamps are accepted; a lower timestamp or mixing this API with
+    /// [`Self::step_tick`] is rejected before capture or mutation.
+    ///
+    /// # Errors
+    /// Returns [`ExperimentError::CadenceTimeRegressed`] for decreasing time,
+    /// [`ExperimentError::StepModeMismatch`] after all-driver stepping, or the
+    /// same runtime/store/fault errors as [`Self::step_tick`].
+    pub fn step_cadenced(&mut self, now_ns: u128) -> Result<TickOutcome, ExperimentError> {
+        self.step_with_mode(
+            StepMode::Cadenced,
+            DriverSelection::Cadenced(now_ns),
+            Some(now_ns),
+        )
+    }
+
+    /// Return projection state only while this live session is healthy.
+    ///
+    /// # Errors
+    /// Returns [`ExperimentError::SessionFaulted`] after any stateful boundary
+    /// failure; rebuild the session through [`Experiment::resume`] before reading.
+    pub fn projections(&self) -> Result<&pos_state::ProjectionRegistry, ExperimentError> {
+        if self.health == SessionHealth::Faulted {
+            Err(ExperimentError::SessionFaulted)
+        } else {
+            Ok(&self.registry.projections)
+        }
+    }
+
+    fn step_with_mode(
+        &mut self,
+        requested: StepMode,
+        selection: DriverSelection,
+        cadence_ns: Option<u128>,
+    ) -> Result<TickOutcome, ExperimentError> {
         if self.health == SessionHealth::Faulted {
             return Err(ExperimentError::SessionFaulted);
         }
+        if let Some(active) = self.step_mode {
+            if active != requested {
+                return Err(ExperimentError::StepModeMismatch {
+                    active: active.name(),
+                    requested: requested.name(),
+                });
+            }
+        }
+        if let (Some(previous_ns), Some(requested_ns)) = (self.last_cadence_ns, cadence_ns) {
+            if requested_ns < previous_ns {
+                return Err(ExperimentError::CadenceTimeRegressed {
+                    previous_ns,
+                    requested_ns,
+                });
+            }
+        }
+
+        let outcome = self.step_boundary(selection)?;
+        if outcome != TickOutcome::Stopped {
+            self.step_mode = Some(requested);
+            if let Some(now_ns) = cadence_ns {
+                self.last_cadence_ns = Some(now_ns);
+            }
+        }
+        Ok(outcome)
+    }
+
+    fn step_boundary(
+        &mut self,
+        selection: DriverSelection,
+    ) -> Result<TickOutcome, ExperimentError> {
         if self.complete || self.reached_stop_condition() {
             self.complete = true;
             return Ok(TickOutcome::Stopped);
@@ -625,7 +733,13 @@ impl ExperimentSession {
         let mut folded_events =
             fold_captured_range(&mut self.boundary, &mut self.registry, &before);
 
-        let drafts = match self.registry.step_all(self.timeline.id()) {
+        let selected = match selection {
+            DriverSelection::AllDrivers => self.registry.step_all(self.timeline.id()),
+            DriverSelection::Cadenced(now_ns) => {
+                self.registry.tick_cadenced(self.timeline.id(), now_ns)
+            }
+        };
+        let drafts = match selected {
             Ok(drafts) => drafts,
             Err(error) => {
                 self.health = SessionHealth::Faulted;
@@ -746,6 +860,8 @@ impl ExperimentSession {
                 boundary: TickBoundaryCoordinator {
                     folded_through: self.boundary.folded_through,
                 },
+                step_mode: None,
+                last_cadence_ns: None,
             })
     }
 
@@ -1161,6 +1277,37 @@ mod tests {
         }
     }
 
+    struct CadencedCountingDriver {
+        name: &'static str,
+        entity: EntityId,
+        event_type: Kind,
+        interval: std::time::Duration,
+        steps: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Driver for CadencedCountingDriver {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn tick_interval(&self) -> std::time::Duration {
+            self.interval
+        }
+
+        fn step(
+            &mut self,
+            _: pos_core::ids::TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            self.steps.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(StepOutput::new(vec![EventDraft::new(
+                self.entity,
+                self.event_type.clone(),
+                CanonicalBytes::from_vec(self.name.as_bytes().to_vec()),
+            )]))
+        }
+    }
+
     struct CountReducer;
     impl Reducer for CountReducer {
         fn initial(&self) -> State {
@@ -1173,6 +1320,65 @@ mod tests {
                 .unwrap_or(0);
             state.set("n", serde_json::json!(n + 1));
         }
+    }
+
+    fn projection_count(
+        session: &ExperimentSession,
+        entity: EntityId,
+    ) -> Result<u64, ExperimentError> {
+        Ok(session
+            .projections()?
+            .state_for(&entity)
+            .and_then(|state| state.get("n"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0))
+    }
+
+    fn new_cadence_session(
+        name: &str,
+    ) -> (
+        ExperimentSession,
+        Arc<std::sync::atomic::AtomicUsize>,
+        EntityId,
+    ) {
+        let entity = EntityId::new();
+        let steps = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let plugin = make_plugin_with_reducer("cadence", &["cadence.event"]);
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: name.to_owned(),
+            stop: StopCondition::MaxTicks(20),
+            store_config: StoreConfig::Memory,
+        });
+        experiment
+            .register(
+                &plugin,
+                Some(Box::new(CountReducer)),
+                Some(Box::new(CadencedCountingDriver {
+                    name: "cadence-driver",
+                    entity,
+                    event_type: Kind::new("cadence.event"),
+                    interval: std::time::Duration::from_millis(100),
+                    steps: Arc::clone(&steps),
+                })),
+            )
+            .unwrap();
+        (experiment.start().unwrap(), steps, entity)
+    }
+
+    fn cadence_session_state(
+        session: &ExperimentSession,
+        entity: EntityId,
+        expected_steps: usize,
+    ) -> (u64, u64, u64) {
+        assert_eq!(
+            projection_count(session, entity).unwrap(),
+            u64::try_from(expected_steps).unwrap()
+        );
+        (
+            session.timeline.head.as_u64(),
+            session.ticks,
+            session.total_events,
+        )
     }
 
     struct RecordingDriver {
@@ -1362,6 +1568,216 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn step_cadenced_runs_real_intervals_and_preserves_registration_order() {
+        let entity = EntityId::new();
+        let fast_steps = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let slow_steps = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fast = make_plugin("fast", &["cadence.fast"]);
+        let slow = make_plugin("slow", &["cadence.slow"]);
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "cadenced-order".to_owned(),
+            stop: StopCondition::MaxTicks(10),
+            store_config: StoreConfig::Memory,
+        });
+        experiment
+            .register(
+                &fast,
+                None,
+                Some(Box::new(CadencedCountingDriver {
+                    name: "fast-driver",
+                    entity,
+                    event_type: Kind::new("cadence.fast"),
+                    interval: std::time::Duration::from_millis(100),
+                    steps: Arc::clone(&fast_steps),
+                })),
+            )
+            .unwrap();
+        experiment
+            .register(
+                &slow,
+                None,
+                Some(Box::new(CadencedCountingDriver {
+                    name: "slow-driver",
+                    entity,
+                    event_type: Kind::new("cadence.slow"),
+                    interval: std::time::Duration::from_millis(200),
+                    steps: Arc::clone(&slow_steps),
+                })),
+            )
+            .unwrap();
+        let mut session = experiment.start().unwrap();
+
+        assert_eq!(
+            session.step_cadenced(0).unwrap(),
+            TickOutcome::Advanced {
+                folded_events: 2,
+                emitted_events: 2,
+            }
+        );
+        assert_eq!(
+            session.step_cadenced(100_000_000).unwrap(),
+            TickOutcome::Advanced {
+                folded_events: 1,
+                emitted_events: 1,
+            }
+        );
+        assert_eq!(
+            session.step_cadenced(200_000_000).unwrap(),
+            TickOutcome::Advanced {
+                folded_events: 2,
+                emitted_events: 2,
+            }
+        );
+        assert_eq!(fast_steps.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert_eq!(slow_steps.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let events = lock_store(&session.store)
+            .unwrap()
+            .read(session.timeline.id(), pos_store::SeqRange::all())
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.event_type.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "cadence.fast",
+                "cadence.slow",
+                "cadence.fast",
+                "cadence.fast",
+                "cadence.slow",
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn step_cadenced_rejects_time_regression_before_mutation_and_remains_usable() {
+        let (mut cadenced, cadenced_steps, entity) = new_cadence_session("cadence-validation");
+        cadenced.step_cadenced(0).unwrap();
+        cadenced.step_cadenced(100_000_000).unwrap();
+        let before_steps = cadenced_steps.load(std::sync::atomic::Ordering::SeqCst);
+        let before = cadence_session_state(&cadenced, entity, before_steps);
+        assert!(matches!(
+            cadenced.step_cadenced(99_999_999),
+            Err(ExperimentError::CadenceTimeRegressed {
+                previous_ns: 100_000_000,
+                requested_ns: 99_999_999,
+            })
+        ));
+        assert_eq!(
+            cadenced_steps.load(std::sync::atomic::Ordering::SeqCst),
+            before_steps
+        );
+        assert_eq!(
+            cadence_session_state(&cadenced, entity, before_steps),
+            before
+        );
+        cadenced.step_cadenced(200_000_000).unwrap();
+        let equal_steps = cadenced_steps.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            cadenced.step_cadenced(200_000_000).unwrap(),
+            TickOutcome::Quiescent
+        );
+        assert_eq!(
+            cadenced_steps.load(std::sync::atomic::Ordering::SeqCst),
+            equal_steps
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn step_cadenced_and_all_driver_modes_reject_mixing_before_mutation() {
+        let (mut all_first, all_steps, all_entity) = new_cadence_session("all-first");
+        all_first.step_tick().unwrap();
+        let all_before_steps = all_steps.load(std::sync::atomic::Ordering::SeqCst);
+        let all_before = cadence_session_state(&all_first, all_entity, all_before_steps);
+        assert!(matches!(
+            all_first.step_cadenced(0),
+            Err(ExperimentError::StepModeMismatch {
+                active: "AllDrivers",
+                requested: "Cadenced",
+            })
+        ));
+        assert_eq!(
+            all_steps.load(std::sync::atomic::Ordering::SeqCst),
+            all_before_steps
+        );
+        assert_eq!(
+            cadence_session_state(&all_first, all_entity, all_before_steps),
+            all_before
+        );
+
+        let (mut cadence_first, later_steps, later_entity) = new_cadence_session("cadence-first");
+        cadence_first.step_cadenced(0).unwrap();
+        let later_before_steps = later_steps.load(std::sync::atomic::Ordering::SeqCst);
+        let later_before = cadence_session_state(&cadence_first, later_entity, later_before_steps);
+        assert!(matches!(
+            cadence_first.step_tick(),
+            Err(ExperimentError::StepModeMismatch {
+                active: "Cadenced",
+                requested: "AllDrivers",
+            })
+        ));
+        assert_eq!(
+            later_steps.load(std::sync::atomic::Ordering::SeqCst),
+            later_before_steps
+        );
+        assert_eq!(
+            cadence_session_state(&cadence_first, later_entity, later_before_steps),
+            later_before
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn step_cadenced_fork_and_resume_choose_fresh_modes() {
+        let database = tempfile::NamedTempFile::new().unwrap();
+        let path = database.path().to_str().unwrap().to_owned();
+        let plugin = CompositionPluginSpec {
+            id: PluginId::new(),
+            name: "mode",
+            version: "1.0.0",
+            event_type: "mode.event",
+        };
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "mode-parent".to_owned(),
+            stop: StopCondition::MaxTicks(10),
+            store_config: StoreConfig::Sqlite { path: path.clone() },
+        })
+        .with_fork_registry_factory(move || Ok(composition_registry(&[plugin])));
+        experiment
+            .register(&CompositionPlugin(plugin), None, None)
+            .unwrap();
+        let mut parent = experiment.start().unwrap();
+        let parent_id = parent.timeline().id();
+        assert_eq!(parent.step_tick().unwrap(), TickOutcome::Quiescent);
+        let mut child = parent.fork("mode-child").unwrap();
+        assert_eq!(child.step_cadenced(0).unwrap(), TickOutcome::Quiescent);
+        assert!(matches!(
+            parent.step_cadenced(0),
+            Err(ExperimentError::StepModeMismatch { .. })
+        ));
+        assert!(matches!(
+            child.step_tick(),
+            Err(ExperimentError::StepModeMismatch { .. })
+        ));
+        drop(parent);
+        drop(child);
+
+        let mut recovery = Experiment::new(ExperimentConfig {
+            name: "mode-resume".to_owned(),
+            stop: StopCondition::MaxTicks(10),
+            store_config: StoreConfig::Sqlite { path },
+        });
+        recovery
+            .register(&CompositionPlugin(plugin), None, None)
+            .unwrap();
+        let mut resumed = recovery.resume(parent_id).unwrap();
+        assert_eq!(resumed.step_cadenced(0).unwrap(), TickOutcome::Quiescent);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn interactive_session_folds_actions_before_one_shared_snapshot_and_resumes_after_quiescence() {
         let entity = EntityId::new();
         let seen_counts = Arc::new(Mutex::new(Vec::new()));
@@ -1488,7 +1904,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn stateful_tick_failure_faults_until_fresh_timeline_resume() {
+    fn projection_access_is_healthy_fault_safe_and_replay_hydrated() {
         struct UnknownDraftDriver {
             entity: EntityId,
         }
@@ -1546,6 +1962,10 @@ mod tests {
             Err(ExperimentError::Runtime(RuntimeError::UnknownEventType(_)))
         ));
         assert!(matches!(
+            session.projections(),
+            Err(ExperimentError::SessionFaulted)
+        ));
+        assert!(matches!(
             session.step_tick(),
             Err(ExperimentError::SessionFaulted)
         ));
@@ -1574,8 +1994,10 @@ mod tests {
             .unwrap();
         let mut resumed = recovery.resume(timeline).unwrap();
         assert_eq!(resumed.total_events, 1);
+        assert_eq!(projection_count(&resumed, entity).unwrap(), 1);
         assert_eq!(resumed.step_tick().unwrap(), TickOutcome::Quiescent);
         assert_eq!(*seen_counts.lock().unwrap(), vec![1]);
+        assert_eq!(projection_count(&resumed, entity).unwrap(), 1);
     }
 
     #[test]
