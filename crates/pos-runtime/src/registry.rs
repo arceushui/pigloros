@@ -57,6 +57,12 @@ struct PendingStep {
     cadence_updates: Vec<(PluginId, u128)>,
 }
 
+#[derive(Clone, Copy)]
+enum AnchoredSelection {
+    All,
+    Cadenced { now_ns: u128 },
+}
+
 /// The central plugin registry.
 ///
 /// Plugins register here; the registry wires their components into the
@@ -176,6 +182,96 @@ impl PluginRegistry {
                 driver.abort_step();
             }
         }
+    }
+
+    fn step_anchored_transaction(
+        &mut self,
+        timeline: pos_core::ids::TimelineId,
+        observed_through: Seq,
+        selection: AnchoredSelection,
+    ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
+        self.ensure_no_pending_step()?;
+        let mut driver_ids = Vec::new();
+        let mut cadence_updates = Vec::new();
+        let mut seen_subscriptions = HashSet::new();
+        let mut subscriptions = Vec::new();
+
+        for (id, entry) in &self.plugins {
+            let Some(driver) = entry.driver.as_deref() else {
+                continue;
+            };
+            let selected = match selection {
+                AnchoredSelection::All => true,
+                AnchoredSelection::Cadenced { now_ns } => {
+                    let interval_ns = driver.tick_interval().as_nanos();
+                    match entry.last_tick {
+                        Some(previous_ns) => {
+                            let due_at = previous_ns.checked_add(interval_ns).ok_or_else(|| {
+                                RuntimeError::CadenceOverflow {
+                                    driver: entry.name.clone(),
+                                    previous_ns,
+                                    interval_ns,
+                                }
+                            })?;
+                            now_ns >= due_at
+                        }
+                        None => true,
+                    }
+                }
+            };
+            if selected {
+                driver_ids.push(*id);
+                if let AnchoredSelection::Cadenced { now_ns } = selection {
+                    cadence_updates.push((*id, now_ns));
+                }
+                extend_unique_subscriptions(
+                    &mut subscriptions,
+                    &mut seen_subscriptions,
+                    driver.subscriptions(),
+                );
+            }
+        }
+
+        let anchor = SnapshotAnchor::new(timeline, observed_through);
+        let snapshot =
+            ObservationSnapshot::from_anchored_subscriptions(anchor, subscriptions.iter(), |key| {
+                self.projections.state_for(key.entity_id()).cloned()
+            });
+        let mut all_drafts = Vec::new();
+        let mut staged_driver_ids = Vec::new();
+        for id in driver_ids {
+            let result = {
+                let entry = self
+                    .plugins
+                    .get_mut(&id)
+                    .expect("selected IDs refer to registered entries");
+                let driver = entry
+                    .driver
+                    .as_mut()
+                    .expect("selected IDs refer to registered drivers");
+                let observations = snapshot.view_for(driver.subscriptions());
+                driver
+                    .step(timeline, observations)
+                    .and_then(|output| reject_geographic_drafts(&output).map(|()| output))
+            };
+            match result {
+                Ok(output) => {
+                    staged_driver_ids.push(id);
+                    all_drafts.extend(output.drafts);
+                }
+                Err(error) => {
+                    staged_driver_ids.push(id);
+                    self.abort_drivers(&staged_driver_ids);
+                    return Err(error);
+                }
+            }
+        }
+
+        self.pending_step = Some(PendingStep {
+            driver_ids: staged_driver_ids,
+            cadence_updates,
+        });
+        Ok(all_drafts)
     }
 
     /// Commit the Driver and cadence state staged by an anchored step.
@@ -418,79 +514,11 @@ impl PluginRegistry {
         now_ns: u128,
         observed_through: Seq,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
-        self.ensure_no_pending_step()?;
-        let mut due_driver_ids = Vec::new();
-        let mut seen_subscriptions = HashSet::new();
-        let mut due_subscriptions = Vec::new();
-
-        for (id, entry) in &self.plugins {
-            if let Some(driver) = entry.driver.as_deref() {
-                let interval_ns = driver.tick_interval().as_nanos();
-                let ready = match entry.last_tick {
-                    Some(previous_ns) => {
-                        let due_at = previous_ns.checked_add(interval_ns).ok_or_else(|| {
-                            RuntimeError::CadenceOverflow {
-                                driver: entry.name.clone(),
-                                previous_ns,
-                                interval_ns,
-                            }
-                        })?;
-                        now_ns >= due_at
-                    }
-                    None => true,
-                };
-                if ready {
-                    due_driver_ids.push(*id);
-                    extend_unique_subscriptions(
-                        &mut due_subscriptions,
-                        &mut seen_subscriptions,
-                        driver.subscriptions(),
-                    );
-                }
-            }
-        }
-
-        let anchor = SnapshotAnchor::new(timeline, observed_through);
-        let snapshot = ObservationSnapshot::from_anchored_subscriptions(
-            anchor,
-            due_subscriptions.iter(),
-            |key| self.projections.state_for(key.entity_id()).cloned(),
-        );
-        let mut all_drafts = Vec::new();
-        let mut staged_driver_ids = Vec::new();
-        for id in &due_driver_ids {
-            let result = {
-                let entry = self
-                    .plugins
-                    .get_mut(id)
-                    .expect("due IDs refer to registered entries");
-                let driver = entry
-                    .driver
-                    .as_mut()
-                    .expect("due IDs refer to registered drivers");
-                let observations = snapshot.view_for(driver.subscriptions());
-                driver
-                    .step(timeline, observations)
-                    .and_then(|output| reject_geographic_drafts(&output).map(|()| output))
-            };
-            match result {
-                Ok(output) => {
-                    staged_driver_ids.push(*id);
-                    all_drafts.extend(output.drafts);
-                }
-                Err(error) => {
-                    staged_driver_ids.push(*id);
-                    self.abort_drivers(&staged_driver_ids);
-                    return Err(error);
-                }
-            }
-        }
-
-        self.pending_step = Some(PendingStep {
-            driver_ids: staged_driver_ids,
-            cadence_updates: due_driver_ids.into_iter().map(|id| (id, now_ns)).collect(),
-        });
-        Ok(all_drafts)
+        self.step_anchored_transaction(
+            timeline,
+            observed_through,
+            AnchoredSelection::Cadenced { now_ns },
+        )
     }
 
     /// Number of plugins that have a driver registered.
@@ -540,62 +568,7 @@ impl PluginRegistry {
         timeline: pos_core::ids::TimelineId,
         observed_through: Seq,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
-        self.ensure_no_pending_step()?;
-        let driver_ids: Vec<_> = self
-            .plugins
-            .iter()
-            .filter_map(|(id, entry)| entry.driver.as_ref().map(|_| *id))
-            .collect();
-        let mut seen = HashSet::new();
-        let mut subscriptions = Vec::new();
-        for id in &driver_ids {
-            let driver = self
-                .plugins
-                .get(id)
-                .and_then(|entry| entry.driver.as_deref())
-                .expect("driver IDs refer to registered drivers");
-            extend_unique_subscriptions(&mut subscriptions, &mut seen, driver.subscriptions());
-        }
-        let anchor = SnapshotAnchor::new(timeline, observed_through);
-        let snapshot =
-            ObservationSnapshot::from_anchored_subscriptions(anchor, subscriptions.iter(), |key| {
-                self.projections.state_for(key.entity_id()).cloned()
-            });
-
-        let mut all_drafts = Vec::new();
-        let mut staged_driver_ids = Vec::new();
-        for id in driver_ids {
-            let result = {
-                let entry = self
-                    .plugins
-                    .get_mut(&id)
-                    .expect("driver IDs refer to registered entries");
-                let driver = entry
-                    .driver
-                    .as_mut()
-                    .expect("driver IDs refer to registered drivers");
-                let observations = snapshot.view_for(driver.subscriptions());
-                driver
-                    .step(timeline, observations)
-                    .and_then(|output| reject_geographic_drafts(&output).map(|()| output))
-            };
-            match result {
-                Ok(output) => {
-                    staged_driver_ids.push(id);
-                    all_drafts.extend(output.drafts);
-                }
-                Err(error) => {
-                    staged_driver_ids.push(id);
-                    self.abort_drivers(&staged_driver_ids);
-                    return Err(error);
-                }
-            }
-        }
-        self.pending_step = Some(PendingStep {
-            driver_ids: staged_driver_ids,
-            cadence_updates: Vec::new(),
-        });
-        Ok(all_drafts)
+        self.step_anchored_transaction(timeline, observed_through, AnchoredSelection::All)
     }
 }
 
