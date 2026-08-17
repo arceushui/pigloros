@@ -694,6 +694,18 @@ mod tests {
     }
 
     #[test]
+    fn bounded_provider_failure_codes_match_authoritative_assignments() {
+        for (failure, expected_code) in [
+            (ProviderFailureCode::Unavailable, 1),
+            (ProviderFailureCode::Timeout, 2),
+            (ProviderFailureCode::Rejected, 3),
+            (ProviderFailureCode::RateLimited, 4),
+        ] {
+            assert_eq!(failure.code(), expected_code, "{failure:?}");
+        }
+    }
+
+    #[test]
     fn bounded_protocol_values_preserve_validated_inputs() {
         let catalogue = ActionCatalogueV1::try_new(vec!["move".to_owned()]).unwrap();
         let provenance = provenance("local-provider", "1.0.0", "2026.08").unwrap();
