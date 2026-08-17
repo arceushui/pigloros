@@ -1619,6 +1619,11 @@ impl SqliteStore {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let chain = Self::fork_chain_on(&tx, timeline)?;
+        let logical_prefix = chain
+            .last()
+            .and_then(|(_, fork)| *fork)
+            .map_or(0, Seq::as_u64);
         let owned_head = tx
             .query_row(
                 "SELECT head_seq FROM timelines WHERE id = ?1",
@@ -1639,6 +1644,9 @@ impl SqliteStore {
         if next_head > max_owned_events {
             return Ok(None);
         }
+        logical_prefix
+            .checked_add(next_head)
+            .ok_or_else(|| CoreError::Storage("logical Timeline sequence overflow".to_owned()))?;
 
         let mut committed = Vec::with_capacity(drafts.len());
         for draft in drafts {
@@ -1649,14 +1657,13 @@ impl SqliteStore {
                 draft.clone(),
             )?);
         }
-        tx.commit()
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let logical_prefix = self.logical_prefix(timeline)?;
-        committed
+        let committed = committed
             .into_iter()
             .map(|event| Self::logical_event(logical_prefix, event))
-            .collect::<Result<Vec<_>, _>>()
-            .map(Some)
+            .collect::<Result<Vec<_>, _>>()?;
+        tx.commit()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        Ok(Some(committed))
     }
 
     fn logical_prefix(&self, timeline: TimelineId) -> Result<u64, CoreError> {
@@ -7090,14 +7097,13 @@ mod tests {
         let fork = store
             .fork(timeline.id(), Seq::from_u64(2), "bounded-fork")
             .unwrap();
-        assert_eq!(
-            store
-                .append_bounded(fork.id(), &[make_draft(entity, b"fork")], 1)
-                .unwrap()
-                .unwrap()
-                .len(),
-            1
-        );
+        let fork_event = store
+            .append_bounded(fork.id(), &[make_draft(entity, b"fork")], 1)
+            .unwrap()
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(fork_event.seq, Seq::from_u64(3));
         assert_eq!(
             store
                 .append_bounded(fork.id(), &[make_draft(entity, b"too-many")], 1)
@@ -7105,6 +7111,35 @@ mod tests {
             None
         );
         assert_eq!(store.read_own(fork.id(), SeqRange::all()).unwrap().len(), 1);
+
+        let corrupt_fork = store
+            .fork(timeline.id(), Seq::from_u64(2), "corrupt-fork")
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE timelines SET fork_seq = 'not-an-integer' WHERE id = ?1",
+                params![corrupt_fork.id().to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.append_bounded(
+                corrupt_fork.id(),
+                &[make_draft(entity, b"must-not-commit")],
+                1,
+            ),
+            Err(CoreError::Storage(_))
+        ));
+        let (head, events) = store
+            .conn
+            .query_row(
+                "SELECT head_seq, (SELECT COUNT(*) FROM events WHERE timeline_id = ?1)
+                 FROM timelines WHERE id = ?1",
+                params![corrupt_fork.id().to_string()],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap();
+        assert_eq!((head, events), (0, 0));
     }
 
     #[test]

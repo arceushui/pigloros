@@ -964,6 +964,15 @@ impl MemoryStore {
         drafts: &[EventDraft],
     ) -> Result<Vec<Event>, CoreError> {
         let logical_prefix = self.logical_prefix(timeline)?;
+        self.append_visible_with_prefix(timeline, drafts, logical_prefix)
+    }
+
+    fn append_visible_with_prefix(
+        &mut self,
+        timeline: TimelineId,
+        drafts: &[EventDraft],
+        logical_prefix: u64,
+    ) -> Result<Vec<Event>, CoreError> {
         let committed = {
             let (timelines, hasher) = (&mut self.timelines, &self.hasher);
             mutable_state(timelines, timeline).map(|state| {
@@ -1528,7 +1537,12 @@ impl EventStore for MemoryStore {
                 if next_head > max_owned_events {
                     Ok(None)
                 } else {
-                    self.append_visible(timeline, drafts).map(Some)
+                    let logical_prefix = self.logical_prefix(timeline)?;
+                    logical_prefix.checked_add(next_head).ok_or_else(|| {
+                        CoreError::Storage("logical Timeline sequence overflow".to_owned())
+                    })?;
+                    self.append_visible_with_prefix(timeline, drafts, logical_prefix)
+                        .map(Some)
                 }
             })
     }
@@ -3586,14 +3600,13 @@ mod tests {
         let fork = store
             .fork(timeline.id(), Seq::from_u64(2), "bounded-fork")
             .unwrap();
-        assert_eq!(
-            store
-                .append_bounded(fork.id(), &[make_draft(entity, b"fork")], 1)
-                .unwrap()
-                .unwrap()
-                .len(),
-            1
-        );
+        let fork_event = store
+            .append_bounded(fork.id(), &[make_draft(entity, b"fork")], 1)
+            .unwrap()
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(fork_event.seq, Seq::from_u64(3));
         assert_eq!(
             store
                 .append_bounded(fork.id(), &[make_draft(entity, b"too-many")], 1)
@@ -3601,6 +3614,33 @@ mod tests {
             None
         );
         assert_eq!(store.read_own(fork.id(), SeqRange::all()).unwrap().len(), 1);
+
+        let overflow_fork = store
+            .fork(timeline.id(), Seq::from_u64(2), "overflow-fork")
+            .unwrap();
+        store
+            .timelines
+            .get_mut(&overflow_fork.id())
+            .unwrap()
+            .timeline
+            .meta
+            .fork_point = Some((timeline.id(), Seq::from_u64(u64::MAX)));
+        assert!(matches!(
+            store.append_bounded(overflow_fork.id(), &[make_draft(entity, b"overflow")], 1,),
+            Err(CoreError::Storage(_))
+        ));
+        assert_eq!(
+            store
+                .get_timeline(overflow_fork.id())
+                .unwrap()
+                .unwrap()
+                .head,
+            Seq::ZERO
+        );
+        assert!(store
+            .read_own(overflow_fork.id(), SeqRange::all())
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
