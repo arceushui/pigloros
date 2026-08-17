@@ -54,8 +54,8 @@ pub struct RunResult {
     pub manifest: ReproManifest,
     /// Final projection state after all ticks.
     pub projections: pos_state::ProjectionRegistry,
-    /// Store configuration used for this run (for re-opening or branching).
-    pub store_config: StoreConfig,
+    /// Accurate recipe for re-opening the run's store, when one is known.
+    pub store_config: Option<StoreConfig>,
 }
 
 /// Host-owned configuration required to execute a reproduction.
@@ -94,9 +94,14 @@ impl RunResult {
     /// Reopen the store and branch from this result's timeline at its head.
     ///
     /// # Errors
-    /// Returns [`ExperimentError`] if the store cannot be opened or the fork fails.
+    /// Returns [`ExperimentError`] if no accurate recovery recipe is available,
+    /// the store cannot be opened, or the fork fails.
     pub fn branch(&self, name: &str) -> Result<Timeline, ExperimentError> {
-        let mut store = open_store(self.store_config.clone())?;
+        let store_config = self
+            .store_config
+            .clone()
+            .ok_or(ExperimentError::MissingStoreRecoveryRecipe)?;
+        let mut store = open_store(store_config)?;
         let timelines = store.list_timelines()?;
         let timeline = timelines
             .iter()
@@ -139,6 +144,7 @@ pub struct ExperimentSession {
     registry: PluginRegistry,
     parent_composition: pos_runtime::PluginComposition,
     store: SharedEventStore,
+    recovery_store_config: Option<StoreConfig>,
     fork_registry_factory: Option<ForkRegistryFactory>,
     timeline: Timeline,
     ticks: u64,
@@ -241,6 +247,8 @@ pub enum ExperimentError {
     Store(#[from] pos_core::CoreError),
     #[error("a fresh PluginRegistry factory is required to run a forked experiment session")]
     MissingForkRegistryFactory,
+    #[error("the experiment store has no accurate recovery recipe")]
+    MissingStoreRecoveryRecipe,
     #[error("the shared experiment EventStore lock is poisoned")]
     SharedStoreLockPoisoned,
     #[error("the fresh PluginRegistry is incompatible with the parent plugin composition")]
@@ -532,23 +540,32 @@ impl Experiment {
     /// Returns [`ExperimentError::Store`] if the configured `EventStore` cannot be
     /// opened or cannot create the Timeline.
     pub fn start(self) -> Result<ExperimentSession, ExperimentError> {
-        let store = open_store(self.config.store_config.clone())?;
-        self.start_with_store(store)
+        let store_config = self.config.store_config.clone();
+        let store = open_store(store_config.clone())?;
+        self.start_with_store_and_recipe(store, Some(store_config))
     }
 
     /// Create the experiment Timeline in a host-supplied `EventStore` adapter.
     ///
     /// This is the production composition seam for decorators such as bounded,
-    /// fault-reporting, or observability adapters. The configured
-    /// [`ExperimentConfig::store_config`] remains the recovery recipe metadata;
-    /// the supplied adapter owns this live session.
+    /// fault-reporting, or observability adapters. Because the supplied adapter
+    /// cannot be reconstructed from [`ExperimentConfig::store_config`], results
+    /// from this session do not advertise a recovery recipe.
     ///
     /// # Errors
     /// Returns [`ExperimentError::Store`] if the supplied store cannot create
     /// the Timeline.
     pub fn start_with_store(
         self,
+        store: Box<dyn pos_core::store::EventStore>,
+    ) -> Result<ExperimentSession, ExperimentError> {
+        self.start_with_store_and_recipe(store, None)
+    }
+
+    fn start_with_store_and_recipe(
+        self,
         mut store: Box<dyn pos_core::store::EventStore>,
+        recovery_store_config: Option<StoreConfig>,
     ) -> Result<ExperimentSession, ExperimentError> {
         let parent_composition = self.registry.composition();
         let timeline = store.create_timeline(&self.config.name)?;
@@ -557,6 +574,7 @@ impl Experiment {
             registry: self.registry,
             parent_composition,
             store: Arc::new(Mutex::new(store)),
+            recovery_store_config,
             fork_registry_factory: self.fork_registry_factory,
             timeline,
             ticks: 0,
@@ -584,8 +602,9 @@ impl Experiment {
         self,
         timeline_id: pos_core::ids::TimelineId,
     ) -> Result<ExperimentSession, ExperimentError> {
-        let store = open_store(self.config.store_config.clone())?;
-        self.resume_with_store(timeline_id, store)
+        let store_config = self.config.store_config.clone();
+        let store = open_store(store_config.clone())?;
+        self.resume_with_store_and_recipe(timeline_id, store, Some(store_config))
     }
 
     /// Resume a durable Timeline through a host-supplied `EventStore` adapter.
@@ -598,9 +617,18 @@ impl Experiment {
     /// Returns a store error when the Timeline cannot be opened or its logical
     /// history is invalid.
     pub fn resume_with_store(
+        self,
+        timeline_id: pos_core::ids::TimelineId,
+        store: Box<dyn pos_core::store::EventStore>,
+    ) -> Result<ExperimentSession, ExperimentError> {
+        self.resume_with_store_and_recipe(timeline_id, store, None)
+    }
+
+    fn resume_with_store_and_recipe(
         mut self,
         timeline_id: pos_core::ids::TimelineId,
         store: Box<dyn pos_core::store::EventStore>,
+        recovery_store_config: Option<StoreConfig>,
     ) -> Result<ExperimentSession, ExperimentError> {
         let parent_composition = self.registry.composition();
         let timeline = store
@@ -622,6 +650,7 @@ impl Experiment {
             registry: self.registry,
             parent_composition,
             store: Arc::new(Mutex::new(store)),
+            recovery_store_config,
             fork_registry_factory: self.fork_registry_factory,
             timeline,
             ticks: 0,
@@ -756,11 +785,17 @@ impl ExperimentSession {
     /// Returns a store or shared-store locking error if the completed prefix
     /// cannot be read.
     pub fn source_events(&self) -> Result<Vec<pos_core::Event>, ExperimentError> {
-        read_events(
+        let events = read_events(
             &self.store,
             self.timeline.id(),
             self.boundary.folded_through,
-        )
+        )?;
+        validate_captured_range(
+            pos_core::clock::Seq::ZERO,
+            self.boundary.folded_through,
+            &events,
+        )?;
+        Ok(events)
     }
 
     fn step_with_mode(&mut self, request: StepRequest) -> Result<TickOutcome, ExperimentError> {
@@ -942,6 +977,7 @@ impl ExperimentSession {
                 registry,
                 parent_composition: self.parent_composition.clone(),
                 store: Arc::clone(&self.store),
+                recovery_store_config: self.recovery_store_config.clone(),
                 fork_registry_factory: Some(Arc::clone(factory)),
                 timeline,
                 ticks: self.ticks,
@@ -996,7 +1032,7 @@ impl ExperimentSession {
                     total_events: self.total_events,
                     manifest,
                     projections: self.registry.projections,
-                    store_config: self.config.store_config,
+                    store_config: self.recovery_store_config,
                 }
             })
     }
@@ -1170,7 +1206,7 @@ impl BacktestRunner {
             total_events: train_events,
             manifest: train_manifest,
             projections: train_registry.projections,
-            store_config: store_config.clone(),
+            store_config: Some(store_config.clone()),
         };
         let eval_result = RunResult {
             timeline_id: eval_tl_id,
@@ -1178,7 +1214,7 @@ impl BacktestRunner {
             total_events: eval_events,
             manifest: eval_manifest,
             projections: eval_registry.projections,
-            store_config,
+            store_config: Some(store_config),
         };
 
         let eval_report = pos_plugin_eval::compute_report(store, eval_tl_id)
@@ -3745,7 +3781,7 @@ mod tests {
                 pos_core::clock::WallTime::from_micros(0),
             ),
             projections: pos_state::ProjectionRegistry::new(),
-            store_config: StoreConfig::Memory,
+            store_config: Some(StoreConfig::Memory),
         };
         // Branching will fail because the timeline doesn't exist in a fresh Memory store
         let err = result.branch("nonexistent");
@@ -3768,7 +3804,7 @@ mod tests {
         let result = exp.run().unwrap();
 
         // store_config should be set to Memory
-        assert!(matches!(result.store_config, StoreConfig::Memory));
+        assert!(matches!(result.store_config, Some(StoreConfig::Memory)));
     }
 
     #[test]
@@ -3839,7 +3875,7 @@ mod tests {
         exp.register(&plugin, None, Some(Box::new(driver))).unwrap();
         let result = exp.run().unwrap();
 
-        let store = open_store(result.store_config.clone()).unwrap();
+        let store = open_store(result.store_config.clone().unwrap()).unwrap();
         let events = store.read(result.timeline_id, SeqRange::all()).unwrap();
         assert!(!events.is_empty());
         let mut hasher = blake3::Hasher::new();
@@ -4478,9 +4514,9 @@ mod fault_injection_tests {
                 pos_core::clock::WallTime::from_micros(0),
             ),
             projections: pos_state::ProjectionRegistry::new(),
-            store_config: StoreConfig::Sqlite {
+            store_config: Some(StoreConfig::Sqlite {
                 path: dir.path().to_str().unwrap().to_owned(),
-            },
+            }),
         };
         assert!(result.branch("fork").is_err());
     }

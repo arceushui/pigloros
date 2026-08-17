@@ -5,7 +5,9 @@ use pos_core::{
     store::EventStore,
     CoreError, Timeline,
 };
-use pos_experiment::{Experiment, ExperimentConfig, ExperimentError, StopCondition, TickOutcome};
+use pos_experiment::{
+    Experiment, ExperimentConfig, ExperimentError, ExperimentSession, StopCondition, TickOutcome,
+};
 use pos_plugin_agent::{
     protocol::{
         ActionCatalogueV1, AgentProviderProvenanceV1, BoundedProviderBytes, ProviderAttempt,
@@ -203,6 +205,7 @@ enum ExpectedResult {
 struct AdapterControl {
     append_batch_sizes: Vec<usize>,
     fail_next_append: bool,
+    drop_first_on_next_read: bool,
 }
 
 #[derive(Clone)]
@@ -225,6 +228,10 @@ impl SharedMemoryAdapter {
 
     fn append_batch_sizes(&self) -> Vec<usize> {
         self.control().append_batch_sizes.clone()
+    }
+
+    fn drop_first_on_next_read(&self) {
+        self.control().drop_first_on_next_read = true;
     }
 
     fn source_events(&self, timeline: TimelineId) -> Vec<Event> {
@@ -269,7 +276,11 @@ impl EventStore for SharedMemoryAdapter {
     }
 
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
-        self.store().read(timeline, range)
+        let mut events = self.store().read(timeline, range)?;
+        if std::mem::take(&mut self.control().drop_first_on_next_read) && !events.is_empty() {
+            events.remove(0);
+        }
+        Ok(events)
     }
 
     fn fork(&mut self, parent: TimelineId, at_seq: Seq, name: &str) -> Result<Timeline, CoreError> {
@@ -287,6 +298,21 @@ impl EventStore for SharedMemoryAdapter {
     fn logical_head(&self, id: TimelineId) -> Result<Seq, CoreError> {
         self.store().logical_head(id)
     }
+}
+
+fn assert_supplied_store_has_no_recovery_recipe(
+    adapter: &SharedMemoryAdapter,
+    session: ExperimentSession,
+) {
+    adapter.drop_first_on_next_read();
+    assert!(session.source_events().is_err());
+
+    let result = session.run_to_completion().unwrap();
+    assert!(result.store_config.is_none());
+    assert!(matches!(
+        result.branch("must-not-reopen"),
+        Err(ExperimentError::MissingStoreRecoveryRecipe)
+    ));
 }
 
 #[test]
@@ -392,6 +418,8 @@ fn live_boundaries_are_atomic_byte_stable_and_provider_free_on_replay() {
     let checkpoint = host.verifier(timeline).verify(&events, None).unwrap();
     assert_eq!(checkpoint.last_verified(), Seq::from_u64(3));
     assert_eq!(calls.load(Ordering::SeqCst), before_replay_calls);
+
+    assert_supplied_store_has_no_recovery_recipe(&adapter, session);
 }
 
 #[test]
