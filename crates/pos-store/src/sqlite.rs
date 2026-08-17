@@ -1657,13 +1657,21 @@ impl SqliteStore {
                 draft.clone(),
             )?);
         }
-        let committed = committed
-            .into_iter()
-            .map(|event| Self::logical_event(logical_prefix, event))
-            .collect::<Result<Vec<_>, _>>()?;
         tx.commit()
             .map_err(|error| CoreError::Storage(error.to_string()))?;
-        Ok(Some(committed))
+        Ok(Some(
+            committed
+                .into_iter()
+                .map(|mut event| {
+                    event.seq = Seq::from_u64(
+                        logical_prefix
+                            .checked_add(event.seq.as_u64())
+                            .expect("bounded append preflights logical sequence overflow"),
+                    );
+                    event
+                })
+                .collect(),
+        ))
     }
 
     fn logical_prefix(&self, timeline: TimelineId) -> Result<u64, CoreError> {
