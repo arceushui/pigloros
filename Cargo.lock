@@ -4398,6 +4398,7 @@ dependencies = [
 name = "pos-plugin-agent"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "ciborium",
  "pos-core",
  "pos-runtime",
@@ -4405,6 +4406,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.19",
+ "ulid",
 ]
 
 [[package]]

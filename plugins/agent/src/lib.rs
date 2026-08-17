@@ -19,6 +19,8 @@ use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+pub mod protocol;
+
 /// The entity kind string for AI agents.
 pub const ENTITY_KIND: &str = "ai-agent";
 
