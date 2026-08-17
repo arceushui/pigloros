@@ -174,7 +174,7 @@ Journal the exact tests and storage level.
 - Consumes: `EventStore::append_bounded(..., MAX_EVENTS_PER_TIMELINE)` from Task 1
 - Preserves: identified ingress identity-first bounded append and HTTP 429 mapping for `"event limit reached"`
 
-- [ ] **Step 1: Add failing executor tests for the ordinary path**
+- [x] **Step 1: Add failing executor tests for the ordinary path**
 
 Create a recording EventStore double whose `get_timeline()` panics and whose `append_bounded()` records the maximum and returns either `Some(events)` or `None`. Assert ordinary action/signal admission calls only the atomic method when a ceiling is supplied.
 
@@ -190,11 +190,11 @@ fn append_bounded(
 }
 ```
 
-- [ ] **Step 2: Add a failing two-Gateway-connection ceiling test**
+- [x] **Step 2: Add a failing two-Gateway-connection ceiling test**
 
 Open two `Gateway` instances on the same SQLite file and one Timeline at `MAX_EVENTS_PER_TIMELINE - 1`. Release two concurrent ordinary appends from a barrier. Assert exactly one succeeds, exactly one returns `GatewayError::EventLimitReached`, and a fresh store reports exactly the maximum owned head with no overflow.
 
-- [ ] **Step 3: Run Gateway tests and confirm RED**
+- [x] **Step 3: Run Gateway tests and confirm RED**
 
 Run:
 
@@ -205,7 +205,7 @@ cargo test -p piglor-gateway sqlite_gateways_enforce_one_atomic_event_ceiling --
 
 Expected: the recording double observes the old `get_timeline` path or both external writers can pass the pre-check.
 
-- [ ] **Step 4: Replace the executor pre-check with bounded append**
+- [x] **Step 4: Replace the executor pre-check with bounded append**
 
 Implement without a separate metadata read:
 
@@ -222,7 +222,7 @@ let result = match maximum {
 
 Keep the existing error string so the established HTTP 429 conversion remains stable.
 
-- [ ] **Step 5: Correct the supported SQLite writer boundary documentation**
+- [x] **Step 5: Correct the supported SQLite writer boundary documentation**
 
 Replace the blanket prohibition in `apps/piglor-gateway/README.md` with:
 
@@ -234,7 +234,7 @@ ceilings are enforced atomically by the adapter. Arbitrary SQL mutation by tools
 that bypass `EventStore` remains unsupported while the file is open.
 ```
 
-- [ ] **Step 6: Run targeted Gateway tests**
+- [x] **Step 6: Run targeted Gateway tests**
 
 Run:
 
@@ -246,7 +246,7 @@ cargo test -p piglor-gateway --all-features concurrent_limit --locked
 
 Expected: all pass; identified retry-at-ceiling tests remain green.
 
-- [ ] **Step 7: Commit Gateway admission**
+- [x] **Step 7: Commit Gateway admission**
 
 ```bash
 git add apps/piglor-gateway/src/executor.rs apps/piglor-gateway/src/lib.rs apps/piglor-gateway/README.md
