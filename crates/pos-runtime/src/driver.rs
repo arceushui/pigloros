@@ -344,6 +344,8 @@ mod tests {
         assert_eq!(snapshot.view_for(&[]).anchor(), Some(anchor));
         assert_eq!(anchor.timeline_id, timeline_id);
         assert_eq!(anchor.observed_through, Seq::from_u64(7));
+        assert_eq!(anchor.timeline_id(), timeline_id);
+        assert_eq!(anchor.observed_through(), Seq::from_u64(7));
         assert_eq!(ObservationView::empty().anchor(), None);
 
         let mut legacy = IdleDriver;
