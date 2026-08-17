@@ -1532,6 +1532,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn execute_append_command_uses_only_atomic_bounded_append_for_a_ceiling() {
         let timeline = TimelineId::new();
         let drafts = [

@@ -1518,6 +1518,18 @@ mod tests {
                 .collect())
         }
 
+        fn append_bounded(
+            &mut self,
+            timeline: TimelineId,
+            drafts: &[EventDraft],
+            _max_owned_events: u64,
+        ) -> Result<Option<Vec<Event>>, CoreError> {
+            if matches!(self.mode, ScriptMode::FailGetTimeline) {
+                return Err(CoreError::Storage("get timeline failed".into()));
+            }
+            self.append(timeline, drafts).map(Some)
+        }
+
         fn read(&self, _timeline: TimelineId, _range: SeqRange) -> Result<Vec<Event>, CoreError> {
             if matches!(self.mode, ScriptMode::FailRead) {
                 return Err(CoreError::Storage("read failed".into()));

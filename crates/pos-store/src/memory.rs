@@ -1527,22 +1527,24 @@ impl EventStore for MemoryStore {
         crate::ensure_non_geographic_drafts(drafts, timeline)
             .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
             .and_then(|()| {
-                let owned_head = self.timeline(timeline)?.head.as_u64();
-                let batch_len = u64::try_from(drafts.len()).map_err(|_| {
-                    CoreError::Storage("bounded append batch length overflow".to_owned())
-                })?;
-                let next_head = owned_head.checked_add(batch_len).ok_or_else(|| {
-                    CoreError::Storage("bounded append owned Event head overflow".to_owned())
-                })?;
-                if next_head > max_owned_events {
-                    Ok(None)
-                } else {
-                    let logical_prefix = self.logical_prefix(timeline)?;
-                    logical_prefix.checked_add(next_head).ok_or_else(|| {
-                        CoreError::Storage("logical Timeline sequence overflow".to_owned())
-                    })?;
+                // Visibility checked this key immediately above and no mutation
+                // occurs between the check and this read.
+                let timeline_state = &self.timelines[&timeline].timeline;
+                let owned_head = timeline_state.head.as_u64();
+                let logical_prefix = timeline_state
+                    .meta
+                    .fork_point
+                    .map_or(0, |(_, fork)| fork.as_u64());
+                let batch_len = u64::try_from(drafts.len())
+                    .expect("slice length fits in u64 on supported targets");
+                if let Some(next_head) =
+                    crate::bounded_owned_head(owned_head, batch_len, max_owned_events)?
+                {
+                    crate::checked_logical_head(logical_prefix, next_head)?;
                     self.append_visible_with_prefix(timeline, drafts, logical_prefix)
                         .map(Some)
+                } else {
+                    Ok(None)
                 }
             })
     }
@@ -3544,6 +3546,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_append_is_all_or_nothing_at_the_owned_event_ceiling() {
         let mut store = MemoryStore::new();
         let timeline = store.create_timeline("bounded").unwrap();
@@ -3639,6 +3642,32 @@ mod tests {
         );
         assert!(store
             .read_own(overflow_fork.id(), SeqRange::all())
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bounded_append_rejects_an_owned_head_overflow_before_mutation() {
+        let mut store = MemoryStore::new();
+        let timeline = store.create_timeline("overflow-head").unwrap();
+        store
+            .timelines
+            .get_mut(&timeline.id())
+            .unwrap()
+            .timeline
+            .head = Seq::from_u64(u64::MAX);
+
+        assert!(matches!(
+            store.append_bounded(
+                timeline.id(),
+                &[make_draft(EntityId::new(), b"owned-head-overflow")],
+                u64::MAX,
+            ),
+            Err(CoreError::Storage(_))
+        ));
+        assert!(store
+            .read_own(timeline.id(), SeqRange::all())
             .unwrap()
             .is_empty());
     }

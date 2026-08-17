@@ -1290,14 +1290,17 @@ mod tests {
     }
 
     impl Driver for CadencedCountingDriver {
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn name(&self) -> &'static str {
             self.name
         }
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn tick_interval(&self) -> std::time::Duration {
             self.interval
         }
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn step(
             &mut self,
             _: pos_core::ids::TimelineId,
@@ -1318,10 +1321,12 @@ mod tests {
     }
 
     impl EventStore for FailFirstLogicalHeadStore {
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
             self.inner.create_timeline(name)
         }
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn append(
             &mut self,
             timeline: pos_core::ids::TimelineId,
@@ -1330,6 +1335,7 @@ mod tests {
             self.inner.append(timeline, drafts)
         }
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn read(
             &self,
             timeline: pos_core::ids::TimelineId,
@@ -1338,6 +1344,7 @@ mod tests {
             self.inner.read(timeline, range)
         }
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn fork(
             &mut self,
             parent: pos_core::ids::TimelineId,
@@ -1347,10 +1354,12 @@ mod tests {
             self.inner.fork(parent, at_seq, name)
         }
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
             self.inner.list_timelines()
         }
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn get_timeline(
             &self,
             id: pos_core::ids::TimelineId,
@@ -1358,6 +1367,7 @@ mod tests {
             self.inner.get_timeline(id)
         }
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn logical_head(
             &self,
             id: pos_core::ids::TimelineId,
@@ -1386,6 +1396,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_count(
         session: &ExperimentSession,
         entity: EntityId,

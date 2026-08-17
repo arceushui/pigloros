@@ -270,13 +270,18 @@ impl PluginRegistry {
     /// Propagates any [`RuntimeError`] from drivers. Returns
     /// [`RuntimeError::CadenceOverflow`] before snapshot creation or driver mutation
     /// when a prior tick plus the configured interval cannot fit in `u128` nanoseconds.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the registry's internal due-driver set refers to an entry
+    /// whose registered driver disappeared without passing through a public API.
     pub fn tick_cadenced(
         &mut self,
         timeline: pos_core::ids::TimelineId,
         now_ns: u128,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         let mut all_drafts = Vec::new();
-        let mut due_driver_ids = Vec::new();
+        let mut due_driver_ids = HashSet::new();
         let mut seen_subscriptions = HashSet::new();
         let mut due_subscriptions = Vec::new();
 
@@ -297,7 +302,7 @@ impl PluginRegistry {
                     None => true,
                 };
                 if ready {
-                    due_driver_ids.push(*id);
+                    due_driver_ids.insert(*id);
                     extend_unique_subscriptions(
                         &mut due_subscriptions,
                         &mut seen_subscriptions,
@@ -308,17 +313,20 @@ impl PluginRegistry {
         }
 
         let snapshot = self.snapshot_for_subscriptions(due_subscriptions.iter());
-        for id in due_driver_ids {
-            if let Some(entry) = self.plugins.get_mut(&id) {
-                if let Some(driver) = entry.driver.as_mut() {
-                    let observations = snapshot.view_for(driver.subscriptions());
-                    let output = driver.step(timeline, observations)?;
-                    reject_geographic_drafts(&output)?;
-                    entry.last_tick = Some(now_ns);
-                    all_drafts.extend(output.drafts);
-                }
+        for (id, entry) in &mut self.plugins {
+            if due_driver_ids.remove(id) {
+                let driver = entry
+                    .driver
+                    .as_mut()
+                    .expect("due IDs are collected only from registered drivers");
+                let observations = snapshot.view_for(driver.subscriptions());
+                let output = driver.step(timeline, observations)?;
+                reject_geographic_drafts(&output)?;
+                entry.last_tick = Some(now_ns);
+                all_drafts.extend(output.drafts);
             }
         }
+        debug_assert!(due_driver_ids.is_empty());
         Ok(all_drafts)
     }
 
@@ -656,6 +664,9 @@ mod tests {
         reg.register_driver(Box::new(FailingDriver));
 
         let error = reg.step_all(timeline.id()).unwrap_err();
+        assert!(error.to_string().contains("failing"));
+
+        let error = reg.tick_cadenced(timeline.id(), 0).unwrap_err();
         assert!(error.to_string().contains("failing"));
     }
 

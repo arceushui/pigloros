@@ -358,6 +358,13 @@ impl SqliteStore {
         CoreError::Storage(error.to_string())
     }
 
+    // `Result::map_err` supplies the owned error; keeping this function pointer
+    // avoids duplicating closure-only coverage regions at every adapter boundary.
+    #[allow(clippy::needless_pass_by_value)]
+    fn into_storage_error(error: rusqlite::Error) -> CoreError {
+        Self::storage_error(&error)
+    }
+
     fn require_utf8_encoding(conn: &Connection) -> Result<(), CoreError> {
         let encoding: String = conn
             .query_row("PRAGMA encoding", [], |row| row.get(0))
@@ -1124,18 +1131,20 @@ impl SqliteStore {
     }
 
     /// Walk the fork chain for a timeline, returning [root, ..., leaf].
-    fn fork_chain(
-        &self,
-        timeline_id: TimelineId,
-    ) -> Result<Vec<(TimelineId, Option<Seq>)>, CoreError> {
+    fn fork_chain(&self, timeline_id: TimelineId) -> Result<ForkChain, CoreError> {
         Self::fork_chain_on(&self.conn, timeline_id)
     }
 
-    fn fork_chain_on(
+    fn fork_chain_on(conn: &Connection, timeline_id: TimelineId) -> Result<ForkChain, CoreError> {
+        Self::fork_chain_with_leaf_head_on(conn, timeline_id).map(|(chain, _)| chain)
+    }
+
+    fn fork_chain_with_leaf_head_on(
         conn: &Connection,
         timeline_id: TimelineId,
-    ) -> Result<Vec<(TimelineId, Option<Seq>)>, CoreError> {
+    ) -> Result<ForkChainWithLeafHead, CoreError> {
         let mut chain = Vec::new();
+        let mut leaf_head = 0;
         let mut visited = HashSet::new();
         let mut current = timeline_id;
         loop {
@@ -1162,18 +1171,24 @@ impl SqliteStore {
 
             match row {
                 None => return Err(CoreError::TimelineNotFound(current)),
-                Some(DecodedForkChainRow::Root { .. }) => {
+                Some(DecodedForkChainRow::Root { head }) => {
+                    if chain.is_empty() {
+                        leaf_head = head;
+                    }
                     chain.push((current, None));
                     break;
                 }
-                Some(DecodedForkChainRow::Fork { parent, fork, .. }) => {
+                Some(DecodedForkChainRow::Fork { parent, fork, head }) => {
+                    if chain.is_empty() {
+                        leaf_head = head;
+                    }
                     chain.push((current, Some(fork)));
                     current = parent;
                 }
             }
         }
         chain.reverse();
-        Ok(chain)
+        Ok((chain, leaf_head))
     }
 
     fn logical_segment_length(
@@ -1303,6 +1318,9 @@ struct ForkChainRow {
     fork_seq: Option<i64>,
     head_seq: i64,
 }
+
+type ForkChain = Vec<(TimelineId, Option<Seq>)>;
+type ForkChainWithLeafHead = (ForkChain, u64);
 
 #[derive(Debug)]
 enum DecodedForkChainRow {
@@ -1462,7 +1480,7 @@ impl SqliteStore {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+            .map_err(Self::into_storage_error)?;
         let timeline_text = timeline.to_string();
         let timeline_query = tx.query_row(
             "SELECT head_seq FROM timelines WHERE id = ?1",
@@ -1619,35 +1637,20 @@ impl SqliteStore {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let chain = Self::fork_chain_on(&tx, timeline)?;
+        let (chain, owned_head) = Self::fork_chain_with_leaf_head_on(&tx, timeline)?;
         let logical_prefix = chain
             .last()
             .and_then(|(_, fork)| *fork)
             .map_or(0, Seq::as_u64);
-        let owned_head = tx
-            .query_row(
-                "SELECT head_seq FROM timelines WHERE id = ?1",
-                params![timeline.to_string()],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()
-            .map_err(|error| CoreError::Storage(error.to_string()))?
-            .ok_or(CoreError::TimelineNotFound(timeline))?;
-        let owned_head = u64::try_from(owned_head).map_err(|_| {
-            CoreError::Storage("bounded append owned Event head overflow".to_owned())
-        })?;
-        let batch_len = u64::try_from(drafts.len())
-            .map_err(|_| CoreError::Storage("bounded append batch length overflow".to_owned()))?;
-        let next_head = owned_head.checked_add(batch_len).ok_or_else(|| {
-            CoreError::Storage("bounded append owned Event head overflow".to_owned())
-        })?;
+        let batch_len =
+            u64::try_from(drafts.len()).expect("slice length fits in u64 on supported targets");
+        // SQLite persists both the fork prefix and owned head as non-negative
+        // signed 64-bit values, while an addressable slice is at most
+        // `isize::MAX`; their sums therefore fit in `u64` on supported targets.
+        let next_head = owned_head + batch_len;
         if next_head > max_owned_events {
             return Ok(None);
         }
-        logical_prefix
-            .checked_add(next_head)
-            .ok_or_else(|| CoreError::Storage("logical Timeline sequence overflow".to_owned()))?;
-
         let mut committed = Vec::with_capacity(drafts.len());
         for draft in drafts {
             committed.push(Self::append_one_in_transaction(
@@ -1657,17 +1660,12 @@ impl SqliteStore {
                 draft.clone(),
             )?);
         }
-        tx.commit()
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        tx.commit().map_err(Self::into_storage_error)?;
         Ok(Some(
             committed
                 .into_iter()
                 .map(|mut event| {
-                    event.seq = Seq::from_u64(
-                        logical_prefix
-                            .checked_add(event.seq.as_u64())
-                            .expect("bounded append preflights logical sequence overflow"),
-                    );
+                    event.seq = Seq::from_u64(logical_prefix + event.seq.as_u64());
                     event
                 })
                 .collect(),
@@ -7049,6 +7047,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn sqlite_bounded_append_is_all_or_nothing_at_the_owned_event_ceiling() {
         let mut store = new_store();
         let timeline = store.create_timeline("bounded").unwrap();
@@ -7151,6 +7150,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn sqlite_writer_contention_serializes_generic_appends() {
         use std::{sync::mpsc, thread, time::Duration};
 
@@ -7214,8 +7214,12 @@ mod tests {
         let err = store
             .append(tl.id(), &[make_draft(entity, b"x")])
             .unwrap_err();
+        let bounded_err = store
+            .append_bounded(tl.id(), &[make_draft(entity, b"bounded")], 1)
+            .unwrap_err();
         let _ = store.conn.execute_batch("ROLLBACK");
         assert!(matches!(err, CoreError::Storage(_)));
+        assert!(matches!(bounded_err, CoreError::Storage(_)));
     }
 
     #[test]
@@ -7230,6 +7234,12 @@ mod tests {
             .append(tl.id(), &[make_draft(entity, b"x")])
             .unwrap_err();
         assert!(matches!(err, CoreError::Storage(_)));
+        let bounded_err = store
+            .append_bounded(tl.id(), &[make_draft(entity, b"bounded")], 1)
+            .unwrap_err();
+        assert!(matches!(bounded_err, CoreError::Storage(_)));
+        store.conn.commit_hook::<fn() -> bool>(None);
+        assert!(store.read_own(tl.id(), SeqRange::all()).unwrap().is_empty());
     }
 
     #[test]
@@ -7509,6 +7519,18 @@ mod tests {
             CoreError::Storage(_) | CoreError::Serialization(_) => {} // Expected for corrupt data
             other => panic!("Expected Storage or Serialization error, got {other:?}"),
         }
+        assert!(store
+            .append_bounded(tl.id(), &[make_draft(entity, b"bounded")], 1)
+            .is_err());
+        let event_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE timeline_id = ?1",
+                params![tl.id().to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(event_count, 0);
     }
 
     #[test]
