@@ -379,7 +379,7 @@ Add private selections:
 
 ```rust
 enum StepMode { AllDrivers, Cadenced }
-enum DriverSelection { AllDrivers, Cadenced(u128) }
+enum StepRequest { AllDrivers, Cadenced(u128) }
 ```
 
 Store `step_mode: Option<StepMode>` and `last_simulation_time_ns: Option<u128>` in every constructor/resume/fork path. Refactor the current body into `step_boundary(selection)`. Select drafts with `step_all()` or `tick_cadenced()`, but leave pre-fold, validation, atomic append, post-fold, health, counters, quiescence, and stop handling shared.
