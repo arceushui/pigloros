@@ -532,8 +532,25 @@ impl Experiment {
     /// Returns [`ExperimentError::Store`] if the configured `EventStore` cannot be
     /// opened or cannot create the Timeline.
     pub fn start(self) -> Result<ExperimentSession, ExperimentError> {
+        let store = open_store(self.config.store_config.clone())?;
+        self.start_with_store(store)
+    }
+
+    /// Create the experiment Timeline in a host-supplied `EventStore` adapter.
+    ///
+    /// This is the production composition seam for decorators such as bounded,
+    /// fault-reporting, or observability adapters. The configured
+    /// [`ExperimentConfig::store_config`] remains the recovery recipe metadata;
+    /// the supplied adapter owns this live session.
+    ///
+    /// # Errors
+    /// Returns [`ExperimentError::Store`] if the supplied store cannot create
+    /// the Timeline.
+    pub fn start_with_store(
+        self,
+        mut store: Box<dyn pos_core::store::EventStore>,
+    ) -> Result<ExperimentSession, ExperimentError> {
         let parent_composition = self.registry.composition();
-        let mut store = open_store(self.config.store_config.clone())?;
         let timeline = store.create_timeline(&self.config.name)?;
         Ok(ExperimentSession {
             config: self.config,
@@ -564,11 +581,28 @@ impl Experiment {
     /// Returns a store error when the Timeline cannot be opened or its logical
     /// history is invalid.
     pub fn resume(
-        mut self,
+        self,
         timeline_id: pos_core::ids::TimelineId,
     ) -> Result<ExperimentSession, ExperimentError> {
-        let parent_composition = self.registry.composition();
         let store = open_store(self.config.store_config.clone())?;
+        self.resume_with_store(timeline_id, store)
+    }
+
+    /// Resume a durable Timeline through a host-supplied `EventStore` adapter.
+    ///
+    /// Persisted Events are validated and folded exactly as in [`Self::resume`].
+    /// This variant keeps host decorators in the recovery path instead of
+    /// reconstructing an adapter from [`ExperimentConfig::store_config`].
+    ///
+    /// # Errors
+    /// Returns a store error when the Timeline cannot be opened or its logical
+    /// history is invalid.
+    pub fn resume_with_store(
+        mut self,
+        timeline_id: pos_core::ids::TimelineId,
+        store: Box<dyn pos_core::store::EventStore>,
+    ) -> Result<ExperimentSession, ExperimentError> {
+        let parent_composition = self.registry.composition();
         let timeline = store
             .get_timeline(timeline_id)?
             .ok_or(pos_core::CoreError::TimelineNotFound(timeline_id))?;
@@ -710,6 +744,23 @@ impl ExperimentSession {
         } else {
             Ok(&self.registry.projections)
         }
+    }
+
+    /// Read the immutable source prefix folded through the last completed Tick Boundary.
+    ///
+    /// The returned Events begin at sequence one and are contiguous through the
+    /// session's completed fold cursor, making them suitable for pure replay
+    /// verification. A failed boundary cannot expose a partial append here.
+    ///
+    /// # Errors
+    /// Returns a store or shared-store locking error if the completed prefix
+    /// cannot be read.
+    pub fn source_events(&self) -> Result<Vec<pos_core::Event>, ExperimentError> {
+        read_events(
+            &self.store,
+            self.timeline.id(),
+            self.boundary.folded_through,
+        )
     }
 
     fn step_with_mode(&mut self, request: StepRequest) -> Result<TickOutcome, ExperimentError> {

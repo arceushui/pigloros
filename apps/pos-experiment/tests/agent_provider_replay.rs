@@ -1,0 +1,664 @@
+use pos_core::{
+    clock::Seq,
+    event::{Event, EventDraft},
+    ids::{EntityId, PluginId, TimelineId},
+    store::EventStore,
+    CoreError, Timeline,
+};
+use pos_experiment::{Experiment, ExperimentConfig, ExperimentError, StopCondition, TickOutcome};
+use pos_plugin_agent::{
+    protocol::{
+        ActionCatalogueV1, AgentProviderProvenanceV1, BoundedProviderBytes, ProviderAttempt,
+    },
+    AgentDecisionReplayVerifier, AgentPlugin, AgentReducer, FixtureAgentDecisionProvider,
+    ProviderBackedAgentDriver, EVENT_TYPE_ACTION,
+};
+use pos_runtime::{
+    recorder::RECORDER_EVENT_TYPE, Driver, ObservationView, ProjectionKey, RuntimeError, StepOutput,
+};
+use pos_store::{memory::MemoryStore, SeqRange, StoreConfig};
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, MutexGuard,
+    },
+    time::Duration,
+};
+
+const PLUGIN_VERSION: &str = "1.0.0";
+const PROVIDER_ID: &str = "fixture-local";
+const PROVIDER_VERSION: &str = "fixture-v1";
+const PLUGIN_HASH: [u8; 32] = [0x31; 32];
+const PROVIDER_HASH: [u8; 32] = [0x32; 32];
+const CONFIDENCE: u32 = 750_000;
+
+#[derive(Clone)]
+struct HostFixture {
+    agent: EntityId,
+    plugin: PluginId,
+    catalogue: ActionCatalogueV1,
+    provenance: AgentProviderProvenanceV1,
+    catalogue_hash: [u8; 32],
+}
+
+impl HostFixture {
+    fn new() -> Self {
+        let agent = EntityId::new();
+        let plugin = PluginId::new();
+        let catalogue =
+            ActionCatalogueV1::try_new(vec!["move".to_owned(), "wait".to_owned()]).unwrap();
+        let provenance = AgentProviderProvenanceV1::try_new(
+            plugin,
+            PLUGIN_VERSION.to_owned(),
+            PLUGIN_HASH,
+            PROVIDER_ID.to_owned(),
+            PROVIDER_VERSION.to_owned(),
+            PROVIDER_HASH,
+        )
+        .unwrap();
+        let catalogue_hash = blake3::derive_key(
+            "pigloros.agent.catalogue.v1",
+            &catalogue_bytes(&["move", "wait"]),
+        );
+        Self {
+            agent,
+            plugin,
+            catalogue,
+            provenance,
+            catalogue_hash,
+        }
+    }
+
+    fn experiment(
+        &self,
+        name: &str,
+        attempts: Vec<ProviderAttempt>,
+    ) -> (
+        Experiment,
+        pos_plugin_agent::FixtureProviderCallCount,
+        DriverTickProbe,
+    ) {
+        let provider = FixtureAgentDecisionProvider::new(attempts);
+        let calls = provider.call_count_handle();
+        let provider_driver = ProviderBackedAgentDriver::new(
+            self.agent,
+            self.catalogue.clone(),
+            self.provenance.clone(),
+            Box::new(provider),
+        );
+        let committed_tick = DriverTickProbe::default();
+        let driver = ObservableProviderDriver {
+            inner: provider_driver,
+            committed_tick: committed_tick.clone(),
+        };
+        let plugin = AgentPlugin::new();
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: name.to_owned(),
+            stop: StopCondition::MaxTicks(2),
+            store_config: StoreConfig::Memory,
+        });
+        experiment
+            .register(
+                &plugin,
+                Some(Box::new(AgentReducer)),
+                Some(Box::new(driver)),
+            )
+            .unwrap();
+        (experiment, calls, committed_tick)
+    }
+
+    fn expected_record(
+        &self,
+        timeline: TimelineId,
+        observed_through: u64,
+        driver_tick: u64,
+        response: &[u8],
+        result: ExpectedResult,
+    ) -> Vec<u8> {
+        let request = request_bytes(self, timeline, observed_through, driver_tick);
+        let request_hash = blake3::derive_key("pigloros.agent.request.v1", &request);
+        let response_digest = blake3::derive_key("pigloros.agent.response.v1", response);
+        record_bytes(
+            self,
+            timeline,
+            observed_through,
+            driver_tick,
+            request_hash,
+            response_digest,
+            result,
+        )
+    }
+
+    fn verifier(&self, timeline: TimelineId) -> AgentDecisionReplayVerifier {
+        AgentDecisionReplayVerifier::new(
+            timeline,
+            self.agent,
+            self.provenance.clone(),
+            self.catalogue.clone(),
+        )
+    }
+}
+
+#[derive(Clone, Default)]
+struct DriverTickProbe(Arc<AtomicU64>);
+
+impl DriverTickProbe {
+    fn load(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+struct ObservableProviderDriver {
+    inner: ProviderBackedAgentDriver,
+    committed_tick: DriverTickProbe,
+}
+
+impl Driver for ObservableProviderDriver {
+    fn step(
+        &mut self,
+        timeline: TimelineId,
+        observations: ObservationView<'_>,
+    ) -> Result<StepOutput, RuntimeError> {
+        self.inner.step(timeline, observations)
+    }
+
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+
+    fn tick_interval(&self) -> Duration {
+        self.inner.tick_interval()
+    }
+
+    fn subscriptions(&self) -> &[ProjectionKey] {
+        self.inner.subscriptions()
+    }
+
+    fn requires_snapshot_anchor(&self) -> bool {
+        self.inner.requires_snapshot_anchor()
+    }
+
+    fn commit_step(&mut self) {
+        self.inner.commit_step();
+        self.committed_tick
+            .0
+            .store(self.inner.committed_tick(), Ordering::SeqCst);
+    }
+
+    fn abort_step(&mut self) {
+        self.inner.abort_step();
+        self.committed_tick
+            .0
+            .store(self.inner.committed_tick(), Ordering::SeqCst);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ExpectedResult {
+    Accepted { action_index: u8, confidence: u32 },
+    NoAction { code: u8 },
+}
+
+#[derive(Default)]
+struct AdapterControl {
+    append_batch_sizes: Vec<usize>,
+    fail_next_append: bool,
+}
+
+#[derive(Clone)]
+struct SharedMemoryAdapter {
+    store: Arc<Mutex<MemoryStore>>,
+    control: Arc<Mutex<AdapterControl>>,
+}
+
+impl SharedMemoryAdapter {
+    fn new() -> Self {
+        Self {
+            store: Arc::new(Mutex::new(MemoryStore::new())),
+            control: Arc::new(Mutex::new(AdapterControl::default())),
+        }
+    }
+
+    fn fail_next_append(&self) {
+        self.control().fail_next_append = true;
+    }
+
+    fn append_batch_sizes(&self) -> Vec<usize> {
+        self.control().append_batch_sizes.clone()
+    }
+
+    fn source_events(&self, timeline: TimelineId) -> Vec<Event> {
+        self.store()
+            .read(timeline, SeqRange::all())
+            .expect("fixture source read should succeed")
+    }
+
+    fn store(&self) -> MutexGuard<'_, MemoryStore> {
+        self.store
+            .lock()
+            .expect("fixture store lock should be healthy")
+    }
+
+    fn control(&self) -> MutexGuard<'_, AdapterControl> {
+        self.control
+            .lock()
+            .expect("fixture control lock should be healthy")
+    }
+}
+
+impl EventStore for SharedMemoryAdapter {
+    fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
+        self.store().create_timeline(name)
+    }
+
+    fn append(
+        &mut self,
+        timeline: TimelineId,
+        drafts: &[EventDraft],
+    ) -> Result<Vec<Event>, CoreError> {
+        let should_fail = {
+            let mut control = self.control();
+            control.append_batch_sizes.push(drafts.len());
+            std::mem::take(&mut control.fail_next_append)
+        };
+        if should_fail {
+            Err(CoreError::Storage("injected append failure".to_owned()))
+        } else {
+            self.store().append(timeline, drafts)
+        }
+    }
+
+    fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+        self.store().read(timeline, range)
+    }
+
+    fn fork(&mut self, parent: TimelineId, at_seq: Seq, name: &str) -> Result<Timeline, CoreError> {
+        self.store().fork(parent, at_seq, name)
+    }
+
+    fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+        self.store().list_timelines()
+    }
+
+    fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+        self.store().get_timeline(id)
+    }
+
+    fn logical_head(&self, id: TimelineId) -> Result<Seq, CoreError> {
+        self.store().logical_head(id)
+    }
+}
+
+#[test]
+fn live_boundaries_are_atomic_byte_stable_and_provider_free_on_replay() {
+    let host = HostFixture::new();
+    let accepted_response = accepted_response_bytes(0, CONFIDENCE);
+    let no_action_response = no_action_response_bytes();
+    let (experiment, calls, committed_tick) = host.experiment(
+        "agent-provider-replay-live",
+        vec![
+            response_attempt(&accepted_response),
+            response_attempt(&no_action_response),
+        ],
+    );
+    let adapter = SharedMemoryAdapter::new();
+    let mut session = experiment
+        .start_with_store(Box::new(adapter.clone()))
+        .unwrap();
+    let timeline = session.timeline().id();
+
+    assert_eq!(
+        session.step_tick().unwrap(),
+        TickOutcome::Advanced {
+            folded_events: 2,
+            emitted_events: 2,
+        }
+    );
+    assert_eq!(committed_tick.load(), 1);
+    assert_eq!(
+        session.step_tick().unwrap(),
+        TickOutcome::Advanced {
+            folded_events: 1,
+            emitted_events: 1,
+        }
+    );
+    assert_eq!(committed_tick.load(), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(adapter.append_batch_sizes(), [2, 1]);
+
+    let events = session.source_events().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.seq.as_u64())
+            .collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>(),
+        [RECORDER_EVENT_TYPE, EVENT_TYPE_ACTION, RECORDER_EVENT_TYPE]
+    );
+    assert!(events.iter().all(|event| event.entity == host.agent));
+
+    let accepted_record = host.expected_record(
+        timeline,
+        0,
+        0,
+        &accepted_response,
+        ExpectedResult::Accepted {
+            action_index: 0,
+            confidence: CONFIDENCE,
+        },
+    );
+    let accepted_record_hash = blake3::derive_key("pigloros.agent.record.v1", &accepted_record);
+    let expected_action = action_bytes(
+        "move",
+        CONFIDENCE,
+        0,
+        host.catalogue_hash,
+        accepted_record_hash,
+    );
+    let no_action_record = host.expected_record(
+        timeline,
+        2,
+        1,
+        &no_action_response,
+        ExpectedResult::NoAction { code: 5 },
+    );
+    assert_eq!(events[0].payload.as_slice(), accepted_record);
+    assert_eq!(events[1].payload.as_slice(), expected_action);
+    assert_eq!(events[2].payload.as_slice(), no_action_record);
+
+    let state = session
+        .projections()
+        .unwrap()
+        .state_for_reducer("agent", &host.agent)
+        .unwrap();
+    assert_eq!(
+        state
+            .get("action_count")
+            .and_then(serde_json::Value::as_u64),
+        Some(1)
+    );
+    assert_eq!(
+        state.get("last_action").and_then(serde_json::Value::as_str),
+        Some("move")
+    );
+
+    let before_replay_calls = calls.load(Ordering::SeqCst);
+    let checkpoint = host.verifier(timeline).verify(&events, None).unwrap();
+    assert_eq!(checkpoint.last_verified(), Seq::from_u64(3));
+    assert_eq!(calls.load(Ordering::SeqCst), before_replay_calls);
+}
+
+#[test]
+fn append_fault_commits_neither_pair_nor_tick_and_fresh_session_recovers() {
+    let host = HostFixture::new();
+    let accepted_response = accepted_response_bytes(0, CONFIDENCE);
+    let adapter = SharedMemoryAdapter::new();
+    adapter.fail_next_append();
+    let (experiment, failed_calls, failed_tick) = host.experiment(
+        "agent-provider-replay-fault",
+        vec![response_attempt(&accepted_response)],
+    );
+    let mut failed_session = experiment
+        .start_with_store(Box::new(adapter.clone()))
+        .unwrap();
+    let timeline = failed_session.timeline().id();
+
+    assert!(matches!(
+        failed_session.step_tick(),
+        Err(ExperimentError::Store(_))
+    ));
+    assert_eq!(failed_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(failed_tick.load(), 0);
+    assert!(adapter.source_events(timeline).is_empty());
+    assert!(failed_session.source_events().unwrap().is_empty());
+    assert_eq!(adapter.append_batch_sizes(), [2]);
+
+    let (recovery, recovery_calls, recovery_tick) = host.experiment(
+        "agent-provider-replay-recovery",
+        vec![response_attempt(&accepted_response)],
+    );
+    let mut recovered = recovery
+        .resume_with_store(timeline, Box::new(adapter.clone()))
+        .unwrap();
+    assert_eq!(
+        recovered.step_tick().unwrap(),
+        TickOutcome::Advanced {
+            folded_events: 2,
+            emitted_events: 2,
+        }
+    );
+    assert_eq!(recovery_tick.load(), 1);
+
+    let events = recovered.source_events().unwrap();
+    let expected_record = host.expected_record(
+        timeline,
+        0,
+        0,
+        &accepted_response,
+        ExpectedResult::Accepted {
+            action_index: 0,
+            confidence: CONFIDENCE,
+        },
+    );
+    let record_hash = blake3::derive_key("pigloros.agent.record.v1", &expected_record);
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.seq.as_u64())
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(events[0].payload.as_slice(), expected_record);
+    assert_eq!(
+        events[1].payload.as_slice(),
+        action_bytes("move", CONFIDENCE, 0, host.catalogue_hash, record_hash,)
+    );
+    assert_eq!(adapter.append_batch_sizes(), [2, 2]);
+    assert_eq!(failed_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(recovery_calls.load(Ordering::SeqCst), 1);
+    let recovered_state = recovered
+        .projections()
+        .unwrap()
+        .state_for_reducer("agent", &host.agent)
+        .unwrap();
+    assert_eq!(
+        recovered_state
+            .get("action_count")
+            .and_then(serde_json::Value::as_u64),
+        Some(1)
+    );
+
+    let total_live_calls =
+        failed_calls.load(Ordering::SeqCst) + recovery_calls.load(Ordering::SeqCst);
+    let checkpoint = host.verifier(timeline).verify(&events, None).unwrap();
+    assert_eq!(checkpoint.last_verified(), Seq::from_u64(2));
+    assert_eq!(
+        failed_calls.load(Ordering::SeqCst) + recovery_calls.load(Ordering::SeqCst),
+        total_live_calls
+    );
+}
+
+fn response_attempt(response: &[u8]) -> ProviderAttempt {
+    ProviderAttempt::Response(BoundedProviderBytes::try_from(response.to_vec()).unwrap())
+}
+
+fn accepted_response_bytes(action_index: u8, confidence: u32) -> Vec<u8> {
+    let mut output = IndependentCbor::default();
+    output.array(5);
+    output.bytes(b"PDP1");
+    output.uint(1);
+    output.uint(0);
+    output.uint(u64::from(action_index));
+    output.uint(u64::from(confidence));
+    output.finish()
+}
+
+fn no_action_response_bytes() -> Vec<u8> {
+    let mut output = IndependentCbor::default();
+    output.array(3);
+    output.bytes(b"PDP1");
+    output.uint(1);
+    output.uint(1);
+    output.finish()
+}
+
+fn catalogue_bytes(actions: &[&str]) -> Vec<u8> {
+    let mut output = IndependentCbor::default();
+    output.array(3);
+    output.bytes(b"PAC1");
+    output.uint(1);
+    output.array(actions.len());
+    for action in actions {
+        output.text(action);
+    }
+    output.finish()
+}
+
+fn request_bytes(
+    host: &HostFixture,
+    timeline: TimelineId,
+    observed_through: u64,
+    driver_tick: u64,
+) -> Vec<u8> {
+    let mut output = IndependentCbor::default();
+    output.array(13);
+    output.bytes(b"PQR1");
+    output.uint(1);
+    write_request_fields(&mut output, host, timeline, observed_through, driver_tick);
+    output.finish()
+}
+
+fn record_bytes(
+    host: &HostFixture,
+    timeline: TimelineId,
+    observed_through: u64,
+    driver_tick: u64,
+    request_hash: [u8; 32],
+    response_digest: [u8; 32],
+    result: ExpectedResult,
+) -> Vec<u8> {
+    let mut output = IndependentCbor::default();
+    output.array(16);
+    output.bytes(b"PDR1");
+    output.uint(1);
+    write_request_fields(&mut output, host, timeline, observed_through, driver_tick);
+    output.bytes(&request_hash);
+    output.array(2);
+    output.uint(1);
+    output.bytes(&response_digest);
+    match result {
+        ExpectedResult::Accepted {
+            action_index,
+            confidence,
+        } => {
+            output.array(3);
+            output.uint(0);
+            output.uint(u64::from(action_index));
+            output.uint(u64::from(confidence));
+        }
+        ExpectedResult::NoAction { code } => {
+            output.array(2);
+            output.uint(1);
+            output.uint(u64::from(code));
+        }
+    }
+    output.finish()
+}
+
+fn write_request_fields(
+    output: &mut IndependentCbor,
+    host: &HostFixture,
+    timeline: TimelineId,
+    observed_through: u64,
+    driver_tick: u64,
+) {
+    output.bytes(&timeline.inner().to_bytes());
+    output.uint(observed_through);
+    output.bytes(&host.agent.inner().to_bytes());
+    output.uint(driver_tick);
+    output.bytes(&host.catalogue_hash);
+    output.bytes(&host.plugin.inner().to_bytes());
+    output.text(PLUGIN_VERSION);
+    output.bytes(&PLUGIN_HASH);
+    output.text(PROVIDER_ID);
+    output.text(PROVIDER_VERSION);
+    output.bytes(&PROVIDER_HASH);
+}
+
+fn action_bytes(
+    action_id: &str,
+    confidence: u32,
+    driver_tick: u64,
+    catalogue_hash: [u8; 32],
+    record_hash: [u8; 32],
+) -> Vec<u8> {
+    let mut output = IndependentCbor::default();
+    output.array(7);
+    output.bytes(b"PAA1");
+    output.uint(1);
+    output.text(action_id);
+    output.uint(u64::from(confidence));
+    output.uint(driver_tick);
+    output.bytes(&catalogue_hash);
+    output.bytes(&record_hash);
+    output.finish()
+}
+
+#[derive(Default)]
+struct IndependentCbor(Vec<u8>);
+
+impl IndependentCbor {
+    fn array(&mut self, len: usize) {
+        self.major(4, u64::try_from(len).unwrap());
+    }
+
+    fn bytes(&mut self, value: &[u8]) {
+        self.major(2, u64::try_from(value.len()).unwrap());
+        self.0.extend_from_slice(value);
+    }
+
+    fn text(&mut self, value: &str) {
+        self.major(3, u64::try_from(value.len()).unwrap());
+        self.0.extend_from_slice(value.as_bytes());
+    }
+
+    fn uint(&mut self, value: u64) {
+        self.major(0, value);
+    }
+
+    fn major(&mut self, major: u8, value: u64) {
+        let prefix = major << 5;
+        match value {
+            0..=23 => self.0.push(prefix | u8::try_from(value).unwrap()),
+            24..=0xff => {
+                self.0.push(prefix | 0x18);
+                self.0.push(u8::try_from(value).unwrap());
+            }
+            0x100..=0xffff => {
+                self.0.push(prefix | 0x19);
+                self.0
+                    .extend_from_slice(&u16::try_from(value).unwrap().to_be_bytes());
+            }
+            0x1_0000..=0xffff_ffff => {
+                self.0.push(prefix | 0x1a);
+                self.0
+                    .extend_from_slice(&u32::try_from(value).unwrap().to_be_bytes());
+            }
+            _ => {
+                self.0.push(prefix | 0x1b);
+                self.0.extend_from_slice(&value.to_be_bytes());
+            }
+        }
+    }
+
+    fn finish(self) -> Vec<u8> {
+        self.0
+    }
+}
