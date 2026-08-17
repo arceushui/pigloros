@@ -1,9 +1,10 @@
 use pos_core::ids::{EntityId, PluginId, TimelineId};
 use pos_plugin_agent::protocol::{
     ActionCatalogueV1, AgentActionV1, AgentDecisionError, AgentDecisionRequestV1,
-    AgentProviderProvenanceV1, DecisionNoActionCodeV1, DecisionRecordV1, DecisionResultV1,
-    ProviderDecisionV1,
+    AgentProviderProvenanceV1, BoundedProviderBytes, DecisionNoActionCodeV1, DecisionRecordV1,
+    DecisionResultV1, ProviderDecisionV1, ProviderFailureCode,
 };
+use std::fmt::Write as _;
 use ulid::Ulid;
 
 const CATALOGUE_HEX: &str = "8344504143310181646d6f7665";
@@ -104,7 +105,11 @@ fn decode_hex(value: &str) -> Vec<u8> {
 }
 
 fn encode_hex(value: &[u8]) -> String {
-    value.iter().map(|byte| format!("{byte:02x}")).collect()
+    let mut encoded = String::with_capacity(value.len() * 2);
+    for byte in value {
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    encoded
 }
 
 fn id(bytes: [u8; 16]) -> Ulid {
@@ -232,267 +237,150 @@ fn golden_codecs_and_domain_hashes_match_frozen_external_fixtures() {
 }
 
 #[test]
-fn decoders_reject_noncanonical_and_foreign_wire_values() {
-    let foreign_values = [
-        "a0",       // map
-        "c0f6",     // tag
-        "f90000",   // float
-        "9fff",     // indefinite array
-        "7f6161ff", // indefinite text
-        "5f4100ff", // indefinite bytes
-    ];
+fn validated_protocol_values_expose_their_bounded_host_owned_fields() {
+    let catalogue = ActionCatalogueV1::try_new(vec!["move".to_owned()]).expect("catalogue");
+    assert_eq!(catalogue.action(0), Some("move"));
+    assert_eq!(catalogue.action(1), None);
+    assert_eq!(catalogue.len(), 1);
+    assert!(!catalogue.is_empty());
 
-    for wire in foreign_values {
-        let bytes = decode_hex(wire);
-        assert_eq!(
-            ActionCatalogueV1::decode(&bytes),
-            Err(AgentDecisionError::MalformedWire),
-            "catalogue {wire}"
-        );
-        assert_eq!(
-            AgentDecisionRequestV1::decode(&bytes),
-            Err(AgentDecisionError::MalformedWire),
-            "request {wire}"
-        );
-        assert_eq!(
-            ProviderDecisionV1::decode(&bytes),
-            Err(AgentDecisionError::MalformedWire),
-            "response {wire}"
-        );
-        assert_eq!(
-            DecisionRecordV1::decode(&bytes),
-            Err(AgentDecisionError::MalformedWire),
-            "record {wire}"
-        );
-        assert_eq!(
-            AgentActionV1::decode(&bytes),
-            Err(AgentDecisionError::MalformedWire),
-            "action {wire}"
-        );
+    let provenance = provenance();
+    assert_eq!(
+        provenance.plugin_id(),
+        PluginId::from_ulid(id([
+            0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d,
+            0x2e, 0x2f,
+        ]))
+    );
+    assert_eq!(provenance.plugin_version(), "1.0.0");
+    assert_eq!(provenance.plugin_content_hash(), [0xbb; 32]);
+    assert_eq!(provenance.provider_id(), "local-1");
+    assert_eq!(provenance.provider_version(), "v1");
+    assert_eq!(provenance.provider_content_hash(), [0xcc; 32]);
+
+    let request = request();
+    assert_eq!(
+        request.timeline_id(),
+        TimelineId::from_ulid(id([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]))
+    );
+    assert_eq!(request.observed_through(), 42);
+    assert_eq!(
+        request.agent_id(),
+        EntityId::from_ulid(id([
+            0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+            0x1e, 0x1f,
+        ]))
+    );
+    assert_eq!(request.driver_tick(), 7);
+    assert_eq!(request.catalogue_hash(), [0xaa; 32]);
+    assert_eq!(request.provenance(), &provenance);
+
+    let response = BoundedProviderBytes::try_from(vec![1, 2]).expect("bounded response");
+    assert_eq!(response.as_slice(), &[1, 2]);
+
+    let decision = ProviderDecisionV1::accepted(3, 4).expect("accepted decision");
+    assert_eq!(
+        ProviderDecisionV1::no_action(),
+        ProviderDecisionV1::NoAction
+    );
+    assert_eq!(
+        DecisionResultV1::from(ProviderDecisionV1::no_action()),
+        DecisionResultV1::NoAction(DecisionNoActionCodeV1::ProviderNoAction)
+    );
+    for (failure, code) in [
+        (ProviderFailureCode::Unavailable, 1),
+        (ProviderFailureCode::Timeout, 2),
+        (ProviderFailureCode::Rejected, 3),
+        (ProviderFailureCode::RateLimited, 4),
+    ] {
+        assert_eq!(failure.code(), code);
+        assert_eq!(DecisionNoActionCodeV1::from(failure).code(), code);
     }
 
-    let mut trailing = decode_hex(PDP_NO_ACTION_HEX);
-    trailing.push(0);
-    assert_eq!(
-        ProviderDecisionV1::decode(&trailing),
-        Err(AgentDecisionError::MalformedWire)
+    let record = DecisionRecordV1::new(
+        request.clone(),
+        [0xdd; 32],
+        Some([0xee; 32]),
+        decision.into(),
     );
+    assert_eq!(record.request(), &request);
+    assert_eq!(record.request_hash(), [0xdd; 32]);
+    assert_eq!(record.response_digest(), Some([0xee; 32]));
     assert_eq!(
-        ProviderDecisionV1::decode(&decode_hex("834450445031180101")),
-        Err(AgentDecisionError::MalformedWire)
-    );
-    assert_eq!(
-        ProviderDecisionV1::decode(&decode_hex("82445044503101")),
-        Err(AgentDecisionError::MalformedWire)
-    );
-    assert_eq!(
-        ProviderDecisionV1::decode(&decode_hex("8344504450310102")),
-        Err(AgentDecisionError::MalformedWire)
-    );
-    assert_eq!(
-        ProviderDecisionV1::decode(&decode_hex("8544504450310100184000")),
-        Err(AgentDecisionError::InvalidActionIndex)
-    );
-    assert_eq!(
-        ProviderDecisionV1::decode(&decode_hex("8544504450310100001a000f4241")),
-        Err(AgentDecisionError::InvalidConfidence)
+        record.result(),
+        DecisionResultV1::Accepted {
+            action_index: pos_plugin_agent::protocol::ActionIndexV1::try_from(3).expect("index"),
+            confidence: pos_plugin_agent::protocol::ConfidencePpmV1::try_from(4)
+                .expect("confidence"),
+        }
     );
 
-    // The version is structurally readable before V1 field validation, so it
-    // takes precedence even though the final field is the wrong primitive.
-    assert_eq!(
-        ProviderDecisionV1::decode(&decode_hex("85445044503102a0a0a0")),
-        Err(AgentDecisionError::UnsupportedWireVersion)
-    );
+    let action =
+        AgentActionV1::try_new("move".to_owned(), 4, 7, [0xaa; 32], [0xff; 32]).expect("action");
+    assert_eq!(action.action_id(), "move");
+    assert_eq!(action.confidence().get(), 4);
+    assert_eq!(action.driver_tick(), 7);
+    assert_eq!(action.catalogue_hash(), [0xaa; 32]);
+    assert_eq!(action.decision_record_hash(), [0xff; 32]);
+}
 
-    assert_eq!(
-        ActionCatalogueV1::decode(&decode_hex("8344504143310181656d6f766500")),
-        Err(AgentDecisionError::MalformedWire)
-    );
-    assert_eq!(
-        ActionCatalogueV1::decode(&decode_hex("834450414331018161ff")),
-        Err(AgentDecisionError::MalformedWire)
-    );
+#[test]
+fn catalogue_constructor_enforces_the_exact_pac1_encoded_size_boundary() {
+    let mut accepted_lengths = vec![64; 64];
+    accepted_lengths[..3].copy_from_slice(&[24; 3]);
+    accepted_lengths[3] = 47;
+    let accepted = ActionCatalogueV1::try_new(catalogue_ids(&accepted_lengths))
+        .expect("4,096-byte PAC1 catalogue");
+    assert_eq!(accepted.encode().expect("accepted PAC1").len(), 4096);
 
-    let mut wrong_request_id_width = decode_hex(REQUEST_HEX);
-    wrong_request_id_width[6] = 0x4f;
+    let mut rejected_lengths = accepted_lengths;
+    rejected_lengths[3] = 48;
     assert_eq!(
-        AgentDecisionRequestV1::decode(&wrong_request_id_width),
-        Err(AgentDecisionError::MalformedWire)
-    );
-
-    let mut oversized_catalogue = vec![0x83, 0x44, b'P', b'A', b'C', b'1', 0x01, 0x98, 0x40];
-    for _ in 0..64 {
-        oversized_catalogue.push(0x58);
-        oversized_catalogue.push(0x40);
-        oversized_catalogue.extend(std::iter::repeat_n(b'a', 64));
-    }
-    assert!(oversized_catalogue.len() > 4096);
-    assert_eq!(
-        ActionCatalogueV1::decode(&oversized_catalogue),
-        Err(AgentDecisionError::MalformedWire)
-    );
-
-    let over_limit = vec![0; 4097];
-    assert_eq!(
-        ActionCatalogueV1::decode(&over_limit),
-        Err(AgentDecisionError::MalformedWire)
-    );
-    assert_eq!(
-        AgentDecisionRequestV1::decode(&over_limit),
-        Err(AgentDecisionError::MalformedWire)
-    );
-    assert_eq!(
-        ProviderDecisionV1::decode(&over_limit),
-        Err(AgentDecisionError::MalformedWire)
-    );
-    assert_eq!(
-        DecisionRecordV1::decode(&over_limit),
-        Err(AgentDecisionError::MalformedWire)
-    );
-    assert_eq!(
-        AgentActionV1::decode(&vec![0; 513]),
+        ActionCatalogueV1::try_new(catalogue_ids(&rejected_lengths)),
         Err(AgentDecisionError::MalformedWire)
     );
 }
 
 #[test]
-fn every_decoder_rejects_its_own_incomplete_trailing_and_wrong_shape_values() {
-    let catalogue = decode_hex(CATALOGUE_HEX);
-    let request = decode_hex(REQUEST_HEX);
-    let decision = decode_hex(PDP_ACCEPTED_HEX);
-    let record = decode_hex(RECORD_ACCEPTED_HEX);
-    let action = decode_hex(ACTION_HEX);
-
-    for wire in [&catalogue, &request, &decision, &record, &action] {
-        let mut truncated = wire.clone();
-        truncated.pop();
-        assert_all_malformed(&truncated);
+fn provider_decision_prioritises_readable_non_v1_versions_before_trailing_or_shape() {
+    for wire in ["8344504450310200f6", "85445044503102a0a0a0"] {
+        assert_eq!(
+            ProviderDecisionV1::decode(&decode_hex(wire)),
+            Err(AgentDecisionError::UnsupportedWireVersion),
+            "{wire}"
+        );
     }
+}
 
-    for wire in [&catalogue, &request, &decision, &record, &action] {
-        let mut trailing = wire.clone();
-        trailing.push(0);
-        assert_all_malformed(&trailing);
-    }
-
-    for (wire, wrong_array_length) in [
-        (catalogue.clone(), 0x82),
-        (request.clone(), 0x8c),
-        (decision.clone(), 0x84),
-        (record.clone(), 0x8f),
-        (action.clone(), 0x86),
+#[test]
+fn provider_decision_rejects_noncanonical_values_before_range_validation() {
+    for wire in [
+        "854450445031010019004000",
+        "8544504450310100001b00000000000f4241",
     ] {
-        let mut malformed = wire;
-        malformed[0] = wrong_array_length;
-        assert_all_malformed(&malformed);
+        assert_eq!(
+            ProviderDecisionV1::decode(&decode_hex(wire)),
+            Err(AgentDecisionError::MalformedWire),
+            "{wire}"
+        );
     }
 
-    for wire in [&catalogue, &request, &decision, &record, &action] {
-        let mut wrong_magic_type = wire.clone();
-        wrong_magic_type[1] = 0x61;
-        assert_all_malformed(&wrong_magic_type);
+    for (wire, error) in [
+        (
+            "8544504450310100184000",
+            AgentDecisionError::InvalidActionIndex,
+        ),
+        (
+            "8544504450310100001a000f4241",
+            AgentDecisionError::InvalidConfidence,
+        ),
+    ] {
+        assert_eq!(
+            ProviderDecisionV1::decode(&decode_hex(wire)),
+            Err(error),
+            "{wire}"
+        );
     }
-
-    let mut wrong_catalogue_magic = catalogue;
-    wrong_catalogue_magic[2] = b'X';
-    assert_eq!(
-        ActionCatalogueV1::decode(&wrong_catalogue_magic),
-        Err(AgentDecisionError::MalformedWire)
-    );
-    let mut wrong_request_magic = request;
-    wrong_request_magic[2] = b'X';
-    assert_eq!(
-        AgentDecisionRequestV1::decode(&wrong_request_magic),
-        Err(AgentDecisionError::MalformedWire)
-    );
-    let mut wrong_record_magic = record;
-    wrong_record_magic[2] = b'X';
-    assert_eq!(
-        DecisionRecordV1::decode(&wrong_record_magic),
-        Err(AgentDecisionError::MalformedWire)
-    );
-    let mut wrong_action_magic = action;
-    wrong_action_magic[2] = b'X';
-    assert_eq!(
-        AgentActionV1::decode(&wrong_action_magic),
-        Err(AgentDecisionError::MalformedWire)
-    );
-    let mut wrong_decision_magic = decision;
-    wrong_decision_magic[2] = b'X';
-    assert_eq!(
-        ProviderDecisionV1::decode(&wrong_decision_magic),
-        Err(AgentDecisionError::MalformedWire)
-    );
-
-    assert_eq!(
-        ActionCatalogueV1::decode(&decode_hex("83445041433102")),
-        Err(AgentDecisionError::MalformedWire)
-    );
-    assert_eq!(
-        AgentDecisionRequestV1::decode(&decode_hex("8d445051523102")),
-        Err(AgentDecisionError::MalformedWire)
-    );
-    assert_eq!(
-        DecisionRecordV1::decode(&decode_hex("90445044523102")),
-        Err(AgentDecisionError::MalformedWire)
-    );
-    assert_eq!(
-        AgentActionV1::decode(&decode_hex("87445041413102")),
-        Err(AgentDecisionError::MalformedWire)
-    );
-
-    assert_eq!(
-        ActionCatalogueV1::decode(&decode_hex("8344504143310181656d6f766500")),
-        Err(AgentDecisionError::MalformedWire)
-    );
-    assert_eq!(
-        AgentDecisionRequestV1::decode(&decode_hex("8d4450515231014f")),
-        Err(AgentDecisionError::MalformedWire)
-    );
-    assert_eq!(
-        DecisionRecordV1::decode(&decode_hex("904450445231014f")),
-        Err(AgentDecisionError::MalformedWire)
-    );
-    assert_eq!(
-        AgentActionV1::decode(&decode_hex("87445041413101646d6f76651a000f4240074f")),
-        Err(AgentDecisionError::MalformedWire)
-    );
-    let mut invalid_request_provider_id = decode_hex(REQUEST_HEX);
-    replace_once(&mut invalid_request_provider_id, b"local-1", b"Local-1");
-    assert_eq!(
-        AgentDecisionRequestV1::decode(&invalid_request_provider_id),
-        Err(AgentDecisionError::MalformedWire)
-    );
-    let mut invalid_record_provider_id = decode_hex(RECORD_ACCEPTED_HEX);
-    replace_once(&mut invalid_record_provider_id, b"local-1", b"Local-1");
-    assert_eq!(
-        DecisionRecordV1::decode(&invalid_record_provider_id),
-        Err(AgentDecisionError::MalformedWire)
-    );
-    let mut invalid_action_identifier = decode_hex(ACTION_HEX);
-    replace_once(&mut invalid_action_identifier, b"move", b"m\0ve");
-    assert_eq!(
-        AgentActionV1::decode(&invalid_action_identifier),
-        Err(AgentDecisionError::MalformedWire)
-    );
-
-    assert_eq!(
-        ProviderDecisionV1::decode(&decode_hex("8544504450310100184000")),
-        Err(AgentDecisionError::InvalidActionIndex)
-    );
-    assert_eq!(
-        ProviderDecisionV1::decode(&decode_hex("8544504450310100001a000f4241")),
-        Err(AgentDecisionError::InvalidConfidence)
-    );
-    assert_eq!(
-        DecisionRecordV1::decode(&decode_hex("90445044523101")),
-        Err(AgentDecisionError::MalformedWire)
-    );
-    assert_eq!(
-        AgentActionV1::decode(&decode_hex("87445041413101646d6f76651a000f4241075820")),
-        Err(AgentDecisionError::MalformedWire)
-    );
 }
 
 #[test]
@@ -508,27 +396,354 @@ fn exact_encoders_use_shortest_integer_widths() {
     );
 }
 
-fn assert_all_malformed(bytes: &[u8]) {
-    assert_eq!(
-        ActionCatalogueV1::decode(bytes),
-        Err(AgentDecisionError::MalformedWire)
+#[test]
+fn catalogue_decoder_has_a_field_specific_malformed_matrix() {
+    let canonical = decode_hex(CATALOGUE_HEX);
+    let mut wrong_magic_type = canonical.clone();
+    wrong_magic_type[1] = 0x64;
+    let mut wrong_magic = canonical.clone();
+    wrong_magic[2] = b'X';
+    let mut wrong_entry_type = canonical.clone();
+    wrong_entry_type[8] = 0x44;
+    let mut control_identifier = canonical.clone();
+    replace_once(&mut control_identifier, b"move", b"m\0ve");
+    let over_limit = oversized_catalogue_wire();
+
+    for (name, wire) in [
+        ("empty", Vec::new()),
+        ("truncated", canonical[..canonical.len() - 1].to_vec()),
+        ("trailing", append(&canonical, 0)),
+        (
+            "missing outer item",
+            missing_outer_item(&canonical, 0x82, 5),
+        ),
+        ("extra outer item", extra_outer_item(&canonical, 0x84)),
+        ("magic type", wrong_magic_type),
+        ("magic value", wrong_magic),
+        ("magic width", decode_hex("834550414331000181646d6f7665")),
+        ("version", decode_hex("8344504143310281646d6f7665")),
+        (
+            "nonshortest version",
+            decode_hex("834450414331180181646d6f7665"),
+        ),
+        ("entry type", wrong_entry_type),
+        ("action collection type", decode_hex("8344504143310100")),
+        ("control identifier", control_identifier),
+        ("zero action count", decode_hex("8344504143310180")),
+        ("too many actions", too_many_catalogue_actions()),
+        (
+            "indefinite nested array",
+            decode_hex("834450414331019f646d6f7665ff"),
+        ),
+        ("over limit nested catalogue", over_limit),
+    ] {
+        assert_malformed(ActionCatalogueV1::decode(&wire), name);
+    }
+
+    for (name, wire) in foreign_root_wires() {
+        assert_malformed(ActionCatalogueV1::decode(&wire), name);
+    }
+}
+
+#[test]
+fn request_decoder_has_a_field_specific_malformed_matrix() {
+    let canonical = decode_hex(REQUEST_HEX);
+    let mut wrong_magic_type = canonical.clone();
+    wrong_magic_type[1] = 0x64;
+    let mut wrong_magic = canonical.clone();
+    wrong_magic[2] = b'X';
+    let timeline = decode_hex("50000102030405060708090a0b0c0d0e0f");
+    let wrong_timeline_type = replace_once_with(&canonical, &timeline, &text_bytes(16, b'a'));
+    let wrong_timeline_width = replace_once_with(&canonical, &timeline, &timeline[..16]);
+    let plugin_id = decode_hex("50202122232425262728292a2b2c2d2e2f");
+    let wrong_plugin_type = replace_once_with(&canonical, &plugin_id, &text_bytes(16, b'a'));
+    let invalid_provider_id = replace_once_with(&canonical, b"local-1", b"Local-1");
+    let nonshortest_observed = replace_once_with(&canonical, &[0x18, 0x2a], &[0x19, 0, 0x2a]);
+
+    for (name, wire) in [
+        ("empty", Vec::new()),
+        ("truncated", canonical[..canonical.len() - 1].to_vec()),
+        ("trailing", append(&canonical, 0)),
+        (
+            "missing outer item",
+            missing_outer_item(&canonical, 0x8c, 34),
+        ),
+        ("extra outer item", extra_outer_item(&canonical, 0x8e)),
+        ("magic type", wrong_magic_type),
+        ("magic value", wrong_magic),
+        (
+            "version",
+            replace_once_with(&canonical, &[1, 0x50], &[2, 0x50]),
+        ),
+        ("nonshortest observed through", nonshortest_observed),
+        ("timeline type", wrong_timeline_type),
+        ("timeline width", wrong_timeline_width),
+        ("plugin identifier type", wrong_plugin_type),
+        ("provider identifier grammar", invalid_provider_id),
+        ("over limit", vec![0; 4097]),
+    ] {
+        assert_malformed(AgentDecisionRequestV1::decode(&wire), name);
+    }
+
+    for (name, wire) in foreign_root_wires() {
+        assert_malformed(AgentDecisionRequestV1::decode(&wire), name);
+    }
+}
+
+#[test]
+fn provider_decoder_has_a_field_specific_malformed_matrix() {
+    let canonical = decode_hex(PDP_ACCEPTED_HEX);
+    let mut wrong_magic_type = canonical.clone();
+    wrong_magic_type[1] = 0x64;
+    let mut wrong_magic = canonical.clone();
+    wrong_magic[2] = b'X';
+    let wrong_kind_type = decode_hex("8544504450310140001a000f4240");
+
+    for (name, wire) in [
+        ("empty", Vec::new()),
+        ("truncated", canonical[..canonical.len() - 1].to_vec()),
+        ("trailing", append(&canonical, 0)),
+        (
+            "missing outer item",
+            missing_outer_item(&canonical, 0x84, 5),
+        ),
+        ("extra outer item", extra_outer_item(&canonical, 0x86)),
+        ("magic type", wrong_magic_type),
+        ("magic value", wrong_magic),
+        ("version type", decode_hex("854450445031a000001a000f4240")),
+        (
+            "nonshortest version",
+            decode_hex("854450445031180100001a000f4240"),
+        ),
+        ("kind type", wrong_kind_type),
+        ("action index width", decode_hex("854450445031010019010000")),
+        ("confidence type", decode_hex("85445044503101000040")),
+        (
+            "confidence width",
+            decode_hex("8544504450310100001b0000000100000000"),
+        ),
+        ("invalid kind", decode_hex("8344504450310102")),
+        ("over limit", vec![0; 4097]),
+    ] {
+        assert_malformed(ProviderDecisionV1::decode(&wire), name);
+    }
+
+    for (name, wire) in foreign_root_wires() {
+        assert_malformed(ProviderDecisionV1::decode(&wire), name);
+    }
+}
+
+#[test]
+fn record_decoder_has_a_field_specific_malformed_matrix() {
+    let canonical = decode_hex(RECORD_ACCEPTED_HEX);
+    let mut wrong_magic_type = canonical.clone();
+    wrong_magic_type[1] = 0x64;
+    let mut wrong_magic = canonical.clone();
+    wrong_magic[2] = b'X';
+    let request_hash = decode_hex(concat!(
+        "5820",
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    ));
+    let wrong_hash_type = replace_once_with(&canonical, &request_hash, &text_bytes(32, b'a'));
+    let wrong_hash_width = replace_once_with(&canonical, &request_hash, &bytes_of(31, 0xdd));
+    let bad_digest_arity = replace_once_with(
+        &canonical,
+        &decode_hex(concat!(
+            "82015820",
+            "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        )),
+        &decode_hex("8101"),
     );
-    assert_eq!(
-        AgentDecisionRequestV1::decode(bytes),
-        Err(AgentDecisionError::MalformedWire)
+    let bad_result_arity = replace_once_with(
+        &canonical,
+        &decode_hex("8300001a000f4240"),
+        &decode_hex("820000"),
     );
-    assert_eq!(
-        ProviderDecisionV1::decode(bytes),
-        Err(AgentDecisionError::MalformedWire)
+    let wrong_request_field = replace_once_with(
+        &canonical,
+        &decode_hex("50000102030405060708090a0b0c0d0e0f"),
+        &text_bytes(16, b'a'),
     );
-    assert_eq!(
-        DecisionRecordV1::decode(bytes),
-        Err(AgentDecisionError::MalformedWire)
+    let wrong_digest_type = replace_once_with(
+        &canonical,
+        &decode_hex(concat!(
+            "82015820",
+            "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        )),
+        &[0],
     );
-    assert_eq!(
-        AgentActionV1::decode(bytes),
-        Err(AgentDecisionError::MalformedWire)
+    let wrong_result_type = replace_once_with(&canonical, &decode_hex("8300001a000f4240"), &[0]);
+
+    for (name, wire) in [
+        ("empty", Vec::new()),
+        ("truncated", canonical[..canonical.len() - 1].to_vec()),
+        ("trailing", append(&canonical, 0)),
+        (
+            "missing outer item",
+            missing_outer_item(&canonical, 0x8f, 8),
+        ),
+        ("extra outer item", extra_outer_item(&canonical, 0x91)),
+        ("magic type", wrong_magic_type),
+        ("magic value", wrong_magic),
+        (
+            "version",
+            replace_once_with(&canonical, &[1, 0x50], &[2, 0x50]),
+        ),
+        (
+            "nonshortest version",
+            replace_once_with(&canonical, &[1, 0x50], &[0x18, 1, 0x50]),
+        ),
+        ("request hash type", wrong_hash_type),
+        ("request hash width", wrong_hash_width),
+        ("nested request field type", wrong_request_field),
+        ("response digest type", wrong_digest_type),
+        ("response digest arity", bad_digest_arity),
+        ("result type", wrong_result_type),
+        ("result arity", bad_result_arity),
+        ("over limit", vec![0; 4097]),
+    ] {
+        assert_malformed(DecisionRecordV1::decode(&wire), name);
+    }
+
+    for (name, wire) in foreign_root_wires() {
+        assert_malformed(DecisionRecordV1::decode(&wire), name);
+    }
+}
+
+#[test]
+fn record_decoder_accepts_each_no_action_code_and_rejects_other_result_values() {
+    for code in no_action_codes() {
+        let wire = record_no_action_wire(code.code());
+        let decoded = DecisionRecordV1::decode(&wire).expect("authoritative no-action record");
+        assert_eq!(
+            decoded.result(),
+            DecisionResultV1::NoAction(code),
+            "{code:?}"
+        );
+    }
+
+    for code in [0, 10] {
+        assert_malformed(
+            DecisionRecordV1::decode(&record_no_action_wire(code)),
+            "unknown code",
+        );
+    }
+
+    let nonshortest_code = replace_once_with(
+        &decode_hex(RECORD_NO_ACTION_HEX),
+        &[0x82, 1, 5],
+        &[0x82, 1, 0x18, 5],
     );
+    assert_malformed(
+        DecisionRecordV1::decode(&nonshortest_code),
+        "nonshortest no-action code",
+    );
+    let no_action_code_type = replace_once_with(
+        &decode_hex(RECORD_NO_ACTION_HEX),
+        &[0x82, 1, 5],
+        &[0x82, 1, 0x40],
+    );
+    assert_malformed(
+        DecisionRecordV1::decode(&no_action_code_type),
+        "no-action code type",
+    );
+}
+
+#[test]
+fn action_decoder_has_a_field_specific_malformed_matrix() {
+    let canonical = decode_hex(ACTION_HEX);
+    let mut wrong_magic_type = canonical.clone();
+    wrong_magic_type[1] = 0x64;
+    let mut wrong_magic = canonical.clone();
+    wrong_magic[2] = b'X';
+    let wrong_hash_width = replace_once_with(
+        &canonical,
+        &decode_hex(concat!(
+            "5820",
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        )),
+        &bytes_of(31, 0xff),
+    );
+    let invalid_identifier = replace_once_with(&canonical, b"move", b"m\0ve");
+    let invalid_confidence = replace_once_with(
+        &canonical,
+        &[0x1a, 0, 0x0f, 0x42, 0x40],
+        &[0x1a, 0, 0x0f, 0x42, 0x41],
+    );
+    let wrong_confidence_type =
+        replace_once_with(&canonical, &[0x1a, 0, 0x0f, 0x42, 0x40], &[0x40]);
+    let wrong_driver_tick_type = replace_once_with(&canonical, &[7, 0x58], &[0x40, 0x58]);
+    let wrong_hash_type = replace_once_with(
+        &canonical,
+        &decode_hex(concat!(
+            "5820",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )),
+        &text_bytes(32, b'a'),
+    );
+
+    for (name, wire) in [
+        ("empty", Vec::new()),
+        ("truncated", canonical[..canonical.len() - 1].to_vec()),
+        ("trailing", append(&canonical, 0)),
+        (
+            "missing outer item",
+            missing_outer_item(&canonical, 0x86, 34),
+        ),
+        ("extra outer item", extra_outer_item(&canonical, 0x88)),
+        ("magic type", wrong_magic_type),
+        ("magic value", wrong_magic),
+        (
+            "version",
+            replace_once_with(&canonical, &[1, 0x64], &[2, 0x64]),
+        ),
+        (
+            "nonshortest version",
+            replace_once_with(&canonical, &[1, 0x64], &[0x18, 1, 0x64]),
+        ),
+        (
+            "action identifier type",
+            replace_once_with(&canonical, &[0x64], &[0x44]),
+        ),
+        ("action identifier grammar", invalid_identifier),
+        ("confidence type", wrong_confidence_type),
+        ("confidence range", invalid_confidence),
+        ("driver tick type", wrong_driver_tick_type),
+        (
+            "driver tick canonicality",
+            replace_once_with(&canonical, &[7, 0x58], &[0x18, 7, 0x58]),
+        ),
+        ("hash width", wrong_hash_width),
+        ("hash type", wrong_hash_type),
+        ("over limit", vec![0; 513]),
+    ] {
+        assert_malformed(AgentActionV1::decode(&wire), name);
+    }
+
+    for (name, wire) in foreign_root_wires() {
+        assert_malformed(AgentActionV1::decode(&wire), name);
+    }
+}
+
+#[test]
+fn exact_writers_cover_all_integer_widths_and_no_action_assignments() {
+    let action = AgentActionV1::try_new("move".to_owned(), 1, u64::MAX, [0; 32], [1; 32])
+        .expect("valid max tick action");
+    assert_eq!(
+        AgentActionV1::decode(&action.encode().expect("max tick encode")),
+        Ok(action)
+    );
+
+    for code in no_action_codes() {
+        let record = DecisionRecordV1::new(
+            request(),
+            [0xdd; 32],
+            None,
+            DecisionResultV1::NoAction(code),
+        );
+        let encoded = record.encode().expect("no-action record encode");
+        assert_eq!(encoded.last().copied(), Some(code.code()));
+    }
 }
 
 fn replace_once(bytes: &mut [u8], needle: &[u8], replacement: &[u8]) {
@@ -538,4 +753,115 @@ fn replace_once(bytes: &mut [u8], needle: &[u8], replacement: &[u8]) {
         .position(|window| window == needle)
         .expect("fixture marker exists");
     bytes[start..start + replacement.len()].copy_from_slice(replacement);
+}
+
+fn catalogue_ids(lengths: &[usize]) -> Vec<String> {
+    lengths
+        .iter()
+        .enumerate()
+        .map(|(index, length)| format!("{index:02}{}", "x".repeat(length - 2)))
+        .collect()
+}
+
+fn append(bytes: &[u8], byte: u8) -> Vec<u8> {
+    let mut result = bytes.to_vec();
+    result.push(byte);
+    result
+}
+
+fn missing_outer_item(bytes: &[u8], outer_header: u8, final_item_bytes: usize) -> Vec<u8> {
+    let mut result = bytes.to_vec();
+    result[0] = outer_header;
+    result.truncate(result.len() - final_item_bytes);
+    result
+}
+
+fn extra_outer_item(bytes: &[u8], outer_header: u8) -> Vec<u8> {
+    let mut result = bytes.to_vec();
+    result[0] = outer_header;
+    result.push(0);
+    result
+}
+
+fn text_bytes(length: usize, byte: u8) -> Vec<u8> {
+    let mut result = vec![0x60 | u8::try_from(length).expect("short test text")];
+    result.extend(std::iter::repeat_n(byte, length));
+    result
+}
+
+fn bytes_of(length: usize, byte: u8) -> Vec<u8> {
+    let mut result = vec![0x58, u8::try_from(length).expect("short test bytes")];
+    result.extend(std::iter::repeat_n(byte, length));
+    result
+}
+
+fn replace_once_with(bytes: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
+    let start = bytes
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .expect("fixture marker exists");
+    let mut replaced = Vec::with_capacity(bytes.len() - needle.len() + replacement.len());
+    replaced.extend_from_slice(&bytes[..start]);
+    replaced.extend_from_slice(replacement);
+    replaced.extend_from_slice(&bytes[start + needle.len()..]);
+    replaced
+}
+
+fn foreign_root_wires() -> Vec<(&'static str, Vec<u8>)> {
+    [
+        ("map", "a0"),
+        ("tag", "c0f6"),
+        ("float", "f90000"),
+        ("indefinite array", "9fff"),
+        ("indefinite text", "7f6161ff"),
+        ("indefinite bytes", "5f4100ff"),
+    ]
+    .into_iter()
+    .map(|(name, wire)| (name, decode_hex(wire)))
+    .collect()
+}
+
+fn oversized_catalogue_wire() -> Vec<u8> {
+    let mut wire = vec![0x83, 0x44, b'P', b'A', b'C', b'1', 1, 0x98, 0x40];
+    for _ in 0..64 {
+        wire.extend([0x58, 0x40]);
+        wire.extend(std::iter::repeat_n(b'a', 64));
+    }
+    wire
+}
+
+fn too_many_catalogue_actions() -> Vec<u8> {
+    let mut wire = vec![0x83, 0x44, b'P', b'A', b'C', b'1', 1, 0x98, 0x41];
+    for _ in 0..65 {
+        wire.extend([0x61, b'a']);
+    }
+    wire
+}
+
+fn no_action_codes() -> [DecisionNoActionCodeV1; 9] {
+    [
+        DecisionNoActionCodeV1::ProviderUnavailable,
+        DecisionNoActionCodeV1::ProviderTimeout,
+        DecisionNoActionCodeV1::ProviderRejected,
+        DecisionNoActionCodeV1::ProviderRateLimited,
+        DecisionNoActionCodeV1::ProviderNoAction,
+        DecisionNoActionCodeV1::ResponseTooLarge,
+        DecisionNoActionCodeV1::ResponseMalformed,
+        DecisionNoActionCodeV1::ResponseVersionUnsupported,
+        DecisionNoActionCodeV1::ResponseValueInvalid,
+    ]
+}
+
+fn record_no_action_wire(code: u8) -> Vec<u8> {
+    let mut wire = decode_hex(RECORD_NO_ACTION_HEX);
+    *wire.last_mut().expect("record fixture has a result code") = code;
+    wire
+}
+
+fn assert_malformed<T>(result: Result<T, AgentDecisionError>, context: &str) {
+    assert_eq!(
+        result.err(),
+        Some(AgentDecisionError::MalformedWire),
+        "{context}"
+    );
 }

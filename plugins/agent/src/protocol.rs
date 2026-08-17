@@ -83,6 +83,10 @@ impl ActionCatalogueV1 {
             }
         }
 
+        if catalogue_encoded_len(&action_ids) > MAX_ENCODED_CATALOGUE_BYTES {
+            return Err(AgentDecisionError::MalformedWire);
+        }
+
         Ok(Self { action_ids })
     }
 
@@ -103,8 +107,12 @@ impl ActionCatalogueV1 {
 
     /// # Errors
     ///
-    /// Returns [`AgentDecisionError::MalformedWire`] when the V1 size bound is exceeded.
+    /// Validated V1 bounds guarantee that encoding cannot exceed the wire limit.
     pub fn encode(&self) -> Result<Vec<u8>, AgentDecisionError> {
+        Ok(self.encode_canonical())
+    }
+
+    fn encode_canonical(&self) -> Vec<u8> {
         let mut output = Vec::new();
         write_array(&mut output, 3);
         write_bytes(&mut output, &CATALOGUE_MAGIC);
@@ -113,7 +121,7 @@ impl ActionCatalogueV1 {
         for action_id in &self.action_ids {
             write_text(&mut output, action_id);
         }
-        finish_encoded(output, MAX_ENCODED_CATALOGUE_BYTES)
+        output
     }
 
     /// # Errors
@@ -136,7 +144,9 @@ impl ActionCatalogueV1 {
             action_ids.push(action_id.to_owned());
         }
         let decoded = Self::try_new(action_ids).map_err(|_| AgentDecisionError::MalformedWire)?;
-        canonical_equals(input, &decoded.encode()?)?;
+        if !canonical_equals(input, &decoded.encode_canonical()) {
+            return Err(AgentDecisionError::MalformedWire);
+        }
         Ok(decoded)
     }
 
@@ -291,14 +301,18 @@ impl AgentDecisionRequestV1 {
 
     /// # Errors
     ///
-    /// Returns [`AgentDecisionError::MalformedWire`] when the V1 size bound is exceeded.
+    /// Validated V1 bounds guarantee that encoding cannot exceed the wire limit.
     pub fn encode(&self) -> Result<Vec<u8>, AgentDecisionError> {
+        Ok(self.encode_canonical())
+    }
+
+    fn encode_canonical(&self) -> Vec<u8> {
         let mut output = Vec::new();
         write_array(&mut output, 13);
         write_bytes(&mut output, &REQUEST_MAGIC);
         write_uint(&mut output, 1);
         write_request_fields(&mut output, self);
-        finish_encoded(output, MAX_ENCODED_REQUEST_BYTES)
+        output
     }
 
     /// # Errors
@@ -313,7 +327,9 @@ impl AgentDecisionRequestV1 {
             return Err(AgentDecisionError::MalformedWire);
         }
         let decoded = decode_request_fields(&values[2..])?;
-        canonical_equals(input, &decoded.encode()?)?;
+        if !canonical_equals(input, &decoded.encode_canonical()) {
+            return Err(AgentDecisionError::MalformedWire);
+        }
         Ok(decoded)
     }
 
@@ -419,8 +435,12 @@ impl ProviderDecisionV1 {
 
     /// # Errors
     ///
-    /// Returns [`AgentDecisionError::MalformedWire`] when the V1 size bound is exceeded.
+    /// Validated V1 bounds guarantee that encoding cannot exceed the wire limit.
     pub fn encode(&self) -> Result<Vec<u8>, AgentDecisionError> {
+        Ok(self.encode_canonical())
+    }
+
+    fn encode_canonical(self) -> Vec<u8> {
         let mut output = Vec::new();
         match self {
             Self::Accepted {
@@ -441,14 +461,14 @@ impl ProviderDecisionV1 {
                 write_uint(&mut output, 1);
             }
         }
-        finish_encoded(output, MAX_PROVIDER_RESPONSE_BYTES)
+        output
     }
 
     /// # Errors
     ///
     /// Returns malformed input, unsupported PDP1 versions, or invalid accepted values.
     pub fn decode(input: &[u8]) -> Result<Self, AgentDecisionError> {
-        let values = decode_array(input, MAX_PROVIDER_RESPONSE_BYTES)?;
+        let (values, trailing) = decode_first_array(input, MAX_PROVIDER_RESPONSE_BYTES)?;
         if !matches_magic(values.first(), DECISION_MAGIC) {
             return Err(AgentDecisionError::MalformedWire);
         }
@@ -456,8 +476,11 @@ impl ProviderDecisionV1 {
         if version != 1 {
             return Err(AgentDecisionError::UnsupportedWireVersion);
         }
+        if trailing {
+            return Err(AgentDecisionError::MalformedWire);
+        }
         let kind = uint(values.get(2)).ok_or(AgentDecisionError::MalformedWire)?;
-        let decoded = match kind {
+        match kind {
             0 if values.len() == 5 => {
                 let action_index = uint(values.get(3))
                     .and_then(|value| u8::try_from(value).ok())
@@ -465,13 +488,21 @@ impl ProviderDecisionV1 {
                 let confidence = uint(values.get(4))
                     .and_then(|value| u32::try_from(value).ok())
                     .ok_or(AgentDecisionError::MalformedWire)?;
-                Self::accepted(action_index, confidence)?
+                let canonical = encode_accepted_decision(action_index, confidence);
+                if !canonical_equals(input, &canonical) {
+                    return Err(AgentDecisionError::MalformedWire);
+                }
+                Self::accepted(action_index, confidence)
             }
-            1 if values.len() == 3 => Self::NoAction,
-            _ => return Err(AgentDecisionError::MalformedWire),
-        };
-        canonical_equals(input, &decoded.encode()?)?;
-        Ok(decoded)
+            1 if values.len() == 3 => {
+                let canonical = encode_no_action_decision();
+                if !canonical_equals(input, &canonical) {
+                    return Err(AgentDecisionError::MalformedWire);
+                }
+                Ok(Self::NoAction)
+            }
+            _ => Err(AgentDecisionError::MalformedWire),
+        }
     }
 
     #[must_use]
@@ -621,8 +652,12 @@ impl DecisionRecordV1 {
 
     /// # Errors
     ///
-    /// Returns [`AgentDecisionError::MalformedWire`] when the V1 size bound is exceeded.
+    /// Validated V1 bounds guarantee that encoding cannot exceed the wire limit.
     pub fn encode(&self) -> Result<Vec<u8>, AgentDecisionError> {
+        Ok(self.encode_canonical())
+    }
+
+    fn encode_canonical(&self) -> Vec<u8> {
         let mut output = Vec::new();
         write_array(&mut output, 16);
         write_bytes(&mut output, &RECORD_MAGIC);
@@ -631,7 +666,7 @@ impl DecisionRecordV1 {
         write_bytes(&mut output, &self.request_hash);
         write_response_digest(&mut output, self.response_digest);
         write_result(&mut output, self.result);
-        finish_encoded(output, MAX_ENCODED_RECORD_BYTES)
+        output
     }
 
     /// # Errors
@@ -650,7 +685,9 @@ impl DecisionRecordV1 {
         let response_digest = decode_response_digest(values.get(14))?;
         let result = decode_result(values.get(15))?;
         let decoded = Self::new(request, request_hash, response_digest, result);
-        canonical_equals(input, &decoded.encode()?)?;
+        if !canonical_equals(input, &decoded.encode_canonical()) {
+            return Err(AgentDecisionError::MalformedWire);
+        }
         Ok(decoded)
     }
 
@@ -723,8 +760,12 @@ impl AgentActionV1 {
 
     /// # Errors
     ///
-    /// Returns [`AgentDecisionError::MalformedWire`] when the V1 size bound is exceeded.
+    /// Validated V1 bounds guarantee that encoding cannot exceed the wire limit.
     pub fn encode(&self) -> Result<Vec<u8>, AgentDecisionError> {
+        Ok(self.encode_canonical())
+    }
+
+    fn encode_canonical(&self) -> Vec<u8> {
         let mut output = Vec::new();
         write_array(&mut output, 7);
         write_bytes(&mut output, &ACTION_MAGIC);
@@ -734,7 +775,7 @@ impl AgentActionV1 {
         write_uint(&mut output, self.driver_tick);
         write_bytes(&mut output, &self.catalogue_hash);
         write_bytes(&mut output, &self.decision_record_hash);
-        finish_encoded(output, MAX_ENCODED_ACTION_BYTES)
+        output
     }
 
     /// # Errors
@@ -764,7 +805,9 @@ impl AgentActionV1 {
             decision_record_hash,
         )
         .map_err(|_| AgentDecisionError::MalformedWire)?;
-        canonical_equals(input, &decoded.encode()?)?;
+        if !canonical_equals(input, &decoded.encode_canonical()) {
+            return Err(AgentDecisionError::MalformedWire);
+        }
         Ok(decoded)
     }
 }
@@ -784,9 +827,6 @@ fn write_request_fields(output: &mut Vec<u8>, request: &AgentDecisionRequestV1) 
 }
 
 fn decode_request_fields(values: &[Value]) -> Result<AgentDecisionRequestV1, AgentDecisionError> {
-    if values.len() != 11 {
-        return Err(AgentDecisionError::MalformedWire);
-    }
     let timeline_id = bytes::<16>(values.first())
         .map(Ulid::from)
         .map(TimelineId::from_ulid);
@@ -950,6 +990,26 @@ fn write_array(output: &mut Vec<u8>, length: usize) {
     write_header(output, 4, u64::try_from(length).unwrap_or(u64::MAX));
 }
 
+fn encode_accepted_decision(action_index: u8, confidence: u32) -> Vec<u8> {
+    let mut output = Vec::new();
+    write_array(&mut output, 5);
+    write_bytes(&mut output, &DECISION_MAGIC);
+    write_uint(&mut output, 1);
+    write_uint(&mut output, 0);
+    write_uint(&mut output, u64::from(action_index));
+    write_uint(&mut output, u64::from(confidence));
+    output
+}
+
+fn encode_no_action_decision() -> Vec<u8> {
+    let mut output = Vec::new();
+    write_array(&mut output, 3);
+    write_bytes(&mut output, &DECISION_MAGIC);
+    write_uint(&mut output, 1);
+    write_uint(&mut output, 1);
+    output
+}
+
 fn write_bytes(output: &mut Vec<u8>, bytes: &[u8]) {
     write_header(output, 2, u64::try_from(bytes.len()).unwrap_or(u64::MAX));
     output.extend_from_slice(bytes);
@@ -987,34 +1047,55 @@ fn write_header(output: &mut Vec<u8>, major: u8, value: u64) {
     }
 }
 
-fn finish_encoded(output: Vec<u8>, limit: usize) -> Result<Vec<u8>, AgentDecisionError> {
-    if output.len() > limit {
+fn decode_array(input: &[u8], limit: usize) -> Result<Vec<Value>, AgentDecisionError> {
+    let (values, trailing) = decode_first_array(input, limit)?;
+    if trailing {
         return Err(AgentDecisionError::MalformedWire);
     }
-    Ok(output)
+    Ok(values)
 }
 
-fn decode_array(input: &[u8], limit: usize) -> Result<Vec<Value>, AgentDecisionError> {
+fn decode_first_array(
+    input: &[u8],
+    limit: usize,
+) -> Result<(Vec<Value>, bool), AgentDecisionError> {
     if input.len() > limit {
         return Err(AgentDecisionError::MalformedWire);
     }
     let mut cursor = Cursor::new(input);
-    let value: Value =
-        ciborium::de::from_reader(&mut cursor).map_err(|_| AgentDecisionError::MalformedWire)?;
-    if usize::try_from(cursor.position()).ok() != Some(input.len()) {
-        return Err(AgentDecisionError::MalformedWire);
-    }
+    let value: Value = match ciborium::de::from_reader(&mut cursor) {
+        Ok(value) => value,
+        Err(_) => return Err(AgentDecisionError::MalformedWire),
+    };
+    let trailing = usize::try_from(cursor.position()).ok() != Some(input.len());
     match value {
-        Value::Array(values) => Ok(values),
+        Value::Array(values) => Ok((values, trailing)),
         _ => Err(AgentDecisionError::MalformedWire),
     }
 }
 
-fn canonical_equals(input: &[u8], encoded: &[u8]) -> Result<(), AgentDecisionError> {
-    if input != encoded {
-        return Err(AgentDecisionError::MalformedWire);
+fn catalogue_encoded_len(action_ids: &[String]) -> usize {
+    cbor_header_len(3)
+        + cbor_header_len(CATALOGUE_MAGIC.len())
+        + CATALOGUE_MAGIC.len()
+        + cbor_header_len(1)
+        + cbor_header_len(action_ids.len())
+        + action_ids
+            .iter()
+            .map(|action_id| cbor_header_len(action_id.len()) + action_id.len())
+            .sum::<usize>()
+}
+
+const fn cbor_header_len(value: usize) -> usize {
+    if value <= 23 {
+        1
+    } else {
+        2
     }
-    Ok(())
+}
+
+fn canonical_equals(input: &[u8], encoded: &[u8]) -> bool {
+    input == encoded
 }
 
 fn matches_magic(value: Option<&Value>, expected: [u8; 4]) -> bool {
@@ -1257,11 +1338,13 @@ mod tests {
         assert_eq!(record.response_digest(), Some(HASH));
         assert_eq!(action.action_id(), "move");
         assert_eq!(ProviderFailureCode::Timeout.code(), 2);
-        assert!(matches!(
+        assert_eq!(
             ProviderAttempt::Oversized {
                 response_digest: Some(HASH)
             },
-            ProviderAttempt::Oversized { .. }
-        ));
+            ProviderAttempt::Oversized {
+                response_digest: Some(HASH)
+            }
+        );
     }
 }
