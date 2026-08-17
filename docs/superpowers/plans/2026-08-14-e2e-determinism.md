@@ -36,7 +36,7 @@
 - Produces: SQLite generic append serialized by `TransactionBehavior::Immediate` and a four-second busy timeout
 - Consumes: existing logical-sequence translation, generic Timeline visibility checks, and adapter append helpers
 
-- [ ] **Step 1: Add failing EventStore default-contract tests**
+- [x] **Step 1: Add failing EventStore default-contract tests**
 
 Add a default-stub assertion beside `event_store_defaults_fail_closed`:
 
@@ -53,7 +53,7 @@ let result = store.append_bounded(
 assert!(result.unwrap_err().to_string().contains("atomic bounded append"));
 ```
 
-- [ ] **Step 2: Add failing MemoryStore ceiling tests**
+- [x] **Step 2: Add failing MemoryStore ceiling tests**
 
 Cover: exact-fit batch succeeds, over-limit batch returns `None`, rejection leaves head/events unchanged, empty batch succeeds without changing head, and a Fork counts only owned Events.
 
@@ -63,7 +63,7 @@ assert_eq!(store.get_timeline(timeline.id()).unwrap().unwrap().head, Seq::ZERO);
 assert!(store.read_own(timeline.id(), SeqRange::all()).unwrap().is_empty());
 ```
 
-- [ ] **Step 3: Add failing SQLite bounded-append and contention tests**
+- [x] **Step 3: Add failing SQLite bounded-append and contention tests**
 
 Use a temporary file. Verify the same ceiling cases as Memory. For contention:
 
@@ -94,7 +94,7 @@ worker.join().unwrap();
 
 Both stores must be fully opened before the blocker acquires its lock, so schema initialization cannot consume the contention window. Read through a fresh store and assert sequences `[1, 2]` and payload order `a, b`.
 
-- [ ] **Step 4: Run the store tests and confirm RED**
+- [x] **Step 4: Run the store tests and confirm RED**
 
 Run:
 
@@ -106,7 +106,7 @@ cargo test -p pos-store sqlite_writer_contention --locked
 
 Expected: failures because the new port and adapter behavior do not exist.
 
-- [ ] **Step 5: Add the fail-closed EventStore port**
+- [x] **Step 5: Add the fail-closed EventStore port**
 
 Add to `EventStore`:
 
@@ -125,11 +125,11 @@ fn append_bounded(
 
 Do not fall back to `get_timeline()` plus `append()` because that recreates the race this task removes.
 
-- [ ] **Step 6: Implement MemoryStore all-or-nothing bounded append**
+- [x] **Step 6: Implement MemoryStore all-or-nothing bounded append**
 
 Reuse generic visibility validation and logical prefix translation. Compute `owned_head.checked_add(drafts.len())`; return a storage overflow error on conversion/arithmetic failure, `Ok(None)` when the result exceeds the maximum, otherwise call the same internal batch append used by `append()`.
 
-- [ ] **Step 7: Implement SQLite busy timeout, immediate append, and bounded append**
+- [x] **Step 7: Implement SQLite busy timeout, immediate append, and bounded append**
 
 Add:
 
@@ -139,7 +139,7 @@ const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(4);
 
 Call `conn.busy_timeout(SQLITE_BUSY_TIMEOUT)` during every `open_with_hasher()`. Change `append_visible()` to `transaction_with_behavior(TransactionBehavior::Immediate)`. Implement bounded append with one immediate transaction that reads local `head_seq`, checks `head + batch_len <= max`, appends every draft through `append_one_in_transaction`, commits, and translates to logical sequence only after commit.
 
-- [ ] **Step 8: Run targeted tests and adapter regression suites**
+- [x] **Step 8: Run targeted tests and adapter regression suites**
 
 Run:
 
@@ -152,7 +152,7 @@ cargo test -p pos-store --all-features --locked
 
 Expected: all pass with no ignored tests.
 
-- [ ] **Step 9: Commit the store contract**
+- [x] **Step 9: Commit the store contract**
 
 ```bash
 git add crates/pos-core/src/store.rs crates/pos-store/src/memory.rs crates/pos-store/src/sqlite.rs
