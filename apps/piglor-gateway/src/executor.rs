@@ -1417,14 +1417,14 @@ fn execute_append_command(
     reply: oneshot::Sender<Result<Vec<Event>, StoreExecutorError>>,
 ) {
     let store = state.store.event_store();
-    let result = store.get_timeline(timeline).and_then(|meta| {
-        if let (Some(maximum), Some(meta)) = (maximum, meta) {
-            if meta.head.as_u64() >= maximum {
-                return Err(CoreError::Storage("event limit reached".to_owned()));
-            }
-        }
-        store.append(timeline, drafts)
-    });
+    let result = match maximum {
+        Some(maximum) => store
+            .append_bounded(timeline, drafts, maximum)
+            .and_then(|events| {
+                events.ok_or_else(|| CoreError::Storage("event limit reached".to_owned()))
+            }),
+        None => store.append(timeline, drafts),
+    };
     send_store_result(reply, result);
 }
 
@@ -1457,7 +1457,8 @@ fn execute_get_timeline_command(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::{
-        execute_owntracks_ingress, Command, ExecutorState, ExecutorStore, OwnTracksRateLimiter,
+        execute_append_command, execute_owntracks_ingress, Command, ExecutorState, ExecutorStore,
+        OwnTracksRateLimiter,
     };
     use pos_core::{
         event::{Event, EventDraft},
@@ -1473,8 +1474,122 @@ mod tests {
     use std::{
         collections::HashMap,
         num::NonZeroUsize,
+        sync::{Arc, Mutex},
         time::{Duration, Instant},
     };
+
+    struct RecordingBoundedStore {
+        calls: Arc<Mutex<Vec<(TimelineId, usize, u64)>>>,
+        outcome: Option<Vec<Event>>,
+    }
+
+    impl EventStore for RecordingBoundedStore {
+        fn create_timeline(&mut self, _name: &str) -> Result<Timeline, CoreError> {
+            panic!("create_timeline must not be called")
+        }
+
+        fn append(
+            &mut self,
+            _timeline: TimelineId,
+            _drafts: &[EventDraft],
+        ) -> Result<Vec<Event>, CoreError> {
+            panic!("ordinary append must not be called when a ceiling is supplied")
+        }
+
+        fn append_bounded(
+            &mut self,
+            timeline: TimelineId,
+            drafts: &[EventDraft],
+            maximum: u64,
+        ) -> Result<Option<Vec<Event>>, CoreError> {
+            self.calls
+                .lock()
+                .expect("bounded-call trace lock is healthy")
+                .push((timeline, drafts.len(), maximum));
+            Ok(self.outcome.take())
+        }
+
+        fn read(&self, _timeline: TimelineId, _range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            panic!("read must not be called")
+        }
+
+        fn fork(
+            &mut self,
+            _parent: TimelineId,
+            _at_seq: pos_core::Seq,
+            _name: &str,
+        ) -> Result<Timeline, CoreError> {
+            panic!("fork must not be called")
+        }
+
+        fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+            panic!("list_timelines must not be called")
+        }
+
+        fn get_timeline(&self, _timeline: TimelineId) -> Result<Option<Timeline>, CoreError> {
+            panic!("get_timeline must not be called by atomic bounded append")
+        }
+    }
+
+    #[test]
+    fn execute_append_command_uses_only_atomic_bounded_append_for_a_ceiling() {
+        let timeline = TimelineId::new();
+        let drafts = [
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new("world.action"),
+                CanonicalBytes::from_static(b"action"),
+            ),
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new("society.signal"),
+                CanonicalBytes::from_static(b"signal"),
+            ),
+        ];
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut state = ExecutorState {
+            store: ExecutorStore::Generic(Box::new(RecordingBoundedStore {
+                calls: Arc::clone(&calls),
+                outcome: Some(Vec::new()),
+            })),
+            owntracks_owner_key: None,
+            owntracks_rate_limiter: OwnTracksRateLimiter {
+                buckets: HashMap::new(),
+            },
+        };
+        let (reply, result) = tokio::sync::oneshot::channel();
+        execute_append_command(&mut state, timeline, &drafts, Some(17), reply);
+        assert!(result.blocking_recv().unwrap().unwrap().is_empty());
+        assert_eq!(
+            *calls.lock().expect("bounded-call trace lock is healthy"),
+            vec![(timeline, 2, 17)]
+        );
+
+        let rejected_calls = Arc::new(Mutex::new(Vec::new()));
+        let mut rejected_state = ExecutorState {
+            store: ExecutorStore::Generic(Box::new(RecordingBoundedStore {
+                calls: Arc::clone(&rejected_calls),
+                outcome: None,
+            })),
+            owntracks_owner_key: None,
+            owntracks_rate_limiter: OwnTracksRateLimiter {
+                buckets: HashMap::new(),
+            },
+        };
+        let (reply, result) = tokio::sync::oneshot::channel();
+        execute_append_command(&mut rejected_state, timeline, &drafts[..1], Some(23), reply);
+        assert!(matches!(
+            result.blocking_recv().unwrap(),
+            Err(super::StoreExecutorError::Store(CoreError::Storage(message)))
+                if message == "event limit reached"
+        ));
+        assert_eq!(
+            *rejected_calls
+                .lock()
+                .expect("bounded-call trace lock is healthy"),
+            vec![(timeline, 1, 23)]
+        );
+    }
 
     struct BlockingRootCountStore {
         inner: MemoryStore,

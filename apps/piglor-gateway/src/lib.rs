@@ -429,7 +429,7 @@ pub const MAX_EVENTS_PER_POLL: usize = 100;
 /// Maximum number of root Timelines managed by one local Gateway process.
 pub const MAX_TIMELINES: usize = 64;
 
-/// Maximum number of owned events accepted for one Timeline by one Gateway process.
+/// Maximum number of owned events atomically accepted for one Timeline.
 pub const MAX_EVENTS_PER_TIMELINE: u64 = 10_000;
 
 /// Default broadcast channel capacity for live event fan-out.
@@ -437,9 +437,10 @@ pub const EVENT_BUS_CAPACITY: usize = 256;
 
 /// Shared Gateway handle (bounded `StoreExecutor` + live Event bus).
 ///
-/// The supported local-first write boundary is one `Gateway` instance per store:
-/// its executor makes each owned-Event ceiling check and append one critical section.
-/// Concurrent mutation through another process is outside this contract.
+/// The supported local-first write boundary permits Gateway and experiment-host
+/// processes to open one `SQLite` file through [`EventStore`]. Adapter-owned immediate
+/// transactions serialize appends and enforce each owned-Event ceiling atomically.
+/// Direct SQL mutation that bypasses [`EventStore`] remains outside this contract.
 #[derive(Clone)]
 pub struct Gateway {
     store: executor::StoreExecutor,
@@ -1422,7 +1423,7 @@ mod tests {
     use std::{
         sync::{
             atomic::{AtomicBool, Ordering},
-            mpsc,
+            mpsc, Arc,
         },
         time::Duration,
     };
@@ -1430,6 +1431,34 @@ mod tests {
 
     fn memory_gw() -> Gateway {
         Gateway::new(open_store(StoreConfig::Memory).unwrap())
+    }
+
+    struct TemporarySqliteFile {
+        path: String,
+    }
+
+    impl TemporarySqliteFile {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "piglor-gateway-{label}-{}-{}.sqlite",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("system clock after Unix epoch")
+                    .as_nanos(),
+            ));
+            Self {
+                path: path.to_str().unwrap().to_owned(),
+            }
+        }
+    }
+
+    impl Drop for TemporarySqliteFile {
+        fn drop(&mut self) {
+            for suffix in ["", "-shm", "-wal"] {
+                let _ = std::fs::remove_file(format!("{}{suffix}", self.path));
+            }
+        }
     }
 
     #[derive(Clone, Copy)]
@@ -2211,6 +2240,85 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(page.events.len(), 1);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn sqlite_gateways_enforce_one_atomic_event_ceiling() {
+        let database = TemporarySqliteFile::new("atomic-ceiling");
+        let path = database.path.clone();
+        let mut seed = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
+        let timeline = seed.create_timeline("sqlite").unwrap();
+        let entity = EntityId::new();
+        let prefill = EventDraft::new(
+            entity,
+            Kind::new(EVENT_TYPE_ACTION),
+            json_to_cbor(&serde_json::json!({"writer": "prefill"})),
+        );
+        seed.append(
+            timeline.id(),
+            &vec![prefill; usize::try_from(MAX_EVENTS_PER_TIMELINE - 1).unwrap()],
+        )
+        .unwrap();
+        drop(seed);
+
+        let first = Gateway::new(open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap());
+        let second = Gateway::new(open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap());
+        let timeline_id = timeline.id().to_string();
+        let entity_id = entity.to_string();
+        let payload_a = serde_json::json!({"writer": "a"});
+        let payload_b = serde_json::json!({"writer": "b"});
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let first_task = {
+            let barrier = Arc::clone(&barrier);
+            let timeline_id = timeline_id.clone();
+            let entity_id = entity_id.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                first
+                    .append_action(&timeline_id, &entity_id, EVENT_TYPE_ACTION, &payload_a)
+                    .await
+            })
+        };
+        let second_task = {
+            let barrier = Arc::clone(&barrier);
+            let timeline_id = timeline_id.clone();
+            let entity_id = entity_id.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                second
+                    .append_action(&timeline_id, &entity_id, EVENT_TYPE_ACTION, &payload_b)
+                    .await
+            })
+        };
+        barrier.wait().await;
+        let (a, b) = tokio::join!(first_task, second_task);
+        let a = a.unwrap();
+        let b = b.unwrap();
+        assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+        let rejected = if let Err(error) = a {
+            error
+        } else {
+            b.unwrap_err()
+        };
+        assert!(matches!(
+            rejected,
+            GatewayError::EventLimitReached {
+                maximum: MAX_EVENTS_PER_TIMELINE
+            }
+        ));
+        let fresh = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
+        assert_eq!(
+            fresh.get_timeline(timeline.id()).unwrap().unwrap().head,
+            Seq::from_u64(MAX_EVENTS_PER_TIMELINE)
+        );
+        assert_eq!(
+            fresh
+                .read_own(timeline.id(), SeqRange::all())
+                .unwrap()
+                .len(),
+            usize::try_from(MAX_EVENTS_PER_TIMELINE).unwrap()
+        );
     }
 
     #[tokio::test]
