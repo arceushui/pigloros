@@ -1,15 +1,17 @@
 use piglor_gateway::{router, AppState, Gateway, LedgerWriteMode};
 use piglor_ledger::LedgerView;
-use pos_core::{Capability, EntityId, Plugin, PluginId, TimelineId};
+use pos_core::{Capability, EntityId, EventStore, Plugin, PluginId, TimelineId, WallTime};
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition, TickOutcome};
 use pos_plugin_agent::{
     AgentAction, AgentContext, AgentDriver, AgentPlugin, AgentPolicy, AgentReducer,
     RoundRobinPolicy, EVENT_TYPE_ACTION,
 };
-use pos_plugin_society::{SocietyPlugin, SocietyReducer};
+use pos_plugin_society::{
+    draft_signal, SocietyDimension, SocietyPlugin, SocietyReducer, SocietySignal,
+};
 use pos_runtime::{Driver, ObservationView, ProjectionKey, RuntimeError, StepOutput};
 use pos_state::{EntityStateProjection, ProjectionRegistry};
-use pos_store::{sqlite::SqliteStore, StoreConfig};
+use pos_store::{sqlite::SqliteStore, SeqRange, StoreConfig};
 use serde_json::{json, Value};
 use std::{
     io::{Read, Write},
@@ -224,11 +226,17 @@ impl FixtureGuard {
         if let Some(shutdown) = self.server_shutdown.take() {
             let _ = shutdown.send(());
         }
-        if let Some(server) = self.server.take() {
-            server
-                .await
-                .expect("Gateway server task joins")
-                .expect("Gateway server shuts down cleanly");
+        if let Some(mut server) = self.server.take() {
+            match tokio::time::timeout(Duration::from_secs(5), &mut server).await {
+                Ok(joined) => joined
+                    .expect("Gateway server task joins")
+                    .expect("Gateway server shuts down cleanly"),
+                Err(_) => {
+                    server.abort();
+                    let _ = server.await;
+                    panic!("Gateway server did not shut down within five seconds");
+                }
+            }
         }
     }
 }
@@ -401,12 +409,35 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
     let mut session = experiment
         .resume(timeline)
         .expect("Experiment opens a second SQLite connection");
+    let pinned_wall_time = WallTime::from_micros(
+        u64::try_from(i64::MAX).expect("positive SQLite integer limit fits u64"),
+    );
+    let mut pending_store =
+        SqliteStore::open(&path).expect("pending-ingress SQLite connection opens");
+    let pending = pending_store
+        .append(
+            timeline,
+            &[draft_signal(
+                fast_entity,
+                &SocietySignal {
+                    dimension: SocietyDimension::Trust,
+                    value: 0.25,
+                    subject: None,
+                    object: None,
+                },
+            )
+            .with_wall_time(pinned_wall_time)],
+        )
+        .expect("externally pending signal commits through EventStore");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].seq.as_u64(), 2);
+    drop(pending_store);
     assert_eq!(
         session
             .step_cadenced(0)
             .expect("zero-time boundary succeeds"),
         TickOutcome::Advanced {
-            folded_events: 2,
+            folded_events: 3,
             emitted_events: 2,
         }
     );
@@ -461,7 +492,10 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
 
     let mut polled = Vec::new();
     let mut from_seq = 0_u64;
+    let mut pages = 0_u8;
     loop {
+        pages += 1;
+        assert!(pages <= 5, "polling must terminate within five pages");
         let page = request_http(
             address,
             "GET",
@@ -480,9 +514,10 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
         let Some(next) = page.body["next_from_seq"].as_u64() else {
             break;
         };
+        assert!(next > from_seq, "poll cursor must advance");
         from_seq = next;
     }
-    assert_eq!(polled.len(), 7);
+    assert_eq!(polled.len(), 8);
     for (index, event) in polled.iter().enumerate() {
         assert_eq!(
             event["seq"].as_u64().expect("event sequence is numeric"),
@@ -505,6 +540,29 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
         .find(|seq| *seq > human_seq)
         .expect("blocked fast action follows human ingress");
     assert!(human_seq < blocked_fast_seq);
+    let agent_order = polled
+        .iter()
+        .filter(|event| event["event_type"] == EVENT_TYPE_ACTION)
+        .map(|event| {
+            (
+                event["seq"].as_u64().expect("agent sequence is numeric"),
+                event["entity"]
+                    .as_str()
+                    .expect("agent entity is a string")
+                    .to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        agent_order,
+        vec![
+            (3, fast_entity.to_string()),
+            (4, slow_entity.to_string()),
+            (6, fast_entity.to_string()),
+            (7, fast_entity.to_string()),
+            (8, slow_entity.to_string()),
+        ]
+    );
 
     let live = session.projections().expect("live session is healthy");
     assert_eq!(
@@ -513,13 +571,14 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
     );
     assert_eq!(
         state_u64(live, "observation", fast_entity, "event_count"),
-        3
+        4
     );
     assert_eq!(
         state_u64(live, "observation", slow_entity, "event_count"),
         2
     );
     assert_eq!(state_u64(live, "society", society_entity, "signals"), 1);
+    assert_eq!(state_u64(live, "society", fast_entity, "signals"), 1);
     assert_eq!(state_u64(live, "agent", fast_entity, "action_count"), 3);
     assert_eq!(state_u64(live, "agent", slow_entity, "action_count"), 2);
     assert_eq!(
@@ -528,9 +587,32 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
             .and_then(Value::as_f64),
         Some(0.75)
     );
+    assert_eq!(
+        live.state_for_reducer("society", &fast_entity)
+            .and_then(|state| state.get("mean.trust"))
+            .and_then(Value::as_f64),
+        Some(0.25)
+    );
+    assert_eq!(
+        live.state_for_reducer("observation", &fast_entity)
+            .and_then(|state| state.get("last_event_type"))
+            .and_then(Value::as_str),
+        Some(EVENT_TYPE_ACTION)
+    );
     let live_snapshot = snapshot_json(live);
 
     let first_store = SqliteStore::open(&path).expect("first replay connection opens");
+    let stored = first_store
+        .read(timeline, SeqRange::all())
+        .expect("sequence-ordered history reads");
+    assert_eq!(stored.len(), 8);
+    assert_eq!(stored[1].seq.as_u64(), 2);
+    assert_eq!(stored[2].seq.as_u64(), 3);
+    assert_eq!(stored[1].wall_time, pinned_wall_time);
+    assert!(
+        stored[1].wall_time > stored[2].wall_time,
+        "sequence order must deliberately conflict with wall-clock order"
+    );
     let mut first_replay = replay_registry();
     pos_time::replay(&first_store, timeline, &mut first_replay).expect("first replay succeeds");
     let second_store = SqliteStore::open(&path).expect("second replay connection opens");
