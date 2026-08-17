@@ -24,6 +24,15 @@ pub enum RuntimeError {
     #[error("driver emitted core-owned geographic event type '{event_type}'")]
     GeographicDraft { event_type: String },
 
+    #[error(
+        "driver '{driver}' cadence overflow: previous={previous_ns}ns, interval={interval_ns}ns"
+    )]
+    CadenceOverflow {
+        driver: String,
+        previous_ns: u128,
+        interval_ns: u128,
+    },
+
     #[error("store error: {0}")]
     Store(#[from] pos_core::CoreError),
 

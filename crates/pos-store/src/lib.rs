@@ -132,6 +132,28 @@ pub(crate) fn ensure_non_geographic_events(
     }
 }
 
+/// Compute the next backend-owned Event head and enforce its atomic ceiling.
+///
+/// Keeping this arithmetic shared gives every adapter identical overflow and
+/// limit semantics before it mutates backend state.
+pub(crate) fn bounded_owned_head(
+    owned_head: u64,
+    batch_len: u64,
+    max_owned_events: u64,
+) -> Result<Option<u64>, CoreError> {
+    let next_head = owned_head
+        .checked_add(batch_len)
+        .ok_or_else(|| CoreError::Storage("bounded append owned Event head overflow".to_owned()))?;
+    Ok((next_head <= max_owned_events).then_some(next_head))
+}
+
+/// Validate the logical head implied by a fork prefix and backend-owned head.
+pub(crate) fn checked_logical_head(logical_prefix: u64, owned_head: u64) -> Result<u64, CoreError> {
+    logical_prefix
+        .checked_add(owned_head)
+        .ok_or_else(|| CoreError::Storage("logical Timeline sequence overflow".to_owned()))
+}
+
 /// Selects which backend [`open_store`] constructs.
 ///
 /// `Memory` is always available. The `Sqlite` variants require the
@@ -276,6 +298,22 @@ pub fn import_timeline_with_verified_signatures(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bounded_head_helpers_cover_accept_reject_and_overflow() {
+        assert_eq!(bounded_owned_head(2, 1, 3).unwrap(), Some(3));
+        assert_eq!(bounded_owned_head(2, 2, 3).unwrap(), None);
+        assert!(matches!(
+            bounded_owned_head(u64::MAX, 1, u64::MAX),
+            Err(CoreError::Storage(_))
+        ));
+        assert_eq!(checked_logical_head(2, 3).unwrap(), 5);
+        assert!(matches!(
+            checked_logical_head(u64::MAX, 1),
+            Err(CoreError::Storage(_))
+        ));
+    }
 
     #[cfg(feature = "sqlite")]
     #[test]

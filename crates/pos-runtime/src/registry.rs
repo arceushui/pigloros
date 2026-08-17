@@ -267,15 +267,21 @@ impl PluginRegistry {
     /// will fire. First-tick drivers always fire.
     ///
     /// # Errors
-    /// Propagates any [`RuntimeError`] from drivers.
-    #[cfg_attr(coverage_nightly, coverage(off))]
+    /// Propagates any [`RuntimeError`] from drivers. Returns
+    /// [`RuntimeError::CadenceOverflow`] before snapshot creation or driver mutation
+    /// when a prior tick plus the configured interval cannot fit in `u128` nanoseconds.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the registry's internal due-driver set refers to an entry
+    /// whose registered driver disappeared without passing through a public API.
     pub fn tick_cadenced(
         &mut self,
         timeline: pos_core::ids::TimelineId,
         now_ns: u128,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         let mut all_drafts = Vec::new();
-        let mut due_driver_ids = Vec::new();
+        let mut due_driver_ids = HashSet::new();
         let mut seen_subscriptions = HashSet::new();
         let mut due_subscriptions = Vec::new();
 
@@ -283,11 +289,20 @@ impl PluginRegistry {
             if let Some(driver) = entry.driver.as_deref() {
                 let interval_ns = driver.tick_interval().as_nanos();
                 let ready = match entry.last_tick {
-                    Some(prev) => now_ns >= prev + interval_ns,
+                    Some(previous_ns) => {
+                        let due_at = previous_ns.checked_add(interval_ns).ok_or_else(|| {
+                            RuntimeError::CadenceOverflow {
+                                driver: entry.name.clone(),
+                                previous_ns,
+                                interval_ns,
+                            }
+                        })?;
+                        now_ns >= due_at
+                    }
                     None => true,
                 };
                 if ready {
-                    due_driver_ids.push(*id);
+                    due_driver_ids.insert(*id);
                     extend_unique_subscriptions(
                         &mut due_subscriptions,
                         &mut seen_subscriptions,
@@ -298,17 +313,20 @@ impl PluginRegistry {
         }
 
         let snapshot = self.snapshot_for_subscriptions(due_subscriptions.iter());
-        for id in due_driver_ids {
-            if let Some(entry) = self.plugins.get_mut(&id) {
-                if let Some(driver) = entry.driver.as_mut() {
-                    let observations = snapshot.view_for(driver.subscriptions());
-                    let output = driver.step(timeline, observations)?;
-                    reject_geographic_drafts(&output)?;
-                    entry.last_tick = Some(now_ns);
-                    all_drafts.extend(output.drafts);
-                }
+        for (id, entry) in &mut self.plugins {
+            if due_driver_ids.remove(id) {
+                let driver = entry
+                    .driver
+                    .as_mut()
+                    .expect("due IDs are collected only from registered drivers");
+                let observations = snapshot.view_for(driver.subscriptions());
+                let output = driver.step(timeline, observations)?;
+                reject_geographic_drafts(&output)?;
+                entry.last_tick = Some(now_ns);
+                all_drafts.extend(output.drafts);
             }
         }
+        debug_assert!(due_driver_ids.is_empty());
         Ok(all_drafts)
     }
 
@@ -647,6 +665,9 @@ mod tests {
 
         let error = reg.step_all(timeline.id()).unwrap_err();
         assert!(error.to_string().contains("failing"));
+
+        let error = reg.tick_cadenced(timeline.id(), 0).unwrap_err();
+        assert!(error.to_string().contains("failing"));
     }
 
     #[test]
@@ -842,6 +863,125 @@ mod tests {
             Some(1)
         );
         assert_eq!(view.state_for(&missing), None);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn cadence_overflow_is_named_and_precedes_every_driver_step() {
+        use std::{
+            sync::{
+                atomic::{AtomicUsize, Ordering},
+                Arc,
+            },
+            time::Duration,
+        };
+
+        struct CadenceDriver {
+            name: &'static str,
+            interval: Duration,
+            steps: Arc<AtomicUsize>,
+        }
+
+        impl Driver for CadenceDriver {
+            fn name(&self) -> &'static str {
+                self.name
+            }
+
+            fn step(
+                &mut self,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                self.steps.fetch_add(1, Ordering::SeqCst);
+                Ok(StepOutput::empty())
+            }
+
+            fn tick_interval(&self) -> Duration {
+                self.interval
+            }
+        }
+
+        let overflow_steps = Arc::new(AtomicUsize::new(0));
+        let untouched_steps = Arc::new(AtomicUsize::new(0));
+        let mut registry = PluginRegistry::new();
+        registry.register_driver(Box::new(CadenceDriver {
+            name: "overflow-driver",
+            interval: Duration::from_nanos(2),
+            steps: Arc::clone(&overflow_steps),
+        }));
+        registry.register_driver(Box::new(CadenceDriver {
+            name: "must-not-step",
+            interval: Duration::from_nanos(1),
+            steps: Arc::clone(&untouched_steps),
+        }));
+
+        let timeline = TimelineId::new();
+        registry.tick_cadenced(timeline, u128::MAX - 1).unwrap();
+        let error = registry.tick_cadenced(timeline, u128::MAX).unwrap_err();
+
+        assert!(matches!(
+            error,
+            RuntimeError::CadenceOverflow {
+                driver,
+                previous_ns,
+                interval_ns: 2,
+            } if driver == "overflow-driver" && previous_ns == u128::MAX - 1
+        ));
+        assert_eq!(overflow_steps.load(Ordering::SeqCst), 1);
+        assert_eq!(untouched_steps.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn cadence_keeps_registration_order_when_a_middle_driver_is_skipped() {
+        use std::time::Duration;
+
+        struct OrderedDriver {
+            name: &'static str,
+            interval: Duration,
+        }
+
+        impl Driver for OrderedDriver {
+            fn name(&self) -> &'static str {
+                self.name
+            }
+
+            fn step(
+                &mut self,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                Ok(StepOutput::new(vec![EventDraft::new(
+                    EntityId::new(),
+                    Kind::new(self.name),
+                    CanonicalBytes::from_static(b"ordered"),
+                )]))
+            }
+
+            fn tick_interval(&self) -> Duration {
+                self.interval
+            }
+        }
+
+        let mut registry = PluginRegistry::new();
+        for (name, interval) in [
+            ("cadence.first", Duration::from_nanos(1)),
+            ("cadence.middle", Duration::from_nanos(2)),
+            ("cadence.third", Duration::from_nanos(1)),
+        ] {
+            registry.register_driver(Box::new(OrderedDriver { name, interval }));
+        }
+
+        let timeline = TimelineId::new();
+        assert_eq!(registry.tick_cadenced(timeline, 0).unwrap().len(), 3);
+        let drafts = registry.tick_cadenced(timeline, 1).unwrap();
+        assert_eq!(
+            drafts
+                .iter()
+                .map(|draft| draft.event_type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cadence.first", "cadence.third"]
+        );
     }
 
     #[test]

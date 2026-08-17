@@ -1,6 +1,7 @@
 # Multi-agent Model Policy
 
 - Use `gpt-5.6-terra` for implementation and execution agents.
+- Use `gpt-5.6-sol` for the designated CTO coordination/review agent. This explicit CTO role overrides the general independent-review preference below.
 - Prefer `gpt-5.3-codex-spark` for independent code-review agents when the runtime exposes it.
 - If Spark is unavailable, prefer the cheaper `gpt-5.4-mini` fallback.
 - If neither model is exposed by the collaboration interface, use `gpt-5.6-terra` rather than the more expensive `gpt-5.6-sol`.

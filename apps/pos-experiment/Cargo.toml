@@ -14,6 +14,8 @@ pos-time = { path = "../../crates/pos-time" }
 pos-query = { path = "../../crates/pos-query" }
 pos-runtime = { path = "../../crates/pos-runtime" }
 pos-plugin-eval = { path = "../../plugins/eval" }
+pos-plugin-agent = { path = "../../plugins/agent" }
+pos-plugin-society = { path = "../../plugins/society" }
 blake3 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

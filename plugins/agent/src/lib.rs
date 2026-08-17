@@ -17,6 +17,7 @@ use pos_core::{
 };
 use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 /// The entity kind string for AI agents.
 pub const ENTITY_KIND: &str = "ai-agent";
@@ -183,6 +184,7 @@ pub struct AgentDriver {
     policy: Box<dyn AgentPolicy>,
     tick: u64,
     available_actions: Vec<String>,
+    tick_interval: Duration,
 }
 
 impl AgentDriver {
@@ -198,13 +200,25 @@ impl AgentDriver {
             policy,
             tick: 0,
             available_actions,
+            tick_interval: Duration::from_millis(100),
         }
+    }
+
+    /// Override the deterministic interval between eligible Agent ticks.
+    #[must_use]
+    pub fn with_tick_interval(mut self, tick_interval: Duration) -> Self {
+        self.tick_interval = tick_interval;
+        self
     }
 }
 
 impl Driver for AgentDriver {
     fn name(&self) -> &'static str {
         "agent-driver"
+    }
+
+    fn tick_interval(&self) -> Duration {
+        self.tick_interval
     }
 
     fn step(
@@ -418,6 +432,50 @@ mod tests {
             assert_eq!(d1.action, d2.action);
             assert!((d1.confidence - 0.5).abs() < f64::EPSILON);
         }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn agent_driver_tick_interval_defaults_and_overrides_without_changing_decisions() {
+        let entity = EntityId::new();
+        let mut default = AgentDriver::new(
+            entity,
+            Box::new(RoundRobinPolicy::new(vec!["wait".to_owned()])),
+            vec!["wait".to_owned()],
+        );
+        let mut overridden = AgentDriver::new(
+            entity,
+            Box::new(RoundRobinPolicy::new(vec!["wait".to_owned()])),
+            vec!["wait".to_owned()],
+        )
+        .with_tick_interval(std::time::Duration::from_millis(200));
+
+        assert_eq!(
+            default.tick_interval(),
+            std::time::Duration::from_millis(100)
+        );
+        assert_eq!(
+            overridden.tick_interval(),
+            std::time::Duration::from_millis(200)
+        );
+
+        let timeline = TimelineId::new();
+        let default_output = default.step(timeline, ObservationView::empty()).unwrap();
+        let overridden_output = overridden.step(timeline, ObservationView::empty()).unwrap();
+        assert_eq!(default_output.drafts.len(), 1);
+        assert_eq!(overridden_output.drafts.len(), 1);
+        assert_eq!(
+            default_output.drafts[0].entity,
+            overridden_output.drafts[0].entity
+        );
+        assert_eq!(
+            default_output.drafts[0].event_type,
+            overridden_output.drafts[0].event_type
+        );
+        assert_eq!(
+            default_output.drafts[0].payload,
+            overridden_output.drafts[0].payload
+        );
     }
 
     #[test]

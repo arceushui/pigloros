@@ -6,7 +6,10 @@
 //! Child reads stitch parent events up to `fork_seq` with child events.
 
 use rusqlite::{params, types::ToSql, Connection, OpenFlags, TransactionBehavior};
-use std::{collections::HashSet, time::Instant};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 
 use pos_core::{
     clock::{AdmissionClock, Seq, SystemAdmissionClock, WallTime},
@@ -286,6 +289,9 @@ impl SqliteStore {
         )
         .map_err(|e| CoreError::Storage(e.to_string()))?;
 
+        conn.busy_timeout(SQLITE_BUSY_TIMEOUT)
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+
         Self::require_utf8_encoding(&conn)?;
         let store = Self {
             conn,
@@ -350,6 +356,13 @@ impl SqliteStore {
 
     fn storage_error(error: &rusqlite::Error) -> CoreError {
         CoreError::Storage(error.to_string())
+    }
+
+    // `Result::map_err` supplies the owned error; keeping this function pointer
+    // avoids duplicating closure-only coverage regions at every adapter boundary.
+    #[allow(clippy::needless_pass_by_value)]
+    fn into_storage_error(error: rusqlite::Error) -> CoreError {
+        Self::storage_error(&error)
     }
 
     fn require_utf8_encoding(conn: &Connection) -> Result<(), CoreError> {
@@ -1118,18 +1131,20 @@ impl SqliteStore {
     }
 
     /// Walk the fork chain for a timeline, returning [root, ..., leaf].
-    fn fork_chain(
-        &self,
-        timeline_id: TimelineId,
-    ) -> Result<Vec<(TimelineId, Option<Seq>)>, CoreError> {
+    fn fork_chain(&self, timeline_id: TimelineId) -> Result<ForkChain, CoreError> {
         Self::fork_chain_on(&self.conn, timeline_id)
     }
 
-    fn fork_chain_on(
+    fn fork_chain_on(conn: &Connection, timeline_id: TimelineId) -> Result<ForkChain, CoreError> {
+        Self::fork_chain_with_leaf_head_on(conn, timeline_id).map(|(chain, _)| chain)
+    }
+
+    fn fork_chain_with_leaf_head_on(
         conn: &Connection,
         timeline_id: TimelineId,
-    ) -> Result<Vec<(TimelineId, Option<Seq>)>, CoreError> {
+    ) -> Result<ForkChainWithLeafHead, CoreError> {
         let mut chain = Vec::new();
+        let mut leaf_head = 0;
         let mut visited = HashSet::new();
         let mut current = timeline_id;
         loop {
@@ -1156,18 +1171,24 @@ impl SqliteStore {
 
             match row {
                 None => return Err(CoreError::TimelineNotFound(current)),
-                Some(DecodedForkChainRow::Root { .. }) => {
+                Some(DecodedForkChainRow::Root { head }) => {
+                    if chain.is_empty() {
+                        leaf_head = head;
+                    }
                     chain.push((current, None));
                     break;
                 }
-                Some(DecodedForkChainRow::Fork { parent, fork, .. }) => {
+                Some(DecodedForkChainRow::Fork { parent, fork, head }) => {
+                    if chain.is_empty() {
+                        leaf_head = head;
+                    }
                     chain.push((current, Some(fork)));
                     current = parent;
                 }
             }
         }
         chain.reverse();
-        Ok(chain)
+        Ok((chain, leaf_head))
     }
 
     fn logical_segment_length(
@@ -1297,6 +1318,9 @@ struct ForkChainRow {
     fork_seq: Option<i64>,
     head_seq: i64,
 }
+
+type ForkChain = Vec<(TimelineId, Option<Seq>)>;
+type ForkChainWithLeafHead = (ForkChain, u64);
 
 #[derive(Debug)]
 enum DecodedForkChainRow {
@@ -1456,7 +1480,7 @@ impl SqliteStore {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+            .map_err(Self::into_storage_error)?;
         let timeline_text = timeline.to_string();
         let timeline_query = tx.query_row(
             "SELECT head_seq FROM timelines WHERE id = ?1",
@@ -1585,7 +1609,7 @@ impl SqliteStore {
         let mut committed = Vec::with_capacity(drafts.len());
         let tx = self
             .conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         for draft in drafts {
             committed.push(Self::append_one_in_transaction(
@@ -1601,6 +1625,50 @@ impl SqliteStore {
             .into_iter()
             .map(|event| Self::logical_event(logical_prefix, event))
             .collect()
+    }
+
+    fn append_bounded_visible(
+        &mut self,
+        timeline: TimelineId,
+        drafts: &[EventDraft],
+        max_owned_events: u64,
+    ) -> Result<Option<Vec<Event>>, CoreError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let (chain, owned_head) = Self::fork_chain_with_leaf_head_on(&tx, timeline)?;
+        let logical_prefix = chain
+            .last()
+            .and_then(|(_, fork)| *fork)
+            .map_or(0, Seq::as_u64);
+        let batch_len =
+            u64::try_from(drafts.len()).expect("slice length fits in u64 on supported targets");
+        let next_head = owned_head.checked_add(batch_len).ok_or_else(|| {
+            CoreError::Storage("bounded append owned-Event head overflow".to_owned())
+        })?;
+        if next_head > max_owned_events {
+            return Ok(None);
+        }
+        let mut committed = Vec::with_capacity(drafts.len());
+        for draft in drafts {
+            committed.push(Self::append_one_in_transaction(
+                &tx,
+                self.hasher.as_ref(),
+                timeline,
+                draft.clone(),
+            )?);
+        }
+        tx.commit().map_err(Self::into_storage_error)?;
+        Ok(Some(
+            committed
+                .into_iter()
+                .map(|mut event| {
+                    event.seq = Seq::from_u64(logical_prefix + event.seq.as_u64());
+                    event
+                })
+                .collect(),
+        ))
     }
 
     fn logical_prefix(&self, timeline: TimelineId) -> Result<u64, CoreError> {
@@ -2617,6 +2685,17 @@ impl EventStore for SqliteStore {
             .and_then(|()| self.append_visible(timeline, drafts))
     }
 
+    fn append_bounded(
+        &mut self,
+        timeline: TimelineId,
+        drafts: &[EventDraft],
+        max_owned_events: u64,
+    ) -> Result<Option<Vec<Event>>, CoreError> {
+        crate::ensure_non_geographic_drafts(drafts, timeline)
+            .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
+            .and_then(|()| self.append_bounded_visible(timeline, drafts, max_owned_events))
+    }
+
     fn append_or_duplicate(
         &mut self,
         timeline: TimelineId,
@@ -2727,7 +2806,7 @@ impl EventStore for SqliteStore {
         let now = self.clock.now()?;
         let tx = self
             .conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         let mut stmt = tx.prepare("SELECT dedup_key FROM append_identities WHERE expires_at <= ?1 ORDER BY expires_at, dedup_key LIMIT ?2").map_err(|error| CoreError::Storage(error.to_string()))?;
         let keys: Result<Vec<Vec<u8>>, _> = stmt
@@ -3130,7 +3209,7 @@ impl EventStore for SqliteStore {
 
             let tx = self
                 .conn
-                .transaction()
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|e| CoreError::Storage(e.to_string()))?;
             tx.execute(
                 "DELETE FROM append_identities
@@ -3389,6 +3468,8 @@ fn parse_correlation_id(s: &str) -> Result<pos_core::CorrelationId, CoreError> {
 }
 
 use rusqlite::OptionalExtension;
+
+const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(4);
 
 #[cfg(test)]
 use pos_core::geo_cell_admission::{
@@ -6966,6 +7047,164 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn sqlite_bounded_append_is_all_or_nothing_at_the_owned_event_ceiling() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("bounded").unwrap();
+        let entity = EntityId::new();
+        let two_drafts = [make_draft(entity, b"one"), make_draft(entity, b"two")];
+
+        assert_eq!(
+            store.append_bounded(timeline.id(), &two_drafts, 1).unwrap(),
+            None
+        );
+        assert_eq!(
+            store.get_timeline(timeline.id()).unwrap().unwrap().head,
+            Seq::ZERO
+        );
+        assert!(store
+            .read_own(timeline.id(), SeqRange::all())
+            .unwrap()
+            .is_empty());
+
+        let exact_fit = store
+            .append_bounded(timeline.id(), &two_drafts, 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(exact_fit.len(), 2);
+        assert_eq!(exact_fit[0].seq, Seq::from_u64(1));
+        assert_eq!(exact_fit[1].seq, Seq::from_u64(2));
+
+        assert_eq!(
+            store.append_bounded(timeline.id(), &two_drafts, 3).unwrap(),
+            None
+        );
+        assert_eq!(
+            store.get_timeline(timeline.id()).unwrap().unwrap().head,
+            Seq::from_u64(2)
+        );
+        assert_eq!(
+            store
+                .read_own(timeline.id(), SeqRange::all())
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let empty = store
+            .append_bounded(timeline.id(), &[], 2)
+            .unwrap()
+            .unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(
+            store.get_timeline(timeline.id()).unwrap().unwrap().head,
+            Seq::from_u64(2)
+        );
+
+        let fork = store
+            .fork(timeline.id(), Seq::from_u64(2), "bounded-fork")
+            .unwrap();
+        let fork_event = store
+            .append_bounded(fork.id(), &[make_draft(entity, b"fork")], 1)
+            .unwrap()
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(fork_event.seq, Seq::from_u64(3));
+        assert_eq!(
+            store
+                .append_bounded(fork.id(), &[make_draft(entity, b"too-many")], 1)
+                .unwrap(),
+            None
+        );
+        assert_eq!(store.read_own(fork.id(), SeqRange::all()).unwrap().len(), 1);
+
+        let corrupt_fork = store
+            .fork(timeline.id(), Seq::from_u64(2), "corrupt-fork")
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE timelines SET fork_seq = 'not-an-integer' WHERE id = ?1",
+                params![corrupt_fork.id().to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.append_bounded(
+                corrupt_fork.id(),
+                &[make_draft(entity, b"must-not-commit")],
+                1,
+            ),
+            Err(CoreError::Storage(_))
+        ));
+        let (head, events) = store
+            .conn
+            .query_row(
+                "SELECT head_seq, (SELECT COUNT(*) FROM events WHERE timeline_id = ?1)
+                 FROM timelines WHERE id = ?1",
+                params![corrupt_fork.id().to_string()],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap();
+        assert_eq!((head, events), (0, 0));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn sqlite_writer_contention_serializes_generic_appends() {
+        use std::{sync::mpsc, thread, time::Duration};
+
+        let database = tempfile::NamedTempFile::new().unwrap();
+        let path = database.path().to_str().unwrap().to_owned();
+        let mut store_a = SqliteStore::open(&path).unwrap();
+        let timeline = store_a.create_timeline("contended").unwrap();
+        store_a
+            .append(timeline.id(), &[make_draft(EntityId::new(), b"a")])
+            .unwrap();
+        let mut store_b = SqliteStore::open(&path).unwrap();
+
+        let blocker = Connection::open(&path).unwrap();
+        blocker
+            .execute_batch("BEGIN IMMEDIATE; UPDATE timelines SET name = name;")
+            .unwrap();
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let timeline_id = timeline.id();
+        let worker = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = store_b.append(timeline_id, &[make_draft(EntityId::new(), b"b")]);
+            done_tx.send(result).unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        blocker.execute_batch("COMMIT;").unwrap();
+        assert_eq!(
+            done_rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap()
+                .len(),
+            1
+        );
+        worker.join().unwrap();
+
+        let store = SqliteStore::open(&path).unwrap();
+        let events = store.read(timeline.id(), SeqRange::all()).unwrap();
+        assert_eq!(
+            events.iter().map(|event| event.seq).collect::<Vec<_>>(),
+            vec![Seq::from_u64(1), Seq::from_u64(2)]
+        );
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.payload.as_slice())
+                .collect::<Vec<_>>(),
+            vec![b"a".as_slice(), b"b".as_slice()]
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_fails_when_connection_already_in_txn() {
         let mut store = new_store();
         let tl = store.create_timeline("main").unwrap();
@@ -6974,8 +7213,12 @@ mod tests {
         let err = store
             .append(tl.id(), &[make_draft(entity, b"x")])
             .unwrap_err();
+        let bounded_err = store
+            .append_bounded(tl.id(), &[make_draft(entity, b"bounded")], 1)
+            .unwrap_err();
         let _ = store.conn.execute_batch("ROLLBACK");
         assert!(matches!(err, CoreError::Storage(_)));
+        assert!(matches!(bounded_err, CoreError::Storage(_)));
     }
 
     #[test]
@@ -6990,6 +7233,12 @@ mod tests {
             .append(tl.id(), &[make_draft(entity, b"x")])
             .unwrap_err();
         assert!(matches!(err, CoreError::Storage(_)));
+        let bounded_err = store
+            .append_bounded(tl.id(), &[make_draft(entity, b"bounded")], 1)
+            .unwrap_err();
+        assert!(matches!(bounded_err, CoreError::Storage(_)));
+        store.conn.commit_hook::<fn() -> bool>(None);
+        assert!(store.read_own(tl.id(), SeqRange::all()).unwrap().is_empty());
     }
 
     #[test]
@@ -7269,6 +7518,18 @@ mod tests {
             CoreError::Storage(_) | CoreError::Serialization(_) => {} // Expected for corrupt data
             other => panic!("Expected Storage or Serialization error, got {other:?}"),
         }
+        assert!(store
+            .append_bounded(tl.id(), &[make_draft(entity, b"bounded")], 1)
+            .is_err());
+        let event_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE timeline_id = ?1",
+                params![tl.id().to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(event_count, 0);
     }
 
     #[test]
