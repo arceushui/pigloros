@@ -813,6 +813,41 @@ mod tests {
     }
 
     #[test]
+    fn reducer_never_falls_back_when_empty_chunks_precede_or_split_paa1_magic() {
+        let reducer = AgentReducer;
+        let entity = EntityId::new();
+        let mut state = reducer.initial();
+        reducer.apply(&mut state, &make_action_event(entity, "legacy"));
+
+        let malformed_candidates = [
+            vec![
+                0x9f, 0x5f, 0x40, 0x40, 0x40, 0x40, 0x41, b'P', 0x41, b'A', 0x41, b'A', 0x41, b'1',
+                0xff, 0xff,
+            ],
+            vec![
+                0x9f, 0x5f, 0x41, b'P', 0x40, 0x41, b'A', 0x40, 0x41, b'A', 0x40, 0x41, b'1', 0x40,
+                0xff, 0xff,
+            ],
+            {
+                let mut budget_exhausted = vec![0x9f, 0x5f];
+                budget_exhausted.extend(std::iter::repeat_n(0x40, 511));
+                budget_exhausted.extend([0x41, b'P', 0x41, b'A', 0x41, b'A', 0x41, b'1']);
+                budget_exhausted
+            },
+        ];
+
+        for payload in malformed_candidates {
+            assert!(protocol::is_agent_action_wire(&payload));
+            reducer.apply(&mut state, &make_action_event_with_payload(entity, payload));
+        }
+
+        assert_eq!(
+            state.get("last_action").and_then(serde_json::Value::as_str),
+            Some("legacy")
+        );
+    }
+
+    #[test]
     fn reducer_dispatches_every_magic_bearing_malformed_paa1_candidate_strictly() {
         let reducer = AgentReducer;
         let entity = EntityId::new();

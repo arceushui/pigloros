@@ -361,13 +361,22 @@ mod tests {
     const PLUGIN_HASH: [u8; 32] = [3; 32];
     const PROVIDER_HASH: [u8; 32] = [4; 32];
 
+    struct HostConfigurationFixture {
+        action_ids: [&'static str; 2],
+        plugin_id: PluginId,
+        plugin_version: &'static str,
+        plugin_content_hash: [u8; 32],
+        provider_id: &'static str,
+        provider_version: &'static str,
+        provider_content_hash: [u8; 32],
+    }
+
     struct DriverFixture {
         registry: PluginRegistry,
         calls: FixtureProviderCallCount,
         timeline: TimelineId,
         entity: EntityId,
-        catalogue: ActionCatalogueV1,
-        provenance: AgentProviderProvenanceV1,
+        host: HostConfigurationFixture,
     }
 
     fn provenance() -> AgentProviderProvenanceV1 {
@@ -386,15 +395,33 @@ mod tests {
         let provider = FixtureAgentDecisionProvider::new(attempts);
         let calls = provider.call_count_handle();
         let entity = EntityId::new();
-        let catalogue =
-            ActionCatalogueV1::try_new(vec!["left".to_owned(), "right".to_owned()]).unwrap();
-        let provenance = provenance();
-        let driver = ProviderBackedAgentDriver::new(
-            entity,
-            catalogue.clone(),
-            provenance.clone(),
-            Box::new(provider),
-        );
+        let host = HostConfigurationFixture {
+            action_ids: ["left", "right"],
+            plugin_id: PluginId::new(),
+            plugin_version: "1.0.0",
+            plugin_content_hash: PLUGIN_HASH,
+            provider_id: "local-provider",
+            provider_version: "2026.08",
+            provider_content_hash: PROVIDER_HASH,
+        };
+        let catalogue = ActionCatalogueV1::try_new(
+            host.action_ids
+                .iter()
+                .map(|action_id| (*action_id).to_owned())
+                .collect(),
+        )
+        .unwrap();
+        let provenance = AgentProviderProvenanceV1::try_new(
+            host.plugin_id,
+            host.plugin_version.to_owned(),
+            host.plugin_content_hash,
+            host.provider_id.to_owned(),
+            host.provider_version.to_owned(),
+            host.provider_content_hash,
+        )
+        .unwrap();
+        let driver =
+            ProviderBackedAgentDriver::new(entity, catalogue, provenance, Box::new(provider));
         let mut registry = PluginRegistry::new();
         registry.register_driver(Box::new(driver));
         DriverFixture {
@@ -402,8 +429,7 @@ mod tests {
             calls,
             timeline: TimelineId::new(),
             entity,
-            catalogue,
-            provenance,
+            host,
         }
     }
 
@@ -415,9 +441,191 @@ mod tests {
         DecisionRecordV1::decode(drafts[0].payload.as_slice()).unwrap()
     }
 
+    #[derive(Default)]
+    struct IndependentCanonicalCbor(Vec<u8>);
+
+    impl IndependentCanonicalCbor {
+        fn array(&mut self, length: usize) {
+            let length = u8::try_from(length).expect("fixture array length fits u8");
+            assert!(length <= 23, "fixture arrays use direct CBOR lengths");
+            self.0.push(0x80 | length);
+        }
+
+        fn bytes(&mut self, value: &[u8]) {
+            let length = u8::try_from(value.len()).expect("fixture byte string length fits u8");
+            if length <= 23 {
+                self.0.push(0x40 | length);
+            } else {
+                self.0.extend([0x58, length]);
+            }
+            self.0.extend_from_slice(value);
+        }
+
+        fn text(&mut self, value: &str) {
+            let length = u8::try_from(value.len()).expect("fixture text length fits u8");
+            assert!(length <= 23, "fixture text uses direct CBOR lengths");
+            self.0.push(0x60 | length);
+            self.0.extend_from_slice(value.as_bytes());
+        }
+
+        fn uint(&mut self, value: u64) {
+            if value <= 23 {
+                self.0
+                    .push(u8::try_from(value).expect("direct CBOR uint fits u8"));
+            } else {
+                self.0.push(0x18);
+                self.0
+                    .push(u8::try_from(value).expect("fixture CBOR uint fits u8"));
+            }
+        }
+
+        fn finish(self) -> Vec<u8> {
+            self.0
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum ExpectedResult {
+        Accepted { action_index: u8, confidence: u32 },
+        NoAction { code: u8 },
+    }
+
+    fn write_fixture_request_fields(
+        output: &mut IndependentCanonicalCbor,
+        fixture: &DriverFixture,
+        catalogue_hash: [u8; 32],
+    ) {
+        output.bytes(&fixture.timeline.inner().to_bytes());
+        output.uint(7);
+        output.bytes(&fixture.entity.inner().to_bytes());
+        output.uint(0);
+        output.bytes(&catalogue_hash);
+        output.bytes(&fixture.host.plugin_id.inner().to_bytes());
+        output.text(fixture.host.plugin_version);
+        output.bytes(&fixture.host.plugin_content_hash);
+        output.text(fixture.host.provider_id);
+        output.text(fixture.host.provider_version);
+        output.bytes(&fixture.host.provider_content_hash);
+    }
+
+    fn expected_catalogue_bytes(fixture: &DriverFixture) -> Vec<u8> {
+        let mut output = IndependentCanonicalCbor::default();
+        output.array(3);
+        output.bytes(b"PAC1");
+        output.uint(1);
+        output.array(fixture.host.action_ids.len());
+        for action_id in fixture.host.action_ids {
+            output.text(action_id);
+        }
+        output.finish()
+    }
+
+    fn expected_request_bytes(fixture: &DriverFixture, catalogue_hash: [u8; 32]) -> Vec<u8> {
+        let mut output = IndependentCanonicalCbor::default();
+        output.array(13);
+        output.bytes(b"PQR1");
+        output.uint(1);
+        write_fixture_request_fields(&mut output, fixture, catalogue_hash);
+        output.finish()
+    }
+
+    fn write_expected_result(output: &mut IndependentCanonicalCbor, result: ExpectedResult) {
+        match result {
+            ExpectedResult::Accepted {
+                action_index,
+                confidence,
+            } => {
+                output.array(3);
+                output.uint(0);
+                output.uint(u64::from(action_index));
+                output.uint(u64::from(confidence));
+            }
+            ExpectedResult::NoAction { code } => {
+                output.array(2);
+                output.uint(1);
+                output.uint(u64::from(code));
+            }
+        }
+    }
+
+    fn expected_record_bytes(
+        fixture: &DriverFixture,
+        catalogue_hash: [u8; 32],
+        request_hash: [u8; 32],
+        response_digest: Option<[u8; 32]>,
+        result: ExpectedResult,
+    ) -> Vec<u8> {
+        let mut output = IndependentCanonicalCbor::default();
+        output.array(16);
+        output.bytes(b"PDR1");
+        output.uint(1);
+        write_fixture_request_fields(&mut output, fixture, catalogue_hash);
+        output.bytes(&request_hash);
+        if let Some(response_digest) = response_digest {
+            output.array(2);
+            output.uint(1);
+            output.bytes(&response_digest);
+        } else {
+            output.array(1);
+            output.uint(0);
+        }
+        write_expected_result(&mut output, result);
+        output.finish()
+    }
+
+    fn expected_action_bytes(
+        action_id: &str,
+        confidence: u32,
+        catalogue_hash: [u8; 32],
+        record_hash: [u8; 32],
+    ) -> Vec<u8> {
+        let mut output = IndependentCanonicalCbor::default();
+        output.array(7);
+        output.bytes(b"PAA1");
+        output.uint(1);
+        output.text(action_id);
+        output.uint(u64::from(confidence));
+        output.uint(0);
+        output.bytes(&catalogue_hash);
+        output.bytes(&record_hash);
+        output.finish()
+    }
+
+    fn assert_decoded_result(actual: DecisionResultV1, expected: ExpectedResult, case: usize) {
+        match (actual, expected) {
+            (
+                DecisionResultV1::Accepted {
+                    action_index,
+                    confidence,
+                },
+                ExpectedResult::Accepted {
+                    action_index: expected_index,
+                    confidence: expected_confidence,
+                },
+            ) => {
+                assert_eq!(
+                    action_index.get(),
+                    expected_index,
+                    "normalization case {case}"
+                );
+                assert_eq!(
+                    confidence.get(),
+                    expected_confidence,
+                    "normalization case {case}"
+                );
+            }
+            (DecisionResultV1::NoAction(code), ExpectedResult::NoAction { code: expected }) => {
+                assert_eq!(code.code(), expected, "normalization case {case}");
+            }
+            (actual, expected) => {
+                panic!("normalization case {case}: decoded {actual:?}, expected {expected:?}");
+            }
+        }
+    }
+
     fn assert_normalized_attempt(
         attempt: ProviderAttempt,
-        expected_result: DecisionResultV1,
+        expected_result: ExpectedResult,
         expected_digest: Option<[u8; 32]>,
         expected_action: Option<&str>,
         case: usize,
@@ -430,57 +638,78 @@ mod tests {
         assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
         assert_eq!(drafts[0].event_type.as_str(), RECORDER_EVENT_TYPE);
         assert_eq!(drafts[0].entity, fixture.entity);
-        let catalogue_hash = fixture.catalogue.hash().unwrap();
-        let expected_request = AgentDecisionRequestV1::new(
-            fixture.timeline,
-            7,
-            fixture.entity,
-            0,
-            catalogue_hash,
-            fixture.provenance.clone(),
+        let catalogue_hash = blake3::derive_key(
+            "pigloros.agent.catalogue.v1",
+            &expected_catalogue_bytes(&fixture),
         );
-        let expected_request_hash = expected_request.hash().unwrap();
-        let expected_record = DecisionRecordV1::new(
-            expected_request,
-            expected_request_hash,
+        let request_bytes = expected_request_bytes(&fixture, catalogue_hash);
+        let request_hash = blake3::derive_key("pigloros.agent.request.v1", &request_bytes);
+        let record_bytes = expected_record_bytes(
+            &fixture,
+            catalogue_hash,
+            request_hash,
             expected_digest,
             expected_result,
         );
-        let expected_record_bytes = expected_record.encode().unwrap();
         assert_eq!(
             drafts[0].payload.as_slice(),
-            expected_record_bytes.as_slice(),
+            record_bytes.as_slice(),
             "normalization case {case}"
         );
         let record = record_from_drafts(&drafts);
+        let request = record.request();
+        assert_eq!(request.timeline_id(), fixture.timeline);
+        assert_eq!(request.observed_through(), 7);
+        assert_eq!(request.agent_id(), fixture.entity);
+        assert_eq!(request.driver_tick(), 0);
+        assert_eq!(request.catalogue_hash(), catalogue_hash);
+        assert_eq!(request.provenance().plugin_id(), fixture.host.plugin_id);
         assert_eq!(
-            record.result(),
-            expected_result,
-            "normalization case {case}"
+            request.provenance().plugin_version(),
+            fixture.host.plugin_version
         );
+        assert_eq!(
+            request.provenance().plugin_content_hash(),
+            fixture.host.plugin_content_hash
+        );
+        assert_eq!(request.provenance().provider_id(), fixture.host.provider_id);
+        assert_eq!(
+            request.provenance().provider_version(),
+            fixture.host.provider_version
+        );
+        assert_eq!(
+            request.provenance().provider_content_hash(),
+            fixture.host.provider_content_hash
+        );
+        assert_eq!(record.request_hash(), request_hash);
         assert_eq!(
             record.response_digest(),
             expected_digest,
             "normalization case {case}"
         );
+        assert_decoded_result(record.result(), expected_result, case);
 
         if let Some(expected_action) = expected_action {
             assert_eq!(drafts.len(), 2);
             assert_eq!(drafts[1].event_type.as_str(), EVENT_TYPE_ACTION);
             assert_eq!(drafts[1].entity, fixture.entity);
-            let expected_action = AgentActionV1::try_new(
-                expected_action.to_owned(),
-                42,
-                0,
-                catalogue_hash,
-                expected_record.hash().unwrap(),
-            )
-            .unwrap();
+            let ExpectedResult::Accepted { confidence, .. } = expected_result else {
+                panic!("normalization case {case}: action requires accepted result");
+            };
+            let record_hash = blake3::derive_key("pigloros.agent.record.v1", &record_bytes);
+            let action_bytes =
+                expected_action_bytes(expected_action, confidence, catalogue_hash, record_hash);
             assert_eq!(
                 drafts[1].payload.as_slice(),
-                expected_action.encode().unwrap().as_slice(),
+                action_bytes.as_slice(),
                 "normalization case {case}"
             );
+            let action = AgentActionV1::decode(drafts[1].payload.as_slice()).unwrap();
+            assert_eq!(action.action_id(), expected_action);
+            assert_eq!(action.confidence().get(), confidence);
+            assert_eq!(action.driver_tick(), 0);
+            assert_eq!(action.catalogue_hash(), catalogue_hash);
+            assert_eq!(action.decision_record_hash(), record_hash);
         } else {
             assert_eq!(drafts.len(), 1);
         }
@@ -545,31 +774,31 @@ mod tests {
         let cases = vec![
             (
                 ProviderAttempt::Failed(ProviderFailureCode::Unavailable),
-                DecisionResultV1::NoAction(DecisionNoActionCodeV1::ProviderUnavailable),
+                ExpectedResult::NoAction { code: 1 },
                 None,
                 None,
             ),
             (
                 ProviderAttempt::Failed(ProviderFailureCode::Timeout),
-                DecisionResultV1::NoAction(DecisionNoActionCodeV1::ProviderTimeout),
+                ExpectedResult::NoAction { code: 2 },
                 None,
                 None,
             ),
             (
                 ProviderAttempt::Failed(ProviderFailureCode::Rejected),
-                DecisionResultV1::NoAction(DecisionNoActionCodeV1::ProviderRejected),
+                ExpectedResult::NoAction { code: 3 },
                 None,
                 None,
             ),
             (
                 ProviderAttempt::Failed(ProviderFailureCode::RateLimited),
-                DecisionResultV1::NoAction(DecisionNoActionCodeV1::ProviderRateLimited),
+                ExpectedResult::NoAction { code: 4 },
                 None,
                 None,
             ),
             (
                 ProviderAttempt::NoResponse,
-                DecisionResultV1::NoAction(DecisionNoActionCodeV1::ProviderNoAction),
+                ExpectedResult::NoAction { code: 5 },
                 None,
                 None,
             ),
@@ -577,7 +806,7 @@ mod tests {
                 ProviderAttempt::Oversized {
                     response_digest: Some(overflow_digest),
                 },
-                DecisionResultV1::NoAction(DecisionNoActionCodeV1::ResponseTooLarge),
+                ExpectedResult::NoAction { code: 6 },
                 Some(overflow_digest),
                 None,
             ),
@@ -585,7 +814,7 @@ mod tests {
                 ProviderAttempt::Oversized {
                     response_digest: None,
                 },
-                DecisionResultV1::NoAction(DecisionNoActionCodeV1::ResponseTooLarge),
+                ExpectedResult::NoAction { code: 6 },
                 None,
                 None,
             ),
@@ -623,38 +852,41 @@ mod tests {
         let cases = vec![
             (
                 malformed.clone(),
-                DecisionResultV1::NoAction(DecisionNoActionCodeV1::ResponseMalformed),
+                ExpectedResult::NoAction { code: 7 },
                 None,
             ),
             (
                 unsupported.clone(),
-                DecisionResultV1::NoAction(DecisionNoActionCodeV1::ResponseVersionUnsupported),
+                ExpectedResult::NoAction { code: 8 },
                 None,
             ),
             (
                 invalid_index.clone(),
-                DecisionResultV1::NoAction(DecisionNoActionCodeV1::ResponseValueInvalid),
+                ExpectedResult::NoAction { code: 9 },
                 None,
             ),
             (
                 invalid_confidence.clone(),
-                DecisionResultV1::NoAction(DecisionNoActionCodeV1::ResponseValueInvalid),
+                ExpectedResult::NoAction { code: 9 },
                 None,
             ),
             (
                 no_action.clone(),
-                DecisionResultV1::NoAction(DecisionNoActionCodeV1::ProviderNoAction),
+                ExpectedResult::NoAction { code: 5 },
                 None,
             ),
             (
                 accepted.clone(),
-                ProviderDecisionV1::accepted(1, 42).unwrap().into(),
+                ExpectedResult::Accepted {
+                    action_index: 1,
+                    confidence: 42,
+                },
                 Some("right"),
             ),
         ];
 
         for (case, (wire, expected_result, expected_action)) in cases.into_iter().enumerate() {
-            let expected_digest = Some(ProviderDecisionV1::hash_response(&wire));
+            let expected_digest = Some(blake3::derive_key("pigloros.agent.response.v1", &wire));
             assert_normalized_attempt(
                 ProviderAttempt::Response(wire.try_into().unwrap()),
                 expected_result,

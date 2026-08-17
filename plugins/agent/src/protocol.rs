@@ -887,40 +887,46 @@ fn raw_definite_byte_string_starts_with_magic(input: &[u8]) -> bool {
 }
 
 fn raw_indefinite_byte_string_starts_with_magic(input: &[u8]) -> bool {
-    const MAX_MAGIC_CHUNKS: usize = ACTION_MAGIC.len();
+    let inspection_len = input.len().min(MAX_ENCODED_ACTION_BYTES);
+    let inspected = &input[..inspection_len];
+    let budget_exhausted = input.len() > inspection_len;
     let mut offset = 1usize;
     let mut matched = 0usize;
-    for _ in 0..MAX_MAGIC_CHUNKS {
-        let Some(remaining) = input.get(offset..) else {
-            return false;
+    while offset < inspected.len() {
+        let Some(remaining) = inspected.get(offset..) else {
+            return budget_exhausted;
         };
         let Some((header_len, value_len)) = raw_definite_byte_string(remaining) else {
-            return false;
+            return budget_exhausted;
         };
         let needed = ACTION_MAGIC.len() - matched;
         let compared = value_len.min(needed);
-        let Some(value_prefix) = remaining.get(header_len..header_len + compared) else {
-            return false;
+        let Some(value_prefix) = remaining
+            .get(header_len..)
+            .and_then(|value| value.get(..compared))
+        else {
+            return budget_exhausted;
         };
-        if value_prefix != &ACTION_MAGIC[matched..matched + compared] {
+        let magic_end = matched + compared;
+        if value_prefix != &ACTION_MAGIC[matched..magic_end] {
             return false;
         }
-        matched += compared;
+        matched = magic_end;
         if matched == ACTION_MAGIC.len() {
             return true;
         }
         let Some(chunk_len) = header_len.checked_add(value_len) else {
-            return false;
+            return budget_exhausted;
         };
         let Some(next_offset) = offset.checked_add(chunk_len) else {
-            return false;
+            return budget_exhausted;
         };
-        if next_offset > input.len() {
-            return false;
+        if next_offset > inspected.len() {
+            return budget_exhausted;
         }
         offset = next_offset;
     }
-    false
+    budget_exhausted
 }
 
 fn raw_definite_byte_string(input: &[u8]) -> Option<(usize, usize)> {
