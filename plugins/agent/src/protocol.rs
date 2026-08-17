@@ -822,82 +822,94 @@ impl AgentActionV1 {
 /// candidate. Callers must still use [`AgentActionV1::decode`] to validate it.
 #[must_use]
 pub fn is_agent_action_wire(input: &[u8]) -> bool {
-    match raw_tagged_array_payload_offset(input) {
-        Ok(Some(array_payload_offset)) => input
-            .get(array_payload_offset..)
-            .is_some_and(raw_byte_string_starts_with_action_magic),
-        Err(()) => true,
+    let inspection_len = input.len().min(MAX_ENCODED_ACTION_BYTES);
+    let inspected = &input[..inspection_len];
+    let budget_reached = input.len() >= MAX_ENCODED_ACTION_BYTES;
+    match raw_tagged_array_payload_offset(inspected) {
+        Ok(Some(array_payload_offset)) => {
+            inspected
+                .get(array_payload_offset..)
+                .is_some_and(|payload| {
+                    raw_byte_string_starts_with_action_magic(payload, budget_reached)
+                })
+        }
+        Err(()) => budget_reached,
         Ok(None) => false,
     }
 }
 
 fn raw_tagged_array_payload_offset(input: &[u8]) -> Result<Option<usize>, ()> {
     let mut offset = 0usize;
-    while offset < MAX_ENCODED_ACTION_BYTES {
-        let Some(remaining) = input.get(offset..) else {
-            return Ok(None);
-        };
-        if let Some(tag_header_len) = raw_tag_header_len(remaining) {
+    loop {
+        let remaining = &input[offset..];
+        if remaining.is_empty() {
+            return Err(());
+        }
+        if let Some(tag_header_len) = raw_tag_header_len(remaining)? {
             offset = offset.checked_add(tag_header_len).ok_or(())?;
         } else {
-            return Ok(raw_array_header_len(remaining)
+            return Ok(raw_array_header_len(remaining)?
                 .and_then(|array_header_len| offset.checked_add(array_header_len)));
         }
     }
-    Err(())
 }
 
-fn raw_tag_header_len(input: &[u8]) -> Option<usize> {
-    match input.first().copied() {
-        Some(0xc0..=0xd7) => Some(1),
-        Some(0xd8) if input.len() >= 2 => Some(2),
-        Some(0xd9) if input.len() >= 3 => Some(3),
-        Some(0xda) if input.len() >= 5 => Some(5),
-        Some(0xdb) if input.len() >= 9 => Some(9),
-        _ => None,
+fn raw_tag_header_len(input: &[u8]) -> Result<Option<usize>, ()> {
+    match input.first().copied().ok_or(())? {
+        0xc0..=0xd7 => Ok(Some(1)),
+        0xd8 => raw_header_len(input, 2).map(Some),
+        0xd9 => raw_header_len(input, 3).map(Some),
+        0xda => raw_header_len(input, 5).map(Some),
+        0xdb => raw_header_len(input, 9).map(Some),
+        _ => Ok(None),
     }
 }
 
-fn raw_array_header_len(input: &[u8]) -> Option<usize> {
-    match input.first().copied() {
-        Some(0x80..=0x97 | 0x9f) => Some(1),
-        Some(0x98) if input.len() >= 2 => Some(2),
-        Some(0x99) if input.len() >= 3 => Some(3),
-        Some(0x9a) if input.len() >= 5 => Some(5),
-        Some(0x9b) if input.len() >= 9 => Some(9),
-        _ => None,
+fn raw_array_header_len(input: &[u8]) -> Result<Option<usize>, ()> {
+    match input.first().copied().ok_or(())? {
+        0x80..=0x97 | 0x9f => Ok(Some(1)),
+        0x98 => raw_header_len(input, 2).map(Some),
+        0x99 => raw_header_len(input, 3).map(Some),
+        0x9a => raw_header_len(input, 5).map(Some),
+        0x9b => raw_header_len(input, 9).map(Some),
+        _ => Ok(None),
     }
 }
 
-fn raw_byte_string_starts_with_action_magic(input: &[u8]) -> bool {
+fn raw_header_len(input: &[u8], header_len: usize) -> Result<usize, ()> {
+    (input.len() >= header_len).then_some(header_len).ok_or(())
+}
+
+fn raw_byte_string_starts_with_action_magic(input: &[u8], budget_reached: bool) -> bool {
     if input.first() == Some(&0x5f) {
-        raw_indefinite_byte_string_starts_with_magic(input)
+        raw_indefinite_byte_string_starts_with_magic(input, budget_reached)
     } else {
-        raw_definite_byte_string_starts_with_magic(input)
+        raw_definite_byte_string_starts_with_magic(input, budget_reached)
     }
 }
 
-fn raw_definite_byte_string_starts_with_magic(input: &[u8]) -> bool {
-    raw_definite_byte_string(input).is_some_and(|(header_len, value_len)| {
-        value_len >= ACTION_MAGIC.len()
-            && input
-                .get(header_len..header_len + ACTION_MAGIC.len())
-                .is_some_and(starts_action_magic)
-    })
+fn raw_definite_byte_string_starts_with_magic(input: &[u8], budget_reached: bool) -> bool {
+    match raw_definite_byte_string(input) {
+        Ok(Some((header_len, value_len))) if value_len >= ACTION_MAGIC.len() => input
+            .get(header_len..header_len + ACTION_MAGIC.len())
+            .map_or(budget_reached, starts_action_magic),
+        Err(()) => budget_reached,
+        Ok(Some(_) | None) => false,
+    }
 }
 
-fn raw_indefinite_byte_string_starts_with_magic(input: &[u8]) -> bool {
-    let inspection_len = input.len().min(MAX_ENCODED_ACTION_BYTES);
-    let inspected = &input[..inspection_len];
-    let budget_exhausted = input.len() > inspection_len;
+fn raw_indefinite_byte_string_starts_with_magic(input: &[u8], budget_reached: bool) -> bool {
     let mut offset = 1usize;
     let mut matched = 0usize;
-    while offset < inspected.len() {
-        let Some(remaining) = inspected.get(offset..) else {
-            return budget_exhausted;
-        };
-        let Some((header_len, value_len)) = raw_definite_byte_string(remaining) else {
-            return budget_exhausted;
+    while offset < input.len() {
+        let remaining = &input[offset..];
+        if remaining.first() == Some(&0xff) {
+            return false;
+        }
+        let (header_len, value_len) = match raw_definite_byte_string(remaining) {
+            Ok(Some(chunk)) => chunk,
+            Err(()) => return budget_reached,
+            Ok(None) => return false,
         };
         let needed = ACTION_MAGIC.len() - matched;
         let compared = value_len.min(needed);
@@ -905,7 +917,7 @@ fn raw_indefinite_byte_string_starts_with_magic(input: &[u8]) -> bool {
             .get(header_len..)
             .and_then(|value| value.get(..compared))
         else {
-            return budget_exhausted;
+            return budget_reached;
         };
         let magic_end = matched + compared;
         if value_prefix != &ACTION_MAGIC[matched..magic_end] {
@@ -915,49 +927,47 @@ fn raw_indefinite_byte_string_starts_with_magic(input: &[u8]) -> bool {
         if matched == ACTION_MAGIC.len() {
             return true;
         }
-        let Some(chunk_len) = header_len.checked_add(value_len) else {
-            return budget_exhausted;
-        };
-        let Some(next_offset) = offset.checked_add(chunk_len) else {
-            return budget_exhausted;
-        };
-        if next_offset > inspected.len() {
-            return budget_exhausted;
-        }
-        offset = next_offset;
+        offset += header_len + value_len;
     }
-    budget_exhausted
+    budget_reached
 }
 
-fn raw_definite_byte_string(input: &[u8]) -> Option<(usize, usize)> {
-    match input.first().copied()? {
-        byte @ 0x40..=0x57 => Some((1, usize::from(byte - 0x40))),
-        0x58 => Some((2, usize::from(*input.get(1)?))),
-        0x59 => Some((
+fn raw_definite_byte_string(input: &[u8]) -> Result<Option<(usize, usize)>, ()> {
+    match input.first().copied().ok_or(())? {
+        byte @ 0x40..=0x57 => Ok(Some((1, usize::from(byte - 0x40)))),
+        0x58 => Ok(Some((2, usize::from(*input.get(1).ok_or(())?)))),
+        0x59 => Ok(Some((
             3,
-            usize::from(u16::from_be_bytes([*input.get(1)?, *input.get(2)?])),
-        )),
-        0x5a => usize::try_from(u32::from_be_bytes([
-            *input.get(1)?,
-            *input.get(2)?,
-            *input.get(3)?,
-            *input.get(4)?,
-        ]))
-        .ok()
-        .map(|length| (5, length)),
-        0x5b => usize::try_from(u64::from_be_bytes([
-            *input.get(1)?,
-            *input.get(2)?,
-            *input.get(3)?,
-            *input.get(4)?,
-            *input.get(5)?,
-            *input.get(6)?,
-            *input.get(7)?,
-            *input.get(8)?,
-        ]))
-        .ok()
-        .map(|length| (9, length)),
-        _ => None,
+            usize::from(u16::from_be_bytes([
+                *input.get(1).ok_or(())?,
+                *input.get(2).ok_or(())?,
+            ])),
+        ))),
+        0x5a => Ok(Some((
+            5,
+            usize::try_from(u32::from_be_bytes([
+                *input.get(1).ok_or(())?,
+                *input.get(2).ok_or(())?,
+                *input.get(3).ok_or(())?,
+                *input.get(4).ok_or(())?,
+            ]))
+            .map_err(|_| ())?,
+        ))),
+        0x5b => Ok(Some((
+            9,
+            usize::try_from(u64::from_be_bytes([
+                *input.get(1).ok_or(())?,
+                *input.get(2).ok_or(())?,
+                *input.get(3).ok_or(())?,
+                *input.get(4).ok_or(())?,
+                *input.get(5).ok_or(())?,
+                *input.get(6).ok_or(())?,
+                *input.get(7).ok_or(())?,
+                *input.get(8).ok_or(())?,
+            ]))
+            .map_err(|_| ())?,
+        ))),
+        _ => Ok(None),
     }
 }
 

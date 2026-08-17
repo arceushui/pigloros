@@ -834,6 +834,31 @@ mod tests {
                 budget_exhausted.extend([0x41, b'P', 0x41, b'A', 0x41, b'A', 0x41, b'1']);
                 budget_exhausted
             },
+            {
+                let mut exact_post_array_window = vec![0x9f, 0x5f];
+                exact_post_array_window.extend(std::iter::repeat_n(0x40, 507));
+                exact_post_array_window.extend([0x43, b'P', b'A', b'A']);
+                exact_post_array_window
+            },
+            {
+                let mut exact_whole_payload_budget = vec![0x9f, 0x5f];
+                exact_whole_payload_budget.extend(std::iter::repeat_n(0x40, 506));
+                exact_whole_payload_budget.extend([0x43, b'P', b'A', b'A']);
+                exact_whole_payload_budget
+            },
+            {
+                let mut tagged_exact_whole_payload_budget = vec![0xc0; 500];
+                tagged_exact_whole_payload_budget.extend([0x9f, 0x5f]);
+                tagged_exact_whole_payload_budget.extend(std::iter::repeat_n(0x40, 6));
+                tagged_exact_whole_payload_budget.extend([0x43, b'P', b'A', b'A']);
+                tagged_exact_whole_payload_budget
+            },
+            {
+                let mut truncated_chunk_header_at_budget = vec![0x9f, 0x5f];
+                truncated_chunk_header_at_budget.extend(std::iter::repeat_n(0x40, 509));
+                truncated_chunk_header_at_budget.push(0x58);
+                truncated_chunk_header_at_budget
+            },
         ];
 
         for payload in malformed_candidates {
@@ -936,6 +961,8 @@ mod tests {
             vec![0x87, 0x5f],
             vec![0x9f, 0x00],
             vec![0x9f, 0x5f, 0x00],
+            vec![0x9f, 0x5f, 0xff],
+            vec![0x9f, 0x5f, 0x58],
             vec![0x9f, 0x5f, 0x44, b'P'],
             vec![0x9f, 0x5f, 0x41, b'Q'],
             vec![0x9f, 0x5f, 0x58, 0x10, b'P'],
@@ -947,6 +974,11 @@ mod tests {
                 0x9f, 0x5f, 0x5b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xf6,
             ],
             vec![0x87, 0x44, b'P', b'A', b'A', b'0'],
+            {
+                let mut clear_non_candidate_at_budget = vec![0x87, 0x00];
+                clear_non_candidate_at_budget.resize(512, 0);
+                clear_non_candidate_at_budget
+            },
         ] {
             assert!(!protocol::is_agent_action_wire(&truncated));
         }
