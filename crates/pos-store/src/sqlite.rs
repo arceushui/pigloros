@@ -1644,10 +1644,9 @@ impl SqliteStore {
             .map_or(0, Seq::as_u64);
         let batch_len =
             u64::try_from(drafts.len()).expect("slice length fits in u64 on supported targets");
-        // SQLite persists both the fork prefix and owned head as non-negative
-        // signed 64-bit values, while an addressable slice is at most
-        // `isize::MAX`; their sums therefore fit in `u64` on supported targets.
-        let next_head = owned_head + batch_len;
+        let next_head = owned_head.checked_add(batch_len).ok_or_else(|| {
+            CoreError::Storage("bounded append owned-Event head overflow".to_owned())
+        })?;
         if next_head > max_owned_events {
             return Ok(None);
         }
@@ -2807,7 +2806,7 @@ impl EventStore for SqliteStore {
         let now = self.clock.now()?;
         let tx = self
             .conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         let mut stmt = tx.prepare("SELECT dedup_key FROM append_identities WHERE expires_at <= ?1 ORDER BY expires_at, dedup_key LIMIT ?2").map_err(|error| CoreError::Storage(error.to_string()))?;
         let keys: Result<Vec<Vec<u8>>, _> = stmt
@@ -3210,7 +3209,7 @@ impl EventStore for SqliteStore {
 
             let tx = self
                 .conn
-                .transaction()
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|e| CoreError::Storage(e.to_string()))?;
             tx.execute(
                 "DELETE FROM append_identities

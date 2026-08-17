@@ -20,7 +20,7 @@
 - No migration: product Timeline data is not deployed.
 - No new external dependency, crate, plugin, protocol, CI workflow, ignored test, or production `coverage(off)`.
 - Every commit gets targeted tests, exact-file staging, Redmine #126 and Notion journal updates, and storage monitoring.
-- Heavy full-workspace, ASan, coverage, WASM, browser, Docker, and dependency gates run remotely; local work stays targeted.
+- Run targeted tests during each red/green implementation step and the repository-required local coverage check after every code change. Before publication, run the full local workspace, ASan, coverage, WASM/browser, and dependency gates; GitHub Actions repeats the applicable gates remotely.
 
 ---
 
@@ -382,7 +382,7 @@ enum StepMode { AllDrivers, Cadenced }
 enum DriverSelection { AllDrivers, Cadenced(u128) }
 ```
 
-Store `step_mode: Option<StepMode>` and `last_cadence_ns: Option<u128>` in every constructor/resume/fork path. Refactor the current body into `step_boundary(selection)`. Select drafts with `step_all()` or `tick_cadenced()`, but leave pre-fold, validation, atomic append, post-fold, health, counters, quiescence, and stop handling shared.
+Store `step_mode: Option<StepMode>` and `last_simulation_time_ns: Option<u128>` in every constructor/resume/fork path. Refactor the current body into `step_boundary(selection)`. Select drafts with `step_all()` or `tick_cadenced()`, but leave pre-fold, validation, atomic append, post-fold, health, counters, quiescence, and stop handling shared.
 
 Add exact public errors:
 
@@ -393,11 +393,11 @@ CadenceTimeRegressed { previous_ns: u128, requested_ns: u128 },
 StepModeMismatch { active: &'static str, requested: &'static str },
 ```
 
-`start()`, `resume()`, and the child returned by `fork()` all construct fresh runtime state with `step_mode: None` and `last_cadence_ns: None`. The parent session retains its existing mode/time. This matches the existing fresh-driver semantics for resume and fork; each new live session selects its own stepping mode on its first successful boundary.
+`start()`, `resume()`, and the child returned by `fork()` all construct fresh runtime state with `step_mode: None` and `last_simulation_time_ns: None`. The parent session retains its existing mode/time. This matches the existing fresh-driver semantics for resume and fork; each new live session selects its own stepping mode on its first successful boundary.
 
 - [x] **Step 6: Validate mode/time before capture and latch only on success**
 
-`step_cadenced()` rejects `now_ns < last_cadence_ns` and mode mismatch before `capture_pending_range()`. `step_tick()` performs the same mode check. After a successful boundary, set the mode and cadence timestamp. Errors after projection/driver mutation preserve existing fault semantics.
+`step_cadenced()` rejects `now_ns < last_simulation_time_ns` and mode mismatch before `capture_pending_range()`. `step_tick()` performs the same mode check. After a successful boundary, set the mode and Simulation Time. Errors after projection/driver mutation preserve existing fault semantics.
 
 - [x] **Step 7: Add the fault-safe projection accessor**
 
@@ -441,19 +441,19 @@ Journal all state-machine and fault-boundary evidence.
 - Consumes: public `router`, `AppState`, `Gateway`, `Experiment::resume`, `step_cadenced`, `projections`, Agent/Society plugins, `EntityStateProjection`, and `pos_time::replay`
 - Produces: one normal workspace integration test executed by CI `test`, coverage, and ASan jobs
 
-- [ ] **Step 1: Add exact dev-dependencies**
+- [x] **Step 1: Add exact dev-dependencies**
 
 Add path dev-dependencies for `pos-experiment`, `pos-runtime`, `pos-state`, `pos-time`, and `pos-plugin-agent`, plus workspace `tempfile`. Do not add an HTTP client dependency; use a small blocking TCP helper so the test covers real HTTP without expanding the dependency graph.
 
-- [ ] **Step 2: Build the failing HTTP fixture**
+- [x] **Step 2: Build the failing HTTP fixture**
 
-Use `#[tokio::test(flavor = "multi_thread", worker_threads = 4)]`. In `e2e_determinism.rs`, bind `tokio::net::TcpListener` to `127.0.0.1:0`, create `Gateway::new(SqliteStore::open(path))`, construct public `AppState`, and spawn `axum::serve(listener, router(state))` with a oneshot graceful shutdown.
+Use `#[tokio::test(flavor = "multi_thread", worker_threads = 4)]`. In `e2e_determinism.rs`, bind `tokio::net::TcpListener` to `127.0.0.1:0`, create the Gateway store through `open_store(StoreConfig::Sqlite { path })`, construct public `AppState`, and spawn `axum::serve(listener, router(state))` with a oneshot graceful shutdown.
 
 Implement `request_http()` as an async wrapper around `tokio::task::spawn_blocking(move || request_http_blocking(...))`. The blocking function writes `Connection: close`, reads the full response, splits at `\r\n\r\n`, parses the status code, and decodes the JSON body; it never runs on a Tokio worker.
 
 Add an RAII `FixtureGuard` that owns optional policy-release and server-shutdown senders plus the server `JoinHandle`. Its `Drop` sends both signals and aborts the server as a panic fallback. Its async `shutdown(mut self)` sends both signals, awaits the server, and clears the handle. Every success path calls `shutdown`; every panic/error path is still released by `Drop`.
 
-- [ ] **Step 3: Define the exact test-only reducer/driver split**
+- [x] **Step 3: Define the exact test-only reducer/driver split**
 
 Register in this order:
 
@@ -467,11 +467,11 @@ Register in this order:
 
 `ObservationProbeDriver` subscribes only to the human entity, reads `event_count`, appends it to an `Arc<Mutex<Vec<u64>>>` capped at three entries, and returns `StepOutput::empty()`.
 
-- [ ] **Step 4: Define the barrier AgentPolicy**
+- [x] **Step 4: Define the barrier AgentPolicy**
 
 Wrap a deterministic action policy. When `AgentContext.tick == 1`, send `snapshot_ready` and wait for `release`. Return a fixed action afterward. The barrier is in the fast Agent's second decision, so the immutable snapshot already exists when the test receives readiness.
 
-- [ ] **Step 5: Write the E2E assertions before implementation is complete**
+- [x] **Step 5: Write the E2E assertions before implementation is complete**
 
 Through `request_http()`, create the Timeline and POST the initial society signal. Resume through a second SQLite connection. Step at `0`. Move the session into `tokio::task::spawn_blocking` for `100 ms`; after readiness, POST the human action and require HTTP 201 before releasing the fast policy. Recover the session from the blocking task, then step at `200 ms`.
 
@@ -485,11 +485,11 @@ assert_eq!(slow_decisions.load(Ordering::SeqCst), 2);
 
 Poll through HTTP to exhaustion and assert contiguous `seq`. Assert the human `world.action` sequence is lower than the `agent.action` emitted by the blocked pass.
 
-- [ ] **Step 6: Compare live projections with two fresh replays**
+- [x] **Step 6: Compare live projections with two fresh replays**
 
 Read reducer-specific state from `session.projections()?`. Open two fresh stores/registries containing the same reducers, call `pos_time::replay` twice, and compare serialized reducer/entity states. Assert final human `event_count == 1`, society signal count/mean is exact, and fast/slow agent counts are `3`/`2`.
 
-- [ ] **Step 7: Run the integration test and fix only contract mismatches**
+- [x] **Step 7: Run the integration test and fix only contract mismatches**
 
 Run:
 
@@ -499,7 +499,7 @@ cargo test -p piglor-gateway --test e2e_determinism --locked -- --nocapture
 
 Expected: one deterministic pass, no ignored test, no sleep-based cadence, listener always shut down.
 
-- [ ] **Step 8: Prove CI discovery**
+- [x] **Step 8: Prove CI discovery**
 
 Run:
 
@@ -510,7 +510,7 @@ cargo test -p piglor-gateway --test e2e_determinism --locked -- --list \
 
 Expected: the exact named test appears in the targeted test-harness stdout. Do not run a local full-workspace discovery build. After push, inspect the remote `test` job log and verify `multi_rate_human_ai_replay_is_deterministic` executes under the authoritative workspace `--include-ignored` command.
 
-- [ ] **Step 9: Commit the E2E proof**
+- [x] **Step 9: Commit the E2E proof**
 
 ```bash
 git add apps/piglor-gateway/Cargo.toml apps/piglor-gateway/tests/e2e_determinism.rs Cargo.lock
@@ -536,7 +536,7 @@ Stage `Cargo.lock` only if Cargo changed it. Journal exact sequence/probe/count/
 - Produces: `run_multi_rate_demo(&DemoArgs) -> Result<DemoSummary, DemoError>`
 - Consumes: Task 4 cadence API and configurable Agent drivers
 
-- [ ] **Step 1: Add failing pure argument-parser tests**
+- [x] **Step 1: Add failing pure argument-parser tests**
 
 Cover help/no command, exact defaults, each override, reordered flags, duplicate flags, unknown flags, extra positionals, invalid Timeline ID, `ticks == 0`, `quantum_ms == 0`, and allowed `pace_ms == 0`.
 
@@ -546,11 +546,11 @@ assert_eq!(parsed.quantum_ms, 100);
 assert_eq!(parsed.pace_ms, 100);
 ```
 
-- [ ] **Step 2: Add failing finite-loop tests**
+- [x] **Step 2: Add failing finite-loop tests**
 
 Use a temporary SQLite Timeline and `pace_ms = 0`. Run three boundaries and assert printed/returned outcomes have simulation times `0`, `100_000_000`, `200_000_000`, fast count `3`, slow count `2`, and finite termination after exactly three iterations. Add missing Timeline and overflowed millisecond-to-nanosecond tests.
 
-- [ ] **Step 3: Run CLI tests and confirm RED**
+- [x] **Step 3: Run CLI tests and confirm RED**
 
 Run:
 
@@ -558,11 +558,11 @@ Run:
 cargo test -p pos-experiment --bin pos-experiment multi_rate_demo --locked
 ```
 
-- [ ] **Step 4: Add only the required plugin dependencies**
+- [x] **Step 4: Add only the required plugin dependencies**
 
 Add path dependencies for `pos-plugin-agent` and `pos-plugin-society`. Do not add Gateway as a dependency; the demo opens the same SQLite file independently.
 
-- [ ] **Step 5: Implement parser and finite deterministic loop**
+- [x] **Step 5: Implement parser and finite deterministic loop**
 
 Define the interfaces in `main.rs`:
 
@@ -601,11 +601,11 @@ let outcome = session.step_cadenced(now_ns)?;
 
 Sleep for `pace_ms` only after each completed boundary and skip sleep when it is zero. Print time, outcome, and final counts.
 
-- [ ] **Step 6: Document the two-process workflow**
+- [x] **Step 6: Document the two-process workflow**
 
 Document exact Gateway and demo commands, same-file requirement, HTTP society/action examples, deterministic-time meaning, finite defaults, fault/restart guidance, and the fact that arbitrary SQL writers remain unsupported.
 
-- [ ] **Step 7: Run CLI and documentation-adjacent tests**
+- [x] **Step 7: Run CLI and documentation-adjacent tests**
 
 Run:
 
@@ -615,7 +615,7 @@ cargo run -p pos-experiment --locked -- multi-rate-demo --help
 cargo clippy -p pos-experiment --all-targets --all-features --locked -- -D warnings
 ```
 
-- [ ] **Step 8: Commit the demo**
+- [x] **Step 8: Commit the demo**
 
 ```bash
 git add apps/pos-experiment/Cargo.toml apps/pos-experiment/src/main.rs apps/pos-experiment/README.md apps/piglor-gateway/README.md Cargo.lock
@@ -636,7 +636,7 @@ Stage `Cargo.lock` only if changed. Journal commands and finite-loop evidence.
 - Consumes: all prior tasks
 - Produces: Sol-approved, fully green, rebased, merged #126 with closed journals and cleaned worktree
 
-- [ ] **Step 1: Run focused local policy checks**
+- [x] **Step 1: Run focused local policy checks**
 
 Run:
 
@@ -650,7 +650,7 @@ bash scripts/check-asan-ci-policy.sh
 python3 scripts/test_check_asan_ci_policy.py
 ```
 
-- [ ] **Step 2: Audit every design requirement against code/tests**
+- [x] **Step 2: Audit every design requirement against code/tests**
 
 Produce a checklist mapping each design section to a file, test name, and expected assertion: atomic ceiling, forced contention, monotonic time, mode latch, fault-safe projections, real HTTP 201 mid-pass, `[0,0,1]`, `3/2`, contiguous sequence, two replays, finite demo, README, ADR-019 v14, CI discovery, no exclusions.
 

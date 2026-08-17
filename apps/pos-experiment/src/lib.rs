@@ -147,7 +147,7 @@ pub struct ExperimentSession {
     health: SessionHealth,
     boundary: TickBoundaryCoordinator,
     step_mode: Option<StepMode>,
-    last_cadence_ns: Option<u128>,
+    last_simulation_time_ns: Option<u128>,
 }
 
 /// Result of one interactive tick-boundary attempt.
@@ -188,9 +188,25 @@ impl StepMode {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum DriverSelection {
+enum StepRequest {
     AllDrivers,
     Cadenced(u128),
+}
+
+impl StepRequest {
+    const fn mode(self) -> StepMode {
+        match self {
+            Self::AllDrivers => StepMode::AllDrivers,
+            Self::Cadenced(_) => StepMode::Cadenced,
+        }
+    }
+
+    const fn simulation_time_ns(self) -> Option<u128> {
+        match self {
+            Self::AllDrivers => None,
+            Self::Cadenced(now_ns) => Some(now_ns),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -516,7 +532,7 @@ impl Experiment {
                 folded_through: pos_core::clock::Seq::ZERO,
             },
             step_mode: None,
-            last_cadence_ns: None,
+            last_simulation_time_ns: None,
         })
     }
 
@@ -562,7 +578,7 @@ impl Experiment {
             health: SessionHealth::Healthy,
             boundary: TickBoundaryCoordinator { folded_through },
             step_mode: None,
-            last_cadence_ns: None,
+            last_simulation_time_ns: None,
         })
     }
 
@@ -648,7 +664,7 @@ impl ExperimentSession {
     /// driver mutation faults the session and subsequent calls return
     /// [`ExperimentError::SessionFaulted`].
     pub fn step_tick(&mut self) -> Result<TickOutcome, ExperimentError> {
-        self.step_with_mode(StepMode::AllDrivers, DriverSelection::AllDrivers, None)
+        self.step_with_mode(StepRequest::AllDrivers)
     }
 
     /// Advance one complete Tick Boundary at caller-supplied simulation time.
@@ -662,11 +678,7 @@ impl ExperimentSession {
     /// [`ExperimentError::StepModeMismatch`] after all-driver stepping, or the
     /// same runtime/store/fault errors as [`Self::step_tick`].
     pub fn step_cadenced(&mut self, now_ns: u128) -> Result<TickOutcome, ExperimentError> {
-        self.step_with_mode(
-            StepMode::Cadenced,
-            DriverSelection::Cadenced(now_ns),
-            Some(now_ns),
-        )
+        self.step_with_mode(StepRequest::Cadenced(now_ns))
     }
 
     /// Return projection state only while this live session is healthy.
@@ -682,15 +694,11 @@ impl ExperimentSession {
         }
     }
 
-    fn step_with_mode(
-        &mut self,
-        requested: StepMode,
-        selection: DriverSelection,
-        cadence_ns: Option<u128>,
-    ) -> Result<TickOutcome, ExperimentError> {
+    fn step_with_mode(&mut self, request: StepRequest) -> Result<TickOutcome, ExperimentError> {
         if self.health == SessionHealth::Faulted {
             return Err(ExperimentError::SessionFaulted);
         }
+        let requested = request.mode();
         if let Some(active) = self.step_mode {
             if active != requested {
                 return Err(ExperimentError::StepModeMismatch {
@@ -699,7 +707,9 @@ impl ExperimentSession {
                 });
             }
         }
-        if let (Some(previous_ns), Some(requested_ns)) = (self.last_cadence_ns, cadence_ns) {
+        if let (Some(previous_ns), Some(requested_ns)) =
+            (self.last_simulation_time_ns, request.simulation_time_ns())
+        {
             if requested_ns < previous_ns {
                 return Err(ExperimentError::CadenceTimeRegressed {
                     previous_ns,
@@ -708,20 +718,17 @@ impl ExperimentSession {
             }
         }
 
-        let outcome = self.step_boundary(selection)?;
+        let outcome = self.step_boundary(request)?;
         if outcome != TickOutcome::Stopped {
             self.step_mode = Some(requested);
-            if let Some(now_ns) = cadence_ns {
-                self.last_cadence_ns = Some(now_ns);
+            if let Some(now_ns) = request.simulation_time_ns() {
+                self.last_simulation_time_ns = Some(now_ns);
             }
         }
         Ok(outcome)
     }
 
-    fn step_boundary(
-        &mut self,
-        selection: DriverSelection,
-    ) -> Result<TickOutcome, ExperimentError> {
+    fn step_boundary(&mut self, request: StepRequest) -> Result<TickOutcome, ExperimentError> {
         if self.complete || self.reached_stop_condition() {
             self.complete = true;
             return Ok(TickOutcome::Stopped);
@@ -737,9 +744,9 @@ impl ExperimentSession {
         let mut folded_events =
             fold_captured_range(&mut self.boundary, &mut self.registry, &before);
 
-        let selected = match selection {
-            DriverSelection::AllDrivers => self.registry.step_all(self.timeline.id()),
-            DriverSelection::Cadenced(now_ns) => {
+        let selected = match request {
+            StepRequest::AllDrivers => self.registry.step_all(self.timeline.id()),
+            StepRequest::Cadenced(now_ns) => {
                 self.registry.tick_cadenced(self.timeline.id(), now_ns)
             }
         };
@@ -865,7 +872,7 @@ impl ExperimentSession {
                     folded_through: self.boundary.folded_through,
                 },
                 step_mode: None,
-                last_cadence_ns: None,
+                last_simulation_time_ns: None,
             })
     }
 

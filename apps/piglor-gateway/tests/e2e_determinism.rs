@@ -1,6 +1,6 @@
 use piglor_gateway::{router, AppState, Gateway, LedgerWriteMode};
 use piglor_ledger::LedgerView;
-use pos_core::{Capability, EntityId, EventStore, Plugin, PluginId, TimelineId, WallTime};
+use pos_core::{Capability, EntityId, Plugin, PluginId, TimelineId, WallTime};
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition, TickOutcome};
 use pos_plugin_agent::{
     AgentAction, AgentContext, AgentDriver, AgentPlugin, AgentPolicy, AgentReducer,
@@ -11,7 +11,7 @@ use pos_plugin_society::{
 };
 use pos_runtime::{Driver, ObservationView, ProjectionKey, RuntimeError, StepOutput};
 use pos_state::{EntityStateProjection, ProjectionRegistry};
-use pos_store::{sqlite::SqliteStore, SeqRange, StoreConfig};
+use pos_store::{open_store, SeqRange, StoreConfig};
 use serde_json::{json, Value};
 use std::{
     io::{Read, Write},
@@ -227,16 +227,14 @@ impl FixtureGuard {
             let _ = shutdown.send(());
         }
         if let Some(mut server) = self.server.take() {
-            match tokio::time::timeout(Duration::from_secs(5), &mut server).await {
-                Ok(joined) => joined
-                    .expect("Gateway server task joins")
-                    .expect("Gateway server shuts down cleanly"),
-                Err(_) => {
-                    server.abort();
-                    let _ = server.await;
-                    panic!("Gateway server did not shut down within five seconds");
-                }
-            }
+            let Ok(joined) = tokio::time::timeout(Duration::from_secs(5), &mut server).await else {
+                server.abort();
+                let _ = server.await;
+                panic!("Gateway server did not shut down within five seconds");
+            };
+            joined
+                .expect("Gateway server task joins")
+                .expect("Gateway server shuts down cleanly");
         }
     }
 }
@@ -274,6 +272,7 @@ fn state_u64(registry: &ProjectionRegistry, reducer: &str, entity: EntityId, key
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)] // One chronological E2E narrative; splitting would hide ordering.
 async fn multi_rate_human_ai_replay_is_deterministic() {
     let database = tempfile::NamedTempFile::new().expect("temporary SQLite file is created");
     let path = database
@@ -287,9 +286,10 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
     let address = listener
         .local_addr()
         .expect("listener address is available");
-    let gateway = Gateway::new(Box::new(
-        SqliteStore::open(&path).expect("Gateway SQLite connection opens"),
-    ));
+    let gateway = Gateway::new(
+        open_store(StoreConfig::Sqlite { path: path.clone() })
+            .expect("Gateway SQLite connection opens"),
+    );
     let state = AppState {
         gateway,
         ledger_view: LedgerView::default(),
@@ -412,8 +412,8 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
     let pinned_wall_time = WallTime::from_micros(
         u64::try_from(i64::MAX).expect("positive SQLite integer limit fits u64"),
     );
-    let mut pending_store =
-        SqliteStore::open(&path).expect("pending-ingress SQLite connection opens");
+    let mut pending_store = open_store(StoreConfig::Sqlite { path: path.clone() })
+        .expect("pending-ingress SQLite connection opens");
     let pending = pending_store
         .append(
             timeline,
@@ -465,9 +465,10 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
     .await;
     assert_eq!(human.status, 201);
     guard.release_policy();
-    let (mut session, middle) = session_task.await.expect("cadenced session task joins");
+    let (mut session, boundary_at_100_ms) =
+        session_task.await.expect("cadenced session task joins");
     assert_eq!(
-        middle.expect("100 ms boundary succeeds"),
+        boundary_at_100_ms.expect("100 ms boundary succeeds"),
         TickOutcome::Advanced {
             folded_events: 2,
             emitted_events: 1,
@@ -601,7 +602,8 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
     );
     let live_snapshot = snapshot_json(live);
 
-    let first_store = SqliteStore::open(&path).expect("first replay connection opens");
+    let first_store = open_store(StoreConfig::Sqlite { path: path.clone() })
+        .expect("first replay connection opens");
     let stored = first_store
         .read(timeline, SeqRange::all())
         .expect("sequence-ordered history reads");
@@ -614,10 +616,13 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
         "sequence order must deliberately conflict with wall-clock order"
     );
     let mut first_replay = replay_registry();
-    pos_time::replay(&first_store, timeline, &mut first_replay).expect("first replay succeeds");
-    let second_store = SqliteStore::open(&path).expect("second replay connection opens");
+    pos_time::replay(first_store.as_ref(), timeline, &mut first_replay)
+        .expect("first replay succeeds");
+    let second_store =
+        open_store(StoreConfig::Sqlite { path }).expect("second replay connection opens");
     let mut second_replay = replay_registry();
-    pos_time::replay(&second_store, timeline, &mut second_replay).expect("second replay succeeds");
+    pos_time::replay(second_store.as_ref(), timeline, &mut second_replay)
+        .expect("second replay succeeds");
     assert_eq!(snapshot_json(&first_replay), live_snapshot);
     assert_eq!(snapshot_json(&second_replay), live_snapshot);
 

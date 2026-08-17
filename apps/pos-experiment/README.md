@@ -2,7 +2,7 @@
 
 `pos-experiment` is the separate simulation host for a durable PiglorOS Timeline. Its
 `multi-rate-demo` command proves deterministic 100 ms / 200 ms agent cadence while a
-Gateway process independently accepts human and society Events into the same SQLite file.
+Gateway process independently accepts human actions and Society Signals into the same SQLite file.
 
 ## Two-process multi-rate demo
 
@@ -36,7 +36,7 @@ Ticks and quantum must be non-zero; `--pace-ms 0` runs without sleeping. Pacing 
 slows terminal output—driver eligibility comes exclusively from the printed monotonic
 simulation nanoseconds, so machine speed does not change deterministic cadence.
 
-While the demo is running, the Gateway can commit society and human Events:
+While the demo is running, the Gateway can commit Society Signals and human action Events:
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/v1/timelines/<timeline-id>/signals \
