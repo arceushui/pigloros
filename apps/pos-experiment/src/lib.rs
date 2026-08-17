@@ -1278,14 +1278,18 @@ mod tests {
         steps: usize,
         commits: usize,
         aborts: usize,
+        committed_tick: u64,
         staged: bool,
         anchors: Vec<pos_runtime::SnapshotAnchor>,
+        append_calls: Vec<(usize, usize)>,
+        capture_commits: Vec<usize>,
     }
 
     struct HostTransactionalDriver {
         entity: EntityId,
         event_type: Option<Kind>,
         state: Arc<Mutex<HostTransactionState>>,
+        fail_step: bool,
     }
 
     impl Driver for HostTransactionalDriver {
@@ -1304,6 +1308,11 @@ mod tests {
             state
                 .anchors
                 .push(observations.anchor().expect("host must supply anchor"));
+            if self.fail_step {
+                return Err(RuntimeError::UnknownEventType(
+                    "injected partial Driver failure".to_owned(),
+                ));
+            }
             let drafts = self
                 .event_type
                 .clone()
@@ -1328,6 +1337,7 @@ mod tests {
             assert!(state.staged);
             state.staged = false;
             state.commits += 1;
+            state.committed_tick += 1;
         }
 
         fn abort_step(&mut self) {
@@ -1336,6 +1346,81 @@ mod tests {
                 state.staged = false;
                 state.aborts += 1;
             }
+        }
+    }
+
+    struct CaptureAwareStore {
+        base: Box<dyn EventStore>,
+        state: Arc<Mutex<HostTransactionState>>,
+        fail_append: bool,
+        fail_post_step_capture: bool,
+    }
+
+    impl EventStore for CaptureAwareStore {
+        fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
+            self.base.create_timeline(name)
+        }
+
+        fn append(
+            &mut self,
+            timeline: pos_core::ids::TimelineId,
+            drafts: &[EventDraft],
+        ) -> Result<Vec<Event>, CoreError> {
+            let mut state = self.state.lock().unwrap();
+            let commits = state.commits;
+            state.append_calls.push((drafts.len(), commits));
+            drop(state);
+            if self.fail_append {
+                Err(CoreError::Storage("injected append failure".to_owned()))
+            } else {
+                self.base.append(timeline, drafts)
+            }
+        }
+
+        fn read(
+            &self,
+            timeline: pos_core::ids::TimelineId,
+            range: pos_core::store::SeqRange,
+        ) -> Result<Vec<Event>, CoreError> {
+            self.base.read(timeline, range)
+        }
+
+        fn fork(
+            &mut self,
+            parent: pos_core::ids::TimelineId,
+            at_seq: pos_core::clock::Seq,
+            name: &str,
+        ) -> Result<Timeline, CoreError> {
+            self.base.fork(parent, at_seq, name)
+        }
+
+        fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+            self.base.list_timelines()
+        }
+
+        fn get_timeline(
+            &self,
+            id: pos_core::ids::TimelineId,
+        ) -> Result<Option<Timeline>, CoreError> {
+            self.base.get_timeline(id)
+        }
+
+        fn logical_head(
+            &self,
+            id: pos_core::ids::TimelineId,
+        ) -> Result<pos_core::clock::Seq, CoreError> {
+            let state = self.state.lock().unwrap();
+            if state.steps > 0 {
+                let commits = state.commits;
+                drop(state);
+                self.state.lock().unwrap().capture_commits.push(commits);
+                if self.fail_post_step_capture {
+                    return Err(CoreError::Storage(
+                        "injected post-step capture failure".to_owned(),
+                    ));
+                }
+            }
+            self.base.logical_head(id)
         }
     }
 
@@ -2629,14 +2714,73 @@ mod tests {
         .is_err());
     }
 
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn experiment_run_path_commits_an_anchored_driver_after_append() {
-        let mut store = pos_store::memory::MemoryStore::new();
-        let timeline = store.create_timeline("anchored-run-path").unwrap();
+    #[derive(Clone, Copy, Debug)]
+    enum TransactionHostPath {
+        AdvanceTick,
+        Session,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum TransactionCase {
+        NonEmpty,
+        ZeroDraft,
+        SchemaFailure,
+        AppendFailure,
+        PartialDriverFailure,
+        PostCaptureFailure,
+    }
+
+    fn transaction_registry(
+        case: TransactionCase,
+        state: &Arc<Mutex<HostTransactionState>>,
+        failing_state: &Arc<Mutex<HostTransactionState>>,
+    ) -> PluginRegistry {
+        let (owned_event_types, emitted_event_type): (&[&str], Option<&str>) = match case {
+            TransactionCase::ZeroDraft | TransactionCase::PartialDriverFailure => (&[], None),
+            TransactionCase::SchemaFailure => (
+                &["host.transaction.known"],
+                Some("host.transaction.unknown"),
+            ),
+            TransactionCase::NonEmpty
+            | TransactionCase::AppendFailure
+            | TransactionCase::PostCaptureFailure => {
+                (&["host.transaction"], Some("host.transaction"))
+            }
+        };
+        let mut registry = PluginRegistry::new();
+        registry
+            .register(
+                &make_plugin("host-transaction", owned_event_types),
+                None,
+                Some(Box::new(HostTransactionalDriver {
+                    entity: EntityId::new(),
+                    event_type: emitted_event_type.map(Kind::new),
+                    state: Arc::clone(state),
+                    fail_step: false,
+                })),
+            )
+            .unwrap();
+        if case == TransactionCase::PartialDriverFailure {
+            registry
+                .register(
+                    &make_plugin("host-failing", &[]),
+                    None,
+                    Some(Box::new(HostTransactionalDriver {
+                        entity: EntityId::new(),
+                        event_type: None,
+                        state: Arc::clone(failing_state),
+                        fail_step: true,
+                    })),
+                )
+                .unwrap();
+        }
+        registry
+    }
+
+    fn seed_external_event(store: &mut dyn EventStore, timeline: pos_core::ids::TimelineId) {
         store
             .append(
-                timeline.id(),
+                timeline,
                 &[EventDraft::new(
                     EntityId::new(),
                     Kind::new("external.before"),
@@ -2644,145 +2788,177 @@ mod tests {
                 )],
             )
             .unwrap();
-        let state = Arc::new(Mutex::new(HostTransactionState::default()));
-        let mut registry = PluginRegistry::new();
-        registry
-            .register(
-                &make_plugin("anchored-run", &["anchored.run"]),
-                None,
-                Some(Box::new(HostTransactionalDriver {
-                    entity: EntityId::new(),
-                    event_type: Some(Kind::new("anchored.run")),
-                    state: Arc::clone(&state),
-                })),
-            )
-            .unwrap();
-        let mut boundary = TickBoundaryCoordinator {
-            folded_through: pos_core::clock::Seq::ZERO,
-        };
-
-        let (outcome, _) =
-            advance_tick(&mut store, timeline.id(), &mut registry, &mut boundary).unwrap();
-
-        assert!(matches!(outcome, TickAdvance::Advanced { .. }));
-        let state = state.lock().unwrap();
-        assert_eq!(state.steps, 1);
-        assert_eq!(state.commits, 1);
-        assert_eq!(state.aborts, 0);
-        assert!(!state.staged);
-        assert_eq!(
-            state.anchors,
-            [pos_runtime::SnapshotAnchor::new(
-                timeline.id(),
-                pos_core::clock::Seq::from_u64(1)
-            )]
-        );
     }
 
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn live_session_commits_a_successful_zero_draft_anchored_step() {
-        let state = Arc::new(Mutex::new(HostTransactionState::default()));
-        let mut experiment = Experiment::new(ExperimentConfig {
-            name: "anchored-zero-draft".to_owned(),
-            stop: StopCondition::MaxTicks(1),
-            store_config: StoreConfig::Memory,
-        });
-        experiment
-            .register(
-                &make_plugin("anchored-zero", &[]),
-                None,
-                Some(Box::new(HostTransactionalDriver {
-                    entity: EntityId::new(),
-                    event_type: None,
-                    state: Arc::clone(&state),
-                })),
-            )
-            .unwrap();
-        let mut session = experiment.start().unwrap();
-        let timeline = session.timeline().id();
+    fn capture_aware_store(
+        base: Box<dyn EventStore>,
+        case: TransactionCase,
+        state: &Arc<Mutex<HostTransactionState>>,
+    ) -> CaptureAwareStore {
+        CaptureAwareStore {
+            base,
+            state: Arc::clone(state),
+            fail_append: case == TransactionCase::AppendFailure,
+            fail_post_step_capture: case == TransactionCase::PostCaptureFailure,
+        }
+    }
 
-        assert_eq!(session.step_tick().unwrap(), TickOutcome::Quiescent);
+    struct HostCaseResult {
+        timeline: pos_core::ids::TimelineId,
+        result: Result<(), ExperimentError>,
+        state: Arc<Mutex<HostTransactionState>>,
+        failing_state: Arc<Mutex<HostTransactionState>>,
+    }
+
+    fn run_host_transaction_case(
+        path: TransactionHostPath,
+        case: TransactionCase,
+    ) -> HostCaseResult {
+        let state = Arc::new(Mutex::new(HostTransactionState::default()));
+        let failing_state = Arc::new(Mutex::new(HostTransactionState::default()));
+        let registry = transaction_registry(case, &state, &failing_state);
+
+        let (timeline, result) = match path {
+            TransactionHostPath::AdvanceTick => {
+                let mut base: Box<dyn EventStore> = Box::new(pos_store::memory::MemoryStore::new());
+                let timeline = base.create_timeline("transaction-advance").unwrap().id();
+                seed_external_event(base.as_mut(), timeline);
+                let mut store = capture_aware_store(base, case, &state);
+                let mut registry = registry;
+                let mut boundary = TickBoundaryCoordinator {
+                    folded_through: pos_core::clock::Seq::ZERO,
+                };
+                let result =
+                    advance_tick(&mut store, timeline, &mut registry, &mut boundary).map(|_| ());
+                (timeline, result)
+            }
+            TransactionHostPath::Session => {
+                let mut session = Experiment {
+                    config: ExperimentConfig {
+                        name: "transaction-session".to_owned(),
+                        stop: StopCondition::MaxTicks(1),
+                        store_config: StoreConfig::Memory,
+                    },
+                    registry,
+                    fork_registry_factory: None,
+                }
+                .start()
+                .unwrap();
+                let timeline = session.timeline().id();
+                {
+                    let mut store = session.store.lock().unwrap();
+                    seed_external_event(store.as_mut(), timeline);
+                    let base = std::mem::replace(
+                        &mut *store,
+                        Box::new(pos_store::memory::MemoryStore::new()),
+                    );
+                    *store = Box::new(capture_aware_store(base, case, &state));
+                }
+                (timeline, session.step_tick().map(|_| ()))
+            }
+        };
+        HostCaseResult {
+            timeline,
+            result,
+            state,
+            failing_state,
+        }
+    }
+
+    fn assert_host_transaction_case(path: TransactionHostPath, case: TransactionCase) {
+        let HostCaseResult {
+            timeline,
+            result,
+            state,
+            failing_state,
+        } = run_host_transaction_case(path, case);
         let state = state.lock().unwrap();
-        assert_eq!(state.steps, 1);
-        assert_eq!(state.commits, 1);
-        assert_eq!(state.aborts, 0);
-        assert!(!state.staged);
+        match case {
+            TransactionCase::NonEmpty
+            | TransactionCase::AppendFailure
+            | TransactionCase::PostCaptureFailure => {
+                assert_eq!(state.append_calls, [(1, 0)], "{path:?} {case:?}");
+            }
+            TransactionCase::ZeroDraft
+            | TransactionCase::SchemaFailure
+            | TransactionCase::PartialDriverFailure => {
+                assert!(state.append_calls.is_empty(), "{path:?} {case:?}");
+            }
+        }
+        assert_eq!(state.steps, 1, "{path:?} {case:?}");
         assert_eq!(
             state.anchors,
             [pos_runtime::SnapshotAnchor::new(
                 timeline,
-                pos_core::clock::Seq::ZERO
-            )]
+                pos_core::clock::Seq::from_u64(1)
+            )],
+            "{path:?} {case:?}"
         );
+        assert!(!state.staged, "{path:?} {case:?}");
+
+        match case {
+            TransactionCase::NonEmpty | TransactionCase::ZeroDraft => {
+                assert!(result.is_ok(), "{path:?} {case:?}: {result:?}");
+                assert_eq!(state.commits, 1, "{path:?} {case:?}");
+                assert_eq!(state.committed_tick, 1, "{path:?} {case:?}");
+                assert_eq!(state.aborts, 0, "{path:?} {case:?}");
+                assert_eq!(state.capture_commits, [1], "{path:?} {case:?}");
+            }
+            TransactionCase::SchemaFailure
+            | TransactionCase::AppendFailure
+            | TransactionCase::PartialDriverFailure => {
+                assert!(result.is_err(), "{path:?} {case:?}");
+                assert_eq!(state.commits, 0, "{path:?} {case:?}");
+                assert_eq!(state.committed_tick, 0, "{path:?} {case:?}");
+                assert_eq!(state.aborts, 1, "{path:?} {case:?}");
+                assert!(state.capture_commits.is_empty(), "{path:?} {case:?}");
+            }
+            TransactionCase::PostCaptureFailure => {
+                assert!(result.is_err(), "{path:?} {case:?}");
+                assert_eq!(state.commits, 1, "{path:?} {case:?}");
+                assert_eq!(state.committed_tick, 1, "{path:?} {case:?}");
+                assert_eq!(state.aborts, 0, "{path:?} {case:?}");
+                assert_eq!(state.capture_commits, [1], "{path:?} {case:?}");
+            }
+        }
+        drop(state);
+
+        let failing_state = failing_state.lock().unwrap();
+        if case == TransactionCase::PartialDriverFailure {
+            assert_eq!(failing_state.steps, 1, "{path:?} {case:?}");
+            assert_eq!(failing_state.commits, 0, "{path:?} {case:?}");
+            assert_eq!(failing_state.committed_tick, 0, "{path:?} {case:?}");
+            assert_eq!(failing_state.aborts, 1, "{path:?} {case:?}");
+            assert!(!failing_state.staged, "{path:?} {case:?}");
+            assert_eq!(
+                failing_state.anchors,
+                [pos_runtime::SnapshotAnchor::new(
+                    timeline,
+                    pos_core::clock::Seq::from_u64(1)
+                )],
+                "{path:?} {case:?}"
+            );
+        }
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn live_session_aborts_anchored_state_on_schema_and_append_failures() {
-        let schema_state = Arc::new(Mutex::new(HostTransactionState::default()));
-        let mut schema_experiment = Experiment::new(ExperimentConfig {
-            name: "anchored-schema-failure".to_owned(),
-            stop: StopCondition::MaxTicks(1),
-            store_config: StoreConfig::Memory,
-        });
-        schema_experiment
-            .register(
-                &make_plugin("anchored-schema", &["anchored.known"]),
-                None,
-                Some(Box::new(HostTransactionalDriver {
-                    entity: EntityId::new(),
-                    event_type: Some(Kind::new("anchored.unknown")),
-                    state: Arc::clone(&schema_state),
-                })),
-            )
-            .unwrap();
-        assert!(schema_experiment.start().unwrap().step().is_err());
-        {
-            let state = schema_state.lock().unwrap();
-            assert_eq!(state.commits, 0);
-            assert_eq!(state.aborts, 1);
-            assert!(!state.staged);
+    fn both_host_paths_cover_the_complete_driver_transaction_matrix() {
+        for path in [
+            TransactionHostPath::AdvanceTick,
+            TransactionHostPath::Session,
+        ] {
+            for case in [
+                TransactionCase::NonEmpty,
+                TransactionCase::ZeroDraft,
+                TransactionCase::SchemaFailure,
+                TransactionCase::AppendFailure,
+                TransactionCase::PartialDriverFailure,
+                TransactionCase::PostCaptureFailure,
+            ] {
+                assert_host_transaction_case(path, case);
+            }
         }
-
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("anchored-append-failure.db");
-        let append_state = Arc::new(Mutex::new(HostTransactionState::default()));
-        let mut append_experiment = Experiment::new(ExperimentConfig {
-            name: "anchored-append-failure".to_owned(),
-            stop: StopCondition::MaxTicks(1),
-            store_config: StoreConfig::Sqlite {
-                path: path.to_str().unwrap().to_owned(),
-            },
-        });
-        append_experiment
-            .register(
-                &make_plugin("anchored-append", &["anchored.append"]),
-                None,
-                Some(Box::new(HostTransactionalDriver {
-                    entity: EntityId::new(),
-                    event_type: Some(Kind::new("anchored.append")),
-                    state: Arc::clone(&append_state),
-                })),
-            )
-            .unwrap();
-        let mut session = append_experiment.start().unwrap();
-        rusqlite::Connection::open(&path)
-            .unwrap()
-            .execute_batch(
-                "CREATE TRIGGER fail_anchored_append
-                 BEFORE INSERT ON events
-                 BEGIN
-                   SELECT RAISE(FAIL, 'injected anchored append failure');
-                 END;",
-            )
-            .unwrap();
-
-        assert!(matches!(session.step(), Err(ExperimentError::Store(_))));
-        let state = append_state.lock().unwrap();
-        assert_eq!(state.commits, 0);
-        assert_eq!(state.aborts, 1);
-        assert!(!state.staged);
     }
 
     #[test]

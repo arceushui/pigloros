@@ -41,3 +41,37 @@ Verification:
 
 Concerns: pre-existing unstaged Experiment changes remain outside packet A and
 are intentionally unmodified and unstaged.
+
+## Fix packet B — two-host-path fault and ordering matrix
+
+Status: DONE
+
+Replaced the three uneven host tests with one table-driven real-behavior matrix
+covering both `advance_tick` and `ExperimentSession::step_boundary`. Each path
+now exercises non-empty commit, zero-draft commit, schema abort, append abort,
+partial-Driver abort, and post-append capture failure. The stateful Driver proves
+the pre-fold anchor, commit/abort counts, cleared staging, and unchanged
+committed tick on every abort. The capture-aware store proves a non-empty append
+sees zero commits, zero-draft and pre-append failures do not append, and every
+post-step capture sees the committed state.
+
+TDD evidence:
+
+- RED mutation: temporarily moved `commit_step` before non-empty append in both
+  production hosts, then ran the focused matrix. It failed as intended for
+  `AdvanceTick NonEmpty`: append observed `[(1, 1)]` instead of `[(1, 0)]`.
+- GREEN restoration: restored append-before-commit with `apply_patch`; the
+  focused matrix passed (1 passed, 0 failed).
+
+Verification:
+
+- Focused host matrix: 1 passed, 0 failed.
+- Capability-dropped `cargo test -p pos-runtime -p pos-experiment --locked --
+  --include-ignored`: 157 passed (75 Experiment library + 14 CLI + 68 runtime),
+  0 failed, 0 ignored; doc-tests passed.
+- `cargo fmt --all -- --check`: pass.
+- `cargo clippy -p pos-runtime -p pos-experiment --all-targets --all-features
+  --locked -- -D warnings`: pass.
+- `git diff --check`: pass; packet A's `crates/pos-runtime` change is untouched.
+
+Concerns: none.
