@@ -33,7 +33,7 @@ pub mod scheduler;
 pub mod schema;
 
 pub use composition::{PluginComposition, RegisteredEventSchema, RegisteredPlugin};
-pub use driver::{Driver, ObservationView, ProjectionKey, StepOutput};
+pub use driver::{Driver, ObservationView, ProjectionKey, SnapshotAnchor, StepOutput};
 pub use error::RuntimeError;
 pub use recorder::{RecordedOutput, Recorder, RunMode};
 pub use registry::PluginRegistry;

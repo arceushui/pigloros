@@ -8,6 +8,7 @@
 //! - `Replay` — the driver reads events from the log (bit-exact)
 
 use pos_core::{
+    clock::Seq,
     event::EventDraft,
     ids::{EntityId, TimelineId},
     State,
@@ -49,12 +50,49 @@ impl ProjectionKey {
 /// even if later tick work changes the live registry.
 #[derive(Default)]
 pub(crate) struct ObservationSnapshot {
+    anchor: Option<SnapshotAnchor>,
     states: std::collections::HashMap<ProjectionKey, State>,
+}
+
+/// Identifies the immutable Timeline prefix observed by every Driver in one
+/// host-owned tick boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SnapshotAnchor {
+    timeline_id: TimelineId,
+    observed_through: Seq,
+}
+
+impl SnapshotAnchor {
+    #[must_use]
+    pub const fn new(timeline_id: TimelineId, observed_through: Seq) -> Self {
+        Self {
+            timeline_id,
+            observed_through,
+        }
+    }
+
+    #[must_use]
+    pub const fn timeline_id(self) -> TimelineId {
+        self.timeline_id
+    }
+
+    #[must_use]
+    pub const fn observed_through(self) -> Seq {
+        self.observed_through
+    }
 }
 
 impl ObservationSnapshot {
     #[must_use]
     pub(crate) fn from_subscriptions<'a>(
+        subscriptions: impl IntoIterator<Item = &'a ProjectionKey>,
+        state_for: impl Fn(&ProjectionKey) -> Option<State>,
+    ) -> Self {
+        Self::capture(None, subscriptions, state_for)
+    }
+
+    fn capture<'a>(
+        anchor: Option<SnapshotAnchor>,
         subscriptions: impl IntoIterator<Item = &'a ProjectionKey>,
         state_for: impl Fn(&ProjectionKey) -> Option<State>,
     ) -> Self {
@@ -66,7 +104,7 @@ impl ObservationSnapshot {
                 }
             }
         }
-        Self { states }
+        Self { anchor, states }
     }
 
     #[must_use]
@@ -109,6 +147,11 @@ impl ObservationView<'_> {
     #[must_use]
     pub fn state_for(&self, key: &ProjectionKey) -> Option<&State> {
         self.snapshot.and_then(|snapshot| snapshot.states.get(key))
+    }
+
+    #[must_use]
+    pub fn anchor(&self) -> Option<SnapshotAnchor> {
+        self.snapshot.and_then(|snapshot| snapshot.anchor)
     }
 
     #[must_use]
@@ -168,12 +211,24 @@ pub trait Driver: Send + Sync {
     fn subscriptions(&self) -> &[ProjectionKey] {
         &[]
     }
+
+    /// Whether this Driver requires a host-owned immutable-prefix anchor.
+    fn requires_snapshot_anchor(&self) -> bool {
+        false
+    }
+
+    /// Commit state staged by the preceding successful anchored step.
+    fn commit_step(&mut self) {}
+
+    /// Discard state staged by the preceding anchored step.
+    fn abort_step(&mut self) {}
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use pos_core::{
+        clock::Seq,
         event::{CanonicalBytes, EventDraft, Kind},
         ids::EntityId,
     };
@@ -267,6 +322,29 @@ mod tests {
     fn empty_snapshot_views_are_empty() {
         let snapshot = ObservationSnapshot::default();
         assert!(snapshot.view_for(&[]).is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn snapshot_anchor_is_shared_and_legacy_driver_hooks_are_noops() {
+        let anchor = SnapshotAnchor::new(TimelineId::new(), Seq::from_u64(7));
+        let snapshot = ObservationSnapshot {
+            anchor: Some(anchor),
+            states: std::collections::HashMap::new(),
+        };
+
+        assert_eq!(snapshot.view_for(&[]).anchor(), Some(anchor));
+        assert_eq!(
+            anchor.timeline_id(),
+            snapshot.view_for(&[]).anchor().unwrap().timeline_id()
+        );
+        assert_eq!(anchor.observed_through(), Seq::from_u64(7));
+        assert_eq!(ObservationView::empty().anchor(), None);
+
+        let mut legacy = IdleDriver;
+        assert!(!legacy.requires_snapshot_anchor());
+        legacy.commit_step();
+        legacy.abort_step();
     }
 
     #[test]
