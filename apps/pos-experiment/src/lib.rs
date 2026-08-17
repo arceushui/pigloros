@@ -627,7 +627,9 @@ impl ExperimentSession {
     /// reached stop condition. Quiescence does not disable a later call.
     ///
     /// # Errors
-    /// Returns runtime or store errors from the atomic tick pipeline.
+    /// Returns [`ExperimentError::StepModeMismatch`] if this session already
+    /// selected cadenced stepping, or runtime/store/fault errors from the atomic
+    /// tick pipeline.
     pub fn step(&mut self) -> Result<bool, ExperimentError> {
         self.step_tick()
             .map(|outcome| matches!(outcome, TickOutcome::Advanced { .. }))
@@ -640,6 +642,8 @@ impl ExperimentSession {
     /// post-step range. A [`TickOutcome::Quiescent`] session remains resumable.
     ///
     /// # Errors
+    /// Returns [`ExperimentError::StepModeMismatch`] if this session already
+    /// selected cadenced stepping.
     /// Pre-boundary read errors are retryable. Any error after projection or
     /// driver mutation faults the session and subsequent calls return
     /// [`ExperimentError::SessionFaulted`].
@@ -1308,6 +1312,66 @@ mod tests {
         }
     }
 
+    struct FailFirstLogicalHeadStore {
+        inner: Box<dyn EventStore>,
+        failed: std::cell::Cell<bool>,
+    }
+
+    impl EventStore for FailFirstLogicalHeadStore {
+        fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
+            self.inner.create_timeline(name)
+        }
+
+        fn append(
+            &mut self,
+            timeline: pos_core::ids::TimelineId,
+            drafts: &[EventDraft],
+        ) -> Result<Vec<Event>, CoreError> {
+            self.inner.append(timeline, drafts)
+        }
+
+        fn read(
+            &self,
+            timeline: pos_core::ids::TimelineId,
+            range: pos_core::store::SeqRange,
+        ) -> Result<Vec<Event>, CoreError> {
+            self.inner.read(timeline, range)
+        }
+
+        fn fork(
+            &mut self,
+            parent: pos_core::ids::TimelineId,
+            at_seq: pos_core::clock::Seq,
+            name: &str,
+        ) -> Result<Timeline, CoreError> {
+            self.inner.fork(parent, at_seq, name)
+        }
+
+        fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+            self.inner.list_timelines()
+        }
+
+        fn get_timeline(
+            &self,
+            id: pos_core::ids::TimelineId,
+        ) -> Result<Option<Timeline>, CoreError> {
+            self.inner.get_timeline(id)
+        }
+
+        fn logical_head(
+            &self,
+            id: pos_core::ids::TimelineId,
+        ) -> Result<pos_core::clock::Seq, CoreError> {
+            if self.failed.replace(true) {
+                self.inner.logical_head(id)
+            } else {
+                Err(CoreError::Storage(
+                    "injected first-boundary head failure".to_owned(),
+                ))
+            }
+        }
+    }
+
     struct CountReducer;
     impl Reducer for CountReducer {
         fn initial(&self) -> State {
@@ -1674,13 +1738,26 @@ mod tests {
         );
         cadenced.step_cadenced(200_000_000).unwrap();
         let equal_steps = cadenced_steps.load(std::sync::atomic::Ordering::SeqCst);
+        let ticks_before_equal = cadenced.ticks;
         assert_eq!(
             cadenced.step_cadenced(200_000_000).unwrap(),
             TickOutcome::Quiescent
         );
+        assert_eq!(cadenced.ticks, ticks_before_equal + 1);
         assert_eq!(
             cadenced_steps.load(std::sync::atomic::Ordering::SeqCst),
             equal_steps
+        );
+        assert!(matches!(
+            cadenced.step_cadenced(300_000_000).unwrap(),
+            TickOutcome::Advanced {
+                folded_events: 1,
+                emitted_events: 1,
+            }
+        ));
+        assert_eq!(
+            cadenced_steps.load(std::sync::atomic::Ordering::SeqCst),
+            equal_steps + 1
         );
     }
 
@@ -1750,12 +1827,18 @@ mod tests {
             .unwrap();
         let mut parent = experiment.start().unwrap();
         let parent_id = parent.timeline().id();
-        assert_eq!(parent.step_tick().unwrap(), TickOutcome::Quiescent);
+        assert_eq!(
+            parent.step_cadenced(100_000_000).unwrap(),
+            TickOutcome::Quiescent
+        );
         let mut child = parent.fork("mode-child").unwrap();
         assert_eq!(child.step_cadenced(0).unwrap(), TickOutcome::Quiescent);
         assert!(matches!(
-            parent.step_cadenced(0),
-            Err(ExperimentError::StepModeMismatch { .. })
+            parent.step_cadenced(99_999_999),
+            Err(ExperimentError::CadenceTimeRegressed {
+                previous_ns: 100_000_000,
+                requested_ns: 99_999_999,
+            })
         ));
         assert!(matches!(
             child.step_tick(),
@@ -1774,6 +1857,43 @@ mod tests {
             .unwrap();
         let mut resumed = recovery.resume(parent_id).unwrap();
         assert_eq!(resumed.step_cadenced(0).unwrap(), TickOutcome::Quiescent);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn step_cadenced_failed_first_boundary_does_not_latch_mode() {
+        let mut session = Experiment::new(ExperimentConfig {
+            name: "first-boundary-failure".to_owned(),
+            stop: StopCondition::MaxTicks(10),
+            store_config: StoreConfig::Memory,
+        })
+        .start()
+        .unwrap();
+        {
+            let mut store = lock_store(&session.store).unwrap();
+            let inner =
+                std::mem::replace(&mut *store, Box::new(pos_store::memory::MemoryStore::new()));
+            *store = Box::new(FailFirstLogicalHeadStore {
+                inner,
+                failed: std::cell::Cell::new(false),
+            });
+        }
+
+        assert!(matches!(
+            session.step_cadenced(0),
+            Err(ExperimentError::Store(CoreError::Storage(message)))
+                if message == "injected first-boundary head failure"
+        ));
+        assert_eq!(session.ticks, 0);
+        assert_eq!(session.step_tick().unwrap(), TickOutcome::Quiescent);
+        assert_eq!(session.ticks, 1);
+        assert!(matches!(
+            session.step_cadenced(0),
+            Err(ExperimentError::StepModeMismatch {
+                active: "AllDrivers",
+                requested: "Cadenced",
+            })
+        ));
     }
 
     #[test]
