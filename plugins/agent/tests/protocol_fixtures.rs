@@ -413,10 +413,7 @@ fn catalogue_decoder_has_a_field_specific_malformed_matrix() {
         ("empty", Vec::new()),
         ("truncated", canonical[..canonical.len() - 1].to_vec()),
         ("trailing", append(&canonical, 0)),
-        (
-            "missing outer item",
-            missing_outer_item(&canonical, 0x82, 5),
-        ),
+        ("missing outer item", decode_hex("82445041433101")),
         ("extra outer item", extra_outer_item(&canonical, 0x84)),
         ("magic type", wrong_magic_type),
         ("magic value", wrong_magic),
@@ -429,6 +426,10 @@ fn catalogue_decoder_has_a_field_specific_malformed_matrix() {
         ("entry type", wrong_entry_type),
         ("action collection type", decode_hex("8344504143310100")),
         ("control identifier", control_identifier),
+        (
+            "invalid UTF-8 action identifier",
+            replace_once_with(&canonical, &decode_hex("646d6f7665"), &decode_hex("62c328")),
+        ),
         ("zero action count", decode_hex("8344504143310180")),
         ("too many actions", too_many_catalogue_actions()),
         (
@@ -491,6 +492,99 @@ fn request_decoder_has_a_field_specific_malformed_matrix() {
 }
 
 #[test]
+fn request_decoder_reaches_every_agent_and_provenance_field() {
+    let canonical = decode_hex(REQUEST_HEX);
+    let agent_id = decode_hex("50101112131415161718191a1b1c1d1e1f");
+    let catalogue_hash = bytes_of(32, 0xaa);
+    let plugin_content_hash = bytes_of(32, 0xbb);
+    let provider_content_hash = bytes_of(32, 0xcc);
+    let plugin_version = decode_hex("65312e302e30");
+    let provider_version = decode_hex("627631");
+    let invalid_utf8 = decode_hex("62c328");
+
+    for (name, wire) in [
+        (
+            "agent identifier type",
+            replace_once_with(&canonical, &agent_id, &text_bytes(16, b'a')),
+        ),
+        (
+            "agent identifier width",
+            replace_once_with(&canonical, &agent_id, &bytes_of(15, 0x10)),
+        ),
+        (
+            "driver tick type",
+            replace_once_with(&canonical, &[7, 0x58, 0x20], &[0x40, 0x58, 0x20]),
+        ),
+        (
+            "driver tick nonshortest",
+            replace_once_with(&canonical, &[7, 0x58, 0x20], &[0x18, 7, 0x58, 0x20]),
+        ),
+        (
+            "catalogue hash type",
+            replace_once_with(&canonical, &catalogue_hash, &text_bytes(32, b'a')),
+        ),
+        (
+            "catalogue hash width",
+            replace_once_with(&canonical, &catalogue_hash, &bytes_of(31, 0xaa)),
+        ),
+        (
+            "plugin content hash type",
+            replace_once_with(&canonical, &plugin_content_hash, &text_bytes(32, b'a')),
+        ),
+        (
+            "plugin content hash width",
+            replace_once_with(&canonical, &plugin_content_hash, &bytes_of(31, 0xbb)),
+        ),
+        (
+            "provider content hash type",
+            replace_once_with(&canonical, &provider_content_hash, &text_bytes(32, b'a')),
+        ),
+        (
+            "provider content hash width",
+            replace_once_with(&canonical, &provider_content_hash, &bytes_of(31, 0xcc)),
+        ),
+        (
+            "plugin version grammar",
+            replace_once_with(&canonical, &plugin_version, &decode_hex("6120")),
+        ),
+        (
+            "plugin version length",
+            replace_once_with(&canonical, &plugin_version, &text_bytes(33, b'a')),
+        ),
+        (
+            "plugin version primitive",
+            replace_once_with(&canonical, &plugin_version, &bytes_of(5, b'a')),
+        ),
+        (
+            "plugin version invalid UTF-8",
+            replace_once_with(&canonical, &plugin_version, &invalid_utf8),
+        ),
+        (
+            "provider version grammar",
+            replace_once_with(&canonical, &provider_version, &decode_hex("6120")),
+        ),
+        (
+            "provider version length",
+            replace_once_with(&canonical, &provider_version, &text_bytes(65, b'a')),
+        ),
+        (
+            "provider version primitive",
+            replace_once_with(&canonical, &provider_version, &bytes_of(2, b'a')),
+        ),
+        (
+            "provider version invalid UTF-8",
+            replace_once_with(&canonical, &provider_version, &invalid_utf8),
+        ),
+        (
+            "provider identifier invalid UTF-8",
+            replace_once_with(&canonical, &decode_hex("676c6f63616c2d31"), &invalid_utf8),
+        ),
+    ] {
+        assert_malformed(AgentDecisionRequestV1::decode(&wire), name);
+    }
+}
+
+#[test]
 fn provider_decoder_has_a_field_specific_malformed_matrix() {
     let canonical = decode_hex(PDP_ACCEPTED_HEX);
     let mut wrong_magic_type = canonical.clone();
@@ -546,31 +640,10 @@ fn record_decoder_has_a_field_specific_malformed_matrix() {
     ));
     let wrong_hash_type = replace_once_with(&canonical, &request_hash, &text_bytes(32, b'a'));
     let wrong_hash_width = replace_once_with(&canonical, &request_hash, &bytes_of(31, 0xdd));
-    let bad_digest_arity = replace_once_with(
-        &canonical,
-        &decode_hex(concat!(
-            "82015820",
-            "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-        )),
-        &decode_hex("8101"),
-    );
-    let bad_result_arity = replace_once_with(
-        &canonical,
-        &decode_hex("8300001a000f4240"),
-        &decode_hex("820000"),
-    );
     let wrong_request_field = replace_once_with(
         &canonical,
         &decode_hex("50000102030405060708090a0b0c0d0e0f"),
         &text_bytes(16, b'a'),
-    );
-    let wrong_digest_type = replace_once_with(
-        &canonical,
-        &decode_hex(concat!(
-            "82015820",
-            "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-        )),
-        &[0],
     );
     let wrong_result_type = replace_once_with(&canonical, &decode_hex("8300001a000f4240"), &[0]);
 
@@ -596,16 +669,102 @@ fn record_decoder_has_a_field_specific_malformed_matrix() {
         ("request hash type", wrong_hash_type),
         ("request hash width", wrong_hash_width),
         ("nested request field type", wrong_request_field),
-        ("response digest type", wrong_digest_type),
-        ("response digest arity", bad_digest_arity),
         ("result type", wrong_result_type),
-        ("result arity", bad_result_arity),
         ("over limit", vec![0; 4097]),
     ] {
         assert_malformed(DecisionRecordV1::decode(&wire), name);
     }
 
     for (name, wire) in foreign_root_wires() {
+        assert_malformed(DecisionRecordV1::decode(&wire), name);
+    }
+}
+
+#[test]
+fn record_decoder_reaches_every_response_digest_branch() {
+    let digest = bytes_of(32, 0xee);
+    let invalid_utf8 = decode_hex("62c328");
+
+    for (name, wire) in [
+        (
+            "present digest wrong width",
+            record_with_digest(&concatenate(&[&[0x82, 1], &bytes_of(31, 0xee)])),
+        ),
+        (
+            "present digest wrong type",
+            record_with_digest(&concatenate(&[&[0x82, 1], &text_bytes(32, b'a')])),
+        ),
+        (
+            "present digest discriminator",
+            record_with_digest(&concatenate(&[&[0x82, 2], &digest])),
+        ),
+        ("absent digest under arity", record_with_digest(&[0x80])),
+        (
+            "absent digest over arity",
+            record_with_digest(&[0x82, 0, 0]),
+        ),
+        ("present digest under arity", record_with_digest(&[0x81, 1])),
+        (
+            "present digest over arity",
+            record_with_digest(&concatenate(&[&[0x83, 1], &digest, &[0]])),
+        ),
+        (
+            "nested request invalid UTF-8",
+            replace_once_with(
+                &decode_hex(RECORD_ACCEPTED_HEX),
+                &decode_hex("65312e302e30"),
+                &invalid_utf8,
+            ),
+        ),
+    ] {
+        assert_malformed(DecisionRecordV1::decode(&wire), name);
+    }
+}
+
+#[test]
+fn record_decoder_reaches_every_result_branch() {
+    for (name, wire) in [
+        (
+            "accepted index range",
+            record_with_result(&decode_hex("830018401a000f4240")),
+        ),
+        (
+            "accepted confidence range",
+            record_with_result(&decode_hex("8300001a000f4241")),
+        ),
+        (
+            "accepted index type",
+            record_with_result(&decode_hex("8300f401")),
+        ),
+        (
+            "accepted confidence type",
+            record_with_result(&decode_hex("830000f4")),
+        ),
+        (
+            "accepted index over width",
+            record_with_result(&decode_hex("830019010001")),
+        ),
+        (
+            "accepted confidence over width",
+            record_with_result(&decode_hex("8300001b0000000100000000")),
+        ),
+        (
+            "accepted index nonshortest",
+            record_with_result(&decode_hex("8300180001")),
+        ),
+        (
+            "accepted confidence nonshortest",
+            record_with_result(&decode_hex("8300001b00000000000f4240")),
+        ),
+        (
+            "no-action under arity",
+            record_with_no_action_result(&decode_hex("8101")),
+        ),
+        (
+            "no-action over arity",
+            record_with_no_action_result(&decode_hex("83010500")),
+        ),
+    ] {
         assert_malformed(DecisionRecordV1::decode(&wire), name);
     }
 }
@@ -665,6 +824,8 @@ fn action_decoder_has_a_field_specific_malformed_matrix() {
         &bytes_of(31, 0xff),
     );
     let invalid_identifier = replace_once_with(&canonical, b"move", b"m\0ve");
+    let invalid_utf8_identifier =
+        replace_once_with(&canonical, &decode_hex("646d6f7665"), &decode_hex("62c328"));
     let invalid_confidence = replace_once_with(
         &canonical,
         &[0x1a, 0, 0x0f, 0x42, 0x40],
@@ -706,6 +867,7 @@ fn action_decoder_has_a_field_specific_malformed_matrix() {
             replace_once_with(&canonical, &[0x64], &[0x44]),
         ),
         ("action identifier grammar", invalid_identifier),
+        ("action identifier invalid UTF-8", invalid_utf8_identifier),
         ("confidence type", wrong_confidence_type),
         ("confidence range", invalid_confidence),
         ("driver tick type", wrong_driver_tick_type),
@@ -769,6 +931,10 @@ fn append(bytes: &[u8], byte: u8) -> Vec<u8> {
     result
 }
 
+fn concatenate(parts: &[&[u8]]) -> Vec<u8> {
+    parts.concat()
+}
+
 fn missing_outer_item(bytes: &[u8], outer_header: u8, final_item_bytes: usize) -> Vec<u8> {
     let mut result = bytes.to_vec();
     result[0] = outer_header;
@@ -784,7 +950,11 @@ fn extra_outer_item(bytes: &[u8], outer_header: u8) -> Vec<u8> {
 }
 
 fn text_bytes(length: usize, byte: u8) -> Vec<u8> {
-    let mut result = vec![0x60 | u8::try_from(length).expect("short test text")];
+    let mut result = if length <= 23 {
+        vec![0x60 | u8::try_from(length).expect("short test text")]
+    } else {
+        vec![0x78, u8::try_from(length).expect("one-byte test text")]
+    };
     result.extend(std::iter::repeat_n(byte, length));
     result
 }
@@ -856,6 +1026,33 @@ fn record_no_action_wire(code: u8) -> Vec<u8> {
     let mut wire = decode_hex(RECORD_NO_ACTION_HEX);
     *wire.last_mut().expect("record fixture has a result code") = code;
     wire
+}
+
+fn record_with_digest(digest: &[u8]) -> Vec<u8> {
+    replace_once_with(
+        &decode_hex(RECORD_ACCEPTED_HEX),
+        &decode_hex(concat!(
+            "82015820",
+            "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        )),
+        digest,
+    )
+}
+
+fn record_with_result(result: &[u8]) -> Vec<u8> {
+    replace_once_with(
+        &decode_hex(RECORD_ACCEPTED_HEX),
+        &decode_hex("8300001a000f4240"),
+        result,
+    )
+}
+
+fn record_with_no_action_result(result: &[u8]) -> Vec<u8> {
+    replace_once_with(
+        &decode_hex(RECORD_NO_ACTION_HEX),
+        &decode_hex("820105"),
+        result,
+    )
 }
 
 fn assert_malformed<T>(result: Result<T, AgentDecisionError>, context: &str) {

@@ -152,7 +152,9 @@ impl ActionCatalogueV1 {
 
     /// # Errors
     ///
-    /// Propagates the V1 encoding size error.
+    /// Returns the domain-separated digest of this validated value's canonical
+    /// encoding. The fallible API is retained for protocol symmetry; validated
+    /// V1 encoding is structurally infallible.
     pub fn hash(&self) -> Result<[u8; 32], AgentDecisionError> {
         self.encode()
             .map(|encoded| derive_hash("pigloros.agent.catalogue.v1", &encoded))
@@ -335,7 +337,9 @@ impl AgentDecisionRequestV1 {
 
     /// # Errors
     ///
-    /// Propagates the V1 encoding size error.
+    /// Returns the domain-separated digest of this validated value's canonical
+    /// encoding. The fallible API is retained for protocol symmetry; validated
+    /// V1 encoding is structurally infallible.
     pub fn hash(&self) -> Result<[u8; 32], AgentDecisionError> {
         self.encode()
             .map(|encoded| derive_hash("pigloros.agent.request.v1", &encoded))
@@ -693,7 +697,9 @@ impl DecisionRecordV1 {
 
     /// # Errors
     ///
-    /// Propagates the V1 encoding size error.
+    /// Returns the domain-separated digest of this validated value's canonical
+    /// encoding. The fallible API is retained for protocol symmetry; validated
+    /// V1 encoding is structurally infallible.
     pub fn hash(&self) -> Result<[u8; 32], AgentDecisionError> {
         self.encode()
             .map(|encoded| derive_hash("pigloros.agent.record.v1", &encoded))
