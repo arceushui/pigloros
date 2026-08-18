@@ -6,10 +6,13 @@ use pos_core::{
     Capability, Plugin,
 };
 use pos_runtime::{
-    Driver, DriverRecoveryEvidence, ObservationView, PluginRegistry, RuntimeError, StepOutput,
-    TimelineHistorySegment,
+    Driver, DriverRecoveryEvidence, ObservationView, PluginRegistry, ProjectionKey, RuntimeError,
+    StepOutput, TimelineHistorySegment,
 };
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 fn event(seq: u64, entity: EntityId, event_type: &str, payload: Vec<u8>) -> Event {
     Event {
@@ -167,4 +170,53 @@ fn recovery_ignores_driverless_plugins_and_rejects_pending_transactions() {
         Err(RuntimeError::PendingDriverStep)
     ));
     pending.abort_step();
+}
+
+#[test]
+fn scheduler_skips_metadata_only_plugins_and_rejects_cadence_overflow() {
+    let timeline = TimelineId::new();
+    let mut registry = PluginRegistry::new();
+    let plugin = MetadataOnlyPlugin {
+        id: PluginId::new(),
+    };
+    registry.register(&plugin, None, None).unwrap();
+    registry.register_driver(Box::new(DefaultRecoveryDriver));
+    registry.step_all_anchored(timeline, Seq::ZERO).unwrap();
+    registry.commit_step();
+    registry.commit_step();
+
+    let mut cadenced = PluginRegistry::new();
+    cadenced.register_driver(Box::new(CadencedDriver {
+        subscriptions: vec![ProjectionKey::new(EntityId::new())],
+    }));
+    cadenced
+        .tick_cadenced_anchored(timeline, u128::MAX, Seq::ZERO)
+        .unwrap();
+    cadenced.commit_step();
+    assert!(matches!(
+        cadenced.tick_cadenced_anchored(timeline, u128::MAX, Seq::ZERO),
+        Err(RuntimeError::CadenceOverflow { .. })
+    ));
+}
+
+struct CadencedDriver {
+    subscriptions: Vec<ProjectionKey>,
+}
+
+impl Driver for CadencedDriver {
+    fn name(&self) -> &'static str {
+        "cadenced"
+    }
+
+    fn tick_interval(&self) -> Duration {
+        Duration::from_nanos(1)
+    }
+
+    fn subscriptions(&self) -> &[ProjectionKey] {
+        &self.subscriptions
+    }
+
+    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
+        Ok(StepOutput::empty())
+    }
 }
