@@ -291,6 +291,7 @@ struct AdapterControl {
     append_batch_sizes: Vec<usize>,
     fail_next_append: bool,
     next_read_fault: Option<ReadFault>,
+    logical_head_reads: usize,
     next_metadata_fault: Option<MetadataFault>,
 }
 
@@ -298,6 +299,7 @@ struct AdapterControl {
 enum ReadFault {
     DropFirstEvent,
     ReportZeroHead,
+    FailSecondHead,
 }
 
 #[derive(Clone, Copy)]
@@ -368,6 +370,12 @@ impl SharedMemoryAdapter {
 
     fn report_zero_head_on_next_read(&self) {
         self.control().next_read_fault = Some(ReadFault::ReportZeroHead);
+    }
+
+    fn fail_after_first_logical_head(&self) {
+        let mut control = self.control();
+        control.logical_head_reads = 0;
+        control.next_read_fault = Some(ReadFault::FailSecondHead);
     }
 
     fn source_events(&self, timeline: TimelineId) -> Vec<Event> {
@@ -449,15 +457,29 @@ impl EventStore for SharedMemoryAdapter {
     }
 
     fn logical_head(&self, id: TimelineId) -> Result<Seq, CoreError> {
-        let should_report_zero = {
+        let fault = {
             let mut control = self.control();
-            matches!(control.next_read_fault, Some(ReadFault::ReportZeroHead))
-                && control.next_read_fault.take().is_some()
+            match control.next_read_fault {
+                Some(ReadFault::ReportZeroHead) => {
+                    control.next_read_fault.take();
+                    Some(ReadFault::ReportZeroHead)
+                }
+                Some(ReadFault::FailSecondHead) => {
+                    control.logical_head_reads += 1;
+                    (control.logical_head_reads >= 2)
+                        .then(|| control.next_read_fault.take())
+                        .flatten()
+                }
+                _ => None,
+            }
         };
-        if should_report_zero {
-            return Ok(Seq::ZERO);
+        match fault {
+            Some(ReadFault::ReportZeroHead) => Ok(Seq::ZERO),
+            Some(ReadFault::FailSecondHead) => Err(CoreError::Storage(
+                "injected second head failure".to_owned(),
+            )),
+            _ => self.store().logical_head(id),
         }
-        self.store().logical_head(id)
     }
 }
 
@@ -511,6 +533,27 @@ fn boundary_driver_paths_cover_quiescence_runtime_and_schema_failures() {
             Err(ExperimentError::SessionFaulted)
         ));
     }
+}
+
+#[test]
+fn post_append_capture_failure_faults_the_session() {
+    let host = HostFixture::new();
+    let response = accepted_response_bytes(0, CONFIDENCE);
+    let (experiment, _, _) = host.experiment(
+        "agent-provider-post-capture-fault",
+        vec![response_attempt(&response)],
+    );
+    let adapter = SharedMemoryAdapter::new();
+    adapter.fail_after_first_logical_head();
+    let mut session = experiment.start_with_store(Box::new(adapter)).unwrap();
+    assert!(matches!(
+        session.step_tick(),
+        Err(ExperimentError::Store(_))
+    ));
+    assert!(matches!(
+        session.step_tick(),
+        Err(ExperimentError::SessionFaulted)
+    ));
 }
 
 #[test]
