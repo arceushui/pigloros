@@ -957,6 +957,29 @@ fn provider_driver_recovers_only_from_selected_evidence_and_remains_fresh_only()
 }
 
 #[test]
+fn provider_driver_recovery_rejects_unordered_evidence_before_provider_use() {
+    let host = HostFixture::new();
+    let provider = FixtureAgentDecisionProvider::new(vec![ProviderAttempt::NoResponse]);
+    let calls = provider.call_count_handle();
+    let driver = ProviderBackedAgentDriver::new(
+        host.agent,
+        host.catalogue.clone(),
+        host.provenance.clone(),
+        Box::new(provider),
+    );
+    let mut registry = PluginRegistry::new();
+    registry.register_driver(Box::new(driver));
+    let segments = [TimelineHistorySegment::new(host.timeline, Seq::from_u64(2))];
+    let evidence = vec![
+        event(2, host.other_agent, "world.observation", vec![0x80]),
+        event(1, host.other_agent, "world.observation", vec![0x80]),
+    ];
+
+    assert!(registry.restore_driver_state(&segments, &evidence).is_err());
+    assert_eq!(calls.get(), 0, "recovery must not call the provider");
+}
+
+#[test]
 fn live_driver_provider_call_count_does_not_change_during_replay() {
     let host = HostFixture::new();
     let response = BoundedProviderBytes::try_from(provider_accepted_bytes(0, 900_000))

@@ -143,11 +143,10 @@ impl AgentDecisionReplayVerifier {
                     checkpoint: checkpoint.last_verified.as_u64(),
                 });
             }
-            let prefix_len = usize::try_from(checkpoint.last_verified.as_u64()).map_err(|_| {
-                ReplayVerificationError::MissingCheckpoint {
-                    checkpoint: checkpoint.last_verified.as_u64(),
-                }
-            })?;
+            let prefix_len = verification_events
+                .iter()
+                .take_while(|event| event.seq <= checkpoint.last_verified)
+                .count();
             let state =
                 self.verify_events(&verification_events[..prefix_len], ReplayState::default())?;
             self.verify_events(&verification_events[prefix_len..], state)?
