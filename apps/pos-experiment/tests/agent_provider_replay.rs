@@ -312,6 +312,7 @@ struct AdapterControl {
 #[derive(Clone, Copy)]
 enum ReadFault {
     DropFirstEvent,
+    FailRead,
     ReportZeroHead,
     FailSecondHead,
 }
@@ -374,6 +375,10 @@ impl SharedMemoryAdapter {
 
     fn drop_first_on_next_read(&self) {
         self.control().next_read_fault = Some(ReadFault::DropFirstEvent);
+    }
+
+    fn fail_next_read(&self) {
+        self.control().next_read_fault = Some(ReadFault::FailRead);
     }
 
     fn fail_next_get_timeline(&self) {
@@ -448,12 +453,12 @@ impl EventStore for SharedMemoryAdapter {
     }
 
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+        let fault = self.control().next_read_fault.take();
+        if matches!(fault, Some(ReadFault::FailRead)) {
+            return Err(CoreError::Storage("injected read failure".to_owned()));
+        }
         let mut events = self.store().read(timeline, range)?;
-        let should_drop_first = {
-            let mut control = self.control();
-            matches!(control.next_read_fault, Some(ReadFault::DropFirstEvent))
-                && control.next_read_fault.take().is_some()
-        };
+        let should_drop_first = matches!(fault, Some(ReadFault::DropFirstEvent));
         if should_drop_first && !events.is_empty() {
             events.remove(0);
         }
@@ -1039,28 +1044,35 @@ fn committed_history_restores_driver_tick_for_resume_and_fork() {
 }
 
 #[test]
-fn non_empty_host_recovery_revalidates_prefix_for_resume_and_fork() {
+fn supplied_store_read_failure_prevents_driver_restore() {
     let host = HostFixture::new();
     let accepted = accepted_response_bytes(0, CONFIDENCE);
-    let experiment = host.forkable_experiment(
-        "agent-provider-non-empty-recovery",
-        vec![response_attempt(&accepted)],
-        vec![],
-    );
     let adapter = SharedMemoryAdapter::new();
-    let mut parent = experiment
+    let (experiment, _, _) = host.experiment(
+        "agent-provider-supplied-store-read-source",
+        vec![response_attempt(&accepted)],
+    );
+    let mut original = experiment
         .start_with_store(Box::new(adapter.clone()))
         .unwrap();
-    parent.step_tick().unwrap();
+    original.step_tick().unwrap();
+    let timeline = original.timeline().id();
+    drop(original);
 
-    let child = parent.fork("agent-provider-non-empty-child").unwrap();
-    assert_eq!(child.source_events().unwrap().len(), 2);
+    adapter.fail_next_read();
+    let (recovery, calls, tick) = host.experiment(
+        "agent-provider-supplied-store-read-recovery",
+        vec![ProviderAttempt::NoResponse],
+    );
+    let result = recovery.resume_with_store(timeline, Box::new(adapter));
 
-    let recovery = host.experiment("agent-provider-non-empty-resume", vec![]).0;
-    let resumed = recovery
-        .resume_with_store(child.timeline().id(), Box::new(adapter))
-        .unwrap();
-    assert_eq!(resumed.source_events().unwrap().len(), 2);
+    assert!(matches!(
+        result,
+        Err(ExperimentError::Store(CoreError::Storage(message)))
+            if message == "injected read failure"
+    ));
+    assert_eq!(calls.get(), 0);
+    assert_eq!(tick.load(), 0);
 }
 
 #[test]

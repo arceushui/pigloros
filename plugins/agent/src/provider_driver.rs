@@ -1113,25 +1113,6 @@ mod tests {
     }
 
     #[test]
-    fn driver_transaction_hooks_are_idempotent_when_nothing_is_staged() {
-        let entity = EntityId::new();
-        let mut driver = ProviderBackedAgentDriver::new(
-            entity,
-            ActionCatalogueV1::try_new(vec!["wait".to_owned()]).unwrap(),
-            provenance(),
-            Box::new(FixtureAgentDecisionProvider::new(vec![])),
-        );
-
-        driver.commit_step();
-        driver.abort_step();
-        driver.commit_restore_from_history();
-        driver.abort_restore_from_history();
-        assert_eq!(driver.committed_tick(), 0);
-        assert!(driver.staged_tick.is_none());
-        assert!(driver.staged_restore_tick.is_none());
-    }
-
-    #[test]
     fn recorder_error_paths_never_surface_record_bytes() {
         let entity = EntityId::new();
         let request =

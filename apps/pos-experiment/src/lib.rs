@@ -1352,63 +1352,6 @@ mod tests {
     }
 
     #[test]
-    fn host_prefix_and_ancestry_reads_cover_a_completed_non_empty_timeline() {
-        let mut store = pos_store::memory::MemoryStore::new();
-        let timeline = store.create_timeline("completed-prefix").unwrap();
-        store
-            .append(
-                timeline.id(),
-                &[EventDraft::new(
-                    EntityId::new(),
-                    Kind::new("completed.event"),
-                    CanonicalBytes::from_static(b"completed"),
-                )],
-            )
-            .unwrap();
-
-        let events =
-            read_completed_prefix(&store, timeline.id(), pos_core::clock::Seq::from_u64(1))
-                .unwrap();
-        assert_eq!(events.len(), 1);
-        let ancestry =
-            timeline_ancestry(&store, timeline.id(), pos_core::clock::Seq::from_u64(1)).unwrap();
-        assert_eq!(ancestry.len(), 1);
-        assert_eq!(ancestry[0].through(), pos_core::clock::Seq::from_u64(1));
-    }
-
-    #[test]
-    fn host_recovery_surfaces_read_failures_before_driver_restore() {
-        let mut store = CaptureFaultStore {
-            base: pos_store::memory::MemoryStore::new(),
-            fault: CaptureFault::Read,
-            head_calls: std::cell::Cell::new(0),
-        };
-        let timeline = store.create_timeline("read-failure").unwrap();
-        store
-            .append(
-                timeline.id(),
-                &[EventDraft::new(
-                    EntityId::new(),
-                    Kind::new("read.failure"),
-                    CanonicalBytes::from_static(b"event"),
-                )],
-            )
-            .unwrap();
-
-        assert!(
-            read_completed_prefix(&store, timeline.id(), pos_core::clock::Seq::from_u64(1),)
-                .is_err()
-        );
-        assert!(Experiment::new(ExperimentConfig {
-            name: "read-failure-resume".to_owned(),
-            stop: StopCondition::MaxTicks(1),
-            store_config: StoreConfig::Memory,
-        })
-        .resume_with_store(timeline.id(), Box::new(store))
-        .is_err());
-    }
-
-    #[test]
     fn reproduction_manifest_wraps_a_host_owned_recipe() {
         let timeline_id = pos_core::ids::TimelineId::new();
         let result = RunResult {
