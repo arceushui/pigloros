@@ -1,8 +1,9 @@
 use pos_core::ids::{EntityId, PluginId, TimelineId};
 use pos_plugin_agent::protocol::{
-    ActionCatalogueV1, AgentActionV1, AgentDecisionError, AgentDecisionRequestV1,
-    AgentProviderProvenanceV1, BoundedProviderBytes, DecisionNoActionCodeV1, DecisionRecordV1,
-    DecisionResultV1, ProviderDecisionV1, ProviderFailureCode,
+    is_agent_action_wire, ActionCatalogueV1, AgentActionV1, AgentDecisionError,
+    AgentDecisionRequestV1, AgentProviderProvenanceV1, BoundedProviderBytes,
+    DecisionNoActionCodeV1, DecisionRecordV1, DecisionResultV1, ProviderDecisionV1,
+    ProviderFailureCode,
 };
 use std::fmt::Write as _;
 use ulid::Ulid;
@@ -1110,4 +1111,32 @@ fn assert_malformed<T>(result: Result<T, AgentDecisionError>, context: &str) {
         Some(AgentDecisionError::MalformedWire),
         "{context}"
     );
+}
+
+#[test]
+fn public_action_wire_probe_handles_tagged_and_length_encoded_boundaries() {
+    let magic = [0x44, b'P', b'A', b'A', b'1'];
+    let mut tagged = Vec::new();
+    tagged.extend([0xd8, 0x00, 0x87]);
+    tagged.extend_from_slice(&magic);
+    assert!(is_agent_action_wire(&tagged));
+
+    let mut long_tagged = Vec::new();
+    long_tagged.extend([0xd9, 0x00, 0x00, 0x87]);
+    long_tagged.extend_from_slice(&magic);
+    assert!(is_agent_action_wire(&long_tagged));
+
+    let mut definite = vec![0x58, 0x04];
+    definite.extend_from_slice(&magic[1..]);
+    assert!(is_agent_action_wire(&[0x87, 0x44, b'P', b'A', b'A', b'1']));
+    assert!(is_agent_action_wire(&[
+        0x87, 0x58, 0x04, b'P', b'A', b'A', b'1'
+    ]));
+    assert!(!is_agent_action_wire(&definite));
+
+    assert!(is_agent_action_wire(&[
+        0x9f, 0x5f, 0x44, b'P', b'A', b'A', b'1', 0xff, 0xff
+    ]));
+    assert!(!is_agent_action_wire(&[0xd8]));
+    assert!(!is_agent_action_wire(&[0x98, 0x07]));
 }

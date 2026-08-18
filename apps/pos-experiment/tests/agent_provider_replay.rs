@@ -1039,6 +1039,31 @@ fn committed_history_restores_driver_tick_for_resume_and_fork() {
 }
 
 #[test]
+fn non_empty_host_recovery_revalidates_prefix_for_resume_and_fork() {
+    let host = HostFixture::new();
+    let accepted = accepted_response_bytes(0, CONFIDENCE);
+    let experiment = host.forkable_experiment(
+        "agent-provider-non-empty-recovery",
+        vec![response_attempt(&accepted)],
+        vec![],
+    );
+    let adapter = SharedMemoryAdapter::new();
+    let mut parent = experiment
+        .start_with_store(Box::new(adapter.clone()))
+        .unwrap();
+    parent.step_tick().unwrap();
+
+    let child = parent.fork("agent-provider-non-empty-child").unwrap();
+    assert_eq!(child.source_events().unwrap().len(), 2);
+
+    let recovery = host.experiment("agent-provider-non-empty-resume", vec![]).0;
+    let resumed = recovery
+        .resume_with_store(child.timeline().id(), Box::new(adapter))
+        .unwrap();
+    assert_eq!(resumed.source_events().unwrap().len(), 2);
+}
+
+#[test]
 fn source_events_validates_empty_metadata_and_completed_head() {
     let host = HostFixture::new();
     let adapter = SharedMemoryAdapter::new();
