@@ -879,6 +879,10 @@ mod tests {
         over_limit.resize(513, 0);
         let mut deeply_tagged = vec![0xc0; 512];
         deeply_tagged.extend([0x87, 0x44, b'P', b'A', b'A', b'1']);
+        let mut truncated_tag_header = vec![0xc0; 511];
+        truncated_tag_header.push(0xd8);
+        let mut truncated_array_header = vec![0xc0; 511];
+        truncated_array_header.push(0x98);
         vec![
             vec![0x87, 0x44, b'P', b'A', b'A', b'1'],
             over_limit,
@@ -910,6 +914,8 @@ mod tests {
             vec![0x9f, 0x59, 0, 4, b'P', b'A', b'A', b'1'],
             vec![0x9f, 0x5a, 0, 0, 0, 4, b'P', b'A', b'A', b'1'],
             vec![0x9f, 0x5b, 0, 0, 0, 0, 0, 0, 0, 4, b'P', b'A', b'A', b'1'],
+            truncated_tag_header,
+            truncated_array_header,
         ]
     }
 
