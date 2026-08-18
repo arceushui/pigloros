@@ -901,10 +901,14 @@ fn raw_tagged_array_payload_offset(input: &[u8]) -> Result<Option<usize>, ()> {
             return Err(());
         }
         if let Some(tag_header_len) = raw_tag_header_len(remaining)? {
-            offset = offset.checked_add(tag_header_len).ok_or(())?;
+            // `input` is capped by `is_agent_action_wire`, and every header is
+            // at most nine bytes, so this bounded offset cannot overflow.
+            offset += tag_header_len;
         } else {
-            return Ok(raw_array_header_len(remaining)?
-                .and_then(|array_header_len| offset.checked_add(array_header_len)));
+            return Ok(raw_array_header_len(remaining)?.map(|array_header_len| {
+                // The same bounded-input invariant makes this addition safe.
+                offset + array_header_len
+            }));
         }
     }
 }
