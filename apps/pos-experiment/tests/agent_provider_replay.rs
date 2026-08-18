@@ -728,8 +728,36 @@ fn source_events_validates_empty_metadata_and_completed_head() {
     assert!(session.source_events().is_err());
 
     session.step_tick().unwrap();
+    assert_eq!(session.source_events().unwrap().len(), 1);
     adapter.report_zero_head_on_next_read();
     assert!(session.source_events().is_err());
+
+    let (experiment, _, _) = host.experiment("agent-provider-capture-regression", vec![]);
+    let mut session = experiment
+        .start_with_store(Box::new(adapter.clone()))
+        .unwrap();
+    session.step_tick().unwrap();
+    adapter.report_zero_head_on_next_read();
+    assert!(session.step_tick().is_err());
+
+    let (experiment, _, _) = host.experiment("agent-provider-capture-gap", vec![]);
+    let mut session = experiment
+        .start_with_store(Box::new(adapter.clone()))
+        .unwrap();
+    let timeline = session.timeline().id();
+    adapter
+        .store()
+        .append(
+            timeline,
+            &[EventDraft::new(
+                EntityId::new(),
+                pos_core::event::Kind::new("external.pending"),
+                pos_core::event::CanonicalBytes::from_static(b"pending"),
+            )],
+        )
+        .unwrap();
+    adapter.drop_first_on_next_read();
+    assert!(session.step_tick().is_err());
 }
 
 #[test]
