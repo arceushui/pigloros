@@ -970,6 +970,12 @@ fn provider_driver_recovery_rejects_unordered_evidence_before_provider_use() {
     let mut registry = PluginRegistry::new();
     registry.register_driver(Box::new(driver));
     let segments = [TimelineHistorySegment::new(host.timeline, Seq::from_u64(2))];
+    let wrong_timeline = TimelineId::new();
+    let wrong_segments = [
+        TimelineHistorySegment::new(wrong_timeline, Seq::from_u64(1)),
+        TimelineHistorySegment::new(wrong_timeline, Seq::from_u64(2)),
+    ];
+    assert!(registry.restore_driver_state(&wrong_segments, &[]).is_err());
     let evidence = vec![
         event(2, host.other_agent, "world.observation", vec![0x80]),
         event(1, host.other_agent, "world.observation", vec![0x80]),

@@ -1586,6 +1586,98 @@ mod tests {
     }
 
     #[test]
+    fn raw_action_magic_probe_covers_all_bounded_cbor_headers() {
+        assert_eq!(raw_tag_header_len(&[]), Err(()));
+        assert_eq!(raw_array_header_len(&[]), Err(()));
+        assert_eq!(raw_header_len(&[0], 2), Err(()));
+
+        for (tag, header_len) in [(0xd8, 2), (0xd9, 3), (0xda, 5), (0xdb, 9)] {
+            let input = vec![tag; header_len];
+            assert_eq!(raw_tag_header_len(&input), Ok(Some(header_len)));
+        }
+        for (tag, header_len) in [(0x98, 2), (0x99, 3), (0x9a, 5), (0x9b, 9)] {
+            let input = vec![tag; header_len];
+            assert_eq!(raw_array_header_len(&input), Ok(Some(header_len)));
+        }
+        assert_eq!(raw_tag_header_len(&[0x00]), Ok(None));
+        assert_eq!(raw_array_header_len(&[0x00]), Ok(None));
+        assert_eq!(raw_tagged_array_payload_offset(&[]), Err(()));
+        assert_eq!(raw_tagged_array_payload_offset(&[0x80]), Ok(Some(1)));
+        assert_eq!(
+            raw_tagged_array_payload_offset(&[0xd8, 0x00, 0x80]),
+            Ok(Some(3))
+        );
+
+        for (tag, header_len, value_len) in [
+            (0x40, 1, 0),
+            (0x43, 1, 3),
+            (0x58, 2, 4),
+            (0x59, 3, 4),
+            (0x5a, 5, 4),
+            (0x5b, 9, 4),
+        ] {
+            let mut input = vec![tag];
+            if tag == 0x58 {
+                input.push(4);
+            } else if tag == 0x59 {
+                input.extend_from_slice(&4_u16.to_be_bytes());
+            } else if tag == 0x5a {
+                input.extend_from_slice(&4_u32.to_be_bytes());
+            } else if tag == 0x5b {
+                input.extend_from_slice(&4_u64.to_be_bytes());
+            }
+            input.extend_from_slice(&[0; 4]);
+            assert_eq!(
+                raw_definite_byte_string(&input),
+                Ok(Some((header_len, value_len)))
+            );
+        }
+        assert_eq!(raw_definite_byte_string(&[]), Err(()));
+        assert_eq!(raw_definite_byte_string(&[0x58]), Err(()));
+        assert_eq!(raw_definite_byte_string(&[0x59, 0]), Err(()));
+        assert_eq!(raw_definite_byte_string(&[0x5a, 0, 0, 0]), Err(()));
+        assert_eq!(
+            raw_definite_byte_string(&[0x5b, 0, 0, 0, 0, 0, 0, 0]),
+            Err(())
+        );
+        for length in 0..2 {
+            let mut input = vec![0x59];
+            input.extend(std::iter::repeat_n(0, length));
+            assert_eq!(raw_definite_byte_string(&input), Err(()));
+        }
+        for length in 0..4 {
+            let mut input = vec![0x5a];
+            input.extend(std::iter::repeat_n(0, length));
+            assert_eq!(raw_definite_byte_string(&input), Err(()));
+        }
+        for length in 0..8 {
+            let mut input = vec![0x5b];
+            input.extend(std::iter::repeat_n(0, length));
+            assert_eq!(raw_definite_byte_string(&input), Err(()));
+        }
+        assert_eq!(raw_definite_byte_string(&[0x20]), Ok(None));
+
+        assert!(!raw_byte_string_starts_with_action_magic(&[0x20], false));
+        assert!(raw_definite_byte_string_starts_with_magic(
+            &[0x44, b'P', b'A', b'A', b'1'],
+            false
+        ));
+        assert!(raw_indefinite_byte_string_starts_with_magic(
+            &[0x5f, 0x42, b'P', b'A', 0x42, b'A', b'1'],
+            false
+        ));
+        assert!(!raw_indefinite_byte_string_starts_with_magic(
+            &[0x5f, 0xff],
+            false
+        ));
+        assert!(raw_indefinite_byte_string_starts_with_magic(
+            &[0x5f, 0x58],
+            true
+        ));
+        assert!(raw_definite_byte_string_starts_with_magic(&[0x58], true));
+    }
+
+    #[test]
     fn decision_record_digest_matrix_and_debug_output_are_fail_closed() {
         let request = AgentDecisionRequestV1::new(
             pos_core::ids::TimelineId::new(),
