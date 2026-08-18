@@ -1140,3 +1140,48 @@ fn public_action_wire_probe_handles_tagged_and_length_encoded_boundaries() {
     assert!(!is_agent_action_wire(&[0xd8]));
     assert!(!is_agent_action_wire(&[0x98, 0x07]));
 }
+
+#[test]
+fn public_action_wire_probe_covers_all_supported_raw_headers() {
+    let magic = [0x44, b'P', b'A', b'A', b'1'];
+
+    for (tag, header) in [
+        (0xda, vec![0, 0, 0, 0]),
+        (0xdb, vec![0, 0, 0, 0, 0, 0, 0, 0]),
+    ] {
+        let mut tagged = vec![tag];
+        tagged.extend(header);
+        tagged.push(0x87);
+        tagged.extend_from_slice(&magic);
+        assert!(is_agent_action_wire(&tagged), "tag header {tag:#x}");
+    }
+
+    for (header, header_len) in [(0x98, 2usize), (0x99, 3), (0x9a, 5), (0x9b, 9)] {
+        let mut array = vec![header];
+        array.extend(std::iter::repeat_n(0, header_len - 1));
+        array.extend_from_slice(&magic);
+        assert!(is_agent_action_wire(&array), "array header {header:#x}");
+    }
+
+    for bytes in [
+        vec![0x87, 0x59, 0, 4, b'P', b'A', b'A', b'1'],
+        vec![0x87, 0x5a, 0, 0, 0, 4, b'P', b'A', b'A', b'1'],
+        vec![0x87, 0x5b, 0, 0, 0, 0, 0, 0, 0, 4, b'P', b'A', b'A', b'1'],
+    ] {
+        assert!(
+            is_agent_action_wire(&bytes),
+            "byte-string header {:#x}",
+            bytes[1]
+        );
+    }
+
+    for bytes in [
+        vec![0xda],
+        vec![0xdb, 0, 0, 0],
+        vec![0x87, 0x59],
+        vec![0x87, 0x5a, 0, 0],
+        vec![0x87, 0x5b, 0, 0, 0, 0],
+    ] {
+        assert!(!is_agent_action_wire(&bytes), "truncated wire: {bytes:?}");
+    }
+}

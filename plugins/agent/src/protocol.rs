@@ -1687,4 +1687,64 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn raw_action_wire_header_parsers_fail_closed_at_each_length_boundary() {
+        assert_eq!(raw_tag_header_len(&[]), Err(()));
+        assert_eq!(raw_tag_header_len(&[0xd8, 0]), Ok(Some(2)));
+        assert_eq!(raw_tag_header_len(&[0xd9, 0, 0]), Ok(Some(3)));
+        assert_eq!(raw_tag_header_len(&[0xda, 0, 0, 0, 0]), Ok(Some(5)));
+        assert_eq!(
+            raw_tag_header_len(&[0xdb, 0, 0, 0, 0, 0, 0, 0, 0]),
+            Ok(Some(9))
+        );
+        for (tag, bytes) in [(0xd8, 1), (0xd9, 2), (0xda, 4), (0xdb, 8)] {
+            assert_eq!(raw_tag_header_len(&vec![tag; bytes]), Err(()));
+        }
+        assert_eq!(raw_tag_header_len(&[0x87]), Ok(None));
+
+        assert_eq!(raw_array_header_len(&[]), Err(()));
+        assert_eq!(raw_array_header_len(&[0x98, 0]), Ok(Some(2)));
+        assert_eq!(raw_array_header_len(&[0x99, 0, 0]), Ok(Some(3)));
+        assert_eq!(raw_array_header_len(&[0x9a, 0, 0, 0, 0]), Ok(Some(5)));
+        assert_eq!(
+            raw_array_header_len(&[0x9b, 0, 0, 0, 0, 0, 0, 0, 0]),
+            Ok(Some(9))
+        );
+        assert_eq!(raw_array_header_len(&[0x98]), Err(()));
+        assert_eq!(raw_array_header_len(&[0x01]), Ok(None));
+
+        assert_eq!(raw_definite_byte_string(&[]), Err(()));
+        assert_eq!(
+            raw_definite_byte_string(&[0x44, 0, 0, 0, 0]),
+            Ok(Some((1, 4)))
+        );
+        assert_eq!(
+            raw_definite_byte_string(&[0x58, 4, 0, 0, 0, 0]),
+            Ok(Some((2, 4)))
+        );
+        assert_eq!(
+            raw_definite_byte_string(&[0x59, 0, 4, 0, 0, 0, 0]),
+            Ok(Some((3, 4)))
+        );
+        assert_eq!(
+            raw_definite_byte_string(&[0x5a, 0, 0, 0, 4, 0, 0, 0, 0]),
+            Ok(Some((5, 4)))
+        );
+        assert_eq!(
+            raw_definite_byte_string(&[0x5b, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0]),
+            Ok(Some((9, 4)))
+        );
+        for header_len in 2..=4 {
+            let mut input = vec![0x5a, 0, 0, 0, 4];
+            input.truncate(header_len);
+            assert_eq!(raw_definite_byte_string(&input), Err(()));
+        }
+        for header_len in 2..=8 {
+            let mut input = vec![0x5b, 0, 0, 0, 0, 0, 0, 0, 4];
+            input.truncate(header_len);
+            assert_eq!(raw_definite_byte_string(&input), Err(()));
+        }
+        assert_eq!(raw_definite_byte_string(&[0x20]), Ok(None));
+    }
 }
