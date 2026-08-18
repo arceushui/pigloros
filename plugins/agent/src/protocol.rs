@@ -1532,7 +1532,7 @@ mod tests {
         );
 
         assert_eq!(
-            ProviderDecisionV1::decode(&vec![0x83, 0x44, b'B', b'A', b'D', b'!', 0x01, 0x00]),
+            ProviderDecisionV1::decode(&[0x83, 0x44, b'B', b'A', b'D', b'!', 0x01, 0x00]),
             Err(AgentDecisionError::MalformedWire)
         );
         assert_eq!(
@@ -1540,7 +1540,7 @@ mod tests {
             Err(AgentDecisionError::MalformedWire)
         );
         assert_eq!(
-            ProviderDecisionV1::decode(&vec![0x83, 0x44, b'P', b'D', b'P', b'1', 0x02, 0x00]),
+            ProviderDecisionV1::decode(&[0x83, 0x44, b'P', b'D', b'P', b'1', 0x02, 0x00]),
             Err(AgentDecisionError::UnsupportedWireVersion)
         );
         assert_eq!(
