@@ -170,6 +170,11 @@ impl AgentDecisionReplayVerifier {
     ///
     /// Returns [`ReplayVerificationError`] for mismatched segments, unordered
     /// evidence headers, or invalid/mismatched target decisions and actions.
+    ///
+    /// # Panics
+    ///
+    /// This method panics only if the verifier's private constructor invariant
+    /// is violated and its timeline ancestry is empty.
     pub fn verify_recovery(
         &self,
         evidence: &DriverRecoveryEvidence,
@@ -185,7 +190,7 @@ impl AgentDecisionReplayVerifier {
         let last_segment = self
             .timeline_segments
             .last()
-            .ok_or(ReplayVerificationError::InvalidTimelineAncestry)?;
+            .expect("replay verifier always has a non-empty timeline ancestry");
         validate_recovery_sequence(&events, last_segment.through())?;
         let state = self.verify_events(&events, ReplayState::default())?;
         Ok(ReplayCheckpoint {

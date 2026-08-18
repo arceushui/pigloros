@@ -257,9 +257,10 @@ impl Driver for ProviderBackedAgentDriver {
     }
 
     fn commit_restore_from_history(&mut self) {
-        if let Some(tick) = self.staged_restore_tick.take() {
-            self.committed_tick = tick;
-        }
+        self.committed_tick = self
+            .staged_restore_tick
+            .take()
+            .unwrap_or(self.committed_tick);
     }
 
     fn abort_restore_from_history(&mut self) {
