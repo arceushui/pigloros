@@ -3124,7 +3124,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn both_host_paths_cover_the_complete_driver_transaction_matrix() {
         for path in [
             TransactionHostPath::AdvanceTick,
