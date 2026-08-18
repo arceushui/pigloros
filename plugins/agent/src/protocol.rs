@@ -1525,6 +1525,67 @@ mod tests {
     }
 
     #[test]
+    fn malformed_wire_and_host_boundary_branches_are_fail_closed() {
+        assert_eq!(
+            BoundedProviderBytes::try_from(vec![0; MAX_PROVIDER_RESPONSE_BYTES + 1]),
+            Err(AgentDecisionError::InvalidProviderResponseLength)
+        );
+
+        for wire in [
+            vec![0x83, 0x44, b'B', b'A', b'D', b'!', 0x01, 0x00],
+            encode_accepted_decision(0, 1),
+            [encode_no_action_decision(), vec![0x00]].concat(),
+            vec![0x83, 0x44, b'P', b'D', b'P', b'1', 0x02, 0x00],
+        ] {
+            let _ = ProviderDecisionV1::decode(&wire);
+        }
+
+        for attempt in [
+            ProviderAttempt::NoResponse,
+            ProviderAttempt::Failed(ProviderFailureCode::Unavailable),
+            ProviderAttempt::Oversized {
+                response_digest: None,
+            },
+        ] {
+            let debug = format!("{attempt:?}");
+            assert!(!debug.is_empty());
+        }
+
+        assert_eq!(
+            DecisionResultV1::from(ProviderDecisionV1::NoAction),
+            DecisionResultV1::NoAction(DecisionNoActionCodeV1::ProviderNoAction)
+        );
+        assert!(DecisionRecordV1::decode(&[0x80]).is_err());
+        assert!(AgentActionV1::decode(&[0x80]).is_err());
+
+        for value in [0_u64, 24, 256, 65_536, u64::MAX] {
+            let mut encoded = Vec::new();
+            write_uint(&mut encoded, value);
+            assert!(!encoded.is_empty());
+        }
+        assert!(decode_response_digest(None).is_err());
+        assert!(decode_response_digest(Some(&Value::Array(vec![]))).is_err());
+        assert!(decode_result(None).is_err());
+        assert!(decode_no_action_code(None).is_err());
+        assert!(decode_no_action_code(Some(99)).is_err());
+        assert_eq!(text(Some(&Value::Text("ok".to_owned()))), Some("ok"));
+        assert_eq!(text(Some(&Value::Integer(1.into()))), None);
+        assert_eq!(uint(Some(&Value::Text("1".to_owned()))), None);
+        assert_eq!(bytes::<2>(Some(&Value::Bytes(vec![1, 2]))), Some([1, 2]));
+        assert_eq!(bytes::<2>(Some(&Value::Bytes(vec![1]))), None);
+        assert!(!matches_magic(
+            Some(&Value::Text("PDP1".to_owned())),
+            DECISION_MAGIC
+        ));
+        assert!(decode_array(&[0x01], MAX_ENCODED_RECORD_BYTES).is_err());
+        assert!(
+            decode_first_array(&[0x80, 0x00], MAX_ENCODED_RECORD_BYTES)
+                .unwrap()
+                .1
+        );
+    }
+
+    #[test]
     fn decision_record_digest_matrix_and_debug_output_are_fail_closed() {
         let request = AgentDecisionRequestV1::new(
             pos_core::ids::TimelineId::new(),
