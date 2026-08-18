@@ -51,6 +51,9 @@ pub enum RuntimeError {
     #[error("driver '{driver}' committed tick exceeds the V1 range")]
     DriverTickOverflow { driver: String },
 
+    #[error("invalid driver recovery evidence: {reason}")]
+    InvalidRecoveryEvidence { reason: &'static str },
+
     #[error("store error: {0}")]
     Store(#[from] pos_core::CoreError),
 

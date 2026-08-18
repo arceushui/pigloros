@@ -34,6 +34,55 @@ fn extend_unique_subscriptions(
     }
 }
 
+fn validate_recovery_evidence(
+    timeline_segments: &[TimelineHistorySegment],
+    events: &[Event],
+) -> Result<(), RuntimeError> {
+    let unique = timeline_segments
+        .iter()
+        .enumerate()
+        .all(|(index, segment)| {
+            !timeline_segments[..index]
+                .iter()
+                .any(|prior| prior.timeline_id() == segment.timeline_id())
+        });
+    let ordered = timeline_segments
+        .windows(2)
+        .all(|pair| pair[0].through() <= pair[1].through());
+    let Some(last_segment) = timeline_segments.last() else {
+        return Err(RuntimeError::InvalidRecoveryEvidence {
+            reason: "Timeline ancestry is empty",
+        });
+    };
+    if !unique || !ordered {
+        return Err(RuntimeError::InvalidRecoveryEvidence {
+            reason: "Timeline ancestry is duplicate or unordered",
+        });
+    }
+    let expected_through = last_segment.through();
+    if events.is_empty() && expected_through == Seq::ZERO {
+        return Ok(());
+    }
+    if events.first().map_or(Seq::ZERO, |event| event.seq) != Seq::from_u64(1) {
+        return Err(RuntimeError::InvalidRecoveryEvidence {
+            reason: "source Events must begin at sequence 1",
+        });
+    }
+    for pair in events.windows(2) {
+        if pair[1].seq != Seq::from_u64(pair[0].seq.as_u64().saturating_add(1)) {
+            return Err(RuntimeError::InvalidRecoveryEvidence {
+                reason: "source Events must be contiguous",
+            });
+        }
+    }
+    if events.last().map_or(Seq::ZERO, |event| event.seq) != expected_through {
+        return Err(RuntimeError::InvalidRecoveryEvidence {
+            reason: "source Events must reach the final Timeline bound",
+        });
+    }
+    Ok(())
+}
+
 fn reject_geographic_drafts(output: &StepOutput) -> Result<(), RuntimeError> {
     match output
         .drafts
@@ -317,6 +366,7 @@ impl PluginRegistry {
         events: &[Event],
     ) -> Result<(), RuntimeError> {
         self.ensure_no_pending_step()?;
+        validate_recovery_evidence(timeline_segments, events)?;
         let mut staged = Vec::new();
         let mut failure = None;
         for (id, entry) in &mut self.plugins {

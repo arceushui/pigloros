@@ -152,6 +152,32 @@ fn recovery_evidence_exposes_all_headers_only_selected_payloads_and_is_atomic() 
 }
 
 #[test]
+fn registry_rejects_incomplete_recovery_before_any_driver_is_staged() {
+    let timeline = TimelineId::new();
+    let observed = Arc::new(Mutex::new(None));
+    let mut registry = PluginRegistry::new();
+    registry.register_driver(Box::new(InspectingRecoveryDriver {
+        selected_entity: EntityId::new(),
+        observed: Arc::clone(&observed),
+    }));
+
+    let segments = [TimelineHistorySegment::new(timeline, Seq::from_u64(3))];
+    let events = [
+        event(1, EntityId::new(), "selected", vec![1]),
+        event(3, EntityId::new(), "selected", vec![3]),
+    ];
+    let error = registry
+        .restore_driver_state(&segments, &events)
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        RuntimeError::InvalidRecoveryEvidence { .. }
+    ));
+    assert!(observed.lock().unwrap().is_none());
+}
+
+#[test]
 fn recovery_ignores_driverless_plugins_and_rejects_pending_transactions() {
     let timeline = TimelineId::new();
     let segments = [TimelineHistorySegment::new(timeline, Seq::ZERO)];

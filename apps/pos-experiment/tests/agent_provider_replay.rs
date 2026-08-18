@@ -11,10 +11,11 @@ use pos_experiment::{
 };
 use pos_plugin_agent::{
     protocol::{
-        ActionCatalogueV1, AgentProviderProvenanceV1, BoundedProviderBytes, ProviderAttempt,
+        ActionCatalogueV1, AgentDecisionRequestV1, AgentProviderProvenanceV1, BoundedProviderBytes,
+        ProviderAttempt,
     },
-    AgentDecisionReplayVerifier, AgentPlugin, AgentReducer, FixtureAgentDecisionProvider,
-    ProviderBackedAgentDriver, EVENT_TYPE_ACTION,
+    AgentDecisionProvider, AgentDecisionReplayVerifier, AgentPlugin, AgentReducer,
+    FixtureAgentDecisionProvider, ProviderBackedAgentDriver, EVENT_TYPE_ACTION,
 };
 use pos_runtime::{
     recorder::RECORDER_EVENT_TYPE, Driver, DriverRecoveryEvidence, ObservationView, PluginRegistry,
@@ -35,6 +36,18 @@ const PROVIDER_VERSION: &str = "fixture-v1";
 const PLUGIN_HASH: [u8; 32] = [0x31; 32];
 const PROVIDER_HASH: [u8; 32] = [0x32; 32];
 const CONFIDENCE: u32 = 750_000;
+
+struct TickRecordingProvider {
+    response: BoundedProviderBytes,
+    ticks: Arc<Mutex<Vec<u64>>>,
+}
+
+impl AgentDecisionProvider for TickRecordingProvider {
+    fn decide(&mut self, request: &AgentDecisionRequestV1) -> ProviderAttempt {
+        self.ticks.lock().unwrap().push(request.driver_tick());
+        ProviderAttempt::Response(self.response.clone())
+    }
+}
 
 #[derive(Clone)]
 struct HostFixture {
@@ -616,6 +629,65 @@ fn backtest_runner_reads_train_history_before_non_empty_eval() {
     assert!(result.eval_events > 0);
     assert_eq!(result.train_result.ticks, 1);
     assert_eq!(result.eval_result.ticks, 1);
+}
+
+#[test]
+fn backtest_eval_restores_driver_tick_before_first_provider_decision() {
+    let host = HostFixture::new();
+    let accepted = BoundedProviderBytes::try_from(accepted_response_bytes(0, CONFIDENCE)).unwrap();
+    let train_ticks = Arc::new(Mutex::new(Vec::new()));
+    let eval_ticks = Arc::new(Mutex::new(Vec::new()));
+    let factory_calls = Arc::new(AtomicU64::new(0));
+    let result = BacktestRunner::new(
+        BacktestConfig {
+            experiment_name: "agent-provider-backtest-tick-continuity".to_owned(),
+            train_ticks: 1,
+            eval_ticks: 1,
+            store_config: StoreConfig::Memory,
+        },
+        {
+            let train_ticks = Arc::clone(&train_ticks);
+            let eval_ticks = Arc::clone(&eval_ticks);
+            let factory_calls = Arc::clone(&factory_calls);
+            let host = host.clone();
+            move || {
+                let phase = factory_calls.fetch_add(1, Ordering::SeqCst);
+                let ticks = if phase == 0 {
+                    Arc::clone(&train_ticks)
+                } else {
+                    Arc::clone(&eval_ticks)
+                };
+                let driver = ProviderBackedAgentDriver::new(
+                    host.agent,
+                    host.catalogue.clone(),
+                    host.provenance.clone(),
+                    Box::new(TickRecordingProvider {
+                        response: accepted.clone(),
+                        ticks,
+                    }),
+                );
+                let mut registry = PluginRegistry::new();
+                registry
+                    .register(
+                        &AgentPlugin::new(),
+                        Some(Box::new(AgentReducer)),
+                        Some(Box::new(driver)),
+                    )
+                    .unwrap();
+                registry
+            }
+        },
+    )
+    .run()
+    .unwrap();
+
+    assert_eq!(factory_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(*train_ticks.lock().unwrap(), vec![0]);
+    assert_eq!(*eval_ticks.lock().unwrap(), vec![1]);
+    assert_eq!(result.train_result.ticks, 1);
+    assert_eq!(result.eval_result.ticks, 1);
+    assert_eq!(result.train_events, 2);
+    assert_eq!(result.eval_events, 2);
 }
 
 #[test]
