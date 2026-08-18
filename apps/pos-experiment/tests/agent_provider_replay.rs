@@ -750,6 +750,34 @@ fn resume_rejects_mismatched_initial_timeline_metadata() {
 }
 
 #[test]
+fn resume_fails_closed_when_the_durable_prefix_or_metadata_is_untrustworthy() {
+    let host = HostFixture::new();
+    let adapter = SharedMemoryAdapter::new();
+    let (experiment, _, _) = host.experiment(
+        "agent-provider-resume-fail-closed",
+        vec![ProviderAttempt::NoResponse],
+    );
+    let mut session = experiment
+        .start_with_store(Box::new(adapter.clone()))
+        .unwrap();
+    session.step_tick().unwrap();
+    let timeline = session.timeline().id();
+    drop(session);
+
+    adapter.drop_first_on_next_read();
+    let (resume, _, _) = host.experiment("agent-provider-resume-corrupt", vec![]);
+    assert!(resume
+        .resume_with_store(timeline, Box::new(adapter.clone()))
+        .is_err());
+
+    adapter.fail_next_get_timeline();
+    let (resume, _, _) = host.experiment("agent-provider-resume-metadata", vec![]);
+    assert!(resume
+        .resume_with_store(timeline, Box::new(adapter))
+        .is_err());
+}
+
+#[test]
 fn durable_recipe_reopens_branches_and_resumes_the_child_history() {
     let host = HostFixture::new();
     let directory = tempfile::tempdir().unwrap();
