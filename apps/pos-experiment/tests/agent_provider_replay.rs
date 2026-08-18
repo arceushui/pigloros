@@ -790,7 +790,7 @@ fn durable_recipe_reopens_branches_and_resumes_the_child_history() {
         vec![ProviderAttempt::NoResponse, ProviderAttempt::NoResponse],
         store_config.clone(),
     );
-    let result = experiment.start().unwrap().run_to_completion().unwrap();
+    let mut result = experiment.start().unwrap().run_to_completion().unwrap();
     assert!(matches!(
         result.store_config,
         Some(StoreConfig::Sqlite { .. })
@@ -811,6 +811,20 @@ fn durable_recipe_reopens_branches_and_resumes_the_child_history() {
         TickOutcome::Advanced { .. }
     ));
     assert_eq!(calls.get(), 1);
+
+    result.store_config = Some(StoreConfig::Memory);
+    assert!(result.branch("missing-from-memory-store").is_err());
+}
+
+#[test]
+fn configured_resume_rejects_an_absent_timeline() {
+    let host = HostFixture::new();
+    let (experiment, calls, restored_tick) =
+        host.experiment("agent-provider-configured-missing", vec![]);
+
+    assert!(experiment.resume(TimelineId::new()).is_err());
+    assert_eq!(calls.get(), 0);
+    assert_eq!(restored_tick.load(), 0);
 }
 
 fn response_attempt(response: &[u8]) -> ProviderAttempt {
