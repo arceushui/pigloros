@@ -308,6 +308,7 @@ enum MetadataFault {
     Fail,
     ReturnWrongTimeline,
     ReturnWrongTimelineOnSecondGet,
+    ReturnCycleOnSecondGet,
 }
 
 enum BoundaryDriver {
@@ -374,6 +375,12 @@ impl SharedMemoryAdapter {
         let mut control = self.control();
         control.metadata_reads = 0;
         control.next_metadata_fault = Some(MetadataFault::ReturnWrongTimelineOnSecondGet);
+    }
+
+    fn return_cycle_on_second_get(&self) {
+        let mut control = self.control();
+        control.metadata_reads = 0;
+        control.next_metadata_fault = Some(MetadataFault::ReturnCycleOnSecondGet);
     }
 
     fn report_zero_head_on_next_read(&self) {
@@ -458,6 +465,7 @@ impl EventStore for SharedMemoryAdapter {
                 {
                     None
                 }
+                Some(MetadataFault::ReturnCycleOnSecondGet) if control.metadata_reads < 2 => None,
                 _ => control.next_metadata_fault.take(),
             }
         };
@@ -475,6 +483,11 @@ impl EventStore for SharedMemoryAdapter {
         ) {
             if let Some(timeline) = &mut timeline {
                 timeline.meta.id = TimelineId::new();
+            }
+        }
+        if matches!(fault, Some(MetadataFault::ReturnCycleOnSecondGet)) {
+            if let Some(timeline) = &mut timeline {
+                timeline.meta.fork_point = Some((timeline.id(), Seq::ZERO));
             }
         }
         Ok(timeline)
@@ -599,6 +612,29 @@ fn resume_rejects_mismatched_ancestry_metadata() {
     let fresh = host.experiment("agent-provider-ancestry-resume", vec![]).0;
     assert!(fresh
         .resume_with_store(child.timeline().id(), Box::new(adapter))
+        .is_err());
+}
+
+#[test]
+fn resume_rejects_cyclic_ancestry_metadata() {
+    let host = HostFixture::new();
+    let accepted = accepted_response_bytes(0, CONFIDENCE);
+    let adapter = SharedMemoryAdapter::new();
+    let experiment = host
+        .experiment(
+            "agent-provider-cyclic-ancestry",
+            vec![response_attempt(&accepted)],
+        )
+        .0;
+    let mut original = experiment
+        .start_with_store(Box::new(adapter.clone()))
+        .unwrap();
+    original.step_tick().unwrap();
+    let timeline = original.timeline().id();
+    adapter.return_cycle_on_second_get();
+    let fresh = host.experiment("agent-provider-cyclic-resume", vec![]).0;
+    assert!(fresh
+        .resume_with_store(timeline, Box::new(adapter))
         .is_err());
 }
 
