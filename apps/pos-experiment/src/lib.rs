@@ -1349,6 +1349,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn reproduction_manifest_wraps_a_host_owned_recipe() {
+        let timeline_id = pos_core::ids::TimelineId::new();
+        let result = RunResult {
+            timeline_id,
+            ticks: 0,
+            total_events: 0,
+            manifest: ReproManifest::new(
+                timeline_id,
+                pos_core::crypto::Hash::zero(),
+                pos_core::clock::WallTime::from_micros(0),
+            ),
+            projections: pos_state::ProjectionRegistry::new(),
+            store_config: None,
+        };
+        let manifest = result.into_reproduction_manifest(ReproductionRecipe::new(
+            "test-host",
+            1,
+            serde_json::json!({"provider": "fixture-local"}),
+        ));
+
+        assert_eq!(manifest.manifest.timeline_id, timeline_id);
+        assert_eq!(manifest.recipe.host_id, "test-host");
+        assert_eq!(manifest.recipe.format_version, 1);
+        assert_eq!(
+            manifest.recipe.configuration,
+            serde_json::json!({"provider": "fixture-local"})
+        );
+    }
+
     fn make_plugin_with_reducer(name: &'static str, event_types: &[&str]) -> TestPlugin {
         let mut p = make_plugin(name, event_types);
         p.has_reducer = true;
