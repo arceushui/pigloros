@@ -6,8 +6,8 @@ use pos_core::{
     CoreError, Timeline,
 };
 use pos_experiment::{
-    Experiment, ExperimentConfig, ExperimentError, ExperimentSession, ReproductionRecipe,
-    StopCondition, TickOutcome,
+    BacktestConfig, BacktestRunner, Experiment, ExperimentConfig, ExperimentError,
+    ExperimentSession, ReproductionRecipe, StopCondition, TickOutcome,
 };
 use pos_plugin_agent::{
     protocol::{
@@ -550,6 +550,72 @@ fn boundary_experiment(name: &str, driver: BoundaryDriver) -> Experiment {
         )
         .unwrap();
     experiment
+}
+
+#[test]
+fn backtest_runner_completes_both_empty_phases() {
+    let result = BacktestRunner::new(
+        BacktestConfig {
+            experiment_name: "agent-provider-backtest".to_owned(),
+            train_ticks: 1,
+            eval_ticks: 1,
+            store_config: StoreConfig::Memory,
+        },
+        PluginRegistry::new,
+    )
+    .run()
+    .unwrap();
+    assert_eq!(result.train_events, 0);
+    assert_eq!(result.eval_events, 0);
+    assert!(matches!(
+        result.train_result.store_config,
+        Some(StoreConfig::Memory)
+    ));
+    assert!(matches!(
+        result.eval_result.store_config,
+        Some(StoreConfig::Memory)
+    ));
+}
+
+#[test]
+fn backtest_runner_reads_train_history_before_non_empty_eval() {
+    let host = HostFixture::new();
+    let plugin = Arc::new(AgentPlugin::new());
+    let accepted = accepted_response_bytes(0, CONFIDENCE);
+    let runner_host = host.clone();
+    let runner_plugin = Arc::clone(&plugin);
+    let result = BacktestRunner::new(
+        BacktestConfig {
+            experiment_name: "agent-provider-backtest-non-empty".to_owned(),
+            train_ticks: 1,
+            eval_ticks: 1,
+            store_config: StoreConfig::Memory,
+        },
+        move || {
+            let provider = FixtureAgentDecisionProvider::new(vec![response_attempt(&accepted)]);
+            let driver = ProviderBackedAgentDriver::new(
+                runner_host.agent,
+                runner_host.catalogue.clone(),
+                runner_host.provenance.clone(),
+                Box::new(provider),
+            );
+            let mut registry = PluginRegistry::new();
+            registry
+                .register(
+                    runner_plugin.as_ref(),
+                    Some(Box::new(AgentReducer)),
+                    Some(Box::new(driver)),
+                )
+                .unwrap();
+            registry
+        },
+    )
+    .run()
+    .unwrap();
+    assert!(result.train_events > 0);
+    assert!(result.eval_events > 0);
+    assert_eq!(result.train_result.ticks, 1);
+    assert_eq!(result.eval_result.ticks, 1);
 }
 
 #[test]
