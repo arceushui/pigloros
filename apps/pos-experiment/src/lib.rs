@@ -3904,6 +3904,25 @@ mod tests {
     }
 
     #[test]
+    fn host_supplied_store_result_has_no_reopen_recipe() {
+        let experiment = Experiment::new(ExperimentConfig {
+            name: "host-store-recipe".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        });
+        let session = experiment
+            .start_with_store(Box::new(pos_store::memory::MemoryStore::new()))
+            .unwrap();
+        assert!(session.source_events().unwrap().is_empty());
+        let result = session.run_to_completion().unwrap();
+        assert!(result.store_config.is_none());
+        assert!(matches!(
+            result.branch("host-store-child"),
+            Err(ExperimentError::MissingStoreRecoveryRecipe)
+        ));
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_result_manifest_has_plugin_versions() {
         let entity = EntityId::new();
