@@ -815,6 +815,61 @@ mod tests {
     }
 
     #[test]
+    fn reducer_rejects_cbor_boundary_forms_without_private_codec_access() {
+        let reducer = AgentReducer;
+        let entity = EntityId::new();
+        let mut state = reducer.initial();
+        reducer.apply(&mut state, &make_action_event(entity, "legacy"));
+
+        let mut payloads = vec![
+            vec![0xd8],
+            vec![0xd9, 0],
+            vec![0xda, 0, 0, 0],
+            vec![0xdb, 0, 0, 0, 0, 0, 0, 0, 0],
+            vec![0x98],
+            vec![0x99, 0],
+            vec![0x9a, 0, 0, 0],
+            vec![0x9b, 0, 0, 0, 0, 0, 0, 0, 0],
+            vec![0x58],
+            vec![0x59, 0],
+            vec![0x5a, 0, 0, 0],
+            vec![0x5b, 0, 0, 0, 0, 0, 0, 0],
+            vec![0x5f, 0xff],
+            vec![0x5f, 0x58],
+            vec![0x5f, 0x42, b'P', b'A', 0x42, b'A', b'1'],
+        ];
+        for length in 0..2 {
+            let mut payload = vec![0x59];
+            payload.extend(std::iter::repeat_n(0, length));
+            payloads.push(payload);
+        }
+        for length in 0..4 {
+            let mut payload = vec![0x5a];
+            payload.extend(std::iter::repeat_n(0, length));
+            payloads.push(payload);
+        }
+        for length in 0..8 {
+            let mut payload = vec![0x5b];
+            payload.extend(std::iter::repeat_n(0, length));
+            payloads.push(payload);
+        }
+
+        for payload in payloads {
+            reducer.apply(&mut state, &make_action_event_with_payload(entity, payload));
+            assert_eq!(
+                state.get("last_action").and_then(serde_json::Value::as_str),
+                Some("legacy")
+            );
+        }
+        assert_eq!(
+            state
+                .get("action_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(1 + 15 + 2 + 4 + 8)
+        );
+    }
+
+    #[test]
     fn reducer_never_falls_back_when_empty_chunks_precede_or_split_paa1_magic() {
         let reducer = AgentReducer;
         let entity = EntityId::new();
