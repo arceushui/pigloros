@@ -404,8 +404,13 @@ impl Driver for AncestryCheckingDriver {
         self.verifier
             .verify_recovery(evidence)
             .map(|_| ())
-            .map_err(|_| RuntimeError::NoDriver {
-                name: "fixture ancestry mismatch".to_owned(),
+            .map_err(|error| match error {
+                ReplayVerificationError::InvalidTimelineAncestry => RuntimeError::NoDriver {
+                    name: "fixture ancestry mismatch".to_owned(),
+                },
+                _ => RuntimeError::NoDriver {
+                    name: "unexpected fixture replay failure".to_owned(),
+                },
             })
     }
 }
@@ -428,7 +433,7 @@ fn registry_passes_recovery_evidence_to_the_driver_verifier() {
             &[TimelineHistorySegment::new(host.timeline, Seq::ZERO)],
             &[],
         ),
-        Err(RuntimeError::NoDriver { .. })
+        Err(RuntimeError::NoDriver { name }) if name == "fixture ancestry mismatch"
     ));
 }
 
