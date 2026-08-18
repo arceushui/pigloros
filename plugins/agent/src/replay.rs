@@ -182,17 +182,12 @@ impl AgentDecisionReplayVerifier {
             .iter()
             .map(verification_event)
             .collect::<Vec<_>>();
-        if events.windows(2).any(|pair| pair[0].seq >= pair[1].seq) {
-            return Err(ReplayVerificationError::NonContiguousSourceSequence {
-                expected: events.first().map_or(1, |event| event.seq.as_u64()),
-                actual: events.last().map_or(0, |event| event.seq.as_u64()),
-            });
-        }
-        let state = self.verify_events(&events, ReplayState::default())?;
         let last_segment = self
             .timeline_segments
             .last()
             .ok_or(ReplayVerificationError::InvalidTimelineAncestry)?;
+        validate_recovery_sequence(&events, last_segment.through())?;
+        let state = self.verify_events(&events, ReplayState::default())?;
         Ok(ReplayCheckpoint {
             last_verified: last_segment.through(),
             verified_decisions: state.expected_driver_tick,
@@ -317,6 +312,38 @@ impl AgentDecisionReplayVerifier {
     fn is_target_action(&self, event: &VerificationEvent<'_>) -> bool {
         event.entity == self.target_agent && event.event_type == EVENT_TYPE_ACTION
     }
+}
+
+fn validate_recovery_sequence(
+    events: &[VerificationEvent<'_>],
+    expected_through: Seq,
+) -> Result<(), ReplayVerificationError> {
+    if events.is_empty() && expected_through == Seq::ZERO {
+        return Ok(());
+    }
+    if events.first().map_or(Seq::ZERO, |event| event.seq) != Seq::from_u64(1) {
+        return Err(ReplayVerificationError::NonContiguousSourceSequence {
+            expected: 1,
+            actual: events.first().map_or(0, |event| event.seq.as_u64()),
+        });
+    }
+    for pair in events.windows(2) {
+        let expected = pair[0].seq.as_u64().saturating_add(1);
+        if pair[1].seq.as_u64() != expected {
+            return Err(ReplayVerificationError::NonContiguousSourceSequence {
+                expected,
+                actual: pair[1].seq.as_u64(),
+            });
+        }
+    }
+    let actual = events.last().map_or(Seq::ZERO, |event| event.seq);
+    if actual != expected_through {
+        return Err(ReplayVerificationError::NonContiguousSourceSequence {
+            expected: expected_through.as_u64(),
+            actual: actual.as_u64(),
+        });
+    }
+    Ok(())
 }
 
 fn verification_event(event: &RecoveryEvent) -> VerificationEvent<'_> {

@@ -1223,6 +1223,8 @@ impl BacktestRunner {
             )?
         };
         validate_captured_range(pos_core::clock::Seq::ZERO, train_head_seq, &inherited)?;
+        let inherited_ancestry = timeline_ancestry(store, eval_tl_id, train_head_seq)?;
+        eval_registry.restore_driver_state(&inherited_ancestry, &inherited)?;
         hydrate_projections(&mut eval_registry, &inherited);
         let eval_stop = StopCondition::MaxTicks(self.config.eval_ticks);
         let (eval_ticks, eval_events, eval_chain_head) = run_experiment_on_store(

@@ -976,6 +976,28 @@ fn provider_driver_recovery_rejects_unordered_evidence_before_provider_use() {
         TimelineHistorySegment::new(wrong_timeline, Seq::from_u64(2)),
     ];
     assert!(registry.restore_driver_state(&wrong_segments, &[]).is_err());
+    let through_three = [TimelineHistorySegment::new(host.timeline, Seq::from_u64(3))];
+    assert!(registry
+        .restore_driver_state(
+            &through_three,
+            &[event(2, host.other_agent, "world.observation", vec![0x80])],
+        )
+        .is_err());
+    assert!(registry
+        .restore_driver_state(
+            &through_three,
+            &[
+                event(1, host.other_agent, "world.observation", vec![0x80]),
+                event(3, host.other_agent, "world.observation", vec![0x80]),
+            ],
+        )
+        .is_err());
+    assert!(registry
+        .restore_driver_state(
+            &through_three,
+            &[event(1, host.other_agent, "world.observation", vec![0x80])],
+        )
+        .is_err());
     let evidence = vec![
         event(2, host.other_agent, "world.observation", vec![0x80]),
         event(1, host.other_agent, "world.observation", vec![0x80]),
