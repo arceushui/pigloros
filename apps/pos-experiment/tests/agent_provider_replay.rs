@@ -1,6 +1,6 @@
 use pos_core::{
     clock::Seq,
-    event::{Event, EventDraft},
+    event::{CanonicalBytes, Event, EventDraft, Kind},
     ids::{EntityId, PluginId, TimelineId},
     store::EventStore,
     CoreError, Timeline,
@@ -306,6 +306,32 @@ enum MetadataFault {
     ReturnWrongTimeline,
 }
 
+enum BoundaryDriver {
+    Empty,
+    Fails,
+    EmitsUnknown,
+}
+
+impl Driver for BoundaryDriver {
+    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
+        match self {
+            Self::Empty => Ok(StepOutput::new(Vec::new())),
+            Self::Fails => Err(RuntimeError::UnknownEventType(
+                "fixture.driver.failure".to_owned(),
+            )),
+            Self::EmitsUnknown => Ok(StepOutput::new(vec![EventDraft::new(
+                EntityId::new(),
+                Kind::new("fixture.unregistered"),
+                CanonicalBytes::from_vec(Vec::new()),
+            )])),
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        "boundary-fixture"
+    }
+}
+
 #[derive(Clone)]
 struct SharedMemoryAdapter {
     store: Arc<Mutex<MemoryStore>>,
@@ -448,6 +474,43 @@ fn assert_supplied_store_has_no_recovery_recipe(
         result.branch("must-not-reopen"),
         Err(ExperimentError::MissingStoreRecoveryRecipe)
     ));
+}
+
+fn boundary_experiment(name: &str, driver: BoundaryDriver) -> Experiment {
+    let plugin = AgentPlugin::new();
+    let mut experiment = Experiment::new(ExperimentConfig {
+        name: name.to_owned(),
+        stop: StopCondition::MaxTicks(1),
+        store_config: StoreConfig::Memory,
+    });
+    experiment
+        .register(
+            &plugin,
+            Some(Box::new(AgentReducer)),
+            Some(Box::new(driver)),
+        )
+        .unwrap();
+    experiment
+}
+
+#[test]
+fn boundary_driver_paths_cover_quiescence_runtime_and_schema_failures() {
+    let result = boundary_experiment("boundary-empty", BoundaryDriver::Empty)
+        .run()
+        .unwrap();
+    assert_eq!(result.total_events, 0);
+
+    for (name, driver) in [
+        ("boundary-runtime", BoundaryDriver::Fails),
+        ("boundary-schema", BoundaryDriver::EmitsUnknown),
+    ] {
+        let mut session = boundary_experiment(name, driver).start().unwrap();
+        assert!(session.step_tick().is_err());
+        assert!(matches!(
+            session.step_tick(),
+            Err(ExperimentError::SessionFaulted)
+        ));
+    }
 }
 
 #[test]
