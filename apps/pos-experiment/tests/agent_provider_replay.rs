@@ -6,7 +6,8 @@ use pos_core::{
     CoreError, Timeline,
 };
 use pos_experiment::{
-    Experiment, ExperimentConfig, ExperimentError, ExperimentSession, StopCondition, TickOutcome,
+    Experiment, ExperimentConfig, ExperimentError, ExperimentSession, ReproductionRecipe,
+    StopCondition, TickOutcome,
 };
 use pos_plugin_agent::{
     protocol::{
@@ -814,6 +815,27 @@ fn durable_recipe_reopens_branches_and_resumes_the_child_history() {
 
     result.store_config = Some(StoreConfig::Memory);
     assert!(result.branch("missing-from-memory-store").is_err());
+}
+
+#[test]
+fn completed_run_preserves_the_host_reproduction_recipe() {
+    let host = HostFixture::new();
+    let (experiment, _, _) = host.experiment("agent-provider-reproduction-manifest", vec![]);
+    let result = experiment.start().unwrap().run_to_completion().unwrap();
+    let timeline_id = result.timeline_id;
+    let manifest = result.into_reproduction_manifest(ReproductionRecipe::new(
+        "pigloros.agent-provider",
+        1,
+        serde_json::json!({"provider": "fixture-local"}),
+    ));
+
+    assert_eq!(manifest.recipe.host_id, "pigloros.agent-provider");
+    assert_eq!(manifest.recipe.format_version, 1);
+    assert_eq!(
+        manifest.recipe.configuration,
+        serde_json::json!({"provider": "fixture-local"})
+    );
+    assert_eq!(manifest.manifest.timeline_id, timeline_id);
 }
 
 #[test]
