@@ -178,6 +178,54 @@ fn registry_rejects_incomplete_recovery_before_any_driver_is_staged() {
 }
 
 #[test]
+fn registry_recovery_boundary_rejects_each_invalid_source_shape() {
+    let first = TimelineId::new();
+    let second = TimelineId::new();
+    let selected = EntityId::new();
+    let cases = [
+        (Vec::new(), Vec::new()),
+        (
+            vec![
+                TimelineHistorySegment::new(first, Seq::from_u64(1)),
+                TimelineHistorySegment::new(first, Seq::from_u64(2)),
+            ],
+            vec![event(1, selected, "selected", vec![1])],
+        ),
+        (
+            vec![
+                TimelineHistorySegment::new(first, Seq::from_u64(2)),
+                TimelineHistorySegment::new(second, Seq::from_u64(1)),
+            ],
+            vec![
+                event(1, selected, "selected", vec![1]),
+                event(2, selected, "selected", vec![2]),
+            ],
+        ),
+        (
+            vec![TimelineHistorySegment::new(first, Seq::from_u64(1))],
+            Vec::new(),
+        ),
+        (
+            vec![TimelineHistorySegment::new(first, Seq::from_u64(1))],
+            vec![event(2, selected, "selected", vec![2])],
+        ),
+        (
+            vec![TimelineHistorySegment::new(first, Seq::from_u64(2))],
+            vec![event(1, selected, "selected", vec![1])],
+        ),
+    ];
+
+    for (segments, events) in cases {
+        let mut registry = PluginRegistry::new();
+        registry.register_driver(Box::new(DefaultRecoveryDriver));
+        assert!(matches!(
+            registry.restore_driver_state(&segments, &events),
+            Err(RuntimeError::InvalidRecoveryEvidence { .. })
+        ));
+    }
+}
+
+#[test]
 fn recovery_ignores_driverless_plugins_and_rejects_pending_transactions() {
     let timeline = TimelineId::new();
     let segments = [TimelineHistorySegment::new(timeline, Seq::ZERO)];
