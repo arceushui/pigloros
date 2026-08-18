@@ -1145,6 +1145,12 @@ fn public_action_wire_probe_handles_tagged_and_length_encoded_boundaries() {
 fn public_action_wire_probe_covers_all_supported_raw_headers() {
     let magic = [0x44, b'P', b'A', b'A', b'1'];
 
+    for tag in 0xc0..=0xd7 {
+        let mut tagged = vec![tag, 0x87];
+        tagged.extend_from_slice(&magic);
+        assert!(is_agent_action_wire(&tagged), "one-byte tag {tag:#x}");
+    }
+
     for (tag, header) in [
         (0xda, vec![0, 0, 0, 0]),
         (0xdb, vec![0, 0, 0, 0, 0, 0, 0, 0]),
@@ -1176,6 +1182,7 @@ fn public_action_wire_probe_covers_all_supported_raw_headers() {
     }
 
     for bytes in [
+        vec![0x87, 0x58],
         vec![0xda],
         vec![0xdb, 0, 0, 0],
         vec![0x87, 0x59],
@@ -1184,4 +1191,15 @@ fn public_action_wire_probe_covers_all_supported_raw_headers() {
     ] {
         assert!(!is_agent_action_wire(&bytes), "truncated wire: {bytes:?}");
     }
+
+    let mut split_chunks = vec![0x87, 0x5f, 0x42, b'P', b'A', 0x42, b'A', b'1', 0xff, 0xff];
+    assert!(is_agent_action_wire(&split_chunks));
+    split_chunks[6] = b'X';
+    assert!(!is_agent_action_wire(&split_chunks));
+    assert!(!is_agent_action_wire(&[0x87, 0x5f, 0xff]));
+    assert!(!is_agent_action_wire(&[0x87, 0x5f, 0x61, b'x', 0xff]));
+
+    let mut budget = vec![0x87, 0x5f, 0x44, b'P', b'A', b'A', b'1'];
+    budget.resize(512, 0);
+    assert!(is_agent_action_wire(&budget));
 }
