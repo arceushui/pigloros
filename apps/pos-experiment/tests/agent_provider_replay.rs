@@ -218,11 +218,18 @@ impl HostFixture {
 }
 
 #[derive(Clone, Default)]
-struct DriverTickProbe(Arc<AtomicU64>);
+struct DriverTickProbe {
+    committed: Arc<AtomicU64>,
+    restore_stage_attempts: Arc<AtomicU64>,
+}
 
 impl DriverTickProbe {
     fn load(&self) -> u64 {
-        self.0.load(Ordering::SeqCst)
+        self.committed.load(Ordering::SeqCst)
+    }
+
+    fn restore_stage_attempts(&self) -> u64 {
+        self.restore_stage_attempts.load(Ordering::SeqCst)
     }
 }
 
@@ -259,14 +266,14 @@ impl Driver for ObservableProviderDriver {
     fn commit_step(&mut self) {
         self.inner.commit_step();
         self.committed_tick
-            .0
+            .committed
             .store(self.inner.committed_tick(), Ordering::SeqCst);
     }
 
     fn abort_step(&mut self) {
         self.inner.abort_step();
         self.committed_tick
-            .0
+            .committed
             .store(self.inner.committed_tick(), Ordering::SeqCst);
     }
 
@@ -278,13 +285,16 @@ impl Driver for ObservableProviderDriver {
         &mut self,
         evidence: &DriverRecoveryEvidence,
     ) -> Result<(), RuntimeError> {
+        self.committed_tick
+            .restore_stage_attempts
+            .fetch_add(1, Ordering::SeqCst);
         self.inner.stage_restore_from_history(evidence)
     }
 
     fn commit_restore_from_history(&mut self) {
         self.inner.commit_restore_from_history();
         self.committed_tick
-            .0
+            .committed
             .store(self.inner.committed_tick(), Ordering::SeqCst);
     }
 
@@ -1073,6 +1083,7 @@ fn supplied_store_read_failure_prevents_driver_restore() {
     ));
     assert_eq!(calls.get(), 0);
     assert_eq!(tick.load(), 0);
+    assert_eq!(tick.restore_stage_attempts(), 0);
 }
 
 #[test]
