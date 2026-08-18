@@ -980,6 +980,100 @@ fn provider_driver_recovery_rejects_unordered_evidence_before_provider_use() {
 }
 
 #[test]
+fn provider_driver_recovery_rejects_invalid_target_evidence_without_provider_use() {
+    let host = HostFixture::new();
+    let accepted = host.record(
+        0,
+        0,
+        FixtureResult::Accepted {
+            action_index: 0,
+            confidence: 750_000,
+        },
+    );
+    let cases = [
+        (
+            "malformed record",
+            vec![event(1, host.agent, RECORDER_EVENT_TYPE, vec![0xff])],
+        ),
+        (
+            "unexpected action",
+            vec![event(1, host.agent, EVENT_TYPE_ACTION, vec![0x80])],
+        ),
+        (
+            "missing accepted action",
+            vec![event(
+                1,
+                host.agent,
+                RECORDER_EVENT_TYPE,
+                accepted.record_bytes(),
+            )],
+        ),
+        (
+            "mismatched accepted action",
+            vec![
+                event(1, host.agent, RECORDER_EVENT_TYPE, accepted.record_bytes()),
+                event(
+                    2,
+                    host.agent,
+                    EVENT_TYPE_ACTION,
+                    accepted.action_bytes("wait", 750_000),
+                ),
+            ],
+        ),
+    ];
+
+    for (name, evidence) in cases {
+        let provider = FixtureAgentDecisionProvider::new(vec![ProviderAttempt::NoResponse]);
+        let calls = provider.call_count_handle();
+        let driver = ProviderBackedAgentDriver::new(
+            host.agent,
+            host.catalogue.clone(),
+            host.provenance.clone(),
+            Box::new(provider),
+        );
+        let mut registry = PluginRegistry::new();
+        registry.register_driver(Box::new(driver));
+        let segments = [TimelineHistorySegment::new(host.timeline, Seq::from_u64(2))];
+
+        assert!(
+            registry.restore_driver_state(&segments, &evidence).is_err(),
+            "{name}"
+        );
+        assert_eq!(calls.get(), 0, "{name} must not call the provider");
+    }
+}
+
+#[test]
+fn provider_driver_recovery_accepts_no_action_and_unrelated_evidence_without_provider_use() {
+    let host = HostFixture::new();
+    let no_action = host.record(0, 0, FixtureResult::NoAction { code: 5 });
+    for evidence in [
+        vec![event(
+            1,
+            host.agent,
+            RECORDER_EVENT_TYPE,
+            no_action.record_bytes(),
+        )],
+        vec![event(1, host.other_agent, "world.observation", vec![0x80])],
+    ] {
+        let provider = FixtureAgentDecisionProvider::new(vec![ProviderAttempt::NoResponse]);
+        let calls = provider.call_count_handle();
+        let driver = ProviderBackedAgentDriver::new(
+            host.agent,
+            host.catalogue.clone(),
+            host.provenance.clone(),
+            Box::new(provider),
+        );
+        let mut registry = PluginRegistry::new();
+        registry.register_driver(Box::new(driver));
+        let segments = [TimelineHistorySegment::new(host.timeline, Seq::from_u64(1))];
+
+        registry.restore_driver_state(&segments, &evidence).unwrap();
+        assert_eq!(calls.get(), 0, "recovery must not call the provider");
+    }
+}
+
+#[test]
 fn live_driver_provider_call_count_does_not_change_during_replay() {
     let host = HostFixture::new();
     let response = BoundedProviderBytes::try_from(provider_accepted_bytes(0, 900_000))
