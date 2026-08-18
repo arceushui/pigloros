@@ -818,7 +818,7 @@ fn durable_recipe_reopens_branches_and_resumes_the_child_history() {
 }
 
 #[test]
-fn completed_run_preserves_the_host_reproduction_recipe() {
+fn completed_run_wraps_the_host_reproduction_recipe() {
     let host = HostFixture::new();
     let (experiment, _, _) = host.experiment("agent-provider-reproduction-manifest", vec![]);
     let result = experiment.start().unwrap().run_to_completion().unwrap();
