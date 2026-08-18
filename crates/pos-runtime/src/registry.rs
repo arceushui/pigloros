@@ -7,12 +7,15 @@
 
 use indexmap::IndexMap;
 
-use pos_core::{clock::Seq, ids::PluginId, Plugin, Reducer};
+use pos_core::{clock::Seq, event::Event, ids::PluginId, Plugin, Reducer};
 use pos_state::ProjectionRegistry;
 
 use crate::{
     composition::{PluginComposition, RegisteredEventSchema, RegisteredPlugin},
-    driver::{Driver, ObservationSnapshot, ProjectionKey, SnapshotAnchor, StepOutput},
+    driver::{
+        Driver, DriverRecoveryEvidence, ObservationSnapshot, ProjectionKey, SnapshotAnchor,
+        StepOutput, TimelineHistorySegment,
+    },
     error::RuntimeError,
     recorder::RECORDER_EVENT_TYPE,
     schema::{EventTypeSchema, SchemaRegistry},
@@ -300,6 +303,59 @@ impl PluginRegistry {
         if let Some(pending) = self.pending_step.take() {
             self.abort_drivers(&pending.driver_ids);
         }
+    }
+
+    /// Restore every Driver's append-committed state from validated history.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::PendingDriverStep`] if a transaction is active,
+    /// or the first Driver-specific durable-history validation error.
+    pub fn restore_driver_state(
+        &mut self,
+        timeline_segments: &[TimelineHistorySegment],
+        events: &[Event],
+    ) -> Result<(), RuntimeError> {
+        self.ensure_no_pending_step()?;
+        let mut staged = Vec::new();
+        let mut failure = None;
+        for (id, entry) in &mut self.plugins {
+            let Some(driver) = entry.driver.as_mut() else {
+                continue;
+            };
+            let evidence =
+                DriverRecoveryEvidence::from_events(timeline_segments, events, |header| {
+                    driver.needs_recovery_payload(header)
+                });
+            if let Err(error) = driver.stage_restore_from_history(&evidence) {
+                driver.abort_restore_from_history();
+                failure = Some(error);
+                break;
+            }
+            staged.push(*id);
+        }
+        if let Some(error) = failure {
+            for staged_id in staged {
+                if let Some(staged_driver) = self
+                    .plugins
+                    .get_mut(&staged_id)
+                    .and_then(|staged_entry| staged_entry.driver.as_mut())
+                {
+                    staged_driver.abort_restore_from_history();
+                }
+            }
+            return Err(error);
+        }
+        for id in staged {
+            if let Some(driver) = self
+                .plugins
+                .get_mut(&id)
+                .and_then(|entry| entry.driver.as_mut())
+            {
+                driver.commit_restore_from_history();
+            }
+        }
+        Ok(())
     }
 
     /// Register a plugin.
@@ -670,6 +726,7 @@ mod tests {
         steps: usize,
         commits: usize,
         aborts: usize,
+        restores: usize,
         staged: bool,
         anchors: Vec<SnapshotAnchor>,
     }
@@ -728,6 +785,14 @@ mod tests {
                 state.staged = false;
                 state.aborts += 1;
             }
+        }
+
+        fn stage_restore_from_history(
+            &mut self,
+            _evidence: &DriverRecoveryEvidence,
+        ) -> Result<(), RuntimeError> {
+            self.state.lock().unwrap().restores += 1;
+            Ok(())
         }
     }
 
@@ -790,6 +855,120 @@ mod tests {
         registry.abort_step();
         assert_eq!(state.lock().unwrap().aborts, 1);
         assert!(!state.lock().unwrap().staged);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn driver_history_restoration_runs_before_any_new_transaction() {
+        let timeline = TimelineId::new();
+        let state = Arc::new(Mutex::new(TransactionState::default()));
+        let mut registry = PluginRegistry::new();
+        registry.register_driver(Box::new(TransactionalDriver {
+            name: "restoring",
+            state: Arc::clone(&state),
+            interval: Duration::from_nanos(1),
+            fail: false,
+        }));
+
+        registry
+            .restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[])
+            .unwrap();
+        assert_eq!(state.lock().unwrap().restores, 1);
+
+        registry
+            .step_all_anchored(timeline, Seq::ZERO)
+            .expect("step stages");
+        assert!(matches!(
+            registry.restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[]),
+            Err(RuntimeError::PendingDriverStep)
+        ));
+        registry.abort_step();
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn failed_driver_recovery_aborts_every_earlier_staged_driver() {
+        #[derive(Default)]
+        struct RestoreState {
+            staged: bool,
+            commits: usize,
+            aborts: usize,
+        }
+
+        struct RestoreDriver {
+            state: Arc<Mutex<RestoreState>>,
+            rejects: bool,
+        }
+
+        impl Driver for RestoreDriver {
+            fn name(&self) -> &'static str {
+                "restore-fixture"
+            }
+
+            fn step(
+                &mut self,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                Ok(StepOutput::empty())
+            }
+
+            fn stage_restore_from_history(
+                &mut self,
+                _: &DriverRecoveryEvidence,
+            ) -> Result<(), RuntimeError> {
+                if self.rejects {
+                    self.state.lock().unwrap().staged = true;
+                    return Err(RuntimeError::NoDriver {
+                        name: "rejected recovery".to_owned(),
+                    });
+                }
+                self.state.lock().unwrap().staged = true;
+                Ok(())
+            }
+
+            fn commit_restore_from_history(&mut self) {
+                let mut state = self.state.lock().unwrap();
+                assert!(state.staged);
+                state.staged = false;
+                state.commits += 1;
+            }
+
+            fn abort_restore_from_history(&mut self) {
+                let mut state = self.state.lock().unwrap();
+                if state.staged {
+                    state.staged = false;
+                    state.aborts += 1;
+                }
+            }
+        }
+
+        let first = Arc::new(Mutex::new(RestoreState::default()));
+        let second = Arc::new(Mutex::new(RestoreState::default()));
+        let mut registry = PluginRegistry::new();
+        registry.register_driver(Box::new(RestoreDriver {
+            state: Arc::clone(&first),
+            rejects: false,
+        }));
+        registry.register_driver(Box::new(RestoreDriver {
+            state: Arc::clone(&second),
+            rejects: true,
+        }));
+
+        assert!(registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(TimelineId::new(), Seq::ZERO)],
+                &[],
+            )
+            .is_err());
+        let first = first.lock().unwrap();
+        assert!(!first.staged);
+        assert_eq!(first.commits, 0);
+        assert_eq!(first.aborts, 1);
+        let second = second.lock().unwrap();
+        assert!(!second.staged);
+        assert_eq!(second.commits, 0);
+        assert_eq!(second.aborts, 1);
     }
 
     #[test]

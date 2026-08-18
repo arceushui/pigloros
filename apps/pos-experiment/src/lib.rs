@@ -420,22 +420,76 @@ fn lock_store(
         .map_err(|_| ExperimentError::SharedStoreLockPoisoned)
 }
 
-fn read_events(
-    store: &Mutex<Box<dyn pos_core::store::EventStore>>,
+fn read_completed_prefix(
+    store: &dyn pos_core::store::EventStore,
     timeline_id: pos_core::ids::TimelineId,
     through: pos_core::clock::Seq,
 ) -> Result<Vec<pos_core::Event>, ExperimentError> {
-    if through == pos_core::clock::Seq::ZERO {
-        return Ok(Vec::new());
+    let timeline = store
+        .get_timeline(timeline_id)?
+        .ok_or(pos_core::CoreError::TimelineNotFound(timeline_id))?;
+    if timeline.id() != timeline_id {
+        return Err(pos_core::CoreError::Storage(
+            "EventStore returned mismatched Timeline metadata".to_owned(),
+        )
+        .into());
     }
-    lock_store(store).and_then(|store| {
-        store
-            .read(
-                timeline_id,
-                pos_store::SeqRange::bounded(pos_core::clock::Seq::from_u64(1), through),
+    let head = store.logical_head(timeline_id)?;
+    if head < through {
+        return Err(pos_core::CoreError::Storage(
+            "logical Timeline head precedes completed fold cursor".to_owned(),
+        )
+        .into());
+    }
+    let events = if through == pos_core::clock::Seq::ZERO {
+        Vec::new()
+    } else {
+        store.read(
+            timeline_id,
+            pos_store::SeqRange::bounded(pos_core::clock::Seq::from_u64(1), through),
+        )?
+    };
+    validate_captured_range(pos_core::clock::Seq::ZERO, through, &events)?;
+    Ok(events)
+}
+
+fn timeline_ancestry(
+    store: &dyn pos_core::store::EventStore,
+    active_timeline: pos_core::ids::TimelineId,
+    active_through: pos_core::clock::Seq,
+) -> Result<Vec<pos_runtime::TimelineHistorySegment>, ExperimentError> {
+    let mut reversed = Vec::new();
+    let mut seen = Vec::new();
+    let mut current = active_timeline;
+    let mut through = active_through;
+    loop {
+        if seen.contains(&current) {
+            return Err(pos_core::CoreError::Storage(
+                "Timeline ancestry contains a cycle".to_owned(),
             )
-            .map_err(ExperimentError::from)
-    })
+            .into());
+        }
+        let timeline = store
+            .get_timeline(current)?
+            .ok_or(pos_core::CoreError::TimelineNotFound(current))?;
+        if timeline.id() != current {
+            return Err(pos_core::CoreError::Storage(
+                "EventStore returned mismatched Timeline ancestry metadata".to_owned(),
+            )
+            .into());
+        }
+        seen.push(current);
+        reversed.push(pos_runtime::TimelineHistorySegment::new(current, through));
+        match timeline.meta.fork_point {
+            Some((parent, fork_at)) => {
+                current = parent;
+                through = fork_at;
+            }
+            None => break,
+        }
+    }
+    reversed.reverse();
+    Ok(reversed)
 }
 
 fn hydrate_projections(registry: &mut PluginRegistry, events: &[pos_core::Event]) {
@@ -510,7 +564,8 @@ impl Experiment {
     ///
     /// The factory must register the same deterministic plugin composition as
     /// the parent. Fork creation hydrates fresh projections from inherited
-    /// Timeline history while drivers begin with fresh runtime state.
+    /// Timeline history and stages durable Driver state from host-filtered,
+    /// sequence-bounded recovery evidence before the child can step.
     #[must_use]
     pub fn with_fork_registry_factory(
         mut self,
@@ -589,11 +644,12 @@ impl Experiment {
         })
     }
 
-    /// Resume an existing durable Timeline with fresh runtime state.
+    /// Resume an existing durable Timeline with a fresh Driver registry.
     ///
     /// Persisted Events are validated and folded in logical sequence order.
-    /// Driver state starts fresh, making this the recovery path after a faulted
-    /// live session whose final append outcome may be ambiguous.
+    /// Stateful Drivers reconstruct only their append-committed state from
+    /// host-filtered immutable evidence, making this the recovery path after a
+    /// faulted live session whose final append outcome may be ambiguous.
     ///
     /// # Errors
     /// Returns a store error when the Timeline cannot be opened or its logical
@@ -634,6 +690,12 @@ impl Experiment {
         let timeline = store
             .get_timeline(timeline_id)?
             .ok_or(pos_core::CoreError::TimelineNotFound(timeline_id))?;
+        if timeline.id() != timeline_id {
+            return Err(pos_core::CoreError::Storage(
+                "EventStore returned mismatched resume Timeline metadata".to_owned(),
+            )
+            .into());
+        }
         let folded_through = store.logical_head(timeline_id)?;
         let events = if folded_through == pos_core::clock::Seq::ZERO {
             Vec::new()
@@ -644,6 +706,8 @@ impl Experiment {
             )?
         };
         validate_captured_range(pos_core::clock::Seq::ZERO, folded_through, &events)?;
+        let ancestry = timeline_ancestry(store.as_ref(), timeline_id, folded_through)?;
+        self.registry.restore_driver_state(&ancestry, &events)?;
         hydrate_projections(&mut self.registry, &events);
         Ok(ExperimentSession {
             config: self.config,
@@ -785,17 +849,13 @@ impl ExperimentSession {
     /// Returns a store or shared-store locking error if the completed prefix
     /// cannot be read.
     pub fn source_events(&self) -> Result<Vec<pos_core::Event>, ExperimentError> {
-        let events = read_events(
-            &self.store,
-            self.timeline.id(),
-            self.boundary.folded_through,
-        )?;
-        validate_captured_range(
-            pos_core::clock::Seq::ZERO,
-            self.boundary.folded_through,
-            &events,
-        )?;
-        Ok(events)
+        lock_store(&self.store).and_then(|store| {
+            read_completed_prefix(
+                store.as_ref(),
+                self.timeline.id(),
+                self.boundary.folded_through,
+            )
+        })
     }
 
     fn step_with_mode(&mut self, request: StepRequest) -> Result<TickOutcome, ExperimentError> {
@@ -929,8 +989,9 @@ impl ExperimentSession {
 
     /// Fork the active Timeline at its most recently completed tick boundary.
     ///
-    /// The child shares the live store, owns fresh runtime state, hydrates
-    /// projections from inherited Timeline history, and can be stepped
+    /// The child shares the live store, owns a fresh runtime registry, hydrates
+    /// projections from inherited Timeline history, restores only durable
+    /// Driver state from host-filtered bounded evidence, and can be stepped
     /// immediately without reopening persistence.
     ///
     /// # Errors
@@ -949,16 +1010,20 @@ impl ExperimentSession {
         if registry.composition() != self.parent_composition {
             return Err(ExperimentError::IncompatibleForkRegistry);
         }
-        let events = read_events(
-            &self.store,
-            self.timeline.id(),
-            self.boundary.folded_through,
-        )?;
-        validate_captured_range(
-            pos_core::clock::Seq::ZERO,
-            self.boundary.folded_through,
-            &events,
-        )?;
+        let (events, ancestry) = lock_store(&self.store).and_then(|store| {
+            let events = read_completed_prefix(
+                store.as_ref(),
+                self.timeline.id(),
+                self.boundary.folded_through,
+            )?;
+            let ancestry = timeline_ancestry(
+                store.as_ref(),
+                self.timeline.id(),
+                self.boundary.folded_through,
+            )?;
+            Ok((events, ancestry))
+        })?;
+        registry.restore_driver_state(&ancestry, &events)?;
         hydrate_projections(&mut registry, &events);
         let config = ExperimentConfig {
             name: name.to_owned(),

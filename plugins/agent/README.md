@@ -60,8 +60,9 @@ Replay consumes a complete immutable source Event prefix; it never receives or
 invokes a provider:
 
 ```rust
-# use pos_core::{Event, ids::{EntityId, TimelineId}};
+# use pos_core::{Event, clock::Seq, ids::{EntityId, TimelineId}};
 # use pos_plugin_agent::{AgentDecisionReplayVerifier, protocol::{ActionCatalogueV1, AgentProviderProvenanceV1}};
+# use pos_runtime::TimelineHistorySegment;
 # fn verify(
 #     timeline_id: TimelineId,
 #     agent_id: EntityId,
@@ -69,12 +70,13 @@ invokes a provider:
 #     catalogue: ActionCatalogueV1,
 #     source_events: Vec<Event>,
 # ) -> Result<(), Box<dyn std::error::Error>> {
-let verifier = AgentDecisionReplayVerifier::new(
-    timeline_id,
+let through = Seq::from_u64(u64::try_from(source_events.len())?);
+let verifier = AgentDecisionReplayVerifier::try_new_with_timeline_ancestry(
+    vec![TimelineHistorySegment::new(timeline_id, through)],
     agent_id,
     provenance,
     catalogue,
-);
+)?;
 let checkpoint = verifier.verify(&source_events, None)?;
 assert_eq!(checkpoint.last_verified().as_u64(), source_events.len() as u64);
 # Ok(())

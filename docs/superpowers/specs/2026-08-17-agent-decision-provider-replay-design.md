@@ -1,8 +1,16 @@
 # Redmine #62: Agent Decision Provider and Replay
 
-**Status:** Approved by `gpt-5.6-sol` CTO review on 2026-08-17  
-**ADR:** ADR-046 v2 (Accepted; canonical source of truth)  
+**Status:** Approved by final `gpt-5.6-sol` CTO review on 2026-08-18
+**ADR:** ADR-046 revision 7 (Accepted; canonical source of truth)
 **Scope:** Local provider contract, bounded record/action wire formats, append-aware driver state, and immutable-Timeline replay verification
+
+This implementation design is subordinate to the current Redmine ADR. Revisions
+3–7 clarify bounded PAA1 classification, independent wire oracles, closed replay
+prefixes and causal anchors, supplied-store recovery authority, complete-prefix
+source validation, and restoration of append-committed Driver state from validated
+Timeline ancestry, sequence-bounded lineage segments, host-filtered recovery
+evidence, and atomic fresh-registry recovery. Historical review references to revision 2 describe only the
+initial design checkpoint.
 
 ## Goal
 
@@ -184,7 +192,7 @@ Provider response bytes, private observations, prompts, completions, credentials
 
 ## Replay verifier
 
-`AgentDecisionReplayVerifier` is a pure module over immutable source `Event` values, not a Driver and not a destination append loop. It is configured with the host-owned expected `TimelineId`, target Agent, plugin/provider provenance, and catalogue, then scans authoritative `Event.seq` order. Because `Event` does not carry Timeline identity, the expected Timeline is a required verifier input and every PDR1 anchor and reconstructed request must match it.
+`AgentDecisionReplayVerifier` is a pure module over immutable source `Event` values, not a Driver and not a destination append loop. It is configured with host-validated root-to-active sequence-bounded `TimelineHistorySegment`s, target Agent, plugin/provider provenance, and catalogue, then scans authoritative `Event.seq` order. Each PDR1 anchor and reconstructed request must match the Timeline segment that owns its `Event.seq`; a post-fork record therefore cannot claim an ancestor Timeline.
 
 It recognizes PDR1 records only in `runtime.recorded_output` for the target entity. For an accepted record it derives exact PAA1 bytes and requires the immediately following Event to be `agent.action` for the same entity with byte-identical payload. A no-action record consumes only itself. An unexpected target action, missing or mismatched action, malformed or unsupported record, anchor/provenance/catalogue/request mismatch, duplicate/regressing/gapped source order, or unconsumed target record fails closed.
 
@@ -222,11 +230,11 @@ Implementation is test-first and must cover:
 - legacy deterministic immediate behavior, repeated `TickScheduler` use, and unanchored rejection whenever any anchor-requiring Driver is registered, even when it is not due;
 - both production Experiment append paths, including zero-draft and partial-Driver failure transaction closure;
 - reducer updates for valid deterministic and PAA1 actions, with malformed PAA1 never falling back;
-- replay accepted/no-action paths, expected-Timeline enforcement, exact adjacency, every mismatch/failure, full-prefix checkpoint resume, no mutation, and compile-time absence of a provider from the verifier interface;
+- replay accepted/no-action paths, sequence-bounded lineage-segment enforcement, exact adjacency, every mismatch/failure, full-prefix checkpoint resume, no mutation, and compile-time absence of a provider from the verifier interface;
 - fixture Live-to-Replay byte stability.
 
 All workspace gates remain mandatory, including formatting, clippy with warnings denied, locked tests with ignored tests included, documentation, dependency/security checks, ASan, WASM/browser parity where configured, and at least 99% line and region coverage. No production coverage exclusions or skipped tests are added.
 
 ## Approval record
 
-The user delegated routine design approval and review corrections to the CTO agent. ADR-046 v2 received final explicit `gpt-5.6-sol` CTO verdict `APPROVE` after correcting the exact schemas, anchor binding, failure matrix, transaction semantics, oversized response handling, precedence, replay recovery, and text grammar. Repository-spec review then corrected lifecycle, Timeline-binding, replay-resume, reducer-dispatch, unanchored preflight, unexpected-action, and direct ULID-dependency omissions. The final corrected repository spec and plan received explicit `gpt-5.6-sol` verdict `APPROVE`. This repository spec is an executable restatement of the Accepted ADR; ADR-046 remains canonical if wording differs.
+The user delegated routine design approval and review corrections to the CTO agent. Earlier accepted slices received explicit `gpt-5.6-sol` verdicts after correcting schemas, anchors, failure handling, transaction semantics, replay recovery, and text grammar. Revision 7 received a final clean `gpt-5.6-sol` CTO review on 2026-08-18 and is Accepted in Redmine. ADR-046 remains canonical if wording differs.

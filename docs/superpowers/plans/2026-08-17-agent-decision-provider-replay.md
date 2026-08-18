@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Implement Redmine #62's bounded local provider-backed Agent decision path and provider-free immutable-Timeline replay verifier under Accepted ADR-046 v2.
+**Goal:** Implement Redmine #62's bounded local provider-backed Agent decision path and provider-free immutable-Timeline replay verifier under Accepted ADR-046 revision 7.
 
 **Architecture:** `pos-runtime` adds an anchored, append-aware Driver transaction while preserving deterministic Driver behavior. `pos-plugin-agent` adds a deep module around one bounded provider interface: exact protocol codecs and hashes stay internal, Live emits a decision record followed by an optional derived action, and replay verifies immutable source Events without a provider.
 
@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- ADR-046 v2 and `docs/superpowers/specs/2026-08-17-agent-decision-provider-replay-design.md` are authoritative.
+- ADR-046 revision 7 is Accepted and canonical; `docs/superpowers/specs/2026-08-17-agent-decision-provider-replay-design.md` is its implementation design.
 - Keep existing `AgentDriver` and `AgentPolicy` behavior unchanged; provider-backed behavior is opt-in.
 - Provider authority is limited to one bounded response per eligible Live boundary; it cannot select actor, Timeline, catalogue, provenance, Event type, or append behavior.
 - No network, provider SDK, new external dependency, migration, backfill, dual-write, upcast, Gateway/client, sandbox/supervisor, ADR-021, or world/physics work.
@@ -324,11 +324,11 @@ git commit -m "feat(agent): record local provider decisions"
 
 **Interfaces:**
 - Consumes: exact PDR1/PAA1 protocol and `pos_core::Event`.
-- Produces: `AgentDecisionReplayVerifier::verify` and `ReplayCheckpoint` with required expected `TimelineId` and no provider parameter or field.
+- Produces: `AgentDecisionReplayVerifier::verify` and `ReplayCheckpoint` with host-owned Timeline input and no provider parameter or field. Revision 7 recovery uses sequence-bounded root-to-active segments, so each PDR1 must match the segment owning its `Event.seq`.
 
 - [ ] **Step 1: Write failing accepted/no-action replay tests**
 
-Build committed-looking Events with fixed contiguous `Seq` values. Construct the verifier with the host-owned expected `TimelineId`, then verify an accepted PDR1 plus immediately adjacent exact PAA1 and a standalone no-action PDR1. Assert the checkpoint equals the final consumed source sequence and input Events remain byte-identical after verification.
+Build committed-looking Events with fixed contiguous `Seq` values. Construct the verifier with the host-owned Timeline input, then verify an accepted PDR1 plus immediately adjacent exact PAA1 and a standalone no-action PDR1. Assert the checkpoint equals the final consumed source sequence and input Events remain byte-identical after verification.
 
 ```rust
 let checkpoint = verifier.verify(&events, None).unwrap();
@@ -338,9 +338,9 @@ assert_eq!(events, original);
 
 - [ ] **Step 2: Write failing fail-closed matrix and resume tests**
 
-Cover malformed/unsupported PDR1; wrong entity, expected Timeline anchor, plugin/provider provenance, catalogue hash, request hash, record hash, action ID/confidence/tick; missing/non-adjacent/extra target action; action after no-action; every unexpected target `agent.action` payload including legacy-map, malformed, and wrong-magic bytes; duplicate/regressing/gapped source `Seq`; unrelated Recorder Events; unrelated Agent actions; resume checkpoint absent, prefix not beginning at sequence 1, incomplete prefix through checkpoint, or changed predecessor; unconsumed final accepted record; and full-prefix resume matching one-shot verification.
+Cover malformed/unsupported PDR1; wrong entity, lineage-segment Timeline anchor, plugin/provider provenance, catalogue hash, request hash, record hash, action ID/confidence/tick; missing/non-adjacent/extra target action; action after no-action; every unexpected target `agent.action` payload including legacy-map, malformed, and wrong-magic bytes; duplicate/regressing/gapped source `Seq`; unrelated Recorder Events; unrelated Agent actions; resume checkpoint absent, prefix not beginning at sequence 1, incomplete prefix through checkpoint, or changed predecessor; unconsumed final accepted record; and full-prefix resume matching one-shot verification.
 
-Add a compile-time construction test showing the verifier constructor accepts only expected Timeline, target identity, provenance, and catalogue and has no provider argument. A counting provider is deliberately impossible to pass; Live-to-Replay integration asserts its call count does not increase during verification.
+Add a compile-time construction test showing the verifier constructor accepts only host-validated root-to-active Timeline segments, target identity, provenance, and catalogue and has no provider argument. A counting provider is deliberately impossible to pass; Live-to-Replay integration asserts its call count does not increase during verification.
 
 - [ ] **Step 3: Run replay tests and confirm RED**
 
@@ -348,7 +348,7 @@ Run: `CARGO_TARGET_DIR=/root/pigloros/target cargo test -p pos-plugin-agent --te
 
 - [ ] **Step 4: Implement pure scan and checkpoint validation**
 
-Scan borrowed `&[Event]` in `Seq` order. Generic unrelated Events pass through. A target PDR1 is fully validated against the expected Timeline and other host configuration plus its recomputed request hash. Accepted records consume and compare the next Event; no-action records consume one Event. Any `agent.action` for the target entity that is not consumed as the exact immediately adjacent action for an accepted record is an error regardless of whether its payload is PAA1, the deterministic legacy map, malformed, or wrong-magic bytes. Return a checkpoint only after no accepted record remains awaiting its adjacent action.
+Scan borrowed `&[Event]` in `Seq` order. Generic unrelated Events pass through. A target PDR1 is fully validated against the host-owned sequence-bounded Timeline segment that owns its `Event.seq` and other host configuration plus its recomputed request hash. Accepted records consume and compare the next Event; no-action records consume one Event. Any `agent.action` for the target entity that is not consumed as the exact immediately adjacent action for an accepted record is an error regardless of whether its payload is PAA1, the deterministic legacy map, malformed, or wrong-magic bytes. Return a checkpoint only after no accepted record remains awaiting its adjacent action.
 
 `ReplayCheckpoint` stores only the last verified source `Seq`. Resume input must be one complete contiguous immutable source range beginning at sequence 1, extending through the checkpoint, and optionally containing later Events. The verifier rescans and revalidates the entire prefix through the checkpoint before accepting the suffix. The verifier has no mutable provider cursor, store handle, append method, or provider type parameter.
 
@@ -435,7 +435,7 @@ Coverage acceptance is explicit: line >= 99.00% and region >= 99.00%, with no sk
 
 - [ ] **Step 3: Request two explicit `gpt-5.6-sol` CTO reviews**
 
-First review Standards against repository rules and ADR-046; second review Spec against Redmine #62, the Accepted ADR, golden fixtures, transaction behavior, and replay authority. Resolve every concrete finding test-first, rerun affected gates, and record verdicts in Redmine and Notion. User approval is not required for routine review corrections under the standing delegation.
+First review Standards against repository rules and ADR-046; second review Spec against Redmine #62, the current Proposed/Accepted ADR state, golden fixtures, transaction behavior, and replay authority. Resolve every concrete finding test-first, rerun affected gates, and record verdicts in Redmine and Notion. User approval is not required for routine review corrections under the standing delegation.
 
 - [ ] **Step 4: Rebase and reverify**
 

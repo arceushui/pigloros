@@ -150,18 +150,20 @@ fn golden_codecs_and_domain_hashes_match_frozen_external_fixtures() {
     let catalogue = ActionCatalogueV1::try_new(vec!["move".to_owned()]).expect("valid catalogue");
     let request = request();
     let accepted = ProviderDecisionV1::accepted(0, 1_000_000).expect("valid accepted decision");
-    let accepted_record = DecisionRecordV1::new(
+    let accepted_record = DecisionRecordV1::try_new(
         request.clone(),
         [0xdd; 32],
         Some([0xee; 32]),
         DecisionResultV1::from(accepted),
-    );
-    let no_action_record = DecisionRecordV1::new(
+    )
+    .expect("accepted record digest matrix");
+    let no_action_record = DecisionRecordV1::try_new(
         request.clone(),
         [0xdd; 32],
         None,
         DecisionResultV1::NoAction(DecisionNoActionCodeV1::ProviderNoAction),
-    );
+    )
+    .expect("no-action record digest matrix");
     let action = AgentActionV1::try_new("move".to_owned(), 1_000_000, 7, [0xaa; 32], [0xff; 32])
         .expect("valid derived action");
 
@@ -297,12 +299,13 @@ fn validated_protocol_values_expose_their_bounded_host_owned_fields() {
         assert_eq!(DecisionNoActionCodeV1::from(failure).code(), code);
     }
 
-    let record = DecisionRecordV1::new(
+    let record = DecisionRecordV1::try_new(
         request.clone(),
         [0xdd; 32],
         Some([0xee; 32]),
         decision.into(),
-    );
+    )
+    .expect("accepted record digest matrix");
     assert_eq!(record.request(), &request);
     assert_eq!(record.request_hash(), [0xdd; 32]);
     assert_eq!(record.response_digest(), Some([0xee; 32]));
@@ -906,12 +909,19 @@ fn exact_writers_cover_all_integer_widths_and_no_action_assignments() {
     );
 
     for code in no_action_codes() {
-        let record = DecisionRecordV1::new(
+        let response_digest = match code {
+            DecisionNoActionCodeV1::ResponseMalformed
+            | DecisionNoActionCodeV1::ResponseVersionUnsupported
+            | DecisionNoActionCodeV1::ResponseValueInvalid => Some([0xee; 32]),
+            _ => None,
+        };
+        let record = DecisionRecordV1::try_new(
             request(),
             [0xdd; 32],
-            None,
+            response_digest,
             DecisionResultV1::NoAction(code),
-        );
+        )
+        .expect("valid no-action digest matrix");
         let encoded = record.encode().expect("no-action record encode");
         assert_eq!(encoded.last().copied(), Some(code.code()));
     }
@@ -1032,9 +1042,17 @@ fn no_action_codes() -> [DecisionNoActionCodeV1; 9] {
 }
 
 fn record_no_action_wire(code: u8) -> Vec<u8> {
-    let mut wire = decode_hex(RECORD_NO_ACTION_HEX);
-    *wire.last_mut().expect("record fixture has a result code") = code;
-    wire
+    if let 7..=9 = code {
+        replace_once_with(
+            &decode_hex(RECORD_ACCEPTED_HEX),
+            &decode_hex("8300001a000f4240"),
+            &[0x82, 1, code],
+        )
+    } else {
+        let mut wire = decode_hex(RECORD_NO_ACTION_HEX);
+        *wire.last_mut().expect("record fixture has a result code") = code;
+        wire
+    }
 }
 
 fn record_with_digest(digest: &[u8]) -> Vec<u8> {

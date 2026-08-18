@@ -9,10 +9,127 @@
 
 use pos_core::{
     clock::Seq,
-    event::EventDraft,
+    event::{CanonicalBytes, Event, EventDraft, Kind},
     ids::{EntityId, TimelineId},
     State,
 };
+
+/// One host-validated Timeline interval in recovery evidence.
+///
+/// The interval owns source Events through `through`, inclusively. It conveys
+/// no store handle or append authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TimelineHistorySegment {
+    timeline_id: TimelineId,
+    through: Seq,
+}
+
+impl TimelineHistorySegment {
+    #[must_use]
+    pub const fn new(timeline_id: TimelineId, through: Seq) -> Self {
+        Self {
+            timeline_id,
+            through,
+        }
+    }
+
+    #[must_use]
+    pub const fn timeline_id(self) -> TimelineId {
+        self.timeline_id
+    }
+
+    #[must_use]
+    pub const fn through(self) -> Seq {
+        self.through
+    }
+}
+
+/// Header-only view of one immutable Event supplied while constructing recovery evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryEventHeader {
+    seq: Seq,
+    entity: EntityId,
+    event_type: Kind,
+}
+
+impl RecoveryEventHeader {
+    #[must_use]
+    pub const fn seq(&self) -> Seq {
+        self.seq
+    }
+
+    #[must_use]
+    pub const fn entity(&self) -> EntityId {
+        self.entity
+    }
+
+    #[must_use]
+    pub fn event_type(&self) -> &Kind {
+        &self.event_type
+    }
+}
+
+/// One bounded recovery Event: all source headers, but payload only when the Driver requested it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryEvent {
+    header: RecoveryEventHeader,
+    payload: Option<CanonicalBytes>,
+}
+
+impl RecoveryEvent {
+    #[must_use]
+    pub fn header(&self) -> &RecoveryEventHeader {
+        &self.header
+    }
+
+    #[must_use]
+    pub fn payload(&self) -> Option<&CanonicalBytes> {
+        self.payload.as_ref()
+    }
+}
+
+/// Host-filtered, immutable, bounded evidence for one Driver recovery attempt.
+#[derive(Clone, Debug)]
+pub struct DriverRecoveryEvidence {
+    timeline_segments: Vec<TimelineHistorySegment>,
+    events: Vec<RecoveryEvent>,
+}
+
+impl DriverRecoveryEvidence {
+    pub(crate) fn from_events(
+        timeline_segments: &[TimelineHistorySegment],
+        events: &[Event],
+        wants_payload: impl FnMut(&RecoveryEventHeader) -> bool,
+    ) -> Self {
+        let mut wants_payload = wants_payload;
+        let events = events
+            .iter()
+            .map(|event| {
+                let header = RecoveryEventHeader {
+                    seq: event.seq,
+                    entity: event.entity,
+                    event_type: event.event_type.clone(),
+                };
+                let payload = wants_payload(&header).then(|| event.payload.clone());
+                RecoveryEvent { header, payload }
+            })
+            .collect();
+        Self {
+            timeline_segments: timeline_segments.to_vec(),
+            events,
+        }
+    }
+
+    #[must_use]
+    pub fn timeline_segments(&self) -> &[TimelineHistorySegment] {
+        &self.timeline_segments
+    }
+
+    #[must_use]
+    pub fn events(&self) -> &[RecoveryEvent] {
+        &self.events
+    }
+}
 
 use crate::error::RuntimeError;
 use std::collections::{hash_map::Entry, HashSet};
@@ -242,6 +359,38 @@ pub trait Driver: Send + Sync {
     fn requires_snapshot_anchor(&self) -> bool {
         false
     }
+
+    /// Selects which recovery Event payloads this Driver needs.
+    ///
+    /// Every Driver receives source headers needed to verify ordering, but no
+    /// payload unless this method selects its header. This callback itself has
+    /// no payload, store, or append authority.
+    fn needs_recovery_payload(&self, _header: &RecoveryEventHeader) -> bool {
+        false
+    }
+
+    /// Stage append-committed state from host-filtered immutable evidence.
+    ///
+    /// Deterministic stateless Drivers need no restoration. Stateful Drivers
+    /// may validate only their own records; they receive no store authority or
+    /// unselected Event payload. Implementations must not mutate committed
+    /// state until [`Self::commit_restore_from_history`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError`] when the Driver's durable history is invalid.
+    fn stage_restore_from_history(
+        &mut self,
+        _evidence: &DriverRecoveryEvidence,
+    ) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
+    /// Commits the preceding successful staged recovery.
+    fn commit_restore_from_history(&mut self) {}
+
+    /// Discards the preceding staged recovery after another Driver rejects it.
+    fn abort_restore_from_history(&mut self) {}
 
     /// Commit state staged by the preceding successful anchored step.
     fn commit_step(&mut self) {}

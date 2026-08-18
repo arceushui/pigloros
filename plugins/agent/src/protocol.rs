@@ -52,6 +52,8 @@ pub enum AgentDecisionError {
     InvalidConfidence,
     #[error("invalid provider response length")]
     InvalidProviderResponseLength,
+    #[error("provider response digest does not match the decision result")]
+    InvalidResponseDigest,
     #[error("malformed agent decision wire value")]
     MalformedWire,
     #[error("unsupported agent decision wire version")]
@@ -388,8 +390,14 @@ impl ConfidencePpmV1 {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct BoundedProviderBytes(Vec<u8>);
+
+impl std::fmt::Debug for BoundedProviderBytes {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("BoundedProviderBytes(<redacted>)")
+    }
+}
 
 impl TryFrom<Vec<u8>> for BoundedProviderBytes {
     type Error = AgentDecisionError;
@@ -535,12 +543,26 @@ impl ProviderFailureCode {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum ProviderAttempt {
     Response(BoundedProviderBytes),
     NoResponse,
     Failed(ProviderFailureCode),
     Oversized { response_digest: Option<[u8; 32]> },
+}
+
+impl std::fmt::Debug for ProviderAttempt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Response(_) => formatter.write_str("Response(<redacted>)"),
+            Self::NoResponse => formatter.write_str("NoResponse"),
+            Self::Failed(code) => formatter.debug_tuple("Failed").field(code).finish(),
+            Self::Oversized { response_digest } => formatter
+                .debug_struct("Oversized")
+                .field("response_digest", &response_digest.map(|_| "<redacted>"))
+                .finish(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -619,19 +641,25 @@ pub struct DecisionRecordV1 {
 }
 
 impl DecisionRecordV1 {
-    #[must_use]
-    pub fn new(
+    /// Builds a record whose digest presence is possible for its normalized result.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentDecisionError::InvalidResponseDigest`] when the result and
+    /// digest presence violate ADR-046's fixed Live failure matrix.
+    pub fn try_new(
         request: AgentDecisionRequestV1,
         request_hash: [u8; 32],
         response_digest: Option<[u8; 32]>,
         result: DecisionResultV1,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, AgentDecisionError> {
+        validate_response_digest(response_digest, result)?;
+        Ok(Self {
             request,
             request_hash,
             response_digest,
             result,
-        }
+        })
     }
 
     #[must_use]
@@ -688,7 +716,8 @@ impl DecisionRecordV1 {
         let request_hash = bytes::<32>(values.get(13)).ok_or(AgentDecisionError::MalformedWire)?;
         let response_digest = decode_response_digest(values.get(14))?;
         let result = decode_result(values.get(15))?;
-        let decoded = Self::new(request, request_hash, response_digest, result);
+        let decoded = Self::try_new(request, request_hash, response_digest, result)
+            .map_err(|_| AgentDecisionError::MalformedWire)?;
         if !canonical_equals(input, &decoded.encode_canonical()) {
             return Err(AgentDecisionError::MalformedWire);
         }
@@ -703,6 +732,32 @@ impl DecisionRecordV1 {
     pub fn hash(&self) -> Result<[u8; 32], AgentDecisionError> {
         self.encode()
             .map(|encoded| derive_hash("pigloros.agent.record.v1", &encoded))
+    }
+}
+
+fn validate_response_digest(
+    response_digest: Option<[u8; 32]>,
+    result: DecisionResultV1,
+) -> Result<(), AgentDecisionError> {
+    let digest_is_valid = match result {
+        DecisionResultV1::Accepted { .. } => response_digest.is_some(),
+        DecisionResultV1::NoAction(code) => match code {
+            DecisionNoActionCodeV1::ProviderUnavailable
+            | DecisionNoActionCodeV1::ProviderTimeout
+            | DecisionNoActionCodeV1::ProviderRejected
+            | DecisionNoActionCodeV1::ProviderRateLimited => response_digest.is_none(),
+            DecisionNoActionCodeV1::ProviderNoAction | DecisionNoActionCodeV1::ResponseTooLarge => {
+                true
+            }
+            DecisionNoActionCodeV1::ResponseMalformed
+            | DecisionNoActionCodeV1::ResponseVersionUnsupported
+            | DecisionNoActionCodeV1::ResponseValueInvalid => response_digest.is_some(),
+        },
+    };
+    if digest_is_valid {
+        Ok(())
+    } else {
+        Err(AgentDecisionError::InvalidResponseDigest)
     }
 }
 
@@ -1470,6 +1525,78 @@ mod tests {
     }
 
     #[test]
+    fn decision_record_digest_matrix_and_debug_output_are_fail_closed() {
+        let request = AgentDecisionRequestV1::new(
+            pos_core::ids::TimelineId::new(),
+            0,
+            pos_core::ids::EntityId::new(),
+            0,
+            HASH,
+            provenance("local-provider", "1.0.0", "2026.08").unwrap(),
+        );
+        let results = std::iter::once(DecisionResultV1::from(
+            ProviderDecisionV1::accepted(0, 1).unwrap(),
+        ))
+        .chain(
+            [
+                DecisionNoActionCodeV1::ProviderUnavailable,
+                DecisionNoActionCodeV1::ProviderTimeout,
+                DecisionNoActionCodeV1::ProviderRejected,
+                DecisionNoActionCodeV1::ProviderRateLimited,
+                DecisionNoActionCodeV1::ProviderNoAction,
+                DecisionNoActionCodeV1::ResponseTooLarge,
+                DecisionNoActionCodeV1::ResponseMalformed,
+                DecisionNoActionCodeV1::ResponseVersionUnsupported,
+                DecisionNoActionCodeV1::ResponseValueInvalid,
+            ]
+            .into_iter()
+            .map(DecisionResultV1::NoAction),
+        );
+        for result in results {
+            for response_digest in [None, Some(HASH)] {
+                let expected_valid = match result {
+                    DecisionResultV1::Accepted { .. } => response_digest.is_some(),
+                    DecisionResultV1::NoAction(code) => match code {
+                        DecisionNoActionCodeV1::ProviderUnavailable
+                        | DecisionNoActionCodeV1::ProviderTimeout
+                        | DecisionNoActionCodeV1::ProviderRejected
+                        | DecisionNoActionCodeV1::ProviderRateLimited => response_digest.is_none(),
+                        DecisionNoActionCodeV1::ProviderNoAction
+                        | DecisionNoActionCodeV1::ResponseTooLarge => true,
+                        DecisionNoActionCodeV1::ResponseMalformed
+                        | DecisionNoActionCodeV1::ResponseVersionUnsupported
+                        | DecisionNoActionCodeV1::ResponseValueInvalid => response_digest.is_some(),
+                    },
+                };
+                let constructed =
+                    DecisionRecordV1::try_new(request.clone(), HASH, response_digest, result);
+                assert_eq!(constructed.is_ok(), expected_valid);
+                if !expected_valid {
+                    let invalid_wire = DecisionRecordV1 {
+                        request: request.clone(),
+                        request_hash: HASH,
+                        response_digest,
+                        result,
+                    }
+                    .encode_canonical();
+                    assert_eq!(
+                        DecisionRecordV1::decode(&invalid_wire),
+                        Err(AgentDecisionError::MalformedWire)
+                    );
+                }
+            }
+        }
+
+        let response = BoundedProviderBytes::try_from(vec![0xde, 0xad, 0xbe, 0xef]).unwrap();
+        let bytes_debug = format!("{response:?}");
+        let attempt_debug = format!("{:?}", ProviderAttempt::Response(response));
+        assert!(!bytes_debug.contains("222"));
+        assert!(!attempt_debug.contains("222"));
+        assert!(bytes_debug.contains("redacted"));
+        assert!(attempt_debug.contains("redacted"));
+    }
+
+    #[test]
     fn bounded_provider_failure_codes_match_authoritative_assignments() {
         for (failure, expected_code) in [
             (ProviderFailureCode::Unavailable, 1),
@@ -1494,7 +1621,7 @@ mod tests {
             provenance.clone(),
         );
         let decision = ProviderDecisionV1::accepted(0, 1_000_000).unwrap();
-        let record = DecisionRecordV1::new(request, HASH, Some(HASH), decision.into());
+        let record = DecisionRecordV1::try_new(request, HASH, Some(HASH), decision.into()).unwrap();
         let action = AgentActionV1::try_new("move".to_owned(), 0, 0, HASH, HASH).unwrap();
 
         assert_eq!(catalogue.action(0), Some("move"));

@@ -45,6 +45,12 @@ pub enum RuntimeError {
     #[error("an anchored Driver step is already pending")]
     PendingDriverStep,
 
+    #[error("driver '{driver}' must be fresh before recovery")]
+    DriverRecoveryNotFresh { driver: String },
+
+    #[error("driver '{driver}' committed tick exceeds the V1 range")]
+    DriverTickOverflow { driver: String },
+
     #[error("store error: {0}")]
     Store(#[from] pos_core::CoreError),
 
@@ -136,6 +142,9 @@ mod tests {
         };
         let mismatch = RuntimeError::SnapshotTimelineMismatch { expected, actual };
         let pending = RuntimeError::PendingDriverStep;
+        let overflow = RuntimeError::DriverTickOverflow {
+            driver: "provider-agent".to_owned(),
+        };
 
         assert_eq!(
             missing.to_string(),
@@ -148,6 +157,10 @@ mod tests {
         assert_eq!(
             pending.to_string(),
             "an anchored Driver step is already pending"
+        );
+        assert_eq!(
+            overflow.to_string(),
+            "driver 'provider-agent' committed tick exceeds the V1 range"
         );
     }
 }

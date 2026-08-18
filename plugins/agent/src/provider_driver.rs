@@ -7,6 +7,7 @@ use crate::{
         ProviderAttempt, ProviderDecisionV1,
     },
     provider::AgentDecisionProvider,
+    replay::AgentDecisionReplayVerifier,
     EVENT_TYPE_ACTION,
 };
 use pos_core::{
@@ -14,13 +15,15 @@ use pos_core::{
     ids::{EntityId, TimelineId},
 };
 use pos_runtime::{
-    recorder::RECORDER_EVENT_TYPE, Driver, ObservationView, ProjectionKey, Recorder, RuntimeError,
-    SnapshotAnchor, StepOutput,
+    recorder::RECORDER_EVENT_TYPE, Driver, DriverRecoveryEvidence, ObservationView, ProjectionKey,
+    Recorder, RecoveryEventHeader, RuntimeError, SnapshotAnchor, StepOutput,
 };
 use std::time::Duration;
 
 const DRIVER_NAME: &str = "provider-backed-agent-driver";
 const RECORDER_ERROR: &str = "agent decision recorder unavailable";
+const RECORD_ERROR: &str = "agent decision record invariant violated";
+const HISTORY_ERROR: &str = "agent decision history does not match provider driver";
 
 enum NormalizedAttempt {
     Accepted {
@@ -65,6 +68,7 @@ pub struct ProviderBackedAgentDriver {
     recorder: Recorder,
     committed_tick: u64,
     staged_tick: Option<u64>,
+    staged_restore_tick: Option<u64>,
     subscriptions: Vec<ProjectionKey>,
     tick_interval: Duration,
 }
@@ -86,6 +90,7 @@ impl ProviderBackedAgentDriver {
             recorder: Recorder::new_live(entity),
             committed_tick: 0,
             staged_tick: None,
+            staged_restore_tick: None,
             subscriptions: Vec::new(),
             tick_interval: Duration::from_millis(100),
         }
@@ -181,9 +186,15 @@ impl Driver for ProviderBackedAgentDriver {
         if self.staged_tick.is_some() {
             return Err(RuntimeError::PendingDriverStep);
         }
+        let staged_tick =
+            self.committed_tick
+                .checked_add(1)
+                .ok_or_else(|| RuntimeError::DriverTickOverflow {
+                    driver: DRIVER_NAME.to_owned(),
+                })?;
         validate_snapshot_anchor(timeline, observations.anchor()).and_then(|anchor| {
             let (request, request_hash) = self.prepared_request(timeline, anchor);
-            self.record_decision(request, request_hash)
+            self.record_decision(request, request_hash, staged_tick)
         })
     }
 
@@ -212,6 +223,48 @@ impl Driver for ProviderBackedAgentDriver {
     fn abort_step(&mut self) {
         self.staged_tick = None;
     }
+
+    fn needs_recovery_payload(&self, header: &RecoveryEventHeader) -> bool {
+        header.entity() == self.entity
+            && matches!(
+                header.event_type().as_str(),
+                RECORDER_EVENT_TYPE | EVENT_TYPE_ACTION
+            )
+    }
+
+    fn stage_restore_from_history(
+        &mut self,
+        evidence: &DriverRecoveryEvidence,
+    ) -> Result<(), RuntimeError> {
+        if self.staged_tick.is_some()
+            || self.staged_restore_tick.is_some()
+            || self.committed_tick != 0
+        {
+            return Err(RuntimeError::DriverRecoveryNotFresh {
+                driver: DRIVER_NAME.to_owned(),
+            });
+        }
+        let checkpoint = AgentDecisionReplayVerifier::try_new_with_timeline_ancestry(
+            evidence.timeline_segments().to_vec(),
+            self.entity,
+            self.provenance.clone(),
+            self.catalogue.clone(),
+        )
+        .and_then(|verifier| verifier.verify_recovery(evidence))
+        .map_err(|_| invalid_payload(RECORDER_EVENT_TYPE, HISTORY_ERROR))?;
+        self.staged_restore_tick = Some(checkpoint.verified_decisions());
+        Ok(())
+    }
+
+    fn commit_restore_from_history(&mut self) {
+        if let Some(tick) = self.staged_restore_tick.take() {
+            self.committed_tick = tick;
+        }
+    }
+
+    fn abort_restore_from_history(&mut self) {
+        self.staged_restore_tick = None;
+    }
 }
 
 impl ProviderBackedAgentDriver {
@@ -219,19 +272,21 @@ impl ProviderBackedAgentDriver {
         &mut self,
         request: AgentDecisionRequestV1,
         request_hash: [u8; 32],
+        staged_tick: u64,
     ) -> Result<StepOutput, RuntimeError> {
         let normalized = normalize_attempt(self.provider.decide(&request), &self.catalogue);
         let catalogue_hash = request.catalogue_hash();
         let response_digest = normalized.response_digest();
         let record =
-            DecisionRecordV1::new(request, request_hash, response_digest, normalized.result());
+            DecisionRecordV1::try_new(request, request_hash, response_digest, normalized.result())
+                .map_err(|_| invalid_payload(RECORDER_EVENT_TYPE, RECORD_ERROR))?;
         let record_hash = record
             .hash()
             .expect("validated agent decision record must hash");
         self.record_draft(&record).map(|drafts| {
             let drafts =
                 self.drafts_for_normalized(normalized, drafts, catalogue_hash, record_hash);
-            self.staged_tick = Some(self.committed_tick.wrapping_add(1));
+            self.staged_tick = Some(staged_tick);
             StepOutput::new(drafts)
         })
     }
@@ -354,8 +409,9 @@ mod tests {
         ids::{EntityId, PluginId, TimelineId},
     };
     use pos_runtime::recorder::RECORDER_EVENT_TYPE;
-    use pos_runtime::{Driver, ObservationView, PluginRegistry, Recorder, SnapshotAnchor};
-    use std::sync::atomic::Ordering;
+    use pos_runtime::{
+        Driver, ObservationView, PluginRegistry, Recorder, RuntimeError, SnapshotAnchor,
+    };
     use std::time::Duration;
 
     const PLUGIN_HASH: [u8; 32] = [3; 32];
@@ -635,7 +691,7 @@ mod tests {
             .registry
             .step_all_anchored(fixture.timeline, Seq::from_u64(7))
             .unwrap();
-        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.calls.get(), 1);
         assert_eq!(drafts[0].event_type.as_str(), RECORDER_EVENT_TYPE);
         assert_eq!(drafts[0].entity, fixture.entity);
         let catalogue_hash = blake3::derive_key(
@@ -956,7 +1012,7 @@ mod tests {
             missing.to_string(),
             "driver 'provider-backed-agent-driver' requires a snapshot anchor"
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.get(), 0);
         let actual = TimelineId::new();
         let mismatch = driver
             .step(
@@ -968,7 +1024,7 @@ mod tests {
             mismatch.to_string(),
             format!("snapshot Timeline mismatch: expected {timeline}, got {actual}")
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.get(), 0);
     }
 
     #[test]
@@ -983,7 +1039,7 @@ mod tests {
             .registry
             .step_all_anchored(fixture.timeline, Seq::from_u64(4))
             .unwrap();
-        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.calls.get(), 1);
         let pending = fixture
             .registry
             .step_all_anchored(fixture.timeline, Seq::from_u64(4))
@@ -992,14 +1048,14 @@ mod tests {
             pending.to_string(),
             "an anchored Driver step is already pending"
         );
-        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.calls.get(), 1);
 
         fixture.registry.abort_step();
         let retry = fixture
             .registry
             .step_all_anchored(fixture.timeline, Seq::from_u64(4))
             .unwrap();
-        assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(fixture.calls.get(), 2);
         assert_eq!(first[0].payload, retry[0].payload);
         fixture.registry.commit_step();
         fixture.registry.commit_step();
@@ -1053,7 +1109,7 @@ mod tests {
             pending.to_string(),
             "an anchored Driver step is already pending"
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.get(), 0);
     }
 
     #[test]
@@ -1061,12 +1117,13 @@ mod tests {
         let entity = EntityId::new();
         let request =
             AgentDecisionRequestV1::new(TimelineId::new(), 0, entity, 0, [1; 32], provenance());
-        let record = DecisionRecordV1::new(
+        let record = DecisionRecordV1::try_new(
             request,
             [2; 32],
             None,
             DecisionResultV1::NoAction(DecisionNoActionCodeV1::ProviderNoAction),
-        );
+        )
+        .unwrap();
         let mut driver = ProviderBackedAgentDriver::new(
             entity,
             ActionCatalogueV1::try_new(vec!["wait".to_owned()]).unwrap(),
@@ -1083,5 +1140,27 @@ mod tests {
             driver.record_draft(&record).unwrap_err().to_string(),
             "payload validation failed for event type 'runtime.recorded_output': agent decision recorder unavailable"
         );
+    }
+
+    #[test]
+    fn driver_tick_overflow_fails_before_provider_call() {
+        let provider = FixtureAgentDecisionProvider::new(vec![ProviderAttempt::NoResponse]);
+        let calls = provider.call_count_handle();
+        let mut driver = ProviderBackedAgentDriver::new(
+            EntityId::new(),
+            ActionCatalogueV1::try_new(vec!["wait".to_owned()]).unwrap(),
+            provenance(),
+            Box::new(provider),
+        );
+        driver.committed_tick = u64::MAX;
+        let timeline = TimelineId::new();
+        let error = driver
+            .step(
+                timeline,
+                ObservationView::anchored_empty(SnapshotAnchor::new(timeline, Seq::ZERO)),
+            )
+            .unwrap_err();
+        assert!(matches!(error, RuntimeError::DriverTickOverflow { .. }));
+        assert_eq!(calls.get(), 0);
     }
 }

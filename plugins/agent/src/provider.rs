@@ -22,8 +22,8 @@ pub struct FixtureProviderCallCount(Arc<AtomicUsize>);
 impl FixtureProviderCallCount {
     /// Returns the number of decisions requested from the fixture.
     #[must_use]
-    pub fn load(&self, ordering: Ordering) -> usize {
-        self.0.load(ordering)
+    pub fn get(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
     }
 }
 
@@ -55,7 +55,7 @@ impl FixtureAgentDecisionProvider {
     /// Returns the number of decision calls observed by this fixture.
     #[must_use]
     pub fn call_count(&self) -> usize {
-        self.call_count.load(Ordering::SeqCst)
+        self.call_count.get()
     }
 }
 

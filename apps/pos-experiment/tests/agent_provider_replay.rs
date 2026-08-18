@@ -16,7 +16,8 @@ use pos_plugin_agent::{
     ProviderBackedAgentDriver, EVENT_TYPE_ACTION,
 };
 use pos_runtime::{
-    recorder::RECORDER_EVENT_TYPE, Driver, ObservationView, ProjectionKey, RuntimeError, StepOutput,
+    recorder::RECORDER_EVENT_TYPE, Driver, DriverRecoveryEvidence, ObservationView, PluginRegistry,
+    ProjectionKey, RecoveryEventHeader, RuntimeError, StepOutput, TimelineHistorySegment,
 };
 use pos_store::{memory::MemoryStore, SeqRange, StoreConfig};
 use std::{
@@ -132,12 +133,60 @@ impl HostFixture {
     }
 
     fn verifier(&self, timeline: TimelineId) -> AgentDecisionReplayVerifier {
-        AgentDecisionReplayVerifier::new(
-            timeline,
+        AgentDecisionReplayVerifier::try_new_with_timeline_ancestry(
+            vec![TimelineHistorySegment::new(timeline, Seq::from_u64(32))],
             self.agent,
             self.provenance.clone(),
             self.catalogue.clone(),
         )
+        .unwrap()
+    }
+
+    fn forkable_experiment(
+        &self,
+        name: &str,
+        parent_attempts: Vec<ProviderAttempt>,
+        child_attempts: Vec<ProviderAttempt>,
+    ) -> Experiment {
+        let plugin = Arc::new(AgentPlugin::new());
+        let child_plugin = Arc::clone(&plugin);
+        let child_host = self.clone();
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: name.to_owned(),
+            stop: StopCondition::MaxTicks(2),
+            store_config: StoreConfig::Memory,
+        })
+        .with_fork_registry_factory(move || {
+            let provider = FixtureAgentDecisionProvider::new(child_attempts.clone());
+            let driver = ProviderBackedAgentDriver::new(
+                child_host.agent,
+                child_host.catalogue.clone(),
+                child_host.provenance.clone(),
+                Box::new(provider),
+            );
+            let mut registry = PluginRegistry::new();
+            registry.register(
+                child_plugin.as_ref(),
+                Some(Box::new(AgentReducer)),
+                Some(Box::new(driver)),
+            )?;
+            Ok(registry)
+        });
+        let parent_provider = FixtureAgentDecisionProvider::new(parent_attempts);
+        let parent_driver = ProviderBackedAgentDriver::new(
+            self.agent,
+            self.catalogue.clone(),
+            self.provenance.clone(),
+            Box::new(parent_provider),
+        );
+        experiment
+            .register(
+                plugin.as_ref(),
+                Some(Box::new(AgentReducer)),
+                Some(Box::new(parent_driver)),
+            )
+            .unwrap();
+        experiment
     }
 }
 
@@ -193,6 +242,28 @@ impl Driver for ObservableProviderDriver {
             .0
             .store(self.inner.committed_tick(), Ordering::SeqCst);
     }
+
+    fn needs_recovery_payload(&self, header: &RecoveryEventHeader) -> bool {
+        self.inner.needs_recovery_payload(header)
+    }
+
+    fn stage_restore_from_history(
+        &mut self,
+        evidence: &DriverRecoveryEvidence,
+    ) -> Result<(), RuntimeError> {
+        self.inner.stage_restore_from_history(evidence)
+    }
+
+    fn commit_restore_from_history(&mut self) {
+        self.inner.commit_restore_from_history();
+        self.committed_tick
+            .0
+            .store(self.inner.committed_tick(), Ordering::SeqCst);
+    }
+
+    fn abort_restore_from_history(&mut self) {
+        self.inner.abort_restore_from_history();
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -205,7 +276,20 @@ enum ExpectedResult {
 struct AdapterControl {
     append_batch_sizes: Vec<usize>,
     fail_next_append: bool,
-    drop_first_on_next_read: bool,
+    next_read_fault: Option<ReadFault>,
+    next_metadata_fault: Option<MetadataFault>,
+}
+
+#[derive(Clone, Copy)]
+enum ReadFault {
+    DropFirstEvent,
+    ReportZeroHead,
+}
+
+#[derive(Clone, Copy)]
+enum MetadataFault {
+    Fail,
+    ReturnWrongTimeline,
 }
 
 #[derive(Clone)]
@@ -231,7 +315,19 @@ impl SharedMemoryAdapter {
     }
 
     fn drop_first_on_next_read(&self) {
-        self.control().drop_first_on_next_read = true;
+        self.control().next_read_fault = Some(ReadFault::DropFirstEvent);
+    }
+
+    fn fail_next_get_timeline(&self) {
+        self.control().next_metadata_fault = Some(MetadataFault::Fail);
+    }
+
+    fn return_wrong_timeline_on_next_get(&self) {
+        self.control().next_metadata_fault = Some(MetadataFault::ReturnWrongTimeline);
+    }
+
+    fn report_zero_head_on_next_read(&self) {
+        self.control().next_read_fault = Some(ReadFault::ReportZeroHead);
     }
 
     fn source_events(&self, timeline: TimelineId) -> Vec<Event> {
@@ -277,7 +373,12 @@ impl EventStore for SharedMemoryAdapter {
 
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
         let mut events = self.store().read(timeline, range)?;
-        if std::mem::take(&mut self.control().drop_first_on_next_read) && !events.is_empty() {
+        let should_drop_first = {
+            let mut control = self.control();
+            matches!(control.next_read_fault, Some(ReadFault::DropFirstEvent))
+                && control.next_read_fault.take().is_some()
+        };
+        if should_drop_first && !events.is_empty() {
             events.remove(0);
         }
         Ok(events)
@@ -292,10 +393,30 @@ impl EventStore for SharedMemoryAdapter {
     }
 
     fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
-        self.store().get_timeline(id)
+        let fault = self.control().next_metadata_fault.take();
+        if matches!(fault, Some(MetadataFault::Fail)) {
+            return Err(CoreError::Storage(
+                "injected Timeline metadata failure".to_owned(),
+            ));
+        }
+        let mut timeline = self.store().get_timeline(id)?;
+        if matches!(fault, Some(MetadataFault::ReturnWrongTimeline)) {
+            if let Some(timeline) = &mut timeline {
+                timeline.meta.id = TimelineId::new();
+            }
+        }
+        Ok(timeline)
     }
 
     fn logical_head(&self, id: TimelineId) -> Result<Seq, CoreError> {
+        let should_report_zero = {
+            let mut control = self.control();
+            matches!(control.next_read_fault, Some(ReadFault::ReportZeroHead))
+                && control.next_read_fault.take().is_some()
+        };
+        if should_report_zero {
+            return Ok(Seq::ZERO);
+        }
         self.store().logical_head(id)
     }
 }
@@ -349,7 +470,7 @@ fn live_boundaries_are_atomic_byte_stable_and_provider_free_on_replay() {
         }
     );
     assert_eq!(committed_tick.load(), 2);
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(calls.get(), 2);
     assert_eq!(adapter.append_batch_sizes(), [2, 1]);
 
     let events = session.source_events().unwrap();
@@ -414,10 +535,10 @@ fn live_boundaries_are_atomic_byte_stable_and_provider_free_on_replay() {
         Some("move")
     );
 
-    let before_replay_calls = calls.load(Ordering::SeqCst);
+    let before_replay_calls = calls.get();
     let checkpoint = host.verifier(timeline).verify(&events, None).unwrap();
     assert_eq!(checkpoint.last_verified(), Seq::from_u64(3));
-    assert_eq!(calls.load(Ordering::SeqCst), before_replay_calls);
+    assert_eq!(calls.get(), before_replay_calls);
 
     assert_supplied_store_has_no_recovery_recipe(&adapter, session);
 }
@@ -441,7 +562,7 @@ fn append_fault_commits_neither_pair_nor_tick_and_fresh_session_recovers() {
         failed_session.step_tick(),
         Err(ExperimentError::Store(_))
     ));
-    assert_eq!(failed_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(failed_calls.get(), 1);
     assert_eq!(failed_tick.load(), 0);
     assert!(adapter.source_events(timeline).is_empty());
     assert!(failed_session.source_events().unwrap().is_empty());
@@ -489,8 +610,8 @@ fn append_fault_commits_neither_pair_nor_tick_and_fresh_session_recovers() {
         action_bytes("move", CONFIDENCE, 0, host.catalogue_hash, record_hash,)
     );
     assert_eq!(adapter.append_batch_sizes(), [2, 2]);
-    assert_eq!(failed_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(recovery_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(failed_calls.get(), 1);
+    assert_eq!(recovery_calls.get(), 1);
     let recovered_state = recovered
         .projections()
         .unwrap()
@@ -503,14 +624,116 @@ fn append_fault_commits_neither_pair_nor_tick_and_fresh_session_recovers() {
         Some(1)
     );
 
-    let total_live_calls =
-        failed_calls.load(Ordering::SeqCst) + recovery_calls.load(Ordering::SeqCst);
+    let total_live_calls = failed_calls.get() + recovery_calls.get();
     let checkpoint = host.verifier(timeline).verify(&events, None).unwrap();
     assert_eq!(checkpoint.last_verified(), Seq::from_u64(2));
-    assert_eq!(
-        failed_calls.load(Ordering::SeqCst) + recovery_calls.load(Ordering::SeqCst),
-        total_live_calls
+    assert_eq!(failed_calls.get() + recovery_calls.get(), total_live_calls);
+}
+
+#[test]
+fn committed_history_restores_driver_tick_for_resume_and_fork() {
+    let host = HostFixture::new();
+    let accepted = accepted_response_bytes(0, CONFIDENCE);
+    let no_action = no_action_response_bytes();
+    let adapter = SharedMemoryAdapter::new();
+    let (experiment, _, _) = host.experiment(
+        "agent-provider-resume-tick",
+        vec![response_attempt(&accepted)],
     );
+    let mut original = experiment
+        .start_with_store(Box::new(adapter.clone()))
+        .unwrap();
+    let timeline = original.timeline().id();
+    original.step_tick().unwrap();
+
+    let (resume, _, resumed_tick) = host.experiment(
+        "agent-provider-resumed-tick",
+        vec![response_attempt(&no_action)],
+    );
+    let mut resumed = resume
+        .resume_with_store(timeline, Box::new(adapter.clone()))
+        .unwrap();
+    assert_eq!(resumed_tick.load(), 1);
+    resumed.step_tick().unwrap();
+    assert_eq!(resumed_tick.load(), 2);
+    let resumed_events = resumed.source_events().unwrap();
+    assert_eq!(resumed_events.len(), 3);
+    assert_eq!(
+        host.verifier(timeline)
+            .verify(&resumed_events, None)
+            .unwrap()
+            .last_verified(),
+        Seq::from_u64(3)
+    );
+
+    let fork_adapter = SharedMemoryAdapter::new();
+    let forkable = host.forkable_experiment(
+        "agent-provider-fork-tick",
+        vec![response_attempt(&accepted)],
+        vec![response_attempt(&no_action)],
+    );
+    let mut parent = forkable.start_with_store(Box::new(fork_adapter)).unwrap();
+    parent.step_tick().unwrap();
+    let parent_timeline = parent.timeline().id();
+    let mut child = parent.fork("agent-provider-child").unwrap();
+    let child_timeline = child.timeline().id();
+    child.step_tick().unwrap();
+    let child_events = child.source_events().unwrap();
+    let verifier = AgentDecisionReplayVerifier::try_new_with_timeline_ancestry(
+        vec![
+            TimelineHistorySegment::new(parent_timeline, Seq::from_u64(2)),
+            TimelineHistorySegment::new(child_timeline, Seq::from_u64(3)),
+        ],
+        host.agent,
+        host.provenance.clone(),
+        host.catalogue.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        verifier
+            .verify(&child_events, None)
+            .unwrap()
+            .last_verified(),
+        Seq::from_u64(3)
+    );
+}
+
+#[test]
+fn source_events_validates_empty_metadata_and_completed_head() {
+    let host = HostFixture::new();
+    let adapter = SharedMemoryAdapter::new();
+    let (experiment, _, _) = host.experiment("agent-provider-source-validation", vec![]);
+    let mut session = experiment
+        .start_with_store(Box::new(adapter.clone()))
+        .unwrap();
+
+    adapter.fail_next_get_timeline();
+    assert!(session.source_events().is_err());
+
+    adapter.return_wrong_timeline_on_next_get();
+    assert!(session.source_events().is_err());
+
+    session.step_tick().unwrap();
+    adapter.report_zero_head_on_next_read();
+    assert!(session.source_events().is_err());
+}
+
+#[test]
+fn resume_rejects_mismatched_initial_timeline_metadata() {
+    let host = HostFixture::new();
+    let adapter = SharedMemoryAdapter::new();
+    let (experiment, _, _) = host.experiment("agent-provider-resume-metadata", vec![]);
+    let session = experiment
+        .start_with_store(Box::new(adapter.clone()))
+        .unwrap();
+    let timeline = session.timeline().id();
+    drop(session);
+
+    adapter.return_wrong_timeline_on_next_get();
+    let (resume, _, _) = host.experiment("agent-provider-resume-metadata", vec![]);
+    assert!(resume
+        .resume_with_store(timeline, Box::new(adapter))
+        .is_err());
 }
 
 fn response_attempt(response: &[u8]) -> ProviderAttempt {

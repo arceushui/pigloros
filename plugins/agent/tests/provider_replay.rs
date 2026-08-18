@@ -13,9 +13,8 @@ use pos_plugin_agent::{
 };
 use pos_runtime::{
     recorder::RECORDER_EVENT_TYPE, Driver, ObservationView, PluginRegistry, RuntimeError,
-    StepOutput,
+    StepOutput, TimelineHistorySegment,
 };
-use std::sync::atomic::Ordering;
 use ulid::Ulid;
 
 const PLUGIN_VERSION: &str = "1.0.0";
@@ -65,12 +64,16 @@ impl HostFixture {
     }
 
     fn verifier(&self) -> AgentDecisionReplayVerifier {
-        AgentDecisionReplayVerifier::new(
-            self.timeline,
+        AgentDecisionReplayVerifier::try_new_with_timeline_ancestry(
+            vec![TimelineHistorySegment::new(
+                self.timeline,
+                Seq::from_u64(32),
+            )],
             self.agent,
             self.provenance.clone(),
             self.catalogue.clone(),
         )
+        .unwrap()
     }
 
     fn record(&self, observed_through: u64, tick: u64, result: FixtureResult) -> RecordFixture {
@@ -86,7 +89,12 @@ impl HostFixture {
             provider_id: PROVIDER_ID.to_owned(),
             provider_version: PROVIDER_VERSION.to_owned(),
             provider_hash: PROVIDER_HASH,
-            response_digest: None,
+            response_digest: match result {
+                FixtureResult::Accepted { .. } | FixtureResult::NoAction { code: 7..=9 } => {
+                    Some([0x42; 32])
+                }
+                FixtureResult::NoAction { .. } => None,
+            },
             result,
             request_hash_override: None,
         }
@@ -374,11 +382,14 @@ impl Driver for PrecedingDriver {
 #[test]
 fn verifier_constructor_has_only_host_owned_replay_inputs() {
     let constructor: fn(
-        TimelineId,
+        Vec<TimelineHistorySegment>,
         EntityId,
         AgentProviderProvenanceV1,
         ActionCatalogueV1,
-    ) -> AgentDecisionReplayVerifier = AgentDecisionReplayVerifier::new;
+    ) -> Result<
+        AgentDecisionReplayVerifier,
+        pos_plugin_agent::ReplayVerificationError,
+    > = AgentDecisionReplayVerifier::try_new_with_timeline_ancestry;
     let checkpoint_reader: fn(ReplayCheckpoint) -> Seq = ReplayCheckpoint::last_verified;
 
     let _ = (constructor, checkpoint_reader);
@@ -401,6 +412,30 @@ fn accepted_and_no_action_records_verify_without_mutating_source_events() {
 
     assert_eq!(checkpoint.last_verified(), Seq::from_u64(3));
     assert_eq!(events, original);
+}
+
+#[test]
+fn sequence_bounded_ancestry_rejects_an_ancestor_record_after_a_fork() {
+    let host = HostFixture::new();
+    let child = TimelineId::new();
+    let record = host.record(0, 0, FixtureResult::NoAction { code: 5 });
+    let events = vec![
+        event(1, host.other_agent, "world.observation", vec![0x80]),
+        event(2, host.other_agent, "world.observation", vec![0x80]),
+        event(3, host.agent, RECORDER_EVENT_TYPE, record.record_bytes()),
+    ];
+    let verifier = AgentDecisionReplayVerifier::try_new_with_timeline_ancestry(
+        vec![
+            TimelineHistorySegment::new(host.timeline, Seq::from_u64(2)),
+            TimelineHistorySegment::new(child, Seq::from_u64(3)),
+        ],
+        host.agent,
+        host.provenance.clone(),
+        host.catalogue.clone(),
+    )
+    .unwrap();
+
+    assert!(verifier.verify(&events, None).is_err());
 }
 
 #[test]
@@ -855,7 +890,7 @@ fn live_driver_provider_call_count_does_not_change_during_replay() {
     let drafts = registry
         .step_all_anchored(host.timeline, Seq::ZERO)
         .expect("live boundary succeeds");
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.get(), 1);
     let events: Vec<Event> = drafts
         .into_iter()
         .enumerate()
@@ -872,6 +907,6 @@ fn live_driver_provider_call_count_does_not_change_during_replay() {
     let checkpoint = host.verifier().verify(&events, None).unwrap();
 
     assert_eq!(checkpoint.last_verified(), Seq::from_u64(3));
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.get(), 1);
     registry.abort_step();
 }
