@@ -379,7 +379,19 @@ fn advance_driver_tick(current: u64) -> Result<u64, ReplayVerificationError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{advance_driver_tick, ReplayVerificationError};
+    use super::{
+        advance_driver_tick, validate_recovery_sequence, ReplayVerificationError, VerificationEvent,
+    };
+    use pos_core::{clock::Seq, ids::EntityId};
+
+    fn event(seq: u64) -> VerificationEvent<'static> {
+        VerificationEvent {
+            seq: Seq::from_u64(seq),
+            entity: EntityId::new(),
+            event_type: "fixture",
+            payload: None,
+        }
+    }
 
     #[test]
     fn driver_tick_advancement_fails_closed_at_the_v1_limit() {
@@ -387,6 +399,43 @@ mod tests {
         assert_eq!(
             advance_driver_tick(u64::MAX),
             Err(ReplayVerificationError::DriverTickOverflow)
+        );
+    }
+
+    #[test]
+    fn recovery_sequence_validation_accepts_empty_zero_and_rejects_every_gap_shape() {
+        assert_eq!(validate_recovery_sequence(&[], Seq::ZERO), Ok(()));
+        assert_eq!(
+            validate_recovery_sequence(&[], Seq::from_u64(1)),
+            Err(ReplayVerificationError::NonContiguousSourceSequence {
+                expected: 1,
+                actual: 0,
+            })
+        );
+        assert_eq!(
+            validate_recovery_sequence(&[event(2)], Seq::from_u64(2)),
+            Err(ReplayVerificationError::NonContiguousSourceSequence {
+                expected: 1,
+                actual: 2,
+            })
+        );
+        assert_eq!(
+            validate_recovery_sequence(&[event(1), event(3)], Seq::from_u64(3)),
+            Err(ReplayVerificationError::NonContiguousSourceSequence {
+                expected: 2,
+                actual: 3,
+            })
+        );
+        assert_eq!(
+            validate_recovery_sequence(&[event(1)], Seq::from_u64(2)),
+            Err(ReplayVerificationError::NonContiguousSourceSequence {
+                expected: 2,
+                actual: 1,
+            })
+        );
+        assert_eq!(
+            validate_recovery_sequence(&[event(1), event(2)], Seq::from_u64(2)),
+            Ok(())
         );
     }
 }
