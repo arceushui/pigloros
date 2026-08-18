@@ -239,6 +239,28 @@ fn golden_codecs_and_domain_hashes_match_frozen_external_fixtures() {
 }
 
 #[test]
+fn public_decoders_reject_trailing_bytes_after_an_empty_array() {
+    let wire = [0x80, 0x00];
+    assert_malformed(
+        ActionCatalogueV1::decode(&wire),
+        "catalogue trailing empty array",
+    );
+    assert_malformed(
+        AgentDecisionRequestV1::decode(&wire),
+        "request trailing empty array",
+    );
+    assert_malformed(
+        ProviderDecisionV1::decode(&wire),
+        "provider trailing empty array",
+    );
+    assert_malformed(
+        DecisionRecordV1::decode(&wire),
+        "record trailing empty array",
+    );
+    assert_malformed(AgentActionV1::decode(&wire), "action trailing empty array");
+}
+
+#[test]
 fn validated_protocol_values_expose_their_bounded_host_owned_fields() {
     let catalogue = ActionCatalogueV1::try_new(vec!["move".to_owned()]).expect("catalogue");
     assert_eq!(catalogue.action(0), Some("move"));
