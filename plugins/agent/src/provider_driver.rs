@@ -647,6 +647,7 @@ mod tests {
         output.finish()
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn assert_decoded_result(actual: DecisionResultV1, expected: ExpectedResult, case: usize) {
         match (actual, expected) {
             (
@@ -679,6 +680,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn assert_normalized_attempt(
         attempt: ProviderAttempt,
         expected_result: ExpectedResult,

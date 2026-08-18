@@ -13,8 +13,8 @@ use pos_plugin_agent::{
     ReplayCheckpoint, ReplayVerificationError, EVENT_TYPE_ACTION,
 };
 use pos_runtime::{
-    recorder::RECORDER_EVENT_TYPE, Driver, ObservationView, PluginRegistry, RuntimeError,
-    StepOutput, TimelineHistorySegment,
+    recorder::RECORDER_EVENT_TYPE, Driver, DriverRecoveryEvidence, ObservationView, PluginRegistry,
+    RuntimeError, StepOutput, TimelineHistorySegment,
 };
 use ulid::Ulid;
 
@@ -378,6 +378,58 @@ impl Driver for PrecedingDriver {
     fn name(&self) -> &'static str {
         "preceding-replay-fixture"
     }
+}
+
+struct AncestryCheckingDriver {
+    verifier: AgentDecisionReplayVerifier,
+}
+
+impl Driver for AncestryCheckingDriver {
+    fn step(
+        &mut self,
+        _timeline: TimelineId,
+        _observations: ObservationView<'_>,
+    ) -> Result<StepOutput, RuntimeError> {
+        Ok(StepOutput::empty())
+    }
+
+    fn name(&self) -> &'static str {
+        "ancestry-checking-fixture"
+    }
+
+    fn stage_restore_from_history(
+        &mut self,
+        evidence: &DriverRecoveryEvidence,
+    ) -> Result<(), RuntimeError> {
+        self.verifier
+            .verify_recovery(evidence)
+            .map(|_| ())
+            .map_err(|_| RuntimeError::NoDriver {
+                name: "fixture ancestry mismatch".to_owned(),
+            })
+    }
+}
+
+#[test]
+fn registry_passes_recovery_evidence_to_the_driver_verifier() {
+    let host = HostFixture::new();
+    let verifier = AgentDecisionReplayVerifier::try_new_with_timeline_ancestry(
+        vec![TimelineHistorySegment::new(TimelineId::new(), Seq::ZERO)],
+        host.agent,
+        host.provenance,
+        host.catalogue,
+    )
+    .unwrap();
+    let mut registry = PluginRegistry::new();
+    registry.register_driver(Box::new(AncestryCheckingDriver { verifier }));
+
+    assert!(matches!(
+        registry.restore_driver_state(
+            &[TimelineHistorySegment::new(host.timeline, Seq::ZERO)],
+            &[],
+        ),
+        Err(RuntimeError::NoDriver { .. })
+    ));
 }
 
 #[test]
