@@ -2,7 +2,8 @@ use pos_core::{
     clock::{Seq, WallTime},
     crypto::Hash,
     event::{CanonicalBytes, Event, Kind, SchemaVersion},
-    ids::{EntityId, EventId, TimelineId},
+    ids::{EntityId, EventId, PluginId, TimelineId},
+    Capability, Plugin,
 };
 use pos_runtime::{
     Driver, DriverRecoveryEvidence, ObservationView, PluginRegistry, RuntimeError, StepOutput,
@@ -37,6 +38,24 @@ impl Driver for DefaultRecoveryDriver {
 
     fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
         Ok(StepOutput::empty())
+    }
+}
+
+struct MetadataOnlyPlugin {
+    id: PluginId,
+}
+
+impl Plugin for MetadataOnlyPlugin {
+    fn id(&self) -> PluginId {
+        self.id
+    }
+
+    fn name(&self) -> &'static str {
+        "metadata-only"
+    }
+
+    fn capability(&self) -> Capability {
+        Capability::default()
     }
 }
 
@@ -127,4 +146,25 @@ fn recovery_evidence_exposes_all_headers_only_selected_payloads_and_is_atomic() 
     rejected.register_driver(Box::new(DefaultRecoveryDriver));
     rejected.register_driver(Box::new(RejectingRecoveryDriver));
     assert!(rejected.restore_driver_state(&segments, &events).is_err());
+}
+
+#[test]
+fn recovery_ignores_driverless_plugins_and_rejects_pending_transactions() {
+    let timeline = TimelineId::new();
+    let segments = [TimelineHistorySegment::new(timeline, Seq::ZERO)];
+    let mut driverless = PluginRegistry::new();
+    let plugin = MetadataOnlyPlugin {
+        id: PluginId::new(),
+    };
+    driverless.register(&plugin, None, None).unwrap();
+    driverless.restore_driver_state(&segments, &[]).unwrap();
+
+    let mut pending = PluginRegistry::new();
+    pending.register_driver(Box::new(DefaultRecoveryDriver));
+    pending.step_all_anchored(timeline, Seq::ZERO).unwrap();
+    assert!(matches!(
+        pending.restore_driver_state(&segments, &[]),
+        Err(RuntimeError::PendingDriverStep)
+    ));
+    pending.abort_step();
 }
