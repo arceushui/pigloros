@@ -292,6 +292,7 @@ struct AdapterControl {
     fail_next_append: bool,
     next_read_fault: Option<ReadFault>,
     logical_head_reads: usize,
+    metadata_reads: usize,
     next_metadata_fault: Option<MetadataFault>,
 }
 
@@ -306,6 +307,7 @@ enum ReadFault {
 enum MetadataFault {
     Fail,
     ReturnWrongTimeline,
+    ReturnWrongTimelineOnSecondGet,
 }
 
 enum BoundaryDriver {
@@ -366,6 +368,12 @@ impl SharedMemoryAdapter {
 
     fn return_wrong_timeline_on_next_get(&self) {
         self.control().next_metadata_fault = Some(MetadataFault::ReturnWrongTimeline);
+    }
+
+    fn return_wrong_timeline_on_second_get(&self) {
+        let mut control = self.control();
+        control.metadata_reads = 0;
+        control.next_metadata_fault = Some(MetadataFault::ReturnWrongTimelineOnSecondGet);
     }
 
     fn report_zero_head_on_next_read(&self) {
@@ -441,14 +449,30 @@ impl EventStore for SharedMemoryAdapter {
     }
 
     fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
-        let fault = self.control().next_metadata_fault.take();
+        let fault = {
+            let mut control = self.control();
+            control.metadata_reads += 1;
+            match control.next_metadata_fault {
+                Some(MetadataFault::ReturnWrongTimelineOnSecondGet)
+                    if control.metadata_reads < 2 =>
+                {
+                    None
+                }
+                _ => control.next_metadata_fault.take(),
+            }
+        };
         if matches!(fault, Some(MetadataFault::Fail)) {
             return Err(CoreError::Storage(
                 "injected Timeline metadata failure".to_owned(),
             ));
         }
         let mut timeline = self.store().get_timeline(id)?;
-        if matches!(fault, Some(MetadataFault::ReturnWrongTimeline)) {
+        if matches!(
+            fault,
+            Some(
+                MetadataFault::ReturnWrongTimeline | MetadataFault::ReturnWrongTimelineOnSecondGet,
+            )
+        ) {
             if let Some(timeline) = &mut timeline {
                 timeline.meta.id = TimelineId::new();
             }
@@ -554,6 +578,28 @@ fn post_append_capture_failure_faults_the_session() {
         session.step_tick(),
         Err(ExperimentError::SessionFaulted)
     ));
+}
+
+#[test]
+fn resume_rejects_mismatched_ancestry_metadata() {
+    let host = HostFixture::new();
+    let accepted = accepted_response_bytes(0, CONFIDENCE);
+    let adapter = SharedMemoryAdapter::new();
+    let experiment = host.forkable_experiment(
+        "agent-provider-ancestry-metadata",
+        vec![response_attempt(&accepted)],
+        vec![],
+    );
+    let mut parent = experiment
+        .start_with_store(Box::new(adapter.clone()))
+        .unwrap();
+    parent.step_tick().unwrap();
+    let child = parent.fork("child").unwrap();
+    adapter.return_wrong_timeline_on_second_get();
+    let fresh = host.experiment("agent-provider-ancestry-resume", vec![]).0;
+    assert!(fresh
+        .resume_with_store(child.timeline().id(), Box::new(adapter))
+        .is_err());
 }
 
 #[test]
