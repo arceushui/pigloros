@@ -7,10 +7,10 @@ use pos_core::{
 use pos_plugin_agent::{
     protocol::{
         ActionCatalogueV1, AgentProviderProvenanceV1, BoundedProviderBytes, DecisionRecordV1,
-        ProviderAttempt,
+        ProviderAttempt, ProviderFailureCode,
     },
     AgentDecisionReplayVerifier, FixtureAgentDecisionProvider, ProviderBackedAgentDriver,
-    ReplayCheckpoint, EVENT_TYPE_ACTION,
+    ReplayCheckpoint, ReplayVerificationError, EVENT_TYPE_ACTION,
 };
 use pos_runtime::{
     recorder::RECORDER_EVENT_TYPE, Driver, ObservationView, PluginRegistry, RuntimeError,
@@ -394,6 +394,63 @@ fn verifier_constructor_has_only_host_owned_replay_inputs() {
     let checkpoint_reader: fn(ReplayCheckpoint) -> Seq = ReplayCheckpoint::last_verified;
 
     let _ = (constructor, checkpoint_reader);
+}
+
+#[test]
+fn verifier_rejects_empty_duplicate_and_decreasing_timeline_ancestry() {
+    let host = HostFixture::new();
+    let child = TimelineId::new();
+    let constructor = |segments| {
+        AgentDecisionReplayVerifier::try_new_with_timeline_ancestry(
+            segments,
+            host.agent,
+            host.provenance.clone(),
+            host.catalogue.clone(),
+        )
+    };
+
+    for segments in [
+        vec![],
+        vec![
+            TimelineHistorySegment::new(host.timeline, Seq::from_u64(1)),
+            TimelineHistorySegment::new(host.timeline, Seq::from_u64(2)),
+        ],
+        vec![
+            TimelineHistorySegment::new(host.timeline, Seq::from_u64(2)),
+            TimelineHistorySegment::new(child, Seq::from_u64(1)),
+        ],
+    ] {
+        assert!(matches!(
+            constructor(segments),
+            Err(ReplayVerificationError::InvalidTimelineAncestry)
+        ));
+    }
+}
+
+#[test]
+fn provider_attempt_debug_redacts_response_data_in_every_variant() {
+    let response = BoundedProviderBytes::try_from(vec![0xab]).unwrap();
+    let cases = [
+        (
+            ProviderAttempt::Response(response),
+            "Response(<redacted>)".to_owned(),
+        ),
+        (ProviderAttempt::NoResponse, "NoResponse".to_owned()),
+        (
+            ProviderAttempt::Failed(ProviderFailureCode::Timeout),
+            "Failed(Timeout)".to_owned(),
+        ),
+        (
+            ProviderAttempt::Oversized {
+                response_digest: Some([0x55; 32]),
+            },
+            "Oversized { response_digest: Some(\"<redacted>\") }".to_owned(),
+        ),
+    ];
+
+    for (attempt, expected) in cases {
+        assert_eq!(format!("{attempt:?}"), expected);
+    }
 }
 
 #[test]

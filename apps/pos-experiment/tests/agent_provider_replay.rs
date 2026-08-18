@@ -81,6 +81,19 @@ impl HostFixture {
         pos_plugin_agent::FixtureProviderCallCount,
         DriverTickProbe,
     ) {
+        self.experiment_with_store(name, attempts, StoreConfig::Memory)
+    }
+
+    fn experiment_with_store(
+        &self,
+        name: &str,
+        attempts: Vec<ProviderAttempt>,
+        store_config: StoreConfig,
+    ) -> (
+        Experiment,
+        pos_plugin_agent::FixtureProviderCallCount,
+        DriverTickProbe,
+    ) {
         let provider = FixtureAgentDecisionProvider::new(attempts);
         let calls = provider.call_count_handle();
         let provider_driver = ProviderBackedAgentDriver::new(
@@ -98,7 +111,7 @@ impl HostFixture {
         let mut experiment = Experiment::new(ExperimentConfig {
             name: name.to_owned(),
             stop: StopCondition::MaxTicks(2),
-            store_config: StoreConfig::Memory,
+            store_config,
         });
         experiment
             .register(
@@ -734,6 +747,42 @@ fn resume_rejects_mismatched_initial_timeline_metadata() {
     assert!(resume
         .resume_with_store(timeline, Box::new(adapter))
         .is_err());
+}
+
+#[test]
+fn durable_recipe_reopens_branches_and_resumes_the_child_history() {
+    let host = HostFixture::new();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("agent-provider-recovery.sqlite");
+    let store_config = StoreConfig::Sqlite {
+        path: path.to_string_lossy().into_owned(),
+    };
+    let (experiment, _, _) = host.experiment_with_store(
+        "agent-provider-durable-recipe",
+        vec![ProviderAttempt::NoResponse, ProviderAttempt::NoResponse],
+        store_config.clone(),
+    );
+    let result = experiment.start().unwrap().run_to_completion().unwrap();
+    assert!(matches!(
+        result.store_config,
+        Some(StoreConfig::Sqlite { .. })
+    ));
+
+    let child = result.branch("agent-provider-durable-child").unwrap();
+    let (resume, calls, restored_tick) = host.experiment_with_store(
+        "agent-provider-durable-child-resume",
+        vec![ProviderAttempt::NoResponse],
+        store_config,
+    );
+    let mut resumed = resume.resume(child.id()).unwrap();
+    assert_eq!(calls.get(), 0, "resume must not call the provider");
+    assert_eq!(restored_tick.load(), 2);
+    assert_eq!(resumed.source_events().unwrap().len(), 2);
+    assert!(matches!(
+        resumed.step_tick().unwrap(),
+        TickOutcome::Advanced { .. }
+    ));
+    assert_eq!(calls.get(), 1);
 }
 
 fn response_attempt(response: &[u8]) -> ProviderAttempt {
