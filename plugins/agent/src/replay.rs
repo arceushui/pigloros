@@ -253,7 +253,7 @@ impl AgentDecisionReplayVerifier {
         let catalogue_hash = self
             .catalogue
             .hash()
-            .map_err(|_| ReplayVerificationError::DecisionRecordMismatch)?;
+            .expect("validated action catalogue must hash");
         let expected_timeline = self
             .timeline_segments
             .iter()
@@ -268,7 +268,7 @@ impl AgentDecisionReplayVerifier {
             && request.provenance() == &self.provenance;
         let request_hash = request
             .hash()
-            .map_err(|_| ReplayVerificationError::InvalidDecisionRecord)?;
+            .expect("validated decision request must hash");
         if matches_host && record.request_hash() == request_hash {
             Ok(())
         } else {
@@ -286,9 +286,7 @@ impl AgentDecisionReplayVerifier {
         if !self.is_target_action(event) {
             return Err(ReplayVerificationError::MissingOrMismatchedAcceptedAction);
         }
-        let record_hash = record
-            .hash()
-            .map_err(|_| ReplayVerificationError::InvalidDecisionRecord)?;
+        let record_hash = record.hash().expect("validated decision record must hash");
         let expected = AgentActionV1::try_new(
             action_id.to_owned(),
             confidence,
@@ -296,9 +294,9 @@ impl AgentDecisionReplayVerifier {
             record.request().catalogue_hash(),
             record_hash,
         )
-        .map_err(|_| ReplayVerificationError::DecisionRecordMismatch)?
+        .expect("validated decision record must produce a valid action")
         .encode()
-        .map_err(|_| ReplayVerificationError::DecisionRecordMismatch)?;
+        .expect("validated agent action must encode");
         if event.payload != Some(expected.as_slice()) {
             return Err(ReplayVerificationError::MissingOrMismatchedAcceptedAction);
         }

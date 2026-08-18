@@ -1054,6 +1054,60 @@ fn committed_history_restores_driver_tick_for_resume_and_fork() {
 }
 
 #[test]
+fn fork_recovery_fails_closed_when_prefix_or_ancestry_read_is_untrustworthy() {
+    let host = HostFixture::new();
+    let accepted = accepted_response_bytes(0, CONFIDENCE);
+
+    let prefix_adapter = SharedMemoryAdapter::new();
+    let prefix_experiment = host.forkable_experiment(
+        "agent-provider-fork-prefix-read-failure",
+        vec![response_attempt(&accepted)],
+        vec![],
+    );
+    let mut prefix_parent = prefix_experiment
+        .start_with_store(Box::new(prefix_adapter.clone()))
+        .unwrap();
+    prefix_parent.step_tick().unwrap();
+    prefix_adapter.fail_next_read();
+    assert!(matches!(
+        prefix_parent.fork("prefix-read-failure"),
+        Err(ExperimentError::Store(_))
+    ));
+
+    let ancestry_adapter = SharedMemoryAdapter::new();
+    let ancestry_experiment = host.forkable_experiment(
+        "agent-provider-fork-ancestry-read-failure",
+        vec![response_attempt(&accepted)],
+        vec![],
+    );
+    let mut ancestry_parent = ancestry_experiment
+        .start_with_store(Box::new(ancestry_adapter.clone()))
+        .unwrap();
+    ancestry_parent.step_tick().unwrap();
+    ancestry_adapter.return_wrong_timeline_on_second_get();
+    assert!(matches!(
+        ancestry_parent.fork("ancestry-read-failure"),
+        Err(ExperimentError::Store(_))
+    ));
+
+    let cycle_adapter = SharedMemoryAdapter::new();
+    let cycle_experiment = host.forkable_experiment(
+        "agent-provider-fork-cyclic-ancestry",
+        vec![response_attempt(&accepted)],
+        vec![],
+    );
+    let mut cycle_parent = cycle_experiment
+        .start_with_store(Box::new(cycle_adapter.clone()))
+        .unwrap();
+    cycle_parent.step_tick().unwrap();
+    cycle_adapter.return_cycle_on_second_get();
+    assert!(matches!(
+        cycle_parent.fork("cyclic-ancestry"),
+        Err(ExperimentError::Store(_))
+    ));
+}
+
+#[test]
 fn supplied_store_read_failure_prevents_driver_restore() {
     let host = HostFixture::new();
     let accepted = accepted_response_bytes(0, CONFIDENCE);
