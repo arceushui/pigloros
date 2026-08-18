@@ -6,7 +6,8 @@ use pos_core::{
 };
 use pos_plugin_agent::{
     protocol::{
-        ActionCatalogueV1, AgentProviderProvenanceV1, BoundedProviderBytes, ProviderAttempt,
+        ActionCatalogueV1, AgentProviderProvenanceV1, BoundedProviderBytes, DecisionRecordV1,
+        ProviderAttempt,
     },
     AgentDecisionReplayVerifier, FixtureAgentDecisionProvider, ProviderBackedAgentDriver,
     ReplayCheckpoint, EVENT_TYPE_ACTION,
@@ -867,6 +868,35 @@ fn empty_source_has_zero_checkpoint_and_cannot_satisfy_a_later_resume() {
         .unwrap();
     assert!(host.verifier().verify(&[], Some(later)).is_err());
     assert_eq!(host.verifier().verify(&[], Some(empty)).unwrap(), empty);
+}
+
+#[test]
+fn provider_driver_recovers_only_from_selected_evidence_and_remains_fresh_only() {
+    let host = HostFixture::new();
+    let events = accepted_events(&host);
+    let provider = FixtureAgentDecisionProvider::new(vec![ProviderAttempt::NoResponse]);
+    let calls = provider.call_count_handle();
+    let driver = ProviderBackedAgentDriver::new(
+        host.agent,
+        host.catalogue.clone(),
+        host.provenance.clone(),
+        Box::new(provider),
+    );
+    let mut registry = PluginRegistry::new();
+    registry.register_driver(Box::new(driver));
+    let segments = [TimelineHistorySegment::new(host.timeline, Seq::from_u64(2))];
+
+    registry.restore_driver_state(&segments, &events).unwrap();
+    assert_eq!(calls.get(), 0, "recovery must not call the provider");
+    assert!(registry.restore_driver_state(&segments, &events).is_err());
+
+    let drafts = registry
+        .step_all_anchored(host.timeline, Seq::from_u64(2))
+        .unwrap();
+    assert_eq!(calls.get(), 1);
+    let record = DecisionRecordV1::decode(drafts[0].payload.as_slice()).unwrap();
+    assert_eq!(record.request().driver_tick(), 1);
+    registry.abort_step();
 }
 
 #[test]
