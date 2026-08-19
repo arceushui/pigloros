@@ -45,7 +45,7 @@ const VERSION_V1: u8 = 1;
 pub const MAX_ACTION_BYTES: usize = 4_096;
 /// Maximum bytes for a sensor value in `world.observation.v1` (ADR-047).
 pub const MAX_SENSOR_VALUE_BYTES: usize = 512;
-/// Minimum sensor quantization in millimetres (ADR-047 §3, ADR-026 privacy floor).
+/// Minimum sensor quantization in millimetres (ADR-047 section3, ADR-026 privacy floor).
 pub const SENSOR_MIN_RESOLUTION_MM: u16 = 100;
 /// The only valid `coord_convention` value in v1 (right-handed Y-up metres).
 pub const COORD_CONVENTION_RIGHT_HANDED_Y_UP: u8 = 0;
@@ -55,7 +55,7 @@ pub const ACTION_SCOPE_SINGLE_BODY: u8 = 0;
 const ACTION_KIND_IMPULSE: &str = "impulse";
 const ACTION_KIND_TARGET_VELOCITY: &str = "target_velocity";
 
-/// The set of allowed actuator action kinds in v1 (ADR-047 §1).
+/// The set of allowed actuator action kinds in v1 (ADR-047 section1).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActionKindV1 {
     Impulse,
@@ -76,6 +76,20 @@ impl ActionKindV1 {
             ACTION_KIND_TARGET_VELOCITY => Some(Self::TargetVelocity),
             _ => None,
         }
+    }
+}
+
+/// Sensor kinds emitted in `world.observation.v1` (ADR-047 section 4, first slice).
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SensorKindV1 {
+    Proximity = 0,
+    ContactCount = 1,
+}
+
+impl SensorKindV1 {
+    pub fn as_u8(self) -> u8 {
+        self as u8
     }
 }
 
@@ -626,6 +640,17 @@ impl WorldConfigV1 {
 }
 
 // ---------------------------------------------------------------------------
+// Action folding helpers
+// ---------------------------------------------------------------------------
+
+fn decode_velocity_params(params: &[u8]) -> Option<(f32, f32)> {
+    let items = cbor_decode_array(params, 2).ok()?;
+    let vx = decode_finite_f32(&items[0]).ok()?;
+    let vy = decode_finite_f32(&items[1]).ok()?;
+    Some((vx, vy))
+}
+
+// ---------------------------------------------------------------------------
 // World backend trait (physics seam)
 // ---------------------------------------------------------------------------
 
@@ -906,7 +931,7 @@ impl Driver for WorldDriver {
     fn step(
         &mut self,
         _timeline: TimelineId,
-        _observations: ObservationView<'_>,
+        observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
         let mut drafts = Vec::new();
 
@@ -922,10 +947,42 @@ impl Driver for WorldDriver {
             self.config_emitted = true;
         }
 
-        let observations = self.backend.step(&self.entities);
+        // Fold world.action.v1 events (in seq order) into entity velocities before
+        // stepping the backend.
+        for event in observations.events() {
+            if event.event_type.as_str() != EVENT_TYPE_ACTION_V1 {
+                continue;
+            }
+            let action = match WorldActionV1::decode(&event.payload) {
+                Ok(a) => a,
+                Err(_) => continue,
+            };
+            if let Some(body) = self
+                .entities
+                .iter_mut()
+                .find(|b| b.entity_id == action.body_entity_id)
+            {
+                match action.action_kind {
+                    ActionKindV1::Impulse => {
+                        if let Some((dvx, dvy)) = decode_velocity_params(&action.params_cbor) {
+                            body.vx += f64::from(dvx);
+                            body.vy += f64::from(dvy);
+                        }
+                    }
+                    ActionKindV1::TargetVelocity => {
+                        if let Some((vx, vy)) = decode_velocity_params(&action.params_cbor) {
+                            body.vx = f64::from(vx);
+                            body.vy = f64::from(vy);
+                        }
+                    }
+                }
+            }
+        }
+
+        let step_obs = self.backend.step(&self.entities);
 
         // Update entities with new positions.
-        for obs in &observations {
+        for obs in &step_obs {
             if let Some(body) = self
                 .entities
                 .iter_mut()
@@ -938,7 +995,7 @@ impl Driver for WorldDriver {
 
         // Emit world.observation.v1 drafts with sensor quantization (ADR-047 v3).
         let resolution_mm = self.config.sensor_min_resolution_mm;
-        for obs in &observations {
+        for obs in &step_obs {
             #[allow(clippy::cast_possible_truncation)]
             let v1 = WorldObservationV1 {
                 body_entity_id: obs.entity_id,
@@ -958,7 +1015,7 @@ impl Driver for WorldDriver {
                 vel_ang_x: 0.0,
                 vel_ang_y: 0.0,
                 vel_ang_z: 0.0,
-                sensor_kind: 0,
+                sensor_kind: SensorKindV1::Proximity.as_u8(),
                 sensor_value: vec![],
             };
             let payload = v1.encode().map_err(|_| RuntimeError::StepFailed)?;
@@ -2169,5 +2226,251 @@ mod tests {
         assert_eq!(driver.tick, 1);
         driver.step(tl.id(), ObservationView::empty()).unwrap();
         assert_eq!(driver.tick, 2);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Conformance fixtures (A5)
+    // ---------------------------------------------------------------------------
+
+    mod conformance_fixtures {
+        use super::*;
+
+        #[test]
+        #[cfg_attr(coverage_nightly, coverage(off))]
+        fn simplekinematic_conformance_fixture() {
+            let entity = EntityId::new();
+            let body = Body {
+                entity_id: entity,
+                x: 0.0,
+                y: 0.0,
+                vx: 1.5,
+                vy: -0.5,
+            };
+
+            // With resolution_mm=100 (0.1m), both 1.5 and -0.5 are exact multiples.
+            let expected_pos_x = ((1.5_f32 / 0.1).round() * 0.1) as f32;
+            let expected_pos_y = ((-0.5_f32 / 0.1).round() * 0.1) as f32;
+
+            // First independent run.
+            let mut store1 = open_store(StoreConfig::Memory).unwrap();
+            let tl1 = store1.create_timeline("fixture-1").unwrap();
+            let mut driver1 = WorldDriver::new(
+                vec![body.clone()],
+                Box::new(SimpleKinematicBackend::new()),
+                sample_config(),
+            );
+            let out1 = driver1.step(tl1.id(), ObservationView::empty()).unwrap();
+            // drafts[0]=config, drafts[1]=observation
+            assert_eq!(out1.drafts.len(), 2);
+            let obs1 = WorldObservationV1::decode(&out1.drafts[1].payload).unwrap();
+            assert!((obs1.pos_x - expected_pos_x).abs() < 0.001);
+            assert!((obs1.pos_y - expected_pos_y).abs() < 0.001);
+
+            // Second independent run — same input must produce same output (determinism).
+            let mut store2 = open_store(StoreConfig::Memory).unwrap();
+            let tl2 = store2.create_timeline("fixture-2").unwrap();
+            let mut driver2 = WorldDriver::new(
+                vec![body],
+                Box::new(SimpleKinematicBackend::new()),
+                sample_config(),
+            );
+            let out2 = driver2.step(tl2.id(), ObservationView::empty()).unwrap();
+            assert_eq!(out2.drafts.len(), 2);
+            let obs2 = WorldObservationV1::decode(&out2.drafts[1].payload).unwrap();
+            assert!((obs2.pos_x - expected_pos_x).abs() < 0.001);
+            assert!((obs2.pos_y - expected_pos_y).abs() < 0.001);
+            // Byte-identical payloads prove determinism.
+            assert_eq!(
+                out1.drafts[1].payload.as_slice(),
+                out2.drafts[1].payload.as_slice()
+            );
+        }
+
+        #[test]
+        #[cfg_attr(coverage_nightly, coverage(off))]
+        fn worlddriver_observation_encodes_sensor_proximity() {
+            let mut store = open_store(StoreConfig::Memory).unwrap();
+            let tl = store.create_timeline("sensor-kind-test").unwrap();
+            let entity = EntityId::new();
+            let body = Body {
+                entity_id: entity,
+                x: 0.0,
+                y: 0.0,
+                vx: 1.0,
+                vy: 0.0,
+            };
+            let mut driver = WorldDriver::new(
+                vec![body],
+                Box::new(SimpleKinematicBackend::new()),
+                sample_config(),
+            );
+            let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
+            // drafts[0]=config, drafts[1]=observation
+            assert_eq!(out.drafts.len(), 2);
+            let obs = WorldObservationV1::decode(&out.drafts[1].payload).unwrap();
+            assert_eq!(obs.sensor_kind, SensorKindV1::Proximity.as_u8());
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // A3: action folding tests
+    // -----------------------------------------------------------------------
+
+    fn make_action_event_from(entity: EntityId, action: &WorldActionV1) -> Event {
+        Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new(EVENT_TYPE_ACTION_V1),
+            payload: action.encode().unwrap(),
+            wall_time: WallTime::from_micros(0),
+            seq: Seq::ZERO,
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0u8; 32]),
+        }
+    }
+
+    fn encode_vel_params(vx: f32, vy: f32) -> Vec<u8> {
+        cbor_encode(&ciborium::Value::Array(vec![
+            cbor_f32(vx).unwrap(),
+            cbor_f32(vy).unwrap(),
+        ]))
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn driver_applies_impulse_action_to_body() {
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let tl = store.create_timeline("test").unwrap();
+        let entity = EntityId::new();
+        let body = Body {
+            entity_id: entity,
+            x: 0.0,
+            y: 0.0,
+            vx: 1.0,
+            vy: 0.0,
+        };
+        let mut driver = WorldDriver::new(
+            vec![body],
+            Box::new(SimpleKinematicBackend::new()),
+            sample_config(),
+        );
+
+        // Impulse (+0.5, +2.0): resulting vx=1.5, vy=2.0 → backend step: x=1.5, y=2.0.
+        let action = WorldActionV1 {
+            actor_entity_id: EntityId::new(),
+            body_entity_id: entity,
+            action_kind: ActionKindV1::Impulse,
+            params_cbor: encode_vel_params(0.5, 2.0),
+            action_scope: ACTION_SCOPE_SINGLE_BODY,
+            catalogue_version: 1,
+            tick: 0,
+        };
+        let events = vec![make_action_event_from(entity, &action)];
+        let out = driver
+            .step(tl.id(), ObservationView::from_events(&events))
+            .unwrap();
+        let obs_draft = out
+            .drafts
+            .iter()
+            .find(|d| d.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
+            .unwrap();
+        let obs = WorldObservationV1::decode(&obs_draft.payload).unwrap();
+        // 100 mm quantization; 1.5 m and 2.0 m are exact multiples of 0.1 m.
+        assert!((obs.pos_x - 1.5_f32).abs() < 0.15);
+        assert!((obs.pos_y - 2.0_f32).abs() < 0.15);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn driver_applies_target_velocity_action() {
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let tl = store.create_timeline("test").unwrap();
+        let entity = EntityId::new();
+        // High initial velocity; TargetVelocity must override it entirely.
+        let body = Body {
+            entity_id: entity,
+            x: 0.0,
+            y: 0.0,
+            vx: 10.0,
+            vy: 10.0,
+        };
+        let mut driver = WorldDriver::new(
+            vec![body],
+            Box::new(SimpleKinematicBackend::new()),
+            sample_config(),
+        );
+
+        // TargetVelocity (2.0, 0.5) → backend step: x=2.0, y=0.5.
+        let action = WorldActionV1 {
+            actor_entity_id: EntityId::new(),
+            body_entity_id: entity,
+            action_kind: ActionKindV1::TargetVelocity,
+            params_cbor: encode_vel_params(2.0, 0.5),
+            action_scope: ACTION_SCOPE_SINGLE_BODY,
+            catalogue_version: 1,
+            tick: 0,
+        };
+        let events = vec![make_action_event_from(entity, &action)];
+        let out = driver
+            .step(tl.id(), ObservationView::from_events(&events))
+            .unwrap();
+        let obs_draft = out
+            .drafts
+            .iter()
+            .find(|d| d.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
+            .unwrap();
+        let obs = WorldObservationV1::decode(&obs_draft.payload).unwrap();
+        assert!((obs.pos_x - 2.0_f32).abs() < 0.15);
+        assert!((obs.pos_y - 0.5_f32).abs() < 0.15);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn driver_ignores_malformed_action_payload() {
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let tl = store.create_timeline("test").unwrap();
+        let entity = EntityId::new();
+        let body = Body {
+            entity_id: entity,
+            x: 0.0,
+            y: 0.0,
+            vx: 1.0,
+            vy: 1.0,
+        };
+        let mut driver = WorldDriver::new(
+            vec![body],
+            Box::new(SimpleKinematicBackend::new()),
+            sample_config(),
+        );
+
+        let bad_event = Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new(EVENT_TYPE_ACTION_V1),
+            payload: CanonicalBytes::from_vec(vec![0xFF, 0xFE, 0xFD]),
+            wall_time: WallTime::from_micros(0),
+            seq: Seq::ZERO,
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0u8; 32]),
+        };
+        let events = vec![bad_event];
+        // Must not panic; body moves with original velocity (1,1) → pos (1,1).
+        let out = driver
+            .step(tl.id(), ObservationView::from_events(&events))
+            .unwrap();
+        let obs_draft = out
+            .drafts
+            .iter()
+            .find(|d| d.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
+            .unwrap();
+        let obs = WorldObservationV1::decode(&obs_draft.payload).unwrap();
+        assert!((obs.pos_x - 1.0_f32).abs() < 0.15);
+        assert!((obs.pos_y - 1.0_f32).abs() < 0.15);
     }
 }
