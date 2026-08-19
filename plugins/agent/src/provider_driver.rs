@@ -1214,6 +1214,29 @@ mod tests {
     }
 
     #[test]
+    fn stage_restore_from_history_fails_when_driver_has_committed_ticks() {
+        let mut fixture = provider_driver(vec![
+            ProviderAttempt::NoResponse,
+            ProviderAttempt::NoResponse,
+        ]);
+        fixture
+            .registry
+            .step_all_anchored(fixture.timeline, Seq::ZERO)
+            .unwrap();
+        fixture.registry.commit_step();
+        // committed_tick is now 1; the guard fires before verifying evidence.
+        let segments = [TimelineHistorySegment::new(fixture.timeline, Seq::ZERO)];
+        let err = fixture
+            .registry
+            .restore_driver_state(&segments, &[])
+            .unwrap_err();
+        assert!(
+            matches!(err, RuntimeError::DriverRecoveryNotFresh { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
     fn stage_restore_from_history_fails_when_a_restore_is_already_staged() {
         let mut driver = ProviderBackedAgentDriver::new(
             EntityId::new(),

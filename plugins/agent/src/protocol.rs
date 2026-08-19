@@ -1785,8 +1785,7 @@ mod tests {
 
     #[test]
     fn provider_decision_v1_converts_to_decision_result() {
-        let accepted =
-            ProviderDecisionV1::accepted(0, 100).expect("valid accepted decision");
+        let accepted = ProviderDecisionV1::accepted(0, 100).expect("valid accepted decision");
         let result = DecisionResultV1::from(accepted);
         assert!(matches!(result, DecisionResultV1::Accepted { .. }));
 
@@ -1796,6 +1795,73 @@ mod tests {
             result,
             DecisionResultV1::NoAction(DecisionNoActionCodeV1::ProviderNoAction)
         );
+    }
+
+    #[test]
+    fn wire_inspection_handles_multibyte_cbor_tag_headers() {
+        // 2-byte tag header (0xd8 + 1 byte tag number)
+        assert!(is_agent_action_wire(&[
+            0xd8, 0x40, 0x81, 0x44, b'P', b'A', b'A', b'1',
+        ]));
+        // 3-byte tag header (0xd9 + 2 byte tag number)
+        assert!(is_agent_action_wire(&[
+            0xd9, 0x00, 0x40, 0x81, 0x44, b'P', b'A', b'A', b'1',
+        ]));
+        // 5-byte tag header (0xda + 4 byte tag number)
+        assert!(is_agent_action_wire(&[
+            0xda, 0x00, 0x00, 0x00, 0x40, 0x81, 0x44, b'P', b'A', b'A', b'1',
+        ]));
+        // 9-byte tag header (0xdb + 8 byte tag number)
+        assert!(is_agent_action_wire(&[
+            0xdb, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x81, 0x44,
+            b'P', b'A', b'A', b'1',
+        ]));
+        // Truncated tag header (0xd8 with no tag number byte) → Err path
+        assert!(!is_agent_action_wire(&[0xd8]));
+        // Non-tag, non-array byte → Ok(None) path → false
+        assert!(!is_agent_action_wire(&[0x00]));
+    }
+
+    #[test]
+    fn wire_inspection_handles_multibyte_cbor_array_and_byte_string_headers() {
+        // 2-byte array header (0x98 = 1 item)
+        assert!(is_agent_action_wire(&[
+            0x98, 0x01, 0x44, b'P', b'A', b'A', b'1',
+        ]));
+        // Byte string with 2-byte length header (0x58)
+        assert!(is_agent_action_wire(&[
+            0x81, 0x58, 0x04, b'P', b'A', b'A', b'1',
+        ]));
+        // Truncated definite byte string header (0x44 present but value bytes missing) → budget fallback
+        assert!(!is_agent_action_wire(&[0x81, 0x44]));
+        // Truncated 2-byte byte-string header (0x58 with no length byte) → Err path
+        assert!(!is_agent_action_wire(&[0x81, 0x58]));
+        // Non-byte-string payload (0x00 = uint) → definite `_` arm → false
+        assert!(!is_agent_action_wire(&[0x81, 0x00]));
+        // Short byte string (value_len < 4) → definite `_` arm → false
+        assert!(!is_agent_action_wire(&[0x81, 0x42, 0x00, 0x00]));
+        // Empty input → Err path in raw_tagged_array_payload_offset
+        assert!(!is_agent_action_wire(&[]));
+    }
+
+    #[test]
+    fn wire_inspection_handles_indefinite_byte_string_variants() {
+        // Indefinite byte string (0x5f) with PAA1 in one chunk
+        assert!(is_agent_action_wire(&[
+            0x81, 0x5f, 0x44, b'P', b'A', b'A', b'1', 0xff,
+        ]));
+        // Empty indefinite byte string (immediate 0xff break) → false
+        assert!(!is_agent_action_wire(&[0x81, 0x5f, 0xff]));
+        // Magic spread across two chunks
+        assert!(is_agent_action_wire(&[
+            0x81, 0x5f, 0x41, b'P', 0x43, b'A', b'A', b'1', 0xff,
+        ]));
+        // Wrong magic content → false
+        assert!(!is_agent_action_wire(&[
+            0x81, 0x5f, 0x44, b'X', b'X', b'X', b'X', 0xff,
+        ]));
+        // Non-byte-string chunk inside indefinite string → Ok(None) → false
+        assert!(!is_agent_action_wire(&[0x81, 0x5f, 0x00, 0xff]));
     }
 
     #[test]
