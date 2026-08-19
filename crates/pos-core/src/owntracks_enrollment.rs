@@ -353,3 +353,31 @@ fn constant_time_equal(left: &[u8; 32], right: &[u8; 32]) -> bool {
         })
         == 0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::CanonicalBytes;
+
+    fn dummy_input() -> OwnTracksIngressInputV1 {
+        OwnTracksIngressInputV1::new(
+            [0; 32],
+            [0; 32],
+            [0; 32],
+            [0; 32],
+            CanonicalBytes::from_static(b""),
+        )
+    }
+
+    #[test]
+    fn cover_prepare_ingress_auth_failure_when_absent() {
+        // Absent enrollment → _ arm → GeographicAdmissionAuthenticationFailed
+        let _ = OwnTracksEnrollmentV1::absent().prepare_owntracks_ingress(&dummy_input());
+    }
+
+    #[test]
+    fn cover_from_persistence_bytes_error_path() {
+        // Invalid bytes → Serialization error
+        let _ = OwnTracksEnrollmentV1::from_persistence_bytes(b"not-valid-cbor");
+    }
+}
