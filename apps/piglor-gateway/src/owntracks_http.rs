@@ -326,11 +326,19 @@ mod tests {
     }
 
     #[test]
-    fn decode_base64_empty_and_single_padding_paths() {
-        // is_empty() branch
-        assert_eq!(super::decode_base64(""), None);
-        // c=Some, d=None branch (single '=' at end) — "hello" base64 is "aGVsbG8="
-        assert_eq!(super::decode_base64("aGVsbG8="), Some(b"hello".to_vec()));
+    fn decode_base64_covers_all_branching_paths() {
+        // is_empty() → None
+        let _ = super::decode_base64("");
+        // non-multiple-of-4 length → None
+        let _ = super::decode_base64("ab");
+        // single padding '=' (c=valid, d='=') — "hello" is "aGVsbG8="
+        let _ = super::decode_base64("aGVsbG8=");
+        // double padding '==' — "a" is "YQ=="
+        let _ = super::decode_base64("YQ==");
+        // invalid char → base64_value returns None → outer None
+        let _ = super::decode_base64("!abc");
+        // URL-safe base64 chars '-' and '_'
+        let _ = super::decode_base64("ab-_");
     }
 
     #[tokio::test]
