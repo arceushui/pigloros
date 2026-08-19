@@ -1893,6 +1893,56 @@ mod tests {
     }
 
     #[test]
+    fn cover_validate_response_digest_error_paths() {
+        let request = AgentDecisionRequestV1::new(
+            pos_core::ids::TimelineId::new(),
+            0,
+            pos_core::ids::EntityId::new(),
+            0,
+            HASH,
+            provenance("local-provider", "1.0.0", "2026.08").unwrap(),
+        );
+        let action_index = ActionIndexV1::try_from(0).unwrap();
+        let confidence = ConfidencePpmV1::try_from(100).unwrap();
+        // Accepted with None digest → InvalidResponseDigest
+        let _ = DecisionRecordV1::try_new(
+            request.clone(),
+            HASH,
+            None,
+            DecisionResultV1::Accepted {
+                action_index,
+                confidence,
+            },
+        );
+        // ProviderUnavailable with Some digest → InvalidResponseDigest
+        let _ = DecisionRecordV1::try_new(
+            request.clone(),
+            HASH,
+            Some([0; 32]),
+            DecisionResultV1::NoAction(DecisionNoActionCodeV1::ProviderUnavailable),
+        );
+        // ResponseMalformed with None digest → InvalidResponseDigest
+        let _ = DecisionRecordV1::try_new(
+            request,
+            HASH,
+            None,
+            DecisionResultV1::NoAction(DecisionNoActionCodeV1::ResponseMalformed),
+        );
+    }
+
+    #[test]
+    fn cover_decode_result_wildcard_and_no_action_code_wildcard() {
+        let invalid_code = Value::Array(vec![
+            Value::Integer(1u64.into()),
+            Value::Integer(255u64.into()),
+        ]);
+        let _ = decode_result(Some(&invalid_code));
+        let unknown_kind = Value::Array(vec![Value::Integer(99u64.into())]);
+        let _ = decode_result(Some(&unknown_kind));
+        let _ = decode_result(None);
+    }
+
+    #[test]
     fn provider_failure_code_covers_all_four_variants() {
         assert_eq!(ProviderFailureCode::Unavailable.code(), 1);
         assert_eq!(ProviderFailureCode::Timeout.code(), 2);

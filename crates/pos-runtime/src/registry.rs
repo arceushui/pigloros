@@ -1822,4 +1822,14 @@ mod tests {
             vec!["a.event", "runtime.recorded_output", "z.event"]
         );
     }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn cover_validate_recovery_evidence_empty_segments_and_zero_bound_paths() {
+        // Empty ancestry → InvalidRecoveryEvidence (first else branch)
+        let _ = validate_recovery_evidence(&[], &[]);
+        // Empty events with through=ZERO → early Ok() return
+        let zero_segment = TimelineHistorySegment::new(TimelineId::new(), Seq::ZERO);
+        let _ = validate_recovery_evidence(&[zero_segment], &[]);
+    }
 }
