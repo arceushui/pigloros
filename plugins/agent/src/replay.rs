@@ -408,7 +408,10 @@ mod tests {
     #[test]
     fn all_replay_verification_error_variants_have_non_empty_display_messages() {
         let variants = [
-            ReplayVerificationError::NonContiguousSourceSequence { expected: 1, actual: 0 },
+            ReplayVerificationError::NonContiguousSourceSequence {
+                expected: 1,
+                actual: 0,
+            },
             ReplayVerificationError::MissingCheckpoint { checkpoint: 5 },
             ReplayVerificationError::InvalidDecisionRecord,
             ReplayVerificationError::DecisionRecordMismatch,

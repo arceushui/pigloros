@@ -1732,7 +1732,10 @@ mod tests {
         );
         let encoded = request.encode().expect("encoding must succeed");
         // A 4-byte uint header (0x1a) appears in the encoded output.
-        assert!(encoded.contains(&0x1a), "4-byte CBOR uint marker must appear");
+        assert!(
+            encoded.contains(&0x1a),
+            "4-byte CBOR uint marker must appear"
+        );
         let decoded = AgentDecisionRequestV1::decode(&encoded).expect("roundtrip must succeed");
         assert_eq!(decoded.observed_through(), 65_536);
         assert_eq!(decoded.driver_tick(), 65_536);

@@ -1211,7 +1211,7 @@ mod tests {
             .restore_driver_state(&segments, &[])
             .unwrap_err();
         assert!(
-            matches!(err, RuntimeError::InvalidPayload { .. }),
+            matches!(err, RuntimeError::DriverRecoveryNotFresh { .. }),
             "{err:?}"
         );
         fixture.registry.abort_step();
@@ -1232,7 +1232,7 @@ mod tests {
         let segments = [TimelineHistorySegment::new(timeline, Seq::ZERO)];
         let err = registry.restore_driver_state(&segments, &[]).unwrap_err();
         assert!(
-            matches!(err, RuntimeError::InvalidPayload { .. }),
+            matches!(err, RuntimeError::DriverRecoveryNotFresh { .. }),
             "{err:?}"
         );
     }
