@@ -1,9 +1,7 @@
-#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
-
 //! Consent, revocation, and key-lifecycle CBOR codecs (ADR-039).
 //!
 //! Owns event types `"consent.granted.v1"` and `"consent.revoked.v1"`.
-//! These event types are **Gateway-only** per ADR-024 section2 — no Plugin may
+//! These event types are **Gateway-only** per ADR-024 section 2 - no Plugin may
 //! propose or observe consent events directly.
 
 use std::io::Cursor;
@@ -139,7 +137,7 @@ fn decode_bool(val: &Value) -> Result<bool, ConsentCodecError> {
 fn decode_id(val: &Value) -> Result<EntityId, ConsentCodecError> {
     match val {
         Value::Bytes(b) if b.len() == 16 => {
-            let arr: [u8; 16] = b.as_slice().try_into().unwrap();
+            let arr: [u8; 16] = b.as_slice().try_into().expect("length checked above");
             let n = u128::from_be_bytes(arr);
             Ok(EntityId::from_ulid(ulid::Ulid::from(n)))
         }
@@ -149,7 +147,9 @@ fn decode_id(val: &Value) -> Result<EntityId, ConsentCodecError> {
 
 fn decode_fixed32(val: &Value) -> Result<[u8; 32], ConsentCodecError> {
     match val {
-        Value::Bytes(b) if b.len() == 32 => Ok(b.as_slice().try_into().unwrap()),
+        Value::Bytes(b) if b.len() == 32 => {
+            Ok(b.as_slice().try_into().expect("length checked above"))
+        }
         _ => Err(ConsentCodecError::WrongFieldType),
     }
 }
@@ -323,7 +323,7 @@ impl ConsentRevokedV1 {
 }
 
 // ---------------------------------------------------------------------------
-// ConsentGate — plugin seam (ADR-039 sectionplugin bypass mitigation)
+// ConsentGate - plugin seam (ADR-039 section: plugin bypass mitigation)
 // ---------------------------------------------------------------------------
 
 /// Opaque token proving consent was checked for a given subject + event type.
@@ -356,7 +356,7 @@ pub enum ConsentError {
 
 /// Plugin seam for consent enforcement (ADR-039).
 ///
-/// Equivalent to `GeoLocationAdmissionStore` — prevents plugins from
+/// Equivalent to `GeoLocationAdmissionStore` - prevents plugins from
 /// accessing sensitive event types without a valid consent grant.
 pub trait ConsentGate: Send + Sync {
     /// Check whether `subject` holds an active, non-revoked consent grant
@@ -376,14 +376,14 @@ pub trait ConsentGate: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// FieldState — Replay sentinel for destroyed keys (ADR-039)
+// FieldState - Replay sentinel for destroyed keys (ADR-039)
 // ---------------------------------------------------------------------------
 
 /// State of a sensitive field when replaying after key destruction.
 ///
 /// When a subject's data key is destroyed on revocation, Replay returns
-/// `FieldState::RedactedDestroyed` for encrypted fields — not an error,
-/// not null — so Replay remains deterministic.
+/// `FieldState::RedactedDestroyed` for encrypted fields - not an error,
+/// not null - so Replay remains deterministic.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldState {
     /// The field is present and decryptable.
