@@ -1209,10 +1209,7 @@ mod tests {
             .registry
             .restore_driver_state(&segments, &[])
             .unwrap_err();
-        assert!(
-            matches!(err, RuntimeError::PendingDriverStep),
-            "{err:?}"
-        );
+        assert!(matches!(err, RuntimeError::PendingDriverStep), "{err:?}");
         fixture.registry.abort_step();
     }
 

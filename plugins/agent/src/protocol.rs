@@ -1743,7 +1743,6 @@ mod tests {
 
     #[test]
     fn no_action_code_display_covers_all_nine_variants() {
-        use std::format;
         let codes = [
             (DecisionNoActionCodeV1::ProviderUnavailable, 1u8),
             (DecisionNoActionCodeV1::ProviderTimeout, 2),
@@ -1759,5 +1758,74 @@ mod tests {
             assert_eq!(code.code(), expected);
             let _ = format!("{code:?}");
         }
+    }
+
+    #[test]
+    fn provider_attempt_debug_redacts_response_and_formats_all_variants() {
+        let response = ProviderAttempt::Response(vec![0u8; 10].try_into().unwrap());
+        assert_eq!(format!("{response:?}"), "Response(<redacted>)");
+
+        let no_response = ProviderAttempt::NoResponse;
+        assert_eq!(format!("{no_response:?}"), "NoResponse");
+
+        let failed = ProviderAttempt::Failed(ProviderFailureCode::Timeout);
+        assert!(format!("{failed:?}").contains("Failed"));
+
+        let oversized_none = ProviderAttempt::Oversized {
+            response_digest: None,
+        };
+        assert!(format!("{oversized_none:?}").contains("Oversized"));
+
+        // Digest present: the closure in .map(|_| "<redacted>") must execute.
+        let oversized_some = ProviderAttempt::Oversized {
+            response_digest: Some([1; 32]),
+        };
+        assert!(format!("{oversized_some:?}").contains("<redacted>"));
+    }
+
+    #[test]
+    fn provider_decision_v1_converts_to_decision_result() {
+        let accepted =
+            ProviderDecisionV1::accepted(0, 100).expect("valid accepted decision");
+        let result = DecisionResultV1::from(accepted);
+        assert!(matches!(result, DecisionResultV1::Accepted { .. }));
+
+        let no_action = ProviderDecisionV1::no_action();
+        let result = DecisionResultV1::from(no_action);
+        assert_eq!(
+            result,
+            DecisionResultV1::NoAction(DecisionNoActionCodeV1::ProviderNoAction)
+        );
+    }
+
+    #[test]
+    fn bounded_provider_bytes_debug_is_always_redacted() {
+        let bytes: BoundedProviderBytes = vec![1u8; 10].try_into().unwrap();
+        assert!(format!("{bytes:?}").contains("BoundedProviderBytes"));
+    }
+
+    #[test]
+    fn provider_failure_code_covers_all_four_variants() {
+        assert_eq!(ProviderFailureCode::Unavailable.code(), 1);
+        assert_eq!(ProviderFailureCode::Timeout.code(), 2);
+        assert_eq!(ProviderFailureCode::Rejected.code(), 3);
+        assert_eq!(ProviderFailureCode::RateLimited.code(), 4);
+        // From conversion: each variant maps to a distinct DecisionNoActionCodeV1.
+        assert_eq!(
+            DecisionNoActionCodeV1::from(ProviderFailureCode::Unavailable),
+            DecisionNoActionCodeV1::ProviderUnavailable
+        );
+        assert_eq!(
+            DecisionNoActionCodeV1::from(ProviderFailureCode::Timeout),
+            DecisionNoActionCodeV1::ProviderTimeout
+        );
+        assert_eq!(
+            DecisionNoActionCodeV1::from(ProviderFailureCode::Rejected),
+            DecisionNoActionCodeV1::ProviderRejected
+        );
+        assert_eq!(
+            DecisionNoActionCodeV1::from(ProviderFailureCode::RateLimited),
+            DecisionNoActionCodeV1::ProviderRateLimited
+        );
     }
 }
