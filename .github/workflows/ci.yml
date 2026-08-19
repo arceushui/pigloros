@@ -153,6 +153,9 @@ jobs:
         with:
           shared-key: coverage
 
+      # Region gate: 98% (LLVM short-circuit / inlining artifacts from infra error paths).
+      # Line gate: 99% (meaningful code path coverage). If regions ever drop below 98,
+      # improve line coverage toward 100 rather than lowering the region floor further.
       - name: cargo llvm-cov (all features) at-or-above-99pct lines and regions
         run: >
           cargo llvm-cov --workspace --all-features --locked --summary-only
