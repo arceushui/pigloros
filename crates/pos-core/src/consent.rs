@@ -655,6 +655,60 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn consent_granted_wrong_field_type_for_fork_permitted() {
+        let g = sample_granted();
+        let bytes = g.encode().unwrap().as_slice().to_vec();
+        let mut cursor = std::io::Cursor::new(bytes.as_slice());
+        let mut val: Value = ciborium::from_reader(&mut cursor).unwrap();
+        if let Value::Array(ref mut items) = val {
+            items[7] = Value::Integer(1.into()); // integer not bool
+        }
+        let mut buf = Vec::new();
+        ciborium::into_writer(&val, &mut buf).unwrap();
+        assert!(matches!(
+            ConsentGranted::decode(&CanonicalBytes::from_vec(buf)),
+            Err(ConsentCodecError::WrongFieldType)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn consent_granted_wrong_field_type_for_retention_days() {
+        let g = sample_granted();
+        let bytes = g.encode().unwrap().as_slice().to_vec();
+        let mut cursor = std::io::Cursor::new(bytes.as_slice());
+        let mut val: Value = ciborium::from_reader(&mut cursor).unwrap();
+        if let Value::Array(ref mut items) = val {
+            items[9] = Value::Text("not_u16".to_owned());
+        }
+        let mut buf = Vec::new();
+        ciborium::into_writer(&val, &mut buf).unwrap();
+        assert!(matches!(
+            ConsentGranted::decode(&CanonicalBytes::from_vec(buf)),
+            Err(ConsentCodecError::WrongFieldType)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn consent_granted_wrong_field_type_for_expiry_secs() {
+        let g = sample_granted();
+        let bytes = g.encode().unwrap().as_slice().to_vec();
+        let mut cursor = std::io::Cursor::new(bytes.as_slice());
+        let mut val: Value = ciborium::from_reader(&mut cursor).unwrap();
+        if let Value::Array(ref mut items) = val {
+            items[10] = Value::Text("not_u32".to_owned());
+        }
+        let mut buf = Vec::new();
+        ciborium::into_writer(&val, &mut buf).unwrap();
+        assert!(matches!(
+            ConsentGranted::decode(&CanonicalBytes::from_vec(buf)),
+            Err(ConsentCodecError::WrongFieldType)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn consent_granted_wrong_field_type_for_modalities() {
         let g = sample_granted();
         let bytes = g.encode().unwrap().as_slice().to_vec();
