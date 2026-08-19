@@ -1263,6 +1263,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn south_pole_and_non_finite_height_are_rejected() {
         // Negative pole: first || branch of the PoleUnsupported check.
         assert!(matches!(
@@ -1277,6 +1278,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn coordinate_from_non_finite_north_or_up_is_rejected() {
         // Second || branch of the NonFiniteCoordinate check in from_components.
         assert!(matches!(
@@ -1291,6 +1293,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn translation_rejects_non_finite_north_or_up_offset() {
         let coord = WorldCoordinateV1::from_components(0.0, 0.0, 0.0).expect("origin is finite");
         assert!(matches!(

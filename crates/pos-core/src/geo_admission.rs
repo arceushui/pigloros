@@ -816,6 +816,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn binding_permits_rejects_zero_epoch_and_withdrawn_consent() {
         let timeline = TimelineId::new();
         let req = request(timeline);
@@ -835,6 +836,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn link_validation_rejects_matching_timeline_but_wrong_event_id() {
         let timeline = TimelineId::new();
         let req = request(timeline);
