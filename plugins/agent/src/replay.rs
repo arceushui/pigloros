@@ -381,7 +381,6 @@ fn advance_driver_tick(current: u64) -> Result<u64, ReplayVerificationError> {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::{
         advance_driver_tick, validate_recovery_sequence, ReplayVerificationError, VerificationEvent,
@@ -398,7 +397,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_tick_advancement_fails_closed_at_the_v1_limit() {
         assert_eq!(advance_driver_tick(0), Ok(1));
         assert_eq!(
@@ -408,7 +406,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn all_replay_verification_error_variants_have_non_empty_display_messages() {
         let variants = [
             ReplayVerificationError::NonContiguousSourceSequence {
@@ -430,7 +427,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn recovery_sequence_validation_accepts_empty_zero_and_rejects_every_gap_shape() {
         assert_eq!(validate_recovery_sequence(&[], Seq::ZERO), Ok(()));
         assert_eq!(

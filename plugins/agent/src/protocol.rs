@@ -1402,7 +1402,6 @@ fn validate_printable_ascii(
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use pos_core::ids::PluginId;
