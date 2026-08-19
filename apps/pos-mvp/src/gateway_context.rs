@@ -1,0 +1,1004 @@
+//! Optional shared-world context for Wave 7 decision preview (ADR-015).
+//!
+//! Polls `piglor-gateway` for timeline events: society means + AI Influence Index (#79).
+
+use crate::ai_influence::{ai_influence_from_events, AiInfluenceIndex};
+use pos_core::clock::Seq;
+use std::collections::HashMap;
+use std::io::Read;
+use std::time::Duration;
+
+const NUDGE_SCALE: f64 = 0.25;
+/// Overall HTTP deadline for gateway poll (connect + read).
+const GATEWAY_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+/// Cap each polling response body (matches the Gateway response budget).
+const MAX_GATEWAY_BODY_BYTES: u64 = 1024 * 1024;
+/// Cap cumulative response bytes across cursor pages without assuming a logical
+/// Timeline Event ceiling (Forks can inherit Events from multiple Timelines).
+const MAX_GATEWAY_AGGREGATE_BYTES: u64 = 64 * 1024 * 1024;
+const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+/// Society dimensions nudge preferences with matching names directly.
+/// No hardcoded aliases — user preference keys drive the mapping.
+fn society_pref_aliases(_dim: &str) -> &'static [&'static str] {
+    &[]
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::{next_gateway_cursor, GatewayEventPage};
+    use pos_core::clock::Seq;
+
+    #[test]
+    fn gateway_page_parser_covers_shape_and_field_errors() {
+        assert!(GatewayEventPage::parse(r#"{"events":[],"next_from_seq":null}"#).is_ok());
+        assert!(GatewayEventPage::parse(r"{}").is_ok());
+        assert!(GatewayEventPage::parse("not-json").is_err());
+        assert!(GatewayEventPage::parse("[]").is_err());
+        assert!(GatewayEventPage::parse(r#"{"events":"bad"}"#).is_err());
+        assert!(GatewayEventPage::parse(r#"{"next_from_seq":"bad"}"#).is_err());
+        let stalled = GatewayEventPage::parse(r#"{"next_from_seq":10}"#).unwrap();
+        assert!(next_gateway_cursor(&stalled, Seq::from_u64(10)).is_err());
+    }
+}
+
+/// Society dimension means extracted from gateway event poll (`dimension` → mean `value`).
+///
+/// Sample values and resulting means are clamped to `[0, 1]` (society semantics).
+pub(crate) fn society_means_from_events(events: &[serde_json::Value]) -> HashMap<String, f64> {
+    let mut sums: HashMap<String, f64> = HashMap::new();
+    let mut counts: HashMap<String, u32> = HashMap::new();
+
+    for event in events {
+        if event.get("event_type").and_then(serde_json::Value::as_str) != Some("society.signal") {
+            continue;
+        }
+        let Some(payload) = event.get("payload") else {
+            continue;
+        };
+        let Some(dim) = payload.get("dimension").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let Some(value) = payload
+            .get("value")
+            .and_then(serde_json::Value::as_f64)
+            .filter(|v| v.is_finite())
+        else {
+            continue;
+        };
+        let value = value.clamp(0.0, 1.0);
+        let key = dim.to_ascii_lowercase();
+        *sums.entry(key.clone()).or_insert(0.0) += value;
+        *counts.entry(key).or_insert(0) += 1;
+    }
+
+    sums.into_iter()
+        .map(|(dim, sum)| {
+            let n = counts[&dim];
+            (dim, (sum / f64::from(n)).clamp(0.0, 1.0))
+        })
+        .collect()
+}
+
+/// Nudge preferences for matching keys **and** society→scenario aliases.
+///
+/// Each preference key is adjusted **once** by the average of all contributing
+/// society nudges (exact dim match + aliases), so overlapping aliases
+/// (`opinion`/`polarization` → `collaboration`) do not stack additively.
+pub(crate) fn apply_society_context(prefs: &mut [(String, f64)], means: &HashMap<String, f64>) {
+    let mut by_pref: HashMap<String, Vec<f64>> = HashMap::new();
+    for (dim, mean) in means {
+        let nudge = (*mean - 0.5) * NUDGE_SCALE;
+        let mut targets: Vec<&str> = vec![dim.as_str()];
+        targets.extend(society_pref_aliases(dim));
+        targets.sort_unstable();
+        targets.dedup();
+        for target in targets {
+            by_pref
+                .entry(target.to_ascii_lowercase())
+                .or_default()
+                .push(nudge);
+        }
+    }
+    for (key, values) in by_pref {
+        let avg = average_f64(&values);
+        if let Some((_, v)) = prefs.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case(&key)) {
+            *v = (*v + avg).clamp(-1.0, 1.0);
+        }
+    }
+}
+
+fn average_f64(values: &[f64]) -> f64 {
+    match values {
+        [] => 0.0,
+        [only] => *only,
+        many => {
+            let sum: f64 = many.iter().sum();
+            let mut n = 0.0_f64;
+            for _ in many {
+                n += 1.0;
+            }
+            sum / n
+        }
+    }
+}
+
+/// Plain-language lines for society means (#76 / ADR-015 follow-on).
+///
+/// Covers society dimensions (`trust`, `opinion`, `economy`, `culture`,
+/// `polarization`) plus any other keys as generic preference-context hints.
+#[must_use]
+pub(crate) fn plain_language_context(means: &HashMap<String, f64>) -> Vec<String> {
+    let mut dims: Vec<(&String, f64)> = means.iter().map(|(k, v)| (k, *v)).collect();
+    dims.sort_by(|a, b| a.0.cmp(b.0));
+    dims.into_iter()
+        .map(|(dim, mean)| describe_dimension(dim, mean))
+        .collect()
+}
+
+fn describe_dimension(dim: &str, mean: f64) -> String {
+    let level = intensity_word(mean);
+    match dim.to_ascii_lowercase().as_str() {
+        "trust" => format!(
+            "Trust in the shared world looks {level} (mean {mean:.2}) — weigh how much you rely on others' signals."
+        ),
+        "opinion" => format!(
+            "Public opinion around this choice is {level} (mean {mean:.2}) — expect the crowd to lean that way."
+        ),
+        "economy" => format!(
+            "Economic conditions read {level} (mean {mean:.2}) — resource and cost pressure may matter."
+        ),
+        "culture" => format!(
+            "Cultural mood is {level} (mean {mean:.2}) — norms and identity cues may shape fit."
+        ),
+        "polarization" => format!(
+            "Polarization is {level} (mean {mean:.2}) — disagreement may be sharp; pick carefully."
+        ),
+        other => format!(
+            "Shared signal '{other}' is {level} (mean {mean:.2}) — preferences with this key may be nudged."
+        ),
+    }
+}
+
+fn intensity_word(mean: f64) -> &'static str {
+    if mean >= 0.75 {
+        "strong"
+    } else if mean >= 0.55 {
+        "elevated"
+    } else if mean >= 0.45 {
+        "balanced"
+    } else if mean >= 0.25 {
+        "soft"
+    } else {
+        "weak"
+    }
+}
+
+/// Reject non-ULID timeline ids before interpolating into the URL path.
+pub(crate) fn validate_timeline_id(timeline_id: &str) -> Result<(), String> {
+    ulid::Ulid::from_string(timeline_id)
+        .map(|_| ())
+        .map_err(|e| format!("invalid timeline id (expected ULID): {e}"))
+}
+
+/// True when the gateway base URL's host is loopback (`127.0.0.1`, `localhost`, `::1`).
+///
+/// Parses scheme/userinfo/port carefully so hosts like `127.0.0.1.evil` are not treated
+/// as loopback (substring match would incorrectly skip the ADR-015 warning).
+fn gateway_host_is_loopback(gateway: &str) -> bool {
+    let s = gateway.trim();
+    // Normalize scheme case so `HTTP://` matches; then strip once.
+    let lower = s.to_ascii_lowercase();
+    let without_scheme = lower
+        .strip_prefix("http://")
+        .or_else(|| lower.strip_prefix("https://"))
+        .unwrap_or(lower.as_str());
+    let authority = without_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    let hostport = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(rest) = hostport.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        // IPv4 / hostname: strip `:port` from the right once.
+        hostport.rsplit_once(':').map_or(hostport, |(h, _)| h)
+    };
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
+fn warn_if_non_loopback(gateway: &str) {
+    if !gateway_host_is_loopback(gateway) {
+        eprintln!(
+            "Warning: gateway URL is not loopback — ADR-015 demos assume local-only (no auth)."
+        );
+    }
+}
+
+/// Society means + AI Influence from one gateway poll.
+pub(crate) struct TimelineContext {
+    pub society_means: HashMap<String, f64>,
+    pub ai_influence: AiInfluenceIndex,
+}
+
+/// One HTTP poll → society means and AI Influence Index (#79).
+///
+/// Hardening: ULID path validation, 10s overall timeout, no redirects, 1 MiB body cap.
+pub(crate) fn fetch_timeline_context(
+    gateway: &str,
+    timeline_id: &str,
+) -> Result<TimelineContext, String> {
+    let events = fetch_gateway_events(gateway, timeline_id)?;
+    Ok(TimelineContext {
+        society_means: society_means_from_events(&events),
+        ai_influence: ai_influence_from_events(&events),
+    })
+}
+
+/// Poll gateway event list. `gateway` is base URL (e.g. `http://127.0.0.1:8080`).
+fn fetch_gateway_events(
+    gateway: &str,
+    timeline_id: &str,
+) -> Result<Vec<serde_json::Value>, String> {
+    fetch_gateway_events_with_aggregate_limit(gateway, timeline_id, MAX_GATEWAY_AGGREGATE_BYTES)
+}
+
+fn fetch_gateway_events_with_aggregate_limit(
+    gateway: &str,
+    timeline_id: &str,
+    max_aggregate_bytes: u64,
+) -> Result<Vec<serde_json::Value>, String> {
+    validate_timeline_id(timeline_id)?;
+    warn_if_non_loopback(gateway);
+
+    let base = gateway.trim_end_matches('/');
+    // ULID charset is path-safe; still percent-encode for defense in depth.
+    let encoded = urlencoding_path_segment(timeline_id);
+    let agent = ureq::AgentBuilder::new()
+        .timeout(GATEWAY_HTTP_TIMEOUT)
+        .redirects(0)
+        .build();
+    let mut events = Vec::new();
+    let mut from_seq = Seq::ZERO;
+    let mut aggregate_bytes = 0_u64;
+    loop {
+        let url = format!(
+            "{base}/v1/timelines/{encoded}/events?from_seq={}",
+            from_seq.as_u64()
+        );
+        let response = agent
+            .get(&url)
+            .call()
+            .map_err(|e| format!("gateway GET failed: {e}"))?;
+        let status = response.status();
+        if !(200..300).contains(&status) {
+            return Err(format!("gateway returned HTTP {status}"));
+        }
+
+        let mut reader = response.into_reader();
+        let bytes = read_capped_body(&mut reader, MAX_GATEWAY_BODY_BYTES)?;
+        aggregate_bytes =
+            checked_gateway_aggregate(aggregate_bytes, bytes.len() as u64, max_aggregate_bytes)?;
+        let body = String::from_utf8(bytes).map_err(|e| format!("gateway body not UTF-8: {e}"))?;
+        let body = GatewayEventPage::parse(&body)
+            .map_err(|e| format!("gateway JSON/cursor parse failed: {e}"))?;
+        let next = next_gateway_cursor(&body, from_seq)?;
+        events.extend(body.events);
+        if let Some(next) = next {
+            from_seq = next;
+        } else {
+            return Ok(events);
+        }
+    }
+}
+
+#[derive(Debug)]
+struct GatewayEventPage {
+    events: Vec<serde_json::Value>,
+    next_from_seq: Option<Seq>,
+}
+
+impl GatewayEventPage {
+    fn parse(body: &str) -> Result<Self, String> {
+        let value: serde_json::Value = serde_json::from_str(body).map_err(|e| e.to_string())?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| "gateway response must be a JSON object".to_owned())?;
+        let events = match object.get("events") {
+            Some(events) => serde_json::from_value(events.clone()).map_err(|e| e.to_string())?,
+            None => Vec::new(),
+        };
+        let next_from_seq = match object.get("next_from_seq") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(cursor) => {
+                Some(serde_json::from_value(cursor.clone()).map_err(|e| e.to_string())?)
+            }
+        };
+        Ok(Self {
+            events,
+            next_from_seq,
+        })
+    }
+}
+
+fn checked_gateway_aggregate(current: u64, page: u64, maximum: u64) -> Result<u64, String> {
+    current
+        .checked_add(page)
+        .filter(|total| *total <= maximum)
+        .ok_or_else(|| format!("gateway aggregate body too large: exceeded {maximum} bytes"))
+}
+
+fn next_gateway_cursor(body: &GatewayEventPage, current: Seq) -> Result<Option<Seq>, String> {
+    match body.next_from_seq {
+        None => Ok(None),
+        Some(next) if next > current => Ok(Some(next)),
+        Some(_) => Err("gateway returned invalid next_from_seq cursor".to_owned()),
+    }
+}
+
+fn read_capped_body(reader: &mut dyn Read, max_bytes: u64) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    reader
+        .take(max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("gateway body read failed: {e}"))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(format!(
+            "gateway body too large: exceeded {max_bytes} bytes"
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Percent-encode a single path segment (ULIDs pass through unchanged).
+fn urlencoding_path_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(char::from(b));
+            }
+            _ => {
+                out.push('%');
+                out.push(char::from(HEX[(b >> 4) as usize]));
+                out.push(char::from(HEX[(b & 0xf) as usize]));
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    fn spawn_scripted_gateway(
+        responses: Vec<(String, Option<String>)>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for (body, expected_request) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 2048];
+                let read = stream.read(&mut request).unwrap();
+                if let Some(expected) = expected_request {
+                    let request = String::from_utf8_lossy(&request[..read]);
+                    assert!(request.contains(&expected), "{request}");
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        (format!("http://{addr}"), server)
+    }
+    use std::collections::HashMap;
+
+    fn fetch_society_means(
+        gateway: &str,
+        timeline_id: &str,
+    ) -> Result<HashMap<String, f64>, String> {
+        Ok(fetch_timeline_context(gateway, timeline_id)?.society_means)
+    }
+
+    #[test]
+    fn society_means_from_fixture() {
+        let events = vec![
+            serde_json::json!({
+                "event_type": "society.signal",
+                "payload": { "dimension": "trust", "value": 0.8 }
+            }),
+            serde_json::json!({
+                "event_type": "society.signal",
+                "payload": { "dimension": "trust", "value": 0.6 }
+            }),
+            serde_json::json!({
+                "event_type": "world.action",
+                "payload": { "dx": 1 }
+            }),
+            serde_json::json!({
+                "event_type": "society.signal",
+                "payload": { "dimension": "trust", "value": "nope" }
+            }),
+        ];
+        let means = society_means_from_events(&events);
+        assert!((means["trust"] - 0.7).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn society_means_clamps_out_of_range_samples() {
+        let events = vec![
+            serde_json::json!({
+                "event_type": "society.signal",
+                "payload": { "dimension": "trust", "value": 2.5 }
+            }),
+            serde_json::json!({
+                "event_type": "society.signal",
+                "payload": { "dimension": "opinion", "value": -1.0 }
+            }),
+        ];
+        let means = society_means_from_events(&events);
+        assert!((means["trust"] - 1.0).abs() < f64::EPSILON);
+        assert!((means["opinion"] - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn plain_language_covers_society_dimensions_and_generic() {
+        let mut means = HashMap::new();
+        means.insert("trust".to_owned(), 0.9);
+        means.insert("opinion".to_owned(), 0.6);
+        means.insert("economy".to_owned(), 0.5);
+        means.insert("culture".to_owned(), 0.3);
+        means.insert("polarization".to_owned(), 0.1);
+        means.insert("nature".to_owned(), 0.8);
+        let lines = plain_language_context(&means);
+        assert_eq!(lines.len(), 6);
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("Trust") && l.contains("strong")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("Public opinion") && l.contains("elevated")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("Economic") && l.contains("balanced")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("Cultural") && l.contains("soft")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("Polarization") && l.contains("weak")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("'nature'") && l.contains("strong")));
+    }
+
+    #[test]
+    fn average_f64_handles_empty_and_values() {
+        assert!((average_f64(&[]) - 0.0).abs() < f64::EPSILON);
+        assert!((average_f64(&[0.4]) - 0.4).abs() < f64::EPSILON);
+        assert!((average_f64(&[0.2, 0.4]) - 0.3).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn apply_society_context_nudges_matching_pref() {
+        let mut prefs = vec![("trust".to_owned(), 0.5), ("food".to_owned(), 0.9)];
+        let mut means = HashMap::new();
+        means.insert("trust".to_owned(), 0.9);
+        apply_society_context(&mut prefs, &means);
+        assert!(prefs[0].1 > 0.5);
+        assert!((prefs[1].1 - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn apply_society_context_hits_all_alias_families() {
+        let mut prefs = vec![
+            ("quiet".to_owned(), 0.5),
+            ("focus".to_owned(), 0.5),
+            ("city".to_owned(), 0.5),
+            ("collaboration".to_owned(), 0.5),
+            ("food".to_owned(), 0.5),
+            ("energy".to_owned(), 0.5),
+            ("nature".to_owned(), 0.5),
+            ("autonomy".to_owned(), 0.5),
+        ];
+        let mut means = HashMap::new();
+        means.insert("trust".to_owned(), 0.9);
+        means.insert("opinion".to_owned(), 0.9);
+        means.insert("economy".to_owned(), 0.9);
+        means.insert("culture".to_owned(), 0.9);
+        means.insert("polarization".to_owned(), 0.9);
+        apply_society_context(&mut prefs, &means);
+        assert!(prefs.iter().all(|(_, v)| *v > 0.5));
+    }
+
+    #[test]
+    fn apply_society_context_averages_overlapping_aliases() {
+        let mut prefs = vec![("collaboration".to_owned(), 0.5)];
+        let mut means = HashMap::new();
+        // Both map to collaboration with the same mean → one averaged nudge, not 2×.
+        means.insert("opinion".to_owned(), 0.9);
+        means.insert("polarization".to_owned(), 0.9);
+        apply_society_context(&mut prefs, &means);
+        let expected = 0.5 + (0.9 - 0.5) * NUDGE_SCALE;
+        assert!(
+            (prefs[0].1 - expected).abs() < 1e-9,
+            "got {} want {expected} (no double stack)",
+            prefs[0].1
+        );
+    }
+
+    #[test]
+    fn apply_society_context_maps_trust_onto_places_quiet() {
+        let mut prefs = vec![
+            ("nature".to_owned(), 0.8),
+            ("city".to_owned(), 0.5),
+            ("food".to_owned(), 0.9),
+            ("quiet".to_owned(), 0.7),
+        ];
+        let mut means = HashMap::new();
+        means.insert("trust".to_owned(), 0.9);
+        let before = prefs[3].1;
+        apply_society_context(&mut prefs, &means);
+        assert!(prefs[3].1 > before, "quiet should rise via trust alias");
+    }
+
+    #[test]
+    fn apply_society_context_maps_trust_onto_work_focus() {
+        let mut prefs = vec![
+            ("autonomy".to_owned(), 0.8),
+            ("focus".to_owned(), 0.7),
+            ("collaboration".to_owned(), 0.5),
+            ("energy".to_owned(), 0.6),
+        ];
+        let mut means = HashMap::new();
+        means.insert("trust".to_owned(), 0.9);
+        let before = prefs[1].1;
+        apply_society_context(&mut prefs, &means);
+        assert!(prefs[1].1 > before, "focus should rise via trust alias");
+    }
+
+    #[test]
+    fn gateway_signal_to_places_score_changes() {
+        let events = vec![serde_json::json!({
+            "event_type": "society.signal",
+            "payload": { "dimension": "culture", "value": 0.95 }
+        })];
+        let means = society_means_from_events(&events);
+        let mut prefs = vec![
+            ("nature".to_owned(), 0.5),
+            ("city".to_owned(), 0.5),
+            ("food".to_owned(), 0.5),
+            ("quiet".to_owned(), 0.5),
+        ];
+        let model_before = pos_plugin_persona::PersonaModel::new(prefs.clone());
+        let score_before = model_before.score_option("kyoto nature quiet temples");
+        apply_society_context(&mut prefs, &means);
+        let model_after = pos_plugin_persona::PersonaModel::new(prefs);
+        let score_after = model_after.score_option("kyoto nature quiet temples");
+        assert!(
+            score_after > score_before,
+            "culture→nature alias should lift Kyoto score ({score_before} → {score_after})"
+        );
+    }
+
+    #[test]
+    fn apply_society_context_ignores_unmatched_dimensions() {
+        let mut prefs = vec![("food".to_owned(), 0.5)];
+        let mut means = HashMap::new();
+        means.insert("unmapped_dim".to_owned(), 0.9);
+        apply_society_context(&mut prefs, &means);
+        assert!((prefs[0].1 - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn validate_timeline_id_accepts_ulid() {
+        validate_timeline_id("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+    }
+
+    #[test]
+    fn validate_timeline_id_rejects_path_injection() {
+        let err = validate_timeline_id("../evil").unwrap_err();
+        assert!(err.contains("invalid timeline"), "{err}");
+        let err = validate_timeline_id("not a ulid").unwrap_err();
+        assert!(err.contains("invalid timeline"), "{err}");
+    }
+
+    #[test]
+    fn urlencoding_leaves_ulid_unchanged() {
+        let id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        assert_eq!(urlencoding_path_segment(id), id);
+        assert!(urlencoding_path_segment("a/b").contains('%'));
+    }
+
+    #[test]
+    fn fetch_timeline_context_includes_ai_influence() {
+        let body = r#"{"events":[
+            {"event_type":"society.signal","payload":{"dimension":"trust","value":0.9}},
+            {"event_type":"agent.action","payload":{"action":"nudge"}},
+            {"event_type":"world.action","payload":{}}
+        ]}"#;
+        let (gateway, server) = spawn_scripted_gateway(vec![(body.to_owned(), None)]);
+        let ctx = fetch_timeline_context(&gateway, "01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        server.join().unwrap();
+        assert!((ctx.society_means["trust"] - 0.9).abs() < f64::EPSILON);
+        assert_eq!(ctx.ai_influence.total_events, 3);
+        assert_eq!(ctx.ai_influence.ai_events, 1);
+        assert!((ctx.ai_influence.index - (1.0 / 3.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fetch_gateway_events_follows_cursor_past_one_hundred_events() {
+        let first_events: Vec<serde_json::Value> = (1..=100)
+            .map(|seq| {
+                serde_json::json!({
+                    "event_type": "world.action",
+                    "seq": seq,
+                    "payload": {"value": seq},
+                })
+            })
+            .collect();
+        let responses = vec![
+            (
+                serde_json::json!({
+                    "events": first_events,
+                    "next_from_seq": 101,
+                })
+                .to_string(),
+                Some("from_seq=0".to_owned()),
+            ),
+            (
+                serde_json::json!({
+                    "events": [{
+                        "event_type": "world.action",
+                        "seq": 101,
+                        "payload": {"value": 101},
+                    }],
+                    "next_from_seq": null,
+                })
+                .to_string(),
+                Some("from_seq=101".to_owned()),
+            ),
+        ];
+        let (gateway, server) = spawn_scripted_gateway(responses);
+        let events = fetch_gateway_events(&gateway, "01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        server.join().unwrap();
+        assert_eq!(events.len(), 101);
+        assert_eq!(events[100]["payload"]["value"], 101);
+    }
+
+    #[test]
+    fn fetch_gateway_events_follows_fork_protocol_past_ten_thousand_events() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for page in 0_u64..=100 {
+                let first = page * 100 + 1;
+                let count = if page == 100 { 1 } else { 100 };
+                let events: Vec<_> = (first..first + count)
+                    .map(|seq| {
+                        serde_json::json!({
+                            "seq": seq,
+                            "event_type": "world.action",
+                            "payload": {
+                                "origin": if seq <= 10_000 { "inherited" } else { "owned" }
+                            }
+                        })
+                    })
+                    .collect();
+                let next = (page < 100).then_some(first + count);
+                let body = serde_json::json!({
+                    "events": events,
+                    "next_from_seq": next,
+                })
+                .to_string();
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 2048];
+                let read = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..read]);
+                let requested = if page == 0 { 0 } else { first };
+                assert!(
+                    request.contains(&format!("from_seq={requested}")),
+                    "{request}"
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        let events =
+            fetch_gateway_events(&format!("http://{addr}"), "01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        server.join().unwrap();
+        assert_eq!(events.len(), 10_001);
+        assert_eq!(events[9_999]["payload"]["origin"], "inherited");
+        assert_eq!(events[10_000]["payload"]["origin"], "owned");
+    }
+
+    #[test]
+    fn aggregate_byte_guard_handles_limit_and_overflow() {
+        assert_eq!(checked_gateway_aggregate(4, 5, 9).unwrap(), 9);
+        for (current, page, maximum) in [(4, 6, 9), (u64::MAX, 1, u64::MAX)] {
+            let error = checked_gateway_aggregate(current, page, maximum).unwrap_err();
+            assert!(error.contains("aggregate body too large"), "{error}");
+        }
+    }
+
+    #[test]
+    fn fetch_gateway_events_enforces_cumulative_byte_guard() {
+        let body = r#"{"events":[],"next_from_seq":null}"#;
+        let (gateway, server) = spawn_scripted_gateway(vec![(body.to_owned(), None)]);
+        let error =
+            fetch_gateway_events_with_aggregate_limit(&gateway, "01ARZ3NDEKTSV4RRFFQ69G5FAV", 1)
+                .unwrap_err();
+        server.join().unwrap();
+        assert!(error.contains("aggregate body too large"), "{error}");
+    }
+
+    #[test]
+    fn fetch_gateway_events_rejects_invalid_server_cursor() {
+        let body = r#"{"events":[],"next_from_seq":"bad"}"#;
+        let (gateway, server) = spawn_scripted_gateway(vec![(body.to_owned(), None)]);
+        let error = fetch_gateway_events(&gateway, "01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap_err();
+        server.join().unwrap();
+        assert!(error.contains("cursor"), "{error}");
+
+        let (gateway, server) = spawn_scripted_gateway(vec![(
+            r#"{"events":[],"next_from_seq":0}"#.to_owned(),
+            None,
+        )]);
+        let error = fetch_gateway_events(&gateway, "01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap_err();
+        server.join().unwrap();
+        assert!(error.contains("invalid next_from_seq"), "{error}");
+    }
+
+    #[test]
+    fn next_gateway_cursor_handles_legacy_exhaustion_and_rejects_stalls() {
+        let page = |value: serde_json::Value| GatewayEventPage::parse(&value.to_string()).unwrap();
+        assert_eq!(
+            next_gateway_cursor(&page(serde_json::json!({"events": []})), Seq::ZERO).unwrap(),
+            None
+        );
+        assert_eq!(
+            next_gateway_cursor(
+                &page(serde_json::json!({"events": [], "next_from_seq": null})),
+                Seq::ZERO,
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            next_gateway_cursor(
+                &page(serde_json::json!({"events": [], "next_from_seq": 101})),
+                Seq::ZERO,
+            )
+            .unwrap(),
+            Some(Seq::from_u64(101))
+        );
+        assert!(next_gateway_cursor(
+            &page(serde_json::json!({"next_from_seq": 10})),
+            Seq::from_u64(10),
+        )
+        .is_err());
+        assert!(
+            GatewayEventPage::parse(&serde_json::json!({"next_from_seq": "11"}).to_string())
+                .is_err()
+        );
+        assert!(GatewayEventPage::parse("not-json").is_err());
+        assert!(GatewayEventPage::parse("[]").is_err());
+        assert!(GatewayEventPage::parse(r#"{"events":"bad"}"#).is_err());
+    }
+
+    #[test]
+    fn fetch_society_means_rejects_bad_timeline_id() {
+        let err = fetch_society_means("http://127.0.0.1:8080", "bad").unwrap_err();
+        assert!(err.contains("invalid timeline"), "{err}");
+    }
+
+    #[test]
+    fn fetch_society_means_trims_trailing_slash() {
+        let body = r#"{"events":[{"event_type":"society.signal","payload":{"dimension":"trust","value":0.9}}]}"#;
+        let (gateway, server) = spawn_scripted_gateway(vec![(body.to_owned(), None)]);
+        let means =
+            fetch_society_means(&format!("{gateway}/"), "01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        server.join().unwrap();
+        assert!((means["trust"] - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn fetch_society_means_parses_mock_http() {
+        let body = r#"{"events":[{"event_type":"society.signal","payload":{"dimension":"trust","value":0.9}}]}"#;
+        let (gateway, server) = spawn_scripted_gateway(vec![(body.to_owned(), None)]);
+        let means = fetch_society_means(&gateway, "01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        server.join().unwrap();
+        assert!((means["trust"] - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn fetch_society_means_treats_missing_events_as_empty() {
+        let body = r"{}";
+        let (gateway, server) = spawn_scripted_gateway(vec![(body.to_owned(), None)]);
+        let means = fetch_society_means(&gateway, "01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        server.join().unwrap();
+        assert!(means.is_empty());
+    }
+
+    #[test]
+    fn fetch_society_means_rejects_redirect_status() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = r#"{"events":[{"event_type":"society.signal","payload":{"dimension":"trust","value":0.9}}]}"#;
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.read(&mut [0u8; 1024]);
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: /elsewhere\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        let err = fetch_society_means(&format!("http://{addr}"), "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+            .unwrap_err();
+        assert!(err.contains("HTTP 302"), "{err}");
+    }
+
+    #[test]
+    fn fetch_society_means_rejects_non_utf8_body() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.read(&mut [0u8; 1024]);
+            let bytes =
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n\xff\xfe";
+            let _ = stream.write_all(bytes);
+        });
+        let err = fetch_society_means(&format!("http://{addr}"), "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+            .unwrap_err();
+        assert!(err.contains("UTF-8"), "{err}");
+    }
+
+    #[test]
+    fn fetch_society_means_rejects_non_success_status() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.read(&mut [0u8; 1024]);
+            let response =
+                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = stream.write_all(response.as_bytes());
+        });
+        let err = fetch_society_means(&format!("http://{addr}"), "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+            .unwrap_err();
+        assert!(err.contains("404"), "{err}");
+    }
+
+    #[test]
+    fn fetch_society_means_rejects_invalid_json() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.read(&mut [0u8; 1024]);
+            let body = "not-json";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        let err = fetch_society_means(&format!("http://{addr}"), "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+            .unwrap_err();
+        assert!(err.contains("JSON"), "{err}");
+    }
+
+    #[test]
+    fn read_capped_body_maps_io_errors() {
+        struct FailRead;
+        impl Read for FailRead {
+            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("boom"))
+            }
+        }
+        let mut fail = FailRead;
+        let err = read_capped_body(&mut fail, 64).unwrap_err();
+        assert!(err.contains("read failed"), "{err}");
+    }
+
+    #[test]
+    fn read_capped_body_ok_and_too_large() {
+        let mut ok = &b"hi"[..];
+        assert_eq!(read_capped_body(&mut ok, 10).unwrap(), b"hi");
+        let big = vec![b'x'; 20];
+        let mut reader = big.as_slice();
+        let err = read_capped_body(&mut reader, 8).unwrap_err();
+        assert!(err.contains("too large"), "{err}");
+    }
+
+    #[test]
+    fn fetch_society_means_rejects_oversized_body() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Omit Content-Length so the client reads until close; send > 1 MiB.
+        let oversized = "x".repeat(usize::try_from(MAX_GATEWAY_BODY_BYTES).unwrap() + 8);
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.read(&mut [0u8; 1024]);
+            let response = format!("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{oversized}");
+            let _ = stream.write_all(response.as_bytes());
+        });
+        let err = fetch_society_means(&format!("http://{addr}"), "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+            .unwrap_err();
+        assert!(err.contains("too large"), "{err}");
+    }
+
+    #[test]
+    fn society_means_skips_non_finite_and_missing_fields() {
+        let events = vec![
+            serde_json::json!({"event_type": "society.signal"}),
+            serde_json::json!({
+                "event_type": "society.signal",
+                "payload": { "value": 0.5 }
+            }),
+            serde_json::json!({
+                "event_type": "society.signal",
+                "payload": { "dimension": "trust", "value": "nope" }
+            }),
+        ];
+        assert!(society_means_from_events(&events).is_empty());
+    }
+
+    #[test]
+    fn fetch_society_means_rejects_bad_status() {
+        let err = fetch_society_means("http://127.0.0.1:1", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+            .expect_err("unreachable port");
+        assert!(err.contains("gateway") || err.contains("failed"));
+    }
+
+    #[test]
+    fn warn_if_non_loopback_runs() {
+        warn_if_non_loopback("http://127.0.0.1:8080");
+        warn_if_non_loopback("http://localhost:8080");
+        warn_if_non_loopback("http://[::1]:8080");
+        warn_if_non_loopback("http://example.com:8080");
+    }
+
+    #[test]
+    fn gateway_host_is_loopback_exact_hosts_only() {
+        assert!(gateway_host_is_loopback("http://127.0.0.1:8080"));
+        assert!(gateway_host_is_loopback("https://localhost"));
+        assert!(gateway_host_is_loopback("HTTP://LOCALHOST:9"));
+        assert!(gateway_host_is_loopback("http://[::1]:8080/v1"));
+        assert!(gateway_host_is_loopback("http://user@127.0.0.1:9"));
+        assert!(gateway_host_is_loopback("127.0.0.1:8080"));
+        assert!(gateway_host_is_loopback("http://127.0.0.1:8080?x=1"));
+        assert!(!gateway_host_is_loopback("http://127.0.0.1.evil:8080"));
+        assert!(!gateway_host_is_loopback("http://example.com:8080"));
+        assert!(!gateway_host_is_loopback("http://notlocalhost:8080"));
+        assert!(!gateway_host_is_loopback(""));
+    }
+}

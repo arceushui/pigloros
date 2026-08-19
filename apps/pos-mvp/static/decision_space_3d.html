@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PiglorOS — 3D Decision Space Visualizer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+  <style>
+    :root {
+      --bg-dark: #090D16;
+      --panel-bg: rgba(15, 23, 42, 0.75);
+      --panel-border: rgba(255, 255, 255, 0.12);
+      --accent-indigo: #6366F1;
+      --accent-emerald: #10B981;
+      --accent-amber: #F59E0B;
+      --accent-pink: #EC4899;
+      --text-main: #F8FAFC;
+      --text-muted: #94A3B8;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+    }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: var(--bg-dark);
+      color: var(--text-main);
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+    }
+
+    #canvas-container {
+      width: 100%;
+      height: 100%;
+      position: absolute;
+      top: 0;
+      left: 0;
+      z-index: 1;
+    }
+
+    /* HUD Overlay */
+    .hud-panel {
+      position: absolute;
+      z-index: 10;
+      background: var(--panel-bg);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid var(--panel-border);
+      border-radius: 16px;
+      padding: 20px;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+    }
+
+    /* Top Header Bar */
+    header {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      right: 20px;
+      z-index: 10;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      pointer-events: none;
+    }
+
+    .brand {
+      pointer-events: auto;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: var(--panel-bg);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--panel-border);
+      padding: 10px 20px;
+      border-radius: 14px;
+    }
+
+    .brand-logo {
+      width: 28px;
+      height: 28px;
+      background: linear-gradient(135deg, var(--accent-indigo), var(--accent-pink));
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+      font-family: 'Outfit', sans-serif;
+      font-size: 16px;
+    }
+
+    .brand-title {
+      font-family: 'Outfit', sans-serif;
+      font-weight: 700;
+      font-size: 18px;
+      letter-spacing: -0.5px;
+    }
+
+    .brand-tag {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 20px;
+      background: rgba(99, 102, 241, 0.2);
+      color: #A5B4FC;
+      border: 1px solid rgba(99, 102, 241, 0.4);
+      font-weight: 600;
+    }
+
+    /* Left Control Sidebar */
+    .controls-sidebar {
+      top: 90px;
+      left: 20px;
+      width: 320px;
+      max-height: calc(100vh - 120px);
+      overflow-y: auto;
+    }
+
+    h3 {
+      font-family: 'Outfit', sans-serif;
+      font-size: 15px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: var(--text-muted);
+      margin-bottom: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .form-group {
+      margin-bottom: 18px;
+    }
+
+    label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 13px;
+      font-weight: 500;
+      margin-bottom: 8px;
+      color: var(--text-main);
+    }
+
+    .value-badge {
+      color: var(--accent-emerald);
+      font-family: monospace;
+      font-weight: 600;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      height: 6px;
+      border-radius: 3px;
+      background: rgba(255, 255, 255, 0.1);
+      outline: none;
+      accent-color: var(--accent-indigo);
+      cursor: pointer;
+    }
+
+    select {
+      width: 100%;
+      padding: 10px 14px;
+      background: rgba(15, 23, 42, 0.9);
+      border: 1px solid var(--panel-border);
+      border-radius: 10px;
+      color: var(--text-main);
+      font-family: inherit;
+      font-size: 13px;
+      outline: none;
+      cursor: pointer;
+    }
+
+    /* Right Inspector Sidebar */
+    .inspector-sidebar {
+      top: 90px;
+      right: 20px;
+      width: 340px;
+      display: none;
+    }
+
+    .inspector-sidebar.active {
+      display: block;
+      animation: fadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateX(20px); }
+      to { opacity: 1; transform: translateX(0); }
+    }
+
+    .metric-card {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      padding: 14px;
+      margin-bottom: 10px;
+    }
+
+    .metric-label {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 4px;
+    }
+
+    .metric-value {
+      font-family: 'Outfit', sans-serif;
+      font-size: 22px;
+      font-weight: 700;
+    }
+
+    .metric-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    /* Bottom Timeline Controller */
+    .timeline-bar {
+      bottom: 20px;
+      left: 360px;
+      right: 380px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .btn {
+      background: linear-gradient(135deg, var(--accent-indigo), #4F46E5);
+      border: none;
+      color: white;
+      padding: 10px 18px;
+      border-radius: 10px;
+      font-weight: 600;
+      font-size: 13px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      transition: all 0.2s ease;
+      box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4);
+    }
+
+    .btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(99, 102, 241, 0.6);
+    }
+
+    /* 3D Legend */
+    .axis-legend {
+      position: absolute;
+      bottom: 100px;
+      left: 20px;
+      background: var(--panel-bg);
+      border: 1px solid var(--panel-border);
+      border-radius: 12px;
+      padding: 12px 16px;
+      font-size: 12px;
+      backdrop-filter: blur(12px);
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .legend-item:last-child {
+      margin-bottom: 0;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+
+    .dot-x { background: #EF4444; }
+    .dot-y { background: #10B981; }
+    .dot-z { background: #3B82F6; }
+  </style>
+</head>
+<body>
+
+  <div id="canvas-container"></div>
+
+  <!-- Header -->
+  <header>
+    <div class="brand">
+      <div class="brand-logo">P</div>
+      <div class="brand-title">PiglorOS</div>
+      <div class="brand-tag">3D DECISION SPACE</div>
+    </div>
+  </header>
+
+  <!-- Controls Sidebar -->
+  <div class="hud-panel controls-sidebar">
+    <h3>
+      <span>Scenario</span>
+      <span style="font-size: 11px; color: var(--accent-emerald);">Wave 7 Active</span>
+    </h3>
+    <div class="form-group">
+      <select id="scenario-select">
+        <option value="places">📍 Places & Location Choice</option>
+        <option value="work">💼 Work Structure Tradeoffs</option>
+        <option value="policy">📜 Organization Policy Shift</option>
+      </select>
+    </div>
+
+    <h3>Preference Weights</h3>
+    <div id="sliders-container">
+      <!-- Dynamic Sliders Inserted via JS -->
+    </div>
+
+    <div style="margin-top: 20px;">
+      <button class="btn" id="run-sim-btn" style="width: 100%; justify-content: center;">
+        <span>⚡ Re-Simulate Timeline Forks</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Inspector Sidebar -->
+  <div class="hud-panel inspector-sidebar" id="inspector-panel">
+    <h3 id="inspect-title">Option A: City Center</h3>
+    <p id="inspect-desc" style="font-size: 13px; color: var(--text-muted); margin-bottom: 14px;">
+      High social interaction density, medium commute cost.
+    </p>
+
+    <div class="metric-grid">
+      <div class="metric-card">
+        <div class="metric-label">Utility Score</div>
+        <div class="metric-value" id="val-utility" style="color: var(--accent-emerald);">0.84</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Social Trust</div>
+        <div class="metric-value" id="val-society" style="color: var(--accent-indigo);">0.91</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Prediction Risk</div>
+        <div class="metric-value" id="val-risk" style="color: var(--accent-pink);">0.15</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">AI Influence</div>
+        <div class="metric-value" id="val-influence" style="color: var(--accent-amber);">0.42</div>
+      </div>
+    </div>
+
+    <div style="margin-top: 16px; padding: 12px; background: rgba(0,0,0,0.3); border-radius: 10px; font-size: 12px;">
+      <div style="font-weight: 600; color: var(--text-main); margin-bottom: 4px;">Timeline Fork Recommendation</div>
+      <div id="inspect-recommendation" style="color: var(--accent-emerald);">
+        ✅ Highest preference satisfaction under current weight configuration.
+      </div>
+    </div>
+  </div>
+
+  <!-- 3D Legend -->
+  <div class="axis-legend">
+    <div class="legend-item"><div class="dot dot-x"></div> <span>X Axis: Utility / Preference Match</span></div>
+    <div class="legend-item"><div class="dot dot-y"></div> <span>Y Axis: Social Trust / Network Signal</span></div>
+    <div class="legend-item"><div class="dot dot-z"></div> <span>Z Axis: Time Projection / Uncertainty</span></div>
+  </div>
+
+  <!-- Timeline Controller -->
+  <div class="hud-panel timeline-bar">
+    <button class="btn" id="play-btn" style="padding: 8px 14px;">
+      <span id="play-icon">▶</span> <span id="play-text">Play Tick Simulation</span>
+    </button>
+    <div style="flex: 1;">
+      <label style="margin-bottom: 4px;">
+        <span>Simulation Step (Tick)</span>
+        <span class="value-badge" id="tick-badge">Tick 42 / 100</span>
+      </label>
+      <input type="range" id="tick-slider" min="0" max="100" value="42">
+    </div>
+  </div>
+
+  <script>
+    // ------------------------------------------------------------------
+    // Scenarios & Decision Options Data Model
+    // ------------------------------------------------------------------
+    const scenarios = {
+      places: {
+        title: 'Places & Location Choice',
+        prefs: [
+          { name: 'food', label: 'Food & Dining Quality', weight: 0.8 },
+          { name: 'nature', label: 'Nature & Open Air', weight: 0.3 },
+          { name: 'transit', label: 'Public Transit Access', weight: 0.7 }
+        ],
+        options: [
+          { id: 'opt-1', name: 'Downtown Hub', desc: 'Dense urban core with high dining & transit.', base: { x: 0.9, y: 0.8, z: 0.2 }, color: 0x10B981 },
+          { id: 'opt-2', name: 'Mountain Suburb', desc: 'Peaceful nature-focused retreat.', base: { x: 0.4, y: 0.6, z: 0.5 }, color: 0x6366F1 },
+          { id: 'opt-3', name: 'Coastal District', desc: 'Balanced beach and local culture.', base: { x: 0.7, y: 0.9, z: 0.3 }, color: 0xEC4899 },
+          { id: 'opt-4', name: 'Tech Park Metro', desc: 'Modern workspace hub near transit.', base: { x: 0.6, y: 0.5, z: 0.7 }, color: 0xF59E0B }
+        ]
+      },
+      work: {
+        title: 'Work Structure Tradeoffs',
+        prefs: [
+          { name: 'autonomy', label: 'Schedule Autonomy', weight: 1.0 },
+          { name: 'collaboration', label: 'In-Person Sync', weight: 0.2 },
+          { name: 'focus', label: 'Deep Work Time', weight: 0.8 }
+        ],
+        options: [
+          { id: 'w-1', name: 'Fully Remote Async', desc: 'Maximum schedule autonomy and focus.', base: { x: 0.95, y: 0.4, z: 0.2 }, color: 0x10B981 },
+          { id: 'w-2', name: 'Hybrid 3/2 Model', desc: 'Balanced team sync and autonomy.', base: { x: 0.65, y: 0.8, z: 0.4 }, color: 0x6366F1 },
+          { id: 'w-3', name: 'HQ Co-location', desc: 'High collaboration density in office.', base: { x: 0.30, y: 0.95, z: 0.6 }, color: 0xF59E0B }
+        ]
+      },
+      policy: {
+        title: 'Organization Policy Shift',
+        prefs: [
+          { name: 'speed', label: 'Execution Speed', weight: 0.9 },
+          { name: 'consensus', label: 'Team Consensus', weight: 0.5 },
+          { name: 'safety', label: 'Risk Mitigation', weight: 0.7 }
+        ],
+        options: [
+          { id: 'p-1', name: 'Rapid Decentralized', desc: 'Empowered pods, high speed.', base: { x: 0.88, y: 0.65, z: 0.35 }, color: 0xEC4899 },
+          { id: 'p-2', name: 'Centralized Review', desc: 'Structured approval cycles.', base: { x: 0.40, y: 0.85, z: 0.20 }, color: 0x6366F1 },
+          { id: 'p-3', name: 'Open RFC Consensus', desc: 'Full transparent team voting.', base: { x: 0.60, y: 0.92, z: 0.55 }, color: 0x10B981 }
+        ]
+      }
+    };
+
+    let currentScenario = 'places';
+    let selectedOptionId = null;
+    let isPlaying = false;
+    let animationFrame = null;
+
+    // ------------------------------------------------------------------
+    // Three.js 3D Scene Initialization
+    // ------------------------------------------------------------------
+    const container = document.getElementById('canvas-container');
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x090D16, 0.035);
+
+    const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.set(12, 10, 16);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    container.appendChild(renderer.domElement);
+
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    controls.maxPolarAngle = Math.PI / 2 + 0.1;
+
+    // Lighting
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambientLight);
+
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    dirLight.position.set(10, 20, 15);
+    scene.add(dirLight);
+
+    const pointLight = new THREE.PointLight(0x6366F1, 2, 30);
+    pointLight.position.set(0, 5, 0);
+    scene.add(pointLight);
+
+    // 3D Grid & Axes
+    const gridHelper = new THREE.GridHelper(20, 20, 0x334155, 0x1E293B);
+    gridHelper.position.y = 0;
+    scene.add(gridHelper);
+
+    // Custom Glowing Axes
+    function createAxis(from, to, color) {
+      const geom = new THREE.BufferGeometry().setFromPoints([from, to]);
+      const mat = new THREE.LineBasicMaterial({ color: color, linewidth: 2 });
+      return new THREE.Line(geom, mat);
+    }
+    scene.add(createAxis(new THREE.Vector3(0, 0, 0), new THREE.Vector3(10, 0, 0), 0xEF4444)); // X: Red
+    scene.add(createAxis(new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 10, 0), 0x10B981)); // Y: Green
+    scene.add(createAxis(new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, 10), 0x3B82F6)); // Z: Blue
+
+    // Background Star Field / Particles
+    const particleCount = 400;
+    const particleGeom = new THREE.BufferGeometry();
+    const particlePositions = new Float32Array(particleCount * 3);
+
+    for (let i = 0; i < particleCount * 3; i += 3) {
+      particlePositions[i] = (Math.random() - 0.5) * 40;
+      particlePositions[i + 1] = Math.random() * 20;
+      particlePositions[i + 2] = (Math.random() - 0.5) * 40;
+    }
+    particleGeom.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
+    const particleMat = new THREE.PointsMaterial({ color: 0x6366F1, size: 0.12, transparent: true, opacity: 0.5 });
+    const particleSystem = new THREE.Points(particleGeom, particleMat);
+    scene.add(particleSystem);
+
+    // Decision Node 3D Objects Storage
+    const nodeObjects = [];
+    const trajectoryLines = [];
+
+    // Raycaster for Clicking 3D Nodes
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+
+    // ------------------------------------------------------------------
+    // Dynamic Scene Rendering & Node Placement
+    // ------------------------------------------------------------------
+    function updateScene() {
+      // Clear old node objects
+      nodeObjects.forEach(obj => scene.remove(obj.mesh));
+      nodeObjects.length = 0;
+
+      trajectoryLines.forEach(line => scene.remove(line));
+      trajectoryLines.length = 0;
+
+      const sc = scenarios[currentScenario];
+      const tick = parseInt(document.getElementById('tick-slider').value, 10);
+
+      // Compute weight multiplier
+      let weightSum = 0;
+      sc.prefs.forEach(p => weightSum += p.weight);
+      const avgWeight = weightSum / sc.prefs.length;
+
+      sc.options.forEach((opt, idx) => {
+        // Calculate dynamic 3D position based on base coordinates & preference weights
+        const posX = opt.base.x * 8 * avgWeight + (Math.sin(tick * 0.05 + idx) * 0.3);
+        const posY = opt.base.y * 8 + (Math.cos(tick * 0.05 + idx) * 0.2);
+        const posZ = opt.base.z * 8 + (tick * 0.02);
+
+        // 1. Create Glowing Sphere Node
+        const geom = new THREE.SphereGeometry(0.55, 32, 32);
+        const mat = new THREE.MeshStandardMaterial({
+          color: opt.color,
+          roughness: 0.2,
+          metalness: 0.8,
+          emissive: opt.color,
+          emissiveIntensity: selectedOptionId === opt.id ? 0.6 : 0.2
+        });
+        const mesh = new THREE.Mesh(geom, mat);
+        mesh.position.set(posX, posY, posZ);
+        mesh.userData = opt;
+        scene.add(mesh);
+
+        nodeObjects.push({ id: opt.id, mesh: mesh, data: opt, pos: { x: posX, y: posY, z: posZ } });
+
+        // 2. Create Trajectory Curve (Timeline Fork)
+        const points = [];
+        for (let t = 0; t <= tick; t += 5) {
+          points.push(new THREE.Vector3(
+            opt.base.x * 8 * avgWeight + (Math.sin(t * 0.05 + idx) * 0.3),
+            opt.base.y * 8 + (Math.cos(t * 0.05 + idx) * 0.2),
+            opt.base.z * 8 + (t * 0.02)
+          ));
+        }
+
+        if (points.length > 1) {
+          const curve = new THREE.CatmullRomCurve3(points);
+          const curveGeom = new THREE.BufferGeometry().setFromPoints(curve.getPoints(50));
+          const curveMat = new THREE.LineBasicMaterial({ color: opt.color, transparent: true, opacity: 0.4 });
+          const trajectoryLine = new THREE.Line(curveGeom, curveMat);
+          scene.add(trajectoryLine);
+          trajectoryLines.push(trajectoryLine);
+        }
+      });
+
+      // Auto select first option if none selected
+      if (!selectedOptionId && sc.options.length > 0) {
+        selectOption(sc.options[0].id);
+      } else if (selectedOptionId) {
+        updateInspector();
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // UI Builder & Event Listeners
+    // ------------------------------------------------------------------
+    function renderSliders() {
+      const container = document.getElementById('sliders-container');
+      container.innerHTML = '';
+      const sc = scenarios[currentScenario];
+
+      sc.prefs.forEach(p => {
+        const div = document.createElement('div');
+        div.className = 'form-group';
+        div.innerHTML = `
+          <label>
+            <span>${p.label}</span>
+            <span class="value-badge" id="badge-${p.name}">${p.weight.toFixed(1)}</span>
+          </label>
+          <input type="range" id="slider-${p.name}" min="0" max="1" step="0.1" value="${p.weight}">
+        `;
+        container.appendChild(div);
+
+        document.getElementById(`slider-${p.name}`).addEventListener('input', (e) => {
+          p.weight = parseFloat(e.target.value);
+          document.getElementById(`badge-${p.name}`).innerText = p.weight.toFixed(1);
+          updateScene();
+        });
+      });
+    }
+
+    function selectOption(id) {
+      selectedOptionId = id;
+      nodeObjects.forEach(obj => {
+        if (obj.id === id) {
+          obj.mesh.material.emissiveIntensity = 0.8;
+          obj.mesh.scale.set(1.25, 1.25, 1.25);
+        } else {
+          obj.mesh.material.emissiveIntensity = 0.2;
+          obj.mesh.scale.set(1.0, 1.0, 1.0);
+        }
+      });
+
+      updateInspector();
+      document.getElementById('inspector-panel').classList.add('active');
+    }
+
+    function updateInspector() {
+      const obj = nodeObjects.find(n => n.id === selectedOptionId);
+      if (!obj) return;
+
+      const d = obj.data;
+      const pos = obj.pos;
+
+      document.getElementById('inspect-title').innerText = d.name;
+      document.getElementById('inspect-desc').innerText = d.desc;
+
+      const utility = (pos.x / 8).toFixed(2);
+      const society = (pos.y / 8).toFixed(2);
+      const risk = (1.0 - (pos.z / 10)).toFixed(2);
+      const influence = (0.2 + (pos.x * 0.05)).toFixed(2);
+
+      document.getElementById('val-utility').innerText = utility;
+      document.getElementById('val-society').innerText = society;
+      document.getElementById('val-risk').innerText = risk;
+      document.getElementById('val-influence').innerText = influence;
+
+      // Determine recommendation
+      let maxUtilObj = nodeObjects[0];
+      nodeObjects.forEach(n => { if (n.pos.x > maxUtilObj.pos.x) maxUtilObj = n; });
+
+      if (obj.id === maxUtilObj.id) {
+        document.getElementById('inspect-recommendation').innerText = '✅ Recommended Option: Highest utility satisfaction in 3D space.';
+        document.getElementById('inspect-recommendation').style.color = 'var(--accent-emerald)';
+      } else {
+        document.getElementById('inspect-recommendation').innerText = `⚠️ Tradeoff Notice: Option '${maxUtilObj.data.name}' currently has higher utility.`;
+        document.getElementById('inspect-recommendation').style.color = 'var(--accent-amber)';
+      }
+    }
+
+    // Event Listeners
+    document.getElementById('scenario-select').addEventListener('change', (e) => {
+      currentScenario = e.target.value;
+      selectedOptionId = null;
+      renderSliders();
+      updateScene();
+    });
+
+    document.getElementById('tick-slider').addEventListener('input', (e) => {
+      document.getElementById('tick-badge').innerText = `Tick ${e.target.value} / 100`;
+      updateScene();
+    });
+
+    document.getElementById('run-sim-btn').addEventListener('click', () => {
+      let tickVal = 0;
+      const interval = setInterval(() => {
+        tickVal += 2;
+        document.getElementById('tick-slider').value = tickVal;
+        document.getElementById('tick-badge').innerText = `Tick ${tickVal} / 100`;
+        updateScene();
+        if (tickVal >= 100) clearInterval(interval);
+      }, 30);
+    });
+
+    // 3D Canvas Click Handler
+    window.addEventListener('pointerdown', (e) => {
+      mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+      mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+
+      raycaster.setFromCamera(mouse, camera);
+      const intersects = raycaster.intersectObjects(nodeObjects.map(n => n.mesh));
+
+      if (intersects.length > 0) {
+        const clickedObj = intersects[0].object;
+        selectOption(clickedObj.userData.id);
+      }
+    });
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // ------------------------------------------------------------------
+    // Main Render Loop
+    // ------------------------------------------------------------------
+    function animate() {
+      requestAnimationFrame(animate);
+      controls.update();
+
+      // Rotate particle background subtly
+      particleSystem.rotation.y += 0.0005;
+
+      // Pulse selected node
+      if (selectedOptionId) {
+        const obj = nodeObjects.find(n => n.id === selectedOptionId);
+        if (obj) {
+          obj.mesh.rotation.y += 0.02;
+        }
+      }
+
+      renderer.render(scene, camera);
+    }
+
+    // Init
+    renderSliders();
+    updateScene();
+    animate();
+  </script>
+</body>
+</html>
