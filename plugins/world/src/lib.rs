@@ -435,7 +435,14 @@ impl WorldObservationV1 {
     ///
     /// # Errors
     /// Returns [`WorldCodecError::NonFiniteFloat`] if any float is non-finite.
+    /// Returns [`WorldCodecError::PayloadTooLarge`] if `sensor_value` exceeds `MAX_SENSOR_VALUE_BYTES`.
     pub fn encode(&self) -> Result<CanonicalBytes, WorldCodecError> {
+        if self.sensor_value.len() > MAX_SENSOR_VALUE_BYTES {
+            return Err(WorldCodecError::PayloadTooLarge {
+                size: self.sensor_value.len(),
+                max: MAX_SENSOR_VALUE_BYTES,
+            });
+        }
         let arr = ciborium::Value::Array(vec![
             cbor_magic(MAGIC_WOB1),
             cbor_u8(VERSION_V1),
@@ -1548,7 +1555,14 @@ mod tests {
         assert!(!WorldCodecError::WrongArrayLength.to_string().is_empty());
         assert!(!WorldCodecError::WrongFieldType.to_string().is_empty());
         assert!(!WorldCodecError::UnknownActionKind.to_string().is_empty());
-        assert!(!format!("{}", WorldCodecError::PayloadTooLarge { size: 5000 }).is_empty());
+        assert!(!format!(
+            "{}",
+            WorldCodecError::PayloadTooLarge {
+                size: 5000,
+                max: MAX_ACTION_BYTES
+            }
+        )
+        .is_empty());
     }
 
     fn flip_version(bytes: &[u8]) -> Vec<u8> {
