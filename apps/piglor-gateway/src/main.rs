@@ -239,11 +239,13 @@ mod coverage_tests {
     impl std::error::Error for ProbeError {}
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn error_handler_is_callable_at_public_process_seam() {
         handle_run_error(&ProbeError);
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn main_error_returns_failure_exit_code() {
         let _ = super::main_with_args(&[
             "piglor-gateway".to_owned(),
@@ -253,6 +255,7 @@ mod coverage_tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_with_args_reports_parse_and_bind_errors() {
         let parse_error = super::run_with_args(&[
             "piglor-gateway".to_owned(),
