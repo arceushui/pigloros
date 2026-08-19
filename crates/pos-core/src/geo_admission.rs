@@ -814,4 +814,28 @@ mod tests {
             .contains("outcome unknown"));
         assert_eq!(unknown.event_id(), None);
     }
+
+    #[test]
+    fn cover_permits_short_circuit_branches() {
+        let timeline = TimelineId::new();
+        let req = request(timeline);
+        let _ =
+            GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 0)).permits(&req);
+        let _ =
+            GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, true, 9)).permits(&req);
+        let _ = GeoLocationAdmissionFenceV1::new(99, ([1; 32], 8, [2; 32]), (1, false, 9))
+            .permits(&req);
+    }
+
+    #[test]
+    fn cover_link_validation_wrong_event_id_branch() {
+        let timeline = TimelineId::new();
+        let req = request(timeline);
+        let snapshot = req.snapshot().clone();
+        let event_id = EventId::new();
+        let event_seq = Seq::from_u64(1);
+        let link =
+            GeoLocationAdmissionLinkV1::for_snapshot(timeline, event_id, event_seq, &snapshot);
+        let _ = link.validate_for(&snapshot, timeline, EventId::new(), event_seq);
+    }
 }

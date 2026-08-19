@@ -1261,4 +1261,23 @@ mod tests {
             .expect("valid restore replaces the registry");
         assert!(registry.resolve(&capability, &second.reference()).is_ok());
     }
+
+    #[test]
+    fn cover_south_pole_and_non_finite_height_branches() {
+        let _ = Wgs84PositionV1::new(-90.0, 0.0, 0.0);
+        let _ = Wgs84PositionV1::new(0.0, 0.0, f64::NAN);
+    }
+
+    #[test]
+    fn cover_from_components_non_finite_north_and_up_branches() {
+        let _ = WorldCoordinateV1::from_components(0.0, f64::NAN, 0.0);
+        let _ = WorldCoordinateV1::from_components(0.0, 0.0, f64::NAN);
+    }
+
+    #[test]
+    fn cover_translated_by_non_finite_north_and_up_branches() {
+        let coord = WorldCoordinateV1::from_components(0.0, 0.0, 0.0).expect("finite");
+        let _ = coord.translated_by(0.0, f64::NAN, 0.0);
+        let _ = coord.translated_by(0.0, 0.0, f64::NAN);
+    }
 }
