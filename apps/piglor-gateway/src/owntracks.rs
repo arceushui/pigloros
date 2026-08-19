@@ -758,10 +758,8 @@ mod tests {
 
     #[test]
     fn cover_parse_consent_policy_error_paths() {
-        // Invalid TOML → PolicyConfigurationUnavailable
-        let _ = parse_consent_policy("not-valid-toml[[[");
-        // Valid TOML but wrong schema_version → PolicyConfigurationUnavailable
-        let _ = parse_consent_policy(
+        let _ = super::parse_consent_policy("not-valid-toml[[[");
+        let _ = super::parse_consent_policy(
             "schema_version = 2\nconsent_revision = 1\npolicy_version = 1\n\
              binding_revision = 1\nwithdrawn = false\npurpose = \"local_pairing\"\n\
              precision = \"exact\"\nsource_time_bucket = \"minute\"\n\
@@ -772,12 +770,9 @@ mod tests {
 
     #[test]
     fn cover_decode_lower_hex_32_error_paths() {
-        // Wrong length
-        let _ = decode_lower_hex_32("abc");
-        // Correct length but uppercase (invalid)
-        let _ = decode_lower_hex_32(&"A".repeat(64));
-        // Correct length but contains non-hex char
-        let _ = decode_lower_hex_32(&"g".repeat(64));
+        let _ = super::decode_lower_hex_32("abc");
+        let _ = super::decode_lower_hex_32(&"A".repeat(64));
+        let _ = super::decode_lower_hex_32(&"g".repeat(64));
     }
 
     #[test]
