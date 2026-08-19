@@ -412,6 +412,7 @@ mod tests {
     use pos_runtime::recorder::RECORDER_EVENT_TYPE;
     use pos_runtime::{
         Driver, ObservationView, PluginRegistry, Recorder, RuntimeError, SnapshotAnchor,
+        TimelineHistorySegment,
     };
     use std::time::Duration;
 
@@ -1165,5 +1166,74 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, RuntimeError::DriverTickOverflow { .. }));
         assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn abort_restore_from_history_clears_staged_restore_tick_and_is_idempotent() {
+        let mut driver = ProviderBackedAgentDriver::new(
+            EntityId::new(),
+            ActionCatalogueV1::try_new(vec!["wait".to_owned()]).unwrap(),
+            provenance(),
+            Box::new(FixtureAgentDecisionProvider::new(vec![])),
+        );
+        driver.staged_restore_tick = Some(7);
+        driver.abort_restore_from_history();
+        assert_eq!(driver.committed_tick(), 0);
+        assert!(driver.staged_restore_tick.is_none());
+        // Aborting when nothing is staged is also a no-op.
+        driver.abort_restore_from_history();
+        assert_eq!(driver.committed_tick(), 0);
+    }
+
+    #[test]
+    fn commit_restore_from_history_preserves_committed_tick_when_nothing_is_staged() {
+        let mut driver = ProviderBackedAgentDriver::new(
+            EntityId::new(),
+            ActionCatalogueV1::try_new(vec!["wait".to_owned()]).unwrap(),
+            provenance(),
+            Box::new(FixtureAgentDecisionProvider::new(vec![])),
+        );
+        driver.committed_tick = 3;
+        driver.commit_restore_from_history();
+        assert_eq!(driver.committed_tick(), 3);
+    }
+
+    #[test]
+    fn stage_restore_from_history_fails_when_a_driver_step_is_already_pending() {
+        let mut fixture = provider_driver(vec![ProviderAttempt::NoResponse]);
+        let _ = fixture
+            .registry
+            .step_all_anchored(fixture.timeline, Seq::ZERO)
+            .unwrap();
+        let segments = [TimelineHistorySegment::new(fixture.timeline, Seq::ZERO)];
+        let err = fixture
+            .registry
+            .restore_driver_state(&segments, &[])
+            .unwrap_err();
+        assert!(
+            matches!(err, RuntimeError::InvalidPayload { .. }),
+            "{err:?}"
+        );
+        fixture.registry.abort_step();
+    }
+
+    #[test]
+    fn stage_restore_from_history_fails_when_a_restore_is_already_staged() {
+        let mut driver = ProviderBackedAgentDriver::new(
+            EntityId::new(),
+            ActionCatalogueV1::try_new(vec!["wait".to_owned()]).unwrap(),
+            provenance(),
+            Box::new(FixtureAgentDecisionProvider::new(vec![])),
+        );
+        driver.staged_restore_tick = Some(5);
+        let mut registry = PluginRegistry::new();
+        registry.register_driver(Box::new(driver));
+        let timeline = TimelineId::new();
+        let segments = [TimelineHistorySegment::new(timeline, Seq::ZERO)];
+        let err = registry.restore_driver_state(&segments, &[]).unwrap_err();
+        assert!(
+            matches!(err, RuntimeError::InvalidPayload { .. }),
+            "{err:?}"
+        );
     }
 }

@@ -406,6 +406,24 @@ mod tests {
     }
 
     #[test]
+    fn all_replay_verification_error_variants_have_non_empty_display_messages() {
+        let variants = [
+            ReplayVerificationError::NonContiguousSourceSequence { expected: 1, actual: 0 },
+            ReplayVerificationError::MissingCheckpoint { checkpoint: 5 },
+            ReplayVerificationError::InvalidDecisionRecord,
+            ReplayVerificationError::DecisionRecordMismatch,
+            ReplayVerificationError::MissingOrMismatchedAcceptedAction,
+            ReplayVerificationError::UnexpectedTargetAction,
+            ReplayVerificationError::InvalidTimelineAncestry,
+            ReplayVerificationError::DriverTickOverflow,
+        ];
+        for variant in variants {
+            let msg = variant.to_string();
+            assert!(!msg.is_empty(), "{variant:?} must have a display message");
+        }
+    }
+
+    #[test]
     fn recovery_sequence_validation_accepts_empty_zero_and_rejects_every_gap_shape() {
         assert_eq!(validate_recovery_sequence(&[], Seq::ZERO), Ok(()));
         assert_eq!(

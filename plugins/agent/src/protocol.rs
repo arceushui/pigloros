@@ -1691,4 +1691,70 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn all_agent_decision_error_variants_have_non_empty_display_messages() {
+        let variants = [
+            AgentDecisionError::InvalidActionCatalogueCount,
+            AgentDecisionError::InvalidActionIdentifierLength,
+            AgentDecisionError::InvalidActionIdentifierControlCharacter,
+            AgentDecisionError::DuplicateActionIdentifier,
+            AgentDecisionError::InvalidProviderIdentifierLength,
+            AgentDecisionError::InvalidProviderIdentifierGrammar,
+            AgentDecisionError::InvalidPluginVersionLength,
+            AgentDecisionError::InvalidPluginVersionCharacter,
+            AgentDecisionError::InvalidProviderVersionLength,
+            AgentDecisionError::InvalidProviderVersionCharacter,
+            AgentDecisionError::InvalidActionIndex,
+            AgentDecisionError::InvalidConfidence,
+            AgentDecisionError::InvalidProviderResponseLength,
+            AgentDecisionError::InvalidResponseDigest,
+            AgentDecisionError::MalformedWire,
+            AgentDecisionError::UnsupportedWireVersion,
+        ];
+        for variant in variants {
+            let msg = variant.to_string();
+            assert!(!msg.is_empty(), "{variant:?} must have a display message");
+        }
+    }
+
+    #[test]
+    fn request_encoder_uses_four_byte_cbor_width_for_large_integer_fields() {
+        let provenance = provenance("local-provider", "1.0.0", "2026.08").unwrap();
+        // observed_through = 65_536 exercises the 4-byte CBOR uint encoding arm.
+        let request = AgentDecisionRequestV1::new(
+            pos_core::ids::TimelineId::new(),
+            65_536,
+            pos_core::ids::EntityId::new(),
+            65_536,
+            HASH,
+            provenance,
+        );
+        let encoded = request.encode().expect("encoding must succeed");
+        // A 4-byte uint header (0x1a) appears in the encoded output.
+        assert!(encoded.contains(&0x1a), "4-byte CBOR uint marker must appear");
+        let decoded = AgentDecisionRequestV1::decode(&encoded).expect("roundtrip must succeed");
+        assert_eq!(decoded.observed_through(), 65_536);
+        assert_eq!(decoded.driver_tick(), 65_536);
+    }
+
+    #[test]
+    fn no_action_code_display_covers_all_nine_variants() {
+        use std::format;
+        let codes = [
+            (DecisionNoActionCodeV1::ProviderUnavailable, 1u8),
+            (DecisionNoActionCodeV1::ProviderTimeout, 2),
+            (DecisionNoActionCodeV1::ProviderRejected, 3),
+            (DecisionNoActionCodeV1::ProviderRateLimited, 4),
+            (DecisionNoActionCodeV1::ProviderNoAction, 5),
+            (DecisionNoActionCodeV1::ResponseTooLarge, 6),
+            (DecisionNoActionCodeV1::ResponseMalformed, 7),
+            (DecisionNoActionCodeV1::ResponseVersionUnsupported, 8),
+            (DecisionNoActionCodeV1::ResponseValueInvalid, 9),
+        ];
+        for (code, expected) in codes {
+            assert_eq!(code.code(), expected);
+            let _ = format!("{code:?}");
+        }
+    }
 }
