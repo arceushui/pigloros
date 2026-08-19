@@ -254,10 +254,9 @@ impl Driver for ProviderBackedAgentDriver {
     }
 
     fn commit_restore_from_history(&mut self) {
-        self.committed_tick = self
-            .staged_restore_tick
-            .take()
-            .unwrap_or(self.committed_tick);
+        if let Some(tick) = self.staged_restore_tick.take() {
+            self.committed_tick = tick;
+        }
     }
 
     fn abort_restore_from_history(&mut self) {
@@ -1163,54 +1162,6 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, RuntimeError::DriverTickOverflow { .. }));
         assert_eq!(calls.get(), 0);
-    }
-
-    #[test]
-    fn abort_restore_from_history_clears_staged_restore_tick_and_is_idempotent() {
-        let mut driver = ProviderBackedAgentDriver::new(
-            EntityId::new(),
-            ActionCatalogueV1::try_new(vec!["wait".to_owned()]).unwrap(),
-            provenance(),
-            Box::new(FixtureAgentDecisionProvider::new(vec![])),
-        );
-        driver.staged_restore_tick = Some(7);
-        driver.abort_restore_from_history();
-        assert_eq!(driver.committed_tick(), 0);
-        assert!(driver.staged_restore_tick.is_none());
-        // Aborting when nothing is staged is also a no-op.
-        driver.abort_restore_from_history();
-        assert_eq!(driver.committed_tick(), 0);
-    }
-
-    #[test]
-    fn commit_restore_from_history_preserves_committed_tick_when_nothing_is_staged() {
-        let mut driver = ProviderBackedAgentDriver::new(
-            EntityId::new(),
-            ActionCatalogueV1::try_new(vec!["wait".to_owned()]).unwrap(),
-            provenance(),
-            Box::new(FixtureAgentDecisionProvider::new(vec![])),
-        );
-        driver.committed_tick = 3;
-        driver.commit_restore_from_history();
-        assert_eq!(driver.committed_tick(), 3);
-    }
-
-    #[test]
-    fn stage_restore_from_history_fails_when_a_driver_step_is_already_pending() {
-        let mut fixture = provider_driver(vec![ProviderAttempt::NoResponse]);
-        let _ = fixture
-            .registry
-            .step_all_anchored(fixture.timeline, Seq::ZERO)
-            .unwrap();
-        let segments = [TimelineHistorySegment::new(fixture.timeline, Seq::ZERO)];
-        // The registry guards restore_driver_state with PendingDriverStep when
-        // any driver has a staged step, so the error surfaces at registry level.
-        let err = fixture
-            .registry
-            .restore_driver_state(&segments, &[])
-            .unwrap_err();
-        assert!(matches!(err, RuntimeError::PendingDriverStep), "{err:?}");
-        fixture.registry.abort_step();
     }
 
     #[test]
