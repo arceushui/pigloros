@@ -164,16 +164,16 @@ fn decode_lower_hex_32(value: &str) -> Result<[u8; 32], OwnTracksCommandError> {
     }
     let mut decoded = [0; 32];
     for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
-        decoded[index] = (hex_nibble(chunk[0])? << 4) | hex_nibble(chunk[1])?;
+        decoded[index] = (hex_nibble(chunk[0]) << 4) | hex_nibble(chunk[1]);
     }
     Ok(decoded)
 }
 
-fn hex_nibble(byte: u8) -> Result<u8, OwnTracksCommandError> {
+// Callers pre-validate that byte is in b'0'..=b'9' or b'a'..=b'f'.
+fn hex_nibble(byte: u8) -> u8 {
     match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        _ => Err(OwnTracksCommandError::PolicyConfigurationUnavailable),
+        b'0'..=b'9' => byte - b'0',
+        _ => byte - b'a' + 10,
     }
 }
 

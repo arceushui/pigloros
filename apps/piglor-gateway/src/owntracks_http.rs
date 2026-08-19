@@ -325,6 +325,14 @@ mod tests {
         assert_eq!(super::base64_value(b'?'), None);
     }
 
+    #[test]
+    fn decode_base64_empty_and_single_padding_paths() {
+        // is_empty() branch
+        assert_eq!(super::decode_base64(""), None);
+        // c=Some, d=None branch (single '=' at end) — "hello" base64 is "aGVsbG8="
+        assert_eq!(super::decode_base64("aGVsbG8="), Some(b"hello".to_vec()));
+    }
+
     #[tokio::test]
     async fn empty_body_is_the_only_unauthenticated_success() {
         let response = post_owntracks(
