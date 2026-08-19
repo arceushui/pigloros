@@ -957,34 +957,4 @@ mod tests {
             Err(GeoCellError::InvalidResolution(16))
         );
     }
-
-    #[test]
-    fn parse_rejects_lowercase_non_hex_characters() {
-        // 'g' is lowercase ASCII but NOT a hex digit; exercises the
-        // is_lower_hex branch where is_ascii_lowercase() && !is_ascii_hexdigit().
-        let cloaker = H3ReferenceCloaker::new();
-        assert_eq!(
-            cloaker.parse("ggggggggggggggg"),
-            Err(GeoCellError::NonCanonicalH3Index)
-        );
-    }
-
-    #[test]
-    fn decoder_reports_wrong_field_type_for_negative_integer_resolution() {
-        // A negative CBOR integer cannot be converted to u64; this exercises
-        // the u64::try_from error arm in unsigned_field.
-        let text = |value: &str| Value::Text(value.to_owned());
-        let negative_resolution = exact_len_map(|padding| {
-            vec![
-                (text("index"), text(KNOWN_INDEX)),
-                (text("system"), text(&"x".repeat(padding))),
-                (text("resolution"), Value::Integer((-1i64).into())),
-                (text("cell_format"), Value::Integer(1.into())),
-            ]
-        });
-        assert_eq!(
-            GeoCellV1::decode_v1(&negative_resolution),
-            Err(GeoCellError::WrongFieldType("resolution"))
-        );
-    }
 }

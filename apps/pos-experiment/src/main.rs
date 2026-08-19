@@ -1,4 +1,4 @@
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use pos_core::{EntityId, TimelineId};
 use pos_experiment::{Experiment, ExperimentConfig, ExperimentError, StopCondition, TickOutcome};
@@ -296,7 +296,6 @@ fn exit_for(args: &[String]) -> ExitCode {
     }
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn main() -> ExitCode {
     exit_for(&std::env::args().skip(1).collect::<Vec<_>>())
 }
