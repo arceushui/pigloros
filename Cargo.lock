@@ -4375,26 +4375,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pos-mvp"
-version = "0.1.0"
-dependencies = [
- "ciborium",
- "pos-core",
- "pos-experiment",
- "pos-plugin-eval",
- "pos-plugin-geo",
- "pos-plugin-persona",
- "pos-runtime",
- "pos-state",
- "pos-store",
- "pos-time",
- "serde",
- "serde_json",
- "ulid",
- "ureq",
-]
-
-[[package]]
 name = "pos-plugin-agent"
 version = "0.1.0"
 dependencies = [
