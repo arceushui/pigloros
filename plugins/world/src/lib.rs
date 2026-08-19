@@ -28,6 +28,527 @@ pub const EVENT_TYPE_OBSERVATION: &str = "world.observation";
 /// The event type for world actions.
 pub const EVENT_TYPE_ACTION: &str = "world.action";
 
+/// Versioned event type for world actions (ADR-047 v1).
+pub const EVENT_TYPE_ACTION_V1: &str = "world.action.v1";
+
+/// Versioned event type for world observations (ADR-047 v1).
+pub const EVENT_TYPE_OBSERVATION_V1: &str = "world.observation.v1";
+
+/// Versioned event type for world configuration (ADR-047 v1).
+pub const EVENT_TYPE_CONFIG_V1: &str = "world.config.v1";
+
+const MAGIC_WAC1: &[u8; 4] = b"WAC1";
+const MAGIC_WOB1: &[u8; 4] = b"WOB1";
+const MAGIC_WCF1: &[u8; 4] = b"WCF1";
+const VERSION_V1: u8 = 1;
+/// Maximum total payload for a world.action.v1 event (ADR-047).
+pub const MAX_ACTION_BYTES: usize = 4_096;
+
+/// Valid v1 action kinds (ADR-047 §1).
+pub const ACTION_KIND_IMPULSE: &str = "impulse";
+/// Valid v1 action kinds (ADR-047 §1).
+pub const ACTION_KIND_TARGET_VELOCITY: &str = "target_velocity";
+
+/// Errors returned by world CBOR codec encode/decode operations.
+#[derive(Debug, PartialEq, thiserror::Error)]
+pub enum WorldCodecError {
+    #[error("wrong magic bytes")]
+    WrongMagic,
+    #[error("wrong schema version")]
+    WrongVersion,
+    #[error("wrong CBOR array length")]
+    WrongArrayLength,
+    #[error("wrong field type")]
+    WrongFieldType,
+    #[error("non-finite float value")]
+    NonFiniteFloat,
+    #[error("action payload too large: {size} bytes (max {MAX_ACTION_BYTES})")]
+    PayloadTooLarge { size: usize },
+    #[error("unknown action kind (not in v1 allow-list)")]
+    UnknownActionKind,
+    #[error("trailing bytes after CBOR item")]
+    TrailingBytes,
+    #[error("CBOR decode error")]
+    CborError,
+}
+
+// ---------------------------------------------------------------------------
+// CBOR helpers
+// ---------------------------------------------------------------------------
+
+fn cbor_magic(magic: &[u8; 4]) -> ciborium::Value {
+    ciborium::Value::Bytes(magic.to_vec())
+}
+
+fn cbor_u8(v: u8) -> ciborium::Value {
+    ciborium::Value::Integer(ciborium::value::Integer::from(v))
+}
+
+fn cbor_u32(v: u32) -> ciborium::Value {
+    ciborium::Value::Integer(ciborium::value::Integer::from(v))
+}
+
+fn cbor_u64(v: u64) -> ciborium::Value {
+    ciborium::Value::Integer(ciborium::value::Integer::from(v))
+}
+
+fn cbor_id(id: EntityId) -> ciborium::Value {
+    let n: u128 = id.inner().into();
+    ciborium::Value::Bytes(n.to_be_bytes().to_vec())
+}
+
+fn cbor_bytes(b: &[u8]) -> ciborium::Value {
+    ciborium::Value::Bytes(b.to_vec())
+}
+
+fn decode_magic(val: &ciborium::Value, expected: &[u8; 4]) -> Result<(), WorldCodecError> {
+    match val {
+        ciborium::Value::Bytes(b) if b.as_slice() == expected => Ok(()),
+        _ => Err(WorldCodecError::WrongMagic),
+    }
+}
+
+fn decode_version(val: &ciborium::Value) -> Result<(), WorldCodecError> {
+    match val {
+        ciborium::Value::Integer(n) if u8::try_from(*n).ok() == Some(VERSION_V1) => Ok(()),
+        _ => Err(WorldCodecError::WrongVersion),
+    }
+}
+
+fn decode_u8(val: &ciborium::Value) -> Result<u8, WorldCodecError> {
+    match val {
+        ciborium::Value::Integer(n) => {
+            u8::try_from(*n).map_err(|_| WorldCodecError::WrongFieldType)
+        }
+        _ => Err(WorldCodecError::WrongFieldType),
+    }
+}
+
+fn decode_u32(val: &ciborium::Value) -> Result<u32, WorldCodecError> {
+    match val {
+        ciborium::Value::Integer(n) => {
+            u32::try_from(*n).map_err(|_| WorldCodecError::WrongFieldType)
+        }
+        _ => Err(WorldCodecError::WrongFieldType),
+    }
+}
+
+fn decode_u64(val: &ciborium::Value) -> Result<u64, WorldCodecError> {
+    match val {
+        ciborium::Value::Integer(n) => {
+            u64::try_from(*n).map_err(|_| WorldCodecError::WrongFieldType)
+        }
+        _ => Err(WorldCodecError::WrongFieldType),
+    }
+}
+
+fn decode_id(val: &ciborium::Value) -> Result<EntityId, WorldCodecError> {
+    match val {
+        ciborium::Value::Bytes(b) if b.len() == 16 => {
+            let arr: [u8; 16] = b.as_slice().try_into().unwrap();
+            let n = u128::from_be_bytes(arr);
+            Ok(EntityId::from_ulid(ulid::Ulid::from(n)))
+        }
+        _ => Err(WorldCodecError::WrongFieldType),
+    }
+}
+
+fn decode_bytes_fixed<const N: usize>(val: &ciborium::Value) -> Result<[u8; N], WorldCodecError> {
+    match val {
+        ciborium::Value::Bytes(b) if b.len() == N => Ok(b.as_slice().try_into().unwrap()),
+        _ => Err(WorldCodecError::WrongFieldType),
+    }
+}
+
+fn decode_bytes_max(val: &ciborium::Value, max: usize) -> Result<Vec<u8>, WorldCodecError> {
+    match val {
+        ciborium::Value::Bytes(b) => {
+            if b.len() > max {
+                Err(WorldCodecError::PayloadTooLarge { size: b.len() })
+            } else {
+                Ok(b.clone())
+            }
+        }
+        _ => Err(WorldCodecError::WrongFieldType),
+    }
+}
+
+fn cbor_encode(value: &ciborium::Value) -> Vec<u8> {
+    let mut buf = Vec::new();
+    ciborium::into_writer(value, &mut buf).expect("Vec<u8> write is infallible");
+    buf
+}
+
+fn cbor_decode_array(
+    bytes: &[u8],
+    expected_len: usize,
+) -> Result<Vec<ciborium::Value>, WorldCodecError> {
+    let mut cursor = std::io::Cursor::new(bytes);
+    let value: ciborium::Value =
+        ciborium::from_reader(&mut cursor).map_err(|_| WorldCodecError::CborError)?;
+    if cursor.position() != bytes.len() as u64 {
+        return Err(WorldCodecError::TrailingBytes);
+    }
+    match value {
+        ciborium::Value::Array(items) if items.len() == expected_len => Ok(items),
+        ciborium::Value::Array(_) => Err(WorldCodecError::WrongArrayLength),
+        _ => Err(WorldCodecError::CborError),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Additional CBOR helpers for f32 and tstr
+// ---------------------------------------------------------------------------
+
+fn cbor_f32(v: f32) -> Result<ciborium::Value, WorldCodecError> {
+    if !v.is_finite() {
+        return Err(WorldCodecError::NonFiniteFloat);
+    }
+    Ok(ciborium::Value::Float(f64::from(v)))
+}
+
+fn decode_finite_f32(val: &ciborium::Value) -> Result<f32, WorldCodecError> {
+    match val {
+        ciborium::Value::Float(f) => {
+            #[allow(clippy::cast_possible_truncation)]
+            let v = *f as f32;
+            if !v.is_finite() {
+                Err(WorldCodecError::NonFiniteFloat)
+            } else {
+                Ok(v)
+            }
+        }
+        _ => Err(WorldCodecError::WrongFieldType),
+    }
+}
+
+fn cbor_tstr(s: &str) -> ciborium::Value {
+    ciborium::Value::Text(s.to_owned())
+}
+
+fn decode_tstr(val: &ciborium::Value) -> Result<String, WorldCodecError> {
+    match val {
+        ciborium::Value::Text(s) => Ok(s.clone()),
+        _ => Err(WorldCodecError::WrongFieldType),
+    }
+}
+
+fn decode_u16(val: &ciborium::Value) -> Result<u16, WorldCodecError> {
+    match val {
+        ciborium::Value::Integer(n) => {
+            u16::try_from(*n).map_err(|_| WorldCodecError::WrongFieldType)
+        }
+        _ => Err(WorldCodecError::WrongFieldType),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WorldActionV1 — CBOR definite array, magic WAC1 (ADR-047 v3)
+// ---------------------------------------------------------------------------
+
+/// A versioned world action command (ADR-047 v3, `world.action.v1`).
+///
+/// Array (9 elements):
+/// `[magic_bstr4, version_u8=1, actor_id_bstr16, body_id_bstr16,
+///   action_kind_tstr, params_cbor_bstr, action_scope_u8, catalogue_version_u32, tick_u64]`
+///
+/// Max total encoded size: 4,096 bytes. `action_kind` must be in the v1 allow-list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorldActionV1 {
+    pub actor_entity_id: EntityId,
+    pub body_entity_id: EntityId,
+    /// Must be one of `ACTION_KIND_IMPULSE` or `ACTION_KIND_TARGET_VELOCITY` in v1.
+    pub action_kind: String,
+    /// Canonical CBOR bytes for the action parameters.
+    pub params_cbor: Vec<u8>,
+    /// `0 = single_body` (only valid value in v1).
+    pub action_scope: u8,
+    pub catalogue_version: u32,
+    pub tick: u64,
+}
+
+impl WorldActionV1 {
+    /// Encode to canonical CBOR bytes.
+    ///
+    /// # Errors
+    /// Returns `WorldCodecError::UnknownActionKind` if `action_kind` is not in the v1 allow-list.
+    /// Returns `WorldCodecError::PayloadTooLarge` if the encoded payload exceeds 4,096 bytes.
+    pub fn encode(&self) -> Result<CanonicalBytes, WorldCodecError> {
+        if self.action_kind != ACTION_KIND_IMPULSE
+            && self.action_kind != ACTION_KIND_TARGET_VELOCITY
+        {
+            return Err(WorldCodecError::UnknownActionKind);
+        }
+        let arr = ciborium::Value::Array(vec![
+            cbor_magic(MAGIC_WAC1),
+            cbor_u8(VERSION_V1),
+            cbor_id(self.actor_entity_id),
+            cbor_id(self.body_entity_id),
+            cbor_tstr(&self.action_kind),
+            cbor_bytes(&self.params_cbor),
+            cbor_u8(self.action_scope),
+            cbor_u32(self.catalogue_version),
+            cbor_u64(self.tick),
+        ]);
+        let encoded = cbor_encode(&arr);
+        if encoded.len() > MAX_ACTION_BYTES {
+            return Err(WorldCodecError::PayloadTooLarge {
+                size: encoded.len(),
+            });
+        }
+        Ok(CanonicalBytes::from_vec(encoded))
+    }
+
+    /// Decode from canonical CBOR bytes.
+    ///
+    /// # Errors
+    /// Returns a [`WorldCodecError`] on any malformed input.
+    pub fn decode(bytes: &CanonicalBytes) -> Result<Self, WorldCodecError> {
+        if bytes.len() > MAX_ACTION_BYTES {
+            return Err(WorldCodecError::PayloadTooLarge { size: bytes.len() });
+        }
+        let items = cbor_decode_array(bytes.as_slice(), 9)?;
+        decode_magic(&items[0], MAGIC_WAC1)?;
+        decode_version(&items[1])?;
+        let actor_entity_id = decode_id(&items[2])?;
+        let body_entity_id = decode_id(&items[3])?;
+        let action_kind = decode_tstr(&items[4])?;
+        if action_kind != ACTION_KIND_IMPULSE && action_kind != ACTION_KIND_TARGET_VELOCITY {
+            return Err(WorldCodecError::UnknownActionKind);
+        }
+        let params_cbor = decode_bytes_max(&items[5], MAX_ACTION_BYTES)?;
+        let action_scope = decode_u8(&items[6])?;
+        let catalogue_version = decode_u32(&items[7])?;
+        let tick = decode_u64(&items[8])?;
+        Ok(Self {
+            actor_entity_id,
+            body_entity_id,
+            action_kind,
+            params_cbor,
+            action_scope,
+            catalogue_version,
+            tick,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WorldObservationV1 — CBOR definite array, magic WOB1 (ADR-047 v3)
+// ---------------------------------------------------------------------------
+
+/// A versioned world body observation (ADR-047 v3, `world.observation.v1`).
+///
+/// Array (20 elements):
+/// `[magic_bstr4, version_u8, body_id_bstr16, tick_u64, step_index_u64,
+///   pos_x_f32, pos_y_f32, pos_z_f32,
+///   orient_w_f32, orient_x_f32, orient_y_f32, orient_z_f32,
+///   vel_lin_x_f32, vel_lin_y_f32, vel_lin_z_f32,
+///   vel_ang_x_f32, vel_ang_y_f32, vel_ang_z_f32,
+///   sensor_kind_u8, sensor_value_bstr]`
+///
+/// Coordinate system: right-handed Y-up metres. Orientation: unit quaternion (w, x, y, z).
+/// All floats are `f32`; non-finite values cause a session fault (fail-closed).
+/// Sensor values are pre-quantized before storage per `sensor_min_resolution_u16` in config.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorldObservationV1 {
+    pub body_entity_id: EntityId,
+    pub tick: u64,
+    pub step_index: u64,
+    pub pos_x: f32,
+    pub pos_y: f32,
+    pub pos_z: f32,
+    pub orient_w: f32,
+    pub orient_x: f32,
+    pub orient_y: f32,
+    pub orient_z: f32,
+    pub vel_lin_x: f32,
+    pub vel_lin_y: f32,
+    pub vel_lin_z: f32,
+    pub vel_ang_x: f32,
+    pub vel_ang_y: f32,
+    pub vel_ang_z: f32,
+    pub sensor_kind: u8,
+    pub sensor_value: Vec<u8>,
+}
+
+impl WorldObservationV1 {
+    /// Encode to canonical CBOR bytes.
+    ///
+    /// # Errors
+    /// Returns [`WorldCodecError::NonFiniteFloat`] if any float is non-finite.
+    pub fn encode(&self) -> Result<CanonicalBytes, WorldCodecError> {
+        let arr = ciborium::Value::Array(vec![
+            cbor_magic(MAGIC_WOB1),
+            cbor_u8(VERSION_V1),
+            cbor_id(self.body_entity_id),
+            cbor_u64(self.tick),
+            cbor_u64(self.step_index),
+            cbor_f32(self.pos_x)?,
+            cbor_f32(self.pos_y)?,
+            cbor_f32(self.pos_z)?,
+            cbor_f32(self.orient_w)?,
+            cbor_f32(self.orient_x)?,
+            cbor_f32(self.orient_y)?,
+            cbor_f32(self.orient_z)?,
+            cbor_f32(self.vel_lin_x)?,
+            cbor_f32(self.vel_lin_y)?,
+            cbor_f32(self.vel_lin_z)?,
+            cbor_f32(self.vel_ang_x)?,
+            cbor_f32(self.vel_ang_y)?,
+            cbor_f32(self.vel_ang_z)?,
+            cbor_u8(self.sensor_kind),
+            cbor_bytes(&self.sensor_value),
+        ]);
+        Ok(CanonicalBytes::from_vec(cbor_encode(&arr)))
+    }
+
+    /// Decode from canonical CBOR bytes.
+    ///
+    /// # Errors
+    /// Returns a [`WorldCodecError`] on any malformed or non-finite input.
+    pub fn decode(bytes: &CanonicalBytes) -> Result<Self, WorldCodecError> {
+        let items = cbor_decode_array(bytes.as_slice(), 20)?;
+        decode_magic(&items[0], MAGIC_WOB1)?;
+        decode_version(&items[1])?;
+        let body_entity_id = decode_id(&items[2])?;
+        let tick = decode_u64(&items[3])?;
+        let step_index = decode_u64(&items[4])?;
+        let pos_x = decode_finite_f32(&items[5])?;
+        let pos_y = decode_finite_f32(&items[6])?;
+        let pos_z = decode_finite_f32(&items[7])?;
+        let orient_w = decode_finite_f32(&items[8])?;
+        let orient_x = decode_finite_f32(&items[9])?;
+        let orient_y = decode_finite_f32(&items[10])?;
+        let orient_z = decode_finite_f32(&items[11])?;
+        let vel_lin_x = decode_finite_f32(&items[12])?;
+        let vel_lin_y = decode_finite_f32(&items[13])?;
+        let vel_lin_z = decode_finite_f32(&items[14])?;
+        let vel_ang_x = decode_finite_f32(&items[15])?;
+        let vel_ang_y = decode_finite_f32(&items[16])?;
+        let vel_ang_z = decode_finite_f32(&items[17])?;
+        let sensor_kind = decode_u8(&items[18])?;
+        let sensor_value = decode_bytes_max(&items[19], MAX_ACTION_BYTES)?;
+        Ok(Self {
+            body_entity_id,
+            tick,
+            step_index,
+            pos_x,
+            pos_y,
+            pos_z,
+            orient_w,
+            orient_x,
+            orient_y,
+            orient_z,
+            vel_lin_x,
+            vel_lin_y,
+            vel_lin_z,
+            vel_ang_x,
+            vel_ang_y,
+            vel_ang_z,
+            sensor_kind,
+            sensor_value,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WorldConfigV1 — CBOR definite array, magic WCF1 (ADR-047 v3)
+// ---------------------------------------------------------------------------
+
+/// Pinned world configuration (ADR-047 v3, `world.config.v1`).
+///
+/// Array (14 elements):
+/// `[magic_bstr4, version_u8=1, timestep_u32_micros, coord_convention_u8,
+///   gravity_x_f32, gravity_y_f32, gravity_z_f32,
+///   backend_id_tstr, backend_version_tstr, backend_content_hash_bstr32,
+///   action_schema_version_u32, observation_schema_version_u32,
+///   sensor_min_resolution_u16, actuator_catalogue_version_u32]`
+///
+/// `coord_convention_u8`: `0 = right_handed_y_up_metres` (only valid value in v1).
+/// `sensor_min_resolution_u16`: minimum quantization in millimetres (minimum 100mm).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorldConfigV1 {
+    /// Fixed simulation timestep in microseconds.
+    pub timestep_micros: u32,
+    /// `0 = right_handed_y_up_metres` (only valid in v1).
+    pub coord_convention: u8,
+    pub gravity_x: f32,
+    pub gravity_y: f32,
+    pub gravity_z: f32,
+    pub backend_id: String,
+    pub backend_version: String,
+    pub backend_content_hash: [u8; 32],
+    pub action_schema_version: u32,
+    pub observation_schema_version: u32,
+    /// Minimum sensor quantization in millimetres (must be ≥ 100).
+    pub sensor_min_resolution_mm: u16,
+    pub actuator_catalogue_version: u32,
+}
+
+impl WorldConfigV1 {
+    /// Encode to canonical CBOR bytes.
+    ///
+    /// # Errors
+    /// Returns [`WorldCodecError::NonFiniteFloat`] if any gravity component is non-finite.
+    pub fn encode(&self) -> Result<CanonicalBytes, WorldCodecError> {
+        let arr = ciborium::Value::Array(vec![
+            cbor_magic(MAGIC_WCF1),
+            cbor_u8(VERSION_V1),
+            cbor_u32(self.timestep_micros),
+            cbor_u8(self.coord_convention),
+            cbor_f32(self.gravity_x)?,
+            cbor_f32(self.gravity_y)?,
+            cbor_f32(self.gravity_z)?,
+            cbor_tstr(&self.backend_id),
+            cbor_tstr(&self.backend_version),
+            cbor_bytes(&self.backend_content_hash),
+            cbor_u32(self.action_schema_version),
+            cbor_u32(self.observation_schema_version),
+            ciborium::Value::Integer(ciborium::value::Integer::from(
+                self.sensor_min_resolution_mm,
+            )),
+            cbor_u32(self.actuator_catalogue_version),
+        ]);
+        Ok(CanonicalBytes::from_vec(cbor_encode(&arr)))
+    }
+
+    /// Decode from canonical CBOR bytes.
+    ///
+    /// # Errors
+    /// Returns a [`WorldCodecError`] on any malformed input.
+    pub fn decode(bytes: &CanonicalBytes) -> Result<Self, WorldCodecError> {
+        let items = cbor_decode_array(bytes.as_slice(), 14)?;
+        decode_magic(&items[0], MAGIC_WCF1)?;
+        decode_version(&items[1])?;
+        let timestep_micros = decode_u32(&items[2])?;
+        let coord_convention = decode_u8(&items[3])?;
+        let gravity_x = decode_finite_f32(&items[4])?;
+        let gravity_y = decode_finite_f32(&items[5])?;
+        let gravity_z = decode_finite_f32(&items[6])?;
+        let backend_id = decode_tstr(&items[7])?;
+        let backend_version = decode_tstr(&items[8])?;
+        let backend_content_hash = decode_bytes_fixed::<32>(&items[9])?;
+        let action_schema_version = decode_u32(&items[10])?;
+        let observation_schema_version = decode_u32(&items[11])?;
+        let sensor_min_resolution_mm = decode_u16(&items[12])?;
+        let actuator_catalogue_version = decode_u32(&items[13])?;
+        Ok(Self {
+            timestep_micros,
+            coord_convention,
+            gravity_x,
+            gravity_y,
+            gravity_z,
+            backend_id,
+            backend_version,
+            backend_content_hash,
+            action_schema_version,
+            observation_schema_version,
+            sensor_min_resolution_mm,
+            actuator_catalogue_version,
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // World backend trait (physics seam)
 // ---------------------------------------------------------------------------
@@ -287,27 +808,36 @@ impl Driver for WorldDriver {
             }
         }
 
-        // Create event drafts for each observation
+        // Emit world.observation.v1 drafts using versioned codec (ADR-047 v3)
         let mut drafts = Vec::new();
         for obs in &observations {
-            let payload = WorldObservationPayload {
-                entity_id: obs.entity_id.to_string(),
-                x: obs.x,
-                y: obs.y,
+            #[allow(clippy::cast_possible_truncation)]
+            let v1 = WorldObservationV1 {
+                body_entity_id: obs.entity_id,
+                tick: self.tick,
+                step_index: self.tick,
+                pos_x: obs.x as f32,
+                pos_y: obs.y as f32,
+                pos_z: 0.0,
+                orient_w: 1.0,
+                orient_x: 0.0,
+                orient_y: 0.0,
+                orient_z: 0.0,
+                vel_lin_x: 0.0,
+                vel_lin_y: 0.0,
+                vel_lin_z: 0.0,
+                vel_ang_x: 0.0,
+                vel_ang_y: 0.0,
+                vel_ang_z: 0.0,
+                sensor_kind: 0,
+                sensor_value: vec![],
             };
-
-            let mut buf = Vec::new();
-            // Writing to Vec<u8> is infallible with ciborium.
-            ciborium::into_writer(&payload, &mut buf)
-                .expect("ciborium write to Vec<u8> is infallible");
-
-            let draft = pos_core::event::EventDraft::new(
+            let payload = v1.encode().map_err(|_| RuntimeError::StepFailed)?;
+            drafts.push(pos_core::event::EventDraft::new(
                 obs.entity_id,
-                Kind::new(EVENT_TYPE_OBSERVATION),
-                CanonicalBytes::from_vec(buf),
-            );
-
-            drafts.push(draft);
+                Kind::new(EVENT_TYPE_OBSERVATION_V1),
+                payload,
+            ));
         }
 
         self.tick = self.tick.wrapping_add(1);
@@ -397,6 +927,342 @@ mod tests {
             signature: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // WorldActionV1 codec tests
+    // ---------------------------------------------------------------------------
+
+    fn sample_action() -> WorldActionV1 {
+        WorldActionV1 {
+            actor_entity_id: EntityId::new(),
+            body_entity_id: EntityId::new(),
+            action_kind: ACTION_KIND_IMPULSE.to_owned(),
+            params_cbor: vec![0xf6], // CBOR null — minimal valid CBOR
+            action_scope: 0,
+            catalogue_version: 42,
+            tick: 100,
+        }
+    }
+
+    fn sample_observation() -> WorldObservationV1 {
+        WorldObservationV1 {
+            body_entity_id: EntityId::new(),
+            tick: 7,
+            step_index: 3,
+            pos_x: 1.0,
+            pos_y: 2.0,
+            pos_z: 3.0,
+            orient_w: 1.0,
+            orient_x: 0.0,
+            orient_y: 0.0,
+            orient_z: 0.0,
+            vel_lin_x: 0.1,
+            vel_lin_y: 0.2,
+            vel_lin_z: 0.0,
+            vel_ang_x: 0.0,
+            vel_ang_y: 0.0,
+            vel_ang_z: 0.0,
+            sensor_kind: 0,
+            sensor_value: vec![],
+        }
+    }
+
+    fn sample_config() -> WorldConfigV1 {
+        WorldConfigV1 {
+            timestep_micros: 16_667,
+            coord_convention: 0,
+            gravity_x: 0.0,
+            gravity_y: -9.81,
+            gravity_z: 0.0,
+            backend_id: "simple-kinematic".to_owned(),
+            backend_version: "1.0.0".to_owned(),
+            backend_content_hash: [3u8; 32],
+            action_schema_version: 1,
+            observation_schema_version: 1,
+            sensor_min_resolution_mm: 100,
+            actuator_catalogue_version: 1,
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_action_v1_round_trip() {
+        let a = sample_action();
+        let bytes = a.encode().unwrap();
+        let decoded = WorldActionV1::decode(&bytes).unwrap();
+        assert_eq!(decoded.actor_entity_id, a.actor_entity_id);
+        assert_eq!(decoded.body_entity_id, a.body_entity_id);
+        assert_eq!(decoded.action_kind, a.action_kind);
+        assert_eq!(decoded.action_scope, a.action_scope);
+        assert_eq!(decoded.params_cbor, a.params_cbor);
+        assert_eq!(decoded.catalogue_version, a.catalogue_version);
+        assert_eq!(decoded.tick, a.tick);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_action_v1_target_velocity_allowed() {
+        let mut a = sample_action();
+        a.action_kind = ACTION_KIND_TARGET_VELOCITY.to_owned();
+        let bytes = a.encode().unwrap();
+        let decoded = WorldActionV1::decode(&bytes).unwrap();
+        assert_eq!(decoded.action_kind, ACTION_KIND_TARGET_VELOCITY);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_action_v1_unknown_kind_rejected_on_encode() {
+        let mut a = sample_action();
+        a.action_kind = "unknown".to_owned();
+        assert!(matches!(
+            a.encode(),
+            Err(WorldCodecError::UnknownActionKind)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_action_v1_wrong_magic_rejected() {
+        let a = sample_action();
+        let mut bytes = a.encode().unwrap().as_slice().to_vec();
+        if let Some(pos) = bytes.iter().position(|&b| b == b'W') {
+            bytes[pos] = b'X';
+        }
+        assert!(matches!(
+            WorldActionV1::decode(&CanonicalBytes::from_vec(bytes)),
+            Err(WorldCodecError::WrongMagic)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_action_v1_trailing_bytes_rejected() {
+        let a = sample_action();
+        let mut bytes = a.encode().unwrap().as_slice().to_vec();
+        bytes.push(0x00);
+        assert!(matches!(
+            WorldActionV1::decode(&CanonicalBytes::from_vec(bytes)),
+            Err(WorldCodecError::TrailingBytes)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_action_v1_empty_params_allowed() {
+        let mut a = sample_action();
+        a.params_cbor = vec![0xf6]; // CBOR null
+        let bytes = a.encode().unwrap();
+        let decoded = WorldActionV1::decode(&bytes).unwrap();
+        assert_eq!(decoded.params_cbor, vec![0xf6]);
+    }
+
+    // ---------------------------------------------------------------------------
+    // WorldObservationV1 codec tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_observation_v1_round_trip() {
+        let o = sample_observation();
+        let bytes = o.encode().unwrap();
+        let decoded = WorldObservationV1::decode(&bytes).unwrap();
+        assert_eq!(decoded.body_entity_id, o.body_entity_id);
+        assert_eq!(decoded.tick, o.tick);
+        assert_eq!(decoded.step_index, o.step_index);
+        assert!((decoded.pos_x - o.pos_x).abs() < f32::EPSILON);
+        assert!((decoded.pos_y - o.pos_y).abs() < f32::EPSILON);
+        assert!((decoded.orient_w - o.orient_w).abs() < f32::EPSILON);
+        assert!((decoded.vel_lin_x - o.vel_lin_x).abs() < f32::EPSILON);
+        assert_eq!(decoded.sensor_kind, o.sensor_kind);
+        assert_eq!(decoded.sensor_value, o.sensor_value);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_observation_v1_nan_pos_rejected_on_encode() {
+        let mut o = sample_observation();
+        o.pos_x = f32::NAN;
+        assert!(matches!(o.encode(), Err(WorldCodecError::NonFiniteFloat)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_observation_v1_infinity_orient_rejected_on_encode() {
+        let mut o = sample_observation();
+        o.orient_x = f32::INFINITY;
+        assert!(matches!(o.encode(), Err(WorldCodecError::NonFiniteFloat)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_observation_v1_wrong_magic_rejected() {
+        let o = sample_observation();
+        let mut bytes = o.encode().unwrap().as_slice().to_vec();
+        if let Some(pos) = bytes.iter().position(|&b| b == b'W') {
+            bytes[pos] = b'X';
+        }
+        assert!(matches!(
+            WorldObservationV1::decode(&CanonicalBytes::from_vec(bytes)),
+            Err(WorldCodecError::WrongMagic)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_observation_v1_trailing_bytes_rejected() {
+        let o = sample_observation();
+        let mut bytes = o.encode().unwrap().as_slice().to_vec();
+        bytes.push(0x00);
+        assert!(matches!(
+            WorldObservationV1::decode(&CanonicalBytes::from_vec(bytes)),
+            Err(WorldCodecError::TrailingBytes)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_observation_v1_wrong_array_length_rejected() {
+        let truncated = ciborium::Value::Array(vec![
+            ciborium::Value::Bytes(b"WOB1".to_vec()),
+            ciborium::Value::Integer(1.into()),
+        ]);
+        let mut buf = Vec::new();
+        ciborium::into_writer(&truncated, &mut buf).unwrap();
+        assert!(matches!(
+            WorldObservationV1::decode(&CanonicalBytes::from_vec(buf)),
+            Err(WorldCodecError::WrongArrayLength)
+        ));
+    }
+
+    // ---------------------------------------------------------------------------
+    // WorldConfigV1 codec tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_config_v1_round_trip() {
+        let c = sample_config();
+        let bytes = c.encode().unwrap();
+        let decoded = WorldConfigV1::decode(&bytes).unwrap();
+        assert_eq!(decoded.backend_id, c.backend_id);
+        assert_eq!(decoded.backend_version, c.backend_version);
+        assert_eq!(decoded.backend_content_hash, c.backend_content_hash);
+        assert_eq!(decoded.timestep_micros, c.timestep_micros);
+        assert_eq!(decoded.coord_convention, c.coord_convention);
+        assert!((decoded.gravity_y - c.gravity_y).abs() < f32::EPSILON);
+        assert_eq!(decoded.sensor_min_resolution_mm, c.sensor_min_resolution_mm);
+        assert_eq!(
+            decoded.actuator_catalogue_version,
+            c.actuator_catalogue_version
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_config_v1_wrong_magic_rejected() {
+        let c = sample_config();
+        let mut bytes = c.encode().unwrap().as_slice().to_vec();
+        if let Some(pos) = bytes.iter().position(|&b| b == b'W') {
+            bytes[pos] = b'X';
+        }
+        assert!(matches!(
+            WorldConfigV1::decode(&CanonicalBytes::from_vec(bytes)),
+            Err(WorldCodecError::WrongMagic)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_config_v1_trailing_bytes_rejected() {
+        let c = sample_config();
+        let mut bytes = c.encode().unwrap().as_slice().to_vec();
+        bytes.push(0xFF);
+        assert!(matches!(
+            WorldConfigV1::decode(&CanonicalBytes::from_vec(bytes)),
+            Err(WorldCodecError::TrailingBytes)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_config_v1_non_finite_gravity_rejected() {
+        let mut c = sample_config();
+        c.gravity_y = f32::NAN;
+        assert!(matches!(c.encode(), Err(WorldCodecError::NonFiniteFloat)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_codec_error_is_debug() {
+        let e = WorldCodecError::WrongMagic;
+        assert!(!format!("{e:?}").is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_codec_error_display() {
+        assert!(!WorldCodecError::NonFiniteFloat.to_string().is_empty());
+        assert!(!WorldCodecError::TrailingBytes.to_string().is_empty());
+        assert!(!WorldCodecError::CborError.to_string().is_empty());
+        assert!(!WorldCodecError::WrongVersion.to_string().is_empty());
+        assert!(!WorldCodecError::WrongArrayLength.to_string().is_empty());
+        assert!(!WorldCodecError::WrongFieldType.to_string().is_empty());
+        assert!(!WorldCodecError::UnknownActionKind.to_string().is_empty());
+        assert!(!format!("{}", WorldCodecError::PayloadTooLarge { size: 5000 }).is_empty());
+    }
+
+    fn flip_version(bytes: &[u8]) -> Vec<u8> {
+        let mut cursor = std::io::Cursor::new(bytes);
+        let mut val: ciborium::Value = ciborium::from_reader(&mut cursor).unwrap();
+        if let ciborium::Value::Array(ref mut items) = val {
+            items[1] = ciborium::Value::Integer(99_i64.into());
+        }
+        let mut buf = Vec::new();
+        ciborium::into_writer(&val, &mut buf).unwrap();
+        buf
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_observation_v1_wrong_version_rejected() {
+        let o = sample_observation();
+        let flipped = flip_version(o.encode().unwrap().as_slice());
+        assert!(matches!(
+            WorldObservationV1::decode(&CanonicalBytes::from_vec(flipped)),
+            Err(WorldCodecError::WrongVersion)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_action_v1_wrong_version_rejected() {
+        let a = sample_action();
+        let flipped = flip_version(a.encode().unwrap().as_slice());
+        assert!(matches!(
+            WorldActionV1::decode(&CanonicalBytes::from_vec(flipped)),
+            Err(WorldCodecError::WrongVersion)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_config_v1_wrong_version_rejected() {
+        let c = sample_config();
+        let flipped = flip_version(c.encode().unwrap().as_slice());
+        assert!(matches!(
+            WorldConfigV1::decode(&CanonicalBytes::from_vec(flipped)),
+            Err(WorldCodecError::WrongVersion)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_action_v1_invalid_cbor_rejected() {
+        assert!(matches!(
+            WorldActionV1::decode(&CanonicalBytes::from_vec(vec![0xFF, 0xFF])),
+            Err(WorldCodecError::CborError)
+        ));
     }
 
     #[test]
@@ -609,12 +1475,12 @@ mod tests {
 
         let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
         assert_eq!(out.drafts.len(), 1);
-        assert_eq!(out.drafts[0].event_type.as_str(), EVENT_TYPE_OBSERVATION);
+        assert_eq!(out.drafts[0].event_type.as_str(), EVENT_TYPE_OBSERVATION_V1);
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn driver_step_produces_decodable_payload() {
+    fn driver_step_produces_decodable_v1_payload() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("test").unwrap();
         let entity = EntityId::new();
@@ -629,11 +1495,10 @@ mod tests {
         let mut driver = WorldDriver::new(vec![body], backend);
 
         let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
-        let payload: WorldObservationPayload =
-            ciborium::from_reader(out.drafts[0].payload.as_slice()).unwrap();
-
-        assert!((payload.x - 7.0).abs() < f64::EPSILON);
-        assert!((payload.y - 13.0).abs() < f64::EPSILON);
+        let obs = WorldObservationV1::decode(&out.drafts[0].payload).unwrap();
+        assert!((obs.pos_x - 7.0_f32).abs() < f32::EPSILON);
+        assert!((obs.pos_y - 13.0_f32).abs() < f32::EPSILON);
+        assert_eq!(obs.tick, 0);
     }
 
     #[test]
