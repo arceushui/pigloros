@@ -1,3 +1,4 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 use pos_core::{
     clock::{Seq, WallTime},
     crypto::Hash,
