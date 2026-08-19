@@ -1857,7 +1857,10 @@ mod tests {
                 request.clone(),
                 HASH,
                 None,
-                DecisionResultV1::Accepted { action_index, confidence },
+                DecisionResultV1::Accepted {
+                    action_index,
+                    confidence
+                },
             ),
             Err(AgentDecisionError::InvalidResponseDigest)
         );
