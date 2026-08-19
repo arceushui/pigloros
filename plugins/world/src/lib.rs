@@ -284,15 +284,6 @@ fn decode_tstr(val: &ciborium::Value) -> Result<String, WorldCodecError> {
     }
 }
 
-fn decode_u16(val: &ciborium::Value) -> Result<u16, WorldCodecError> {
-    match val {
-        ciborium::Value::Integer(n) => {
-            u16::try_from(*n).map_err(|_| WorldCodecError::WrongFieldType)
-        }
-        _ => Err(WorldCodecError::WrongFieldType),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // WorldActionV1 — CBOR definite array, magic WAC1 (ADR-047 v3)
 // ---------------------------------------------------------------------------
