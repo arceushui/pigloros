@@ -236,10 +236,7 @@ impl Driver for ProviderBackedAgentDriver {
         &mut self,
         evidence: &DriverRecoveryEvidence,
     ) -> Result<(), RuntimeError> {
-        if self.staged_tick.is_some()
-            || self.staged_restore_tick.is_some()
-            || self.committed_tick != 0
-        {
+        if self.staged_restore_tick.is_some() || self.committed_tick != 0 {
             return Err(RuntimeError::DriverRecoveryNotFresh {
                 driver: DRIVER_NAME.to_owned(),
             });
@@ -1206,12 +1203,14 @@ mod tests {
             .step_all_anchored(fixture.timeline, Seq::ZERO)
             .unwrap();
         let segments = [TimelineHistorySegment::new(fixture.timeline, Seq::ZERO)];
+        // The registry guards restore_driver_state with PendingDriverStep when
+        // any driver has a staged step, so the error surfaces at registry level.
         let err = fixture
             .registry
             .restore_driver_state(&segments, &[])
             .unwrap_err();
         assert!(
-            matches!(err, RuntimeError::DriverRecoveryNotFresh { .. }),
+            matches!(err, RuntimeError::PendingDriverStep),
             "{err:?}"
         );
         fixture.registry.abort_step();
