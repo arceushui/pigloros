@@ -1,4 +1,4 @@
-#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(all(feature = "runtime", not(target_arch = "wasm32"), not(test)))]
