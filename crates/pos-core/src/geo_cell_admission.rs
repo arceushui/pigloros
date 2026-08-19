@@ -2860,4 +2860,37 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn geo_cell_admission_helper_functions_cover_overflow_and_wrong_type_arms() {
+        // signed_value: too-large positive integer cannot be represented as i64.
+        let too_large = Value::Integer(u64::MAX.into());
+        assert!(matches!(
+            signed_value(Some(&too_large), "source_time_bucket"),
+            Err(GeoCellAdmissionError::WrongFieldType("source_time_bucket"))
+        ));
+
+        // unsigned_value: negative integer cannot be represented as u64.
+        let negative = Value::Integer((-1i64).into());
+        assert!(matches!(
+            unsigned_value(Some(&negative), "quality_flags"),
+            Err(GeoCellAdmissionError::WrongFieldType("quality_flags"))
+        ));
+
+        // text_value: non-text value present → WrongFieldType.
+        let not_text = Value::Integer(1.into());
+        assert!(matches!(
+            text_value(Some(not_text), "admission_snapshot_id"),
+            Err(GeoCellAdmissionError::WrongFieldType(
+                "admission_snapshot_id"
+            ))
+        ));
+
+        // unsigned_value: non-integer value present → WrongFieldType.
+        let not_int = Value::Text("x".to_owned());
+        assert!(matches!(
+            unsigned_value(Some(&not_int), "policy_version"),
+            Err(GeoCellAdmissionError::WrongFieldType("policy_version"))
+        ));
+    }
 }

@@ -1423,6 +1423,78 @@ mod tests {
         assert_eq!(drafts[0].event_type.as_str(), "driver.observed");
     }
 
+    fn test_event(seq: u64, entity: EntityId) -> Event {
+        Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new("test.event"),
+            payload: CanonicalBytes::from_vec(vec![]),
+            wall_time: WallTime::from_micros(seq),
+            seq: Seq::from_u64(seq),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0u8; 32]),
+        }
+    }
+
+    #[test]
+    fn recovery_evidence_validation_rejects_all_invalid_shapes() {
+        let tl = TimelineId::new();
+        let entity = EntityId::new();
+        let seg1 = TimelineHistorySegment::new(tl, Seq::from_u64(1));
+
+        // 1. Empty timeline ancestry
+        let mut registry = PluginRegistry::new();
+        assert!(matches!(
+            registry.restore_driver_state(&[], &[]),
+            Err(RuntimeError::InvalidRecoveryEvidence { .. })
+        ));
+
+        // 2. Duplicate timeline in ancestry
+        assert!(matches!(
+            registry.restore_driver_state(&[seg1, seg1], &[]),
+            Err(RuntimeError::InvalidRecoveryEvidence { .. })
+        ));
+
+        // 3. Decreasing (unordered) ancestry bounds
+        let seg2 = TimelineHistorySegment::new(TimelineId::new(), Seq::ZERO);
+        assert!(matches!(
+            registry.restore_driver_state(&[seg1, seg2], &[]),
+            Err(RuntimeError::InvalidRecoveryEvidence { .. })
+        ));
+
+        // 4. Events not starting at sequence 1
+        let e2 = test_event(2, entity);
+        assert!(matches!(
+            registry
+                .restore_driver_state(&[TimelineHistorySegment::new(tl, Seq::from_u64(2))], &[e2],),
+            Err(RuntimeError::InvalidRecoveryEvidence { .. })
+        ));
+
+        // 5. Events not contiguous
+        let e1 = test_event(1, entity);
+        let e3 = test_event(3, entity);
+        assert!(matches!(
+            registry.restore_driver_state(
+                &[TimelineHistorySegment::new(tl, Seq::from_u64(3))],
+                &[e1, e3],
+            ),
+            Err(RuntimeError::InvalidRecoveryEvidence { .. })
+        ));
+
+        // 6. Events not reaching the final bound (seq ends at 1, bound is 2)
+        let e1b = test_event(1, entity);
+        assert!(matches!(
+            registry.restore_driver_state(
+                &[TimelineHistorySegment::new(tl, Seq::from_u64(2))],
+                &[e1b],
+            ),
+            Err(RuntimeError::InvalidRecoveryEvidence { .. })
+        ));
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn tick_cadenced_deduplicates_snapshot_subscriptions() {

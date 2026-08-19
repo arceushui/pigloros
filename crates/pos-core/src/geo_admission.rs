@@ -814,4 +814,38 @@ mod tests {
             .contains("outcome unknown"));
         assert_eq!(unknown.event_id(), None);
     }
+
+    #[test]
+    fn validate_for_rejects_event_id_mismatch() {
+        let timeline = TimelineId::new();
+        let request = request(timeline);
+        let snapshot = request.snapshot().clone();
+        let event_id = EventId::new();
+        let event_seq = Seq::from_u64(1);
+        let link =
+            GeoLocationAdmissionLinkV1::for_snapshot(timeline, event_id, event_seq, &snapshot);
+
+        // Different event_id: the link was created for event_id but validated against a new one.
+        assert!(link
+            .validate_for(&snapshot, timeline, EventId::new(), event_seq)
+            .is_err());
+    }
+
+    #[test]
+    fn fence_permits_rejects_withdrawn_or_zero_epoch() {
+        let timeline = TimelineId::new();
+        let request = request(timeline);
+
+        // admission_epoch == 0 → not permitted
+        let zero_epoch = GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 0));
+        assert!(!zero_epoch.permits(&request));
+
+        // withdrawn == true → not permitted
+        let withdrawn = GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, true, 9));
+        assert!(!withdrawn.permits(&request));
+
+        // Both conditions satisfied → permitted
+        let valid = GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9));
+        assert!(valid.permits(&request));
+    }
 }
