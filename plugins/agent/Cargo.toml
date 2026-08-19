@@ -12,9 +12,9 @@ pos-runtime = { path = "../../crates/pos-runtime" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-ciborium = { workspace = true }
-blake3 = { workspace = true }
-ulid = { workspace = true }
+ciborium = { workspace = true } # CBOR wire encoding for all PDR1/PAA1/PQR1/PAC1/PDP1 message types
+blake3 = { workspace = true }  # content-addressed hashing for request, record, and action digests
+ulid = { workspace = true }    # EntityId / TimelineId newtype wrappers sourced from pos-core
 
 [dev-dependencies]
 pos-store = { path = "../../crates/pos-store" }
