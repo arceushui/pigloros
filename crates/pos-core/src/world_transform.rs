@@ -1261,4 +1261,45 @@ mod tests {
             .expect("valid restore replaces the registry");
         assert!(registry.resolve(&capability, &second.reference()).is_ok());
     }
+
+    #[test]
+    fn south_pole_and_non_finite_height_are_rejected() {
+        // Negative pole: first || branch of the PoleUnsupported check.
+        assert!(matches!(
+            Wgs84PositionV1::new(-90.0, 0.0, 0.0),
+            Err(WorldTransformError::PoleUnsupported)
+        ));
+        // Non-finite height: third || branch of the NonFiniteCoordinate check.
+        assert!(matches!(
+            Wgs84PositionV1::new(0.0, 0.0, f64::NAN),
+            Err(WorldTransformError::NonFiniteCoordinate)
+        ));
+    }
+
+    #[test]
+    fn coordinate_from_non_finite_north_or_up_is_rejected() {
+        // Second || branch of the NonFiniteCoordinate check in from_components.
+        assert!(matches!(
+            WorldCoordinateV1::from_components(0.0, f64::NAN, 0.0),
+            Err(WorldTransformError::NonFiniteCoordinate)
+        ));
+        // Third || branch.
+        assert!(matches!(
+            WorldCoordinateV1::from_components(0.0, 0.0, f64::NAN),
+            Err(WorldTransformError::NonFiniteCoordinate)
+        ));
+    }
+
+    #[test]
+    fn translation_rejects_non_finite_north_or_up_offset() {
+        let coord = WorldCoordinateV1::from_components(0.0, 0.0, 0.0).expect("origin is finite");
+        assert!(matches!(
+            coord.translated_by(0.0, f64::NAN, 0.0),
+            Err(WorldTransformError::NonFiniteCoordinate)
+        ));
+        assert!(matches!(
+            coord.translated_by(0.0, 0.0, f64::NAN),
+            Err(WorldTransformError::NonFiniteCoordinate)
+        ));
+    }
 }
