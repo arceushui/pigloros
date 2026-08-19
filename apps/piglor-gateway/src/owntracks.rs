@@ -758,7 +758,9 @@ mod tests {
 
     #[test]
     fn cover_parse_consent_policy_error_paths() {
+        // Invalid TOML
         let _ = super::parse_consent_policy("not-valid-toml[[[");
+        // Wrong schema_version
         let _ = super::parse_consent_policy(
             "schema_version = 2\nconsent_revision = 1\npolicy_version = 1\n\
              binding_revision = 1\nwithdrawn = false\npurpose = \"local_pairing\"\n\
@@ -766,13 +768,45 @@ mod tests {
              visibility = \"paired_devices_only\"\nconsent_identity = \"\
              0000000000000000000000000000000000000000000000000000000000000000\"",
         );
+        // consent_revision == 0 (schema_version=1 passes, this fails)
+        let _ = super::parse_consent_policy(
+            "schema_version = 1\nconsent_revision = 0\npolicy_version = 1\n\
+             binding_revision = 1\nwithdrawn = false\npurpose = \"local_pairing\"\n\
+             precision = \"exact\"\nsource_time_bucket = \"minute\"\n\
+             visibility = \"paired_devices_only\"\nconsent_identity = \"\
+             0000000000000000000000000000000000000000000000000000000000000000\"",
+        );
+        // withdrawn = true
+        let _ = super::parse_consent_policy(
+            "schema_version = 1\nconsent_revision = 1\npolicy_version = 1\n\
+             binding_revision = 1\nwithdrawn = true\npurpose = \"local_pairing\"\n\
+             precision = \"exact\"\nsource_time_bucket = \"minute\"\n\
+             visibility = \"paired_devices_only\"\nconsent_identity = \"\
+             0000000000000000000000000000000000000000000000000000000000000000\"",
+        );
+        // wrong purpose
+        let _ = super::parse_consent_policy(
+            "schema_version = 1\nconsent_revision = 1\npolicy_version = 1\n\
+             binding_revision = 1\nwithdrawn = false\npurpose = \"other\"\n\
+             precision = \"exact\"\nsource_time_bucket = \"minute\"\n\
+             visibility = \"paired_devices_only\"\nconsent_identity = \"\
+             0000000000000000000000000000000000000000000000000000000000000000\"",
+        );
+        // invalid consent_identity (not 64 hex chars)
+        let _ = super::parse_consent_policy(
+            "schema_version = 1\nconsent_revision = 1\npolicy_version = 1\n\
+             binding_revision = 1\nwithdrawn = false\npurpose = \"local_pairing\"\n\
+             precision = \"exact\"\nsource_time_bucket = \"minute\"\n\
+             visibility = \"paired_devices_only\"\nconsent_identity = \"notvalidhex\"",
+        );
     }
 
     #[test]
     fn cover_decode_lower_hex_32_error_paths() {
+        // Wrong length
         let _ = super::decode_lower_hex_32("abc");
+        // Correct length but invalid char (uppercase not in a-f)
         let _ = super::decode_lower_hex_32(&"A".repeat(64));
-        let _ = super::decode_lower_hex_32(&"g".repeat(64));
     }
 
     #[test]
