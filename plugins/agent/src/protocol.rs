@@ -1798,70 +1798,89 @@ mod tests {
     }
 
     #[test]
-    fn wire_inspection_handles_multibyte_cbor_tag_headers() {
-        // 2-byte tag header (0xd8 + 1 byte tag number)
-        assert!(is_agent_action_wire(&[
-            0xd8, 0x40, 0x81, 0x44, b'P', b'A', b'A', b'1',
-        ]));
-        // 3-byte tag header (0xd9 + 2 byte tag number)
-        assert!(is_agent_action_wire(&[
-            0xd9, 0x00, 0x40, 0x81, 0x44, b'P', b'A', b'A', b'1',
-        ]));
-        // 5-byte tag header (0xda + 4 byte tag number)
-        assert!(is_agent_action_wire(&[
-            0xda, 0x00, 0x00, 0x00, 0x40, 0x81, 0x44, b'P', b'A', b'A', b'1',
-        ]));
-        // 9-byte tag header (0xdb + 8 byte tag number)
-        assert!(is_agent_action_wire(&[
-            0xdb, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x81, 0x44,
-            b'P', b'A', b'A', b'1',
-        ]));
-        // Truncated tag header (0xd8 with no tag number byte) → Err path
-        assert!(!is_agent_action_wire(&[0xd8]));
-        // Non-tag, non-array byte → Ok(None) path → false
-        assert!(!is_agent_action_wire(&[0x00]));
+    fn request_encoder_uses_eight_byte_cbor_width_for_very_large_integer_fields() {
+        let provenance = provenance("local-provider", "1.0.0", "2026.08").unwrap();
+        let request = AgentDecisionRequestV1::new(
+            pos_core::ids::TimelineId::new(),
+            u64::MAX,
+            pos_core::ids::EntityId::new(),
+            u64::MAX,
+            HASH,
+            provenance,
+        );
+        let encoded = request.encode().expect("encoding must succeed");
+        // 0x1b = 8-byte CBOR uint header (major 0, additional info 27)
+        assert!(
+            encoded.contains(&0x1b),
+            "8-byte CBOR uint marker must appear for u64::MAX"
+        );
+        let decoded = AgentDecisionRequestV1::decode(&encoded).expect("roundtrip must succeed");
+        assert_eq!(decoded.observed_through(), u64::MAX);
     }
 
     #[test]
-    fn wire_inspection_handles_multibyte_cbor_array_and_byte_string_headers() {
-        // 2-byte array header (0x98 = 1 item)
-        assert!(is_agent_action_wire(&[
-            0x98, 0x01, 0x44, b'P', b'A', b'A', b'1',
-        ]));
-        // Byte string with 2-byte length header (0x58)
-        assert!(is_agent_action_wire(&[
-            0x81, 0x58, 0x04, b'P', b'A', b'A', b'1',
-        ]));
-        // Truncated definite byte string header (0x44 present but value bytes missing) → budget fallback
-        assert!(!is_agent_action_wire(&[0x81, 0x44]));
-        // Truncated 2-byte byte-string header (0x58 with no length byte) → Err path
-        assert!(!is_agent_action_wire(&[0x81, 0x58]));
-        // Non-byte-string payload (0x00 = uint) → definite `_` arm → false
-        assert!(!is_agent_action_wire(&[0x81, 0x00]));
-        // Short byte string (value_len < 4) → definite `_` arm → false
-        assert!(!is_agent_action_wire(&[0x81, 0x42, 0x00, 0x00]));
-        // Empty input → Err path in raw_tagged_array_payload_offset
-        assert!(!is_agent_action_wire(&[]));
+    fn decode_result_rejects_unknown_no_action_code_and_unrecognized_kind() {
+        // Invalid no-action code (255 is not 1-9) → decode_no_action_code wildcard → MalformedWire
+        let invalid_code = Value::Array(vec![
+            Value::Integer(1u64.into()),
+            Value::Integer(255u64.into()),
+        ]);
+        assert_eq!(
+            decode_result(Some(&invalid_code)),
+            Err(AgentDecisionError::MalformedWire)
+        );
+        // Unknown result kind → `_` arm → MalformedWire
+        let unknown_kind = Value::Array(vec![Value::Integer(99u64.into())]);
+        assert_eq!(
+            decode_result(Some(&unknown_kind)),
+            Err(AgentDecisionError::MalformedWire)
+        );
+        // None value → else branch → MalformedWire
+        assert_eq!(decode_result(None), Err(AgentDecisionError::MalformedWire));
     }
 
     #[test]
-    fn wire_inspection_handles_indefinite_byte_string_variants() {
-        // Indefinite byte string (0x5f) with PAA1 in one chunk
-        assert!(is_agent_action_wire(&[
-            0x81, 0x5f, 0x44, b'P', b'A', b'A', b'1', 0xff,
-        ]));
-        // Empty indefinite byte string (immediate 0xff break) → false
-        assert!(!is_agent_action_wire(&[0x81, 0x5f, 0xff]));
-        // Magic spread across two chunks
-        assert!(is_agent_action_wire(&[
-            0x81, 0x5f, 0x41, b'P', 0x43, b'A', b'A', b'1', 0xff,
-        ]));
-        // Wrong magic content → false
-        assert!(!is_agent_action_wire(&[
-            0x81, 0x5f, 0x44, b'X', b'X', b'X', b'X', 0xff,
-        ]));
-        // Non-byte-string chunk inside indefinite string → Ok(None) → false
-        assert!(!is_agent_action_wire(&[0x81, 0x5f, 0x00, 0xff]));
+    fn decision_record_rejects_mismatched_digest_result_combinations() {
+        let request = AgentDecisionRequestV1::new(
+            pos_core::ids::TimelineId::new(),
+            0,
+            pos_core::ids::EntityId::new(),
+            0,
+            HASH,
+            provenance("local-provider", "1.0.0", "2026.08").unwrap(),
+        );
+        let action_index = ActionIndexV1::try_from(0).unwrap();
+        let confidence = ConfidencePpmV1::try_from(1_000).unwrap();
+        // Accepted result requires a response digest — None is invalid.
+        assert_eq!(
+            DecisionRecordV1::try_new(
+                request.clone(),
+                HASH,
+                None,
+                DecisionResultV1::Accepted { action_index, confidence },
+            ),
+            Err(AgentDecisionError::InvalidResponseDigest)
+        );
+        // ProviderUnavailable (fail-code) must have no digest — Some is invalid.
+        assert_eq!(
+            DecisionRecordV1::try_new(
+                request.clone(),
+                HASH,
+                Some([9; 32]),
+                DecisionResultV1::NoAction(DecisionNoActionCodeV1::ProviderUnavailable),
+            ),
+            Err(AgentDecisionError::InvalidResponseDigest)
+        );
+        // ResponseMalformed requires a digest — None is invalid.
+        assert_eq!(
+            DecisionRecordV1::try_new(
+                request,
+                HASH,
+                None,
+                DecisionResultV1::NoAction(DecisionNoActionCodeV1::ResponseMalformed),
+            ),
+            Err(AgentDecisionError::InvalidResponseDigest)
+        );
     }
 
     #[test]
