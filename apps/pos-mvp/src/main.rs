@@ -4,12 +4,13 @@
 
 //! `PiglorOS` Single-User MVP: decision preview.
 //!
-//! Shows the general loop — preferences → scored options → recommendation →
-//! calibrated outcomes — using a pluggable example scenario (not trip-only).
+//! Shows the general loop — preferences → scored options → recommendation.
 //!
 //! ```text
-//! cargo run -p pos-mvp -- --scenario places
-//! cargo run -p pos-mvp -- --scenario work --prefer autonomy=1.0
+//! cargo run -p pos-mvp -- --prefer nature=0.8 --prefer food=0.9
+//! cargo run -p pos-mvp -- --a-label "Option A" --a-tags "nature quiet" \
+//!                         --b-label "Option B" --b-tags "city food" \
+//!                         --prefer nature=0.8
 //! ```
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
@@ -21,150 +22,15 @@ use ai_influence::{format_ai_influence_lines, local_ai_influence, unavailable_ai
 use fork_compare::{print_fork_compare, run_personal_fork_compare};
 use gateway_context::{apply_society_context, fetch_timeline_context, plain_language_context};
 use pos_core::ids::EntityId;
-use pos_experiment::{BacktestConfig, BacktestRunner};
-use pos_plugin_eval::{EvalPlugin, EvalReducer};
-use pos_plugin_geo::{SpatialCloaker, Wgs84Point};
-use pos_plugin_persona::{
-    PersonaEvalDriver, PersonaModel, PersonaPlugin, PersonaReducer, PreferencePair,
-};
+use pos_plugin_persona::{PersonaEvalDriver, PersonaModel, PersonaPlugin, PersonaReducer};
 use pos_runtime::PluginRegistry;
-use pos_store::StoreConfig;
-use std::sync::LazyLock;
-
-/// One choice in a binary decision preview.
-struct OptionSpec {
-    /// Human label shown in the recommendation.
-    label: &'static str,
-    /// Text matched against preference dimension names.
-    tags: &'static str,
-    /// Short hint for why this option tends to win.
-    lean: &'static str,
-    /// Optional real-world coordinates (privacy-cloaked when present).
-    coordinates: Option<Wgs84Point>,
-}
-
-/// A domain-agnostic binary decision the MVP can preview.
-struct Scenario {
-    /// CLI id (`--scenario <id>`).
-    id: &'static str,
-    /// One-line domain description (English).
-    blurb: &'static str,
-    option_a: OptionSpec,
-    option_b: OptionSpec,
-    default_prefs: &'static [(&'static str, f64)],
-    /// Ground-truth pairs for the eval loop (`option_a` preferred when `prefers_a`).
-    eval_pairs: &'static [(&'static str, &'static str, bool)],
-}
-
-static SCENARIO_PLACES: LazyLock<Scenario> = LazyLock::new(|| Scenario {
-    id: "places",
-    blurb: "Where to spend a weekend — any two tagged options work the same way.",
-    option_a: OptionSpec {
-        label: "Kyoto",
-        tags: "kyoto nature quiet temples",
-        lean: "nature / quiet",
-        coordinates: Some(
-            Wgs84Point::new(35.0116, 135.7681)
-                .expect("Kyoto scenario coordinates must be valid WGS84 points"),
-        ),
-    },
-    option_b: OptionSpec {
-        label: "Osaka",
-        tags: "osaka city food nightlife",
-        lean: "city / food",
-        coordinates: Some(
-            Wgs84Point::new(34.6937, 135.5023)
-                .expect("Osaka scenario coordinates must be valid WGS84 points"),
-        ),
-    },
-    default_prefs: &[
-        ("nature", 0.8),
-        ("city", 0.5),
-        ("food", 0.9),
-        ("quiet", 0.7),
-    ],
-    eval_pairs: &[
-        (
-            "kyoto nature quiet temples",
-            "osaka city food nightlife",
-            true,
-        ),
-        ("kyoto gardens quiet", "osaka street food city", true),
-        ("osaka city nightlife", "kyoto nature temples", false),
-        ("kyoto quiet nature", "osaka food city", true),
-        ("osaka food nightlife", "kyoto quiet temples", false),
-    ],
-});
-
-static SCENARIO_WORK: LazyLock<Scenario> = LazyLock::new(|| Scenario {
-    id: "work",
-    blurb: "How to structure next quarter — same preview loop, different domain.",
-    option_a: OptionSpec {
-        label: "Remote-first",
-        tags: "remote autonomy focus deep-work",
-        lean: "autonomy / focus",
-        coordinates: None,
-    },
-    option_b: OptionSpec {
-        label: "Office-first",
-        tags: "office collaboration energy hallway",
-        lean: "collaboration / energy",
-        coordinates: None,
-    },
-    default_prefs: &[
-        ("autonomy", 0.8),
-        ("focus", 0.7),
-        ("collaboration", 0.5),
-        ("energy", 0.6),
-    ],
-    eval_pairs: &[
-        (
-            "remote autonomy focus deep-work",
-            "office collaboration energy hallway",
-            true,
-        ),
-        ("remote focus autonomy", "office collaboration energy", true),
-        (
-            "office collaboration energy",
-            "remote autonomy focus",
-            false,
-        ),
-        (
-            "remote deep-work focus",
-            "office hallway collaboration",
-            true,
-        ),
-        (
-            "office energy collaboration",
-            "remote autonomy focus",
-            false,
-        ),
-    ],
-});
-
-fn scenarios() -> [&'static Scenario; 2] {
-    [&SCENARIO_PLACES, &SCENARIO_WORK]
-}
-
-fn scenario_by_id(id: &str) -> Option<&'static Scenario> {
-    scenarios().into_iter().find(|scenario| scenario.id == id)
-}
-
-fn default_scenario() -> &'static Scenario {
-    &SCENARIO_PLACES
-}
-
-fn prefs_from_scenario(scenario: &Scenario) -> Vec<(String, f64)> {
-    scenario
-        .default_prefs
-        .iter()
-        .map(|(k, v)| ((*k).to_owned(), *v))
-        .collect()
-}
 
 enum CliAction {
     Run {
-        scenario: &'static Scenario,
+        option_a_label: String,
+        option_a_tags: String,
+        option_b_label: String,
+        option_b_tags: String,
         preferences: Vec<(String, f64)>,
         gateway: Option<String>,
         timeline: Option<String>,
@@ -173,87 +39,83 @@ enum CliAction {
     Help,
 }
 
-/// Parse CLI flags into a scenario + preference set, or help.
+/// Parse CLI flags into an action.
 fn parse_cli(args: &[String]) -> Result<CliAction, String> {
-    // Pass 1: resolve scenario (and help) so defaults match the chosen domain.
-    let mut scenario = default_scenario();
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--help" || args[i] == "-h" {
-            return Ok(CliAction::Help);
-        }
-        if args[i] == "--scenario" {
-            if let Some(id) = args.get(i + 1) {
-                if let Some(s) = scenario_by_id(id) {
-                    scenario = s;
-                } else {
-                    let known = scenarios()
-                        .iter()
-                        .map(|s| s.id)
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    return Err(format!("unknown --scenario {id} (try: {known})"));
-                }
-                i += 2;
-            } else {
-                return Err("--scenario: expected an id".to_owned());
-            }
-            continue;
-        }
-        i += 1;
-    }
-
-    // Pass 2: start from scenario defaults, then apply --prefer overrides.
-    let mut prefs = prefs_from_scenario(scenario);
+    let mut option_a_label = "Option A".to_owned();
+    let mut option_a_tags = String::new();
+    let mut option_b_label = "Option B".to_owned();
+    let mut option_b_tags = String::new();
+    let mut prefs: Vec<(String, f64)> = Vec::new();
     let mut gateway: Option<String> = None;
     let mut timeline: Option<String> = None;
     let mut fork_compare = false;
-    i = 0;
+
+    let mut i = 0;
     while i < args.len() {
-        if args[i] == "--fork-compare" {
-            fork_compare = true;
-            i += 1;
-            continue;
-        }
-        if args[i] == "--gateway" {
-            if let Some(url) = args.get(i + 1) {
-                gateway = Some(url.clone());
+        match args[i].as_str() {
+            "--help" | "-h" => return Ok(CliAction::Help),
+            "--a-label" => {
+                option_a_label = args.get(i + 1).ok_or("--a-label: expected text")?.clone();
                 i += 2;
-            } else {
-                return Err("--gateway: expected base URL".to_owned());
             }
-            continue;
-        }
-        if args[i] == "--timeline" {
-            if let Some(id) = args.get(i + 1) {
-                timeline = Some(id.clone());
+            "--a-tags" => {
+                option_a_tags = args
+                    .get(i + 1)
+                    .ok_or("--a-tags: expected tag string")?
+                    .clone();
                 i += 2;
-            } else {
-                return Err("--timeline: expected timeline id".to_owned());
             }
-            continue;
-        }
-        if args[i] == "--prefer" {
-            if let Some(spec) = args.get(i + 1) {
-                match parse_prefer_spec(spec) {
-                    Ok((key, value)) => apply_prefer(&mut prefs, key, value),
-                    Err(msg) => eprintln!("ignoring --prefer {spec}: {msg}"),
+            "--b-label" => {
+                option_b_label = args.get(i + 1).ok_or("--b-label: expected text")?.clone();
+                i += 2;
+            }
+            "--b-tags" => {
+                option_b_tags = args
+                    .get(i + 1)
+                    .ok_or("--b-tags: expected tag string")?
+                    .clone();
+                i += 2;
+            }
+            "--prefer" => {
+                if let Some(spec) = args.get(i + 1) {
+                    match parse_prefer_spec(spec) {
+                        Ok((key, value)) => apply_prefer(&mut prefs, key, value),
+                        Err(msg) => eprintln!("ignoring --prefer {spec}: {msg}"),
+                    }
+                    i += 2;
+                } else {
+                    eprintln!("ignoring --prefer: expected key=value");
+                    i += 1;
                 }
+            }
+            "--gateway" => {
+                gateway = Some(
+                    args.get(i + 1)
+                        .ok_or("--gateway: expected base URL")?
+                        .clone(),
+                );
                 i += 2;
-            } else {
-                eprintln!("ignoring --prefer: expected key=value");
+            }
+            "--timeline" => {
+                timeline = Some(
+                    args.get(i + 1)
+                        .ok_or("--timeline: expected timeline id")?
+                        .clone(),
+                );
+                i += 2;
+            }
+            "--fork-compare" => {
+                fork_compare = true;
                 i += 1;
             }
-            continue;
+            flag if flag.starts_with('-') => {
+                eprintln!("ignoring unknown argument: {flag}");
+                i += 1;
+            }
+            _ => {
+                i += 1;
+            }
         }
-        if args[i] == "--scenario" {
-            i += args.get(i + 1).map_or(1, |_| 2);
-            continue;
-        }
-        if args[i].starts_with('-') {
-            eprintln!("ignoring unknown argument: {}", args[i]);
-        }
-        i += 1;
     }
     if (gateway.is_some() || timeline.is_some())
         && gateway.as_ref().zip(timeline.as_ref()).is_none()
@@ -261,7 +123,10 @@ fn parse_cli(args: &[String]) -> Result<CliAction, String> {
         return Err("--gateway and --timeline must be used together".to_owned());
     }
     Ok(CliAction::Run {
-        scenario,
+        option_a_label,
+        option_a_tags,
+        option_b_label,
+        option_b_tags,
         preferences: prefs,
         gateway,
         timeline,
@@ -298,157 +163,74 @@ fn parse_prefer_spec(spec: &str) -> Result<(String, f64), String> {
 fn print_help() {
     println!("PiglorOS MVP — Decision preview");
     println!();
-    println!("Preview which option fits your preferences, then check whether");
-    println!("those predictions hold up against recorded outcomes.");
+    println!("Preview which option fits your preferences best.");
     println!();
     println!("Usage:");
     println!("  cargo run -p pos-mvp -- [OPTIONS]");
     println!();
     println!("Options:");
-    println!("  --scenario <id>      Example decision domain (default: places)");
-    for s in scenarios() {
-        println!("                        {} — {}", s.id, s.blurb);
-    }
-    println!("  --prefer key=value   Override a preference score in [-1, 1]");
+    println!("  --a-label TEXT       Label for option A (default: \"Option A\")");
+    println!("  --a-tags TEXT        Space-separated tags for option A");
+    println!("  --b-label TEXT       Label for option B (default: \"Option B\")");
+    println!("  --b-tags TEXT        Space-separated tags for option B");
+    println!("  --prefer key=value   Set a preference score in [-1, 1]");
     println!("  --gateway <url>      Shared-world context + AI Influence (with --timeline)");
     println!("  --timeline <id>      Timeline ULID on the gateway");
     println!("  --fork-compare       Dual-future personal fork (#75 thin slice)");
     println!("  -h, --help           Show this help");
     println!();
-    println!("Notes:");
-    println!("  AI Influence Index counts agent.* events on the timeline. piglor-gateway HTTP");
-    println!("  currently accepts world.action / society.signal — seed agent.action elsewhere");
-    println!("  (or wait for #72) for a non-zero live index.");
-    println!();
     println!("Examples:");
-    println!("  cargo run -p pos-mvp");
-    println!("  cargo run -p pos-mvp -- --scenario work --prefer autonomy=1.0 --prefer collaboration=0.2");
-    println!("  cargo run -p pos-mvp -- --scenario places --prefer food=1.0 --prefer nature=0.2");
+    println!("  cargo run -p pos-mvp -- --prefer focus=0.9 --prefer collaboration=0.3");
     println!(
-        "  cargo run -p pos-mvp -- --scenario work --gateway http://127.0.0.1:8080 --timeline <id>"
+        "  cargo run -p pos-mvp -- --a-label Remote --a-tags \"autonomy focus\" \\
+           --b-label Office --b-tags \"collaboration energy\" --prefer autonomy=0.8"
     );
-    println!("  cargo run -p pos-mvp -- --scenario work --fork-compare");
 }
 
-fn build_registry_with(
-    preferences: Vec<(String, f64)>,
-    pairs: Vec<PreferencePair>,
-) -> PluginRegistry {
+fn build_registry(preferences: Vec<(String, f64)>) -> PluginRegistry {
     let entity = EntityId::new();
     let model = PersonaModel::new(preferences);
-
     let mut registry = PluginRegistry::new();
-
     let persona = PersonaPlugin::new();
     registry
         .register(
             &persona,
             Some(Box::new(PersonaReducer)),
-            Some(Box::new(PersonaEvalDriver::new(entity, model, pairs))),
+            Some(Box::new(PersonaEvalDriver::new(entity, model, vec![]))),
         )
         .expect("persona plugin registration failed");
-
-    let eval = EvalPlugin::new();
-    registry
-        .register(&eval, Some(Box::new(EvalReducer)), None)
-        .expect("eval plugin registration failed");
-
     registry
 }
 
-fn eval_pairs_for(scenario: &Scenario) -> Vec<PreferencePair> {
-    scenario
-        .eval_pairs
-        .iter()
-        .map(|(a, b, prefers_a)| PreferencePair {
-            option_a: (*a).to_owned(),
-            option_b: (*b).to_owned(),
-            prefers_a: *prefers_a,
-        })
-        .collect()
+fn recommend(score_a: f64, score_b: f64, label_a: &str, label_b: &str) -> (String, String) {
+    let margin = (score_a - score_b).abs();
+    if margin < 0.02 {
+        (
+            "Toss-up".to_owned(),
+            format!("Scores are nearly tied — adjust preferences to break the tie."),
+        )
+    } else if score_a > score_b {
+        (
+            label_a.to_owned(),
+            format!("Closer fit to your preferences. Raise preferences for {label_b} to switch."),
+        )
+    } else {
+        (
+            label_b.to_owned(),
+            format!("Closer fit to your preferences. Raise preferences for {label_a} to switch."),
+        )
+    }
 }
 
 fn format_prefs(prefs: &[(String, f64)]) -> String {
+    if prefs.is_empty() {
+        return "(none set — use --prefer key=value)".to_owned();
+    }
     prefs
         .iter()
         .map(|(k, v)| format!("{k}={v:.2}"))
         .collect::<Vec<_>>()
         .join(" · ")
-}
-
-fn recommend(
-    score_a: f64,
-    score_b: f64,
-    label_a: &str,
-    label_b: &str,
-    lean_a: &str,
-    lean_b: &str,
-) -> (String, String) {
-    let margin = (score_a - score_b).abs();
-    if margin < 0.02 {
-        (
-            "Toss-up".to_owned(),
-            format!(
-                "Scores are nearly tied — raise ({lean_a}) for {label_a}, or ({lean_b}) for {label_b}."
-            ),
-        )
-    } else if score_a > score_b {
-        (
-            label_a.to_owned(),
-            format!("Closer fit to your ({lean_a}) lean. Raise ({lean_b}) if you want {label_b} to win."),
-        )
-    } else {
-        (
-            label_b.to_owned(),
-            format!("Closer fit to your ({lean_b}) lean. Raise ({lean_a}) if you want {label_a} to win."),
-        )
-    }
-}
-
-fn explain_calibration(brier: f64, lift: f64, n_resolved: u64, n_predictions: u64) {
-    println!("Did this preview hold up? (calibration check)");
-    println!("  {n_resolved} of {n_predictions} predictions got real outcomes.");
-    println!(
-        "  Brier score {brier:.2} — lower is better (0 = perfect, 0.25 ≈ coin-flip on balanced data)."
-    );
-    if lift > 0.02 {
-        println!(
-            "  Beats a base-rate guess by {:.0}% — the preference signal helped.",
-            lift * 100.0
-        );
-    } else if lift < -0.02 {
-        println!(
-            "  Trails a base-rate guess by {:.0}% — prefs shape the choice, but calibration is still rough.",
-            lift.abs() * 100.0
-        );
-    } else {
-        println!("  About even with a base-rate guess — signal is present, not yet sharp.");
-    }
-}
-
-fn print_privacy(scenario: &Scenario) {
-    let cloaker = SpatialCloaker::new(0.1).expect("static privacy grid resolution is valid");
-    let mut any = false;
-    for opt in [&scenario.option_a, &scenario.option_b] {
-        if let Some(point) = opt.coordinates {
-            if !any {
-                println!(
-                    "Privacy: location-bearing options are shown as coarse grid cells (exact pins stay private)"
-                );
-                any = true;
-            }
-            let cloaked_point = cloaker.cloak(point);
-            println!(
-                "  {} ≈ ({:.1}, {:.1})",
-                opt.label,
-                cloaked_point.latitude(),
-                cloaked_point.longitude()
-            );
-        }
-    }
-    if any {
-        println!();
-    }
 }
 
 fn print_ai_influence_headline(index: &ai_influence::AiInfluenceIndex) {
@@ -457,7 +239,6 @@ fn print_ai_influence_headline(index: &ai_influence::AiInfluenceIndex) {
     }
 }
 
-/// Apply gateway society context (and print) after the AI Influence headline.
 fn apply_and_print_society(
     gateway: &str,
     timeline_id: &str,
@@ -490,7 +271,6 @@ fn print_gateway_block(
     timeline: Option<&str>,
     preferences: &mut [(String, f64)],
 ) {
-    // #79 — AI Influence Index is always the first product headline.
     if let (Some(gw), Some(tl)) = (gateway, timeline) {
         match fetch_timeline_context(gw, tl) {
             Ok(ctx) => {
@@ -511,109 +291,62 @@ fn print_gateway_block(
 }
 
 fn run_mvp(
-    scenario: &Scenario,
+    option_a_label: &str,
+    option_a_tags: &str,
+    option_b_label: &str,
+    option_b_tags: &str,
     mut preferences: Vec<(String, f64)>,
     gateway: Option<&str>,
     timeline: Option<&str>,
     fork_compare: bool,
 ) {
     println!("PiglorOS — Decision preview");
-    println!("Scenario: {} — {}", scenario.id, scenario.blurb);
     println!();
 
     print_gateway_block(gateway, timeline, &mut preferences);
 
     println!("Your preferences:");
     println!("  {}", format_prefs(&preferences));
-    println!(
-        "  Override: cargo run -p pos-mvp -- --scenario {} --prefer <key>=<value>",
-        scenario.id
-    );
     println!();
 
     let model = PersonaModel::new(preferences.clone());
-    let score_a = model.score_option(scenario.option_a.tags);
-    let score_b = model.score_option(scenario.option_b.tags);
+    let score_a = model.score_option(option_a_tags);
+    let score_b = model.score_option(option_b_tags);
 
     println!("Match scores:");
-    println!(
-        "  {:<12} {score_a:.3}  ({})",
-        scenario.option_a.label, scenario.option_a.tags
-    );
-    println!(
-        "  {:<12} {score_b:.3}  ({})",
-        scenario.option_b.label, scenario.option_b.tags
-    );
+    println!("  {option_a_label:<16} {score_a:.3}  tags: [{option_a_tags}]");
+    println!("  {option_b_label:<16} {score_b:.3}  tags: [{option_b_tags}]");
     println!();
 
-    let (pick, why) = recommend(
-        score_a,
-        score_b,
-        scenario.option_a.label,
-        scenario.option_b.label,
-        scenario.option_a.lean,
-        scenario.option_b.lean,
-    );
+    let (pick, why) = recommend(score_a, score_b, option_a_label, option_b_label);
     println!("→ Recommendation: {pick}");
     println!("  {why}");
     println!();
 
-    print_privacy(scenario);
-
     if fork_compare {
-        let summary =
-            run_personal_fork_compare(&preferences, scenario.option_a.tags, scenario.option_b.tags);
-        print_fork_compare(&summary, scenario.option_a.label, scenario.option_b.label);
+        let summary = run_personal_fork_compare(&preferences, option_a_tags, option_b_tags);
+        print_fork_compare(&summary, option_a_label, option_b_label);
         println!();
-        println!("Same loop without fork:");
-        println!("  cargo run -p pos-mvp -- --scenario {}", scenario.id);
-        return;
     }
-
-    let pairs = eval_pairs_for(scenario);
-    let prefs_for_registry = preferences;
-    let config = BacktestConfig {
-        experiment_name: format!("mvp-{}", scenario.id),
-        train_ticks: 5,
-        eval_ticks: 5,
-        store_config: StoreConfig::Memory,
-    };
-
-    let result = BacktestRunner::new(config, move || {
-        build_registry_with(prefs_for_registry.clone(), pairs.clone())
-    })
-    .run()
-    .expect("backtest run failed");
-
-    let report = &result.eval_report;
-    assert!(
-        report.n_resolved > 0,
-        "MVP must close the eval loop (n_resolved > 0)"
-    );
-
-    explain_calibration(
-        report.brier_score,
-        report.lift_vs_persistence,
-        report.n_resolved,
-        report.n_predictions,
-    );
-    println!();
-    println!("Same loop, other domains:");
-    println!("  cargo run -p pos-mvp -- --scenario work --prefer autonomy=1.0 --prefer collaboration=0.2");
-    println!("  cargo run -p pos-mvp -- --scenario places --prefer food=1.0 --prefer nature=0.2");
 }
 
 fn run_from_args(args: &[String]) -> Result<(), String> {
     match parse_cli(args)? {
         CliAction::Help => print_help(),
         CliAction::Run {
-            scenario,
+            option_a_label,
+            option_a_tags,
+            option_b_label,
+            option_b_tags,
             preferences,
             gateway,
             timeline,
             fork_compare,
         } => run_mvp(
-            scenario,
+            &option_a_label,
+            &option_a_tags,
+            &option_b_label,
+            &option_b_tags,
             preferences,
             gateway.as_deref(),
             timeline.as_deref(),
@@ -636,29 +369,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn mvp_smoke_test() {
         let model = PersonaModel::new(vec![("nature".to_owned(), 0.8), ("food".to_owned(), 0.9)]);
-        let score = model.score_option("kyoto nature");
+        let score = model.score_option("nature quiet");
         assert!(score > 0.0);
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn mvp_backtest_resolves_predictions() {
-        let scenario = default_scenario();
-        let prefs = prefs_from_scenario(scenario);
-        let pairs = eval_pairs_for(scenario);
-        let config = BacktestConfig {
-            experiment_name: "mvp-test".to_owned(),
-            train_ticks: 3,
-            eval_ticks: 3,
-            store_config: StoreConfig::Memory,
-        };
-        let result = BacktestRunner::new(config, move || {
-            build_registry_with(prefs.clone(), pairs.clone())
-        })
-        .run()
-        .expect("backtest");
-        assert!(result.eval_report.n_resolved >= 3);
-        assert!(result.eval_report.brier_score >= 0.0);
     }
 
     #[test]
@@ -676,60 +388,30 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn prefer_overrides_update_scores_for_places() {
+    fn prefer_overrides_affect_scores() {
         let args = vec![
-            "--scenario".to_owned(),
-            "places".to_owned(),
-            "--prefer".to_owned(),
-            "nature=0.1".to_owned(),
+            "--a-tags".to_owned(),
+            "nature quiet".to_owned(),
+            "--b-tags".to_owned(),
+            "city food".to_owned(),
             "--prefer".to_owned(),
             "food=1.0".to_owned(),
             "--prefer".to_owned(),
             "city=0.95".to_owned(),
         ];
         let CliAction::Run {
-            scenario,
+            option_a_tags,
+            option_b_tags,
             preferences,
             ..
         } = parse_cli(&args).expect("parse ok")
         else {
             panic!("expected Run");
         };
-        assert_eq!(scenario.id, "places");
         let model = PersonaModel::new(preferences);
-        let a = model.score_option(scenario.option_a.tags);
-        let b = model.score_option(scenario.option_b.tags);
-        assert!(b > a, "food/city prefs should favor Osaka");
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn work_scenario_autonomy_favors_remote() {
-        let args = vec![
-            "--scenario".to_owned(),
-            "work".to_owned(),
-            "--prefer".to_owned(),
-            "autonomy=1.0".to_owned(),
-            "--prefer".to_owned(),
-            "focus=0.9".to_owned(),
-            "--prefer".to_owned(),
-            "collaboration=0.1".to_owned(),
-            "--prefer".to_owned(),
-            "energy=0.1".to_owned(),
-        ];
-        let CliAction::Run {
-            scenario,
-            preferences,
-            ..
-        } = parse_cli(&args).expect("parse ok")
-        else {
-            panic!("expected Run");
-        };
-        assert_eq!(scenario.id, "work");
-        let model = PersonaModel::new(preferences);
-        let remote = model.score_option(scenario.option_a.tags);
-        let office = model.score_option(scenario.option_b.tags);
-        assert!(remote > office);
+        let a = model.score_option(&option_a_tags);
+        let b = model.score_option(&option_b_tags);
+        assert!(b > a, "food/city prefs should favor option B");
     }
 
     #[test]
@@ -745,29 +427,12 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn recommend_covers_all_branches() {
-        let (pick, _) = recommend(0.9, 0.5, "A", "B", "lean-a", "lean-b");
+        let (pick, _) = recommend(0.9, 0.5, "A", "B");
         assert_eq!(pick, "A");
-        let (pick, _) = recommend(0.5, 0.9, "A", "B", "lean-a", "lean-b");
+        let (pick, _) = recommend(0.5, 0.9, "A", "B");
         assert_eq!(pick, "B");
-        let (pick, _) = recommend(0.5, 0.51, "A", "B", "lean-a", "lean-b");
+        let (pick, _) = recommend(0.5, 0.51, "A", "B");
         assert_eq!(pick, "Toss-up");
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn parse_cli_rejects_unknown_scenario() {
-        match parse_cli(&["--scenario".to_owned(), "nope".to_owned()]) {
-            Err(err) => assert!(err.contains("unknown --scenario nope"), "{err}"),
-            Ok(_) => panic!("expected error for unknown scenario"),
-        }
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn run_from_args_rejects_unknown_scenario() {
-        let err = run_from_args(&["--scenario".to_owned(), "nope".to_owned()])
-            .expect_err("unknown scenario must hard-fail");
-        assert!(err.contains("unknown --scenario nope"), "{err}");
     }
 
     #[test]
@@ -778,9 +443,8 @@ mod tests {
             "adventure=0.6".to_owned(),
             "--prefer".to_owned(),
             "broken".to_owned(),
-            "harness_filter".to_owned(),
             "--unknown-flag".to_owned(),
-            "--prefer".to_owned(), // dangling prefer value
+            "--prefer".to_owned(),
         ];
         let CliAction::Run { preferences, .. } = parse_cli(&args).expect("parse ok") else {
             panic!("expected Run");
@@ -792,197 +456,42 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn explain_calibration_runs_for_lift_signs() {
-        explain_calibration(0.2, 0.1, 5, 5);
-        explain_calibration(0.2, -0.1, 5, 5);
-        explain_calibration(0.2, 0.0, 5, 5);
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn format_prefs_lists_pairs() {
         let s = format_prefs(&[("nature".to_owned(), 0.8)]);
         assert!(s.contains("nature=0.80"));
+        let empty = format_prefs(&[]);
+        assert!(empty.contains("none set"));
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn run_places_and_work_scenarios() {
+    fn run_mvp_basic_smoke() {
         run_from_args(&[
-            "--scenario".to_owned(),
-            "places".to_owned(),
-            "--prefer".to_owned(),
-            "food=1.0".to_owned(),
-            "--prefer".to_owned(),
-            "city=0.9".to_owned(),
-            "--prefer".to_owned(),
-            "nature=0.2".to_owned(),
-            "--prefer".to_owned(),
-            "quiet=0.2".to_owned(),
-        ])
-        .expect("places");
-        run_from_args(&[
-            "--scenario".to_owned(),
-            "work".to_owned(),
+            "--a-label".to_owned(),
+            "Remote".to_owned(),
+            "--a-tags".to_owned(),
+            "autonomy focus".to_owned(),
+            "--b-label".to_owned(),
+            "Office".to_owned(),
+            "--b-tags".to_owned(),
+            "collaboration energy".to_owned(),
             "--prefer".to_owned(),
             "autonomy=1.0".to_owned(),
-            "--prefer".to_owned(),
-            "collaboration=0.2".to_owned(),
         ])
-        .expect("work");
+        .expect("smoke run");
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn parse_cli_dangling_flags() {
-        match parse_cli(&["--scenario".to_owned()]) {
-            Err(err) => assert!(err.contains("expected an id"), "{err}"),
-            Ok(_) => panic!("expected error for dangling --scenario"),
-        }
+        assert!(parse_cli(&["--a-label".to_owned()]).is_err());
+        assert!(parse_cli(&["--b-tags".to_owned()]).is_err());
+        assert!(parse_cli(&["--gateway".to_owned()]).is_err());
+        assert!(parse_cli(&["--timeline".to_owned()]).is_err());
         let CliAction::Run { .. } = parse_cli(&["--prefer".to_owned()]).expect("soft prefer")
         else {
             panic!("expected Run");
         };
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn run_mvp_gateway_warning_on_unreachable() {
-        // Headline copy for this path is covered by
-        // `unavailable_formats_poll_failed_not_local`; this smoke-runs the Err branch.
-        let lines = format_ai_influence_lines(&unavailable_ai_influence());
-        assert!(lines[0].contains("n/a") && lines[0].contains("gateway poll failed"));
-        assert!(!lines[0].contains("needs --gateway"));
-        run_mvp(
-            default_scenario(),
-            prefs_from_scenario(default_scenario()),
-            Some("http://127.0.0.1:1"),
-            Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
-            false,
-        );
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn run_mvp_gateway_empty_means() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let body = r#"{"events":[]}"#;
-        std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let _ = stream.read(&mut [0u8; 1024]);
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = stream.write_all(response.as_bytes());
-        });
-        run_mvp(
-            default_scenario(),
-            prefs_from_scenario(default_scenario()),
-            Some(&format!("http://{addr}")),
-            Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
-            false,
-        );
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn run_mvp_gateway_applies_context() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let body = r#"{"events":[
-            {"event_type":"society.signal","payload":{"dimension":"trust","value":0.9}},
-            {"event_type":"society.signal","payload":{"dimension":"opinion","value":0.4}},
-            {"event_type":"agent.action","payload":{"archetype":"scout"}},
-            {"event_type":"agent.decision","payload":{}}
-        ]}"#;
-        std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let _ = stream.read(&mut [0u8; 1024]);
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = stream.write_all(response.as_bytes());
-        });
-        run_mvp(
-            default_scenario(),
-            prefs_from_scenario(default_scenario()),
-            Some(&format!("http://{addr}")),
-            Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
-            false,
-        );
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn run_mvp_fork_compare_path() {
-        run_mvp(
-            default_scenario(),
-            prefs_from_scenario(default_scenario()),
-            None,
-            None,
-            true,
-        );
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn parse_cli_fork_compare_flag() {
-        let CliAction::Run { fork_compare, .. } =
-            parse_cli(&["--fork-compare".to_owned()]).unwrap()
-        else {
-            panic!("expected Run");
-        };
-        assert!(fork_compare);
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn parse_cli_dangling_gateway_and_timeline() {
-        match parse_cli(&["--gateway".to_owned()]) {
-            Err(err) => assert!(err.contains("expected base URL"), "{err}"),
-            Ok(_) => panic!("expected dangling --gateway error"),
-        }
-        match parse_cli(&["--timeline".to_owned()]) {
-            Err(err) => assert!(err.contains("expected timeline id"), "{err}"),
-            Ok(_) => panic!("expected dangling --timeline error"),
-        }
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn parse_cli_accepts_gateway_and_timeline() {
-        let CliAction::Run {
-            scenario,
-            preferences,
-            gateway,
-            timeline,
-            fork_compare,
-        } = parse_cli(&[
-            "--scenario".to_owned(),
-            "places".to_owned(),
-            "--gateway".to_owned(),
-            "http://127.0.0.1:8080".to_owned(),
-            "--timeline".to_owned(),
-            "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
-        ])
-        .unwrap()
-        else {
-            panic!("expected Run action");
-        };
-        assert_eq!(scenario.id, "places");
-        assert!(!preferences.is_empty());
-        assert_eq!(gateway.as_deref(), Some("http://127.0.0.1:8080"));
-        assert_eq!(timeline.as_deref(), Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"));
-        assert!(!fork_compare);
     }
 
     #[test]
@@ -996,9 +505,86 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn scenario_by_id_finds_known() {
-        assert!(scenario_by_id("places").is_some());
-        assert!(scenario_by_id("work").is_some());
-        assert!(scenario_by_id("nope").is_none());
+    fn run_mvp_gateway_warning_on_unreachable() {
+        let lines = format_ai_influence_lines(&unavailable_ai_influence());
+        assert!(lines[0].contains("n/a") && lines[0].contains("gateway poll failed"));
+        run_mvp(
+            "A",
+            "focus",
+            "B",
+            "energy",
+            vec![("focus".to_owned(), 0.8)],
+            Some("http://127.0.0.1:1"),
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+            false,
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn run_mvp_fork_compare_path() {
+        run_mvp(
+            "A",
+            "autonomy",
+            "B",
+            "collaboration",
+            vec![("autonomy".to_owned(), 0.9)],
+            None,
+            None,
+            true,
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn parse_cli_accepts_gateway_and_timeline() {
+        let CliAction::Run {
+            gateway, timeline, ..
+        } = parse_cli(&[
+            "--gateway".to_owned(),
+            "http://127.0.0.1:8080".to_owned(),
+            "--timeline".to_owned(),
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+        ])
+        .unwrap()
+        else {
+            panic!("expected Run action");
+        };
+        assert_eq!(gateway.as_deref(), Some("http://127.0.0.1:8080"));
+        assert_eq!(timeline.as_deref(), Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn run_mvp_gateway_applies_context() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = r#"{"events":[
+            {"event_type":"society.signal","payload":{"dimension":"trust","value":0.9}},
+            {"event_type":"agent.action","payload":{"archetype":"scout"}},
+            {"event_type":"agent.decision","payload":{}}
+        ]}"#;
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.read(&mut [0u8; 1024]);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        run_mvp(
+            "A",
+            "focus",
+            "B",
+            "energy",
+            vec![],
+            Some(&format!("http://{addr}")),
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+            false,
+        );
     }
 }

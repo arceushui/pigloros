@@ -18,17 +18,10 @@ const MAX_GATEWAY_BODY_BYTES: u64 = 1024 * 1024;
 const MAX_GATEWAY_AGGREGATE_BYTES: u64 = 64 * 1024 * 1024;
 const HEX: &[u8; 16] = b"0123456789ABCDEF";
 
-/// Map society dimensions onto default scenario preference keys so ADR demos
-/// (`places` / `work`) actually change scores without `--prefer trust=…`.
-fn society_pref_aliases(dim: &str) -> &'static [&'static str] {
-    match dim {
-        "trust" => &["quiet", "focus"],
-        "opinion" => &["city", "collaboration"],
-        "economy" => &["food", "energy"],
-        "culture" => &["nature", "autonomy"],
-        "polarization" => &["collaboration", "energy"],
-        _ => &[],
-    }
+/// Society dimensions nudge preferences with matching names directly.
+/// No hardcoded aliases — user preference keys drive the mapping.
+fn society_pref_aliases(_dim: &str) -> &'static [&'static str] {
+    &[]
 }
 
 #[cfg(test)]
