@@ -636,6 +636,25 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn consent_granted_wrong_length_bytes_for_subject_id() {
+        // decode_id rejects bstr that is not exactly 16 bytes
+        let g = sample_granted();
+        let bytes = g.encode().unwrap().as_slice().to_vec();
+        let mut cursor = std::io::Cursor::new(bytes.as_slice());
+        let mut val: Value = ciborium::from_reader(&mut cursor).unwrap();
+        if let Value::Array(ref mut items) = val {
+            items[2] = Value::Bytes(vec![0u8; 15]); // wrong length (15 not 16)
+        }
+        let mut buf = Vec::new();
+        ciborium::into_writer(&val, &mut buf).unwrap();
+        assert!(matches!(
+            ConsentGranted::decode(&CanonicalBytes::from_vec(buf)),
+            Err(ConsentCodecError::WrongFieldType)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn consent_granted_wrong_field_type_for_modalities() {
         let g = sample_granted();
         let bytes = g.encode().unwrap().as_slice().to_vec();
@@ -795,7 +814,6 @@ mod tests {
         token: ConsentCapabilityToken,
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     impl ConsentGate for TestGate {
         fn check_consent(
             &self,
