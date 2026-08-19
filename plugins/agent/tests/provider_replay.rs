@@ -1199,3 +1199,72 @@ fn live_driver_provider_call_count_does_not_change_during_replay() {
     assert_eq!(calls.get(), 1);
     registry.abort_step();
 }
+
+// ── Coverage-off targeted tests: production regions covered, zero test overhead ──
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn verify_record_rejects_mismatched_request_hash() {
+    let host = HostFixture::new();
+    let mut wrong = host.record(0, 0, FixtureResult::NoAction { code: 5 });
+    wrong.request_hash_override = Some([0xFF; 32]);
+    let events = vec![event(
+        1,
+        host.agent,
+        RECORDER_EVENT_TYPE,
+        wrong.record_bytes(),
+    )];
+    assert!(host.verifier().verify(&events, None).is_err());
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn verify_action_rejects_non_action_event_following_accepted_decision() {
+    let host = HostFixture::new();
+    let accepted = host.record(
+        0,
+        0,
+        FixtureResult::Accepted {
+            action_index: 0,
+            confidence: 900_000,
+        },
+    );
+    let events = vec![
+        event(1, host.agent, RECORDER_EVENT_TYPE, accepted.record_bytes()),
+        event(2, host.agent, RECORDER_EVENT_TYPE, vec![0x80]),
+    ];
+    assert!(host.verifier().verify(&events, None).is_err());
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn restore_driver_state_rejects_empty_timeline_ancestry() {
+    let host = HostFixture::new();
+    let provider = FixtureAgentDecisionProvider::new(vec![]);
+    let driver = ProviderBackedAgentDriver::new(
+        host.agent,
+        host.catalogue.clone(),
+        host.provenance.clone(),
+        Box::new(provider),
+    );
+    let mut registry = PluginRegistry::new();
+    registry.register_driver(Box::new(driver));
+    assert!(registry.restore_driver_state(&[], &[]).is_err());
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn restore_driver_state_accepts_empty_history_when_bound_is_zero() {
+    let host = HostFixture::new();
+    let provider = FixtureAgentDecisionProvider::new(vec![ProviderAttempt::NoResponse]);
+    let driver = ProviderBackedAgentDriver::new(
+        host.agent,
+        host.catalogue.clone(),
+        host.provenance.clone(),
+        Box::new(provider),
+    );
+    let mut registry = PluginRegistry::new();
+    registry.register_driver(Box::new(driver));
+    let segments = [TimelineHistorySegment::new(host.timeline, Seq::ZERO)];
+    assert!(registry.restore_driver_state(&segments, &[]).is_ok());
+}

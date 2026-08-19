@@ -1166,6 +1166,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn abort_restore_from_history_clears_staged_restore_tick_and_is_idempotent() {
         let mut driver = ProviderBackedAgentDriver::new(
             EntityId::new(),
@@ -1183,6 +1184,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn commit_restore_from_history_preserves_committed_tick_when_nothing_is_staged() {
         let mut driver = ProviderBackedAgentDriver::new(
             EntityId::new(),
@@ -1196,6 +1198,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn stage_restore_from_history_fails_when_a_driver_step_is_already_pending() {
         let mut fixture = provider_driver(vec![ProviderAttempt::NoResponse]);
         let _ = fixture

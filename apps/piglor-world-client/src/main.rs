@@ -32,11 +32,13 @@ mod tests {
     use piglor_world_client::ClientError;
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_main_returns_success_for_a_running_client() {
         assert_eq!(run_main(|| Ok(())), 0);
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_main_reports_client_errors() {
         assert_eq!(
             run_main(|| Err(ClientError::Invalid("test failure".to_owned()))),
