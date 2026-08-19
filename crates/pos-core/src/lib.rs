@@ -11,6 +11,7 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 pub mod clock;
+pub mod consent;
 pub mod crypto;
 pub mod entity;
 pub mod error;
