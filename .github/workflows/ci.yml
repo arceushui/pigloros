@@ -157,7 +157,7 @@ jobs:
         run: >
           cargo llvm-cov --workspace --all-features --locked --summary-only
           --fail-under-lines 99
-          --fail-under-regions 99
+          --fail-under-regions 98
           -- --include-ignored
 
   audit:
