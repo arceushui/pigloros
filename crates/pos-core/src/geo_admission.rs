@@ -821,17 +821,16 @@ mod tests {
         let req = request(timeline);
 
         // admission_epoch == 0: first && condition is false — short-circuit.
-        let zero_epoch =
-            GeoLocationAdmissionBindingV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 0));
+        let zero_epoch = GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 0));
         assert!(!zero_epoch.permits(&req));
 
         // withdrawn == true: second && condition is false.
-        let withdrawn = GeoLocationAdmissionBindingV1::new(7, ([1; 32], 8, [2; 32]), (1, true, 9));
+        let withdrawn = GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, true, 9));
         assert!(!withdrawn.permits(&req));
 
         // wrong binding_revision: third && condition is false.
         let wrong_revision =
-            GeoLocationAdmissionBindingV1::new(99, ([1; 32], 8, [2; 32]), (1, false, 9));
+            GeoLocationAdmissionFenceV1::new(99, ([1; 32], 8, [2; 32]), (1, false, 9));
         assert!(!wrong_revision.permits(&req));
     }
 
