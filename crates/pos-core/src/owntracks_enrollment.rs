@@ -372,12 +372,12 @@ mod tests {
     #[test]
     fn cover_prepare_ingress_auth_failure_when_absent() {
         // Absent enrollment → _ arm → GeographicAdmissionAuthenticationFailed
-        let _ = OwnTracksEnrollmentV1::absent().prepare_owntracks_ingress(&dummy_input());
+        let _ = OwnTracksEnrollmentStateV1::absent().prepare_owntracks_ingress(&dummy_input());
     }
 
     #[test]
     fn cover_from_persistence_bytes_error_path() {
         // Invalid bytes → Serialization error
-        let _ = OwnTracksEnrollmentV1::from_persistence_bytes(b"not-valid-cbor");
+        let _ = OwnTracksEnrollmentStateV1::from_persistence_bytes(b"not-valid-cbor");
     }
 }
