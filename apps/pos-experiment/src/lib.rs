@@ -439,19 +439,27 @@ fn read_completed_prefix(
     timeline_id: pos_core::ids::TimelineId,
     through: pos_core::clock::Seq,
 ) -> Result<Vec<pos_core::Event>, ExperimentError> {
+    let head = store.logical_head(timeline_id)?;
+    if head < through {
+        return Err(pos_core::CoreError::Storage(
+            "logical Timeline head precedes completed fold cursor".to_owned(),
+        )
+        .into());
+    }
+    read_completed_prefix_at(store, timeline_id, through)
+}
+
+fn read_completed_prefix_at(
+    store: &dyn pos_core::store::EventStore,
+    timeline_id: pos_core::ids::TimelineId,
+    through: pos_core::clock::Seq,
+) -> Result<Vec<pos_core::Event>, ExperimentError> {
     let timeline = store
         .get_timeline(timeline_id)?
         .ok_or(pos_core::CoreError::TimelineNotFound(timeline_id))?;
     if timeline.id() != timeline_id {
         return Err(pos_core::CoreError::Storage(
             "EventStore returned mismatched Timeline metadata".to_owned(),
-        )
-        .into());
-    }
-    let head = store.logical_head(timeline_id)?;
-    if head < through {
-        return Err(pos_core::CoreError::Storage(
-            "logical Timeline head precedes completed fold cursor".to_owned(),
         )
         .into());
     }
@@ -1169,14 +1177,15 @@ impl ExperimentSession {
                 self.boundary.folded_through,
             )
         })?;
-        let folded_events = fold_captured_range(&mut self.boundary, &mut self.registry, &before);
-        let committed_events = lock_store(&self.store).and_then(|store| {
-            read_completed_prefix(
+        let mut committed_events = lock_store(&self.store).and_then(|store| {
+            read_completed_prefix_at(
                 store.as_ref(),
                 self.timeline.id(),
                 self.boundary.folded_through,
             )
         })?;
+        committed_events.extend(before.events.iter().cloned());
+        let folded_events = fold_captured_range(&mut self.boundary, &mut self.registry, &before);
         Ok((folded_events, committed_events))
     }
 
