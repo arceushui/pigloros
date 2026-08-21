@@ -1,15 +1,23 @@
-# PiglorOS CI — mirrors README Development gates (Redmine #100).
+# PiglorOS CI — quality gates enforced on every PR and push to main.
 #
-# Decisions locked for the coverage quality bar:
-# - Platform: GitHub Actions (remote is github.com/arceushui/pigloros)
-# - Triggers: every PR + pushes to main
-# - Jobs: fmt, test, clippy (pedantic), coverage (99% lines + regions), audit, deny — all required
-# - coverage(off) test-only + no ```ignore doctests: Trunk `rust-test-policy`
-# - Tests: `cargo test --all-features -- --include-ignored` so #[ignore] cannot silently skip and feature-gated code is exercised
-# - Dependencies: cargo-deny.yml (crates/licenses/advisories/sources)
-# - Coverage: RUSTC_BOOTSTRAP=1 so cfg(coverage_nightly) can enable feature(coverage_attribute).
-#   Unnecessary code is deleted/simplified rather than left as dead branches.
-# - Runners: ubuntu-latest only (rusqlite bundled; no macOS matrix yet)
+# Gate policy (Redmine #100):
+#   fmt          — cargo fmt --check (rustfmt)
+#   test         — cargo test --all-features (no ignored tests silently skip)
+#   clippy       — pedantic + -D warnings
+#   coverage     — lines ≥99%, regions ≥99%
+#   audit        — cargo-audit (CVE advisories)
+#   deny         — cargo-deny (licenses, bans, sources)
+#   geiger       — no unsafe in own crates
+#   asan         — address sanitizer on nightly
+#   docker       — image builds and smoke-tests
+#   wasm         — world-client WASM contract + browser parity
+#
+# Implementation notes:
+#   RUSTC_BOOTSTRAP=1 in coverage: lets cfg(coverage_nightly) enable
+#     feature(coverage_attribute) for #[coverage(off)] on test helpers.
+#   coverage(off) is only permitted on #[test]/#[tokio::test]/#[cfg(test)] code
+#     (enforced by Trunk rust-test-policy).
+#   --include-ignored: ensures #[ignore] tests run in CI; none may silently skip.
 
 name: ci
 
@@ -28,40 +36,11 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Surface future warnings as errors in CI builds (clippy still has its own -D warnings).
   RUSTFLAGS: -D warnings
 
+# ── Quality gates ────────────────────────────────────────────────────────────
+
 jobs:
-  pinned-dependencies:
-    name: pinned-dependencies
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: 3.12.11
-
-      - name: Install pinned dependency checker requirements
-        run: >
-          python -m pip install --require-hashes --only-binary=:all:
-          --requirement requirements-pinned-dependencies.txt
-
-      - name: Check immutable Action and Docker references
-        run: bash scripts/check-pinned-dependencies.sh
-
-      - name: Test pinned dependency checker
-        run: bash scripts/test-check-pinned-dependencies.sh
-
-      - name: Check ASan CI policy
-        run: bash scripts/check-asan-ci-policy.sh
-
-      - name: Test ASan CI policy checker
-        run: |
-          python scripts/test_check_asan_ci_policy.py
-          python scripts/test_check_lsan_suppression_report.py
 
   fmt:
     name: fmt
@@ -69,13 +48,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           toolchain: 1.97.1
           components: rustfmt
-
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
@@ -85,21 +61,15 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           toolchain: 1.97.1
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: test
-
-      - name: cargo check --workspace --no-default-features --locked
+      - name: cargo check (no default features)
         run: cargo check --workspace --all-targets --no-default-features --locked
-
-      - name: cargo test --workspace --all-features --locked -- --include-ignored
+      - name: cargo test (all features, no ignored skip)
         run: |
           set -euo pipefail
           cargo test --workspace --all-features --locked -- --include-ignored 2>&1 | tee /tmp/cargo-test.log
@@ -111,19 +81,14 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           toolchain: 1.97.1
           components: clippy
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: clippy
-
-      - name: cargo clippy (all features, pedantic, deny warnings)
+      - name: cargo clippy (pedantic, deny warnings)
         run: >
           cargo clippy --workspace --all-features --all-targets --locked --
           -D warnings -W clippy::pedantic
@@ -134,11 +99,11 @@ jobs:
     timeout-minutes: 45
     env:
       RUSTC_BOOTSTRAP: "1"
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           toolchain: 1.97.1
           components: llvm-tools-preview
@@ -147,18 +112,17 @@ jobs:
         uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2
         with:
           tool: cargo-llvm-cov
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: coverage
-
-      - name: cargo llvm-cov (all features) at-or-above-99pct lines and regions
+      - name: cargo llvm-cov (lines ≥99%, regions ≥99%)
         run: >
           cargo llvm-cov --workspace --all-features --locked --summary-only
           --fail-under-lines 99
           --fail-under-regions 99
           -- --include-ignored
+
+# ── Security & compliance ────────────────────────────────────────────────────
 
   audit:
     name: cargo-audit (security advisories)
@@ -171,7 +135,6 @@ jobs:
         uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2
         with:
           tool: cargo-audit
-
       - name: cargo audit
         run: cargo audit
 
@@ -186,7 +149,6 @@ jobs:
         uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2
         with:
           tool: cargo-deny
-
       - name: cargo deny check
         run: cargo deny --locked check
 
@@ -199,10 +161,12 @@ jobs:
       - uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2
         with:
           tool: cargo-geiger
-      - name: cargo geiger (all features)
-        run: cargo geiger --all-features --locked --workspace 2>&1 | tee /tmp/geiger.log
-      - name: assert no unsafe in own crates
-        run: '! grep -E "^(crates|apps|plugins)/" /tmp/geiger.log | grep -v "0 unsafe"'
+      - name: cargo geiger (assert no unsafe in own crates)
+        run: |
+          cargo geiger --all-features --locked --workspace 2>&1 | tee /tmp/geiger.log
+          ! grep -E "^(crates|apps|plugins)/" /tmp/geiger.log | grep -v "0 unsafe"
+
+# ── Platform verification ────────────────────────────────────────────────────
 
   asan:
     name: asan (address sanitizer)
@@ -250,11 +214,7 @@ jobs:
           RUSTC_BOOTSTRAP: "1"
           ASAN_OPTIONS: detect_leaks=1:detect_odr_violation=0
           LSAN_OPTIONS: suppressions=${{ github.workspace }}/scripts/asan/bevy-reflect.lsan:print_suppressions=1
-          # ASan + build-std produces unusually large links. Serialize them so
-          # hosted-runner memory pressure cannot crash concurrent lld workers.
           CARGO_BUILD_JOBS: "1"
-          # Policy-lock the toolchain action's no-incremental default and use
-          # line-level backtraces to reduce full-debug artifact storage.
           CARGO_INCREMENTAL: "0"
           CARGO_PROFILE_TEST_DEBUG: line-tables-only
         run: |
@@ -286,7 +246,6 @@ jobs:
           tags: pigloros-gateway:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
       - name: Smoke test container
         run: |
           docker run --rm -d -p 8080:8080 --name pigloros-smoke pigloros-gateway:ci
@@ -298,15 +257,89 @@ jobs:
           curl -sf http://localhost:8080/v1/ledger | grep '"domain":"piglor.com"'
           docker stop pigloros-smoke
 
-  modules:
+  world-client-wasm:
+    name: world-client-wasm
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: 1.97.1
+      - name: Install wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+      - uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2
+        with:
+          tool: wasm-pack@0.15.0
+      - name: Check world-client WASM contract
+        run: bash scripts/test-check-world-client-wasm.sh
+      - name: Check world-client WASM packaging
+        run: bash scripts/check-world-client-wasm.sh package
+
+  world-client-browser-parity:
+    name: world-client-browser-parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: 1.97.1
+      - name: Install wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+      - uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2
+        with:
+          tool: wasm-pack@0.15.0
+      - id: setup-chrome
+        uses: browser-actions/setup-chrome@2e1d749697dd1612b833dba4a722266286fbefcd # v2.1.2
+        with:
+          chrome-version: 151.0.7922.47
+          install-chromedriver: true
+      - name: Configure Chrome binary for wasm-bindgen
+        env:
+          CHROME_PATH: ${{ steps.setup-chrome.outputs.chrome-path }}
+          WEBDRIVER_CONFIG: ${{ runner.temp }}/world-client-webdriver.json
+        run: >
+          jq -n --arg binary "$CHROME_PATH"
+          '{"goog:chromeOptions": {"binary": $binary}}' > "$WEBDRIVER_CONFIG"
+      - name: Check world-client browser parity
+        env:
+          WASM_BINDGEN_TEST_WEBDRIVER_JSON: ${{ runner.temp }}/world-client-webdriver.json
+        run: bash scripts/check-world-client-wasm.sh browser
+
+# ── Informational reports (non-blocking) ────────────────────────────────────
+
+  pinned-dependencies:
+    name: pinned-dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: 3.12.11
+      - name: Install pinned dependency checker
+        run: >
+          python -m pip install --require-hashes --only-binary=:all:
+          --requirement requirements-pinned-dependencies.txt
+      - name: Check immutable Action and Docker references
+        run: bash scripts/check-pinned-dependencies.sh
+      - name: Test pinned dependency checker
+        run: bash scripts/test-check-pinned-dependencies.sh
+      - name: Check ASan CI policy
+        run: bash scripts/check-asan-ci-policy.sh
+      - name: Test ASan CI policy checker
+        run: |
+          python scripts/test_check_asan_ci_policy.py
+          python scripts/test_check_lsan_suppression_report.py
+
+  modules-structure:
     name: modules-structure (reports only)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           toolchain: 1.97.1
 
@@ -314,12 +347,9 @@ jobs:
         uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2
         with:
           tool: cargo-modules
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: modules
-
       - name: Module structure reports
         if: always()
         run: |
@@ -328,10 +358,9 @@ jobs:
             pos-plugin-agent pos-plugin-bridges pos-plugin-eval pos-plugin-geo \
             pos-plugin-ledger pos-plugin-persona pos-plugin-rule-agent \
             pos-plugin-society pos-plugin-synthetic-obs pos-plugin-world \
-            piglor-gateway piglor-ledger pos-experiment pos-cli pos-mvp; do
+            piglor-gateway piglor-ledger pos-experiment pos-cli; do
             cargo modules structure -p "$pkg" --lib > "artifacts/modules/${pkg}.txt" 2>/dev/null || true
           done
-
       - name: Upload module reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -345,9 +374,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           toolchain: 1.97.1
 
@@ -355,84 +382,15 @@ jobs:
         uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2
         with:
           tool: cargo-depgraph
-
       - name: Install graphviz
         run: sudo apt-get update && sudo apt-get install -y graphviz
-
       - name: Generate dependency graph
         run: |
           mkdir -p artifacts
           cargo depgraph --locked --all-deps --dedup-transitive-deps > artifacts/depgraph.svg
-
       - name: Upload dependency graph
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: depgraph
           path: artifacts/depgraph.svg
-
-  world-client-wasm:
-    name: world-client-wasm
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
-        with:
-          toolchain: 1.97.1
-
-      - name: Install wasm32 target
-        run: rustup target add wasm32-unknown-unknown
-
-      - name: Install wasm-pack
-        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2
-        with:
-          tool: wasm-pack@0.15.0
-
-      - name: Check world-client WASM contract
-        run: bash scripts/test-check-world-client-wasm.sh
-
-      - name: Check world-client WASM packaging
-        run: bash scripts/check-world-client-wasm.sh package
-
-  world-client-browser-parity:
-    name: world-client-browser-parity
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
-        with:
-          toolchain: 1.97.1
-
-      - name: Install wasm32 target
-        run: rustup target add wasm32-unknown-unknown
-
-      - name: Install wasm-pack
-        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2
-        with:
-          tool: wasm-pack@0.15.0
-
-      - name: Install Chrome and ChromeDriver
-        id: setup-chrome
-        uses: browser-actions/setup-chrome@2e1d749697dd1612b833dba4a722266286fbefcd # v2.1.2
-        with:
-          chrome-version: 151.0.7922.47
-          install-chromedriver: true
-
-      - name: Configure Chrome binary for wasm-bindgen
-        env:
-          CHROME_PATH: ${{ steps.setup-chrome.outputs.chrome-path }}
-          WEBDRIVER_CONFIG: ${{ runner.temp }}/world-client-webdriver.json
-        run: |
-          jq -n --arg binary "$CHROME_PATH" \
-            '{"goog:chromeOptions": {"binary": $binary}}' > "$WEBDRIVER_CONFIG"
-
-      - name: Check world-client browser parity
-        env:
-          WASM_BINDGEN_TEST_WEBDRIVER_JSON: ${{ runner.temp }}/world-client-webdriver.json
-        run: bash scripts/check-world-client-wasm.sh browser

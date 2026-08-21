@@ -19,6 +19,15 @@ use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+pub mod protocol;
+pub mod provider;
+pub mod provider_driver;
+pub mod replay;
+
+pub use provider::{AgentDecisionProvider, FixtureAgentDecisionProvider, FixtureProviderCallCount};
+pub use provider_driver::ProviderBackedAgentDriver;
+pub use replay::{AgentDecisionReplayVerifier, ReplayCheckpoint, ReplayVerificationError};
+
 /// The entity kind string for AI agents.
 pub const ENTITY_KIND: &str = "ai-agent";
 
@@ -281,10 +290,17 @@ impl Reducer for AgentReducer {
                 serde_json::Value::Number((action_count + 1).into()),
             );
 
-            // Decode payload to extract last_action
-            if let Ok(payload) = ciborium::from_reader::<ActionPayload, _>(event.payload.as_slice())
-            {
-                state.set("last_action", serde_json::Value::String(payload.action));
+            let action = if protocol::is_agent_action_wire(event.payload.as_slice()) {
+                protocol::AgentActionV1::decode(event.payload.as_slice())
+                    .ok()
+                    .map(|payload| payload.action_id().to_owned())
+            } else {
+                ciborium::from_reader::<ActionPayload, _>(event.payload.as_slice())
+                    .ok()
+                    .map(|payload| payload.action)
+            };
+            if let Some(action) = action {
+                state.set("last_action", serde_json::Value::String(action));
             }
         }
     }
@@ -319,6 +335,22 @@ mod tests {
             entity,
             event_type: Kind::new(EVENT_TYPE_ACTION),
             payload: CanonicalBytes::from_vec(buf),
+            wall_time: WallTime::from_micros(0),
+            seq: Seq::ZERO,
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0u8; 32]),
+        }
+    }
+
+    fn make_action_event_with_payload(entity: EntityId, payload: Vec<u8>) -> Event {
+        Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new(EVENT_TYPE_ACTION),
+            payload: CanonicalBytes::from_vec(payload),
             wall_time: WallTime::from_micros(0),
             seq: Seq::ZERO,
             causation_id: None,
@@ -724,5 +756,286 @@ mod tests {
             state.get("last_action").and_then(serde_json::Value::as_str),
             Some("")
         );
+    }
+
+    #[test]
+    fn reducer_accepts_active_deterministic_and_provider_action_producers() {
+        let reducer = AgentReducer;
+        let entity = EntityId::new();
+        let mut state = reducer.initial();
+        let deterministic = make_action_event(entity, "legacy");
+        let provider_payload =
+            protocol::AgentActionV1::try_new("provider".to_owned(), 42, 7, [8; 32], [9; 32])
+                .unwrap()
+                .encode()
+                .unwrap();
+        let provider = make_action_event_with_payload(entity, provider_payload);
+
+        reducer.apply(&mut state, &deterministic);
+        reducer.apply(&mut state, &provider);
+
+        assert_eq!(
+            state
+                .get("action_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            state.get("last_action").and_then(serde_json::Value::as_str),
+            Some("provider")
+        );
+    }
+
+    #[test]
+    fn reducer_never_falls_back_from_malformed_provider_action_wire() {
+        let reducer = AgentReducer;
+        let entity = EntityId::new();
+        let mut state = reducer.initial();
+        reducer.apply(&mut state, &make_action_event(entity, "legacy"));
+
+        let mut malformed =
+            protocol::AgentActionV1::try_new("provider".to_owned(), 42, 7, [8; 32], [9; 32])
+                .unwrap()
+                .encode()
+                .unwrap();
+        malformed[6] = 2;
+        let provider = make_action_event_with_payload(entity, malformed);
+        reducer.apply(&mut state, &provider);
+
+        assert_eq!(
+            state
+                .get("action_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            state.get("last_action").and_then(serde_json::Value::as_str),
+            Some("legacy")
+        );
+    }
+
+    #[test]
+    fn reducer_rejects_cbor_boundary_forms_without_private_codec_access() {
+        let reducer = AgentReducer;
+        let entity = EntityId::new();
+        let mut state = reducer.initial();
+        reducer.apply(&mut state, &make_action_event(entity, "legacy"));
+
+        let mut payloads = vec![
+            vec![0xd8],
+            vec![0xd9, 0],
+            vec![0xda, 0, 0, 0],
+            vec![0xdb, 0, 0, 0, 0, 0, 0, 0, 0],
+            vec![0x98],
+            vec![0x99, 0],
+            vec![0x9a, 0, 0, 0],
+            vec![0x9b, 0, 0, 0, 0, 0, 0, 0, 0],
+            vec![0x58],
+            vec![0x59, 0],
+            vec![0x5a, 0, 0, 0],
+            vec![0x5b, 0, 0, 0, 0, 0, 0, 0],
+            vec![0x5f, 0xff],
+            vec![0x5f, 0x58],
+            vec![0x5f, 0x42, b'P', b'A', 0x42, b'A', b'1'],
+        ];
+        for length in 0..2 {
+            let mut payload = vec![0x59];
+            payload.extend(std::iter::repeat_n(0, length));
+            payloads.push(payload);
+        }
+        for length in 0..4 {
+            let mut payload = vec![0x5a];
+            payload.extend(std::iter::repeat_n(0, length));
+            payloads.push(payload);
+        }
+        for length in 0..8 {
+            let mut payload = vec![0x5b];
+            payload.extend(std::iter::repeat_n(0, length));
+            payloads.push(payload);
+        }
+
+        for payload in payloads {
+            reducer.apply(&mut state, &make_action_event_with_payload(entity, payload));
+            assert_eq!(
+                state.get("last_action").and_then(serde_json::Value::as_str),
+                Some("legacy")
+            );
+        }
+        assert_eq!(
+            state
+                .get("action_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(1 + 15 + 2 + 4 + 8)
+        );
+    }
+
+    #[test]
+    fn reducer_never_falls_back_when_empty_chunks_precede_or_split_paa1_magic() {
+        let reducer = AgentReducer;
+        let entity = EntityId::new();
+        let mut state = reducer.initial();
+        reducer.apply(&mut state, &make_action_event(entity, "legacy"));
+
+        let malformed_candidates = [
+            vec![
+                0x9f, 0x5f, 0x40, 0x40, 0x40, 0x40, 0x41, b'P', 0x41, b'A', 0x41, b'A', 0x41, b'1',
+                0xff, 0xff,
+            ],
+            vec![
+                0x9f, 0x5f, 0x41, b'P', 0x40, 0x41, b'A', 0x40, 0x41, b'A', 0x40, 0x41, b'1', 0x40,
+                0xff, 0xff,
+            ],
+            {
+                let mut budget_exhausted = vec![0x9f, 0x5f];
+                budget_exhausted.extend(std::iter::repeat_n(0x40, 511));
+                budget_exhausted.extend([0x41, b'P', 0x41, b'A', 0x41, b'A', 0x41, b'1']);
+                budget_exhausted
+            },
+            {
+                let mut exact_post_array_window = vec![0x9f, 0x5f];
+                exact_post_array_window.extend(std::iter::repeat_n(0x40, 507));
+                exact_post_array_window.extend([0x43, b'P', b'A', b'A']);
+                exact_post_array_window
+            },
+            {
+                let mut exact_whole_payload_budget = vec![0x9f, 0x5f];
+                exact_whole_payload_budget.extend(std::iter::repeat_n(0x40, 506));
+                exact_whole_payload_budget.extend([0x43, b'P', b'A', b'A']);
+                exact_whole_payload_budget
+            },
+            {
+                let mut tagged_exact_whole_payload_budget = vec![0xc0; 500];
+                tagged_exact_whole_payload_budget.extend([0x9f, 0x5f]);
+                tagged_exact_whole_payload_budget.extend(std::iter::repeat_n(0x40, 6));
+                tagged_exact_whole_payload_budget.extend([0x43, b'P', b'A', b'A']);
+                tagged_exact_whole_payload_budget
+            },
+            {
+                let mut truncated_chunk_header_at_budget = vec![0x9f, 0x5f];
+                truncated_chunk_header_at_budget.extend(std::iter::repeat_n(0x40, 509));
+                truncated_chunk_header_at_budget.push(0x58);
+                truncated_chunk_header_at_budget
+            },
+        ];
+
+        for payload in malformed_candidates {
+            assert!(protocol::is_agent_action_wire(&payload));
+            reducer.apply(&mut state, &make_action_event_with_payload(entity, payload));
+        }
+
+        assert_eq!(
+            state.get("last_action").and_then(serde_json::Value::as_str),
+            Some("legacy")
+        );
+    }
+
+    fn malformed_action_wire_candidates() -> Vec<Vec<u8>> {
+        let mut over_limit = vec![0x87, 0x44, b'P', b'A', b'A', b'1'];
+        over_limit.resize(513, 0);
+        let mut deeply_tagged = vec![0xc0; 512];
+        deeply_tagged.extend([0x87, 0x44, b'P', b'A', b'A', b'1']);
+        let mut truncated_tag_header = vec![0xc0; 511];
+        truncated_tag_header.push(0xd8);
+        let mut truncated_array_header = vec![0xc0; 511];
+        truncated_array_header.push(0x98);
+        vec![
+            vec![0x87, 0x44, b'P', b'A', b'A', b'1'],
+            over_limit,
+            vec![0x98, 0x07, 0x58, 0x04, b'P', b'A', b'A', b'1'],
+            vec![0x86, 0x44, b'P', b'A', b'A', b'1'],
+            vec![0x9f, 0x5f, 0x44, b'P', b'A', b'A', b'1'],
+            vec![0x9f, 0x5f, 0x58, 0x04, b'P', b'A', b'A', b'1'],
+            vec![0x9f, 0x5f, 0x59, 0x00, 0x04, b'P', b'A', b'A', b'1'],
+            vec![0x9f, 0x5f, 0x41, b'P', 0x41, b'A', 0x42, b'A', b'1'],
+            vec![0xd8, 0x2a, 0x87, 0x44, b'P', b'A', b'A', b'1'],
+            vec![0xd9, 0x00, 0x2a, 0x87, 0x44, b'P', b'A', b'A', b'1'],
+            vec![0xda, 0, 0, 0, 0x2a, 0x87, 0x44, b'P', b'A', b'A', b'1'],
+            vec![
+                0xdb, 0, 0, 0, 0, 0, 0, 0, 0x2a, 0x87, 0x44, b'P', b'A', b'A', b'1',
+            ],
+            vec![
+                0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0x87, 0x44, b'P', b'A', b'A', b'1',
+            ],
+            deeply_tagged,
+            vec![0x9f, 0x5f, 0x5a, 0, 0, 0, 4, b'P', b'A', b'A', b'1'],
+            vec![
+                0x9f, 0x5f, 0x5b, 0, 0, 0, 0, 0, 0, 0, 4, b'P', b'A', b'A', b'1',
+            ],
+            vec![0x99, 0, 7, 0x59, 0, 4, b'P', b'A', b'A', b'1'],
+            vec![0x9a, 0, 0, 0, 7, 0x5a, 0, 0, 0, 4, b'P', b'A', b'A', b'1'],
+            vec![
+                0x9b, 0, 0, 0, 0, 0, 0, 0, 7, 0x5b, 0, 0, 0, 0, 0, 0, 0, 4, b'P', b'A', b'A', b'1',
+            ],
+            vec![0x9f, 0x59, 0, 4, b'P', b'A', b'A', b'1'],
+            vec![0x9f, 0x5a, 0, 0, 0, 4, b'P', b'A', b'A', b'1'],
+            vec![0x9f, 0x5b, 0, 0, 0, 0, 0, 0, 0, 4, b'P', b'A', b'A', b'1'],
+            truncated_tag_header,
+            truncated_array_header,
+        ]
+    }
+
+    fn non_action_wire_prefixes() -> Vec<Vec<u8>> {
+        let mut clear_non_candidate_at_budget = vec![0x87, 0x00];
+        clear_non_candidate_at_budget.resize(512, 0);
+        vec![
+            vec![0x98],
+            vec![0x99, 0],
+            vec![0x9a, 0, 0, 0],
+            vec![0x9b, 0, 0, 0, 0, 0, 0, 0],
+            vec![0x87, 0x58],
+            vec![0x87, 0x59, 0],
+            vec![0x87, 0x5a, 0, 0, 0],
+            vec![0x87, 0x5b, 0, 0, 0, 0, 0, 0, 0],
+            vec![0x87, 0x5f],
+            vec![0x9f, 0],
+            vec![0x9f, 0x5f, 0],
+            vec![0x9f, 0x5f, 0xff],
+            vec![0x9f, 0x5f, 0x58],
+            vec![0x9f, 0x5f, 0x44, b'P'],
+            vec![0x9f, 0x5f, 0x41, b'Q'],
+            vec![0x9f, 0x5f, 0x58, 0x10, b'P'],
+            vec![0x9f, 0x5f, 0x40, 0x40, 0x40, 0x40],
+            vec![
+                0x9f, 0x5f, 0x5b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            ],
+            vec![
+                0x9f, 0x5f, 0x5b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xf6,
+            ],
+            vec![0x87, 0x44, b'P', b'A', b'A', b'0'],
+            clear_non_candidate_at_budget,
+        ]
+    }
+
+    #[test]
+    fn reducer_dispatches_every_magic_bearing_malformed_paa1_candidate_strictly() {
+        let reducer = AgentReducer;
+        let entity = EntityId::new();
+        let legacy = make_action_event(entity, "PAA1");
+        assert!(!protocol::is_agent_action_wire(legacy.payload.as_slice()));
+
+        let malformed = malformed_action_wire_candidates();
+        let expected_action_count = u64::try_from(malformed.len() + 1).unwrap();
+
+        let mut state = reducer.initial();
+        reducer.apply(&mut state, &legacy);
+        for payload in malformed {
+            assert!(protocol::is_agent_action_wire(&payload));
+            reducer.apply(&mut state, &make_action_event_with_payload(entity, payload));
+        }
+
+        assert_eq!(
+            state
+                .get("action_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(expected_action_count)
+        );
+        assert_eq!(
+            state.get("last_action").and_then(serde_json::Value::as_str),
+            Some("PAA1")
+        );
+
+        for truncated in non_action_wire_prefixes() {
+            assert!(!protocol::is_agent_action_wire(&truncated));
+        }
     }
 }

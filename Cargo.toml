@@ -19,7 +19,6 @@ members = [
   "plugins/ledger",
   "apps/pos-experiment",
   "apps/pos-cli",
-  "apps/pos-mvp",
   "apps/piglor-gateway",
   "apps/piglor-ledger",
   "apps/piglor-world-client",

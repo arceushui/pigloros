@@ -1,6 +1,6 @@
-use piglor_gateway::{router, AppState, Gateway, LedgerWriteMode};
+use piglor_gateway::{router, ActionPrincipal, AppState, Gateway, LedgerWriteMode};
 use piglor_ledger::LedgerView;
-use pos_core::{Capability, EntityId, Plugin, PluginId, TimelineId, WallTime};
+use pos_core::{Capability, EntityId, Kind, Plugin, PluginId, TimelineId, WallTime};
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition, TickOutcome};
 use pos_plugin_agent::{
     AgentAction, AgentContext, AgentDriver, AgentPlugin, AgentPolicy, AgentReducer,
@@ -286,9 +286,13 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
     let address = listener
         .local_addr()
         .expect("listener address is available");
-    let gateway = Gateway::new(
+    let human_body = EntityId::new();
+    let human_entity = EntityId::new();
+    let gateway = Gateway::new_with_world_bodies_and_principal(
         open_store(StoreConfig::Sqlite { path: path.clone() })
             .expect("Gateway SQLite connection opens"),
+        [human_body],
+        ActionPrincipal::new(human_entity, [Kind::new("world.action.submit")]),
     );
     let state = AppState {
         gateway,
@@ -325,7 +329,6 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
     let timeline =
         TimelineId::from_ulid(ulid::Ulid::from_string(timeline_text).expect("Timeline id parses"));
     let society_entity = EntityId::new();
-    let human_entity = EntityId::new();
     let fast_entity = EntityId::new();
     let slow_entity = EntityId::new();
     let signal = request_http(
@@ -459,7 +462,16 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
         Some(json!({
             "entity_id": human_entity.to_string(),
             "event_type": "world.action",
-            "payload": {"command": "intervene"},
+            "capability": "world.action.submit",
+            "payload": {
+                "actor_entity_id": human_entity.to_string(),
+                "body_entity_id": human_body.to_string(),
+                "action_kind": "impulse",
+                "params": [1],
+                "action_scope": 0,
+                "catalogue_version": 1,
+                "tick": 1
+            },
         })),
     )
     .await;

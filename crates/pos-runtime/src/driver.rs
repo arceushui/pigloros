@@ -8,10 +8,128 @@
 //! - `Replay` — the driver reads events from the log (bit-exact)
 
 use pos_core::{
-    event::{Event, EventDraft},
+    clock::Seq,
+    event::{CanonicalBytes, Event, EventDraft, Kind},
     ids::{EntityId, TimelineId},
     State,
 };
+
+/// One host-validated Timeline interval in recovery evidence.
+///
+/// The interval owns source Events through `through`, inclusively. It conveys
+/// no store handle or append authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TimelineHistorySegment {
+    timeline_id: TimelineId,
+    through: Seq,
+}
+
+impl TimelineHistorySegment {
+    #[must_use]
+    pub const fn new(timeline_id: TimelineId, through: Seq) -> Self {
+        Self {
+            timeline_id,
+            through,
+        }
+    }
+
+    #[must_use]
+    pub const fn timeline_id(self) -> TimelineId {
+        self.timeline_id
+    }
+
+    #[must_use]
+    pub const fn through(self) -> Seq {
+        self.through
+    }
+}
+
+/// Header-only view of one immutable Event supplied while constructing recovery evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryEventHeader {
+    seq: Seq,
+    entity: EntityId,
+    event_type: Kind,
+}
+
+impl RecoveryEventHeader {
+    #[must_use]
+    pub const fn seq(&self) -> Seq {
+        self.seq
+    }
+
+    #[must_use]
+    pub const fn entity(&self) -> EntityId {
+        self.entity
+    }
+
+    #[must_use]
+    pub fn event_type(&self) -> &Kind {
+        &self.event_type
+    }
+}
+
+/// One bounded recovery Event: all source headers, but payload only when the Driver requested it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryEvent {
+    header: RecoveryEventHeader,
+    payload: Option<CanonicalBytes>,
+}
+
+impl RecoveryEvent {
+    #[must_use]
+    pub fn header(&self) -> &RecoveryEventHeader {
+        &self.header
+    }
+
+    #[must_use]
+    pub fn payload(&self) -> Option<&CanonicalBytes> {
+        self.payload.as_ref()
+    }
+}
+
+/// Host-filtered, immutable, bounded evidence for one Driver recovery attempt.
+#[derive(Clone, Debug)]
+pub struct DriverRecoveryEvidence {
+    timeline_segments: Vec<TimelineHistorySegment>,
+    events: Vec<RecoveryEvent>,
+}
+
+impl DriverRecoveryEvidence {
+    pub(crate) fn from_events(
+        timeline_segments: &[TimelineHistorySegment],
+        events: &[Event],
+        wants_payload: impl FnMut(&RecoveryEventHeader) -> bool,
+    ) -> Self {
+        let mut wants_payload = wants_payload;
+        let events = events
+            .iter()
+            .map(|event| {
+                let header = RecoveryEventHeader {
+                    seq: event.seq,
+                    entity: event.entity,
+                    event_type: event.event_type.clone(),
+                };
+                let payload = wants_payload(&header).then(|| event.payload.clone());
+                RecoveryEvent { header, payload }
+            })
+            .collect();
+        Self {
+            timeline_segments: timeline_segments.to_vec(),
+            events,
+        }
+    }
+
+    #[must_use]
+    pub fn timeline_segments(&self) -> &[TimelineHistorySegment] {
+        &self.timeline_segments
+    }
+
+    #[must_use]
+    pub fn events(&self) -> &[RecoveryEvent] {
+        &self.events
+    }
+}
 
 use crate::error::RuntimeError;
 use std::collections::{hash_map::Entry, HashSet};
@@ -49,12 +167,58 @@ impl ProjectionKey {
 /// even if later tick work changes the live registry.
 #[derive(Default)]
 pub(crate) struct ObservationSnapshot {
+    anchor: Option<SnapshotAnchor>,
     states: std::collections::HashMap<ProjectionKey, State>,
+}
+
+/// Identifies the immutable Timeline prefix observed by every Driver in one
+/// host-owned tick boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SnapshotAnchor {
+    pub timeline_id: TimelineId,
+    pub observed_through: Seq,
+}
+
+impl SnapshotAnchor {
+    #[must_use]
+    pub const fn new(timeline_id: TimelineId, observed_through: Seq) -> Self {
+        Self {
+            timeline_id,
+            observed_through,
+        }
+    }
+
+    #[must_use]
+    pub const fn timeline_id(self) -> TimelineId {
+        self.timeline_id
+    }
+
+    #[must_use]
+    pub const fn observed_through(self) -> Seq {
+        self.observed_through
+    }
 }
 
 impl ObservationSnapshot {
     #[must_use]
     pub(crate) fn from_subscriptions<'a>(
+        subscriptions: impl IntoIterator<Item = &'a ProjectionKey>,
+        state_for: impl Fn(&ProjectionKey) -> Option<State>,
+    ) -> Self {
+        Self::capture(None, subscriptions, state_for)
+    }
+
+    #[must_use]
+    pub(crate) fn from_anchored_subscriptions<'a>(
+        anchor: SnapshotAnchor,
+        subscriptions: impl IntoIterator<Item = &'a ProjectionKey>,
+        state_for: impl Fn(&ProjectionKey) -> Option<State>,
+    ) -> Self {
+        Self::capture(Some(anchor), subscriptions, state_for)
+    }
+
+    fn capture<'a>(
+        anchor: Option<SnapshotAnchor>,
         subscriptions: impl IntoIterator<Item = &'a ProjectionKey>,
         state_for: impl Fn(&ProjectionKey) -> Option<State>,
     ) -> Self {
@@ -66,7 +230,7 @@ impl ObservationSnapshot {
                 }
             }
         }
-        Self { states }
+        Self { anchor, states }
     }
 
     #[must_use]
@@ -80,6 +244,7 @@ impl ObservationSnapshot {
         }
         ObservationView {
             snapshot: Some(self),
+            direct_anchor: None,
             len: unique,
             events: &[],
         }
@@ -99,6 +264,7 @@ impl ObservationSnapshot {
 /// `seq` order.
 pub struct ObservationView<'a> {
     snapshot: Option<&'a ObservationSnapshot>,
+    direct_anchor: Option<SnapshotAnchor>,
     len: usize,
     events: &'a [Event],
 }
@@ -108,6 +274,21 @@ impl ObservationView<'_> {
     pub fn empty() -> Self {
         Self {
             snapshot: None,
+            direct_anchor: None,
+            len: 0,
+            events: &[],
+        }
+    }
+
+    /// Creates an empty view carrying a host-owned snapshot anchor.
+    ///
+    /// This is useful for direct Driver integration and validation. Registry
+    /// hosts continue to construct anchored views from one shared snapshot.
+    #[must_use]
+    pub const fn anchored_empty(anchor: SnapshotAnchor) -> Self {
+        Self {
+            snapshot: None,
+            direct_anchor: Some(anchor),
             len: 0,
             events: &[],
         }
@@ -116,6 +297,12 @@ impl ObservationView<'_> {
     #[must_use]
     pub fn state_for(&self, key: &ProjectionKey) -> Option<&State> {
         self.snapshot.and_then(|snapshot| snapshot.states.get(key))
+    }
+
+    #[must_use]
+    pub fn anchor(&self) -> Option<SnapshotAnchor> {
+        self.direct_anchor
+            .or_else(|| self.snapshot.and_then(|snapshot| snapshot.anchor))
     }
 
     #[must_use]
@@ -144,6 +331,7 @@ impl<'a> ObservationView<'a> {
     pub fn from_events(events: &'a [Event]) -> Self {
         Self {
             snapshot: None,
+            direct_anchor: None,
             len: 0,
             events,
         }
@@ -196,12 +384,56 @@ pub trait Driver: Send + Sync {
     fn subscriptions(&self) -> &[ProjectionKey] {
         &[]
     }
+
+    /// Whether this Driver requires a host-owned immutable-prefix anchor.
+    fn requires_snapshot_anchor(&self) -> bool {
+        false
+    }
+
+    /// Selects which recovery Event payloads this Driver needs.
+    ///
+    /// Every Driver receives source headers needed to verify ordering, but no
+    /// payload unless this method selects its header. This callback itself has
+    /// no payload, store, or append authority.
+    fn needs_recovery_payload(&self, _header: &RecoveryEventHeader) -> bool {
+        false
+    }
+
+    /// Stage append-committed state from host-filtered immutable evidence.
+    ///
+    /// Deterministic stateless Drivers need no restoration. Stateful Drivers
+    /// may validate only their own records; they receive no store authority or
+    /// unselected Event payload. Implementations must not mutate committed
+    /// state until [`Self::commit_restore_from_history`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError`] when the Driver's durable history is invalid.
+    fn stage_restore_from_history(
+        &mut self,
+        _evidence: &DriverRecoveryEvidence,
+    ) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
+    /// Commits the preceding successful staged recovery.
+    fn commit_restore_from_history(&mut self) {}
+
+    /// Discards the preceding staged recovery after another Driver rejects it.
+    fn abort_restore_from_history(&mut self) {}
+
+    /// Commit state staged by the preceding successful anchored step.
+    fn commit_step(&mut self) {}
+
+    /// Discard state staged by the preceding anchored step.
+    fn abort_step(&mut self) {}
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use pos_core::{
+        clock::Seq,
         event::{CanonicalBytes, EventDraft, Kind},
         ids::EntityId,
     };
@@ -295,6 +527,30 @@ mod tests {
     fn empty_snapshot_views_are_empty() {
         let snapshot = ObservationSnapshot::default();
         assert!(snapshot.view_for(&[]).is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn snapshot_anchor() {
+        let timeline_id = TimelineId::new();
+        let anchor = SnapshotAnchor::new(timeline_id, Seq::from_u64(7));
+        let snapshot =
+            ObservationSnapshot::from_anchored_subscriptions(anchor, std::iter::empty(), |_| None);
+
+        assert_eq!(snapshot.view_for(&[]).anchor(), Some(anchor));
+        assert_eq!(anchor.timeline_id, timeline_id);
+        assert_eq!(anchor.observed_through, Seq::from_u64(7));
+        assert_eq!(anchor.timeline_id(), timeline_id);
+        assert_eq!(anchor.observed_through(), Seq::from_u64(7));
+        assert_eq!(ObservationView::empty().anchor(), None);
+        let direct = ObservationView::anchored_empty(anchor);
+        assert_eq!(direct.anchor(), Some(anchor));
+        assert!(direct.is_empty());
+
+        let mut legacy = IdleDriver;
+        assert!(!legacy.requires_snapshot_anchor());
+        legacy.commit_step();
+        legacy.abort_step();
     }
 
     #[test]

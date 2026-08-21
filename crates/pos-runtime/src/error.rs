@@ -1,4 +1,4 @@
-use pos_core::ids::PluginId;
+use pos_core::ids::{PluginId, TimelineId};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -33,6 +33,27 @@ pub enum RuntimeError {
         interval_ns: u128,
     },
 
+    #[error("driver '{driver}' requires a snapshot anchor")]
+    MissingSnapshotAnchor { driver: String },
+
+    #[error("snapshot Timeline mismatch: expected {expected}, got {actual}")]
+    SnapshotTimelineMismatch {
+        expected: TimelineId,
+        actual: TimelineId,
+    },
+
+    #[error("an anchored Driver step is already pending")]
+    PendingDriverStep,
+
+    #[error("driver '{driver}' must be fresh before recovery")]
+    DriverRecoveryNotFresh { driver: String },
+
+    #[error("driver '{driver}' committed tick exceeds the V1 range")]
+    DriverTickOverflow { driver: String },
+
+    #[error("invalid driver recovery evidence: {reason}")]
+    InvalidRecoveryEvidence { reason: &'static str },
+
     #[error("store error: {0}")]
     Store(#[from] pos_core::CoreError),
 
@@ -43,7 +64,7 @@ pub enum RuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pos_core::ids::PluginId;
+    use pos_core::ids::{PluginId, TimelineId};
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -112,5 +133,37 @@ mod tests {
         };
         assert!(e.to_string().contains("Live"));
         assert!(e.to_string().contains("Replay"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn anchored_driver_errors_report_only_host_owned_context() {
+        let expected = TimelineId::new();
+        let actual = TimelineId::new();
+        let missing = RuntimeError::MissingSnapshotAnchor {
+            driver: "provider-agent".to_owned(),
+        };
+        let mismatch = RuntimeError::SnapshotTimelineMismatch { expected, actual };
+        let pending = RuntimeError::PendingDriverStep;
+        let overflow = RuntimeError::DriverTickOverflow {
+            driver: "provider-agent".to_owned(),
+        };
+
+        assert_eq!(
+            missing.to_string(),
+            "driver 'provider-agent' requires a snapshot anchor"
+        );
+        assert_eq!(
+            mismatch.to_string(),
+            format!("snapshot Timeline mismatch: expected {expected}, got {actual}")
+        );
+        assert_eq!(
+            pending.to_string(),
+            "an anchored Driver step is already pending"
+        );
+        assert_eq!(
+            overflow.to_string(),
+            "driver 'provider-agent' committed tick exceeds the V1 range"
+        );
     }
 }

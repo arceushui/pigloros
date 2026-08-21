@@ -54,8 +54,8 @@ pub struct RunResult {
     pub manifest: ReproManifest,
     /// Final projection state after all ticks.
     pub projections: pos_state::ProjectionRegistry,
-    /// Store configuration used for this run (for re-opening or branching).
-    pub store_config: StoreConfig,
+    /// Accurate recipe for re-opening the run's store, when one is known.
+    pub store_config: Option<StoreConfig>,
 }
 
 /// Host-owned configuration required to execute a reproduction.
@@ -94,9 +94,14 @@ impl RunResult {
     /// Reopen the store and branch from this result's timeline at its head.
     ///
     /// # Errors
-    /// Returns [`ExperimentError`] if the store cannot be opened or the fork fails.
+    /// Returns [`ExperimentError`] if no accurate recovery recipe is available,
+    /// the store cannot be opened, or the fork fails.
     pub fn branch(&self, name: &str) -> Result<Timeline, ExperimentError> {
-        let mut store = open_store(self.store_config.clone())?;
+        let store_config = self
+            .store_config
+            .clone()
+            .ok_or(ExperimentError::MissingStoreRecoveryRecipe)?;
+        let mut store = open_store(store_config)?;
         let timelines = store.list_timelines()?;
         let timeline = timelines
             .iter()
@@ -139,6 +144,7 @@ pub struct ExperimentSession {
     registry: PluginRegistry,
     parent_composition: pos_runtime::PluginComposition,
     store: SharedEventStore,
+    recovery_store_config: Option<StoreConfig>,
     fork_registry_factory: Option<ForkRegistryFactory>,
     timeline: Timeline,
     ticks: u64,
@@ -241,6 +247,8 @@ pub enum ExperimentError {
     Store(#[from] pos_core::CoreError),
     #[error("a fresh PluginRegistry factory is required to run a forked experiment session")]
     MissingForkRegistryFactory,
+    #[error("the experiment store has no accurate recovery recipe")]
+    MissingStoreRecoveryRecipe,
     #[error("the shared experiment EventStore lock is poisoned")]
     SharedStoreLockPoisoned,
     #[error("the fresh PluginRegistry is incompatible with the parent plugin composition")]
@@ -333,16 +341,33 @@ fn append_driver_drafts(
     store: &mut dyn pos_core::store::EventStore,
     timeline_id: pos_core::ids::TimelineId,
     registry: &mut PluginRegistry,
+    observed_through: pos_core::clock::Seq,
 ) -> Result<u64, ExperimentError> {
-    let drafts = registry.step_all(timeline_id)?;
-    registry.schemas.validate_batch(&drafts)?;
+    let drafts = match registry.step_all_anchored(timeline_id, observed_through) {
+        Ok(drafts) => drafts,
+        Err(error) => {
+            registry.abort_step();
+            return Err(error.into());
+        }
+    };
+    if let Err(error) = registry.schemas.validate_batch(&drafts) {
+        registry.abort_step();
+        return Err(error.into());
+    }
     if drafts.is_empty() {
+        registry.commit_step();
         Ok(0)
     } else {
-        store
-            .append(timeline_id, &drafts)
-            .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
-            .map_err(ExperimentError::from)
+        match store.append(timeline_id, &drafts) {
+            Ok(events) => {
+                registry.commit_step();
+                Ok(u64::try_from(events.len()).unwrap_or(u64::MAX))
+            }
+            Err(error) => {
+                registry.abort_step();
+                Err(error.into())
+            }
+        }
     }
 }
 
@@ -355,7 +380,8 @@ fn advance_tick(
 ) -> Result<(TickAdvance, Timeline), ExperimentError> {
     let before = capture_pending_range(store, timeline_id, boundary.folded_through)?;
     let mut folded_events = fold_captured_range(boundary, registry, &before);
-    let emitted_events = append_driver_drafts(store, timeline_id, registry)?;
+    let emitted_events =
+        append_driver_drafts(store, timeline_id, registry, boundary.folded_through)?;
     let after = capture_pending_range(store, timeline_id, boundary.folded_through)?;
     folded_events = folded_events.saturating_add(fold_captured_range(boundary, registry, &after));
     let outcome = if folded_events == 0 && emitted_events == 0 {
@@ -394,22 +420,76 @@ fn lock_store(
         .map_err(|_| ExperimentError::SharedStoreLockPoisoned)
 }
 
-fn read_events(
-    store: &Mutex<Box<dyn pos_core::store::EventStore>>,
+fn read_completed_prefix(
+    store: &dyn pos_core::store::EventStore,
     timeline_id: pos_core::ids::TimelineId,
     through: pos_core::clock::Seq,
 ) -> Result<Vec<pos_core::Event>, ExperimentError> {
-    if through == pos_core::clock::Seq::ZERO {
-        return Ok(Vec::new());
+    let timeline = store
+        .get_timeline(timeline_id)?
+        .ok_or(pos_core::CoreError::TimelineNotFound(timeline_id))?;
+    if timeline.id() != timeline_id {
+        return Err(pos_core::CoreError::Storage(
+            "EventStore returned mismatched Timeline metadata".to_owned(),
+        )
+        .into());
     }
-    lock_store(store).and_then(|store| {
-        store
-            .read(
-                timeline_id,
-                pos_store::SeqRange::bounded(pos_core::clock::Seq::from_u64(1), through),
+    let head = store.logical_head(timeline_id)?;
+    if head < through {
+        return Err(pos_core::CoreError::Storage(
+            "logical Timeline head precedes completed fold cursor".to_owned(),
+        )
+        .into());
+    }
+    let events = if through == pos_core::clock::Seq::ZERO {
+        Vec::new()
+    } else {
+        store.read(
+            timeline_id,
+            pos_store::SeqRange::bounded(pos_core::clock::Seq::from_u64(1), through),
+        )?
+    };
+    validate_captured_range(pos_core::clock::Seq::ZERO, through, &events)?;
+    Ok(events)
+}
+
+fn timeline_ancestry(
+    store: &dyn pos_core::store::EventStore,
+    active_timeline: pos_core::ids::TimelineId,
+    active_through: pos_core::clock::Seq,
+) -> Result<Vec<pos_runtime::TimelineHistorySegment>, ExperimentError> {
+    let mut reversed = Vec::new();
+    let mut seen = Vec::new();
+    let mut current = active_timeline;
+    let mut through = active_through;
+    loop {
+        if seen.contains(&current) {
+            return Err(pos_core::CoreError::Storage(
+                "Timeline ancestry contains a cycle".to_owned(),
             )
-            .map_err(ExperimentError::from)
-    })
+            .into());
+        }
+        let timeline = store
+            .get_timeline(current)?
+            .ok_or(pos_core::CoreError::TimelineNotFound(current))?;
+        if timeline.id() != current {
+            return Err(pos_core::CoreError::Storage(
+                "EventStore returned mismatched Timeline ancestry metadata".to_owned(),
+            )
+            .into());
+        }
+        seen.push(current);
+        reversed.push(pos_runtime::TimelineHistorySegment::new(current, through));
+        match timeline.meta.fork_point {
+            Some((parent, fork_at)) => {
+                current = parent;
+                through = fork_at;
+            }
+            None => break,
+        }
+    }
+    reversed.reverse();
+    Ok(reversed)
 }
 
 fn hydrate_projections(registry: &mut PluginRegistry, events: &[pos_core::Event]) {
@@ -484,7 +564,8 @@ impl Experiment {
     ///
     /// The factory must register the same deterministic plugin composition as
     /// the parent. Fork creation hydrates fresh projections from inherited
-    /// Timeline history while drivers begin with fresh runtime state.
+    /// Timeline history and stages durable Driver state from host-filtered,
+    /// sequence-bounded recovery evidence before the child can step.
     #[must_use]
     pub fn with_fork_registry_factory(
         mut self,
@@ -508,20 +589,69 @@ impl Experiment {
         self.registry.register(plugin, reducer, driver)
     }
 
+    /// Register a plugin with an optional action approver.
+    ///
+    /// # Errors
+    /// Returns [`pos_runtime::RuntimeError::DuplicatePlugin`] if a plugin with the same id
+    /// is already registered.
+    pub fn register_with_approver(
+        &mut self,
+        plugin: &dyn pos_core::Plugin,
+        reducer: Option<Box<dyn pos_core::Reducer>>,
+        driver: Option<Box<dyn pos_runtime::Driver>>,
+        approver: Option<Box<dyn pos_core::ActionApprover>>,
+        approver_event_types: impl IntoIterator<Item = pos_core::Kind>,
+    ) -> Result<(), pos_runtime::RuntimeError> {
+        self.registry.register_with_approver(
+            plugin,
+            reducer,
+            driver,
+            approver,
+            approver_event_types,
+        )
+    }
+
     /// Create the experiment Timeline and retain the live runtime resources.
     ///
     /// # Errors
     /// Returns [`ExperimentError::Store`] if the configured `EventStore` cannot be
     /// opened or cannot create the Timeline.
     pub fn start(self) -> Result<ExperimentSession, ExperimentError> {
+        let store_config = self.config.store_config.clone();
+        let store = open_store(store_config.clone())?;
+        self.start_with_store_and_recipe(store, Some(store_config))
+    }
+
+    /// Create the experiment Timeline in a host-supplied `EventStore` adapter.
+    ///
+    /// This is the production composition seam for decorators such as bounded,
+    /// fault-reporting, or observability adapters. Because the supplied adapter
+    /// cannot be reconstructed from [`ExperimentConfig::store_config`], results
+    /// from this session do not advertise a recovery recipe.
+    ///
+    /// # Errors
+    /// Returns [`ExperimentError::Store`] if the supplied store cannot create
+    /// the Timeline.
+    pub fn start_with_store(
+        self,
+        store: Box<dyn pos_core::store::EventStore>,
+    ) -> Result<ExperimentSession, ExperimentError> {
+        self.start_with_store_and_recipe(store, None)
+    }
+
+    fn start_with_store_and_recipe(
+        self,
+        mut store: Box<dyn pos_core::store::EventStore>,
+        recovery_store_config: Option<StoreConfig>,
+    ) -> Result<ExperimentSession, ExperimentError> {
         let parent_composition = self.registry.composition();
-        let mut store = open_store(self.config.store_config.clone())?;
         let timeline = store.create_timeline(&self.config.name)?;
         Ok(ExperimentSession {
             config: self.config,
             registry: self.registry,
             parent_composition,
             store: Arc::new(Mutex::new(store)),
+            recovery_store_config,
             fork_registry_factory: self.fork_registry_factory,
             timeline,
             ticks: 0,
@@ -536,24 +666,58 @@ impl Experiment {
         })
     }
 
-    /// Resume an existing durable Timeline with fresh runtime state.
+    /// Resume an existing durable Timeline with a fresh Driver registry.
     ///
     /// Persisted Events are validated and folded in logical sequence order.
-    /// Driver state starts fresh, making this the recovery path after a faulted
-    /// live session whose final append outcome may be ambiguous.
+    /// Stateful Drivers reconstruct only their append-committed state from
+    /// host-filtered immutable evidence, making this the recovery path after a
+    /// faulted live session whose final append outcome may be ambiguous.
     ///
     /// # Errors
     /// Returns a store error when the Timeline cannot be opened or its logical
     /// history is invalid.
     pub fn resume(
-        mut self,
+        self,
         timeline_id: pos_core::ids::TimelineId,
     ) -> Result<ExperimentSession, ExperimentError> {
+        let store_config = self.config.store_config.clone();
+        let store = open_store(store_config.clone())?;
+        self.resume_with_store_and_recipe(timeline_id, store, Some(store_config))
+    }
+
+    /// Resume a durable Timeline through a host-supplied `EventStore` adapter.
+    ///
+    /// Persisted Events are validated and folded exactly as in [`Self::resume`].
+    /// This variant keeps host decorators in the recovery path instead of
+    /// reconstructing an adapter from [`ExperimentConfig::store_config`].
+    ///
+    /// # Errors
+    /// Returns a store error when the Timeline cannot be opened or its logical
+    /// history is invalid.
+    pub fn resume_with_store(
+        self,
+        timeline_id: pos_core::ids::TimelineId,
+        store: Box<dyn pos_core::store::EventStore>,
+    ) -> Result<ExperimentSession, ExperimentError> {
+        self.resume_with_store_and_recipe(timeline_id, store, None)
+    }
+
+    fn resume_with_store_and_recipe(
+        mut self,
+        timeline_id: pos_core::ids::TimelineId,
+        store: Box<dyn pos_core::store::EventStore>,
+        recovery_store_config: Option<StoreConfig>,
+    ) -> Result<ExperimentSession, ExperimentError> {
         let parent_composition = self.registry.composition();
-        let store = open_store(self.config.store_config.clone())?;
         let timeline = store
             .get_timeline(timeline_id)?
             .ok_or(pos_core::CoreError::TimelineNotFound(timeline_id))?;
+        if timeline.id() != timeline_id {
+            return Err(pos_core::CoreError::Storage(
+                "EventStore returned mismatched resume Timeline metadata".to_owned(),
+            )
+            .into());
+        }
         let folded_through = store.logical_head(timeline_id)?;
         let events = if folded_through == pos_core::clock::Seq::ZERO {
             Vec::new()
@@ -564,12 +728,15 @@ impl Experiment {
             )?
         };
         validate_captured_range(pos_core::clock::Seq::ZERO, folded_through, &events)?;
+        let ancestry = timeline_ancestry(store.as_ref(), timeline_id, folded_through)?;
+        self.registry.restore_driver_state(&ancestry, &events)?;
         hydrate_projections(&mut self.registry, &events);
         Ok(ExperimentSession {
             config: self.config,
             registry: self.registry,
             parent_composition,
             store: Arc::new(Mutex::new(store)),
+            recovery_store_config,
             fork_registry_factory: self.fork_registry_factory,
             timeline,
             ticks: 0,
@@ -694,6 +861,25 @@ impl ExperimentSession {
         }
     }
 
+    /// Read the immutable source prefix folded through the last completed Tick Boundary.
+    ///
+    /// The returned Events begin at sequence one and are contiguous through the
+    /// session's completed fold cursor, making them suitable for pure replay
+    /// verification. A failed boundary cannot expose a partial append here.
+    ///
+    /// # Errors
+    /// Returns a store or shared-store locking error if the completed prefix
+    /// cannot be read.
+    pub fn source_events(&self) -> Result<Vec<pos_core::Event>, ExperimentError> {
+        lock_store(&self.store).and_then(|store| {
+            read_completed_prefix(
+                store.as_ref(),
+                self.timeline.id(),
+                self.boundary.folded_through,
+            )
+        })
+    }
+
     fn step_with_mode(&mut self, request: StepRequest) -> Result<TickOutcome, ExperimentError> {
         if self.health == SessionHealth::Faulted {
             return Err(ExperimentError::SessionFaulted);
@@ -745,23 +931,30 @@ impl ExperimentSession {
             fold_captured_range(&mut self.boundary, &mut self.registry, &before);
 
         let selected = match request {
-            StepRequest::AllDrivers => self.registry.step_all(self.timeline.id()),
-            StepRequest::Cadenced(now_ns) => {
-                self.registry.tick_cadenced(self.timeline.id(), now_ns)
-            }
+            StepRequest::AllDrivers => self
+                .registry
+                .step_all_anchored(self.timeline.id(), self.boundary.folded_through),
+            StepRequest::Cadenced(now_ns) => self.registry.tick_cadenced_anchored(
+                self.timeline.id(),
+                now_ns,
+                self.boundary.folded_through,
+            ),
         };
         let drafts = match selected {
             Ok(drafts) => drafts,
             Err(error) => {
+                self.registry.abort_step();
                 self.health = SessionHealth::Faulted;
                 return Err(error.into());
             }
         };
         if let Err(error) = self.registry.schemas.validate_batch(&drafts) {
+            self.registry.abort_step();
             self.health = SessionHealth::Faulted;
             return Err(error.into());
         }
         let emitted_events = if drafts.is_empty() {
+            self.registry.commit_step();
             0
         } else {
             match lock_store(&self.store)
@@ -772,8 +965,12 @@ impl ExperimentSession {
                 })
                 .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
             {
-                Ok(count) => count,
+                Ok(count) => {
+                    self.registry.commit_step();
+                    count
+                }
                 Err(error) => {
+                    self.registry.abort_step();
                     self.health = SessionHealth::Faulted;
                     return Err(error);
                 }
@@ -814,8 +1011,9 @@ impl ExperimentSession {
 
     /// Fork the active Timeline at its most recently completed tick boundary.
     ///
-    /// The child shares the live store, owns fresh runtime state, hydrates
-    /// projections from inherited Timeline history, and can be stepped
+    /// The child shares the live store, owns a fresh runtime registry, hydrates
+    /// projections from inherited Timeline history, restores only durable
+    /// Driver state from host-filtered bounded evidence, and can be stepped
     /// immediately without reopening persistence.
     ///
     /// # Errors
@@ -834,16 +1032,20 @@ impl ExperimentSession {
         if registry.composition() != self.parent_composition {
             return Err(ExperimentError::IncompatibleForkRegistry);
         }
-        let events = read_events(
-            &self.store,
-            self.timeline.id(),
-            self.boundary.folded_through,
-        )?;
-        validate_captured_range(
-            pos_core::clock::Seq::ZERO,
-            self.boundary.folded_through,
-            &events,
-        )?;
+        let (events, ancestry) = lock_store(&self.store).and_then(|store| {
+            let events = read_completed_prefix(
+                store.as_ref(),
+                self.timeline.id(),
+                self.boundary.folded_through,
+            )?;
+            let ancestry = timeline_ancestry(
+                store.as_ref(),
+                self.timeline.id(),
+                self.boundary.folded_through,
+            )?;
+            Ok((events, ancestry))
+        })?;
+        registry.restore_driver_state(&ancestry, &events)?;
         hydrate_projections(&mut registry, &events);
         let config = ExperimentConfig {
             name: name.to_owned(),
@@ -862,6 +1064,7 @@ impl ExperimentSession {
                 registry,
                 parent_composition: self.parent_composition.clone(),
                 store: Arc::clone(&self.store),
+                recovery_store_config: self.recovery_store_config.clone(),
                 fork_registry_factory: Some(Arc::clone(factory)),
                 timeline,
                 ticks: self.ticks,
@@ -916,7 +1119,7 @@ impl ExperimentSession {
                     total_events: self.total_events,
                     manifest,
                     projections: self.registry.projections,
-                    store_config: self.config.store_config,
+                    store_config: self.recovery_store_config,
                 }
             })
     }
@@ -1042,6 +1245,8 @@ impl BacktestRunner {
             )?
         };
         validate_captured_range(pos_core::clock::Seq::ZERO, train_head_seq, &inherited)?;
+        let inherited_ancestry = timeline_ancestry(store, eval_tl_id, train_head_seq)?;
+        eval_registry.restore_driver_state(&inherited_ancestry, &inherited)?;
         hydrate_projections(&mut eval_registry, &inherited);
         let eval_stop = StopCondition::MaxTicks(self.config.eval_ticks);
         let (eval_ticks, eval_events, eval_chain_head) = run_experiment_on_store(
@@ -1090,7 +1295,7 @@ impl BacktestRunner {
             total_events: train_events,
             manifest: train_manifest,
             projections: train_registry.projections,
-            store_config: store_config.clone(),
+            store_config: Some(store_config.clone()),
         };
         let eval_result = RunResult {
             timeline_id: eval_tl_id,
@@ -1098,7 +1303,7 @@ impl BacktestRunner {
             total_events: eval_events,
             manifest: eval_manifest,
             projections: eval_registry.projections,
-            store_config,
+            store_config: Some(store_config),
         };
 
         let eval_report = pos_plugin_eval::compute_report(store, eval_tl_id)
@@ -1166,6 +1371,36 @@ mod tests {
             event_types: event_types.iter().map(|s| Kind::new(*s)).collect(),
             has_reducer: false,
         }
+    }
+
+    #[test]
+    fn reproduction_manifest_wraps_a_host_owned_recipe() {
+        let timeline_id = pos_core::ids::TimelineId::new();
+        let result = RunResult {
+            timeline_id,
+            ticks: 0,
+            total_events: 0,
+            manifest: ReproManifest::new(
+                timeline_id,
+                pos_core::crypto::Hash::zero(),
+                pos_core::clock::WallTime::from_micros(0),
+            ),
+            projections: pos_state::ProjectionRegistry::new(),
+            store_config: None,
+        };
+        let manifest = result.into_reproduction_manifest(ReproductionRecipe::new(
+            "test-host",
+            1,
+            serde_json::json!({"provider": "fixture-local"}),
+        ));
+
+        assert_eq!(manifest.manifest.timeline_id, timeline_id);
+        assert_eq!(manifest.recipe.host_id, "test-host");
+        assert_eq!(manifest.recipe.format_version, 1);
+        assert_eq!(
+            manifest.recipe.configuration,
+            serde_json::json!({"provider": "fixture-local"})
+        );
     }
 
     fn make_plugin_with_reducer(name: &'static str, event_types: &[&str]) -> TestPlugin {
@@ -1242,6 +1477,157 @@ mod tests {
         event_type: Kind,
         events_per_tick: usize,
         ticks_remaining: Option<u64>,
+    }
+
+    #[derive(Default)]
+    struct HostTransactionState {
+        steps: usize,
+        commits: usize,
+        aborts: usize,
+        committed_tick: u64,
+        staged: bool,
+        anchors: Vec<pos_runtime::SnapshotAnchor>,
+        append_calls: Vec<(usize, usize)>,
+        capture_commits: Vec<usize>,
+    }
+
+    struct HostTransactionalDriver {
+        entity: EntityId,
+        event_type: Option<Kind>,
+        state: Arc<Mutex<HostTransactionState>>,
+        fail_step: bool,
+    }
+
+    impl Driver for HostTransactionalDriver {
+        fn name(&self) -> &'static str {
+            "host-transactional"
+        }
+
+        fn step(
+            &mut self,
+            _: pos_core::ids::TimelineId,
+            observations: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            let mut state = self.state.lock().unwrap();
+            state.steps += 1;
+            state.staged = true;
+            state
+                .anchors
+                .push(observations.anchor().expect("host must supply anchor"));
+            if self.fail_step {
+                return Err(RuntimeError::UnknownEventType(
+                    "injected partial Driver failure".to_owned(),
+                ));
+            }
+            let drafts = self
+                .event_type
+                .clone()
+                .map(|event_type| {
+                    EventDraft::new(
+                        self.entity,
+                        event_type,
+                        CanonicalBytes::from_static(b"host-transaction"),
+                    )
+                })
+                .into_iter()
+                .collect();
+            Ok(StepOutput::new(drafts))
+        }
+
+        fn requires_snapshot_anchor(&self) -> bool {
+            true
+        }
+
+        fn commit_step(&mut self) {
+            let mut state = self.state.lock().unwrap();
+            assert!(state.staged);
+            state.staged = false;
+            state.commits += 1;
+            state.committed_tick += 1;
+        }
+
+        fn abort_step(&mut self) {
+            let mut state = self.state.lock().unwrap();
+            if state.staged {
+                state.staged = false;
+                state.aborts += 1;
+            }
+        }
+    }
+
+    struct CaptureAwareStore {
+        base: Box<dyn EventStore>,
+        state: Arc<Mutex<HostTransactionState>>,
+        fail_append: bool,
+        fail_post_step_capture: bool,
+    }
+
+    impl EventStore for CaptureAwareStore {
+        fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
+            self.base.create_timeline(name)
+        }
+
+        fn append(
+            &mut self,
+            timeline: pos_core::ids::TimelineId,
+            drafts: &[EventDraft],
+        ) -> Result<Vec<Event>, CoreError> {
+            let mut state = self.state.lock().unwrap();
+            let commits = state.commits;
+            state.append_calls.push((drafts.len(), commits));
+            drop(state);
+            if self.fail_append {
+                Err(CoreError::Storage("injected append failure".to_owned()))
+            } else {
+                self.base.append(timeline, drafts)
+            }
+        }
+
+        fn read(
+            &self,
+            timeline: pos_core::ids::TimelineId,
+            range: pos_core::store::SeqRange,
+        ) -> Result<Vec<Event>, CoreError> {
+            self.base.read(timeline, range)
+        }
+
+        fn fork(
+            &mut self,
+            parent: pos_core::ids::TimelineId,
+            at_seq: pos_core::clock::Seq,
+            name: &str,
+        ) -> Result<Timeline, CoreError> {
+            self.base.fork(parent, at_seq, name)
+        }
+
+        fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+            self.base.list_timelines()
+        }
+
+        fn get_timeline(
+            &self,
+            id: pos_core::ids::TimelineId,
+        ) -> Result<Option<Timeline>, CoreError> {
+            self.base.get_timeline(id)
+        }
+
+        fn logical_head(
+            &self,
+            id: pos_core::ids::TimelineId,
+        ) -> Result<pos_core::clock::Seq, CoreError> {
+            let state = self.state.lock().unwrap();
+            if state.steps > 0 {
+                let commits = state.commits;
+                drop(state);
+                self.state.lock().unwrap().capture_commits.push(commits);
+                if self.fail_post_step_capture {
+                    return Err(CoreError::Storage(
+                        "injected post-step capture failure".to_owned(),
+                    ));
+                }
+            }
+            self.base.logical_head(id)
+        }
     }
 
     impl FixedDriver {
@@ -2511,9 +2897,13 @@ mod tests {
                 Some(Box::new(CaptureFailDriver)),
             )
             .unwrap();
-        assert!(
-            append_driver_drafts(&mut driver_store, driver_timeline.id(), &mut registry).is_err()
-        );
+        assert!(append_driver_drafts(
+            &mut driver_store,
+            driver_timeline.id(),
+            &mut registry,
+            pos_core::clock::Seq::ZERO,
+        )
+        .is_err());
 
         let mut branch_store = CaptureFaultStore {
             base: pos_store::memory::MemoryStore::new(),
@@ -2528,6 +2918,252 @@ mod tests {
         })
         .branch("child", &mut branch_store)
         .is_err());
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum TransactionHostPath {
+        AdvanceTick,
+        Session,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum TransactionCase {
+        NonEmpty,
+        ZeroDraft,
+        SchemaFailure,
+        AppendFailure,
+        PartialDriverFailure,
+        PostCaptureFailure,
+    }
+
+    fn transaction_registry(
+        case: TransactionCase,
+        state: &Arc<Mutex<HostTransactionState>>,
+        failing_state: &Arc<Mutex<HostTransactionState>>,
+    ) -> PluginRegistry {
+        let (owned_event_types, emitted_event_type): (&[&str], Option<&str>) = match case {
+            TransactionCase::ZeroDraft | TransactionCase::PartialDriverFailure => (&[], None),
+            TransactionCase::SchemaFailure => (
+                &["host.transaction.known"],
+                Some("host.transaction.unknown"),
+            ),
+            TransactionCase::NonEmpty
+            | TransactionCase::AppendFailure
+            | TransactionCase::PostCaptureFailure => {
+                (&["host.transaction"], Some("host.transaction"))
+            }
+        };
+        let mut registry = PluginRegistry::new();
+        registry
+            .register(
+                &make_plugin("host-transaction", owned_event_types),
+                None,
+                Some(Box::new(HostTransactionalDriver {
+                    entity: EntityId::new(),
+                    event_type: emitted_event_type.map(Kind::new),
+                    state: Arc::clone(state),
+                    fail_step: false,
+                })),
+            )
+            .unwrap();
+        if case == TransactionCase::PartialDriverFailure {
+            registry
+                .register(
+                    &make_plugin("host-failing", &[]),
+                    None,
+                    Some(Box::new(HostTransactionalDriver {
+                        entity: EntityId::new(),
+                        event_type: None,
+                        state: Arc::clone(failing_state),
+                        fail_step: true,
+                    })),
+                )
+                .unwrap();
+        }
+        registry
+    }
+
+    fn seed_external_event(store: &mut dyn EventStore, timeline: pos_core::ids::TimelineId) {
+        store
+            .append(
+                timeline,
+                &[EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("external.before"),
+                    CanonicalBytes::from_static(b"before"),
+                )],
+            )
+            .unwrap();
+    }
+
+    fn capture_aware_store(
+        base: Box<dyn EventStore>,
+        case: TransactionCase,
+        state: &Arc<Mutex<HostTransactionState>>,
+    ) -> CaptureAwareStore {
+        CaptureAwareStore {
+            base,
+            state: Arc::clone(state),
+            fail_append: case == TransactionCase::AppendFailure,
+            fail_post_step_capture: case == TransactionCase::PostCaptureFailure,
+        }
+    }
+
+    struct HostCaseResult {
+        timeline: pos_core::ids::TimelineId,
+        result: Result<(), ExperimentError>,
+        state: Arc<Mutex<HostTransactionState>>,
+        failing_state: Arc<Mutex<HostTransactionState>>,
+    }
+
+    fn run_host_transaction_case(
+        path: TransactionHostPath,
+        case: TransactionCase,
+    ) -> HostCaseResult {
+        let state = Arc::new(Mutex::new(HostTransactionState::default()));
+        let failing_state = Arc::new(Mutex::new(HostTransactionState::default()));
+        let registry = transaction_registry(case, &state, &failing_state);
+
+        let (timeline, result) = match path {
+            TransactionHostPath::AdvanceTick => {
+                let mut base: Box<dyn EventStore> = Box::new(pos_store::memory::MemoryStore::new());
+                let timeline = base.create_timeline("transaction-advance").unwrap().id();
+                seed_external_event(base.as_mut(), timeline);
+                let mut store = capture_aware_store(base, case, &state);
+                let mut registry = registry;
+                let mut boundary = TickBoundaryCoordinator {
+                    folded_through: pos_core::clock::Seq::ZERO,
+                };
+                let result =
+                    advance_tick(&mut store, timeline, &mut registry, &mut boundary).map(|_| ());
+                (timeline, result)
+            }
+            TransactionHostPath::Session => {
+                let mut session = Experiment {
+                    config: ExperimentConfig {
+                        name: "transaction-session".to_owned(),
+                        stop: StopCondition::MaxTicks(1),
+                        store_config: StoreConfig::Memory,
+                    },
+                    registry,
+                    fork_registry_factory: None,
+                }
+                .start()
+                .unwrap();
+                let timeline = session.timeline().id();
+                {
+                    let mut store = session.store.lock().unwrap();
+                    seed_external_event(store.as_mut(), timeline);
+                    let base = std::mem::replace(
+                        &mut *store,
+                        Box::new(pos_store::memory::MemoryStore::new()),
+                    );
+                    *store = Box::new(capture_aware_store(base, case, &state));
+                }
+                (timeline, session.step_tick().map(|_| ()))
+            }
+        };
+        HostCaseResult {
+            timeline,
+            result,
+            state,
+            failing_state,
+        }
+    }
+
+    fn assert_host_transaction_case(path: TransactionHostPath, case: TransactionCase) {
+        let HostCaseResult {
+            timeline,
+            result,
+            state,
+            failing_state,
+        } = run_host_transaction_case(path, case);
+        let state = state.lock().unwrap();
+        match case {
+            TransactionCase::NonEmpty
+            | TransactionCase::AppendFailure
+            | TransactionCase::PostCaptureFailure => {
+                assert_eq!(state.append_calls, [(1, 0)], "{path:?} {case:?}");
+            }
+            TransactionCase::ZeroDraft
+            | TransactionCase::SchemaFailure
+            | TransactionCase::PartialDriverFailure => {
+                assert!(state.append_calls.is_empty(), "{path:?} {case:?}");
+            }
+        }
+        assert_eq!(state.steps, 1, "{path:?} {case:?}");
+        assert_eq!(
+            state.anchors,
+            [pos_runtime::SnapshotAnchor::new(
+                timeline,
+                pos_core::clock::Seq::from_u64(1)
+            )],
+            "{path:?} {case:?}"
+        );
+        assert!(!state.staged, "{path:?} {case:?}");
+
+        match case {
+            TransactionCase::NonEmpty | TransactionCase::ZeroDraft => {
+                assert!(result.is_ok(), "{path:?} {case:?}: {result:?}");
+                assert_eq!(state.commits, 1, "{path:?} {case:?}");
+                assert_eq!(state.committed_tick, 1, "{path:?} {case:?}");
+                assert_eq!(state.aborts, 0, "{path:?} {case:?}");
+                assert_eq!(state.capture_commits, [1], "{path:?} {case:?}");
+            }
+            TransactionCase::SchemaFailure
+            | TransactionCase::AppendFailure
+            | TransactionCase::PartialDriverFailure => {
+                assert!(result.is_err(), "{path:?} {case:?}");
+                assert_eq!(state.commits, 0, "{path:?} {case:?}");
+                assert_eq!(state.committed_tick, 0, "{path:?} {case:?}");
+                assert_eq!(state.aborts, 1, "{path:?} {case:?}");
+                assert!(state.capture_commits.is_empty(), "{path:?} {case:?}");
+            }
+            TransactionCase::PostCaptureFailure => {
+                assert!(result.is_err(), "{path:?} {case:?}");
+                assert_eq!(state.commits, 1, "{path:?} {case:?}");
+                assert_eq!(state.committed_tick, 1, "{path:?} {case:?}");
+                assert_eq!(state.aborts, 0, "{path:?} {case:?}");
+                assert_eq!(state.capture_commits, [1], "{path:?} {case:?}");
+            }
+        }
+        drop(state);
+
+        let failing_state = failing_state.lock().unwrap();
+        if case == TransactionCase::PartialDriverFailure {
+            assert_eq!(failing_state.steps, 1, "{path:?} {case:?}");
+            assert_eq!(failing_state.commits, 0, "{path:?} {case:?}");
+            assert_eq!(failing_state.committed_tick, 0, "{path:?} {case:?}");
+            assert_eq!(failing_state.aborts, 1, "{path:?} {case:?}");
+            assert!(!failing_state.staged, "{path:?} {case:?}");
+            assert_eq!(
+                failing_state.anchors,
+                [pos_runtime::SnapshotAnchor::new(
+                    timeline,
+                    pos_core::clock::Seq::from_u64(1)
+                )],
+                "{path:?} {case:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn both_host_paths_cover_the_complete_driver_transaction_matrix() {
+        for path in [
+            TransactionHostPath::AdvanceTick,
+            TransactionHostPath::Session,
+        ] {
+            for case in [
+                TransactionCase::NonEmpty,
+                TransactionCase::ZeroDraft,
+                TransactionCase::SchemaFailure,
+                TransactionCase::AppendFailure,
+                TransactionCase::PartialDriverFailure,
+                TransactionCase::PostCaptureFailure,
+            ] {
+                assert_host_transaction_case(path, case);
+            }
+        }
     }
 
     #[test]
@@ -3263,7 +3899,7 @@ mod tests {
                 pos_core::clock::WallTime::from_micros(0),
             ),
             projections: pos_state::ProjectionRegistry::new(),
-            store_config: StoreConfig::Memory,
+            store_config: Some(StoreConfig::Memory),
         };
         // Branching will fail because the timeline doesn't exist in a fresh Memory store
         let err = result.branch("nonexistent");
@@ -3286,7 +3922,26 @@ mod tests {
         let result = exp.run().unwrap();
 
         // store_config should be set to Memory
-        assert!(matches!(result.store_config, StoreConfig::Memory));
+        assert!(matches!(result.store_config, Some(StoreConfig::Memory)));
+    }
+
+    #[test]
+    fn host_supplied_store_result_has_no_reopen_recipe() {
+        let experiment = Experiment::new(ExperimentConfig {
+            name: "host-store-recipe".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        });
+        let session = experiment
+            .start_with_store(Box::new(pos_store::memory::MemoryStore::new()))
+            .unwrap();
+        assert!(session.source_events().unwrap().is_empty());
+        let result = session.run_to_completion().unwrap();
+        assert!(result.store_config.is_none());
+        assert!(matches!(
+            result.branch("host-store-child"),
+            Err(ExperimentError::MissingStoreRecoveryRecipe)
+        ));
     }
 
     #[test]
@@ -3357,7 +4012,7 @@ mod tests {
         exp.register(&plugin, None, Some(Box::new(driver))).unwrap();
         let result = exp.run().unwrap();
 
-        let store = open_store(result.store_config.clone()).unwrap();
+        let store = open_store(result.store_config.clone().unwrap()).unwrap();
         let events = store.read(result.timeline_id, SeqRange::all()).unwrap();
         assert!(!events.is_empty());
         let mut hasher = blake3::Hasher::new();
@@ -3996,9 +4651,9 @@ mod fault_injection_tests {
                 pos_core::clock::WallTime::from_micros(0),
             ),
             projections: pos_state::ProjectionRegistry::new(),
-            store_config: StoreConfig::Sqlite {
+            store_config: Some(StoreConfig::Sqlite {
                 path: dir.path().to_str().unwrap().to_owned(),
-            },
+            }),
         };
         assert!(result.branch("fork").is_err());
     }
