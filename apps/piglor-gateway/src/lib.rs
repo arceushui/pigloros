@@ -20,20 +20,22 @@ use pos_core::{
     geo_admission::{
         GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore,
     },
-    ids::{EntityId, TimelineId},
+    ids::{EntityId, PluginId, TimelineId},
     store::{
         AppendDedupKey, AppendDedupScope, AppendIdentity, AppendIntent, AppendOrDuplicateOutcome,
         EventReadBounds, EventStore, PurgeOutcome, SeqRange,
     },
     timeline::Timeline,
-    CoreError,
+    ActionRejected, Capability, CoreError, Plugin, ProposedAction,
 };
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
-use pos_plugin_world::EVENT_TYPE_ACTION;
+use pos_plugin_world::{WorldPlugin, EVENT_TYPE_ACTION};
+use pos_runtime::PluginRegistry;
 use serde::{Deserialize, Serialize};
 use std::{
     num::NonZeroUsize,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use thiserror::Error;
 use tokio::sync::broadcast;
@@ -447,6 +449,84 @@ pub struct Gateway {
     bus: broadcast::Sender<EventNotice>,
     limits: GatewayLimits,
     owntracks_enabled: bool,
+    action_registry: Arc<PluginRegistry>,
+    action_principal: Option<ActionPrincipal>,
+}
+
+/// Authenticated principal configuration for human action submission.
+#[derive(Clone)]
+pub struct ActionPrincipal {
+    entity_id: EntityId,
+    capabilities: Vec<Kind>,
+}
+
+impl ActionPrincipal {
+    /// Create a principal with its already-authenticated entity and capabilities.
+    #[must_use]
+    pub fn new(entity_id: EntityId, capabilities: impl IntoIterator<Item = Kind>) -> Self {
+        Self {
+            entity_id,
+            capabilities: capabilities.into_iter().collect(),
+        }
+    }
+
+    fn authorizes(&self, proposal: &ProposedAction) -> Result<(), ActionRejected> {
+        if proposal.actor_entity_id != self.entity_id {
+            return Err(ActionRejected::InvalidActorEntityId);
+        }
+        if !self
+            .capabilities
+            .iter()
+            .any(|capability| capability.as_str() == proposal.capability.as_str())
+        {
+            return Err(ActionRejected::CapabilityNotGranted);
+        }
+        Ok(())
+    }
+}
+
+struct GatewayActionPlugin {
+    id: PluginId,
+}
+
+impl Plugin for GatewayActionPlugin {
+    fn id(&self) -> PluginId {
+        self.id
+    }
+
+    fn name(&self) -> &'static str {
+        "gateway-world-actions"
+    }
+
+    fn capability(&self) -> Capability {
+        Capability {
+            owned_event_types: vec![Kind::new(EVENT_TYPE_ACTION)],
+            ..Capability::default()
+        }
+    }
+}
+
+fn gateway_action_registry() -> Arc<PluginRegistry> {
+    gateway_action_registry_with_bodies(std::iter::empty())
+}
+
+fn gateway_action_registry_with_bodies(
+    bodies: impl IntoIterator<Item = EntityId>,
+) -> Arc<PluginRegistry> {
+    let mut registry = PluginRegistry::new();
+    let descriptor = GatewayActionPlugin {
+        id: PluginId::new(),
+    };
+    registry
+        .register_with_approver(
+            &descriptor,
+            None,
+            None,
+            Some(Box::new(WorldPlugin::new().with_bodies(bodies))),
+            [Kind::new(EVENT_TYPE_ACTION)],
+        )
+        .expect("the gateway action descriptor must register exactly once");
+    Arc::new(registry)
 }
 
 /// Resource bounds applied by the local-first Gateway process.
@@ -562,6 +642,12 @@ pub enum GatewayError {
     /// The existing `OwnTracks` owner-key file failed the activation policy.
     #[error("OwnTracks owner-key file is unavailable")]
     OwnTracksOwnerKeyUnavailable,
+    /// Proposed action was rejected by the capability check or approver (ADR-057).
+    #[error(transparent)]
+    ActionRejected(#[from] ActionRejected),
+    /// Human action submission requires an authenticated action principal.
+    #[error("human action authorization is unavailable")]
+    ActionAuthorizationUnavailable,
 }
 
 /// An existing, owner-only `OwnTracks` activation key loaded from disk.
@@ -687,6 +773,9 @@ impl From<executor::StoreExecutorError> for GatewayError {
 
 impl Gateway {
     /// Wrap an existing store backend.
+    ///
+    /// Human action submission is intentionally disabled until the host supplies
+    /// both a World body catalogue and an authenticated [`ActionPrincipal`].
     #[must_use]
     pub fn new(store: Box<dyn EventStore>) -> Self {
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
@@ -695,6 +784,43 @@ impl Gateway {
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            action_registry: gateway_action_registry(),
+            action_principal: None,
+        }
+    }
+
+    /// Wrap a store and configure the World body catalogue used for actions.
+    #[must_use]
+    pub fn new_with_world_bodies(
+        store: Box<dyn EventStore>,
+        bodies: impl IntoIterator<Item = EntityId>,
+    ) -> Self {
+        let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        Self {
+            store: executor::StoreExecutor::new(store),
+            bus,
+            limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: false,
+            action_registry: gateway_action_registry_with_bodies(bodies),
+            action_principal: None,
+        }
+    }
+
+    /// Wrap a store with World bodies and an authenticated action principal.
+    #[must_use]
+    pub fn new_with_world_bodies_and_principal(
+        store: Box<dyn EventStore>,
+        bodies: impl IntoIterator<Item = EntityId>,
+        principal: ActionPrincipal,
+    ) -> Self {
+        let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        Self {
+            store: executor::StoreExecutor::new(store),
+            bus,
+            limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: false,
+            action_registry: gateway_action_registry_with_bodies(bodies),
+            action_principal: Some(principal),
         }
     }
 
@@ -713,6 +839,8 @@ impl Gateway {
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            action_registry: gateway_action_registry(),
+            action_principal: None,
         }
     }
 
@@ -731,6 +859,8 @@ impl Gateway {
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: true,
+            action_registry: gateway_action_registry(),
+            action_principal: None,
         }
     }
 
@@ -745,6 +875,8 @@ impl Gateway {
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: true,
+            action_registry: gateway_action_registry(),
+            action_principal: None,
         }
     }
 
@@ -1010,7 +1142,8 @@ impl Gateway {
     ///
     /// # Errors
     /// Returns store / id / unsupported-type errors.
-    pub async fn append_action(
+    #[cfg(test)]
+    pub(crate) async fn append_action(
         &self,
         timeline_id: &str,
         entity_id: &str,
@@ -1027,6 +1160,112 @@ impl Gateway {
         self.append_draft(timeline, draft).await
     }
 
+    /// Submit a proposed action through capability checks and plugin approval (ADR-057).
+    ///
+    /// # Errors
+    /// Returns capability, validation, store, or ID errors.
+    pub async fn submit_proposed_action(
+        &self,
+        timeline_id: &str,
+        proposal: ProposedAction,
+    ) -> Result<Event, GatewayError> {
+        let Some(principal) = self.action_principal.as_ref() else {
+            return Err(GatewayError::ActionAuthorizationUnavailable);
+        };
+        principal.authorizes(&proposal)?;
+        let timeline = match parse_timeline_id(timeline_id) {
+            Ok(timeline) => timeline,
+            Err(error) => return Err(error),
+        };
+        match self.store.timeline(timeline).await {
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(GatewayError::Store(CoreError::TimelineNotFound(timeline))),
+            Err(error) => return Err(error.into()),
+        }
+        let draft = match self.action_registry.submit_action(&proposal) {
+            Ok(draft) => draft,
+            Err(error) => return Err(error.into()),
+        };
+        self.append_draft(timeline, draft).await
+    }
+
+    /// Submit a JSON action through the Gateway-owned action registry.
+    ///
+    /// # Errors
+    /// Returns an ID, capability, validation, or store error.
+    pub async fn submit_json_action(
+        &self,
+        timeline_id: &str,
+        entity_id: &str,
+        event_type: &str,
+        payload: &serde_json::Value,
+        capability: &str,
+    ) -> Result<Event, GatewayError> {
+        let entity = match parse_entity_id(entity_id) {
+            Ok(entity) => entity,
+            Err(error) => return Err(error),
+        };
+        let proposal = match ProposedAction::try_new(
+            Kind::new(event_type),
+            entity,
+            json_to_cbor(payload),
+            Kind::new(capability),
+        ) {
+            Ok(proposal) => proposal,
+            Err(error) => return Err(error.into()),
+        };
+        self.submit_proposed_action(timeline_id, proposal).await
+    }
+
+    /// Submit an identified JSON action through the Gateway-owned action registry.
+    ///
+    /// # Errors
+    /// Returns an ID, capability, validation, conflict, or store error.
+    pub async fn submit_identified_json_action(
+        &self,
+        timeline_id: &str,
+        entity_id: &str,
+        event_type: &str,
+        payload: &serde_json::Value,
+        capability: &str,
+        ingress_id: &str,
+    ) -> Result<IdentifiedAppend, GatewayError> {
+        let Some(principal) = self.action_principal.as_ref() else {
+            return Err(GatewayError::ActionAuthorizationUnavailable);
+        };
+        let timeline = match parse_timeline_id(timeline_id) {
+            Ok(timeline) => timeline,
+            Err(error) => return Err(error),
+        };
+        match self.store.timeline(timeline).await {
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(GatewayError::Store(CoreError::TimelineNotFound(timeline))),
+            Err(error) => return Err(error.into()),
+        }
+        let entity = match parse_entity_id(entity_id) {
+            Ok(entity) => entity,
+            Err(error) => return Err(error),
+        };
+        let proposal = match ProposedAction::try_new(
+            Kind::new(event_type),
+            entity,
+            json_to_cbor(payload),
+            Kind::new(capability),
+        ) {
+            Ok(proposal) => proposal,
+            Err(error) => return Err(error.into()),
+        };
+        if let Err(error) = principal.authorizes(&proposal) {
+            return Err(error.into());
+        }
+        let draft = match self.action_registry.submit_action(&proposal) {
+            Ok(draft) => draft,
+            Err(error) => return Err(error.into()),
+        };
+        self.append_identified_draft(timeline, draft, ingress_id)
+            .await
+    }
+
     /// Append an action using an opaque external ingress identity.
     ///
     /// The identity is hashed before it crosses the store boundary. The store
@@ -1035,7 +1274,8 @@ impl Gateway {
     ///
     /// # Errors
     /// Returns an ID, payload, unsupported-action, conflict, or store error.
-    pub async fn append_identified_action(
+    #[cfg(test)]
+    pub(crate) async fn append_identified_action(
         &self,
         timeline_id: &str,
         entity_id: &str,
@@ -1049,6 +1289,16 @@ impl Gateway {
         let timeline = parse_timeline_id(timeline_id)?;
         let entity = parse_entity_id(entity_id)?;
         let draft = EventDraft::new(entity, Kind::new(EVENT_TYPE_ACTION), json_to_cbor(payload));
+        self.append_identified_draft(timeline, draft, ingress_id)
+            .await
+    }
+
+    async fn append_identified_draft(
+        &self,
+        timeline: TimelineId,
+        draft: EventDraft,
+        ingress_id: &str,
+    ) -> Result<IdentifiedAppend, GatewayError> {
         if draft.payload.len() > MAX_EVENT_PAYLOAD_BYTES {
             return Err(GatewayError::EventPayloadTooLarge {
                 maximum: MAX_EVENT_PAYLOAD_BYTES,
@@ -1059,7 +1309,7 @@ impl Gateway {
                 maximum: MAX_EVENTS_RESPONSE_BYTES,
             });
         }
-        let identity = ingress_identity(timeline, entity, ingress_id);
+        let identity = ingress_identity(timeline, draft.entity, ingress_id);
         let outcome = {
             let timeline_meta = self
                 .store
@@ -1209,6 +1459,8 @@ impl Gateway {
             bus: broadcast::channel(capacity).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            action_registry: gateway_action_registry(),
+            action_principal: None,
         }
     }
 
@@ -1219,6 +1471,8 @@ impl Gateway {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            action_registry: gateway_action_registry(),
+            action_principal: None,
         }
     }
 
@@ -1229,6 +1483,8 @@ impl Gateway {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits,
             owntracks_enabled: false,
+            action_registry: gateway_action_registry(),
+            action_principal: None,
         }
     }
 }
@@ -1311,6 +1567,8 @@ pub struct ActionRequest {
     #[serde(default = "default_action_type")]
     pub event_type: String,
     pub payload: serde_json::Value,
+    /// Capability required to submit the action.
+    pub capability: String,
     /// Optional external ingress identity for retry-safe append.
     #[serde(default)]
     pub ingress_id: Option<String>,
@@ -2848,7 +3106,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    async fn store_error_paths() {
+    async fn store_error_paths_create_and_list() {
         let fail_create = Gateway {
             store: executor::StoreExecutor::new(Box::new(ScriptedStore {
                 mode: ScriptMode::FailCreate,
@@ -2856,6 +3114,8 @@ mod tests {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            action_registry: gateway_action_registry(),
+            action_principal: None,
         };
         assert!(matches!(
             fail_create.create_timeline("x").await,
@@ -2869,12 +3129,18 @@ mod tests {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            action_registry: gateway_action_registry(),
+            action_principal: None,
         };
         assert!(matches!(
             fail_list.create_timeline("x").await,
             Err(GatewayError::Store(_))
         ));
+    }
 
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn store_error_paths_append_and_read() {
         let empty_append = Gateway {
             store: executor::StoreExecutor::new(Box::new(ScriptedStore {
                 mode: ScriptMode::EmptyAppend,
@@ -2882,6 +3148,8 @@ mod tests {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            action_registry: gateway_action_registry(),
+            action_principal: None,
         };
         let tl = empty_append.create_timeline("e").await.unwrap();
         let err = empty_append
@@ -2902,6 +3170,8 @@ mod tests {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            action_registry: gateway_action_registry(),
+            action_principal: None,
         };
         let err = fail_get_timeline
             .append_action(
@@ -2921,6 +3191,8 @@ mod tests {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            action_registry: gateway_action_registry(),
+            action_principal: None,
         };
         let tl = fail_append.create_timeline("a").await.unwrap();
         let err = fail_append
@@ -2941,6 +3213,8 @@ mod tests {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            action_registry: gateway_action_registry(),
+            action_principal: None,
         };
         let err = fail_read
             .read_events_page(&TimelineId::new().to_string(), 0, 1)
@@ -3070,5 +3344,69 @@ mod tests {
             ingress_identity(timeline, EntityId::new(), "device-1:42").scope
         );
         assert_ne!(same.dedup_key.as_bytes(), same.scope.as_bytes());
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn submit_proposed_action_approves_and_rejects() {
+        let actor = EntityId::new();
+        let body = EntityId::new();
+        let gw = Gateway::new_with_world_bodies_and_principal(
+            open_store(StoreConfig::Memory).unwrap(),
+            [body],
+            ActionPrincipal::new(actor, [Kind::new("world.action.submit")]),
+        );
+        let tl = gw.create_timeline("actions").await.unwrap();
+        let action = pos_plugin_world::WorldAction {
+            actor_entity_id: actor,
+            body_entity_id: body,
+            action_kind: "impulse".to_owned(),
+            params: vec![1, 2, 3],
+            action_scope: 0,
+            catalogue_version: 1,
+            tick: 1,
+        };
+        let mut payload = Vec::new();
+        ciborium::into_writer(&action, &mut payload).unwrap();
+
+        // Valid proposal
+        let valid = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION),
+            actor,
+            CanonicalBytes::from_vec(payload.clone()),
+            Kind::new("world.action.submit"),
+        );
+        let event = gw
+            .submit_proposed_action(&tl.id().to_string(), valid)
+            .await
+            .unwrap();
+        assert_eq!(event.entity, actor);
+        assert_eq!(event.event_type.as_str(), EVENT_TYPE_ACTION);
+
+        // Capability mismatch
+        let bad_cap = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION),
+            actor,
+            CanonicalBytes::from_vec(b"ok".to_vec()),
+            Kind::new("wrong.capability"),
+        );
+        let err = gw
+            .submit_proposed_action(&tl.id().to_string(), bad_cap)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("capability not granted"));
+
+        // Approver rejection
+        let invalid = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION),
+            actor,
+            CanonicalBytes::from_vec(vec![0xff]),
+            Kind::new("world.action.submit"),
+        );
+        let err = gw
+            .submit_proposed_action(&tl.id().to_string(), invalid)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("malformed world.action payload"));
     }
 }
