@@ -10,7 +10,7 @@
 use pos_core::{
     clock::Seq,
     event::{CanonicalBytes, Event, EventDraft, Kind},
-    ids::{EntityId, TimelineId},
+    ids::{EntityId, EventId, TimelineId},
     State,
 };
 use std::borrow::Cow;
@@ -48,12 +48,18 @@ impl TimelineHistorySegment {
 /// Header-only view of one immutable Event supplied while constructing recovery evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryEventHeader {
+    id: EventId,
     seq: Seq,
     entity: EntityId,
     event_type: Kind,
 }
 
 impl RecoveryEventHeader {
+    #[must_use]
+    pub const fn id(&self) -> EventId {
+        self.id
+    }
+
     #[must_use]
     pub const fn seq(&self) -> Seq {
         self.seq
@@ -107,6 +113,7 @@ impl DriverRecoveryEvidence {
             .iter()
             .map(|event| {
                 let header = RecoveryEventHeader {
+                    id: event.id,
                     seq: event.seq,
                     entity: event.entity,
                     event_type: event.event_type.clone(),
@@ -246,6 +253,17 @@ impl ObservationSnapshot {
         events: &'a [Event],
         event_subscriptions: &[Kind],
     ) -> ObservationView<'a> {
+        self.view_for_events_after(subscriptions, events, event_subscriptions, Seq::ZERO)
+    }
+
+    #[must_use]
+    pub(crate) fn view_for_events_after<'a>(
+        &'a self,
+        subscriptions: &[ProjectionKey],
+        events: &'a [Event],
+        event_subscriptions: &[Kind],
+        after_seq: Seq,
+    ) -> ObservationView<'a> {
         let mut unique = 0usize;
         let mut seen = HashSet::with_capacity(subscriptions.len());
         for key in subscriptions {
@@ -263,7 +281,9 @@ impl ObservationSnapshot {
                 Cow::Owned(
                     events
                         .iter()
-                        .filter(|event| event_subscriptions.contains(&event.event_type))
+                        .filter(|event| {
+                            event.seq > after_seq && event_subscriptions.contains(&event.event_type)
+                        })
                         .cloned()
                         .collect(),
                 )

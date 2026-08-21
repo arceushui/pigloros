@@ -2,15 +2,15 @@
 //!
 //! The kernel composes the existing Tick Boundary host with the versioned
 //! World plugin and two deliberately small, swappable proof Plugins. It is an
-//! engineering evaluator, not a public Scenario Room API; that client
-//! contract remains a Wave 9 concern.
+//! engineering evaluator for the user-parameterized Scenario Room proof
+//! contract; the public Gateway/client contract remains a Wave 9 concern.
 
 use crate::{Experiment, ExperimentConfig, ExperimentError, ExperimentSession, StopCondition};
 use pos_conformance::{
-    compare, verify_evidence, AuthoritativeEventV1, CausalTraceEntryV1, ComparisonV1,
-    ConsentAuditV1, DivergenceClassV1, ExecutionModeV1, MoatProofEvidenceV1, MoatProofInputV1,
-    ParticipantViewV1, PluginFailureV1, ProjectionEvidenceV1, ReproManifestV1, UncertaintyV1,
-    EVIDENCE_FORMAT_V1,
+    compare, verify_counterfactual_fork, verify_evidence, AuthoritativeEventV1, CausalTraceEntryV1,
+    ComparisonV1, ConsentAuditV1, DivergenceClassV1, ExecutionModeV1, MoatProofEvidenceV1,
+    MoatProofInputV1, ParticipantEventV1, ParticipantViewV1, PluginFailureV1, ProjectionEvidenceV1,
+    ReproManifestV1, UncertaintyV1, EVIDENCE_FORMAT_V1,
 };
 use pos_core::{
     event::{CanonicalBytes, Event, EventDraft, Kind},
@@ -39,6 +39,8 @@ const SOCIETY_ENTITY_KIND: &str = "proof-society";
 pub struct MoatProofReport {
     pub baseline: MoatProofEvidenceV1,
     pub counterfactual: MoatProofEvidenceV1,
+    pub baseline_cbor: Vec<u8>,
+    pub counterfactual_cbor: Vec<u8>,
     pub divergence: ComparisonV1,
     pub physical_reaction: GateStatus,
     pub agent_reaction: GateStatus,
@@ -63,7 +65,8 @@ impl MoatProofReport {
             && self.failure_probes.iter().all(|failure| !failure.committed)
             && self.failure_probes.len() == 2
             && self.consent_audit.halted_at_tick_boundary
-            && self.consent_audit.requested_after_seq == self.consent_audit.effective_after_seq
+            && self.consent_audit.effective_after_seq >= self.consent_audit.requested_after_seq
+            && self.consent_audit.revocation_event_seq == self.consent_audit.effective_after_seq
     }
 }
 
@@ -126,7 +129,8 @@ impl MoatProofRun {
             stop: StopCondition::MaxTicks(input.ticks.saturating_add(1)),
             store_config: pos_store::StoreConfig::Memory,
         })
-        .with_fork_registry_factory(registry_factory);
+        .with_fork_registry_factory(registry_factory)
+        .with_resource_limit(input.resource_limit);
         register_plugins(&mut experiment, &topology)?;
         let mut parent = experiment.start()?;
         parent.step_tick()?;
@@ -166,6 +170,16 @@ impl MoatProofRun {
         });
         verify_evidence(&baseline)?;
         verify_evidence(&counterfactual)?;
+        verify_counterfactual_fork(&baseline, &counterfactual, EVENT_TYPE_ACTION_V1)?;
+        let baseline_cbor = baseline.to_canonical_cbor()?;
+        let counterfactual_cbor = counterfactual.to_canonical_cbor()?;
+        let baseline_json = baseline.to_json()?;
+        let counterfactual_json = counterfactual.to_json()?;
+        pos_reference::verify_fork_json(
+            &baseline_json,
+            &counterfactual_json,
+            EVENT_TYPE_ACTION_V1,
+        )?;
         let divergence = compare(&baseline, &counterfactual);
         compare_with_reference(&baseline, &counterfactual, &divergence)?;
         let physical_reaction = projection_changed(&baseline, &counterfactual, "world");
@@ -174,6 +188,8 @@ impl MoatProofRun {
         let report = MoatProofReport {
             baseline,
             counterfactual,
+            baseline_cbor,
+            counterfactual_cbor,
             divergence,
             physical_reaction: physical_reaction.into(),
             agent_reaction: agent_reaction.into(),
@@ -204,6 +220,15 @@ pub fn run_local_and_air_gapped(
     let local = MoatProofRun::new(input.clone(), ExecutionModeV1::Local)?.run()?;
     let air_gapped = MoatProofRun::new(input, ExecutionModeV1::AirGapped)?.run()?;
     let comparison = compare(&local.baseline, &air_gapped.baseline);
+    if !comparison.equal {
+        return Err(MoatProofError::ExecutionModesDiverged(comparison));
+    }
+    let counterfactual_comparison = compare(&local.counterfactual, &air_gapped.counterfactual);
+    if !counterfactual_comparison.equal {
+        return Err(MoatProofError::ExecutionModesDiverged(
+            counterfactual_comparison,
+        ));
+    }
     Ok((local, air_gapped, comparison))
 }
 
@@ -223,10 +248,14 @@ pub enum MoatProofError {
     Evidence(#[from] pos_conformance::EvidenceError),
     #[error("proof evidence JSON export failed: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("proof evidence canonical-CBOR export failed: {0}")]
+    CanonicalCbor(#[from] pos_core::CoreError),
     #[error("independent reference evaluator failed: {0}")]
     Reference(#[from] pos_reference::ReferenceError),
     #[error("independent reference evaluator classified a different divergence")]
     ReferenceDivergenceMismatch,
+    #[error("Local and Air-Gapped proof artifacts diverged: {0:?}")]
+    ExecutionModesDiverged(ComparisonV1),
     #[error("Wave 8 reaction and atomicity conformance gates failed")]
     ReactionGatesFailed,
     #[error("consent-revoked session accepted a post-revocation append")]
@@ -256,6 +285,17 @@ fn compare_with_reference(
 
 fn fixed_id(value: u128) -> EntityId {
     EntityId::from_ulid(ulid::Ulid::from(value))
+}
+
+fn room_entity(input: &MoatProofInputV1, slot: u8) -> EntityId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"pigloros.wave8.scenario-room.entity.v1");
+    hasher.update(&input.digest());
+    hasher.update(&[slot]);
+    let digest = hasher.finalize();
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&digest.as_bytes()[..16]);
+    EntityId::from_ulid(ulid::Ulid::from(u128::from_be_bytes(bytes)))
 }
 
 fn finish(session: &mut ExperimentSession) -> Result<(), ExperimentError> {
@@ -306,13 +346,16 @@ struct ProofTopology {
 
 impl ProofTopology {
     fn new(input: MoatProofInputV1) -> Self {
-        let body = fixed_id(1);
+        let body = room_entity(&input, 1);
+        let agent = room_entity(&input, 2);
+        let society = room_entity(&input, 3);
+        let config_entity = room_entity(&input, 4);
         Self {
             input,
             body,
-            agent: fixed_id(2),
-            society: fixed_id(3),
-            config_entity: fixed_id(4),
+            agent,
+            society,
+            config_entity,
             world_plugin: WorldPlugin::new().with_bodies([body]),
             agent_plugin: ProofAgentPlugin::new(),
             society_plugin: ProofSocietyPlugin::new(),
@@ -352,7 +395,8 @@ fn register_plugins(
 }
 
 fn build_registry(topology: &ProofTopology) -> Result<pos_runtime::PluginRegistry, RuntimeError> {
-    let mut registry = pos_runtime::PluginRegistry::new();
+    let mut registry =
+        pos_runtime::PluginRegistry::new().with_resource_limit(topology.input.resource_limit);
     registry.register_with_approver(
         &topology.world_plugin,
         Some(Box::new(WorldReducer)),
@@ -474,6 +518,7 @@ fn evidence(context: &EvidenceContext<'_>) -> MoatProofEvidenceV1 {
         })
         .collect();
     let uncertainty = uncertainty_from_events(events);
+    let participant_views = participant_views(events);
     MoatProofEvidenceV1 {
         format_version: EVIDENCE_FORMAT_V1,
         manifest: ReproManifestV1 {
@@ -494,24 +539,44 @@ fn evidence(context: &EvidenceContext<'_>) -> MoatProofEvidenceV1 {
         projections: projection_evidence,
         causal_trace,
         uncertainty,
-        participant_views: vec![
-            ParticipantViewV1 {
-                participant: "proof-agent".to_owned(),
-                visible_event_types: vec![EVENT_TYPE_OBSERVATION_V1.to_owned()],
-                hidden_event_types: vec!["society.signal".to_owned()],
-            },
-            ParticipantViewV1 {
-                participant: "society".to_owned(),
-                visible_event_types: vec![AGENT_EVENT_TYPE.to_owned()],
-                hidden_event_types: vec![EVENT_TYPE_OBSERVATION_V1.to_owned()],
-            },
-        ],
+        participant_views,
         plugin_failures: failure_probes.to_vec(),
         consent_audit: consent_audit.clone(),
     }
 }
 
 const SOCIETY_NAME: &str = "society";
+
+fn participant_views(events: &[Event]) -> Vec<ParticipantViewV1> {
+    [
+        (
+            "proof-agent",
+            &[EVENT_TYPE_OBSERVATION_V1][..],
+            &["society.signal", AGENT_EVENT_TYPE][..],
+        ),
+        (
+            "society",
+            &[AGENT_EVENT_TYPE][..],
+            &[EVENT_TYPE_OBSERVATION_V1][..],
+        ),
+    ]
+    .into_iter()
+    .map(|(participant, visible, hidden)| ParticipantViewV1 {
+        participant: participant.to_owned(),
+        visible_event_types: visible.iter().map(|kind| (*kind).to_owned()).collect(),
+        hidden_event_types: hidden.iter().map(|kind| (*kind).to_owned()).collect(),
+        visible_events: events
+            .iter()
+            .filter(|event| visible.contains(&event.event_type.as_str()))
+            .map(|event| ParticipantEventV1 {
+                seq: event.seq.as_u64(),
+                event_type: event.event_type.as_str().to_owned(),
+                payload_digest: payload_digest(event),
+            })
+            .collect(),
+    })
+    .collect()
+}
 
 fn uncertainty_from_events(events: &[Event]) -> Vec<UncertaintyV1> {
     events
@@ -598,7 +663,8 @@ fn failure_probe(
         name: format!("wave8-failure-{class}"),
         stop: StopCondition::MaxTicks(1),
         store_config: pos_store::StoreConfig::Memory,
-    });
+    })
+    .with_resource_limit(resource_limit);
     experiment.register(
         &plugin,
         None,
@@ -634,7 +700,7 @@ fn consent_probe() -> Result<ConsentAuditV1, MoatProofError> {
         .source_events()?
         .last()
         .map_or(0, |event| event.seq.as_u64());
-    session.revoke_consent_at_boundary();
+    session.revoke_consent_for_subject_at_boundary("proof-subject");
     let post_revocation_append = session.append_events(&[EventDraft::new(
         fixed_id(5),
         Kind::new("proof.consent.tick"),
@@ -643,7 +709,14 @@ fn consent_probe() -> Result<ConsentAuditV1, MoatProofError> {
     if post_revocation_append.is_ok() {
         return Err(MoatProofError::ConsentAppendAccepted);
     }
-    let halted = matches!(session.step_tick()?, crate::TickOutcome::Stopped);
+    let marker_committed = matches!(
+        session.step_tick()?,
+        crate::TickOutcome::Advanced {
+            emitted_events: 1,
+            ..
+        }
+    );
+    let halted = marker_committed && matches!(session.step_tick()?, crate::TickOutcome::Stopped);
     let after_seq = session
         .source_events()?
         .last()
@@ -652,6 +725,7 @@ fn consent_probe() -> Result<ConsentAuditV1, MoatProofError> {
         subject: "proof-subject".to_owned(),
         requested_after_seq: boundary_seq,
         effective_after_seq: after_seq,
+        revocation_event_seq: after_seq,
         halted_at_tick_boundary: halted,
     })
 }
@@ -739,11 +813,19 @@ impl Driver for FailureProbeDriver {
     ) -> Result<StepOutput, RuntimeError> {
         assert!(self.class != "plugin_crash", "proof crash probe");
         if self.class == "resource_exhaustion" {
-            return Err(RuntimeError::ResourceExhausted {
-                driver: self.name().to_owned(),
-                requested: self.resource_limit.saturating_add(1),
-                limit: self.resource_limit,
-            });
+            let count =
+                usize::try_from(self.resource_limit.saturating_add(1)).unwrap_or(usize::MAX);
+            return Ok(StepOutput::new(
+                (0..count)
+                    .map(|_| {
+                        EventDraft::new(
+                            fixed_id(6),
+                            Kind::new("proof.failure.probe"),
+                            CanonicalBytes::from_static(b"budget"),
+                        )
+                    })
+                    .collect(),
+            ));
         }
         Err(RuntimeError::InvalidPayload {
             event_type: "proof.failure.probe".to_owned(),
@@ -1141,6 +1223,19 @@ mod tests {
             MoatProofRun::new(value, ExecutionModeV1::AirGapped),
             Err(pos_conformance::InputError::NetworkNotAllowedInAirGapped)
         ));
+    }
+
+    #[test]
+    fn scenario_room_entities_are_deterministic_and_input_derived() {
+        let first = ProofTopology::new(input());
+        let same = ProofTopology::new(input());
+        let mut changed_input = input();
+        changed_input.scenario_id = "different-room".to_owned();
+        let changed = ProofTopology::new(changed_input);
+        assert_eq!(first.body, same.body);
+        assert_eq!(first.agent, same.agent);
+        assert_ne!(first.body, changed.body);
+        assert_ne!(first.config_entity, changed.config_entity);
     }
 
     #[test]

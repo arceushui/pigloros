@@ -121,11 +121,13 @@ struct PluginEntry {
     driver: Option<Box<dyn Driver>>,
     approver: Option<Box<dyn ActionApprover>>,
     last_tick: Option<u128>,
+    event_cursor: Seq,
 }
 
 struct PendingStep {
     driver_ids: Vec<PluginId>,
     cadence_updates: Vec<(PluginId, u128)>,
+    event_cursors: Vec<(PluginId, Seq)>,
 }
 
 #[derive(Clone, Copy)]
@@ -147,6 +149,7 @@ pub struct PluginRegistry {
     pub projections: ProjectionRegistry,
     pending_step: Option<PendingStep>,
     run_mode: RunMode,
+    resource_limit: Option<u64>,
 }
 
 impl PluginRegistry {
@@ -225,6 +228,11 @@ impl PluginRegistry {
             description: "Internal: nondeterministic output recorded by the Recorder".to_owned(),
             json_schema: None,
         });
+        schemas.register(EventTypeSchema {
+            event_type: pos_core::event::Kind::new(crate::HOST_CONSENT_REVOCATION_EVENT_TYPE),
+            description: "Host-owned durable consent revocation marker".to_owned(),
+            json_schema: None,
+        });
         Self {
             plugins: IndexMap::new(),
             approver_map: IndexMap::new(),
@@ -232,7 +240,15 @@ impl PluginRegistry {
             projections: ProjectionRegistry::new(),
             pending_step: None,
             run_mode,
+            resource_limit: None,
         }
+    }
+
+    /// Bound the number of Event drafts one atomic Tick may stage.
+    #[must_use]
+    pub fn with_resource_limit(mut self, limit: u64) -> Self {
+        self.resource_limit = Some(limit);
+        self
     }
 
     fn reject_unanchored_drivers(&self) -> Result<(), RuntimeError> {
@@ -279,6 +295,7 @@ impl PluginRegistry {
         self.ensure_no_pending_step()?;
         let mut driver_ids = Vec::new();
         let mut cadence_updates = Vec::new();
+        let mut event_cursors = Vec::new();
         let mut seen_subscriptions = HashSet::new();
         let mut subscriptions = Vec::new();
 
@@ -335,10 +352,11 @@ impl PluginRegistry {
                     .driver
                     .as_mut()
                     .expect("selected IDs refer to registered drivers");
-                let observations = snapshot.view_for_events(
+                let observations = snapshot.view_for_events_after(
                     driver.subscriptions(),
                     committed_events,
                     driver.event_subscriptions(),
+                    entry.event_cursor,
                 );
                 invoke_driver(driver.as_mut(), timeline, observations)
                     .and_then(|output| reject_geographic_drafts(&output).map(|()| output))
@@ -346,6 +364,7 @@ impl PluginRegistry {
             match result {
                 Ok(output) => {
                     staged_driver_ids.push(id);
+                    event_cursors.push((id, observed_through));
                     all_drafts.extend(output.drafts);
                 }
                 Err(error) => {
@@ -356,9 +375,22 @@ impl PluginRegistry {
             }
         }
 
+        if let Some(limit) = self.resource_limit {
+            let requested = u64::try_from(all_drafts.len()).unwrap_or(u64::MAX);
+            if requested > limit {
+                self.abort_drivers(&staged_driver_ids);
+                return Err(RuntimeError::ResourceExhausted {
+                    driver: "host-tick-budget".to_owned(),
+                    requested,
+                    limit,
+                });
+            }
+        }
+
         self.pending_step = Some(PendingStep {
             driver_ids: staged_driver_ids,
             cadence_updates,
+            event_cursors,
         });
         Ok(all_drafts)
     }
@@ -380,6 +412,11 @@ impl PluginRegistry {
         for (id, now_ns) in pending.cadence_updates {
             if let Some(entry) = self.plugins.get_mut(&id) {
                 entry.last_tick = Some(now_ns);
+            }
+        }
+        for (id, cursor) in pending.event_cursors {
+            if let Some(entry) = self.plugins.get_mut(&id) {
+                entry.event_cursor = cursor;
             }
         }
     }
@@ -440,6 +477,9 @@ impl PluginRegistry {
                 .and_then(|entry| entry.driver.as_mut())
             {
                 driver.commit_restore_from_history();
+            }
+            if let Some(entry) = self.plugins.get_mut(&id) {
+                entry.event_cursor = events.last().map_or(Seq::ZERO, |event| event.seq);
             }
         }
         Ok(())
@@ -575,6 +615,7 @@ impl PluginRegistry {
                 driver,
                 approver,
                 last_tick: None,
+                event_cursor: Seq::ZERO,
             },
         );
         Ok(())
@@ -621,6 +662,7 @@ impl PluginRegistry {
                 driver: Some(driver),
                 approver: None,
                 last_tick: None,
+                event_cursor: Seq::ZERO,
             },
         );
     }

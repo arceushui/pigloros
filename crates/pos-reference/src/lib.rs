@@ -8,6 +8,8 @@
 //! import the conformance crate, experiment host, or any plugin. It exists to
 //! prove that a separately implemented consumer can classify the same fixture.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 /// Divergence classes emitted by the independent JSON evaluator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReferenceDivergenceV1 {
@@ -35,6 +37,170 @@ pub enum ReferenceError {
     RootNotObject,
     #[error("evidence JSON is missing field '{0}'")]
     MissingField(&'static str),
+    #[error("independent Fork evaluator rejected evidence: {0}")]
+    InvalidForkEvidence(&'static str),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ReferenceEvent {
+    seq: u64,
+    event_type: String,
+    causation_seq: Option<u64>,
+}
+
+/// Independently validate a baseline/counterfactual Fork evidence pair.
+///
+/// This evaluator intentionally works only from untyped JSON and reimplements
+/// the causal-tail checks without importing the host or conformance crate.
+/// Callers receive a stable classified error rather than an implementation
+/// panic when a fixture is incomplete.
+///
+/// # Errors
+/// Returns [`ReferenceError`] when either JSON artifact is malformed or the
+/// independent Fork invariants do not hold.
+pub fn verify_fork_json(
+    baseline: &str,
+    counterfactual: &str,
+    intervention_event_type: &str,
+) -> Result<(), ReferenceError> {
+    let baseline = parse(baseline)?;
+    let counterfactual = parse(counterfactual)?;
+    let baseline_manifest = baseline
+        .get("manifest")
+        .and_then(serde_json::Value::as_object)
+        .ok_or(ReferenceError::MissingField("manifest"))?;
+    let counterfactual_manifest = counterfactual
+        .get("manifest")
+        .and_then(serde_json::Value::as_object)
+        .ok_or(ReferenceError::MissingField("manifest"))?;
+    if baseline_manifest.get("input_digest") != counterfactual_manifest.get("input_digest")
+        || baseline_manifest.get("fork_cut_seq") != counterfactual_manifest.get("fork_cut_seq")
+    {
+        return Err(ReferenceError::InvalidForkEvidence("manifest mismatch"));
+    }
+    let Some(cut) = counterfactual_manifest
+        .get("fork_cut_seq")
+        .and_then(serde_json::Value::as_u64)
+    else {
+        return Err(ReferenceError::InvalidForkEvidence("fork cut is absent"));
+    };
+    let baseline_events = events(&baseline)?;
+    let counterfactual_events = events(&counterfactual)?;
+    let prefix = |events: &[ReferenceEvent]| {
+        events
+            .iter()
+            .filter(|event| event.seq <= cut)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    if prefix(&baseline_events) != prefix(&counterfactual_events) {
+        return Err(ReferenceError::InvalidForkEvidence("prefix mismatch"));
+    }
+    let baseline_suffix = baseline_events
+        .iter()
+        .filter(|event| event.seq > cut)
+        .collect::<Vec<_>>();
+    let counterfactual_suffix = counterfactual_events
+        .iter()
+        .filter(|event| event.seq > cut)
+        .collect::<Vec<_>>();
+    if baseline_suffix.is_empty() || counterfactual_suffix.len() < 2 {
+        return Err(ReferenceError::InvalidForkEvidence("suffix is empty"));
+    }
+    let Some(intervention) = counterfactual_suffix
+        .iter()
+        .find(|event| event.event_type == intervention_event_type)
+    else {
+        return Err(ReferenceError::InvalidForkEvidence(
+            "intervention is absent",
+        ));
+    };
+    let by_seq = counterfactual_events
+        .iter()
+        .map(|event| (event.seq, event))
+        .collect::<BTreeMap<_, _>>();
+    let has_complete_tail = counterfactual_suffix
+        .iter()
+        .filter(|event| event.seq > intervention.seq)
+        .any(|candidate| {
+            let tail = counterfactual_suffix
+                .iter()
+                .filter(|event| event.seq >= candidate.seq)
+                .collect::<Vec<_>>();
+            tail.len() >= 3
+                && tail
+                    .iter()
+                    .all(|event| reaches(event, intervention.seq, &by_seq))
+        });
+    if !has_complete_tail {
+        return Err(ReferenceError::InvalidForkEvidence(
+            "causal tail is incomplete",
+        ));
+    }
+    if baseline_suffix == counterfactual_suffix {
+        return Err(ReferenceError::InvalidForkEvidence("suffix was copied"));
+    }
+    Ok(())
+}
+
+fn events(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Vec<ReferenceEvent>, ReferenceError> {
+    let values = object
+        .get("authoritative_events")
+        .and_then(serde_json::Value::as_array)
+        .ok_or(ReferenceError::MissingField("authoritative_events"))?;
+    values
+        .iter()
+        .map(|value| {
+            let event = value
+                .as_object()
+                .ok_or(ReferenceError::InvalidForkEvidence(
+                    "Event is not an object",
+                ))?;
+            let seq = event.get("seq").and_then(serde_json::Value::as_u64).ok_or(
+                ReferenceError::InvalidForkEvidence("Event sequence is invalid"),
+            )?;
+            let event_type = event
+                .get("event_type")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(ReferenceError::InvalidForkEvidence("Event type is invalid"))?
+                .to_owned();
+            let causation_seq = event
+                .get("causation_seq")
+                .and_then(|value| (!value.is_null()).then(|| value.as_u64()))
+                .flatten();
+            Ok(ReferenceEvent {
+                seq,
+                event_type,
+                causation_seq,
+            })
+        })
+        .collect()
+}
+
+fn reaches(
+    event: &ReferenceEvent,
+    intervention_seq: u64,
+    by_seq: &BTreeMap<u64, &ReferenceEvent>,
+) -> bool {
+    let mut current = event;
+    let mut seen = BTreeSet::new();
+    loop {
+        if current.seq == intervention_seq {
+            return true;
+        }
+        if !seen.insert(current.seq) {
+            return false;
+        }
+        let Some(cause_seq) = current.causation_seq else {
+            return false;
+        };
+        let Some(cause) = by_seq.get(&cause_seq) else {
+            return false;
+        };
+        current = cause;
+    }
 }
 
 /// Compare two JSON evidence artifacts without importing the implementation's

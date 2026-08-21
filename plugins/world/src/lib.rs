@@ -11,7 +11,7 @@
 
 use pos_core::{
     event::{CanonicalBytes, Event, Kind},
-    ids::{EntityId, PluginId, TimelineId},
+    ids::{EntityId, EventId, PluginId, TimelineId},
     plugin::{Capability, Plugin},
     state::{Reducer, State},
     ActionApprover, ActionRejected, ProposedAction, WorldCoordinateV1, WorldTransformError,
@@ -1040,6 +1040,7 @@ pub struct WorldDriver {
     config: WorldConfigV1,
     config_emitted: bool,
     applied_action_seqs: Vec<u64>,
+    causation_by_body: Vec<(EntityId, EventId)>,
     config_entity: EntityId,
     staged_step: Option<WorldDriverState>,
     staged_restore: Option<WorldDriverState>,
@@ -1052,6 +1053,7 @@ struct WorldDriverState {
     step_index: u64,
     config_emitted: bool,
     applied_action_seqs: Vec<u64>,
+    causation_by_body: Vec<(EntityId, EventId)>,
 }
 
 impl WorldDriver {
@@ -1067,6 +1069,7 @@ impl WorldDriver {
             config,
             config_emitted: false,
             applied_action_seqs: Vec::new(),
+            causation_by_body: Vec::new(),
             config_entity: EntityId::new(),
             staged_step: None,
             staged_restore: None,
@@ -1087,6 +1090,7 @@ impl WorldDriver {
             step_index: self.step_index,
             config_emitted: self.config_emitted,
             applied_action_seqs: self.applied_action_seqs.clone(),
+            causation_by_body: self.causation_by_body.clone(),
         }
     }
 
@@ -1096,6 +1100,7 @@ impl WorldDriver {
         self.step_index = state.step_index;
         self.config_emitted = state.config_emitted;
         self.applied_action_seqs = state.applied_action_seqs;
+        self.causation_by_body = state.causation_by_body;
     }
 
     fn apply_action_to_entities(entities: &mut [Body], action: &WorldActionV1) -> bool {
@@ -1127,6 +1132,115 @@ impl WorldDriver {
     fn quantize_sensor(raw: f32, resolution_mm: u16) -> f32 {
         let r = f32::from(resolution_mm) / 1_000.0; // mm → metres
         (raw / r).round() * r
+    }
+
+    fn config_draft(&mut self) -> Result<Option<pos_core::event::EventDraft>, RuntimeError> {
+        if self.config_emitted {
+            return Ok(None);
+        }
+        let payload = self
+            .config
+            .encode()
+            .map_err(|error| RuntimeError::InvalidPayload {
+                event_type: EVENT_TYPE_CONFIG_V1.to_owned(),
+                reason: error.to_string(),
+            })?;
+        self.config_emitted = true;
+        Ok(Some(pos_core::event::EventDraft::new(
+            self.config_entity,
+            Kind::new(EVENT_TYPE_CONFIG_V1),
+            payload,
+        )))
+    }
+
+    fn apply_observed_actions(&mut self, events: &[Event]) -> Result<(), RuntimeError> {
+        for event in events {
+            if event.event_type.as_str() != EVENT_TYPE_ACTION_V1
+                || self.applied_action_seqs.contains(&event.seq.as_u64())
+            {
+                continue;
+            }
+            let action = WorldActionV1::decode(&event.payload).map_err(|error| {
+                RuntimeError::InvalidPayload {
+                    event_type: EVENT_TYPE_ACTION_V1.to_owned(),
+                    reason: error.to_string(),
+                }
+            })?;
+            if !Self::apply_action_to_entities(&mut self.entities, &action) {
+                return Err(RuntimeError::InvalidPayload {
+                    event_type: EVENT_TYPE_ACTION_V1.to_owned(),
+                    reason: "action target or velocity parameters are invalid".to_owned(),
+                });
+            }
+            self.applied_action_seqs.push(event.seq.as_u64());
+            if let Some((_, causation)) = self
+                .causation_by_body
+                .iter_mut()
+                .find(|(body, _)| *body == action.body_entity_id)
+            {
+                *causation = event.id;
+            } else {
+                self.causation_by_body
+                    .push((action.body_entity_id, event.id));
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_observations(
+        &self,
+        observations: &[WorldObservation],
+    ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
+        observations
+            .iter()
+            .map(|observation| {
+                #[allow(clippy::cast_possible_truncation)]
+                let value = WorldObservationV1 {
+                    body_entity_id: observation.entity_id,
+                    tick: self.tick,
+                    step_index: self.step_index,
+                    pos_x: Self::quantize_sensor(
+                        observation.x as f32,
+                        self.config.sensor_min_resolution_mm,
+                    ),
+                    pos_y: Self::quantize_sensor(
+                        observation.y as f32,
+                        self.config.sensor_min_resolution_mm,
+                    ),
+                    pos_z: 0.0,
+                    orient_w: 1.0,
+                    orient_x: 0.0,
+                    orient_y: 0.0,
+                    orient_z: 0.0,
+                    vel_lin_x: 0.0,
+                    vel_lin_y: 0.0,
+                    vel_lin_z: 0.0,
+                    vel_ang_x: 0.0,
+                    vel_ang_y: 0.0,
+                    vel_ang_z: 0.0,
+                    sensor_kind: SensorKindV1::Proximity.as_u8(),
+                    sensor_value: vec![],
+                };
+                let payload = value
+                    .encode()
+                    .map_err(|error| RuntimeError::InvalidPayload {
+                        event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
+                        reason: error.to_string(),
+                    })?;
+                let mut draft = pos_core::event::EventDraft::new(
+                    observation.entity_id,
+                    Kind::new(EVENT_TYPE_OBSERVATION_V1),
+                    payload,
+                );
+                draft.causation_id = self
+                    .causation_by_body
+                    .iter()
+                    .rev()
+                    .find(|(body, _)| *body == observation.entity_id)
+                    .map(|(_, event_id)| *event_id);
+                Ok(draft)
+            })
+            .collect()
     }
 }
 
@@ -1180,6 +1294,7 @@ impl Driver for WorldDriver {
             step_index: 0,
             config_emitted: false,
             applied_action_seqs: Vec::new(),
+            causation_by_body: Vec::new(),
         };
         for event in evidence.events() {
             let Some(payload) = event.payload() else {
@@ -1202,6 +1317,17 @@ impl Driver for WorldDriver {
                     restored
                         .applied_action_seqs
                         .push(event.header().seq().as_u64());
+                    if let Some((_, causation)) = restored
+                        .causation_by_body
+                        .iter_mut()
+                        .find(|(body, _)| *body == action.body_entity_id)
+                    {
+                        *causation = event.header().id();
+                    } else {
+                        restored
+                            .causation_by_body
+                            .push((action.body_entity_id, event.header().id()));
+                    }
                     restored.tick = restored.tick.max(action.tick.saturating_add(1));
                 }
                 EVENT_TYPE_OBSERVATION_V1 => {
@@ -1273,54 +1399,12 @@ impl Driver for WorldDriver {
     ) -> Result<StepOutput, RuntimeError> {
         self.staged_step = Some(self.state());
         let mut drafts = Vec::new();
-
-        // Emit world.config.v1 once at session creation (first step).
-        if !self.config_emitted {
-            let config_payload =
-                self.config
-                    .encode()
-                    .map_err(|error| RuntimeError::InvalidPayload {
-                        event_type: EVENT_TYPE_CONFIG_V1.to_owned(),
-                        reason: error.to_string(),
-                    })?;
-            // The config entity is session-global and host-pinned for evidence.
-            drafts.push(pos_core::event::EventDraft::new(
-                self.config_entity,
-                Kind::new(EVENT_TYPE_CONFIG_V1),
-                config_payload,
-            ));
-            self.config_emitted = true;
+        if let Some(config) = self.config_draft()? {
+            drafts.push(config);
         }
-
-        // Fold world.action.v1 events (in seq order) into entity velocities before
-        // stepping the backend.
-        let mut causation_by_body = Vec::new();
-        for event in observations.events() {
-            if event.event_type.as_str() != EVENT_TYPE_ACTION_V1 {
-                continue;
-            }
-            if self.applied_action_seqs.contains(&event.seq.as_u64()) {
-                continue;
-            }
-            let action = WorldActionV1::decode(&event.payload).map_err(|error| {
-                RuntimeError::InvalidPayload {
-                    event_type: EVENT_TYPE_ACTION_V1.to_owned(),
-                    reason: error.to_string(),
-                }
-            })?;
-            if !Self::apply_action_to_entities(&mut self.entities, &action) {
-                return Err(RuntimeError::InvalidPayload {
-                    event_type: EVENT_TYPE_ACTION_V1.to_owned(),
-                    reason: "action target or velocity parameters are invalid".to_owned(),
-                });
-            }
-            self.applied_action_seqs.push(event.seq.as_u64());
-            causation_by_body.push((action.body_entity_id, event.id));
-        }
+        self.apply_observed_actions(observations.events())?;
 
         let step_obs = self.backend.step(&self.entities);
-
-        // Update entities with new positions.
         for obs in &step_obs {
             if let Some(body) = self
                 .entities
@@ -1332,48 +1416,7 @@ impl Driver for WorldDriver {
             }
         }
 
-        // Emit world.observation.v1 drafts with sensor quantization (ADR-047 v3).
-        let resolution_mm = self.config.sensor_min_resolution_mm;
-        for obs in &step_obs {
-            #[allow(clippy::cast_possible_truncation)]
-            let v1 = WorldObservationV1 {
-                body_entity_id: obs.entity_id,
-                tick: self.tick,
-                // step_index tracks simulation steps; equals tick in the V1 single-backend model.
-                step_index: self.step_index,
-                pos_x: Self::quantize_sensor(obs.x as f32, resolution_mm),
-                pos_y: Self::quantize_sensor(obs.y as f32, resolution_mm),
-                pos_z: 0.0,
-                orient_w: 1.0,
-                orient_x: 0.0,
-                orient_y: 0.0,
-                orient_z: 0.0,
-                vel_lin_x: 0.0,
-                vel_lin_y: 0.0,
-                vel_lin_z: 0.0,
-                vel_ang_x: 0.0,
-                vel_ang_y: 0.0,
-                vel_ang_z: 0.0,
-                sensor_kind: SensorKindV1::Proximity.as_u8(),
-                sensor_value: vec![],
-            };
-            let payload = v1.encode().map_err(|error| RuntimeError::InvalidPayload {
-                event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
-                reason: error.to_string(),
-            })?;
-            let mut draft = pos_core::event::EventDraft::new(
-                obs.entity_id,
-                Kind::new(EVENT_TYPE_OBSERVATION_V1),
-                payload,
-            );
-            draft.causation_id = causation_by_body
-                .iter()
-                .rev()
-                .find(|(body, _)| *body == obs.entity_id)
-                .map(|(_, event_id)| *event_id);
-            drafts.push(draft);
-        }
-
+        drafts.extend(self.emit_observations(&step_obs)?);
         self.tick = self.tick.wrapping_add(1);
         self.step_index = self.step_index.wrapping_add(1);
         Ok(StepOutput::new(drafts))

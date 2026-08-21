@@ -9,7 +9,13 @@
 //! projections on each tick until a [`StopCondition`] is met.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-use pos_core::{clock::WallTime, crypto::Hash, ReproManifest, Timeline};
+use pos_core::{
+    clock::WallTime,
+    crypto::Hash,
+    event::{CanonicalBytes, EventDraft, Kind},
+    ids::EntityId,
+    ReproManifest, Timeline,
+};
 use pos_runtime::PluginRegistry;
 use pos_store::{open_store, StoreConfig};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -157,6 +163,7 @@ pub struct ExperimentSession {
     step_mode: Option<StepMode>,
     last_simulation_time_ns: Option<u128>,
     consent_revoked: bool,
+    consent_revocation_pending: Option<String>,
 }
 
 /// Result of one interactive tick-boundary attempt.
@@ -582,6 +589,13 @@ impl Experiment {
         self
     }
 
+    /// Apply a deterministic per-Tick Event budget to the runtime.
+    #[must_use]
+    pub fn with_resource_limit(mut self, limit: u64) -> Self {
+        self.registry = self.registry.with_resource_limit(limit);
+        self
+    }
+
     /// Register a plugin (wires schemas + reducer + driver).
     ///
     /// # Errors
@@ -671,6 +685,7 @@ impl Experiment {
             step_mode: None,
             last_simulation_time_ns: None,
             consent_revoked: false,
+            consent_revocation_pending: None,
         })
     }
 
@@ -739,6 +754,9 @@ impl Experiment {
         let ancestry = timeline_ancestry(store.as_ref(), timeline_id, folded_through)?;
         self.registry.restore_driver_state(&ancestry, &events)?;
         hydrate_projections(&mut self.registry, &events);
+        let consent_revoked = events.iter().any(|event| {
+            event.event_type.as_str() == pos_runtime::HOST_CONSENT_REVOCATION_EVENT_TYPE
+        });
         Ok(ExperimentSession {
             config: self.config,
             registry: self.registry,
@@ -754,7 +772,8 @@ impl Experiment {
             boundary: TickBoundaryCoordinator { folded_through },
             step_mode: None,
             last_simulation_time_ns: None,
-            consent_revoked: false,
+            consent_revoked,
+            consent_revocation_pending: None,
         })
     }
 
@@ -904,7 +923,7 @@ impl ExperimentSession {
         if self.health == SessionHealth::Faulted {
             return Err(ExperimentError::SessionFaulted);
         }
-        if self.consent_revoked {
+        if self.consent_revoked || self.consent_revocation_pending.is_some() {
             return Err(ExperimentError::ConsentRevoked);
         }
         self.registry.schemas.validate_batch(drafts)?;
@@ -951,12 +970,25 @@ impl ExperimentSession {
         self.append_events(std::slice::from_ref(&draft))
     }
 
-    /// Revoke consent effective at the next Tick Boundary.
+    /// Revoke the default session subject's consent at the next Tick Boundary.
     ///
-    /// The current completed boundary remains readable. The next step returns
+    /// The current completed boundary remains readable. The next step commits
+    /// only the host-owned revocation marker; a following step returns
     /// [`TickOutcome::Stopped`] without invoking or committing any Driver.
     pub fn revoke_consent_at_boundary(&mut self) {
-        self.consent_revoked = true;
+        self.revoke_consent_for_subject_at_boundary("session");
+    }
+
+    /// Schedule a durable, subject-scoped consent revocation.
+    ///
+    /// The request immediately closes external append authority. The host
+    /// persists a host-owned revocation marker as the next atomic boundary;
+    /// Drivers are not invoked for that boundary. Recovery derives the closed
+    /// state from that marker rather than from process memory.
+    pub fn revoke_consent_for_subject_at_boundary(&mut self, subject: impl Into<String>) {
+        if !self.consent_revoked {
+            self.consent_revocation_pending = Some(subject.into());
+        }
     }
 
     fn step_with_mode(&mut self, request: StepRequest) -> Result<TickOutcome, ExperimentError> {
@@ -994,27 +1026,15 @@ impl ExperimentSession {
     }
 
     fn step_boundary(&mut self, request: StepRequest) -> Result<TickOutcome, ExperimentError> {
+        if let Some(subject) = self.consent_revocation_pending.take() {
+            return self.commit_consent_revocation(subject);
+        }
         if self.consent_revoked || self.complete || self.reached_stop_condition() {
             self.complete = true;
             return Ok(TickOutcome::Stopped);
         }
 
-        let before = lock_store(&self.store).and_then(|store| {
-            capture_pending_range(
-                store.as_ref(),
-                self.timeline.id(),
-                self.boundary.folded_through,
-            )
-        })?;
-        let committed_events = lock_store(&self.store).and_then(|store| {
-            read_completed_prefix(
-                store.as_ref(),
-                self.timeline.id(),
-                self.boundary.folded_through,
-            )
-        })?;
-        let mut folded_events =
-            fold_captured_range(&mut self.boundary, &mut self.registry, &before);
+        let (mut folded_events, committed_events) = self.prepare_tick()?;
 
         let selected = match request {
             StepRequest::AllDrivers => self.registry.step_all_anchored_with_events(
@@ -1098,6 +1118,68 @@ impl ExperimentSession {
         }
     }
 
+    fn commit_consent_revocation(
+        &mut self,
+        subject: String,
+    ) -> Result<TickOutcome, ExperimentError> {
+        let draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new(pos_runtime::HOST_CONSENT_REVOCATION_EVENT_TYPE),
+            CanonicalBytes::from_vec(subject.into_bytes()),
+        );
+        self.registry.schemas.validate(&draft)?;
+        let emitted_events = lock_store(&self.store)
+            .and_then(|mut store| {
+                store
+                    .append(self.timeline.id(), std::slice::from_ref(&draft))
+                    .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
+                    .map_err(ExperimentError::from)
+            })
+            .inspect_err(|_| {
+                self.health = SessionHealth::Faulted;
+            })?;
+        let after = lock_store(&self.store)
+            .and_then(|store| {
+                capture_pending_range(
+                    store.as_ref(),
+                    self.timeline.id(),
+                    self.boundary.folded_through,
+                )
+            })
+            .inspect_err(|_| {
+                self.health = SessionHealth::Faulted;
+            })?;
+        let folded_events = fold_captured_range(&mut self.boundary, &mut self.registry, &after);
+        self.timeline = after.timeline;
+        self.total_events = self.total_events.saturating_add(folded_events);
+        self.ticks = self.ticks.saturating_add(1);
+        self.consent_revoked = true;
+        self.complete = true;
+        Ok(TickOutcome::Advanced {
+            folded_events,
+            emitted_events,
+        })
+    }
+
+    fn prepare_tick(&mut self) -> Result<(u64, Vec<pos_core::Event>), ExperimentError> {
+        let before = lock_store(&self.store).and_then(|store| {
+            capture_pending_range(
+                store.as_ref(),
+                self.timeline.id(),
+                self.boundary.folded_through,
+            )
+        })?;
+        let folded_events = fold_captured_range(&mut self.boundary, &mut self.registry, &before);
+        let committed_events = lock_store(&self.store).and_then(|store| {
+            read_completed_prefix(
+                store.as_ref(),
+                self.timeline.id(),
+                self.boundary.folded_through,
+            )
+        })?;
+        Ok((folded_events, committed_events))
+    }
+
     /// Fork the active Timeline at its most recently completed tick boundary.
     ///
     /// The child shares the live store, owns a fresh runtime registry, hydrates
@@ -1166,6 +1248,7 @@ impl ExperimentSession {
                 step_mode: None,
                 last_simulation_time_ns: None,
                 consent_revoked: self.consent_revoked,
+                consent_revocation_pending: self.consent_revocation_pending.clone(),
             })
     }
 
@@ -3532,6 +3615,91 @@ mod tests {
         let result = session.run_to_completion().unwrap();
         assert_eq!(result.ticks, 2);
         assert_eq!(result.total_events, 3);
+    }
+
+    #[test]
+    fn consent_revocation_is_durable_across_resume() {
+        let database = tempfile::NamedTempFile::new().unwrap();
+        let path = database.path().to_str().unwrap().to_owned();
+        let entity = EntityId::new();
+        let plugin = make_plugin("consent-ticker", &["consent.event"]);
+        let plugin_id = plugin.id;
+        let store_config = StoreConfig::Sqlite { path };
+        let config = ExperimentConfig {
+            name: "durable-consent".to_owned(),
+            stop: StopCondition::MaxTicks(8),
+            store_config: store_config.clone(),
+        };
+        let mut experiment = Experiment::new(config);
+        experiment
+            .register(
+                &plugin,
+                None,
+                Some(Box::new(FixedDriver::new(entity, "consent.event", 1))),
+            )
+            .unwrap();
+        let mut session = experiment.start().unwrap();
+        assert!(matches!(
+            session.step_tick().unwrap(),
+            TickOutcome::Advanced {
+                emitted_events: 1,
+                ..
+            }
+        ));
+        let timeline_id = session.timeline().id();
+        session.revoke_consent_for_subject_at_boundary("subject");
+        assert!(matches!(
+            session.append_events(&[EventDraft::new(
+                entity,
+                Kind::new("consent.event"),
+                CanonicalBytes::from_static(b"blocked"),
+            )]),
+            Err(ExperimentError::ConsentRevoked)
+        ));
+        assert!(matches!(
+            session.step_tick().unwrap(),
+            TickOutcome::Advanced {
+                emitted_events: 1,
+                ..
+            }
+        ));
+        assert_eq!(session.step_tick().unwrap(), TickOutcome::Stopped);
+        drop(session);
+
+        let resumed_plugin = TestPlugin {
+            id: plugin_id,
+            name: "consent-ticker",
+            event_types: vec![Kind::new("consent.event")],
+            has_reducer: false,
+        };
+        let mut recovery = Experiment::new(ExperimentConfig {
+            name: "durable-consent-recovery".to_owned(),
+            stop: StopCondition::MaxTicks(8),
+            store_config,
+        });
+        recovery
+            .register(
+                &resumed_plugin,
+                None,
+                Some(Box::new(FixedDriver::new(entity, "consent.event", 1))),
+            )
+            .unwrap();
+        let mut resumed = recovery.resume(timeline_id).unwrap();
+        assert_eq!(resumed.step_tick().unwrap(), TickOutcome::Stopped);
+        assert!(matches!(
+            resumed.append_events(&[EventDraft::new(
+                entity,
+                Kind::new("consent.event"),
+                CanonicalBytes::from_static(b"still-blocked"),
+            )]),
+            Err(ExperimentError::ConsentRevoked)
+        ));
+        assert!(resumed
+            .source_events()
+            .unwrap()
+            .iter()
+            .any(|event| event.event_type.as_str()
+                == pos_runtime::HOST_CONSENT_REVOCATION_EVENT_TYPE));
     }
 
     #[test]

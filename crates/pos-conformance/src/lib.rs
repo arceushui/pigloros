@@ -12,7 +12,7 @@
 
 use blake3::Hash;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Version of the first independent proof-evidence envelope.
 pub const EVIDENCE_FORMAT_V1: u32 = 1;
@@ -71,6 +71,9 @@ impl MoatProofInputV1 {
         if self.resource_limit == 0 {
             return Err(InputError::ZeroResourceLimit);
         }
+        if self.resource_limit < 3 || self.resource_limit > 10_000 {
+            return Err(InputError::ResourceLimitOutOfRange);
+        }
         Ok(())
     }
 
@@ -104,6 +107,8 @@ pub enum InputError {
     ThresholdOutOfRange,
     #[error("resource_limit must be greater than zero")]
     ZeroResourceLimit,
+    #[error("resource_limit must be between 3 and 10000")]
+    ResourceLimitOutOfRange,
     #[error("network access must be disabled for an air-gapped execution")]
     NetworkNotAllowedInAirGapped,
 }
@@ -156,6 +161,16 @@ pub struct ParticipantViewV1 {
     pub participant: String,
     pub visible_event_types: Vec<String>,
     pub hidden_event_types: Vec<String>,
+    pub visible_events: Vec<ParticipantEventV1>,
+}
+
+/// One committed Event materialized in a participant's knowledge view.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParticipantEventV1 {
+    pub seq: u64,
+    pub event_type: String,
+    pub payload_digest: [u8; 32],
 }
 
 /// Deterministic Plugin failure evidence.
@@ -175,6 +190,7 @@ pub struct ConsentAuditV1 {
     pub subject: String,
     pub requested_after_seq: u64,
     pub effective_after_seq: u64,
+    pub revocation_event_seq: u64,
     pub halted_at_tick_boundary: bool,
 }
 
@@ -223,6 +239,27 @@ impl MoatProofEvidenceV1 {
     /// uses an unknown field.
     pub fn from_json(value: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(value)
+    }
+
+    /// Export the complete evidence envelope as deterministic canonical CBOR.
+    ///
+    /// The bytes are suitable for hashing, durable fixture storage, and
+    /// consumption by an evaluator that does not link the experiment host.
+    ///
+    /// # Errors
+    /// Returns a canonical-CBOR serialization error when the envelope cannot
+    /// be represented by the shared crypto codec.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, pos_core::CoreError> {
+        pos_crypto::canonical::encode(self).map(|bytes| bytes.as_slice().to_vec())
+    }
+
+    /// Import an evidence envelope from deterministic canonical CBOR.
+    ///
+    /// # Errors
+    /// Returns a serialization error when the bytes are malformed or the
+    /// envelope does not satisfy the typed schema.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, pos_core::CoreError> {
+        pos_crypto::canonical::decode(&pos_core::CanonicalBytes::from_vec(bytes.to_vec()))
     }
 
     /// Return the canonical digest of this evidence envelope.
@@ -357,6 +394,11 @@ pub fn verify_evidence(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceErr
             return Err(EvidenceError::InvalidUncertainty);
         }
     }
+    verify_participant_views(
+        &evidence.participant_views,
+        &evidence.authoritative_events,
+        &sequences,
+    )?;
     if evidence
         .plugin_failures
         .iter()
@@ -364,12 +406,169 @@ pub fn verify_evidence(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceErr
     {
         return Err(EvidenceError::CommittedPluginFailure);
     }
-    if evidence.consent_audit.effective_after_seq != evidence.consent_audit.requested_after_seq
+    if evidence.consent_audit.effective_after_seq < evidence.consent_audit.requested_after_seq
+        || evidence.consent_audit.revocation_event_seq != evidence.consent_audit.effective_after_seq
         || !evidence.consent_audit.halted_at_tick_boundary
     {
         return Err(EvidenceError::InvalidConsentAudit);
     }
     Ok(())
+}
+
+fn verify_participant_views(
+    views: &[ParticipantViewV1],
+    authoritative_events: &[AuthoritativeEventV1],
+    sequences: &BTreeSet<u64>,
+) -> Result<(), EvidenceError> {
+    for view in views {
+        if view
+            .visible_event_types
+            .iter()
+            .any(|event_type| view.hidden_event_types.contains(event_type))
+        {
+            return Err(EvidenceError::InvalidParticipantView);
+        }
+        for event in &view.visible_events {
+            if !view.visible_event_types.contains(&event.event_type)
+                || view.hidden_event_types.contains(&event.event_type)
+                || !sequences.contains(&event.seq)
+            {
+                return Err(EvidenceError::InvalidParticipantView);
+            }
+            let Some(authoritative) = authoritative_events
+                .iter()
+                .find(|candidate| candidate.seq == event.seq)
+            else {
+                return Err(EvidenceError::InvalidParticipantView);
+            };
+            if authoritative.event_type != event.event_type
+                || authoritative.payload_digest != event.payload_digest
+            {
+                return Err(EvidenceError::InvalidParticipantView);
+            }
+        }
+        for authoritative in authoritative_events {
+            let visible = view
+                .visible_events
+                .iter()
+                .filter(|event| event.seq == authoritative.seq)
+                .count();
+            if view.hidden_event_types.contains(&authoritative.event_type) && visible != 0 {
+                return Err(EvidenceError::InvalidParticipantView);
+            }
+            if view.visible_event_types.contains(&authoritative.event_type) && visible != 1 {
+                return Err(EvidenceError::InvalidParticipantView);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Independently verify that a counterfactual contains a recomputed causal
+/// suffix after the shared Fork prefix.
+///
+/// The verifier does not know the host's Timeline implementation. It checks
+/// only the portable Event summaries: equal prefix, a post-cut intervention,
+/// and a causal path from that intervention to a complete downstream causal
+/// tail. Events before the tail may be tick-delayed observations of the
+/// unchanged prefix; once the intervention's effects reach the endogenous
+/// frontier, every later Event must remain connected to it.
+///
+/// # Errors
+/// Returns [`EvidenceError::IncompleteForkSuffix`] when the artifacts do not
+/// establish a shared prefix, intervention, or complete causal tail.
+pub fn verify_counterfactual_fork(
+    baseline: &MoatProofEvidenceV1,
+    counterfactual: &MoatProofEvidenceV1,
+    intervention_event_type: &str,
+) -> Result<(), EvidenceError> {
+    verify_evidence(baseline)?;
+    verify_evidence(counterfactual)?;
+    if baseline.manifest.input_digest != counterfactual.manifest.input_digest
+        || baseline.manifest.fork_cut_seq != counterfactual.manifest.fork_cut_seq
+    {
+        return Err(EvidenceError::IncompleteForkSuffix);
+    }
+    let Some(cut) = counterfactual.manifest.fork_cut_seq else {
+        return Err(EvidenceError::IncompleteForkSuffix);
+    };
+    let prefix = |events: &[AuthoritativeEventV1]| {
+        events
+            .iter()
+            .filter(|event| event.seq <= cut)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    if prefix(&baseline.authoritative_events) != prefix(&counterfactual.authoritative_events) {
+        return Err(EvidenceError::IncompleteForkSuffix);
+    }
+    let baseline_suffix = baseline
+        .authoritative_events
+        .iter()
+        .filter(|event| event.seq > cut)
+        .collect::<Vec<_>>();
+    let counterfactual_suffix = counterfactual
+        .authoritative_events
+        .iter()
+        .filter(|event| event.seq > cut)
+        .collect::<Vec<_>>();
+    if baseline_suffix.is_empty() || counterfactual_suffix.len() < 2 {
+        return Err(EvidenceError::IncompleteForkSuffix);
+    }
+    let Some(intervention) = counterfactual_suffix
+        .iter()
+        .find(|event| event.event_type == intervention_event_type)
+    else {
+        return Err(EvidenceError::IncompleteForkSuffix);
+    };
+    let intervention_seq = intervention.seq;
+    let by_seq = counterfactual
+        .authoritative_events
+        .iter()
+        .map(|event| (event.seq, event))
+        .collect::<BTreeMap<_, _>>();
+    let causal_tail_start = counterfactual_suffix
+        .iter()
+        .filter(|event| event.seq > intervention_seq)
+        .find(|candidate| {
+            let tail = counterfactual_suffix
+                .iter()
+                .filter(|event| event.seq >= candidate.seq)
+                .collect::<Vec<_>>();
+            tail.len() >= 3
+                && tail
+                    .iter()
+                    .all(|event| event_reaches_intervention(event, intervention_seq, &by_seq))
+        })
+        .map(|event| event.seq);
+    if causal_tail_start.is_none() || baseline_suffix == counterfactual_suffix {
+        return Err(EvidenceError::IncompleteForkSuffix);
+    }
+    Ok(())
+}
+
+fn event_reaches_intervention(
+    event: &AuthoritativeEventV1,
+    intervention_seq: u64,
+    by_seq: &BTreeMap<u64, &AuthoritativeEventV1>,
+) -> bool {
+    let mut current = event;
+    let mut seen = std::collections::BTreeSet::new();
+    loop {
+        if current.seq == intervention_seq {
+            return true;
+        }
+        if !seen.insert(current.seq) {
+            return false;
+        }
+        let Some(cause_seq) = current.causation_seq else {
+            return false;
+        };
+        let Some(cause) = by_seq.get(&cause_seq) else {
+            return false;
+        };
+        current = cause;
+    }
 }
 
 /// Independent evidence validation failure.
@@ -385,10 +584,14 @@ pub enum EvidenceError {
     InvalidCausalEdge,
     #[error("uncertainty interval is invalid")]
     InvalidUncertainty,
+    #[error("participant knowledge view contains an invalid or mismatched Event")]
+    InvalidParticipantView,
     #[error("plugin failure was marked committed")]
     CommittedPluginFailure,
     #[error("consent revocation was not effective at a tick boundary")]
     InvalidConsentAudit,
+    #[error("counterfactual Fork suffix is missing, copied, or causally incomplete")]
+    IncompleteForkSuffix,
 }
 
 /// Return a hex digest for human-facing evidence reports.
@@ -467,12 +670,18 @@ mod tests {
                 participant: "operator".to_owned(),
                 visible_event_types: vec!["world.observation.v1".to_owned()],
                 hidden_event_types: vec!["private.note".to_owned()],
+                visible_events: vec![ParticipantEventV1 {
+                    seq: 1,
+                    event_type: "world.observation.v1".to_owned(),
+                    payload_digest: [1; 32],
+                }],
             }],
             plugin_failures: Vec::new(),
             consent_audit: ConsentAuditV1 {
                 subject: "subject".to_owned(),
                 requested_after_seq: 1,
                 effective_after_seq: 1,
+                revocation_event_seq: 1,
                 halted_at_tick_boundary: true,
             },
         }
@@ -647,6 +856,11 @@ mod tests {
         let json = value.to_json().unwrap();
         assert!(json.contains("world.observation.v1"));
         assert_eq!(MoatProofEvidenceV1::from_json(&json).unwrap(), value);
+        let cbor = value.to_canonical_cbor().unwrap();
+        assert_eq!(
+            MoatProofEvidenceV1::from_canonical_cbor(&cbor).unwrap(),
+            value
+        );
         assert_eq!(hex_digest(&value.digest()).len(), 64);
     }
 }
