@@ -273,16 +273,23 @@ impl PluginRegistry {
         }
     }
 
-    fn abort_drivers(&mut self, driver_ids: &[PluginId]) {
+    fn abort_drivers(&mut self, driver_ids: &[PluginId]) -> Option<RuntimeError> {
+        let mut first_error = None;
         for id in driver_ids {
             if let Some(driver) = self
                 .plugins
                 .get_mut(id)
                 .and_then(|entry| entry.driver.as_mut())
             {
-                driver.abort_step();
+                let name = driver.name().to_owned();
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| driver.abort_step()))
+                    .is_err()
+                {
+                    first_error.get_or_insert(RuntimeError::DriverAbortPanicked { name });
+                }
             }
         }
+        first_error
     }
 
     fn step_anchored_transaction(
@@ -363,27 +370,29 @@ impl PluginRegistry {
             };
             match result {
                 Ok(output) => {
+                    let requested = u64::try_from(all_drafts.len())
+                        .unwrap_or(u64::MAX)
+                        .saturating_add(u64::try_from(output.drafts.len()).unwrap_or(u64::MAX));
+                    if let Some(limit) = self.resource_limit {
+                        if requested > limit {
+                            staged_driver_ids.push(id);
+                            let _ = self.abort_drivers(&staged_driver_ids);
+                            return Err(RuntimeError::ResourceExhausted {
+                                driver: "host-tick-budget".to_owned(),
+                                requested,
+                                limit,
+                            });
+                        }
+                    }
                     staged_driver_ids.push(id);
                     event_cursors.push((id, observed_through));
                     all_drafts.extend(output.drafts);
                 }
                 Err(error) => {
                     staged_driver_ids.push(id);
-                    self.abort_drivers(&staged_driver_ids);
+                    let _ = self.abort_drivers(&staged_driver_ids);
                     return Err(error);
                 }
-            }
-        }
-
-        if let Some(limit) = self.resource_limit {
-            let requested = u64::try_from(all_drafts.len()).unwrap_or(u64::MAX);
-            if requested > limit {
-                self.abort_drivers(&staged_driver_ids);
-                return Err(RuntimeError::ResourceExhausted {
-                    driver: "host-tick-budget".to_owned(),
-                    requested,
-                    limit,
-                });
             }
         }
 
@@ -424,7 +433,7 @@ impl PluginRegistry {
     /// Abort the Driver and cadence state staged by an anchored step.
     pub fn abort_step(&mut self) {
         if let Some(pending) = self.pending_step.take() {
-            self.abort_drivers(&pending.driver_ids);
+            let _ = self.abort_drivers(&pending.driver_ids);
         }
     }
 
@@ -1000,6 +1009,25 @@ mod tests {
         }
     }
 
+    struct AbortPanickingDriver;
+    impl crate::driver::Driver for AbortPanickingDriver {
+        fn name(&self) -> &'static str {
+            "abort-panicking"
+        }
+
+        fn step(
+            &mut self,
+            _: pos_core::ids::TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<crate::driver::StepOutput, RuntimeError> {
+            Ok(StepOutput::empty())
+        }
+
+        fn abort_step(&mut self) {
+            panic!("test abort panic");
+        }
+    }
+
     #[derive(Default)]
     struct TransactionState {
         steps: usize,
@@ -1090,6 +1118,70 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, RuntimeError::DriverPanicked { .. }));
         registry.abort_step();
+    }
+
+    #[test]
+    fn aborting_a_staged_driver_catches_a_driver_abort_panic() {
+        let mut registry = PluginRegistry::new();
+        let plugin = plugin_with_caps("abort-panicking", &[], true, false);
+        registry
+            .register(&plugin, None, Some(Box::new(AbortPanickingDriver)))
+            .unwrap();
+        registry
+            .step_all_anchored(TimelineId::new(), Seq::ZERO)
+            .unwrap();
+        registry.abort_step();
+        assert!(registry
+            .step_all_anchored(TimelineId::new(), Seq::ZERO)
+            .is_ok());
+        registry.abort_step();
+    }
+
+    #[test]
+    fn resource_limit_aborts_before_collecting_a_later_driver_output() {
+        struct BudgetDriver {
+            aborted: Arc<Mutex<bool>>,
+        }
+
+        impl Driver for BudgetDriver {
+            fn name(&self) -> &'static str {
+                "budget"
+            }
+
+            fn step(
+                &mut self,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                Ok(StepOutput::new(vec![
+                    EventDraft::new(
+                        EntityId::new(),
+                        Kind::new("budget.event"),
+                        CanonicalBytes::from_static(b"one"),
+                    ),
+                    EventDraft::new(
+                        EntityId::new(),
+                        Kind::new("budget.event"),
+                        CanonicalBytes::from_static(b"two"),
+                    ),
+                ]))
+            }
+
+            fn abort_step(&mut self) {
+                *self.aborted.lock().unwrap() = true;
+            }
+        }
+
+        let aborted = Arc::new(Mutex::new(false));
+        let mut registry = PluginRegistry::new().with_resource_limit(1);
+        registry.register_driver(Box::new(BudgetDriver {
+            aborted: Arc::clone(&aborted),
+        }));
+        let error = registry
+            .step_all_anchored(TimelineId::new(), Seq::ZERO)
+            .unwrap_err();
+        assert!(matches!(error, RuntimeError::ResourceExhausted { .. }));
+        assert!(*aborted.lock().unwrap());
     }
 
     #[test]

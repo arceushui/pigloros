@@ -17,6 +17,31 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Version of the first independent proof-evidence envelope.
 pub const EVIDENCE_FORMAT_V1: u32 = 1;
 
+/// The reproducibility claim made by a proof artifact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReproducibilityClassV1 {
+    /// Fold committed history without executing Drivers.
+    RecordedReplay,
+    /// Recompute from the complete frozen input closure.
+    ProfileRecomputation,
+    /// Compare two named profiles against one expected fixture.
+    CrossProfileConformance,
+    /// A live run with no deterministic-future claim.
+    LiveUnverified,
+}
+
+/// The replay claim that survives the available evidence and erasure state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayClaimV1 {
+    Exact,
+    ExactAuthoritativeWithRedactedViews,
+    StructuralOnly,
+    UnverifiableArtifactsMissing,
+    IncompatibleProfile,
+}
+
 /// Execution profile used by a proof run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -142,6 +167,7 @@ pub struct CausalTraceEntryV1 {
     pub effect_seq: u64,
     pub relation: String,
     pub visibility: String,
+    pub dependency_class: String,
 }
 
 /// An uncertainty claim attached to a result rather than hidden in prose.
@@ -191,6 +217,8 @@ pub struct ConsentAuditV1 {
     pub requested_after_seq: u64,
     pub effective_after_seq: u64,
     pub revocation_event_seq: u64,
+    pub revocation_event_type: String,
+    pub revocation_payload_digest: [u8; 32],
     pub halted_at_tick_boundary: bool,
 }
 
@@ -205,6 +233,13 @@ pub struct ReproManifestV1 {
     pub seed: u64,
     pub resource_limit: u64,
     pub network_enabled: bool,
+    pub reproducibility_class: ReproducibilityClassV1,
+    pub execution_profile: String,
+    pub execution_profile_digest: [u8; 32],
+    pub trust_policy_snapshot_digest: [u8; 32],
+    pub artifact_closure_digest: [u8; 32],
+    pub evaluator_digest: [u8; 32],
+    pub replay_claim: ReplayClaimV1,
     pub plugin_versions: BTreeMap<String, String>,
 }
 
@@ -310,6 +345,14 @@ pub fn compare(left: &MoatProofEvidenceV1, right: &MoatProofEvidenceV1) -> Compa
         && left.manifest.seed == right.manifest.seed
         && left.manifest.resource_limit == right.manifest.resource_limit
         && left.manifest.network_enabled == right.manifest.network_enabled
+        && left.manifest.reproducibility_class == right.manifest.reproducibility_class
+        && left.manifest.execution_profile == right.manifest.execution_profile
+        && left.manifest.execution_profile_digest == right.manifest.execution_profile_digest
+        && left.manifest.trust_policy_snapshot_digest
+            == right.manifest.trust_policy_snapshot_digest
+        && left.manifest.artifact_closure_digest == right.manifest.artifact_closure_digest
+        && left.manifest.evaluator_digest == right.manifest.evaluator_digest
+        && left.manifest.replay_claim == right.manifest.replay_claim
         && left.manifest.plugin_versions == right.manifest.plugin_versions;
     let divergence = if !manifests_match {
         DivergenceClassV1::Metadata
@@ -350,69 +393,147 @@ pub fn verify_evidence(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceErr
     if evidence.manifest.input_digest == [0; 32] {
         return Err(EvidenceError::MissingInputDigest);
     }
+    verify_manifest(&evidence.manifest)?;
+    let sequences = event_sequences(&evidence.authoritative_events)?;
+    verify_causal_trace(
+        &evidence.authoritative_events,
+        &evidence.causal_trace,
+        &sequences,
+    )?;
+    verify_uncertainty(&evidence.uncertainty)?;
+    verify_participant_views(
+        &evidence.participant_views,
+        &evidence.authoritative_events,
+        &sequences,
+    )?;
+    verify_plugin_failures(&evidence.plugin_failures)?;
+    verify_consent_audit(&evidence.consent_audit)?;
+    Ok(())
+}
+
+fn verify_manifest(manifest: &ReproManifestV1) -> Result<(), EvidenceError> {
+    if manifest.execution_profile.trim().is_empty()
+        || manifest.execution_profile_digest == [0; 32]
+        || manifest.trust_policy_snapshot_digest == [0; 32]
+        || manifest.artifact_closure_digest == [0; 32]
+        || manifest.evaluator_digest == [0; 32]
+        || manifest.resource_limit == 0
+        || manifest.plugin_versions.is_empty()
+        || manifest
+            .plugin_versions
+            .iter()
+            .any(|(name, version)| name.trim().is_empty() || version.trim().is_empty())
+        || (matches!(manifest.execution_mode, ExecutionModeV1::AirGapped)
+            && manifest.network_enabled)
+    {
+        Err(EvidenceError::InvalidManifest)
+    } else {
+        Ok(())
+    }
+}
+
+fn event_sequences(events: &[AuthoritativeEventV1]) -> Result<BTreeSet<u64>, EvidenceError> {
     let mut previous_seq: Option<u64> = None;
-    let sequences = evidence
-        .authoritative_events
+    events
         .iter()
         .map(|event| {
-            if let Some(previous) = previous_seq {
-                if event.seq != previous.saturating_add(1) {
-                    return Err(EvidenceError::NonContiguousEventSequence);
-                }
+            if previous_seq.is_some_and(|previous| event.seq != previous.saturating_add(1)) {
+                return Err(EvidenceError::NonContiguousEventSequence);
             }
             previous_seq = Some(event.seq);
             Ok(event.seq)
         })
-        .collect::<Result<std::collections::BTreeSet<_>, EvidenceError>>()?;
-    for event in &evidence.authoritative_events {
-        if let Some(cause_seq) = event.causation_seq {
-            if cause_seq >= event.seq
+        .collect()
+}
+
+fn verify_causal_trace(
+    events: &[AuthoritativeEventV1],
+    trace: &[CausalTraceEntryV1],
+    sequences: &BTreeSet<u64>,
+) -> Result<(), EvidenceError> {
+    if events.iter().any(|event| {
+        event.causation_seq.is_some_and(|cause_seq| {
+            cause_seq >= event.seq
                 || !sequences.contains(&cause_seq)
                 || !sequences.contains(&event.seq)
-            {
-                return Err(EvidenceError::InvalidCausalEdge);
-            }
-        }
+        })
+    }) {
+        return Err(EvidenceError::InvalidCausalEdge);
     }
-    for edge in &evidence.causal_trace {
-        if edge.cause_seq >= edge.effect_seq
+    if trace.iter().any(|edge| {
+        edge.cause_seq >= edge.effect_seq
             || !sequences.contains(&edge.cause_seq)
             || !sequences.contains(&edge.effect_seq)
-        {
-            return Err(EvidenceError::InvalidCausalEdge);
-        }
+            || !matches!(
+                edge.relation.as_str(),
+                "physical_to_agent" | "agent_to_society" | "intervention_to_physics" | "derived"
+            )
+            || !matches!(
+                edge.visibility.as_str(),
+                "operator" | "participant" | "public"
+            )
+            || !matches!(
+                edge.dependency_class.as_str(),
+                "exogenous_frozen"
+                    | "intervention_assigned"
+                    | "endogenous_recomputed"
+                    | "fixed_policy"
+                    | "presentation_only"
+            )
+    }) {
+        return Err(EvidenceError::InvalidCausalEdge);
     }
-    for claim in &evidence.uncertainty {
-        if !claim.lower.is_finite()
+    let authoritative_edges = events
+        .iter()
+        .filter_map(|event| event.causation_seq.map(|cause| (cause, event.seq)))
+        .collect::<BTreeSet<_>>();
+    let traced_edges = trace
+        .iter()
+        .map(|edge| (edge.cause_seq, edge.effect_seq))
+        .collect::<BTreeSet<_>>();
+    if authoritative_edges == traced_edges {
+        Ok(())
+    } else {
+        Err(EvidenceError::IncompleteCausalTrace)
+    }
+}
+
+fn verify_uncertainty(claims: &[UncertaintyV1]) -> Result<(), EvidenceError> {
+    if claims.iter().any(|claim| {
+        !claim.lower.is_finite()
             || !claim.upper.is_finite()
             || !claim.confidence.is_finite()
             || claim.lower > claim.upper
             || !(0.0..=1.0).contains(&claim.lower)
             || !(0.0..=1.0).contains(&claim.upper)
             || !(0.0..=1.0).contains(&claim.confidence)
-        {
-            return Err(EvidenceError::InvalidUncertainty);
-        }
+    }) {
+        Err(EvidenceError::InvalidUncertainty)
+    } else {
+        Ok(())
     }
-    verify_participant_views(
-        &evidence.participant_views,
-        &evidence.authoritative_events,
-        &sequences,
-    )?;
-    if evidence
-        .plugin_failures
-        .iter()
-        .any(|failure| failure.committed)
+}
+
+fn verify_plugin_failures(failures: &[PluginFailureV1]) -> Result<(), EvidenceError> {
+    if failures.iter().any(|failure| failure.committed) {
+        Err(EvidenceError::CommittedPluginFailure)
+    } else {
+        Ok(())
+    }
+}
+
+fn verify_consent_audit(audit: &ConsentAuditV1) -> Result<(), EvidenceError> {
+    if audit.subject.trim().is_empty()
+        || audit.revocation_event_type != "pos.host.consent.revoked.v1"
+        || audit.revocation_payload_digest == [0; 32]
+        || audit.effective_after_seq < audit.requested_after_seq
+        || audit.revocation_event_seq != audit.effective_after_seq
+        || !audit.halted_at_tick_boundary
     {
-        return Err(EvidenceError::CommittedPluginFailure);
+        Err(EvidenceError::InvalidConsentAudit)
+    } else {
+        Ok(())
     }
-    if evidence.consent_audit.effective_after_seq < evidence.consent_audit.requested_after_seq
-        || evidence.consent_audit.revocation_event_seq != evidence.consent_audit.effective_after_seq
-        || !evidence.consent_audit.halted_at_tick_boundary
-    {
-        return Err(EvidenceError::InvalidConsentAudit);
-    }
-    Ok(())
 }
 
 fn verify_participant_views(
@@ -420,7 +541,29 @@ fn verify_participant_views(
     authoritative_events: &[AuthoritativeEventV1],
     sequences: &BTreeSet<u64>,
 ) -> Result<(), EvidenceError> {
+    if views.is_empty() {
+        return Err(EvidenceError::InvalidParticipantView);
+    }
+    let mut participants = BTreeSet::new();
     for view in views {
+        if !participants.insert(view.participant.as_str())
+            || view.visible_event_types.iter().any(|event_type| {
+                view.visible_event_types
+                    .iter()
+                    .filter(|candidate| *candidate == event_type)
+                    .count()
+                    > 1
+            })
+            || view.hidden_event_types.iter().any(|event_type| {
+                view.hidden_event_types
+                    .iter()
+                    .filter(|candidate| *candidate == event_type)
+                    .count()
+                    > 1
+            })
+        {
+            return Err(EvidenceError::InvalidParticipantView);
+        }
         if view
             .visible_event_types
             .iter()
@@ -448,6 +591,12 @@ fn verify_participant_views(
             }
         }
         for authoritative in authoritative_events {
+            let classified =
+                usize::from(view.visible_event_types.contains(&authoritative.event_type))
+                    + usize::from(view.hidden_event_types.contains(&authoritative.event_type));
+            if classified != 1 {
+                return Err(EvidenceError::InvalidParticipantView);
+            }
             let visible = view
                 .visible_events
                 .iter()
@@ -459,6 +608,13 @@ fn verify_participant_views(
             if view.visible_event_types.contains(&authoritative.event_type) && visible != 1 {
                 return Err(EvidenceError::InvalidParticipantView);
             }
+        }
+        if view
+            .visible_events
+            .windows(2)
+            .any(|pair| pair[0].seq >= pair[1].seq)
+        {
+            return Err(EvidenceError::InvalidParticipantView);
         }
     }
     Ok(())
@@ -527,7 +683,7 @@ pub fn verify_counterfactual_fork(
         .iter()
         .map(|event| (event.seq, event))
         .collect::<BTreeMap<_, _>>();
-    let causal_tail_start = counterfactual_suffix
+    let complete_endogenous_suffix = counterfactual_suffix
         .iter()
         .filter(|event| event.seq > intervention_seq)
         .find(|candidate| {
@@ -535,13 +691,12 @@ pub fn verify_counterfactual_fork(
                 .iter()
                 .filter(|event| event.seq >= candidate.seq)
                 .collect::<Vec<_>>();
-            tail.len() >= 3
+            !tail.is_empty()
                 && tail
                     .iter()
                     .all(|event| event_reaches_intervention(event, intervention_seq, &by_seq))
-        })
-        .map(|event| event.seq);
-    if causal_tail_start.is_none() || baseline_suffix == counterfactual_suffix {
+        });
+    if complete_endogenous_suffix.is_none() || baseline_suffix == counterfactual_suffix {
         return Err(EvidenceError::IncompleteForkSuffix);
     }
     Ok(())
@@ -578,10 +733,14 @@ pub enum EvidenceError {
     UnsupportedFormat,
     #[error("input digest is missing")]
     MissingInputDigest,
+    #[error("reproducibility manifest is incomplete or incompatible")]
+    InvalidManifest,
     #[error("authoritative event sequence is not contiguous")]
     NonContiguousEventSequence,
     #[error("causal edge does not reference an earlier and present event")]
     InvalidCausalEdge,
+    #[error("causal trace does not exactly materialize authoritative causation")]
+    IncompleteCausalTrace,
     #[error("uncertainty interval is invalid")]
     InvalidUncertainty,
     #[error("participant knowledge view contains an invalid or mismatched Event")]
@@ -631,6 +790,13 @@ mod tests {
                 seed: input.random_seed,
                 resource_limit: input.resource_limit,
                 network_enabled: input.network_enabled,
+                reproducibility_class: ReproducibilityClassV1::ProfileRecomputation,
+                execution_profile: "deterministic-v1".to_owned(),
+                execution_profile_digest: [3; 32],
+                trust_policy_snapshot_digest: [4; 32],
+                artifact_closure_digest: [5; 32],
+                evaluator_digest: [6; 32],
+                replay_claim: ReplayClaimV1::Exact,
                 plugin_versions: BTreeMap::from([("world".to_owned(), "1".to_owned())]),
             },
             authoritative_events: vec![
@@ -659,6 +825,7 @@ mod tests {
                 effect_seq: 2,
                 relation: "physical_to_agent".to_owned(),
                 visibility: "operator".to_owned(),
+                dependency_class: "endogenous_recomputed".to_owned(),
             }],
             uncertainty: vec![UncertaintyV1 {
                 label: "agent_confidence".to_owned(),
@@ -669,7 +836,10 @@ mod tests {
             participant_views: vec![ParticipantViewV1 {
                 participant: "operator".to_owned(),
                 visible_event_types: vec!["world.observation.v1".to_owned()],
-                hidden_event_types: vec!["private.note".to_owned()],
+                hidden_event_types: vec![
+                    "private.note".to_owned(),
+                    "proof.agent.reaction.v1".to_owned(),
+                ],
                 visible_events: vec![ParticipantEventV1 {
                     seq: 1,
                     event_type: "world.observation.v1".to_owned(),
@@ -682,6 +852,8 @@ mod tests {
                 requested_after_seq: 1,
                 effective_after_seq: 1,
                 revocation_event_seq: 1,
+                revocation_event_type: "pos.host.consent.revoked.v1".to_owned(),
+                revocation_payload_digest: [7; 32],
                 halted_at_tick_boundary: true,
             },
         }
@@ -847,6 +1019,48 @@ mod tests {
         assert_eq!(
             verify_evidence(&invalid),
             Err(EvidenceError::InvalidConsentAudit)
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_unclassified_events_and_unbound_trace_edges() {
+        let valid = evidence();
+        let mut invalid = valid.clone();
+        invalid.causal_trace.clear();
+        assert_eq!(
+            verify_evidence(&invalid),
+            Err(EvidenceError::IncompleteCausalTrace)
+        );
+
+        let mut invalid = valid.clone();
+        invalid.causal_trace[0].dependency_class = "secret_reasoning".to_owned();
+        assert_eq!(
+            verify_evidence(&invalid),
+            Err(EvidenceError::InvalidCausalEdge)
+        );
+
+        let mut invalid = valid.clone();
+        invalid.participant_views[0].hidden_event_types.pop();
+        assert_eq!(
+            verify_evidence(&invalid),
+            Err(EvidenceError::InvalidParticipantView)
+        );
+
+        let mut invalid = valid;
+        invalid.consent_audit.revocation_payload_digest = [0; 32];
+        assert_eq!(
+            verify_evidence(&invalid),
+            Err(EvidenceError::InvalidConsentAudit)
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_incomplete_manifest_before_event_checks() {
+        let mut invalid = evidence();
+        invalid.manifest.evaluator_digest = [0; 32];
+        assert_eq!(
+            verify_evidence(&invalid),
+            Err(EvidenceError::InvalidManifest)
         );
     }
 

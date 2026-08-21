@@ -10,7 +10,7 @@ use pos_conformance::{
     compare, verify_counterfactual_fork, verify_evidence, AuthoritativeEventV1, CausalTraceEntryV1,
     ComparisonV1, ConsentAuditV1, DivergenceClassV1, ExecutionModeV1, MoatProofEvidenceV1,
     MoatProofInputV1, ParticipantEventV1, ParticipantViewV1, PluginFailureV1, ProjectionEvidenceV1,
-    ReproManifestV1, UncertaintyV1, EVIDENCE_FORMAT_V1,
+    ReplayClaimV1, ReproManifestV1, ReproducibilityClassV1, UncertaintyV1, EVIDENCE_FORMAT_V1,
 };
 use pos_core::{
     event::{CanonicalBytes, Event, EventDraft, Kind},
@@ -28,11 +28,12 @@ use pos_runtime::{
     Driver, DriverRecoveryEvidence, ObservationView, RecoveryEventHeader, RuntimeError, StepOutput,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 const AGENT_EVENT_TYPE: &str = "proof.agent.reaction.v1";
 const AGENT_ENTITY_KIND: &str = "proof-agent";
 const SOCIETY_ENTITY_KIND: &str = "proof-society";
+const WORLD_BACKEND_CONTENT: &[u8] = b"PiglorOS.WorldBackend.simple-kinematic.v1";
 
 /// Result of one Local or Air-Gapped proof execution.
 #[derive(Debug)]
@@ -260,6 +261,8 @@ pub enum MoatProofError {
     ReactionGatesFailed,
     #[error("consent-revoked session accepted a post-revocation append")]
     ConsentAppendAccepted,
+    #[error("consent probe did not commit its host-owned revocation marker")]
+    ConsentMarkerMissing,
 }
 
 fn compare_with_reference(
@@ -442,7 +445,7 @@ fn world_driver(input: &MoatProofInputV1, body: EntityId, config_entity: EntityI
             gravity_z: 0.0,
             backend_id: "simple-kinematic".to_owned(),
             backend_version: "1.0.0".to_owned(),
-            backend_content_hash: [0; 32],
+            backend_content_hash: *blake3::hash(WORLD_BACKEND_CONTENT).as_bytes(),
             action_schema_version: 1,
             observation_schema_version: 1,
             sensor_min_resolution_mm: SENSOR_MIN_RESOLUTION_MM,
@@ -508,11 +511,18 @@ fn evidence(context: &EvidenceContext<'_>) -> MoatProofEvidenceV1 {
         .iter()
         .filter_map(|event| {
             event.causation_id.and_then(|cause| {
-                ids.get(&cause).map(|cause_seq| CausalTraceEntryV1 {
-                    cause_seq: *cause_seq,
-                    effect_seq: event.seq.as_u64(),
-                    relation: format!("{cause_seq}_to_{}", event.event_type.as_str()),
-                    visibility: "operator".to_owned(),
+                ids.get(&cause).map(|cause_seq| {
+                    let cause_type = events
+                        .iter()
+                        .find(|candidate| candidate.seq.as_u64() == *cause_seq)
+                        .map_or("", |candidate| candidate.event_type.as_str());
+                    CausalTraceEntryV1 {
+                        cause_seq: *cause_seq,
+                        effect_seq: event.seq.as_u64(),
+                        relation: causal_relation(cause_type, event.event_type.as_str()),
+                        visibility: "operator".to_owned(),
+                        dependency_class: dependency_class(event.event_type.as_str()),
+                    }
                 })
             })
         })
@@ -529,6 +539,16 @@ fn evidence(context: &EvidenceContext<'_>) -> MoatProofEvidenceV1 {
             seed: input.random_seed,
             resource_limit: input.resource_limit,
             network_enabled: input.network_enabled,
+            reproducibility_class: ReproducibilityClassV1::ProfileRecomputation,
+            execution_profile: "deterministic-v1".to_owned(),
+            execution_profile_digest: profile_digest(input),
+            trust_policy_snapshot_digest: digest_domain(
+                b"PiglorOS.TrustPolicySnapshot.v1",
+                &input.digest(),
+            ),
+            artifact_closure_digest: artifact_closure_digest(topology),
+            evaluator_digest: digest_domain(b"PiglorOS.Evaluator.v1", b"pos-reference-json-v1"),
+            replay_claim: ReplayClaimV1::Exact,
             plugin_versions: BTreeMap::from([
                 ("world".to_owned(), "1.0.0".to_owned()),
                 ("proof-agent".to_owned(), "1.0.0".to_owned()),
@@ -549,33 +569,98 @@ const SOCIETY_NAME: &str = "society";
 
 fn participant_views(events: &[Event]) -> Vec<ParticipantViewV1> {
     [
-        (
-            "proof-agent",
-            &[EVENT_TYPE_OBSERVATION_V1][..],
-            &["society.signal", AGENT_EVENT_TYPE][..],
-        ),
+        ("proof-agent", &[EVENT_TYPE_OBSERVATION_V1][..]),
         (
             "society",
-            &[AGENT_EVENT_TYPE][..],
-            &[EVENT_TYPE_OBSERVATION_V1][..],
+            &[AGENT_EVENT_TYPE, pos_plugin_society::EVENT_TYPE_SIGNAL][..],
         ),
     ]
     .into_iter()
-    .map(|(participant, visible, hidden)| ParticipantViewV1 {
-        participant: participant.to_owned(),
-        visible_event_types: visible.iter().map(|kind| (*kind).to_owned()).collect(),
-        hidden_event_types: hidden.iter().map(|kind| (*kind).to_owned()).collect(),
-        visible_events: events
+    .map(|(participant, visible)| {
+        let all_types = events
             .iter()
-            .filter(|event| visible.contains(&event.event_type.as_str()))
-            .map(|event| ParticipantEventV1 {
-                seq: event.seq.as_u64(),
-                event_type: event.event_type.as_str().to_owned(),
-                payload_digest: payload_digest(event),
-            })
-            .collect(),
+            .map(|event| event.event_type.as_str())
+            .collect::<BTreeSet<_>>();
+        let visible_types = visible
+            .iter()
+            .filter(|event_type| all_types.contains(**event_type))
+            .map(|event_type| (*event_type).to_owned())
+            .collect::<Vec<_>>();
+        let hidden_types = all_types
+            .iter()
+            .filter(|event_type| !visible.contains(event_type))
+            .map(|event_type| (*event_type).to_owned())
+            .collect::<Vec<_>>();
+        ParticipantViewV1 {
+            participant: participant.to_owned(),
+            visible_event_types: visible_types.clone(),
+            hidden_event_types: hidden_types,
+            visible_events: events
+                .iter()
+                .filter(|event| {
+                    visible_types
+                        .iter()
+                        .any(|kind| kind == event.event_type.as_str())
+                })
+                .map(|event| ParticipantEventV1 {
+                    seq: event.seq.as_u64(),
+                    event_type: event.event_type.as_str().to_owned(),
+                    payload_digest: payload_digest(event),
+                })
+                .collect(),
+        }
     })
     .collect()
+}
+
+fn causal_relation(cause_type: &str, effect_type: &str) -> String {
+    match (cause_type, effect_type) {
+        (EVENT_TYPE_ACTION_V1, EVENT_TYPE_OBSERVATION_V1) => "intervention_to_physics",
+        (EVENT_TYPE_OBSERVATION_V1, AGENT_EVENT_TYPE) => "physical_to_agent",
+        (AGENT_EVENT_TYPE, pos_plugin_society::EVENT_TYPE_SIGNAL) => "agent_to_society",
+        _ => "derived",
+    }
+    .to_owned()
+}
+
+fn dependency_class(event_type: &str) -> String {
+    if event_type == EVENT_TYPE_ACTION_V1 {
+        "intervention_assigned".to_owned()
+    } else {
+        "endogenous_recomputed".to_owned()
+    }
+}
+
+fn digest_domain(domain: &[u8], input: &[u8]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
+    hasher.update(&[0]);
+    hasher.update(input);
+    *hasher.finalize().as_bytes()
+}
+
+fn profile_digest(input: &MoatProofInputV1) -> [u8; 32] {
+    digest_domain(
+        b"PiglorOS.ExecutionProfile.deterministic-v1",
+        &input.digest(),
+    )
+}
+
+fn artifact_closure_digest(topology: &ProofTopology) -> [u8; 32] {
+    let mut bytes = Vec::new();
+    for (name, version) in [
+        ("world", "1.0.0"),
+        ("proof-agent", "1.0.0"),
+        ("society", "1.0.0"),
+    ] {
+        bytes.extend_from_slice(name.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(version.as_bytes());
+        bytes.push(0);
+    }
+    bytes.extend_from_slice(&topology.input.digest());
+    bytes.extend_from_slice(blake3::hash(WORLD_BACKEND_CONTENT).as_bytes());
+    digest_domain(b"PiglorOS.ArtifactClosure.v1", &bytes)
 }
 
 fn uncertainty_from_events(events: &[Event]) -> Vec<UncertaintyV1> {
@@ -716,6 +801,13 @@ fn consent_probe() -> Result<ConsentAuditV1, MoatProofError> {
             ..
         }
     );
+    let marker_events = session.source_events()?;
+    let marker = marker_events
+        .last()
+        .filter(|event| {
+            event.event_type.as_str() == pos_runtime::HOST_CONSENT_REVOCATION_EVENT_TYPE
+        })
+        .ok_or(MoatProofError::ConsentMarkerMissing)?;
     let halted = marker_committed && matches!(session.step_tick()?, crate::TickOutcome::Stopped);
     let after_seq = session
         .source_events()?
@@ -726,6 +818,8 @@ fn consent_probe() -> Result<ConsentAuditV1, MoatProofError> {
         requested_after_seq: boundary_seq,
         effective_after_seq: after_seq,
         revocation_event_seq: after_seq,
+        revocation_event_type: marker.event_type.as_str().to_owned(),
+        revocation_payload_digest: *blake3::hash(marker.payload.as_slice()).as_bytes(),
         halted_at_tick_boundary: halted,
     })
 }

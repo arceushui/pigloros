@@ -37,6 +37,8 @@ pub enum ReferenceError {
     RootNotObject,
     #[error("evidence JSON is missing field '{0}'")]
     MissingField(&'static str),
+    #[error("evidence JSON contains an unknown field '{0}'")]
+    UnexpectedField(String),
     #[error("independent Fork evaluator rejected evidence: {0}")]
     InvalidForkEvidence(&'static str),
 }
@@ -86,6 +88,8 @@ pub fn verify_fork_json(
     };
     let baseline_events = events(&baseline)?;
     let counterfactual_events = events(&counterfactual)?;
+    verify_reference_kernel(&baseline_events)?;
+    verify_reference_kernel(&counterfactual_events)?;
     let prefix = |events: &[ReferenceEvent]| {
         events
             .iter()
@@ -119,26 +123,76 @@ pub fn verify_fork_json(
         .iter()
         .map(|event| (event.seq, event))
         .collect::<BTreeMap<_, _>>();
-    let has_complete_tail = counterfactual_suffix
+    let complete_endogenous_suffix = counterfactual_suffix
         .iter()
         .filter(|event| event.seq > intervention.seq)
-        .any(|candidate| {
+        .find(|candidate| {
             let tail = counterfactual_suffix
                 .iter()
                 .filter(|event| event.seq >= candidate.seq)
                 .collect::<Vec<_>>();
-            tail.len() >= 3
+            !tail.is_empty()
                 && tail
                     .iter()
                     .all(|event| reaches(event, intervention.seq, &by_seq))
         });
-    if !has_complete_tail {
+    if complete_endogenous_suffix.is_none() {
         return Err(ReferenceError::InvalidForkEvidence(
             "causal tail is incomplete",
         ));
     }
     if baseline_suffix == counterfactual_suffix {
         return Err(ReferenceError::InvalidForkEvidence("suffix was copied"));
+    }
+    Ok(())
+}
+
+/// Reproduce the public causal contract of the proof fixture without linking
+/// the runtime, reducers, or plugin implementations. This is intentionally a
+/// small independent model: it checks the reaction chain, not private payload
+/// representation or generated Event IDs.
+fn verify_reference_kernel(events: &[ReferenceEvent]) -> Result<(), ReferenceError> {
+    let event_types = events
+        .iter()
+        .map(|event| event.event_type.as_str())
+        .collect::<BTreeSet<_>>();
+    for required in [
+        "world.observation.v1",
+        "proof.agent.reaction.v1",
+        "society.signal",
+    ] {
+        if !event_types.contains(required) {
+            return Err(ReferenceError::InvalidForkEvidence(
+                "independent fixture reaction is incomplete",
+            ));
+        }
+    }
+    let by_seq = events
+        .iter()
+        .map(|event| (event.seq, event))
+        .collect::<BTreeMap<_, _>>();
+    for event in events {
+        let Some(cause_seq) = event.causation_seq else {
+            continue;
+        };
+        let Some(cause) = by_seq.get(&cause_seq) else {
+            return Err(ReferenceError::InvalidForkEvidence(
+                "independent causal source is missing",
+            ));
+        };
+        let valid = match event.event_type.as_str() {
+            "proof.agent.reaction.v1" => cause.event_type == "world.observation.v1",
+            "society.signal" => cause.event_type == "proof.agent.reaction.v1",
+            "world.observation.v1" => {
+                cause.event_type == "world.action.v1" || cause.event_type == "world.observation.v1"
+            }
+            _ => true,
+        };
+        if !valid {
+            return Err(ReferenceError::InvalidForkEvidence(
+                "independent causal relation is invalid",
+            ));
+        }
     }
     Ok(())
 }
@@ -217,10 +271,18 @@ pub fn compare_json(left: &str, right: &str) -> Result<ReferenceComparisonV1, Re
     let manifest_fields = [
         "format_version",
         "input_digest",
+        "execution_mode",
         "fork_cut_seq",
         "seed",
         "resource_limit",
         "network_enabled",
+        "reproducibility_class",
+        "execution_profile",
+        "execution_profile_digest",
+        "trust_policy_snapshot_digest",
+        "artifact_closure_digest",
+        "evaluator_digest",
+        "replay_claim",
         "plugin_versions",
     ];
     if manifest_fields.iter().any(|field| {
@@ -266,7 +328,7 @@ fn parse(value: &str) -> Result<serde_json::Map<String, serde_json::Value>, Refe
     let serde_json::Value::Object(object) = value else {
         return Err(ReferenceError::RootNotObject);
     };
-    for field in [
+    let required = [
         "format_version",
         "manifest",
         "authoritative_events",
@@ -276,26 +338,46 @@ fn parse(value: &str) -> Result<serde_json::Map<String, serde_json::Value>, Refe
         "participant_views",
         "plugin_failures",
         "consent_audit",
-    ] {
+    ];
+    for field in required {
         if !object.contains_key(field) {
             return Err(ReferenceError::MissingField(field));
+        }
+    }
+    for field in object.keys() {
+        if !required.contains(&field.as_str()) {
+            return Err(ReferenceError::UnexpectedField(field.clone()));
         }
     }
     let manifest = object
         .get("manifest")
         .and_then(serde_json::Value::as_object)
         .ok_or(ReferenceError::MissingField("manifest"))?;
-    for field in [
+    let manifest_fields = [
         "format_version",
         "input_digest",
+        "execution_mode",
         "fork_cut_seq",
         "seed",
         "resource_limit",
         "network_enabled",
+        "reproducibility_class",
+        "execution_profile",
+        "execution_profile_digest",
+        "trust_policy_snapshot_digest",
+        "artifact_closure_digest",
+        "evaluator_digest",
+        "replay_claim",
         "plugin_versions",
-    ] {
+    ];
+    for field in manifest_fields {
         if !manifest.contains_key(field) {
             return Err(ReferenceError::MissingField(field));
+        }
+    }
+    for field in manifest.keys() {
+        if !manifest_fields.contains(&field.as_str()) {
+            return Err(ReferenceError::UnexpectedField(field.clone()));
         }
     }
     Ok(object)
@@ -329,6 +411,13 @@ mod tests {
                 "seed": 1,
                 "resource_limit": 10,
                 "network_enabled": false,
+                "reproducibility_class": "profile_recomputation",
+                "execution_profile": "deterministic-v1",
+                "execution_profile_digest": [3],
+                "trust_policy_snapshot_digest": [4],
+                "artifact_closure_digest": [5],
+                "evaluator_digest": [6],
+                "replay_claim": "exact",
                 "plugin_versions": {"world": "1"}
             },
             "authoritative_events": [{"seq": 1}],
@@ -385,6 +474,12 @@ mod tests {
         assert!(matches!(
             compare_json("not-json", &fixture()),
             Err(ReferenceError::Json(_))
+        ));
+        let mut value: serde_json::Value = serde_json::from_str(&fixture()).unwrap();
+        value["unknown"] = serde_json::json!(true);
+        assert!(matches!(
+            compare_json(&value.to_string(), &fixture()),
+            Err(ReferenceError::UnexpectedField(field)) if field == "unknown"
         ));
     }
 }
