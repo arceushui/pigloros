@@ -1,8 +1,8 @@
 # piglor-gateway
 
-Wave 6 local-first HTTP gateway ([ADR-014](../../docs/adr/ADR-014-gateway-mvp.md) / Redmine #69).
+Wave 6 local-first HTTP Gateway foundation ([ADR-014](../../docs/adr/ADR-014-gateway-mvp.md) / Redmine #69). This is a transport component, not the product MVP.
 
-HTTP poll MVP for timelines, events, `world.action`, and `society.signal`. WebSocket stream and auth are deferred.
+The Wave 9 external-client MVP target will use this documented HTTP boundary to create or select Timelines, submit authenticated `world.action` proposals, and poll committed Events. This foundation is not the product MVP: the default Gateway process has no authenticated `ActionPrincipal`, so action submission fails closed until a host configures one. WebSocket, public client decision-preview contracts, and Replay/Fork routes remain deferred.
 
 ## Run
 
@@ -60,7 +60,7 @@ non-loopback listener is spectator-only.
 
 - **Actions:** `event_type` defaults to `world.action`; `capability` must be `world.action.submit`. The configured Gateway authentication principal must own that capability and match `entity_id`; the World approver then requires a complete `WorldAction` payload, a known body ID, and canonical CBOR validation before append. The default production Gateway has no action principal and therefore fails closed with `401` until the host wires authentication and a World body catalogue.
 - **Signals:** convenience wrapper for `society.signal` (see `plugins/society`).
-- **Polling:** `limit` defaults to and may not exceed 100. `from_seq` is inclusive. `next_from_seq` is `null` only when the Timeline is exhausted; otherwise it is the inclusive sequence of the first omitted Event and clients must request it to continue. The bundled `pos-mvp` consumer follows the cursor until exhaustion.
+- **Polling:** `limit` defaults to and may not exceed 100. `from_seq` is inclusive. `next_from_seq` is `null` only when the Timeline is exhausted; otherwise it is the inclusive sequence of the first omitted Event and clients must request it to continue. A future independent client will own this cursor and continue polling until exhaustion; this transport behavior is not, by itself, product MVP evidence.
 - **Response budget:** each polling response is at most 1 MiB. The Gateway may return fewer than `limit` Events to stay within that budget. Polling uses the store's bounded-read seam and requests exactly `limit + 1` candidates so the first omitted Event becomes the cursor. The memory adapter derives Fork-segment lengths from Timeline heads and seeks directly into contiguous per-Timeline Event vectors. SQLite derives the same segment ranges from indexed Timeline metadata and uses `(timeline_id, seq)` primary-key range predicates with `LIMIT` in both phases: it first selects only `seq`, `typeof(payload)`, `length(CAST(payload AS BLOB))`, and `length(CAST(event_type AS BLOB))`, validates them, and only then fetches at most the same bounded number of full Events in the same snapshot transaction. Neither adapter scans preceding Event history for a late cursor. SQLite files must use UTF-8 encoding, Event sequences must be contiguous from 1 through `timelines.head_seq`, and offline imports must preserve payloads with SQLite `BLOB` storage class. Existing SQLite files are sequence-validated once when opened; supported import APIs validate committed batches as they arrive. Opening UTF-16 or non-contiguous databases, or polling non-BLOB payload rows, fails closed with an actionable store error. Direct SQL mutation that bypasses `EventStore` while the database is open is outside the supported write boundary. Stored payloads over 256 KiB or imported `event_type` values over 64 KiB return deterministic JSON `413`. The metadata ceiling reserves at most 384 KiB for worst-case JSON escaping; together with the maximum payload's 512 KiB hex form and fixed Event fields this fits the 1 MiB envelope. The exact response-size check still handles decoded payload expansion. For Gateway-authored Events, admission serializes an exact `EventView`-equivalent envelope with worst-case sequence and cursor widths.
 - **Fork traversal bound:** one poll traverses at most 64 parent links. Imported deeper chains and corrupt ancestry cycles fail with JSON `413` before an unbounded ancestry collection can grow. The bound does not change shallow Fork pagination, including Timelines exposing 10,001 logical Events.
 - **Timeline bound:** one Gateway process accepts at most 64 **root** Timelines. Forks and identity-preserving imported children do not consume root capacity. Quota checks use a bounded scalar store seam that stops at quota + 1 and never lists or clones Timeline metadata.
@@ -111,7 +111,7 @@ ceilings are enforced atomically by the adapter. Arbitrary SQL mutation by tools
 that bypass `EventStore` remains unsupported while the file is open. Imported
 Events remain safely bounded on read.
 
-The bundled `pos-mvp` consumer does not reuse the 10,000-owned-Event ceiling as
+An external client does not reuse the 10,000-owned-Event ceiling as
 a logical read limit: Forks may expose inherited plus owned Events beyond that
 number. It follows monotonic cursors to exhaustion, caps every response at 1 MiB,
 and caps cumulative response bytes at 64 MiB.

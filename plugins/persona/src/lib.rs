@@ -282,42 +282,6 @@ impl PersonaEvalDriver {
             tick: 0,
         }
     }
-
-    /// Default Kyoto vs Osaka trip-preview pairs with ground truth favoring Kyoto.
-    #[must_use]
-    pub fn trip_preview(entity: EntityId, model: PersonaModel) -> Self {
-        Self::new(
-            entity,
-            model,
-            vec![
-                PreferencePair {
-                    option_a: "kyoto nature quiet temples".to_owned(),
-                    option_b: "osaka city food nightlife".to_owned(),
-                    prefers_a: true,
-                },
-                PreferencePair {
-                    option_a: "kyoto gardens quiet".to_owned(),
-                    option_b: "osaka street food city".to_owned(),
-                    prefers_a: true,
-                },
-                PreferencePair {
-                    option_a: "osaka city nightlife".to_owned(),
-                    option_b: "kyoto nature temples".to_owned(),
-                    prefers_a: false,
-                },
-                PreferencePair {
-                    option_a: "kyoto quiet nature".to_owned(),
-                    option_b: "osaka food city".to_owned(),
-                    prefers_a: true,
-                },
-                PreferencePair {
-                    option_a: "osaka food nightlife".to_owned(),
-                    option_b: "kyoto quiet temples".to_owned(),
-                    prefers_a: false,
-                },
-            ],
-        )
-    }
 }
 
 impl Driver for PersonaEvalDriver {
@@ -361,6 +325,14 @@ mod tests {
         event::SchemaVersion,
         ids::EventId,
     };
+
+    fn quiet_workspace_pair() -> PreferencePair {
+        PreferencePair {
+            option_a: "quiet workspace".to_owned(),
+            option_b: "busy workspace".to_owned(),
+            prefers_a: true,
+        }
+    }
 
     // ── PersonaPlugin tests ──────────────────────────────────────────────────
 
@@ -860,7 +832,7 @@ mod tests {
 
         let model = PersonaModel::new(vec![("nature".to_owned(), 0.8)]);
         let entity = EntityId::new();
-        let mut driver = PersonaEvalDriver::trip_preview(entity, model);
+        let mut driver = PersonaEvalDriver::new(entity, model, vec![quiet_workspace_pair()]);
         assert_eq!(driver.name(), "persona-eval");
 
         let mut store = open_store(StoreConfig::Memory).unwrap();
@@ -894,7 +866,11 @@ mod tests {
             .register(
                 &persona,
                 Some(Box::new(PersonaReducer)),
-                Some(Box::new(PersonaEvalDriver::trip_preview(entity, model))),
+                Some(Box::new(PersonaEvalDriver::new(
+                    entity,
+                    model,
+                    vec![quiet_workspace_pair()],
+                ))),
             )
             .unwrap();
         let eval = EvalPlugin::new();

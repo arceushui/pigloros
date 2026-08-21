@@ -1,4 +1,4 @@
-//! Axum HTTP surface for [`crate::Gateway`] (WebSocket stream deferred — HTTP poll is MVP).
+//! Axum HTTP surface for [`crate::Gateway`] (WebSocket stream deferred — HTTP poll is the current foundation).
 
 use crate::{
     ActionRequest, CreateTimelineRequest, EventPage, EventView, EventsQuery, Gateway, GatewayError,
@@ -60,7 +60,7 @@ mod coverage_tests {
     }
 }
 
-/// Build the MVP router (ADR-014 route table; WS deferred to follow-up).
+/// Build the Gateway foundation router (ADR-014 route table; WS deferred to follow-up).
 pub fn router(state: AppState) -> Router {
     build_router(state, MAX_HTTP_BODY_BYTES)
 }

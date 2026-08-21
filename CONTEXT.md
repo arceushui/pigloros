@@ -36,14 +36,14 @@ A shared language for humans and agents working on PiglorOS. Use these terms exa
 
 | Term | Module | Meaning |
 |---|---|---|
-| **Decision Preview** | `apps/pos-mvp` | The core user-facing loop: preferences → option scoring → recommendation → calibration. |
-| **Scenario** | `pos-mvp` | A named binary decision domain (e.g. `places`, `work`). Defines two `OptionSpec`s and default preference weights. |
-| **OptionSpec** | `pos-mvp` | One side of a binary decision: a label, tags, lean hint, and optional coordinates. |
-| **Preference** | `pos-mvp`, `pos-plugin-persona` | A named dimension weight in `[-1.0, 1.0]` expressing affinity (e.g. `nature=0.8`). |
-| **PersonaModel** | `plugins/persona` | Scores an option's tags against a set of Preferences using a weighted dot product. |
-| **Match Score** | `pos-mvp` | The output of `PersonaModel::score_option` for one option (a real number). |
-| **Recommendation** | `pos-mvp` | The winning option determined by comparing Match Scores; "Toss-up" when margin < 0.02. |
-| **Fork Compare** | `pos-mvp`, `pos-time` | `--fork-compare` mode — CoW twin timelines, one per option — showing diverged entity state side-by-side. |
+| **Decision Preview** | external client + `plugins/persona` | The user-facing loop: client-supplied preferences and options → scoring → recommendation → calibration. It is not a bundled scenario or demo binary. |
+| **Scenario Room** | planned Wave 9 client contract | A user-configured simulation context with explicit inputs and reproducible Fork identity. No current Rust type or Gateway route is allowed to imply that this contract already exists. It is never a hard-coded product scenario. |
+| **OptionSpec** | planned external-client/persona contract | One user- or client-supplied side of a decision: a label, tags, lean hint, and optional coordinates. The current PersonaModel accepts caller-supplied preference inputs; the public client contract remains a Wave 9 deliverable. |
+| **Preference** | external client, `pos-plugin-persona` | A named dimension weight in `[-1.0, 1.0]` expressing affinity (e.g. `nature=0.8`). |
+| **PersonaModel** | `plugins/persona` | Current in-process validation primitive: scores an option string by averaging matching preference dimensions and normalizing the result. It has no public `OptionSpec` or tag contract yet. |
+| **Match Score** | `pos-plugin-persona` | The output of `PersonaModel::score_option` for one option string (a real number); the third-party client contract remains a Wave 9 deliverable. |
+| **Recommendation** | external client + `pos-plugin-persona` | The winning option determined by comparing Match Scores; "Toss-up" when margin < 0.02. |
+| **Fork Compare** | external client, `pos-time` | CoW Timelines, one per user-supplied option, showing diverged state side-by-side. |
 
 ---
 
@@ -54,8 +54,8 @@ A shared language for humans and agents working on PiglorOS. Use these terms exa
 | **Gateway** | `apps/piglor-gateway` | The local-first HTTP gateway (ADR-014). Manages Timelines and event append/poll over HTTP. |
 | **Society Signal** | `plugins/society` | A `society.signal` event encoding a value for one social dimension (`trust`, `opinion`, `culture`, `economy`, `polarization`). |
 | **Society Reducer** | `plugins/society` | Folds Society Signals into running means per dimension. |
-| **Context Nudge** | `apps/pos-mvp` (gateway_context.rs) | Adjusts Preferences using Society Signal means before scoring. Formula: `adjusted = clamp(pref + avg(nudges), -1, 1)` where `nudge = (mean - 0.5) × 0.25`. |
-| **AI Influence Index** | `apps/pos-mvp` (ai_influence.rs) | Fraction of Timeline events from AI agents (`agent.*`), broken down by archetype (`goal-seeking`, `rule-bound`). Always shown as a headline. |
+| **Context Nudge** | future client composition | Adjusts Preferences using Society Signal means before scoring. Formula: `adjusted = clamp(pref + avg(nudges), -1, 1)` where `nudge = (mean - 0.5) × 0.25`. |
+| **AI Influence Index** | future client projection | Fraction of Timeline events from AI agents (`agent.*`), broken down by archetype (`goal-seeking`, `rule-bound`). It is not a current MVP claim. |
 | **Prediction Ledger** | `plugins/ledger`, `apps/piglor-ledger`, `apps/piglor-gateway` | Public pre-registered prediction log with Brier Scores, verification hashes, and OSF workflow. Curated TOML tier + signed EventStore tier (ADR-017). |
 
 ---
@@ -91,9 +91,10 @@ A shared language for humans and agents working on PiglorOS. Use these terms exa
 
 | Term | Meaning |
 |---|---|
-| **Wave** | A named delivery increment. Waves 1–7 shipped on `main`. Wave 8+ planned. |
+| **Wave** | A named delivery increment. Waves 1–6 shipped foundation increments on `main`; Wave 7's hard-coded demo was retired; Wave 8+ remain planned or in progress. |
 | **ADR** | Architecture Decision Record. Canonical on Redmine wiki (`redmine.piglor.com/projects/pigloros/wiki`). |
-| **Thin MVP** | Minimal vertical slice *of the final architecture* — just enough to validate the concept, built on the seams the full vision requires. Never a throwaway shortcut. |
+| **MVP** | The first usable product boundary: an independently built third-party client can submit user-supplied preferences/options, receive a decision preview, operate a Timeline/Scenario Room through documented public contracts, observe committed Events/state, and use Replay/Fork. A hard-coded scenario, generic fixture shell, curl-only smoke test, or embedded demo does not qualify. This is the Wave 9 product target; ADR-018 remains the narrower accepted engineering design for the fixture-backed 3D shell, and any live Gateway/action/authentication contract requires a separate accepted design before implementation. |
+| **Retired demo** | Removed code or documentation that is preserved only as historical context; it is not part of the product or roadmap status. |
 | **Deferred** | Explicitly out-of-scope for the current wave; tracked in Redmine or ADR non-goals. |
 
 ---

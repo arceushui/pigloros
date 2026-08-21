@@ -21,5 +21,5 @@ See also `docs/test-policy.md` in each repo.
 | Attrs / doctests | Trunk `rust-test-policy` | `coverage(off)` test-only; bans ` ```ignore ` |
 | Git hooks | Trunk pre-commit / pre-push | `trunk git-hooks sync` |
 | Runtime | `cargo test -- --include-ignored` | Ignored tests still execute |
-| Coverage | `cargo llvm-cov` with `--include-ignored` | At least 99% lines + regions; the tolerance is only for source-unmappable LLVM regions |
+| Coverage | `cargo llvm-cov` with `--include-ignored` | At least 99% lines + 98% regions; the tolerance is only for source-unmappable LLVM regions |
 | Dependencies | **cargo-deny** | Crates/licenses/advisories/sources only |

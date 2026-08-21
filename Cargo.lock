@@ -4300,8 +4300,6 @@ dependencies = [
  "blake3",
  "pos-core",
  "pos-experiment",
- "pos-plugin-eval",
- "pos-plugin-persona",
  "pos-plugin-rule-agent",
  "pos-plugin-synthetic-obs",
  "pos-query",

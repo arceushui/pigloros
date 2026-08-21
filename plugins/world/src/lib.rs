@@ -1866,6 +1866,18 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_observation_v1_encode_rejects_oversized_sensor_value() {
+        let mut observation = sample_observation();
+        observation.sensor_value = vec![0; MAX_SENSOR_VALUE_BYTES + 1];
+
+        assert!(matches!(
+            observation.encode(),
+            Err(WorldCodecError::PayloadTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_driver_emits_config_on_first_step() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("test").unwrap();
@@ -1886,6 +1898,25 @@ mod tests {
         let driver = WorldDriver::default();
         assert_eq!(driver.name(), "world-driver");
         assert!(driver.entities.is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_driver_default_emits_its_default_config() {
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let tl = store.create_timeline("default-driver").unwrap();
+        let mut driver = WorldDriver::default();
+
+        let output = driver
+            .step(tl.id(), ObservationView::empty())
+            .expect("default configuration is valid");
+        let config = WorldConfigV1::decode(&output.drafts[0].payload)
+            .expect("default config draft uses the public codec");
+
+        assert_eq!(config.backend_id, "simple-kinematic");
+        assert_eq!(config.backend_version, "1.0.0");
+        assert!((config.gravity_y + 9.81).abs() < f32::EPSILON);
+        assert_eq!(config.sensor_min_resolution_mm, SENSOR_MIN_RESOLUTION_MM);
     }
 
     #[test]
