@@ -468,6 +468,80 @@ mod tests {
     }
 
     #[test]
+    fn owntracks_subcommand_is_dispatched_by_the_binary_entrypoint() {
+        let database = std::env::temp_dir().join(format!(
+            "piglor-gw-owntracks-dispatch-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        run_with_args_and_shutdown(
+            &[
+                String::from("piglor-gateway"),
+                String::from("owntracks"),
+                String::from("status"),
+                database.display().to_string(),
+            ],
+            Box::pin(async {}),
+        )
+        .unwrap();
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn serve_dispatches_owner_key_and_sqlite_configuration() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _environment = clean_ledger_environment();
+        let directory = std::env::temp_dir().join(format!(
+            "piglor-gw-owner-serve-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let database = directory.join("gateway.db");
+        let owner_key = directory.join("owner.key");
+        owntracks::create_or_load_owner_key(&owner_key).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        run_with_args_and_shutdown(
+            &[
+                String::from("piglor-gateway"),
+                String::from("serve"),
+                addr.to_string(),
+                database.display().to_string(),
+                String::from("--owntracks-owner-key"),
+                owner_key.display().to_string(),
+            ],
+            Box::pin(async {
+                tokio::task::yield_now().await;
+            }),
+        )
+        .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let missing_sqlite = runtime
+            .block_on(serve_with_owntracks(
+                addr,
+                None,
+                Some(&owner_key),
+                async {},
+                LedgerView::default(),
+                LedgerWriteMode::Disabled,
+            ))
+            .unwrap_err();
+        assert!(missing_sqlite.to_string().contains("SQLite"));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_main_error_path() {
         let _ = run_main(&[
