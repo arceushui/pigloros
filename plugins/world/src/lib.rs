@@ -14,10 +14,12 @@ use pos_core::{
     ids::{EntityId, PluginId, TimelineId},
     plugin::{Capability, Plugin},
     state::{Reducer, State},
-    WorldCoordinateV1, WorldTransformError,
+    ActionApprover, ActionRejected, ProposedAction, WorldCoordinateV1, WorldTransformError,
+    MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
 use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 /// The entity kind string for world bodies.
 pub const ENTITY_KIND: &str = "world-body";
@@ -193,13 +195,29 @@ struct WorldObservationPayload {
     y: f64,
 }
 
+/// A structured world action payload (ADR-047 / ADR-057).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorldAction {
+    pub actor_entity_id: EntityId,
+    pub body_entity_id: EntityId,
+    pub action_kind: String,
+    pub params: Vec<u8>,
+    pub action_scope: u8,
+    pub catalogue_version: u32,
+    pub tick: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Plugin descriptor
 // ---------------------------------------------------------------------------
 
 /// World simulation plugin.
+#[derive(Clone)]
 pub struct WorldPlugin {
     id: PluginId,
+    allowed_action_kinds: Vec<String>,
+    catalogue_version: u32,
+    known_bodies: HashSet<EntityId>,
 }
 
 impl Default for WorldPlugin {
@@ -209,12 +227,47 @@ impl Default for WorldPlugin {
 }
 
 impl WorldPlugin {
-    /// Create a new world plugin.
+    /// Create a new world plugin with default actuator allow-list (`["impulse", "target_velocity"]`).
     #[must_use]
     pub fn new() -> Self {
         Self {
             id: PluginId::new(),
+            allowed_action_kinds: vec!["impulse".to_owned(), "target_velocity".to_owned()],
+            catalogue_version: 1,
+            known_bodies: HashSet::new(),
         }
+    }
+
+    /// Pinned catalogue version.
+    #[must_use]
+    pub const fn catalogue_version(&self) -> u32 {
+        self.catalogue_version
+    }
+
+    /// Configure allowed action kinds.
+    #[must_use]
+    pub fn with_allowed_actions(mut self, actions: impl IntoIterator<Item = String>) -> Self {
+        self.allowed_action_kinds = actions.into_iter().collect();
+        self
+    }
+
+    /// Configure known body entities.
+    #[must_use]
+    pub fn with_bodies(mut self, bodies: impl IntoIterator<Item = EntityId>) -> Self {
+        self.known_bodies = bodies.into_iter().collect();
+        self
+    }
+
+    /// Configure pinned catalogue version.
+    #[must_use]
+    pub const fn with_catalogue_version(mut self, version: u32) -> Self {
+        self.catalogue_version = version;
+        self
+    }
+
+    /// Add a known body entity ID.
+    pub fn add_body(&mut self, body: EntityId) {
+        self.known_bodies.insert(body);
     }
 }
 
@@ -237,6 +290,72 @@ impl Plugin for WorldPlugin {
             has_driver: true,
             has_reducer: true,
         }
+    }
+}
+
+impl ActionApprover for WorldPlugin {
+    fn approve(
+        &self,
+        proposal: &ProposedAction,
+    ) -> Result<pos_core::event::EventDraft, ActionRejected> {
+        if proposal.event_type.as_str() != EVENT_TYPE_ACTION {
+            return Err(ActionRejected::UnknownEventType);
+        }
+        if proposal.capability.as_str() != "world.action.submit" {
+            return Err(ActionRejected::CapabilityNotGranted);
+        }
+        if proposal.payload.len() > MAX_PROPOSED_ACTION_PAYLOAD_BYTES {
+            return Err(ActionRejected::PayloadTooLarge {
+                size: proposal.payload.len(),
+                max: MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+            });
+        }
+
+        let action: WorldAction = match ciborium::from_reader(proposal.payload.as_slice()) {
+            Ok(action) => action,
+            Err(_) => {
+                return Err(ActionRejected::DomainValidationFailed(
+                    "malformed world.action payload".to_owned(),
+                ));
+            }
+        };
+
+        if action.actor_entity_id != proposal.actor_entity_id {
+            return Err(ActionRejected::InvalidActorEntityId);
+        }
+
+        if action.action_scope != 0 {
+            return Err(ActionRejected::DomainValidationFailed(format!(
+                "invalid action scope: expected 0, got {}",
+                action.action_scope
+            )));
+        }
+
+        if action.catalogue_version != self.catalogue_version {
+            return Err(ActionRejected::DomainValidationFailed(format!(
+                "catalogue version mismatch: expected {}, got {}",
+                self.catalogue_version, action.catalogue_version
+            )));
+        }
+
+        if !self.allowed_action_kinds.contains(&action.action_kind) {
+            return Err(ActionRejected::DomainValidationFailed(format!(
+                "action kind '{}' not in allow-list",
+                action.action_kind
+            )));
+        }
+
+        if !self.known_bodies.contains(&action.body_entity_id) {
+            return Err(ActionRejected::DomainValidationFailed(
+                "unknown body entity ID".to_owned(),
+            ));
+        }
+
+        Ok(pos_core::event::EventDraft::new(
+            proposal.actor_entity_id,
+            proposal.event_type.clone(),
+            proposal.payload.clone(),
+        ))
     }
 }
 
@@ -926,5 +1045,251 @@ mod tests {
         assert_eq!(driver.tick, 1);
         driver.step(tl.id(), ObservationView::empty()).unwrap();
         assert_eq!(driver.tick, 2);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_plugin_builders_and_accessors() {
+        let body_id = EntityId::new();
+        let plugin = WorldPlugin::new()
+            .with_catalogue_version(2)
+            .with_allowed_actions(vec!["custom_action".to_owned()])
+            .with_bodies(vec![body_id]);
+
+        assert_eq!(plugin.catalogue_version(), 2);
+        assert_eq!(plugin.allowed_action_kinds, vec!["custom_action"]);
+        assert!(plugin.known_bodies.contains(&body_id));
+
+        let mut plugin2 = WorldPlugin::default();
+        let body_id2 = EntityId::new();
+        plugin2.add_body(body_id2);
+        assert!(plugin2.known_bodies.contains(&body_id2));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_action_requires_complete_envelope() {
+        let incomplete = serde_json::json!({
+            "actor_entity_id": EntityId::new(),
+            "body_entity_id": EntityId::new(),
+            "action_kind": "impulse"
+        });
+        let result = serde_json::from_value::<WorldAction>(incomplete);
+        assert!(result.is_err());
+    }
+
+    // ─── helpers ──────────────────────────────────────────────────────────────
+
+    /// Serialise `action` to CBOR and wrap it in a [`ProposedAction`].
+    fn cbor_proposal(action: &WorldAction, actor: EntityId) -> ProposedAction {
+        let mut buf = Vec::new();
+        ciborium::into_writer(action, &mut buf).unwrap();
+        ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION),
+            actor,
+            CanonicalBytes::from_vec(buf),
+            Kind::new("world.action.submit"),
+        )
+    }
+
+    /// Build a canonical `WorldAction` with sensible defaults.
+    fn default_action(actor: EntityId, body: EntityId) -> WorldAction {
+        WorldAction {
+            actor_entity_id: actor,
+            body_entity_id: body,
+            action_kind: "impulse".to_owned(),
+            params: vec![1, 2, 3],
+            action_scope: 0,
+            catalogue_version: 1,
+            tick: 10,
+        }
+    }
+
+    // ─── approver happy-path tests ────────────────────────────────────────────
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_plugin_approver_happy_paths() {
+        let actor = EntityId::new();
+        let body = EntityId::new();
+        let plugin = WorldPlugin::new().with_bodies(vec![body]);
+        let action = default_action(actor, body);
+
+        // 1. Valid CBOR proposal
+        let proposal = cbor_proposal(&action, actor);
+        let draft = plugin
+            .approve(&proposal)
+            .expect("CBOR proposal should be approved");
+        assert_eq!(draft.entity, actor);
+        assert_eq!(draft.event_type.as_str(), EVENT_TYPE_ACTION);
+
+        // 2. Unknown event type
+        let wrong_type = ProposedAction::new(
+            Kind::new("wrong.event"),
+            actor,
+            proposal.payload.clone(),
+            Kind::new("world.action.submit"),
+        );
+        assert_eq!(
+            plugin.approve(&wrong_type),
+            Err(ActionRejected::UnknownEventType)
+        );
+    }
+
+    // ─── approver early-rejection tests ──────────────────────────────────────
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_plugin_approver_rejects_early_checks() {
+        let actor = EntityId::new();
+        let body = EntityId::new();
+        let plugin = WorldPlugin::new().with_bodies(vec![body]);
+        let action = default_action(actor, body);
+        let proposal = cbor_proposal(&action, actor);
+
+        // 4. Capability not granted
+        let wrong_cap = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION),
+            actor,
+            proposal.payload.clone(),
+            Kind::new("wrong.capability"),
+        );
+        assert_eq!(
+            plugin.approve(&wrong_cap),
+            Err(ActionRejected::CapabilityNotGranted)
+        );
+
+        // 5. Payload too large (>4096)
+        let large_payload = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION),
+            actor,
+            CanonicalBytes::from_vec(vec![0u8; 5000]),
+            Kind::new("world.action.submit"),
+        );
+        assert_eq!(
+            plugin.approve(&large_payload),
+            Err(ActionRejected::PayloadTooLarge {
+                size: 5000,
+                max: 4096
+            })
+        );
+
+        // 6. Malformed payload
+        let malformed = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION),
+            actor,
+            CanonicalBytes::from_vec(vec![0xff, 0xff, 0xff]),
+            Kind::new("world.action.submit"),
+        );
+        assert_eq!(
+            plugin.approve(&malformed),
+            Err(ActionRejected::DomainValidationFailed(
+                "malformed world.action payload".to_owned()
+            ))
+        );
+
+        // 7. Actor entity mismatch
+        let other_actor = EntityId::new();
+        let wrong_actor = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION),
+            other_actor,
+            proposal.payload.clone(),
+            Kind::new("world.action.submit"),
+        );
+        assert_eq!(
+            plugin.approve(&wrong_actor),
+            Err(ActionRejected::InvalidActorEntityId)
+        );
+    }
+
+    // ─── approver domain-validation tests ────────────────────────────────────
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_plugin_approver_rejects_domain_checks() {
+        let actor = EntityId::new();
+        let body = EntityId::new();
+        let plugin = WorldPlugin::new().with_bodies(vec![body]);
+
+        // 8. Invalid action scope (!= 0)
+        let scope_prop = cbor_proposal(
+            &WorldAction {
+                actor_entity_id: actor,
+                body_entity_id: body,
+                action_kind: "impulse".to_owned(),
+                params: vec![],
+                action_scope: 1,
+                catalogue_version: 1,
+                tick: 0,
+            },
+            actor,
+        );
+        assert_eq!(
+            plugin.approve(&scope_prop),
+            Err(ActionRejected::DomainValidationFailed(
+                "invalid action scope: expected 0, got 1".to_owned()
+            ))
+        );
+
+        // 9. Catalogue version mismatch
+        let ver_prop = cbor_proposal(
+            &WorldAction {
+                actor_entity_id: actor,
+                body_entity_id: body,
+                action_kind: "impulse".to_owned(),
+                params: vec![],
+                action_scope: 0,
+                catalogue_version: 99,
+                tick: 0,
+            },
+            actor,
+        );
+        assert_eq!(
+            plugin.approve(&ver_prop),
+            Err(ActionRejected::DomainValidationFailed(
+                "catalogue version mismatch: expected 1, got 99".to_owned()
+            ))
+        );
+
+        // 10. Unknown action kind
+        let kind_prop = cbor_proposal(
+            &WorldAction {
+                actor_entity_id: actor,
+                body_entity_id: body,
+                action_kind: "fly_to_moon".to_owned(),
+                params: vec![],
+                action_scope: 0,
+                catalogue_version: 1,
+                tick: 0,
+            },
+            actor,
+        );
+        assert_eq!(
+            plugin.approve(&kind_prop),
+            Err(ActionRejected::DomainValidationFailed(
+                "action kind 'fly_to_moon' not in allow-list".to_owned()
+            ))
+        );
+
+        // 11. Unknown body entity ID
+        let unknown_body = EntityId::new();
+        let unk_prop = cbor_proposal(
+            &WorldAction {
+                actor_entity_id: actor,
+                body_entity_id: unknown_body,
+                action_kind: "impulse".to_owned(),
+                params: vec![],
+                action_scope: 0,
+                catalogue_version: 1,
+                tick: 0,
+            },
+            actor,
+        );
+        assert_eq!(
+            plugin.approve(&unk_prop),
+            Err(ActionRejected::DomainValidationFailed(
+                "unknown body entity ID".to_owned()
+            ))
+        );
     }
 }

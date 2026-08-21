@@ -7,7 +7,13 @@
 
 use indexmap::IndexMap;
 
-use pos_core::{clock::Seq, event::Event, ids::PluginId, Plugin, Reducer};
+use pos_core::{
+    clock::Seq,
+    event::{Event, EventDraft, Kind},
+    ids::PluginId,
+    ActionApprover, ActionRejected, Plugin, ProposedAction, Reducer,
+    MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+};
 use pos_state::ProjectionRegistry;
 
 use crate::{
@@ -17,7 +23,7 @@ use crate::{
         StepOutput, TimelineHistorySegment,
     },
     error::RuntimeError,
-    recorder::RECORDER_EVENT_TYPE,
+    recorder::{RunMode, RECORDER_EVENT_TYPE},
     schema::{EventTypeSchema, SchemaRegistry},
 };
 use std::collections::HashSet;
@@ -101,6 +107,7 @@ struct PluginEntry {
     name: String,
     version: String,
     driver: Option<Box<dyn Driver>>,
+    approver: Option<Box<dyn ActionApprover>>,
     last_tick: Option<u128>,
 }
 
@@ -123,9 +130,11 @@ enum AnchoredSelection {
 pub struct PluginRegistry {
     /// `IndexMap` preserves insertion order — `step_all` / `plugin_names` are stable.
     plugins: IndexMap<PluginId, PluginEntry>,
+    approver_map: IndexMap<Kind, PluginId>,
     pub schemas: SchemaRegistry,
     pub projections: ProjectionRegistry,
     pending_step: Option<PendingStep>,
+    run_mode: RunMode,
 }
 
 impl PluginRegistry {
@@ -186,6 +195,16 @@ impl PluginRegistry {
 
     #[must_use]
     pub fn new() -> Self {
+        Self::new_with_mode(RunMode::Live)
+    }
+
+    /// Create a projection-only registry for replay.
+    #[must_use]
+    pub fn new_replay() -> Self {
+        Self::new_with_mode(RunMode::Replay)
+    }
+
+    fn new_with_mode(run_mode: RunMode) -> Self {
         let mut schemas = SchemaRegistry::new();
         // Auto-register the Recorder's internal event type so that
         // Recorder::to_draft() output passes SchemaRegistry::validate().
@@ -196,9 +215,11 @@ impl PluginRegistry {
         });
         Self {
             plugins: IndexMap::new(),
+            approver_map: IndexMap::new(),
             schemas,
             projections: ProjectionRegistry::new(),
             pending_step: None,
+            run_mode,
         }
     }
 
@@ -421,6 +442,25 @@ impl PluginRegistry {
         reducer: Option<Box<dyn Reducer>>,
         driver: Option<Box<dyn Driver>>,
     ) -> Result<(), RuntimeError> {
+        self.register_with_approver(plugin, reducer, driver, None, std::iter::empty())
+    }
+
+    /// Register a plugin with an optional [`ActionApprover`] (ADR-057).
+    ///
+    /// Wires event-type schemas, (optionally) a reducer and driver, and (optionally)
+    /// an action approver indexed by the explicitly supplied event types.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError::DuplicatePlugin`] if a plugin with the same `PluginId`
+    /// is already registered.
+    pub fn register_with_approver(
+        &mut self,
+        plugin: &dyn Plugin,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+        approver: Option<Box<dyn ActionApprover>>,
+        approver_event_types: impl IntoIterator<Item = Kind>,
+    ) -> Result<(), RuntimeError> {
         let id = plugin.id();
         let name = plugin.name().to_owned();
 
@@ -429,6 +469,7 @@ impl PluginRegistry {
         }
 
         let cap = plugin.capability();
+        let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
 
         if let Some(kind) = cap
             .owned_event_types
@@ -462,6 +503,33 @@ impl PluginRegistry {
             });
         }
 
+        if approver.is_none() && !approver_event_types.is_empty() {
+            return Err(RuntimeError::CapabilityMismatch {
+                name,
+                reason: "approver event types were supplied without an approver".to_owned(),
+            });
+        }
+        if let Some(kind) = approver_event_types
+            .iter()
+            .find(|kind| !cap.owned_event_types.contains(kind))
+        {
+            return Err(RuntimeError::CapabilityMismatch {
+                name,
+                reason: format!("approver event type '{kind}' is not plugin-owned"),
+            });
+        }
+
+        if approver.is_some() {
+            if let Some(kind) = cap.owned_event_types.iter().find(|kind| {
+                approver_event_types.contains(*kind) && self.approver_map.contains_key(*kind)
+            }) {
+                return Err(RuntimeError::CapabilityMismatch {
+                    name,
+                    reason: format!("an action approver route already exists for '{kind}'"),
+                });
+            }
+        }
+
         // Register event type schemas
         for kind in &cap.owned_event_types {
             self.schemas.register(EventTypeSchema {
@@ -476,12 +544,20 @@ impl PluginRegistry {
             self.projections.register(&name, r);
         }
 
+        // Index action approver if present
+        if approver.is_some() {
+            for kind in &approver_event_types {
+                self.approver_map.insert(kind.clone(), id);
+            }
+        }
+
         self.plugins.insert(
             id,
             PluginEntry {
                 name,
                 version: plugin.version().to_owned(),
                 driver,
+                approver,
                 last_tick: None,
             },
         );
@@ -527,9 +603,51 @@ impl PluginRegistry {
                 name,
                 version: "0.1.0".to_owned(),
                 driver: Some(driver),
+                approver: None,
                 last_tick: None,
             },
         );
+    }
+
+    /// Submit a proposed action through the capability-checked envelope (ADR-057).
+    ///
+    /// Routes to the approver registered for `proposal.event_type`. This is a
+    /// live-only boundary: replay accepts a [`pos_state::ProjectionRegistry`]
+    /// and never receives a [`PluginRegistry`], so replay cannot submit actions.
+    ///
+    /// # Errors
+    /// Returns [`ActionRejected`] if the payload is too large, no approver is registered
+    /// for the event type, or domain validation fails.
+    pub fn submit_action(&self, proposal: &ProposedAction) -> Result<EventDraft, ActionRejected> {
+        if self.run_mode == RunMode::Replay {
+            return Err(ActionRejected::UnknownEventType);
+        }
+        if proposal.payload.len() > MAX_PROPOSED_ACTION_PAYLOAD_BYTES {
+            return Err(ActionRejected::PayloadTooLarge {
+                size: proposal.payload.len(),
+                max: MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+            });
+        }
+
+        let expected_capability = format!("{}.submit", proposal.event_type.as_str());
+        if proposal.capability.as_str() != expected_capability {
+            return Err(ActionRejected::CapabilityNotGranted);
+        }
+
+        let Some(approver) = self.approver_for(&proposal.event_type) else {
+            return Err(ActionRejected::UnknownEventType);
+        };
+
+        approver.approve(proposal)
+    }
+
+    /// Return the action approver registered for the given event type, if any.
+    #[must_use]
+    fn approver_for(&self, event_type: &Kind) -> Option<&dyn ActionApprover> {
+        self.approver_map
+            .get(event_type)
+            .and_then(|plugin_id| self.plugins.get(plugin_id))
+            .and_then(|entry| entry.approver.as_deref())
     }
 
     /// Step ready drivers on cadence, returning all drafts from eligible plugins.
@@ -1831,5 +1949,141 @@ mod tests {
         // Empty events with through=ZERO → early Ok() return
         let zero_segment = TimelineHistorySegment::new(TimelineId::new(), Seq::ZERO);
         let _ = validate_recovery_evidence(&[zero_segment], &[]);
+    }
+
+    struct MockActionApprover;
+
+    impl ActionApprover for MockActionApprover {
+        fn approve(&self, proposal: &ProposedAction) -> Result<EventDraft, ActionRejected> {
+            if proposal.payload.as_slice() == b"reject_me" {
+                return Err(ActionRejected::DomainValidationFailed(
+                    "rejected".to_owned(),
+                ));
+            }
+            Ok(EventDraft::new(
+                proposal.actor_entity_id,
+                proposal.event_type.clone(),
+                proposal.payload.clone(),
+            ))
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn plugin_registry_registers_approver_and_submits_action() {
+        let plugin = plugin_with_caps("approver_plugin", &["action.type"], false, false);
+        let mut reg = PluginRegistry::new();
+        reg.register_with_approver(
+            &plugin,
+            None,
+            None,
+            Some(Box::new(MockActionApprover)),
+            [Kind::new("action.type")],
+        )
+        .unwrap();
+
+        assert!(reg.approver_for(&Kind::new("action.type")).is_some());
+        assert!(reg.approver_for(&Kind::new("other.type")).is_none());
+
+        let duplicate_plugin =
+            plugin_with_caps("duplicate_approver", &["action.type"], false, false);
+        let duplicate = reg
+            .register_with_approver(
+                &duplicate_plugin,
+                None,
+                None,
+                Some(Box::new(MockActionApprover)),
+                [Kind::new("action.type")],
+            )
+            .unwrap_err();
+        assert!(matches!(duplicate, RuntimeError::CapabilityMismatch { .. }));
+
+        let no_approver = plugin_with_caps("missing_approver", &["missing.type"], false, false);
+        let missing = reg
+            .register_with_approver(&no_approver, None, None, None, [Kind::new("missing.type")])
+            .unwrap_err();
+        assert!(matches!(missing, RuntimeError::CapabilityMismatch { .. }));
+
+        let foreign_type = plugin_with_caps("foreign_type", &["owned.type"], false, false);
+        let foreign = reg
+            .register_with_approver(
+                &foreign_type,
+                None,
+                None,
+                Some(Box::new(MockActionApprover)),
+                [Kind::new("not-owned.type")],
+            )
+            .unwrap_err();
+        assert!(matches!(foreign, RuntimeError::CapabilityMismatch { .. }));
+
+        let actor = EntityId::new();
+        let valid = ProposedAction::new(
+            Kind::new("action.type"),
+            actor,
+            CanonicalBytes::from_vec(b"ok_payload".to_vec()),
+            Kind::new("action.type.submit"),
+        );
+        let draft = reg.submit_action(&valid).expect("should succeed");
+        assert_eq!(draft.entity, actor);
+        assert_eq!(draft.event_type.as_str(), "action.type");
+
+        // Capability is enforced by the registry before the approver runs.
+        let wrong_capability = ProposedAction::new(
+            Kind::new("action.type"),
+            actor,
+            CanonicalBytes::from_vec(b"ok_payload".to_vec()),
+            Kind::new("action.type.read"),
+        );
+        assert_eq!(
+            reg.submit_action(&wrong_capability),
+            Err(ActionRejected::CapabilityNotGranted)
+        );
+
+        // Payload too large (>4096)
+        let too_large = ProposedAction::new(
+            Kind::new("action.type"),
+            actor,
+            CanonicalBytes::from_vec(vec![0u8; 5000]),
+            Kind::new("action.type.submit"),
+        );
+        assert_eq!(
+            reg.submit_action(&too_large),
+            Err(ActionRejected::PayloadTooLarge {
+                size: 5000,
+                max: 4096
+            })
+        );
+
+        // Unknown event type
+        let unknown = ProposedAction::new(
+            Kind::new("unknown.type"),
+            actor,
+            CanonicalBytes::from_vec(b"ok".to_vec()),
+            Kind::new("unknown.type.submit"),
+        );
+        assert_eq!(
+            reg.submit_action(&unknown),
+            Err(ActionRejected::UnknownEventType)
+        );
+
+        // Domain validation failure
+        let rejected = ProposedAction::new(
+            Kind::new("action.type"),
+            actor,
+            CanonicalBytes::from_vec(b"reject_me".to_vec()),
+            Kind::new("action.type.submit"),
+        );
+        assert_eq!(
+            reg.submit_action(&rejected),
+            Err(ActionRejected::DomainValidationFailed(
+                "rejected".to_owned()
+            ))
+        );
+
+        let replay = PluginRegistry::new_replay();
+        assert_eq!(
+            replay.submit_action(&valid),
+            Err(ActionRejected::UnknownEventType)
+        );
     }
 }

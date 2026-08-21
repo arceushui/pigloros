@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 pos-core = { path = "../../crates/pos-core" }
+pos-runtime = { path = "../../crates/pos-runtime" }
 pos-store = { path = "../../crates/pos-store" }
 pos-plugin-ledger = { path = "../../plugins/ledger" }
 pos-plugin-society = { path = "../../plugins/society" }

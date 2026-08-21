@@ -60,7 +60,10 @@ pub use owntracks_ingress::{
     OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1, OwnTracksIngressStore,
     PreparedOwnTracksIngressV1,
 };
-pub use plugin::{Capability, Plugin};
+pub use plugin::{
+    ActionApprover, ActionRejected, Capability, Plugin, ProposedAction,
+    MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+};
 pub use state::{Reducer, State, StateRegistry};
 pub use store::{
     append_identity_expires_at, checked_append_identity_expires_at, export_timeline,

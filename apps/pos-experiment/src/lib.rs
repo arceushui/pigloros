@@ -589,6 +589,28 @@ impl Experiment {
         self.registry.register(plugin, reducer, driver)
     }
 
+    /// Register a plugin with an optional action approver.
+    ///
+    /// # Errors
+    /// Returns [`pos_runtime::RuntimeError::DuplicatePlugin`] if a plugin with the same id
+    /// is already registered.
+    pub fn register_with_approver(
+        &mut self,
+        plugin: &dyn pos_core::Plugin,
+        reducer: Option<Box<dyn pos_core::Reducer>>,
+        driver: Option<Box<dyn pos_runtime::Driver>>,
+        approver: Option<Box<dyn pos_core::ActionApprover>>,
+        approver_event_types: impl IntoIterator<Item = pos_core::Kind>,
+    ) -> Result<(), pos_runtime::RuntimeError> {
+        self.registry.register_with_approver(
+            plugin,
+            reducer,
+            driver,
+            approver,
+            approver_event_types,
+        )
+    }
+
     /// Create the experiment Timeline and retain the live runtime resources.
     ///
     /// # Errors

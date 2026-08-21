@@ -1,4 +1,7 @@
 //! Replay events from an `EventStore` through a `ProjectionRegistry`.
+//!
+//! Replay is projection-only. It has no `PluginRegistry` or action-approval
+//! authority, so replay cannot submit new human actions.
 
 use pos_core::store::{EventStore, SeqRange};
 use pos_core::{CoreError, Seq, TimelineId};

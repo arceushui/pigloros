@@ -265,11 +265,12 @@ async fn post_action(
     if let Some(ingress_id) = body.ingress_id.as_deref() {
         let result = state
             .gateway
-            .append_identified_action(
+            .submit_identified_json_action(
                 &id,
                 &body.entity_id,
                 &body.event_type,
                 &body.payload,
+                &body.capability,
                 ingress_id,
             )
             .await?;
@@ -282,7 +283,13 @@ async fn post_action(
     }
     let event = state
         .gateway
-        .append_action(&id, &body.entity_id, &body.event_type, &body.payload)
+        .submit_json_action(
+            &id,
+            &body.entity_id,
+            &body.event_type,
+            &body.payload,
+            &body.capability,
+        )
         .await?;
     EventView::try_from(&event).map(|view| (StatusCode::CREATED, Json(view)))
 }
@@ -324,6 +331,15 @@ impl IntoResponse for GatewayError {
             | GatewayError::UnsupportedAction(_)
             | GatewayError::InvalidPageLimit { .. }
             | GatewayError::InvalidEventsQuery(_) => StatusCode::BAD_REQUEST,
+            GatewayError::ActionRejected(ar) => match ar {
+                pos_core::ActionRejected::UnknownEventType => StatusCode::BAD_REQUEST,
+                pos_core::ActionRejected::CapabilityNotGranted => StatusCode::FORBIDDEN,
+                pos_core::ActionRejected::InvalidActorEntityId
+                | pos_core::ActionRejected::DomainValidationFailed(_) => {
+                    StatusCode::UNPROCESSABLE_ENTITY
+                }
+                pos_core::ActionRejected::PayloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+            },
             GatewayError::TimelineLimitReached { .. }
             | GatewayError::EventLimitReached { .. }
             | GatewayError::StoreExecutorSaturated => StatusCode::TOO_MANY_REQUESTS,
@@ -339,6 +355,7 @@ impl IntoResponse for GatewayError {
             | GatewayError::Store(CoreError::TimelineNotFound(_)) => StatusCode::NOT_FOUND,
             GatewayError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
             GatewayError::LedgerWriteDisabled => StatusCode::FORBIDDEN,
+            GatewayError::ActionAuthorizationUnavailable => StatusCode::UNAUTHORIZED,
             GatewayError::StoreExecutorClosed
             | GatewayError::StoreExecutorDeadlineExceeded
             | GatewayError::StoreExecutorUnhealthy
@@ -360,7 +377,7 @@ impl IntoResponse for GatewayError {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::{LedgerConfig, LedgerGateway, EVENT_BUS_CAPACITY};
+    use crate::{ActionPrincipal, LedgerConfig, LedgerGateway, EVENT_BUS_CAPACITY};
     use axum::{
         body::Body,
         http::{Request, StatusCode},
@@ -374,8 +391,30 @@ mod tests {
     use std::path::PathBuf;
     use tower::ServiceExt;
 
+    fn test_world_body() -> EntityId {
+        EntityId::from_ulid(
+            ulid::Ulid::from_string("01J38AE3E964B9281A2ADF6FDB")
+                .expect("test World body ID is valid"),
+        )
+    }
+
+    fn test_action_actor() -> EntityId {
+        EntityId::from_ulid(
+            ulid::Ulid::from_string("01J38AE3E965B9281A2ADF6FDB")
+                .expect("test action principal ID is valid"),
+        )
+    }
+
+    fn test_action_principal() -> ActionPrincipal {
+        ActionPrincipal::new(test_action_actor(), [Kind::new("world.action.submit")])
+    }
+
     fn test_app() -> Router {
-        let gw = Gateway::new(open_store(StoreConfig::Memory).unwrap());
+        let gw = Gateway::new_with_world_bodies_and_principal(
+            open_store(StoreConfig::Memory).unwrap(),
+            [test_world_body()],
+            test_action_principal(),
+        );
         router(AppState {
             gateway: gw,
             ledger_view: LedgerView::default(),
@@ -393,6 +432,18 @@ mod tests {
             },
             max_body_bytes,
         )
+    }
+
+    fn world_action_payload(actor: &str, body: &str, marker: u8) -> serde_json::Value {
+        json!({
+            "actor_entity_id": actor,
+            "body_entity_id": body,
+            "action_kind": "impulse",
+            "params": [marker],
+            "action_scope": 0,
+            "catalogue_version": 1,
+            "tick": u64::from(marker)
+        })
     }
 
     fn spectator_test_app() -> Router {
@@ -728,14 +779,16 @@ mod tests {
         assert_eq!(status, StatusCode::CREATED);
         let id = created["id"].as_str().unwrap().to_owned();
 
-        let entity = EntityId::new().to_string();
+        let entity = test_action_actor().to_string();
+        let body = test_world_body().to_string();
         let (status, _) = json_request(
             app.clone(),
             "POST",
             &format!("/v1/timelines/{id}/actions"),
             Some(json!({
                 "entity_id": entity,
-                "payload": {"dx": 1}
+                "capability": "world.action.submit",
+                "payload": world_action_payload(&entity, &body, 1)
             })),
         )
         .await;
@@ -750,7 +803,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(listed["events"].as_array().unwrap().len(), 1);
-        assert_eq!(listed["events"][0]["payload"]["dx"], 1);
+        assert_eq!(listed["events"][0]["payload"]["action_kind"], "impulse");
         assert!(listed["next_from_seq"].is_null());
     }
 
@@ -767,11 +820,13 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CREATED);
         let id = created["id"].as_str().unwrap();
-        let entity = EntityId::new().to_string();
+        let entity = test_action_actor().to_string();
+        let body = test_world_body().to_string();
         let request = json!({
             "entity_id": entity,
+            "capability": "world.action.submit",
             "ingress_id": "device-1-42",
-            "payload": {"lat": 1}
+            "payload": world_action_payload(&entity, &body, 1)
         });
         let (status, first) = json_request(
             app.clone(),
@@ -796,8 +851,9 @@ mod tests {
             &format!("/v1/timelines/{id}/actions"),
             Some(json!({
                 "entity_id": entity,
+                "capability": "world.action.submit",
                 "ingress_id": "device-1-42",
-                "payload": {"lat": 2}
+                "payload": world_action_payload(&entity, &body, 2)
             })),
         )
         .await;
@@ -818,13 +874,18 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CREATED);
         let id = created["id"].as_str().unwrap();
-        let entity = EntityId::new().to_string();
+        let entity = test_action_actor().to_string();
+        let body = test_world_body().to_string();
         for dx in 0..3 {
             let (status, _) = json_request(
                 app.clone(),
                 "POST",
                 &format!("/v1/timelines/{id}/actions"),
-                Some(json!({"entity_id": entity, "payload": {"dx": dx}})),
+                Some(json!({
+                    "entity_id": entity,
+                    "capability": "world.action.submit",
+                    "payload": world_action_payload(&entity, &body, dx)
+                })),
             )
             .await;
             assert_eq!(status, StatusCode::CREATED);
@@ -1008,7 +1069,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CREATED);
         let id = created["id"].as_str().unwrap().to_owned();
-        let entity = EntityId::new().to_string();
+        let entity = test_action_actor().to_string();
 
         let (status, _) = json_request(
             app.clone(),
@@ -1028,14 +1089,15 @@ mod tests {
             "POST",
             &format!("/v1/timelines/{id}/actions"),
             Some(json!({
-                "entity_id": EntityId::new().to_string(),
+                "entity_id": test_action_actor().to_string(),
                 "event_type": "world.observation",
+                "capability": "world.action.submit",
                 "payload": {}
             })),
         )
         .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(err["error"].as_str().unwrap().contains("unsupported"));
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(err["error"].as_str().unwrap().contains("capability"));
     }
 
     #[tokio::test]
@@ -1064,13 +1126,14 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn missing_timeline_action_and_signal_not_found() {
         let id = TimelineId::new().to_string();
-        let entity = EntityId::new().to_string();
+        let entity = test_action_actor().to_string();
         let (status, _) = json_request(
             test_app(),
             "POST",
             &format!("/v1/timelines/{id}/actions"),
             Some(json!({
                 "entity_id": entity,
+                "capability": "world.action.submit",
                 "payload": {}
             })),
         )
@@ -1163,6 +1226,8 @@ mod tests {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: crate::GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            action_registry: crate::gateway_action_registry(),
+            action_principal: None,
         };
         let app = router(AppState {
             gateway: gw,
@@ -1462,5 +1527,84 @@ mod tests {
             "domain validation should produce an error field, got: {err_resp:?}"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn post_action_rejects_missing_or_invalid_capability() {
+        let app = test_app();
+        let (_status, created) = json_request(
+            app.clone(),
+            "POST",
+            "/v1/timelines",
+            Some(json!({"name": "actions-test"})),
+        )
+        .await;
+        let id = created["id"].as_str().unwrap();
+        let entity = test_action_actor().to_string();
+
+        let (status, err) = json_request(
+            app,
+            "POST",
+            &format!("/v1/timelines/{id}/actions"),
+            Some(json!({
+                "entity_id": entity,
+                "capability": "wrong.capability",
+                "payload": {"value": 1}
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(err["error"].as_str().unwrap().contains("capability"));
+
+        let other_actor = EntityId::new().to_string();
+        let (status, err) = json_request(
+            test_app(),
+            "POST",
+            &format!("/v1/timelines/{id}/actions"),
+            Some(json!({
+                "entity_id": other_actor,
+                "capability": "world.action.submit",
+                "payload": world_action_payload(&other_actor, &test_world_body().to_string(), 7)
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(err["error"].as_str().unwrap().contains("actor"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn action_rejected_into_response_status_mappings() {
+        let cases = vec![
+            (
+                pos_core::ActionRejected::UnknownEventType,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                pos_core::ActionRejected::CapabilityNotGranted,
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                pos_core::ActionRejected::InvalidActorEntityId,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                pos_core::ActionRejected::DomainValidationFailed("err".into()),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                pos_core::ActionRejected::PayloadTooLarge {
+                    size: 5000,
+                    max: 4096,
+                },
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ),
+        ];
+
+        for (rejected, expected_status) in cases {
+            let resp = GatewayError::ActionRejected(rejected).into_response();
+            assert_eq!(resp.status(), expected_status);
+        }
     }
 }
