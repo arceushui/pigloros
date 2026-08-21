@@ -127,6 +127,8 @@ The MVP is a product boundary, not a demo. It is accepted only when an independe
 
 The Wave 9 acceptance run must use the real 3D reference client connected to live Gateway data; `piglor-world-client`'s fixture shell and the curl smoke test above are engineering validation only. The current repository does not yet satisfy this acceptance bar: Wave 9 still must connect the real 3D client to the Gateway and provide the missing public contracts.
 
+This is a product-level acceptance target, not a claim that the accepted ADR-018 engineering slice already includes these contracts. ADR-018 remains the design boundary for the fixture-backed 3D shell: fixed `TimelineExport` inputs, pure projection parity, WebGL2/native entry points, and no human action submission or Gateway read integration in that shell. Any Wave 9 Gateway action, authentication, live-read, decision-preview, or Replay/Fork contract must be designed and accepted separately before implementation; this reset records the target and keeps the current fixture shell explicitly out of the MVP claim.
+
 ## Development
 
 Toolchain is pinned in `rust-toolchain.toml` (**1.97.1** + clippy / rustfmt / llvm-tools).

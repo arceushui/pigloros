@@ -93,7 +93,7 @@ A shared language for humans and agents working on PiglorOS. Use these terms exa
 |---|---|
 | **Wave** | A named delivery increment. Waves 1–6 shipped foundation increments on `main`; Wave 7's hard-coded demo was retired; Wave 8+ remain planned or in progress. |
 | **ADR** | Architecture Decision Record. Canonical on Redmine wiki (`redmine.piglor.com/projects/pigloros/wiki`). |
-| **MVP** | The first usable product boundary: an independently built third-party client can submit user-supplied preferences/options, receive a decision preview, operate a Timeline/Scenario Room through documented public contracts, observe committed Events/state, and use Replay/Fork. A hard-coded scenario, generic fixture shell, curl-only smoke test, or embedded demo does not qualify. |
+| **MVP** | The first usable product boundary: an independently built third-party client can submit user-supplied preferences/options, receive a decision preview, operate a Timeline/Scenario Room through documented public contracts, observe committed Events/state, and use Replay/Fork. A hard-coded scenario, generic fixture shell, curl-only smoke test, or embedded demo does not qualify. This is the Wave 9 product target; ADR-018 remains the narrower accepted engineering design for the fixture-backed 3D shell, and any live Gateway/action/authentication contract requires a separate accepted design before implementation. |
 | **Retired demo** | Removed code or documentation that is preserved only as historical context; it is not part of the product or roadmap status. |
 | **Deferred** | Explicitly out-of-scope for the current wave; tracked in Redmine or ADR non-goals. |
 

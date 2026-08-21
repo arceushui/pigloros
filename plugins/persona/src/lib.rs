@@ -326,7 +326,7 @@ mod tests {
         ids::EventId,
     };
 
-    fn quiet_workspace_preference() -> PreferencePair {
+    fn quiet_workspace_pair() -> PreferencePair {
         PreferencePair {
             option_a: "quiet workspace".to_owned(),
             option_b: "busy workspace".to_owned(),
@@ -832,7 +832,7 @@ mod tests {
 
         let model = PersonaModel::new(vec![("nature".to_owned(), 0.8)]);
         let entity = EntityId::new();
-        let mut driver = PersonaEvalDriver::new(entity, model, vec![quiet_workspace_preference()]);
+        let mut driver = PersonaEvalDriver::new(entity, model, vec![quiet_workspace_pair()]);
         assert_eq!(driver.name(), "persona-eval");
 
         let mut store = open_store(StoreConfig::Memory).unwrap();
@@ -869,7 +869,7 @@ mod tests {
                 Some(Box::new(PersonaEvalDriver::new(
                     entity,
                     model,
-                    vec![quiet_workspace_preference()],
+                    vec![quiet_workspace_pair()],
                 ))),
             )
             .unwrap();
