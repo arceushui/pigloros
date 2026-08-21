@@ -3506,6 +3506,41 @@ mod tests {
         SqliteStore::open_in_memory().unwrap()
     }
 
+    #[test]
+    fn sqlite_validation_boundaries_fail_closed_for_missing_and_mismatched_rows() {
+        let mut store = new_store();
+        let missing_timeline = TimelineId::new();
+        let missing = store
+            .append(
+                missing_timeline,
+                &[make_draft(EntityId::new(), b"missing-timeline")],
+            )
+            .unwrap_err();
+        assert!(matches!(
+            missing,
+            CoreError::TimelineNotFound(id) if id == missing_timeline
+        ));
+
+        let consent_id = AdmissionSnapshotId::from_canonical("01ARZ3NDEKTSV4RRFFQ69G5FAZ").unwrap();
+        let tx = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        tx.execute(
+            "INSERT INTO geographic_cell_admission_consent_records
+             (consent_record_id, consent_revision, consent_record_hash, consent_record_cbor)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![consent_id.as_str(), 12_i64, vec![0_u8; 32], b"mismatched"],
+        )
+        .unwrap();
+        let error = SqliteStore::geo_cell_consent_in_transaction(&tx, &consent_id, 12).unwrap_err();
+        assert!(matches!(
+            error,
+            CoreError::GeographicAdmissionValidationFailed
+        ));
+        tx.rollback().unwrap();
+    }
+
     fn geo_cell_request(
         timeline: TimelineId,
         entity: EntityId,
