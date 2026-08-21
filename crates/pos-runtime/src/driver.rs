@@ -246,6 +246,7 @@ impl ObservationSnapshot {
             snapshot: Some(self),
             direct_anchor: None,
             len: unique,
+            events: &[],
         }
     }
 }
@@ -257,10 +258,15 @@ impl ObservationSnapshot {
 /// [`ProjectionKey`]. Missing projection state is represented by `None`, allowing
 /// a driver to distinguish a subscribed-but-unseen entity from an undeclared
 /// dependency.
+///
+/// The view also carries any committed [`Event`]s that the runtime chose to
+/// forward (e.g. action events for physics drivers). Events are in Timeline
+/// `seq` order.
 pub struct ObservationView<'a> {
     snapshot: Option<&'a ObservationSnapshot>,
     direct_anchor: Option<SnapshotAnchor>,
     len: usize,
+    events: &'a [Event],
 }
 
 impl ObservationView<'_> {
@@ -270,6 +276,7 @@ impl ObservationView<'_> {
             snapshot: None,
             direct_anchor: None,
             len: 0,
+            events: &[],
         }
     }
 
@@ -283,6 +290,7 @@ impl ObservationView<'_> {
             snapshot: None,
             direct_anchor: Some(anchor),
             len: 0,
+            events: &[],
         }
     }
 
@@ -305,6 +313,28 @@ impl ObservationView<'_> {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len == 0
+    }
+
+    /// Committed events forwarded to this driver for the current tick, in
+    /// Timeline `seq` order.
+    #[must_use]
+    pub fn events(&self) -> &[Event] {
+        self.events
+    }
+}
+
+impl<'a> ObservationView<'a> {
+    /// Construct a view that carries the given events and no projection state.
+    ///
+    /// Primarily for tests and drivers that only need to fold incoming events.
+    #[must_use]
+    pub fn from_events(events: &'a [Event]) -> Self {
+        Self {
+            snapshot: None,
+            direct_anchor: None,
+            len: 0,
+            events,
+        }
     }
 }
 
