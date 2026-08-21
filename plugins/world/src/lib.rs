@@ -1915,7 +1915,7 @@ mod tests {
 
         assert_eq!(config.backend_id, "simple-kinematic");
         assert_eq!(config.backend_version, "1.0.0");
-        assert_eq!(config.gravity_y, -9.81);
+        assert!((config.gravity_y + 9.81).abs() < f32::EPSILON);
         assert_eq!(config.sensor_min_resolution_mm, SENSOR_MIN_RESOLUTION_MM);
     }
 
