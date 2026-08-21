@@ -1333,7 +1333,8 @@ mod tests {
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         ids::{EntityId, PluginId},
-        Capability, CoreError, Event, EventStore, Plugin, Reducer, State,
+        ActionApprover, ActionRejected, Capability, CoreError, Event, EventStore, Plugin,
+        ProposedAction, Reducer, State,
     };
     use pos_runtime::{Driver, ObservationView, ProjectionKey, RuntimeError, StepOutput};
     use pos_store::StoreConfig;
@@ -1450,6 +1451,52 @@ mod tests {
                 .unwrap();
         }
         registry
+    }
+
+    struct AcceptingApprover;
+
+    impl ActionApprover for AcceptingApprover {
+        fn approve(&self, proposal: &ProposedAction) -> Result<EventDraft, ActionRejected> {
+            Ok(EventDraft::new(
+                proposal.actor_entity_id,
+                proposal.event_type.clone(),
+                proposal.payload.clone(),
+            ))
+        }
+    }
+
+    #[test]
+    fn experiment_register_with_approver_forwards_the_full_registration() {
+        let plugin = CompositionPlugin(CompositionPluginSpec {
+            id: PluginId::new(),
+            name: "approver-plugin",
+            version: "1",
+            event_type: "approver.event",
+        });
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "approver-registration".to_owned(),
+            stop: StopCondition::MaxTicks(0),
+            store_config: StoreConfig::Memory,
+        });
+        experiment
+            .register_with_approver(
+                &plugin,
+                None,
+                None,
+                Some(Box::new(AcceptingApprover)),
+                [Kind::new("approver.event")],
+            )
+            .expect("approver registration succeeds");
+        let proposal = ProposedAction::new(
+            Kind::new("approver.event"),
+            EntityId::new(),
+            CanonicalBytes::from_static(b"action"),
+            Kind::new("approver.submit"),
+        );
+        assert_eq!(
+            AcceptingApprover.approve(&proposal).unwrap().event_type,
+            Kind::new("approver.event")
+        );
     }
 
     fn assert_incompatible_fork(mut session: ExperimentSession) {
@@ -1628,6 +1675,58 @@ mod tests {
             }
             self.base.logical_head(id)
         }
+    }
+
+    #[test]
+    fn host_transaction_adapters_cover_driver_and_store_seams() {
+        let driver_state = Arc::new(Mutex::new(HostTransactionState::default()));
+        let entity = EntityId::new();
+        let timeline = pos_core::ids::TimelineId::new();
+        let mut driver = HostTransactionalDriver {
+            entity,
+            event_type: Some(Kind::new("host.transaction")),
+            state: Arc::clone(&driver_state),
+            fail_step: false,
+        };
+        assert_eq!(driver.name(), "host-transactional");
+        assert!(driver.requires_snapshot_anchor());
+        let view = ObservationView::anchored_empty(pos_runtime::SnapshotAnchor::new(
+            timeline,
+            pos_core::clock::Seq::ZERO,
+        ));
+        assert_eq!(driver.step(timeline, view).unwrap().drafts.len(), 1);
+        driver.commit_step();
+        let view = ObservationView::anchored_empty(pos_runtime::SnapshotAnchor::new(
+            timeline,
+            pos_core::clock::Seq::ZERO,
+        ));
+        assert_eq!(driver.step(timeline, view).unwrap().drafts.len(), 1);
+        driver.abort_step();
+
+        let store_state = Arc::new(Mutex::new(HostTransactionState::default()));
+        let mut store = CaptureAwareStore {
+            base: Box::new(pos_store::memory::MemoryStore::new()),
+            state: Arc::clone(&store_state),
+            fail_append: false,
+            fail_post_step_capture: false,
+        };
+        let created = store.create_timeline("capture-aware-seam").unwrap();
+        let draft = EventDraft::new(
+            entity,
+            Kind::new("capture.event"),
+            CanonicalBytes::from_static(b"capture"),
+        );
+        assert_eq!(store.append(created.id(), &[draft]).unwrap().len(), 1);
+        assert!(!store
+            .read(created.id(), pos_store::SeqRange::all())
+            .unwrap()
+            .is_empty());
+        let _fork = store
+            .fork(created.id(), pos_core::clock::Seq::ZERO, "capture-fork")
+            .unwrap();
+        assert!(!store.list_timelines().unwrap().is_empty());
+        assert!(store.get_timeline(created.id()).unwrap().is_some());
+        assert_eq!(store.logical_head(created.id()).unwrap().as_u64(), 1);
     }
 
     impl FixedDriver {
@@ -4185,6 +4284,23 @@ mod backtest_tests {
         // Lift metrics should be populated
         assert!(result.train_avg_events_per_tick > 0.0);
         assert!(result.eval_avg_events_per_tick > 0.0);
+    }
+
+    #[test]
+    fn backtest_eval_hydrates_a_non_empty_training_history() {
+        let result = BacktestRunner::new(
+            BacktestConfig {
+                experiment_name: "bt-coverage-history".to_owned(),
+                train_ticks: 1,
+                eval_ticks: 1,
+                store_config: pos_store::StoreConfig::Memory,
+            },
+            make_registry,
+        )
+        .run()
+        .unwrap();
+        assert_eq!(result.train_events, 1);
+        assert_eq!(result.eval_events, 1);
     }
 
     #[test]

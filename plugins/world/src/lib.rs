@@ -1300,6 +1300,19 @@ mod tests {
         }
     }
 
+    fn rewrite_array_field(
+        bytes: &CanonicalBytes,
+        index: usize,
+        replacement: ciborium::Value,
+    ) -> CanonicalBytes {
+        let mut cursor = std::io::Cursor::new(bytes.as_slice());
+        let mut value: ciborium::Value = ciborium::from_reader(&mut cursor).unwrap();
+        if let ciborium::Value::Array(ref mut items) = value {
+            items[index] = replacement;
+        }
+        CanonicalBytes::from_vec(cbor_encode(&value))
+    }
+
     struct NonFiniteBackend;
 
     impl WorldBackend for NonFiniteBackend {
@@ -1474,6 +1487,39 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_action_v1_rejects_wrong_numeric_and_params_types() {
+        let action = sample_action();
+        let encoded = action.encode().unwrap();
+        for (index, replacement) in [
+            (5, ciborium::Value::Integer(1.into())),
+            (6, ciborium::Value::Text("not-a-number".to_owned())),
+            (7, ciborium::Value::Text("not-a-number".to_owned())),
+            (8, ciborium::Value::Text("not-a-number".to_owned())),
+        ] {
+            assert!(matches!(
+                WorldActionV1::decode(&rewrite_array_field(&encoded, index, replacement)),
+                Err(WorldCodecError::WrongFieldType)
+            ));
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_action_v1_payload_too_large_rejected_on_encode_and_decode() {
+        let mut action = sample_action();
+        action.params_cbor = cbor_encode(&ciborium::Value::Bytes(vec![0; MAX_ACTION_BYTES]));
+        assert!(matches!(
+            action.encode(),
+            Err(WorldCodecError::PayloadTooLarge { .. })
+        ));
+        assert!(matches!(
+            WorldActionV1::decode(&CanonicalBytes::from_vec(vec![0; MAX_ACTION_BYTES + 1])),
+            Err(WorldCodecError::PayloadTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_action_v1_wrong_magic_rejected() {
         let a = sample_action();
         let mut bytes = a.encode().unwrap().as_slice().to_vec();
@@ -1551,6 +1597,28 @@ mod tests {
         let mut o = sample_observation();
         o.orient_x = f32::INFINITY;
         assert!(matches!(o.encode(), Err(WorldCodecError::NonFiniteFloat)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_observation_v1_non_finite_float_rejected_on_decode() {
+        let o = sample_observation();
+        let bytes = rewrite_array_field(&o.encode().unwrap(), 5, ciborium::Value::Float(f64::NAN));
+        assert!(matches!(
+            WorldObservationV1::decode(&bytes),
+            Err(WorldCodecError::NonFiniteFloat)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_observation_v1_payload_too_large_rejected_on_encode() {
+        let mut observation = sample_observation();
+        observation.sensor_value = vec![0; MAX_SENSOR_VALUE_BYTES + 1];
+        assert!(matches!(
+            observation.encode(),
+            Err(WorldCodecError::PayloadTooLarge { .. })
+        ));
     }
 
     #[test]
@@ -1729,6 +1797,39 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_config_v1_rejects_wrong_hash_and_resolution_types() {
+        let config = sample_config();
+        let encoded = config.encode().unwrap();
+        assert!(matches!(
+            WorldConfigV1::decode(&rewrite_array_field(
+                &encoded,
+                9,
+                ciborium::Value::Integer(42.into()),
+            )),
+            Err(WorldCodecError::WrongFieldType)
+        ));
+        assert!(matches!(
+            WorldConfigV1::decode(&rewrite_array_field(
+                &encoded,
+                12,
+                ciborium::Value::Text("not-a-number".to_owned()),
+            )),
+            Err(WorldCodecError::WrongFieldType)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_codecs_reject_non_array_cbor() {
+        let scalar = CanonicalBytes::from_vec(cbor_encode(&ciborium::Value::Integer(1.into())));
+        assert!(matches!(
+            WorldActionV1::decode(&scalar),
+            Err(WorldCodecError::CborError)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_observation_v1_wrong_field_type_for_float_rejected() {
         let o = sample_observation();
         let bytes = o.encode().unwrap().as_slice().to_vec();
@@ -1777,6 +1878,14 @@ mod tests {
         // Second step: no config, no bodies
         let out2 = driver.step(tl.id(), ObservationView::empty()).unwrap();
         assert_eq!(out2.drafts.len(), 0);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_driver_default_is_constructible() {
+        let driver = WorldDriver::default();
+        assert_eq!(driver.name(), "world-driver");
+        assert!(driver.entities.is_empty());
     }
 
     #[test]
@@ -2571,7 +2680,15 @@ mod tests {
             catalogue_version: 1,
             tick: 0,
         };
-        let events = vec![make_action_event_from(entity, &action)];
+        let unknown_body_action = WorldActionV1 {
+            body_entity_id: EntityId::new(),
+            ..action.clone()
+        };
+        let events = vec![
+            make_other_event(entity),
+            make_action_event_from(entity, &action),
+            make_action_event_from(entity, &unknown_body_action),
+        ];
         let out = driver
             .step(tl.id(), ObservationView::from_events(&events))
             .unwrap();

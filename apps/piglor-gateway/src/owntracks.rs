@@ -482,13 +482,19 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::{create_or_load_owner_key, derive_owntracks_verifier, generate_pairing_credential};
+    use super::{
+        create_or_load_owner_key, derive_owntracks_verifier, generate_pairing_credential,
+        load_owner_key, OwnTracksMaterialError,
+    };
     use pos_core::{
         EntityId, EventStore, GeoLocationAdmissionFenceV1, OwnTracksEnrollmentRequestV1,
         OwnTracksEnrollmentStore, TimelineId,
     };
     use pos_store::sqlite::SqliteStore;
-    use std::os::unix::fs::{symlink, MetadataExt};
+    use std::{
+        os::unix::fs::{symlink, MetadataExt},
+        path::Path,
+    };
 
     fn temporary_path(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -527,6 +533,28 @@ mod tests {
             .expect_err("symlink owner key is rejected");
         assert!(!symlink_error.to_string().contains("owner.key"));
 
+        std::fs::remove_dir_all(directory).expect("remove temporary directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_key_paths_cover_relative_and_io_error_branches() {
+        let relative = super::absolute_path(Path::new("relative-owner.key"))
+            .expect("relative path resolves against the current directory");
+        assert!(relative.is_absolute());
+
+        let directory = temporary_path("invalid-owner-key");
+        std::fs::create_dir(&directory).expect("create private temporary directory");
+        let invalid_path = directory.join("owner\0.key");
+        let create_result = create_or_load_owner_key(&invalid_path);
+        assert!(matches!(
+            create_result,
+            Err(OwnTracksMaterialError::OwnerKeyIo)
+        ));
+        assert!(matches!(
+            load_owner_key(&invalid_path),
+            Err(OwnTracksMaterialError::OwnerKeyIo)
+        ));
         std::fs::remove_dir_all(directory).expect("remove temporary directory");
     }
 
@@ -816,5 +844,46 @@ mod tests {
         assert!(!source.contains(&[".", "append", "("].concat()));
         assert!(!source.contains(&["router", "("].concat()));
         assert!(!source.contains(&["geo", ".location"].concat()));
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::{create_or_load_owner_key, OwnTracksMaterialError};
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn unsafe_ancestor_and_existing_key_lengths_fail_closed() {
+        let directory = std::env::temp_dir().join(format!(
+            "piglor-gateway-owntracks-coverage-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let mut permissions = std::fs::metadata(&directory).unwrap().permissions();
+        permissions.set_mode(0o777);
+        std::fs::set_permissions(&directory, permissions).unwrap();
+        let unsafe_result = create_or_load_owner_key(&directory.join("owner.key"));
+        assert!(matches!(
+            unsafe_result,
+            Err(OwnTracksMaterialError::UnsafeOwnerKeyPath)
+        ));
+
+        let mut permissions = std::fs::metadata(&directory).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&directory, permissions).unwrap();
+        let malformed = directory.join("malformed.key");
+        std::fs::write(&malformed, [0_u8; 31]).unwrap();
+        let mut permissions = std::fs::metadata(&malformed).unwrap().permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(&malformed, permissions).unwrap();
+        assert!(matches!(
+            create_or_load_owner_key(&malformed),
+            Err(OwnTracksMaterialError::InvalidOwnerKeyLength)
+        ));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

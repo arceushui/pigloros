@@ -1691,6 +1691,223 @@ mod tests {
         Gateway::new(open_store(StoreConfig::Memory).unwrap())
     }
 
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_body_constructor_without_principal_is_fail_closed() {
+        let body = EntityId::new();
+        let gateway =
+            Gateway::new_with_world_bodies(open_store(StoreConfig::Memory).unwrap(), [body]);
+        assert!(gateway.action_principal.is_none());
+        assert!(!gateway.owntracks_enabled);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn action_submission_rejects_unauthorized_inputs_before_store_access() {
+        let gateway = memory_gw();
+        let proposal = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION),
+            EntityId::new(),
+            CanonicalBytes::from_static(b"payload"),
+            Kind::new("world.action.submit"),
+        );
+        assert!(matches!(
+            gateway
+                .submit_proposed_action(&TimelineId::new().to_string(), proposal)
+                .await,
+            Err(GatewayError::ActionAuthorizationUnavailable)
+        ));
+        assert!(matches!(
+            gateway
+                .submit_json_action(
+                    &TimelineId::new().to_string(),
+                    "not-an-entity",
+                    EVENT_TYPE_ACTION,
+                    &serde_json::json!({}),
+                    "world.action.submit",
+                )
+                .await,
+            Err(GatewayError::InvalidId(_))
+        ));
+        assert!(matches!(
+            gateway
+                .submit_identified_json_action(
+                    "not-a-timeline",
+                    &EntityId::new().to_string(),
+                    EVENT_TYPE_ACTION,
+                    &serde_json::json!({}),
+                    "world.action.submit",
+                    "ingress-1",
+                )
+                .await,
+            Err(GatewayError::ActionAuthorizationUnavailable)
+        ));
+    }
+
+    async fn assert_proposed_action_boundaries(
+        gateway: &Gateway,
+        valid_timeline: &str,
+        proposal: &ProposedAction,
+    ) {
+        assert!(matches!(
+            gateway
+                .submit_proposed_action("not-a-timeline", proposal.clone())
+                .await,
+            Err(GatewayError::InvalidId(_))
+        ));
+        assert!(matches!(
+            gateway
+                .submit_proposed_action(&TimelineId::new().to_string(), proposal.clone())
+                .await,
+            Err(GatewayError::Store(CoreError::TimelineNotFound(_)))
+        ));
+        assert!(matches!(
+            gateway
+                .submit_json_action(
+                    valid_timeline,
+                    &proposal.actor_entity_id.to_string(),
+                    EVENT_TYPE_ACTION,
+                    &serde_json::json!({"data": "x".repeat(5000)}),
+                    "world.action.submit",
+                )
+                .await,
+            Err(GatewayError::ActionRejected(_))
+        ));
+    }
+
+    async fn assert_identified_action_boundaries(
+        gateway: &Gateway,
+        valid_timeline: &str,
+        actor: EntityId,
+    ) {
+        assert!(matches!(
+            gateway
+                .submit_identified_json_action(
+                    "not-a-timeline",
+                    &actor.to_string(),
+                    EVENT_TYPE_ACTION,
+                    &serde_json::json!({}),
+                    "world.action.submit",
+                    "boundary-1",
+                )
+                .await,
+            Err(GatewayError::InvalidId(_))
+        ));
+        assert!(matches!(
+            gateway
+                .submit_identified_json_action(
+                    valid_timeline,
+                    "not-an-entity",
+                    EVENT_TYPE_ACTION,
+                    &serde_json::json!({}),
+                    "world.action.submit",
+                    "boundary-2",
+                )
+                .await,
+            Err(GatewayError::InvalidId(_))
+        ));
+        let oversized = serde_json::json!({"data": "x".repeat(5000)});
+        assert!(matches!(
+            gateway
+                .submit_identified_json_action(
+                    valid_timeline,
+                    &actor.to_string(),
+                    EVENT_TYPE_ACTION,
+                    &oversized,
+                    "world.action.submit",
+                    "boundary-3",
+                )
+                .await,
+            Err(GatewayError::ActionRejected(_))
+        ));
+        assert!(matches!(
+            gateway
+                .submit_identified_json_action(
+                    valid_timeline,
+                    &EntityId::new().to_string(),
+                    EVENT_TYPE_ACTION,
+                    &serde_json::json!({}),
+                    "world.action.submit",
+                    "boundary-4",
+                )
+                .await,
+            Err(GatewayError::ActionRejected(_))
+        ));
+        assert!(matches!(
+            gateway
+                .submit_identified_json_action(
+                    valid_timeline,
+                    &actor.to_string(),
+                    EVENT_TYPE_ACTION,
+                    &serde_json::json!({}),
+                    "world.action.submit",
+                    "boundary-5",
+                )
+                .await,
+            Err(GatewayError::ActionRejected(_))
+        ));
+    }
+
+    fn action_error_gateway(actor: EntityId, body: EntityId) -> Gateway {
+        Gateway {
+            store: executor::StoreExecutor::new(Box::new(ScriptedStore {
+                mode: ScriptMode::FailGetTimeline,
+            })),
+            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
+            limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: false,
+            action_registry: gateway_action_registry_with_bodies([body]),
+            action_principal: Some(ActionPrincipal::new(
+                actor,
+                [Kind::new("world.action.submit")],
+            )),
+        }
+    }
+
+    #[tokio::test]
+    async fn action_submission_covers_id_store_and_approver_boundaries() {
+        let actor = EntityId::new();
+        let body = EntityId::new();
+        let gateway = Gateway::new_with_world_bodies_and_principal(
+            open_store(StoreConfig::Memory).unwrap(),
+            [body],
+            ActionPrincipal::new(actor, [Kind::new("world.action.submit")]),
+        );
+        let timeline = gateway.create_timeline("action-boundaries").await.unwrap();
+        let valid_timeline = timeline.id().to_string();
+        let proposal = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION),
+            actor,
+            CanonicalBytes::from_static(b"payload"),
+            Kind::new("world.action.submit"),
+        );
+        assert_proposed_action_boundaries(&gateway, &valid_timeline, &proposal).await;
+        assert_identified_action_boundaries(&gateway, &valid_timeline, actor).await;
+        gateway.shutdown().await.unwrap();
+
+        let error_gateway = action_error_gateway(actor, body);
+        assert!(matches!(
+            error_gateway
+                .submit_proposed_action(&valid_timeline, proposal)
+                .await,
+            Err(GatewayError::Store(_))
+        ));
+        assert!(matches!(
+            error_gateway
+                .submit_identified_json_action(
+                    &valid_timeline,
+                    &actor.to_string(),
+                    EVENT_TYPE_ACTION,
+                    &serde_json::json!({}),
+                    "world.action.submit",
+                    "boundary-error",
+                )
+                .await,
+            Err(GatewayError::Store(_))
+        ));
+        error_gateway.shutdown().await.unwrap();
+    }
+
     struct TemporarySqliteFile {
         path: String,
     }
@@ -1727,6 +1944,11 @@ mod tests {
         EmptyAppend,
         FailAppend,
         FailRead,
+        ReadPayloadTooLarge,
+        ReadMetadataTooLarge,
+        ReadForkDepthTooLarge,
+        ReadBytesTooLarge,
+        ReadTimeTooLarge,
         RejectListUse,
         Duplicate,
         DuplicateReadError,
@@ -1791,6 +2013,24 @@ mod tests {
         fn read(&self, _timeline: TimelineId, _range: SeqRange) -> Result<Vec<Event>, CoreError> {
             if matches!(self.mode, ScriptMode::FailRead) {
                 return Err(CoreError::Storage("read failed".into()));
+            }
+            let bounded_error = match self.mode {
+                ScriptMode::ReadPayloadTooLarge => Some(CoreError::PayloadTooLarge { size: 1 }),
+                ScriptMode::ReadMetadataTooLarge => Some(CoreError::EventMetadataTooLarge {
+                    field: "event_type",
+                    size: 1,
+                }),
+                ScriptMode::ReadForkDepthTooLarge => {
+                    Some(CoreError::ForkDepthTooLarge { depth: 1 })
+                }
+                ScriptMode::ReadBytesTooLarge => Some(CoreError::ReadBytesTooLarge { size: 1 }),
+                ScriptMode::ReadTimeTooLarge => {
+                    Some(CoreError::ReadTimeTooLarge { elapsed_micros: 1 })
+                }
+                _ => None,
+            };
+            if let Some(error) = bounded_error {
+                return Err(error);
             }
             if let ScriptMode::GeographicRead(event_type) = self.mode {
                 let payload = CanonicalBytes::from_vec(b"protected".to_vec());
@@ -3221,6 +3461,59 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, GatewayError::Store(_)));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn read_error_boundaries_map_to_bounded_gateway_errors() {
+        let cases = [
+            (
+                ScriptMode::ReadPayloadTooLarge,
+                GatewayError::EventPayloadTooLarge {
+                    maximum: MAX_EVENT_PAYLOAD_BYTES,
+                },
+            ),
+            (
+                ScriptMode::ReadMetadataTooLarge,
+                GatewayError::EventMetadataTooLarge {
+                    field: "event_type",
+                    maximum: MAX_EVENT_TYPE_BYTES,
+                },
+            ),
+            (
+                ScriptMode::ReadForkDepthTooLarge,
+                GatewayError::ForkDepthTooLarge {
+                    maximum: MAX_FORK_DEPTH,
+                },
+            ),
+            (
+                ScriptMode::ReadBytesTooLarge,
+                GatewayError::EventResponseTooLarge {
+                    maximum: MAX_EVENTS_RESPONSE_BYTES,
+                },
+            ),
+            (
+                ScriptMode::ReadTimeTooLarge,
+                GatewayError::EventReadTimeExceeded {
+                    maximum_micros: MAX_EVENTS_READ_TIME_MICROS,
+                },
+            ),
+        ];
+        for (mode, expected) in cases {
+            let gateway = Gateway {
+                store: executor::StoreExecutor::new(Box::new(ScriptedStore { mode })),
+                bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
+                limits: GatewayLimits::LOCAL_DEFAULT,
+                owntracks_enabled: false,
+                action_registry: gateway_action_registry(),
+                action_principal: None,
+            };
+            let error = gateway
+                .read_events_page(&TimelineId::new().to_string(), 0, 1)
+                .await
+                .unwrap_err();
+            assert_eq!(error.to_string(), expected.to_string());
+        }
     }
 
     #[tokio::test]
