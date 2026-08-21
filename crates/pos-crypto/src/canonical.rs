@@ -64,15 +64,15 @@ fn json_value_to_cbor(json: serde_json::Value) -> Result<Value, CoreError> {
     match json {
         J::Null => Ok(Value::Null),
         J::Bool(b) => Ok(Value::Bool(b)),
-        J::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(Value::Integer(i.into()))
-            } else if let Some(u) = n.as_u64() {
-                Ok(Value::Integer(u.into()))
-            } else {
-                cbor_float(n.as_f64())
-            }
-        }
+        J::Number(n) => n.as_i64().map_or_else(
+            || {
+                n.as_u64().map_or_else(
+                    || cbor_float(n.as_f64()),
+                    |value| Ok(Value::Integer(value.into())),
+                )
+            },
+            |value| Ok(Value::Integer(value.into())),
+        ),
         J::String(s) => Ok(Value::Text(s)),
         J::Array(items) => items
             .into_iter()
@@ -88,16 +88,17 @@ fn json_value_to_cbor(json: serde_json::Value) -> Result<Value, CoreError> {
 }
 
 fn cbor_float(value: Option<f64>) -> Result<Value, CoreError> {
-    value
-        .map(Value::Float)
-        .ok_or(CoreError::CanonicalCborNumericConversion)
+    value.map_or_else(
+        || Err(CoreError::CanonicalCborNumericConversion),
+        |value| Ok(Value::Float(value)),
+    )
 }
 
 /// Sort map keys recursively per RFC 8949 §4.2.1: sort by (`key_length`, `key_bytes`) ascending.
 fn sort_map_keys(value: Value) -> Result<Value, CoreError> {
     match value {
-        Value::Map(mut pairs) => pairs
-            .drain(..)
+        Value::Map(pairs) => pairs
+            .into_iter()
             .map(|(key, value)| {
                 cbor_key_bytes(&key)
                     .and_then(|key_bytes| sort_map_keys(value).map(|value| (key_bytes, key, value)))

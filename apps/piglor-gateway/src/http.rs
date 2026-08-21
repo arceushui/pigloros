@@ -220,7 +220,11 @@ fn bounded_events_response(
 ) -> Result<serde_json::Value, GatewayError> {
     let mut events = Vec::with_capacity(page.events.len());
     let mut source = page.events.into_iter().peekable();
-    while let Some(event) = source.next() {
+    loop {
+        let next_event = source.next();
+        let Some(event) = next_event else {
+            break;
+        };
         let event_seq = event.seq.as_u64();
         let view = EventView::try_from(&event)?;
         events.push(serde_json::to_value(view).expect("EventView serialization is infallible"));

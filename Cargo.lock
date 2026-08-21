@@ -4522,6 +4522,7 @@ name = "pos-plugin-world"
 version = "0.1.0"
 dependencies = [
  "ciborium",
+ "num-traits",
  "pos-core",
  "pos-runtime",
  "pos-store",

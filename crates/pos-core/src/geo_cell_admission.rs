@@ -5,7 +5,7 @@
 //! validates the complete neutral wire shape before it can become Event data.
 #![allow(clippy::missing_errors_doc)]
 
-use std::{cmp::Ordering, fmt, fmt::Write as _, io::Cursor};
+use std::{cmp::Ordering, fmt, io::Cursor};
 
 use ciborium::value::Value;
 use serde::{Deserialize, Serialize};
@@ -213,8 +213,13 @@ fn encode_cell_value(index: &str, resolution: u64) -> CanonicalBytes {
         ),
     ]);
     let mut bytes = Vec::with_capacity(61);
-    let _ = ciborium::into_writer(&value, &mut bytes);
+    write_cbor(&value, &mut bytes);
     CanonicalBytes::from_vec(bytes)
+}
+
+fn write_cbor<T: Serialize>(value: &T, bytes: &mut Vec<u8>) {
+    let result = ciborium::into_writer(value, bytes);
+    assert!(result.is_ok(), "writing CBOR to a Vec cannot fail");
 }
 
 /// Validated 15-minute bucket of source occurrence time.
@@ -303,7 +308,7 @@ impl AdmissionSnapshotHash {
         }
         let mut canonical = String::with_capacity(64);
         for byte in bytes {
-            let _ = write!(&mut canonical, "{byte:02x}");
+            push_lower_hex_byte(&mut canonical, byte);
         }
         if canonical != value {
             return Err(GeoCellAdmissionError::InvalidSnapshotHash);
@@ -320,19 +325,25 @@ impl AdmissionSnapshotHash {
     pub fn as_hex(self) -> String {
         let mut hex = String::with_capacity(64);
         for byte in self.0 {
-            let _ = write!(&mut hex, "{byte:02x}");
+            push_lower_hex_byte(&mut hex, byte);
         }
         hex
     }
 }
 
-fn hex_nibble(byte: u8) -> u8 {
+const fn hex_nibble(byte: u8) -> u8 {
     match byte {
         b'0'..=b'9' => byte - b'0',
         b'a'..=b'f' => byte - b'a' + 10,
         b'A'..=b'F' => byte - b'A' + 10,
         _ => 0,
     }
+}
+
+fn push_lower_hex_byte(output: &mut String, byte: u8) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    output.push(char::from(HEX[usize::from(byte >> 4)]));
+    output.push(char::from(HEX[usize::from(byte & 0x0f)]));
 }
 
 /// The exact six-field deterministic-CBOR outer V1 payload.
@@ -346,7 +357,7 @@ pub struct GeographicObservationV1 {
 
 impl GeographicObservationV1 {
     #[must_use]
-    pub fn new(
+    pub const fn new(
         cell: ValidatedGeoCellV1,
         source_time_bucket: SourceTimeBucket,
         snapshot_id: AdmissionSnapshotId,
@@ -389,7 +400,7 @@ impl GeographicObservationV1 {
             ),
         ]);
         let mut bytes = Vec::new();
-        let _ = ciborium::into_writer(&value, &mut bytes);
+        write_cbor(&value, &mut bytes);
         CanonicalBytes::from_vec(bytes)
     }
 
@@ -450,7 +461,7 @@ impl GeographicObservationV1 {
             return Err(GeoCellAdmissionError::WrongFieldType("cell"));
         };
         let mut cell_bytes = Vec::new();
-        let _ = ciborium::into_writer(&Value::Map(cell_map), &mut cell_bytes);
+        write_cbor(&Value::Map(cell_map), &mut cell_bytes);
         let cell = ValidatedGeoCellV1::from_adr031_bytes(&CanonicalBytes::from_vec(cell_bytes))?;
         let decoded = Self::new(
             cell,
@@ -484,7 +495,7 @@ impl GeographicObservationV1 {
     }
 
     #[must_use]
-    pub fn snapshot_id(&self) -> &AdmissionSnapshotId {
+    pub const fn snapshot_id(&self) -> &AdmissionSnapshotId {
         &self.snapshot_id
     }
 
@@ -697,7 +708,7 @@ pub struct GeoCellAdmissionFenceV1 {
 
 impl GeoCellAdmissionFenceV1 {
     #[must_use]
-    pub fn new(
+    pub const fn new(
         draft: AdmissionEntitlementDraftV1,
         binding_identity: [u8; 32],
         binding_revision: u64,
@@ -740,7 +751,7 @@ impl GeoCellAdmissionFenceV1 {
     #[must_use]
     pub fn persistence_bytes(&self) -> CanonicalBytes {
         let mut bytes = Vec::new();
-        let _ = ciborium::into_writer(self, &mut bytes);
+        write_cbor(self, &mut bytes);
         CanonicalBytes::from_vec(bytes)
     }
 
@@ -753,7 +764,7 @@ impl GeoCellAdmissionFenceV1 {
             return Err(CoreError::GeographicAdmissionValidationFailed);
         }
         let mut canonical = Vec::new();
-        let _ = ciborium::into_writer(&fence, &mut canonical);
+        write_cbor(&fence, &mut canonical);
         if canonical != bytes {
             return Err(CoreError::GeographicAdmissionValidationFailed);
         }
@@ -788,7 +799,7 @@ pub struct GeoCellAdmissionInputV1 {
 
 impl GeoCellAdmissionInputV1 {
     #[must_use]
-    pub fn new(
+    pub const fn new(
         cell: ValidatedGeoCellV1,
         source_time_bucket: SourceTimeBucket,
         fence: GeoCellAdmissionFenceV1,
@@ -799,7 +810,7 @@ impl GeoCellAdmissionInputV1 {
 
     /// Construct input with a fingerprint produced by a trusted source ingress.
     #[must_use]
-    pub fn with_fingerprint(
+    pub const fn with_fingerprint(
         cell: ValidatedGeoCellV1,
         source_time_bucket: SourceTimeBucket,
         fence: GeoCellAdmissionFenceV1,
@@ -951,7 +962,7 @@ fn encode_intent(request: &GeoCellAdmissionInputV1) -> GeographicAdmissionIntent
         Value::Bytes(request.cell.bytes.as_slice().to_vec()),
     ]);
     let mut bytes = Vec::new();
-    let _ = ciborium::into_writer(&value, &mut bytes);
+    write_cbor(&value, &mut bytes);
     GeographicAdmissionIntentV1(CanonicalBytes::from_vec(bytes))
 }
 
@@ -1134,7 +1145,7 @@ impl AdmissionEntitlementSnapshotV1 {
         sort_snapshot_entries(&mut entries);
         let value = Value::Map(entries);
         let mut bytes = Vec::new();
-        let _ = ciborium::into_writer(&value, &mut bytes);
+        write_cbor(&value, &mut bytes);
         CanonicalBytes::from_vec(bytes)
     }
 
@@ -1145,7 +1156,7 @@ impl AdmissionEntitlementSnapshotV1 {
     }
 
     #[must_use]
-    pub fn id(&self) -> &AdmissionSnapshotId {
+    pub const fn id(&self) -> &AdmissionSnapshotId {
         &self.id
     }
 
@@ -1409,7 +1420,7 @@ impl AdmissionEntitlementSnapshotV1 {
         sort_snapshot_entries(&mut canonical_entries);
         let canonical_value = Value::Map(canonical_entries);
         let mut canonical = Vec::new();
-        let _ = ciborium::into_writer(&canonical_value, &mut canonical);
+        write_cbor(&canonical_value, &mut canonical);
         if canonical != bytes.as_slice() {
             return Err(CoreError::GeographicAdmissionValidationFailed);
         }
@@ -1431,7 +1442,7 @@ impl AdmissionSnapshotId {
     #[must_use]
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        let value = ulid::Ulid::gen().to_string();
+        let value = ulid::Ulid::r#gen().to_string();
         Self(value)
     }
 }

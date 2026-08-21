@@ -88,7 +88,7 @@ impl PreparedOwnTracksIngressV1 {
     }
 
     #[must_use]
-    pub(crate) fn from_authenticated_parts(
+    pub(crate) const fn from_authenticated_parts(
         rate_key: [u8; 32],
         admission_request: GeoLocationAdmissionRequestV1,
     ) -> Self {

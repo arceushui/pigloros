@@ -904,15 +904,16 @@ impl SqliteStore {
                         Ok(seq) => seq,
                         Err(error) => return Err(CoreError::Storage(error.to_string())),
                     };
-                    field_sizes.push((
-                        row.get(1)
-                            .expect("typeof(non-null SQLite value) returns text"),
-                        row.get(2)
-                            .expect("length(non-null SQLite BLOB) returns an integer"),
-                        row.get(3).expect(
-                            "length(CAST(non-null SQLite TEXT AS BLOB)) returns an integer",
-                        ),
-                    ));
+                    let payload_type: String = row
+                        .get(1)
+                        .map_err(|error| CoreError::Storage(error.to_string()))?;
+                    let payload_length: i64 = row
+                        .get(2)
+                        .map_err(|error| CoreError::Storage(error.to_string()))?;
+                    let event_type_length: i64 = row
+                        .get(3)
+                        .map_err(|error| CoreError::Storage(error.to_string()))?;
+                    field_sizes.push((payload_type, payload_length, event_type_length));
                 }
                 Ok(None) => break,
                 Err(error) => {
@@ -1642,8 +1643,8 @@ impl SqliteStore {
             .last()
             .and_then(|(_, fork)| *fork)
             .map_or(0, Seq::as_u64);
-        let batch_len =
-            u64::try_from(drafts.len()).expect("slice length fits in u64 on supported targets");
+        let batch_len = u64::try_from(drafts.len())
+            .map_err(|_| CoreError::Storage("draft batch length does not fit in u64".to_owned()))?;
         let next_head = owned_head.checked_add(batch_len).ok_or_else(|| {
             CoreError::Storage("bounded append owned-Event head overflow".to_owned())
         })?;
@@ -2572,7 +2573,8 @@ impl GeoLocationAdmissionStore for SqliteStore {
             ],
         )
         .map_err(|error| CoreError::Storage(error.to_string()))?;
-        match tx.commit() {
+        let commit_result = tx.commit();
+        match commit_result {
             Ok(()) => Ok(GeoLocationAdmissionOutcome::accepted(event.id, event.seq)),
             Err(_) => Ok(GeoLocationAdmissionOutcome::outcome_unknown()),
         }
@@ -2704,7 +2706,13 @@ impl EventStore for SqliteStore {
         draft: EventDraft,
     ) -> Result<AppendOrDuplicateOutcome, CoreError> {
         self.append_or_duplicate_with_limit(timeline, identity, admitted_at, &draft, None)
-            .map(|outcome| outcome.expect("unbounded append cannot hit an event limit"))
+            .and_then(|outcome| {
+                outcome.ok_or_else(|| {
+                    CoreError::Storage(
+                        "unbounded append unexpectedly hit an event limit".to_owned(),
+                    )
+                })
+            })
     }
 
     fn purge_expired_append_identities(&mut self, now: WallTime) -> Result<usize, CoreError> {
@@ -2853,9 +2861,11 @@ impl EventStore for SqliteStore {
                 for (i, &(tid, _)) in chain.iter().enumerate() {
                     let logical_prefix = chain[i].1.map_or(0, Seq::as_u64);
                     if i + 1 < chain.len() {
-                        let logical_fork = chain[i + 1]
-                            .1
-                            .expect("non-root chain entry always has fork_seq");
+                        let logical_fork = chain[i + 1].1.ok_or_else(|| {
+                            CoreError::Storage(
+                                "non-root chain entry is missing its fork sequence".to_owned(),
+                            )
+                        })?;
                         let local_limit = logical_fork
                             .as_u64()
                             .checked_sub(logical_prefix)
@@ -3181,9 +3191,9 @@ impl EventStore for SqliteStore {
                             .conn
                             .execute_batch("COMMIT")
                             .map_err(|e| CoreError::Storage(e.to_string()))?,
-                        Err(_) => {
-                            let _ = self.conn.execute_batch("ROLLBACK");
-                        }
+                        Err(_) => match self.conn.execute_batch("ROLLBACK") {
+                            Ok(()) | Err(_) => {}
+                        },
                     }
                 }
                 applied
@@ -3320,7 +3330,9 @@ impl EventStore for SqliteStore {
                 Ok(tl)
             }
             Err(err) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
+                match self.conn.execute_batch("ROLLBACK") {
+                    Ok(()) | Err(_) => {}
+                }
                 Err(err)
             }
         }
@@ -3405,11 +3417,16 @@ impl SqliteStore {
     }
 }
 
+#[cfg(test)]
 fn begin_immediate_sql() -> &'static str {
-    #[cfg(test)]
     if FAIL_BEGIN_IMMEDIATE.with(std::cell::Cell::get) {
         return "SELECT RAISE(ABORT, 'begin fault')";
     }
+    "BEGIN IMMEDIATE"
+}
+
+#[cfg(not(test))]
+const fn begin_immediate_sql() -> &'static str {
     "BEGIN IMMEDIATE"
 }
 

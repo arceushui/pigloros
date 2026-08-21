@@ -84,7 +84,7 @@ impl Seq {
     }
 
     #[must_use = "returns the pre-advance value; use next() if you don't need the old value"]
-    pub fn advance(&mut self) -> Self {
+    pub const fn advance(&mut self) -> Self {
         let current = *self;
         self.0 += 1;
         current

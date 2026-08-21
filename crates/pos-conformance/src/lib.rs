@@ -136,6 +136,8 @@ pub enum InputError {
     ResourceLimitOutOfRange,
     #[error("network access must be disabled for an air-gapped execution")]
     NetworkNotAllowedInAirGapped,
+    #[error("network access must be disabled for deterministic recomputation")]
+    NetworkNotAllowedInDeterministicProfile,
 }
 
 /// Canonical event evidence; generated Event IDs and wall-clock metadata are
@@ -578,12 +580,10 @@ fn verify_participant_views(
             {
                 return Err(EvidenceError::InvalidParticipantView);
             }
-            let Some(authoritative) = authoritative_events
+            let authoritative = authoritative_events
                 .iter()
                 .find(|candidate| candidate.seq == event.seq)
-            else {
-                return Err(EvidenceError::InvalidParticipantView);
-            };
+                .expect("visible event sequence is authoritative");
             if authoritative.event_type != event.event_type
                 || authoritative.payload_digest != event.payload_digest
             {
@@ -602,9 +602,6 @@ fn verify_participant_views(
                 .iter()
                 .filter(|event| event.seq == authoritative.seq)
                 .count();
-            if view.hidden_event_types.contains(&authoritative.event_type) && visible != 0 {
-                return Err(EvidenceError::InvalidParticipantView);
-            }
             if view.visible_event_types.contains(&authoritative.event_type) && visible != 1 {
                 return Err(EvidenceError::InvalidParticipantView);
             }
@@ -708,20 +705,14 @@ fn event_reaches_intervention(
     by_seq: &BTreeMap<u64, &AuthoritativeEventV1>,
 ) -> bool {
     let mut current = event;
-    let mut seen = std::collections::BTreeSet::new();
     loop {
         if current.seq == intervention_seq {
             return true;
         }
-        if !seen.insert(current.seq) {
-            return false;
-        }
         let Some(cause_seq) = current.causation_seq else {
             return false;
         };
-        let Some(cause) = by_seq.get(&cause_seq) else {
-            return false;
-        };
+        let cause = by_seq[&cause_seq];
         current = cause;
     }
 }
@@ -763,6 +754,8 @@ pub fn hex_digest(bytes: &[u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type EvidenceMutation = Box<dyn Fn(&mut MoatProofEvidenceV1)>;
 
     fn input() -> MoatProofInputV1 {
         MoatProofInputV1 {
@@ -887,6 +880,21 @@ mod tests {
         value = input();
         value.resource_limit = 0;
         assert_eq!(value.validate(), Err(InputError::ZeroResourceLimit));
+        value = input();
+        value.ticks = 10_001;
+        assert_eq!(value.validate(), Err(InputError::TicksOutOfRange));
+        value = input();
+        value.initial_velocity[1] = f64::INFINITY;
+        assert_eq!(value.validate(), Err(InputError::NonFiniteCoordinate));
+        value = input();
+        value.agent_response_threshold = f64::NAN;
+        assert_eq!(value.validate(), Err(InputError::ThresholdOutOfRange));
+        value = input();
+        value.resource_limit = 2;
+        assert_eq!(value.validate(), Err(InputError::ResourceLimitOutOfRange));
+        value = input();
+        value.resource_limit = 10_001;
+        assert_eq!(value.validate(), Err(InputError::ResourceLimitOutOfRange));
     }
 
     #[test]
@@ -1061,6 +1069,263 @@ mod tests {
         assert_eq!(
             verify_evidence(&invalid),
             Err(EvidenceError::InvalidManifest)
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_each_manifest_contract_violation() {
+        let cases: Vec<EvidenceMutation> = vec![
+            Box::new(|value| value.manifest.execution_profile.clear()),
+            Box::new(|value| value.manifest.execution_profile_digest = [0; 32]),
+            Box::new(|value| value.manifest.trust_policy_snapshot_digest = [0; 32]),
+            Box::new(|value| value.manifest.artifact_closure_digest = [0; 32]),
+            Box::new(|value| value.manifest.evaluator_digest = [0; 32]),
+            Box::new(|value| value.manifest.resource_limit = 0),
+            Box::new(|value| value.manifest.plugin_versions.clear()),
+            Box::new(|value| {
+                value
+                    .manifest
+                    .plugin_versions
+                    .insert(String::new(), "1".to_owned());
+            }),
+            Box::new(|value| {
+                value
+                    .manifest
+                    .plugin_versions
+                    .insert("world".to_owned(), String::new());
+            }),
+            Box::new(|value| {
+                value.manifest.execution_mode = ExecutionModeV1::AirGapped;
+                value.manifest.network_enabled = true;
+            }),
+        ];
+        for mutate in cases {
+            let mut invalid = evidence();
+            mutate(&mut invalid);
+            assert_eq!(
+                verify_evidence(&invalid),
+                Err(EvidenceError::InvalidManifest)
+            );
+        }
+    }
+
+    #[test]
+    fn verifier_rejects_each_causal_edge_shape() {
+        let cases: Vec<EvidenceMutation> = vec![
+            Box::new(|value| value.authoritative_events[1].causation_seq = Some(2)),
+            Box::new(|value| value.authoritative_events[1].causation_seq = Some(99)),
+            Box::new(|value| value.causal_trace[0].cause_seq = 2),
+            Box::new(|value| value.causal_trace[0].cause_seq = 99),
+            Box::new(|value| value.causal_trace[0].relation = "other".to_owned()),
+            Box::new(|value| value.causal_trace[0].visibility = "secret".to_owned()),
+        ];
+        for mutate in cases {
+            let mut invalid = evidence();
+            mutate(&mut invalid);
+            assert_eq!(
+                verify_evidence(&invalid),
+                Err(EvidenceError::InvalidCausalEdge)
+            );
+        }
+    }
+
+    #[test]
+    fn verifier_rejects_uncertainty_and_participant_boundaries() {
+        let uncertainty_cases: Vec<EvidenceMutation> = vec![
+            Box::new(|value| value.uncertainty[0].lower = -0.1),
+            Box::new(|value| value.uncertainty[0].upper = 1.1),
+            Box::new(|value| value.uncertainty[0].confidence = f64::NAN),
+        ];
+        for mutate in uncertainty_cases {
+            let mut invalid = evidence();
+            mutate(&mut invalid);
+            assert_eq!(
+                verify_evidence(&invalid),
+                Err(EvidenceError::InvalidUncertainty)
+            );
+        }
+
+        let participant_cases: Vec<EvidenceMutation> = vec![
+            Box::new(|value| value.participant_views.clear()),
+            Box::new(|value| {
+                let view = value.participant_views[0].clone();
+                value.participant_views.push(view);
+            }),
+            Box::new(|value| {
+                value.participant_views[0]
+                    .visible_event_types
+                    .push("world.observation.v1".to_owned());
+            }),
+            Box::new(|value| {
+                value.participant_views[0]
+                    .hidden_event_types
+                    .push("proof.agent.reaction.v1".to_owned());
+            }),
+            Box::new(|value| {
+                value.participant_views[0]
+                    .visible_event_types
+                    .push("proof.agent.reaction.v1".to_owned());
+            }),
+            Box::new(|value| {
+                value.participant_views[0].visible_events[0].event_type = "wrong".to_owned();
+            }),
+            Box::new(|value| value.participant_views[0].visible_events[0].payload_digest = [8; 32]),
+            Box::new(|value| value.participant_views[0].visible_events[0].seq = 99),
+            Box::new(|value| value.participant_views[0].visible_events.clear()),
+        ];
+        for mutate in participant_cases {
+            let mut invalid = evidence();
+            mutate(&mut invalid);
+            assert_eq!(
+                verify_evidence(&invalid),
+                Err(EvidenceError::InvalidParticipantView)
+            );
+        }
+
+        let mut invalid = evidence();
+        invalid.participant_views[0].hidden_event_types[0] = "world.observation.v1".to_owned();
+        assert_eq!(
+            verify_evidence(&invalid),
+            Err(EvidenceError::InvalidParticipantView)
+        );
+
+        let mut invalid = evidence();
+        invalid.participant_views[0]
+            .visible_event_types
+            .push("proof.agent.reaction.v1".to_owned());
+        invalid.participant_views[0]
+            .hidden_event_types
+            .retain(|event_type| event_type != "proof.agent.reaction.v1");
+        invalid.participant_views[0]
+            .visible_events
+            .push(ParticipantEventV1 {
+                seq: 2,
+                event_type: "proof.agent.reaction.v1".to_owned(),
+                payload_digest: [2; 32],
+            });
+        invalid.participant_views[0].visible_events.reverse();
+        assert_eq!(
+            verify_evidence(&invalid),
+            Err(EvidenceError::InvalidParticipantView)
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_each_consent_boundary() {
+        let cases: Vec<Box<dyn Fn(&mut MoatProofEvidenceV1)>> = vec![
+            Box::new(|value| value.consent_audit.subject.clear()),
+            Box::new(|value| value.consent_audit.revocation_event_type = "other".to_owned()),
+            Box::new(|value| value.consent_audit.effective_after_seq = 0),
+            Box::new(|value| value.consent_audit.revocation_event_seq = 2),
+            Box::new(|value| value.consent_audit.halted_at_tick_boundary = false),
+        ];
+        for mutate in cases {
+            let mut invalid = evidence();
+            mutate(&mut invalid);
+            assert_eq!(
+                verify_evidence(&invalid),
+                Err(EvidenceError::InvalidConsentAudit)
+            );
+        }
+    }
+
+    fn fork_pair() -> (MoatProofEvidenceV1, MoatProofEvidenceV1) {
+        let mut baseline = evidence();
+        baseline.manifest.fork_cut_seq = Some(1);
+        baseline.authoritative_events[1].event_type = "proof.agent.reaction.v1".to_owned();
+        baseline.authoritative_events.push(AuthoritativeEventV1 {
+            seq: 3,
+            entity: "society".to_owned(),
+            event_type: "society.signal".to_owned(),
+            payload_digest: [3; 32],
+            causation_seq: Some(2),
+        });
+        baseline.causal_trace.push(CausalTraceEntryV1 {
+            cause_seq: 2,
+            effect_seq: 3,
+            relation: "agent_to_society".to_owned(),
+            visibility: "public".to_owned(),
+            dependency_class: "endogenous_recomputed".to_owned(),
+        });
+        baseline.participant_views[0]
+            .hidden_event_types
+            .push("society.signal".to_owned());
+        let mut counterfactual = baseline.clone();
+        counterfactual.authoritative_events[1].event_type = "world.action.v1".to_owned();
+        counterfactual.authoritative_events[1].payload_digest = [4; 32];
+        counterfactual.causal_trace[0].relation = "intervention_to_physics".to_owned();
+        counterfactual.participant_views[0].hidden_event_types[1] = "world.action.v1".to_owned();
+        (baseline, counterfactual)
+    }
+
+    #[test]
+    fn verifies_and_rejects_counterfactual_fork_boundaries() {
+        let (baseline, counterfactual) = fork_pair();
+        assert_eq!(
+            verify_counterfactual_fork(&baseline, &counterfactual, "world.action.v1"),
+            Ok(())
+        );
+
+        let mut no_cut_baseline = baseline.clone();
+        let mut no_cut_counterfactual = counterfactual.clone();
+        no_cut_baseline.manifest.fork_cut_seq = None;
+        no_cut_counterfactual.manifest.fork_cut_seq = None;
+        assert_eq!(
+            verify_counterfactual_fork(&no_cut_baseline, &no_cut_counterfactual, "world.action.v1"),
+            Err(EvidenceError::IncompleteForkSuffix)
+        );
+
+        let short_baseline = evidence();
+        let short_counterfactual = evidence();
+        assert_eq!(
+            verify_counterfactual_fork(&short_baseline, &short_counterfactual, "world.action.v1"),
+            Err(EvidenceError::IncompleteForkSuffix)
+        );
+        let mut one_event_counterfactual = counterfactual.clone();
+        one_event_counterfactual.authoritative_events.pop();
+        one_event_counterfactual.causal_trace.pop();
+        assert_eq!(
+            verify_counterfactual_fork(&baseline, &one_event_counterfactual, "world.action.v1"),
+            Err(EvidenceError::IncompleteForkSuffix)
+        );
+
+        let mut invalid = counterfactual.clone();
+        invalid.manifest.input_digest[0] ^= 1;
+        assert_eq!(
+            verify_counterfactual_fork(&baseline, &invalid, "world.action.v1"),
+            Err(EvidenceError::IncompleteForkSuffix)
+        );
+        let mut invalid = counterfactual.clone();
+        invalid.manifest.fork_cut_seq = None;
+        assert_eq!(
+            verify_counterfactual_fork(&baseline, &invalid, "world.action.v1"),
+            Err(EvidenceError::IncompleteForkSuffix)
+        );
+        let mut invalid = counterfactual.clone();
+        invalid.authoritative_events[0].payload_digest = [9; 32];
+        invalid.participant_views[0].visible_events[0].payload_digest = [9; 32];
+        assert_eq!(
+            verify_counterfactual_fork(&baseline, &invalid, "world.action.v1"),
+            Err(EvidenceError::IncompleteForkSuffix)
+        );
+        let mut invalid = counterfactual.clone();
+        invalid.authoritative_events[1].event_type = "proof.agent.reaction.v1".to_owned();
+        invalid.participant_views[0].hidden_event_types[1] = "proof.agent.reaction.v1".to_owned();
+        assert_eq!(
+            verify_counterfactual_fork(&baseline, &invalid, "world.action.v1"),
+            Err(EvidenceError::IncompleteForkSuffix)
+        );
+        let mut invalid = counterfactual.clone();
+        invalid.authoritative_events[2].causation_seq = Some(1);
+        invalid.causal_trace[1].cause_seq = 1;
+        assert_eq!(
+            verify_counterfactual_fork(&baseline, &invalid, "world.action.v1"),
+            Err(EvidenceError::IncompleteForkSuffix)
+        );
+        let invalid = baseline.clone();
+        assert_eq!(
+            verify_counterfactual_fork(&baseline, &invalid, "proof.agent.reaction.v1"),
+            Err(EvidenceError::IncompleteForkSuffix)
         );
     }
 

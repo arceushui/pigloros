@@ -46,7 +46,9 @@ pub enum ReferenceError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ReferenceEvent {
     seq: u64,
+    entity: String,
     event_type: String,
+    payload_digest: serde_json::Value,
     causation_seq: Option<u64>,
 }
 
@@ -220,13 +222,29 @@ fn events(
                 .and_then(serde_json::Value::as_str)
                 .ok_or(ReferenceError::InvalidForkEvidence("Event type is invalid"))?
                 .to_owned();
+            let entity = event
+                .get("entity")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(ReferenceError::InvalidForkEvidence(
+                    "Event entity is invalid",
+                ))?
+                .to_owned();
+            let payload_digest =
+                event
+                    .get("payload_digest")
+                    .cloned()
+                    .ok_or(ReferenceError::InvalidForkEvidence(
+                        "Event payload digest is missing",
+                    ))?;
             let causation_seq = event
                 .get("causation_seq")
                 .and_then(|value| (!value.is_null()).then(|| value.as_u64()))
                 .flatten();
             Ok(ReferenceEvent {
                 seq,
+                entity,
                 event_type,
+                payload_digest,
                 causation_seq,
             })
         })
@@ -250,9 +268,7 @@ fn reaches(
         let Some(cause_seq) = current.causation_seq else {
             return false;
         };
-        let Some(cause) = by_seq.get(&cause_seq) else {
-            return false;
-        };
+        let cause = by_seq[&cause_seq];
         current = cause;
     }
 }
@@ -271,7 +287,6 @@ pub fn compare_json(left: &str, right: &str) -> Result<ReferenceComparisonV1, Re
     let manifest_fields = [
         "format_version",
         "input_digest",
-        "execution_mode",
         "fork_cut_seq",
         "seed",
         "resource_limit",
@@ -420,7 +435,13 @@ mod tests {
                 "replay_claim": "exact",
                 "plugin_versions": {"world": "1"}
             },
-            "authoritative_events": [{"seq": 1}],
+            "authoritative_events": [{
+                "seq": 1,
+                "entity": "body",
+                "event_type": "world.observation.v1",
+                "payload_digest": [1],
+                "causation_seq": null
+            }],
             "projections": [],
             "causal_trace": [],
             "uncertainty": [],
@@ -479,6 +500,320 @@ mod tests {
         value["unknown"] = serde_json::json!(true);
         assert!(matches!(
             compare_json(&value.to_string(), &fixture()),
+            Err(ReferenceError::UnexpectedField(field)) if field == "unknown"
+        ));
+    }
+
+    fn fork_fixture() -> (String, String) {
+        let manifest = serde_json::json!({
+            "format_version": 1,
+            "input_digest": [1],
+            "execution_mode": "local",
+            "fork_cut_seq": 1,
+            "seed": 1,
+            "resource_limit": 10,
+            "network_enabled": false,
+            "reproducibility_class": "profile_recomputation",
+            "execution_profile": "deterministic-v1",
+            "execution_profile_digest": [3],
+            "trust_policy_snapshot_digest": [4],
+            "artifact_closure_digest": [5],
+            "evaluator_digest": [6],
+            "replay_claim": "exact",
+            "plugin_versions": {"world": "1"}
+        });
+        let event = |seq, entity, event_type, payload_digest, causation_seq| {
+            serde_json::json!({
+                "seq": seq,
+                "entity": entity,
+                "event_type": event_type,
+                "payload_digest": [payload_digest],
+                "causation_seq": causation_seq
+            })
+        };
+        let baseline = serde_json::json!({
+            "format_version": 1,
+            "manifest": manifest,
+            "authoritative_events": [
+                event(1, "body", "world.observation.v1", 1, serde_json::Value::Null),
+                event(2, "agent", "proof.agent.reaction.v1", 2, serde_json::json!(1)),
+                event(3, "society", "society.signal", 3, serde_json::json!(2))
+            ],
+            "projections": [],
+            "causal_trace": [],
+            "uncertainty": [],
+            "participant_views": [],
+            "plugin_failures": [],
+            "consent_audit": {"subject": "s"}
+        });
+        let mut counterfactual = baseline.clone();
+        counterfactual["authoritative_events"] = serde_json::json!([
+            event(
+                1,
+                "body",
+                "world.observation.v1",
+                1,
+                serde_json::Value::Null
+            ),
+            event(2, "world", "world.action.v1", 4, serde_json::json!(1)),
+            event(3, "body", "world.observation.v1", 5, serde_json::json!(2)),
+            event(
+                4,
+                "agent",
+                "proof.agent.reaction.v1",
+                6,
+                serde_json::json!(3)
+            ),
+            event(5, "society", "society.signal", 7, serde_json::json!(4))
+        ]);
+        (baseline.to_string(), counterfactual.to_string())
+    }
+
+    #[test]
+    fn independently_verifies_fork_and_rejects_each_boundary() {
+        let (baseline, counterfactual) = fork_fixture();
+        assert!(verify_fork_json(&baseline, &counterfactual, "world.action.v1").is_ok());
+
+        let mut value: serde_json::Value = serde_json::from_str(&counterfactual).unwrap();
+        value["manifest"]["input_digest"] = serde_json::json!([9]);
+        assert!(matches!(
+            verify_fork_json(&baseline, &value.to_string(), "world.action.v1"),
+            Err(ReferenceError::InvalidForkEvidence("manifest mismatch"))
+        ));
+
+        let mut no_cut_baseline: serde_json::Value = serde_json::from_str(&baseline).unwrap();
+        let mut no_cut_counterfactual: serde_json::Value =
+            serde_json::from_str(&counterfactual).unwrap();
+        no_cut_baseline["manifest"]["fork_cut_seq"] = serde_json::Value::Null;
+        no_cut_counterfactual["manifest"]["fork_cut_seq"] = serde_json::Value::Null;
+        assert!(matches!(
+            verify_fork_json(
+                &no_cut_baseline.to_string(),
+                &no_cut_counterfactual.to_string(),
+                "world.action.v1"
+            ),
+            Err(ReferenceError::InvalidForkEvidence("fork cut is absent"))
+        ));
+
+        let mut prefix: serde_json::Value = serde_json::from_str(&counterfactual).unwrap();
+        prefix["authoritative_events"][0]["payload_digest"] = serde_json::json!([9]);
+        assert!(matches!(
+            verify_fork_json(&baseline, &prefix.to_string(), "world.action.v1"),
+            Err(ReferenceError::InvalidForkEvidence("prefix mismatch"))
+        ));
+
+        let mut no_suffix: serde_json::Value = serde_json::from_str(&baseline).unwrap();
+        no_suffix["manifest"]["fork_cut_seq"] = serde_json::json!(5);
+        assert!(matches!(
+            verify_fork_json(
+                &no_suffix.to_string(),
+                &no_suffix.to_string(),
+                "world.action.v1"
+            ),
+            Err(ReferenceError::InvalidForkEvidence("suffix is empty"))
+        ));
+
+        let mut no_intervention: serde_json::Value = serde_json::from_str(&counterfactual).unwrap();
+        no_intervention["authoritative_events"][1]["event_type"] =
+            serde_json::json!("world.observation.v1");
+        assert!(matches!(
+            verify_fork_json(&baseline, &no_intervention.to_string(), "world.action.v1"),
+            Err(ReferenceError::InvalidForkEvidence(
+                "intervention is absent"
+            ))
+        ));
+
+        let mut incomplete_tail: serde_json::Value = serde_json::from_str(&counterfactual).unwrap();
+        incomplete_tail["authoritative_events"][2]["causation_seq"] = serde_json::json!(1);
+        assert!(matches!(
+            verify_fork_json(&baseline, &incomplete_tail.to_string(), "world.action.v1"),
+            Err(ReferenceError::InvalidForkEvidence(
+                "causal tail is incomplete"
+            ))
+        ));
+    }
+
+    #[test]
+    fn independently_rejects_kernel_boundaries() {
+        let (baseline, counterfactual) = fork_fixture();
+        let mut incomplete_kernel: serde_json::Value =
+            serde_json::from_str(&counterfactual).unwrap();
+        incomplete_kernel["authoritative_events"] = serde_json::json!([{
+            "seq": 1,
+            "entity": "body",
+            "event_type": "world.observation.v1",
+            "payload_digest": [1],
+            "causation_seq": null
+        }]);
+        assert!(matches!(
+            verify_fork_json(&baseline, &incomplete_kernel.to_string(), "world.action.v1"),
+            Err(ReferenceError::InvalidForkEvidence(
+                "independent fixture reaction is incomplete"
+            ))
+        ));
+
+        let mut missing_source: serde_json::Value = serde_json::from_str(&counterfactual).unwrap();
+        missing_source["authoritative_events"][3]["causation_seq"] = serde_json::json!(99);
+        assert!(matches!(
+            verify_fork_json(&baseline, &missing_source.to_string(), "world.action.v1"),
+            Err(ReferenceError::InvalidForkEvidence(
+                "independent causal source is missing"
+            ))
+        ));
+
+        let mut invalid_relation: serde_json::Value =
+            serde_json::from_str(&counterfactual).unwrap();
+        invalid_relation["authoritative_events"][3]["causation_seq"] = serde_json::json!(5);
+        assert!(matches!(
+            verify_fork_json(&baseline, &invalid_relation.to_string(), "world.action.v1"),
+            Err(ReferenceError::InvalidForkEvidence(
+                "independent causal relation is invalid"
+            ))
+        ));
+    }
+
+    #[test]
+    fn independently_rejects_cyclic_and_copied_suffixes() {
+        let (baseline, counterfactual) = fork_fixture();
+        let mut cycle_baseline: serde_json::Value = serde_json::from_str(&baseline).unwrap();
+        cycle_baseline["manifest"]["fork_cut_seq"] = serde_json::json!(3);
+        cycle_baseline["authoritative_events"]
+            .as_array_mut()
+            .unwrap()
+            .extend([
+                serde_json::json!({
+                    "seq": 4, "entity": "world", "event_type": "custom.action",
+                    "payload_digest": [8], "causation_seq": 3
+                }),
+                serde_json::json!({
+                    "seq": 5, "entity": "custom", "event_type": "custom.event",
+                    "payload_digest": [9], "causation_seq": 4
+                }),
+            ]);
+        let mut cycle_counterfactual = cycle_baseline.clone();
+        cycle_counterfactual["authoritative_events"]
+            .as_array_mut()
+            .unwrap()
+            .extend([
+                serde_json::json!({
+                    "seq": 6, "entity": "custom", "event_type": "custom.event",
+                    "payload_digest": [10], "causation_seq": 7
+                }),
+                serde_json::json!({
+                    "seq": 7, "entity": "custom", "event_type": "custom.event",
+                    "payload_digest": [11], "causation_seq": 6
+                }),
+            ]);
+        cycle_counterfactual["authoritative_events"][4]["causation_seq"] = serde_json::json!(7);
+        cycle_counterfactual["authoritative_events"][5]["causation_seq"] = serde_json::json!(6);
+        assert!(matches!(
+            verify_fork_json(
+                &cycle_baseline.to_string(),
+                &cycle_counterfactual.to_string(),
+                "custom.action"
+            ),
+            Err(ReferenceError::InvalidForkEvidence(
+                "causal tail is incomplete"
+            ))
+        ));
+
+        let mut copied_suffix: serde_json::Value = serde_json::from_str(&baseline).unwrap();
+        copied_suffix["manifest"]["fork_cut_seq"] = serde_json::json!(1);
+        assert!(matches!(
+            verify_fork_json(
+                &baseline,
+                &copied_suffix.to_string(),
+                "proof.agent.reaction.v1"
+            ),
+            Err(ReferenceError::InvalidForkEvidence("suffix was copied"))
+        ));
+
+        let mut short_counterfactual: serde_json::Value =
+            serde_json::from_str(&counterfactual).unwrap();
+        short_counterfactual["manifest"]["fork_cut_seq"] = serde_json::json!(4);
+        assert!(matches!(
+            verify_fork_json(
+                &baseline,
+                &short_counterfactual.to_string(),
+                "world.action.v1"
+            ),
+            Err(ReferenceError::InvalidForkEvidence("manifest mismatch"))
+        ));
+    }
+
+    #[test]
+    fn rejects_malformed_reference_events_and_manifests() {
+        let (baseline, counterfactual) = fork_fixture();
+        let mut cases = Vec::new();
+        cases.push(serde_json::json!("not-an-event"));
+        cases.push(serde_json::json!({"entity": "body"}));
+        cases.push(serde_json::json!({"seq": 1, "entity": "body"}));
+        cases.push(serde_json::json!({
+            "seq": 1,
+            "entity": "body",
+            "event_type": "world.observation.v1"
+        }));
+        cases.push(serde_json::json!({
+            "seq": 1,
+            "entity": 7,
+            "event_type": "world.observation.v1",
+            "payload_digest": [1]
+        }));
+        for event in cases {
+            let mut value: serde_json::Value = serde_json::from_str(&counterfactual).unwrap();
+            value["authoritative_events"] = serde_json::json!([event]);
+            assert!(matches!(
+                verify_fork_json(&baseline, &value.to_string(), "world.action.v1"),
+                Err(ReferenceError::InvalidForkEvidence(_))
+            ));
+        }
+
+        let mut missing_manifest: serde_json::Value =
+            serde_json::from_str(&counterfactual).unwrap();
+        missing_manifest.as_object_mut().unwrap().remove("manifest");
+        assert!(matches!(
+            verify_fork_json(&baseline, &missing_manifest.to_string(), "world.action.v1"),
+            Err(ReferenceError::MissingField("manifest"))
+        ));
+        let mut bad_manifest: serde_json::Value = serde_json::from_str(&counterfactual).unwrap();
+        bad_manifest["manifest"] = serde_json::json!(true);
+        assert!(matches!(
+            verify_fork_json(&baseline, &bad_manifest.to_string(), "world.action.v1"),
+            Err(ReferenceError::MissingField("manifest"))
+        ));
+        let mut missing_events: serde_json::Value = serde_json::from_str(&counterfactual).unwrap();
+        missing_events
+            .as_object_mut()
+            .unwrap()
+            .remove("authoritative_events");
+        assert!(matches!(
+            verify_fork_json(&baseline, &missing_events.to_string(), "world.action.v1"),
+            Err(ReferenceError::MissingField("authoritative_events"))
+        ));
+
+        let mut missing_manifest_field: serde_json::Value =
+            serde_json::from_str(&counterfactual).unwrap();
+        missing_manifest_field["manifest"]
+            .as_object_mut()
+            .unwrap()
+            .remove("evaluator_digest");
+        assert!(matches!(
+            verify_fork_json(
+                &baseline,
+                &missing_manifest_field.to_string(),
+                "world.action.v1"
+            ),
+            Err(ReferenceError::MissingField("evaluator_digest"))
+        ));
+        let mut unknown_manifest_field: serde_json::Value =
+            serde_json::from_str(&counterfactual).unwrap();
+        unknown_manifest_field["manifest"]["unknown"] = serde_json::json!(true);
+        assert!(matches!(
+            verify_fork_json(
+                &baseline,
+                &unknown_manifest_field.to_string(),
+                "world.action.v1"
+            ),
             Err(ReferenceError::UnexpectedField(field)) if field == "unknown"
         ));
     }

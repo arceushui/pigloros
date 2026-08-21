@@ -21,6 +21,12 @@ pub enum RuntimeError {
     #[error("driver '{name}' panicked while aborting; its Tick Boundary was discarded")]
     DriverAbortPanicked { name: String },
 
+    #[error("driver '{name}' panicked while committing; the runtime is faulted")]
+    DriverCommitPanicked { name: String },
+
+    #[error("driver '{name}' panicked while restoring; the runtime is faulted")]
+    DriverRestorePanicked { name: String },
+
     #[error(
         "driver '{driver}' exceeded its deterministic resource budget: requested={requested}, limit={limit}"
     )]

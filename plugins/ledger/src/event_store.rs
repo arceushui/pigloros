@@ -24,7 +24,7 @@ impl From<CoreError> for LedgerError {
 
 fn to_canonical(value: &impl serde::Serialize) -> CanonicalBytes {
     let mut buf = Vec::new();
-    let _ = ciborium::into_writer(value, &mut buf);
+    assert!(ciborium::into_writer(value, &mut buf).is_ok());
     CanonicalBytes::from_vec(buf)
 }
 
@@ -127,7 +127,7 @@ impl LedgerStore for EventLedgerStore {
 
     fn register(&mut self, new: NewPrediction) -> Result<String, LedgerError> {
         new.validate()?;
-        let prediction = new.into_prediction(ulid::Ulid::gen().to_string());
+        let prediction = new.into_prediction(ulid::Ulid::r#gen().to_string());
         let payload = to_canonical(&prediction);
 
         self.append_signed(payload, Kind::new(EVENT_TYPE_PREDICTION))?;

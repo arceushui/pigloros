@@ -93,14 +93,14 @@ fn injected_fault_result(path: &Path, stage: FaultStage) -> std::io::Result<()> 
 
 #[cfg(all(test, unix))]
 macro_rules! fault {
-    ($path:expr, $stage:expr) => {
+    ($path:expr_2021, $stage:expr_2021) => {
         injected_fault_result($path, $stage)
     };
 }
 
 #[cfg(all(not(test), unix))]
 macro_rules! fault {
-    ($path:expr, $stage:expr) => {{
+    ($path:expr_2021, $stage:expr_2021) => {{
         let _ = ($path, $stage);
         Ok::<(), std::io::Error>(())
     }};

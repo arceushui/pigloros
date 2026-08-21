@@ -71,7 +71,7 @@ impl RecoveryEventHeader {
     }
 
     #[must_use]
-    pub fn event_type(&self) -> &Kind {
+    pub const fn event_type(&self) -> &Kind {
         &self.event_type
     }
 }
@@ -85,12 +85,12 @@ pub struct RecoveryEvent {
 
 impl RecoveryEvent {
     #[must_use]
-    pub fn header(&self) -> &RecoveryEventHeader {
+    pub const fn header(&self) -> &RecoveryEventHeader {
         &self.header
     }
 
     #[must_use]
-    pub fn payload(&self) -> Option<&CanonicalBytes> {
+    pub const fn payload(&self) -> Option<&CanonicalBytes> {
         self.payload.as_ref()
     }
 }
@@ -158,12 +158,12 @@ pub struct ProjectionKey(EntityId);
 
 impl ProjectionKey {
     #[must_use]
-    pub fn new(entity: EntityId) -> Self {
+    pub const fn new(entity: EntityId) -> Self {
         Self(entity)
     }
 
     #[must_use]
-    pub fn entity_id(&self) -> &EntityId {
+    pub const fn entity_id(&self) -> &EntityId {
         &self.0
     }
 }
@@ -312,7 +312,7 @@ pub struct ObservationView<'a> {
 
 impl ObservationView<'_> {
     #[must_use]
-    pub fn empty() -> Self {
+    pub const fn empty() -> Self {
         Self {
             snapshot: None,
             direct_anchor: None,
@@ -347,7 +347,7 @@ impl ObservationView<'_> {
     }
 
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.len
     }
 
@@ -369,7 +369,7 @@ impl<'a> ObservationView<'a> {
     ///
     /// Primarily for tests and drivers that only need to fold incoming events.
     #[must_use]
-    pub fn from_events(events: &'a [Event]) -> Self {
+    pub const fn from_events(events: &'a [Event]) -> Self {
         Self {
             snapshot: None,
             direct_anchor: None,
@@ -381,12 +381,12 @@ impl<'a> ObservationView<'a> {
 
 impl StepOutput {
     #[must_use]
-    pub fn new(drafts: Vec<EventDraft>) -> Self {
+    pub const fn new(drafts: Vec<EventDraft>) -> Self {
         Self { drafts }
     }
 
     #[must_use]
-    pub fn empty() -> Self {
+    pub const fn empty() -> Self {
         Self { drafts: Vec::new() }
     }
 }

@@ -153,6 +153,7 @@ pub fn is_valid_osf_link(link: &str) -> bool {
 
 /// Field validation shared by [`NewPrediction`] and [`LedgerPrediction`]
 /// (the OSF link is *not* checked here — read-side exclusion handles it).
+#[allow(clippy::redundant_pub_crate)]
 pub(crate) fn validate_fields(
     title: &str,
     statement: &str,
@@ -200,6 +201,7 @@ pub(crate) fn validate_fields(
 }
 
 /// Validate the payload-specific fields of a [`LedgerPrediction`].
+#[allow(clippy::redundant_pub_crate)]
 pub(crate) fn validate_prediction(prediction: &LedgerPrediction) -> Result<(), LedgerError> {
     if ulid::Ulid::from_string(&prediction.prediction_id).is_err() {
         return Err(LedgerError::InvalidPrediction(format!(
@@ -218,7 +220,7 @@ pub(crate) fn validate_prediction(prediction: &LedgerPrediction) -> Result<(), L
 }
 
 /// Result of checking a prediction's resolve preconditions.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResolveStatus {
     /// Whether a prediction with the given id exists.
     pub found_prediction: bool,

@@ -35,6 +35,7 @@ pub(crate) async fn post_owntracks(gateway: Gateway, headers: HeaderMap, body: B
             return error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_location");
         }
     };
+    drop(bytes);
     match gateway
         .admit_owntracks_ingress(handle, secret, payload)
         .await

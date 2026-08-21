@@ -2,8 +2,8 @@
 //!
 //! The kernel composes the existing Tick Boundary host with the versioned
 //! World plugin and two deliberately small, swappable proof Plugins. It is an
-//! engineering evaluator for the user-parameterized Scenario Room proof
-//! contract; the public Gateway/client contract remains a Wave 9 concern.
+//! engineering evaluator for the user-parameterized Wave 8 fixture contract;
+//! the public Gateway/client Scenario Room contract remains a Wave 9 concern.
 
 use crate::{Experiment, ExperimentConfig, ExperimentError, ExperimentSession, StopCondition};
 use pos_conformance::{
@@ -34,6 +34,9 @@ const AGENT_EVENT_TYPE: &str = "proof.agent.reaction.v1";
 const AGENT_ENTITY_KIND: &str = "proof-agent";
 const SOCIETY_ENTITY_KIND: &str = "proof-society";
 const WORLD_BACKEND_CONTENT: &[u8] = b"PiglorOS.WorldBackend.simple-kinematic.v1";
+const EXECUTION_PROFILE_CONTENT: &[u8] = b"PiglorOS.ExecutionProfile.deterministic-v1";
+const TRUST_POLICY_CONTENT: &[u8] = b"PiglorOS.TrustPolicySnapshot.wave8-v1";
+const EVALUATOR_CONTENT: &[u8] = b"PiglorOS.Evaluator.pos-reference-json-v1";
 
 /// Result of one Local or Air-Gapped proof execution.
 #[derive(Debug)]
@@ -107,8 +110,12 @@ impl MoatProofRun {
         mode: ExecutionModeV1,
     ) -> Result<Self, pos_conformance::InputError> {
         input.validate()?;
-        if matches!(mode, ExecutionModeV1::AirGapped) && input.network_enabled {
-            return Err(pos_conformance::InputError::NetworkNotAllowedInAirGapped);
+        if input.network_enabled {
+            return Err(if matches!(mode, ExecutionModeV1::AirGapped) {
+                pos_conformance::InputError::NetworkNotAllowedInAirGapped
+            } else {
+                pos_conformance::InputError::NetworkNotAllowedInDeterministicProfile
+            });
         }
         Ok(Self { input, mode })
     }
@@ -123,6 +130,7 @@ impl MoatProofRun {
         let failure_probes = failure_probes(input.resource_limit)?;
         let consent_audit = consent_probe()?;
         let topology = ProofTopology::new(input.clone());
+        let plugin_versions = plugin_versions(&topology)?;
         let factory_topology = topology.clone();
         let registry_factory = move || build_registry(&factory_topology);
         let mut experiment = Experiment::new(ExperimentConfig {
@@ -156,6 +164,7 @@ impl MoatProofRun {
             events: baseline_events.as_slice(),
             projections: parent.projections()?,
             topology: &topology,
+            plugin_versions: &plugin_versions,
             failure_probes: &failure_probes,
             consent_audit: &consent_audit,
         });
@@ -166,6 +175,7 @@ impl MoatProofRun {
             events: counterfactual_events.as_slice(),
             projections: child.projections()?,
             topology: &topology,
+            plugin_versions: &plugin_versions,
             failure_probes: &failure_probes,
             consent_audit: &consent_audit,
         });
@@ -292,7 +302,7 @@ fn fixed_id(value: u128) -> EntityId {
 
 fn room_entity(input: &MoatProofInputV1, slot: u8) -> EntityId {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"pigloros.wave8.scenario-room.entity.v1");
+    hasher.update(b"pigloros.wave8.fixture.entity.v1");
     hasher.update(&input.digest());
     hasher.update(&[slot]);
     let digest = hasher.finalize();
@@ -466,6 +476,7 @@ struct EvidenceContext<'a> {
     events: &'a [Event],
     projections: &'a pos_state::ProjectionRegistry,
     topology: &'a ProofTopology,
+    plugin_versions: &'a BTreeMap<String, String>,
     failure_probes: &'a [PluginFailureV1],
     consent_audit: &'a ConsentAuditV1,
 }
@@ -477,6 +488,7 @@ fn evidence(context: &EvidenceContext<'_>) -> MoatProofEvidenceV1 {
     let events = context.events;
     let projections = context.projections;
     let topology = context.topology;
+    let plugin_versions = context.plugin_versions;
     let failure_probes = context.failure_probes;
     let consent_audit = context.consent_audit;
     let mut ids = HashMap::<EventId, u64>::new();
@@ -541,19 +553,15 @@ fn evidence(context: &EvidenceContext<'_>) -> MoatProofEvidenceV1 {
             network_enabled: input.network_enabled,
             reproducibility_class: ReproducibilityClassV1::ProfileRecomputation,
             execution_profile: "deterministic-v1".to_owned(),
-            execution_profile_digest: profile_digest(input),
+            execution_profile_digest: profile_digest(),
             trust_policy_snapshot_digest: digest_domain(
                 b"PiglorOS.TrustPolicySnapshot.v1",
-                &input.digest(),
+                TRUST_POLICY_CONTENT,
             ),
             artifact_closure_digest: artifact_closure_digest(topology),
-            evaluator_digest: digest_domain(b"PiglorOS.Evaluator.v1", b"pos-reference-json-v1"),
+            evaluator_digest: digest_domain(b"PiglorOS.Evaluator.v1", EVALUATOR_CONTENT),
             replay_claim: ReplayClaimV1::Exact,
-            plugin_versions: BTreeMap::from([
-                ("world".to_owned(), "1.0.0".to_owned()),
-                ("proof-agent".to_owned(), "1.0.0".to_owned()),
-                ("society".to_owned(), "1.0.0".to_owned()),
-            ]),
+            plugin_versions: plugin_versions.clone(),
         },
         authoritative_events,
         projections: projection_evidence,
@@ -639,11 +647,8 @@ fn digest_domain(domain: &[u8], input: &[u8]) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-fn profile_digest(input: &MoatProofInputV1) -> [u8; 32] {
-    digest_domain(
-        b"PiglorOS.ExecutionProfile.deterministic-v1",
-        &input.digest(),
-    )
+fn profile_digest() -> [u8; 32] {
+    digest_domain(EXECUTION_PROFILE_CONTENT, b"profile-v1")
 }
 
 fn artifact_closure_digest(topology: &ProofTopology) -> [u8; 32] {
@@ -660,7 +665,19 @@ fn artifact_closure_digest(topology: &ProofTopology) -> [u8; 32] {
     }
     bytes.extend_from_slice(&topology.input.digest());
     bytes.extend_from_slice(blake3::hash(WORLD_BACKEND_CONTENT).as_bytes());
+    bytes.extend_from_slice(blake3::hash(EXECUTION_PROFILE_CONTENT).as_bytes());
+    bytes.extend_from_slice(blake3::hash(TRUST_POLICY_CONTENT).as_bytes());
+    bytes.extend_from_slice(blake3::hash(EVALUATOR_CONTENT).as_bytes());
     digest_domain(b"PiglorOS.ArtifactClosure.v1", &bytes)
+}
+
+fn plugin_versions(topology: &ProofTopology) -> Result<BTreeMap<String, String>, RuntimeError> {
+    build_registry(topology).map(|registry| {
+        registry
+            .plugin_versions()
+            .map(|(name, version)| (name.to_owned(), version.to_owned()))
+            .collect()
+    })
 }
 
 fn uncertainty_from_events(events: &[Event]) -> Vec<UncertaintyV1> {
@@ -907,19 +924,11 @@ impl Driver for FailureProbeDriver {
     ) -> Result<StepOutput, RuntimeError> {
         assert!(self.class != "plugin_crash", "proof crash probe");
         if self.class == "resource_exhaustion" {
-            let count =
-                usize::try_from(self.resource_limit.saturating_add(1)).unwrap_or(usize::MAX);
-            return Ok(StepOutput::new(
-                (0..count)
-                    .map(|_| {
-                        EventDraft::new(
-                            fixed_id(6),
-                            Kind::new("proof.failure.probe"),
-                            CanonicalBytes::from_static(b"budget"),
-                        )
-                    })
-                    .collect(),
-            ));
+            return Err(RuntimeError::ResourceExhausted {
+                driver: "failure-probe-driver".to_owned(),
+                requested: self.resource_limit.saturating_add(1),
+                limit: self.resource_limit,
+            });
         }
         Err(RuntimeError::InvalidPayload {
             event_type: "proof.failure.probe".to_owned(),

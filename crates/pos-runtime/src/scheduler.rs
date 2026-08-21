@@ -13,7 +13,7 @@ pub struct TickScheduler {
 
 impl TickScheduler {
     #[must_use]
-    pub fn new(registry: PluginRegistry) -> Self {
+    pub const fn new(registry: PluginRegistry) -> Self {
         Self { registry }
     }
 

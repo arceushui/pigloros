@@ -411,7 +411,7 @@ struct TimelineState {
 }
 
 impl TimelineState {
-    fn new(timeline: Timeline, chain_head: Hash) -> Self {
+    const fn new(timeline: Timeline, chain_head: Hash) -> Self {
         Self {
             timeline,
             events: Vec::new(),
@@ -540,10 +540,11 @@ impl MemoryStore {
     }
 
     fn timeline(&self, id: TimelineId) -> Result<&Timeline, CoreError> {
-        match self.timelines.get(&id) {
-            Some(state) => Ok(&state.timeline),
-            None => Err(CoreError::TimelineNotFound(id)),
-        }
+        self.timelines
+            .get(&id)
+            .map_or(Err(CoreError::TimelineNotFound(id)), |state| {
+                Ok(&state.timeline)
+            })
     }
 
     fn logical_prefix(&self, timeline: TimelineId) -> Result<u64, CoreError> {
@@ -1333,7 +1334,7 @@ impl GeographicAdmissionStore for MemoryStore {
         let link = GeographicCellLink {
             snapshot_id: snapshot_id.clone(),
             snapshot_hash,
-            snapshot_cbor: snapshot_cbor.clone(),
+            snapshot_cbor,
         };
         if event.event_type.as_str() != pos_core::GEOGRAPHIC_CELL_EVENT_TYPE
             || event.schema_version != pos_core::SchemaVersion::V1
@@ -1381,8 +1382,9 @@ impl MemoryStore {
             .events
             .iter()
             .find(|event| event.id == record.event_id)?;
+        let record_event_seq = record.event_seq;
         if event.entity != record.entity
-            || event.seq != record.event_seq
+            || event.seq != record_event_seq
             || event.event_type.as_str() != pos_core::GEOGRAPHIC_CELL_EVENT_TYPE
             || event.schema_version != pos_core::SchemaVersion::V1
             || self.hasher.hash_payload(&event.payload) != event.payload_hash
@@ -1464,7 +1466,8 @@ impl GeographicReplayVerifier for MemoryStore {
             return fail();
         };
         let snapshot_cbor = snapshot.canonical_bytes();
-        if snapshot.hash() != evidence.snapshot_hash()
+        let evidence_snapshot_hash = evidence.snapshot_hash();
+        if snapshot.hash() != evidence_snapshot_hash
             || snapshot.event_id() != evidence.event_id()
             || snapshot.event_seq() != evidence.event_seq()
             || snapshot.timeline() != evidence.timeline()
@@ -1535,8 +1538,9 @@ impl EventStore for MemoryStore {
                     .meta
                     .fork_point
                     .map_or(0, |(_, fork)| fork.as_u64());
-                let batch_len = u64::try_from(drafts.len())
-                    .expect("slice length fits in u64 on supported targets");
+                let batch_len = u64::try_from(drafts.len()).map_err(|_| {
+                    CoreError::Storage("draft batch length does not fit in u64".to_owned())
+                })?;
                 if let Some(next_head) =
                     crate::bounded_owned_head(owned_head, batch_len, max_owned_events)?
                 {
@@ -1691,13 +1695,10 @@ impl EventStore for MemoryStore {
     }
 
     fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
-        match self.timelines.get(&id) {
-            Some(state) => {
-                crate::generic_timeline_is_visible(Ok(self.geographic_timelines.contains(&id)))
-                    .map(|visible| visible.then(|| state.timeline.clone()))
-            }
-            None => Ok(None),
-        }
+        self.timelines.get(&id).map_or(Ok(None), |state| {
+            crate::generic_timeline_is_visible(Ok(self.geographic_timelines.contains(&id)))
+                .map(|visible| visible.then(|| state.timeline.clone()))
+        })
     }
 
     fn logical_head(&self, id: TimelineId) -> Result<Seq, CoreError> {

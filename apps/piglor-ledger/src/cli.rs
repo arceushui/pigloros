@@ -510,7 +510,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn keygen_accepts_relative_path_in_private_directory() {
-        let key_path = PathBuf::from(format!(".keygen-relative-{}.key", ulid::Ulid::gen()));
+        let key_path = PathBuf::from(format!(".keygen-relative-{}.key", ulid::Ulid::r#gen()));
 
         run_keygen(&key_path).unwrap();
 

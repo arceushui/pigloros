@@ -175,7 +175,7 @@ impl Plugin for SocietyPlugin {
 #[must_use]
 pub fn draft_signal(entity: EntityId, signal: &SocietySignal) -> EventDraft {
     let mut buf = Vec::new();
-    ciborium::into_writer(signal, &mut buf).expect("ciborium write to Vec<u8> is infallible");
+    assert!(ciborium::into_writer(signal, &mut buf).is_ok());
     EventDraft::new(
         entity,
         Kind::new(EVENT_TYPE_SIGNAL),

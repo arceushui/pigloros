@@ -9,6 +9,7 @@
 //! rapier is deferred to Wave 6 when we need 3D physics).
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
+use num_traits::ToPrimitive;
 use pos_core::{
     event::{CanonicalBytes, Event, Kind},
     ids::{EntityId, EventId, PluginId, TimelineId},
@@ -60,14 +61,14 @@ const ACTION_KIND_IMPULSE: &str = "impulse";
 const ACTION_KIND_TARGET_VELOCITY: &str = "target_velocity";
 
 /// The set of allowed actuator action kinds in v1 (ADR-047 section1).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionKindV1 {
     Impulse,
     TargetVelocity,
 }
 
 impl ActionKindV1 {
-    fn as_str(&self) -> &str {
+    const fn as_str(&self) -> &str {
         match self {
             Self::Impulse => ACTION_KIND_IMPULSE,
             Self::TargetVelocity => ACTION_KIND_TARGET_VELOCITY,
@@ -85,7 +86,7 @@ impl ActionKindV1 {
 
 /// Sensor kinds emitted in `world.observation.v1` (ADR-047 section 4, first slice).
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SensorKindV1 {
     Proximity = 0,
     ContactCount = 1,
@@ -93,13 +94,13 @@ pub enum SensorKindV1 {
 
 impl SensorKindV1 {
     #[must_use]
-    pub fn as_u8(self) -> u8 {
+    pub const fn as_u8(self) -> u8 {
         self as u8
     }
 }
 
 /// Errors returned by world CBOR codec encode/decode operations.
-#[derive(Debug, PartialEq, thiserror::Error)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum WorldCodecError {
     #[error("wrong magic bytes")]
     WrongMagic,
@@ -206,7 +207,10 @@ fn decode_u64(val: &ciborium::Value) -> Result<u64, WorldCodecError> {
 fn decode_id(val: &ciborium::Value) -> Result<EntityId, WorldCodecError> {
     match val {
         ciborium::Value::Bytes(b) if b.len() == 16 => {
-            let arr: [u8; 16] = b.as_slice().try_into().unwrap();
+            let arr: [u8; 16] = b
+                .as_slice()
+                .try_into()
+                .map_err(|_| WorldCodecError::WrongFieldType)?;
             let n = u128::from_be_bytes(arr);
             Ok(EntityId::from_ulid(ulid::Ulid::from(n)))
         }
@@ -216,7 +220,10 @@ fn decode_id(val: &ciborium::Value) -> Result<EntityId, WorldCodecError> {
 
 fn decode_bytes_fixed<const N: usize>(val: &ciborium::Value) -> Result<[u8; N], WorldCodecError> {
     match val {
-        ciborium::Value::Bytes(b) if b.len() == N => Ok(b.as_slice().try_into().unwrap()),
+        ciborium::Value::Bytes(b) if b.len() == N => b
+            .as_slice()
+            .try_into()
+            .map_err(|_| WorldCodecError::WrongFieldType),
         _ => Err(WorldCodecError::WrongFieldType),
     }
 }
@@ -245,7 +252,7 @@ fn decode_u16(val: &ciborium::Value) -> Result<u16, WorldCodecError> {
 
 fn cbor_encode(value: &ciborium::Value) -> Vec<u8> {
     let mut buf = Vec::new();
-    ciborium::into_writer(value, &mut buf).expect("Vec<u8> write is infallible");
+    assert!(ciborium::into_writer(value, &mut buf).is_ok());
     buf
 }
 
@@ -277,7 +284,7 @@ fn cbor_f32(v: f32) -> Result<ciborium::Value, WorldCodecError> {
     Ok(ciborium::Value::Float(f64::from(v)))
 }
 
-fn decode_finite_f32(val: &ciborium::Value) -> Result<f32, WorldCodecError> {
+const fn decode_finite_f32(val: &ciborium::Value) -> Result<f32, WorldCodecError> {
     match val {
         ciborium::Value::Float(f) => {
             #[allow(clippy::cast_possible_truncation)]
@@ -314,7 +321,7 @@ fn decode_tstr(val: &ciborium::Value) -> Result<String, WorldCodecError> {
 ///   action_kind_tstr, params_cbor_bstr, action_scope_u8, catalogue_version_u32, tick_u64]`
 ///
 /// Max total encoded size: 4,096 bytes. `action_scope` must be `ACTION_SCOPE_SINGLE_BODY` in v1.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorldActionV1 {
     pub actor_entity_id: EntityId,
     pub body_entity_id: EntityId,
@@ -667,7 +674,7 @@ pub trait WorldBackend: Send + Sync {
     fn name(&self) -> &'static str;
 
     /// Simulate one step and return observations for all bodies.
-    fn step(&mut self, bodies: &[Body]) -> Vec<WorldObservation>;
+    fn step(&self, bodies: &[Body]) -> Vec<WorldObservation>;
 }
 
 /// A body in the world.
@@ -772,7 +779,7 @@ impl SimpleKinematicBackend {
     /// Returns [`WorldTransformError::NonFiniteCoordinate`] when a velocity
     /// component or translated coordinate is not finite.
     pub fn step_coordinates(
-        &mut self,
+        &self,
         bodies: &[WorldCoordinateBody],
     ) -> Result<Vec<WorldCoordinateObservation>, WorldTransformError> {
         bodies
@@ -797,7 +804,7 @@ impl WorldBackend for SimpleKinematicBackend {
         "simple-kinematic"
     }
 
-    fn step(&mut self, bodies: &[Body]) -> Vec<WorldObservation> {
+    fn step(&self, bodies: &[Body]) -> Vec<WorldObservation> {
         bodies
             .iter()
             .map(|body| WorldObservation {
@@ -814,7 +821,7 @@ impl WorldBackend for SimpleKinematicBackend {
 // ---------------------------------------------------------------------------
 
 /// A structured world action payload (ADR-047 / ADR-057).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorldAction {
     pub actor_entity_id: EntityId,
     pub body_entity_id: EntityId,
@@ -1134,6 +1141,13 @@ impl WorldDriver {
         (raw / r).round() * r
     }
 
+    fn checked_f32(value: f64, axis: &'static str) -> Result<f32, RuntimeError> {
+        value.to_f32().ok_or_else(|| RuntimeError::InvalidPayload {
+            event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
+            reason: format!("backend produced a non-representable {axis} coordinate"),
+        })
+    }
+
     fn config_draft(&mut self) -> Result<Option<pos_core::event::EventDraft>, RuntimeError> {
         if self.config_emitted {
             return Ok(None);
@@ -1194,17 +1208,16 @@ impl WorldDriver {
         observations
             .iter()
             .map(|observation| {
-                #[allow(clippy::cast_possible_truncation)]
                 let value = WorldObservationV1 {
                     body_entity_id: observation.entity_id,
                     tick: self.tick,
                     step_index: self.step_index,
                     pos_x: Self::quantize_sensor(
-                        observation.x as f32,
+                        Self::checked_f32(observation.x, "x")?,
                         self.config.sensor_min_resolution_mm,
                     ),
                     pos_y: Self::quantize_sensor(
-                        observation.y as f32,
+                        Self::checked_f32(observation.y, "y")?,
                         self.config.sensor_min_resolution_mm,
                     ),
                     pos_z: 0.0,
@@ -1621,7 +1634,7 @@ mod tests {
             "non-finite-test-backend"
         }
 
-        fn step(&mut self, bodies: &[Body]) -> Vec<WorldObservation> {
+        fn step(&self, bodies: &[Body]) -> Vec<WorldObservation> {
             bodies
                 .iter()
                 .map(|body| WorldObservation {
@@ -2507,7 +2520,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn simple_kinematic_backend_step_moves_bodies() {
-        let mut backend = SimpleKinematicBackend::new();
+        let backend = SimpleKinematicBackend::new();
         let entity = EntityId::new();
         let bodies = vec![Body {
             entity_id: entity,
@@ -2527,7 +2540,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn simple_kinematic_backend_step_multiple_bodies() {
-        let mut backend = SimpleKinematicBackend::new();
+        let backend = SimpleKinematicBackend::new();
         let entity1 = EntityId::new();
         let entity2 = EntityId::new();
         let bodies = vec![
@@ -2583,7 +2596,7 @@ mod tests {
         assert!((body.position().north_metres() - position.north_metres()).abs() < f64::EPSILON);
         assert!((body.position().up_metres() - position.up_metres()).abs() < f64::EPSILON);
 
-        let mut backend = SimpleKinematicBackend::new();
+        let backend = SimpleKinematicBackend::new();
         let observations = backend
             .step_coordinates(&[body])
             .expect("named coordinate step is finite");
@@ -2628,7 +2641,7 @@ mod tests {
             )
             .expect("fixture position is in range");
         let body = WorldCoordinateBody::new(EntityId::new(), position, f64::INFINITY, 0.0, 0.0);
-        let mut backend = SimpleKinematicBackend::new();
+        let backend = SimpleKinematicBackend::new();
 
         assert!(matches!(
             backend.step_coordinates(&[body]),
@@ -2735,7 +2748,7 @@ mod tests {
             "unknown-entity"
         }
 
-        fn step(&mut self, _bodies: &[Body]) -> Vec<WorldObservation> {
+        fn step(&self, _bodies: &[Body]) -> Vec<WorldObservation> {
             vec![WorldObservation {
                 entity_id: EntityId::new(),
                 x: 9.0,
@@ -2754,7 +2767,7 @@ mod tests {
             "mixed-entity"
         }
 
-        fn step(&mut self, bodies: &[Body]) -> Vec<WorldObservation> {
+        fn step(&self, bodies: &[Body]) -> Vec<WorldObservation> {
             let mut out: Vec<WorldObservation> = bodies
                 .iter()
                 .map(|body| WorldObservation {
@@ -2947,7 +2960,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn backend_step_with_zero_velocity() {
-        let mut backend = SimpleKinematicBackend::new();
+        let backend = SimpleKinematicBackend::new();
         let entity = EntityId::new();
         let bodies = vec![Body {
             entity_id: entity,
@@ -2966,7 +2979,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn backend_step_with_negative_velocity() {
-        let mut backend = SimpleKinematicBackend::new();
+        let backend = SimpleKinematicBackend::new();
         let entity = EntityId::new();
         let bodies = vec![Body {
             entity_id: entity,

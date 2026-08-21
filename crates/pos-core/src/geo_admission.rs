@@ -30,7 +30,7 @@ pub struct GeoLocationAdmissionInputV1 {
 impl GeoLocationAdmissionInputV1 {
     /// Create the bounded input captured by the gateway before storage begins.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         timeline: TimelineId,
         entity: EntityId,
         payload: CanonicalBytes,
@@ -122,7 +122,7 @@ pub struct GeoLocationAdmissionFenceV1 {
 impl GeoLocationAdmissionFenceV1 {
     /// Create current core-owned state for a trusted composition root.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         binding_revision: u64,
         consent: ([u8; 32], u64, [u8; 32]),
         policy: (u32, bool, u64),
@@ -184,7 +184,7 @@ impl GeoLocationAdmissionSnapshotV1 {
 
     fn deterministic_cbor(&self) -> CanonicalBytes {
         let mut bytes = Vec::new();
-        ciborium::into_writer(
+        let result = ciborium::into_writer(
             &(
                 self.timeline,
                 self.entity,
@@ -197,8 +197,11 @@ impl GeoLocationAdmissionSnapshotV1 {
                 self.consent.admission_epoch,
             ),
             &mut bytes,
-        )
-        .expect("writing deterministic CBOR to a Vec cannot fail");
+        );
+        assert!(
+            result.is_ok(),
+            "writing deterministic CBOR to a Vec cannot fail"
+        );
         CanonicalBytes::from_vec(bytes)
     }
 
@@ -612,7 +615,7 @@ impl GeoLocationAdmissionOutcome {
     }
 
     #[must_use]
-    pub fn error(&self) -> Option<CoreError> {
+    pub const fn error(&self) -> Option<CoreError> {
         match self.kind {
             GeoLocationAdmissionOutcomeKind::Accepted
             | GeoLocationAdmissionOutcomeKind::Duplicate

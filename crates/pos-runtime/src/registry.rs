@@ -90,16 +90,15 @@ fn validate_recovery_evidence(
 }
 
 fn reject_geographic_drafts(output: &StepOutput) -> Result<(), RuntimeError> {
-    match output
+    output
         .drafts
         .iter()
         .find(|draft| pos_core::is_geographic_event_type(&draft.event_type))
-    {
-        Some(draft) => Err(RuntimeError::GeographicDraft {
-            event_type: draft.event_type.as_str().to_owned(),
-        }),
-        None => Ok(()),
-    }
+        .map_or(Ok(()), |draft| {
+            Err(RuntimeError::GeographicDraft {
+                event_type: draft.event_type.as_str().to_owned(),
+            })
+        })
 }
 
 fn invoke_driver(
@@ -150,6 +149,7 @@ pub struct PluginRegistry {
     pending_step: Option<PendingStep>,
     run_mode: RunMode,
     resource_limit: Option<u64>,
+    poisoned_driver: Option<String>,
 }
 
 impl PluginRegistry {
@@ -241,31 +241,33 @@ impl PluginRegistry {
             pending_step: None,
             run_mode,
             resource_limit: None,
+            poisoned_driver: None,
         }
     }
 
     /// Bound the number of Event drafts one atomic Tick may stage.
     #[must_use]
-    pub fn with_resource_limit(mut self, limit: u64) -> Self {
+    pub const fn with_resource_limit(mut self, limit: u64) -> Self {
         self.resource_limit = Some(limit);
         self
     }
 
     fn reject_unanchored_drivers(&self) -> Result<(), RuntimeError> {
-        match self
-            .plugins
+        self.plugins
             .values()
             .filter_map(|entry| entry.driver.as_deref())
             .find(|driver| driver.requires_snapshot_anchor())
-        {
-            Some(driver) => Err(RuntimeError::MissingSnapshotAnchor {
-                driver: driver.name().to_owned(),
-            }),
-            None => Ok(()),
-        }
+            .map_or(Ok(()), |driver| {
+                Err(RuntimeError::MissingSnapshotAnchor {
+                    driver: driver.name().to_owned(),
+                })
+            })
     }
 
     fn ensure_no_pending_step(&self) -> Result<(), RuntimeError> {
+        if let Some(name) = &self.poisoned_driver {
+            return Err(RuntimeError::DriverCommitPanicked { name: name.clone() });
+        }
         if self.pending_step.is_some() {
             Err(RuntimeError::PendingDriverStep)
         } else {
@@ -285,11 +287,39 @@ impl PluginRegistry {
                 if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| driver.abort_step()))
                     .is_err()
                 {
+                    self.poisoned_driver = Some(name.clone());
                     first_error.get_or_insert(RuntimeError::DriverAbortPanicked { name });
                 }
             }
         }
         first_error
+    }
+
+    fn invoke_selected_driver(
+        &mut self,
+        id: PluginId,
+        timeline: pos_core::ids::TimelineId,
+        snapshot: &ObservationSnapshot,
+        committed_events: &[Event],
+    ) -> Result<StepOutput, RuntimeError> {
+        let Some(entry) = self.plugins.get_mut(&id) else {
+            return Err(RuntimeError::NoDriver {
+                name: id.to_string(),
+            });
+        };
+        let Some(driver) = entry.driver.as_mut() else {
+            return Err(RuntimeError::NoDriver {
+                name: entry.name.clone(),
+            });
+        };
+        let observations = snapshot.view_for_events_after(
+            driver.subscriptions(),
+            committed_events,
+            driver.event_subscriptions(),
+            entry.event_cursor,
+        );
+        invoke_driver(driver.as_mut(), timeline, observations)
+            .and_then(|output| reject_geographic_drafts(&output).map(|()| output))
     }
 
     fn step_anchored_transaction(
@@ -350,24 +380,7 @@ impl PluginRegistry {
         let mut all_drafts = Vec::new();
         let mut staged_driver_ids = Vec::new();
         for id in driver_ids {
-            let result = {
-                let entry = self
-                    .plugins
-                    .get_mut(&id)
-                    .expect("selected IDs refer to registered entries");
-                let driver = entry
-                    .driver
-                    .as_mut()
-                    .expect("selected IDs refer to registered drivers");
-                let observations = snapshot.view_for_events_after(
-                    driver.subscriptions(),
-                    committed_events,
-                    driver.event_subscriptions(),
-                    entry.event_cursor,
-                );
-                invoke_driver(driver.as_mut(), timeline, observations)
-                    .and_then(|output| reject_geographic_drafts(&output).map(|()| output))
-            };
+            let result = self.invoke_selected_driver(id, timeline, &snapshot, committed_events);
             match result {
                 Ok(output) => {
                     let requested = u64::try_from(all_drafts.len())
@@ -415,7 +428,12 @@ impl PluginRegistry {
                 .get_mut(id)
                 .and_then(|entry| entry.driver.as_mut())
             {
-                driver.commit_step();
+                let name = driver.name().to_owned();
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| driver.commit_step()))
+                    .is_err()
+                {
+                    self.poisoned_driver = Some(name);
+                }
             }
         }
         for (id, now_ns) in pending.cadence_updates {
@@ -485,7 +503,15 @@ impl PluginRegistry {
                 .get_mut(&id)
                 .and_then(|entry| entry.driver.as_mut())
             {
-                driver.commit_restore_from_history();
+                let name = driver.name().to_owned();
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    driver.commit_restore_from_history();
+                }))
+                .is_err()
+                {
+                    self.poisoned_driver = Some(name.clone());
+                    return Err(RuntimeError::DriverRestorePanicked { name });
+                }
             }
             if let Some(entry) = self.plugins.get_mut(&id) {
                 entry.event_cursor = events.last().map_or(Seq::ZERO, |event| event.seq);
@@ -773,10 +799,11 @@ impl PluginRegistry {
         let snapshot = self.snapshot_for_subscriptions(due_subscriptions.iter());
         for (id, entry) in &mut self.plugins {
             if due_driver_ids.remove(id) {
-                let driver = entry
-                    .driver
-                    .as_mut()
-                    .expect("due IDs are collected only from registered drivers");
+                let Some(driver) = entry.driver.as_mut() else {
+                    return Err(RuntimeError::NoDriver {
+                        name: entry.name.clone(),
+                    });
+                };
                 let observations = snapshot.view_for(driver.subscriptions());
                 let output = invoke_driver(driver.as_mut(), timeline, observations)?;
                 reject_geographic_drafts(&output)?;
@@ -1133,8 +1160,7 @@ mod tests {
         registry.abort_step();
         assert!(registry
             .step_all_anchored(TimelineId::new(), Seq::ZERO)
-            .is_ok());
-        registry.abort_step();
+            .is_err());
     }
 
     #[test]

@@ -35,9 +35,9 @@
 mod entry;
 mod event_store;
 mod ledger;
-mod payload;
+pub(crate) mod payload;
 mod plugin;
-mod store;
+pub(crate) mod store;
 mod toml_store;
 
 pub use entry::{LedgerEntry, LedgerEntryView, LedgerView, Status};

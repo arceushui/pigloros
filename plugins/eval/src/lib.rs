@@ -91,7 +91,7 @@ pub fn draft_prediction(
         prediction_id: prediction_id.to_owned(),
     };
     let mut buf = Vec::new();
-    ciborium::into_writer(&payload, &mut buf).expect("CBOR encoding infallible for payload");
+    assert!(ciborium::into_writer(&payload, &mut buf).is_ok());
     EventDraft::new(
         entity,
         Kind::new(EVENT_TYPE_PREDICTION),
@@ -116,7 +116,7 @@ pub fn draft_outcome(
         outcome,
     };
     let mut buf = Vec::new();
-    ciborium::into_writer(&payload, &mut buf).expect("CBOR encoding infallible for payload");
+    assert!(ciborium::into_writer(&payload, &mut buf).is_ok());
     EventDraft::new(
         entity,
         Kind::new(EVENT_TYPE_OUTCOME),

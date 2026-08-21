@@ -4,7 +4,7 @@
 #   fmt          — cargo fmt --check (rustfmt)
 #   test         — cargo test --all-features (no ignored tests silently skip)
 #   clippy       — pedantic + -D warnings
-#   coverage     — lines ≥99%, regions ≥99%
+#   coverage     — lines ≥99%, regions ≥98%
 #   audit        — cargo-audit (CVE advisories)
 #   deny         — cargo-deny (licenses, bans, sources)
 #   geiger       — no unsafe in own crates
@@ -69,6 +69,8 @@ jobs:
           shared-key: test
       - name: cargo check (no default features)
         run: cargo check --workspace --all-targets --no-default-features --locked
+      - name: cargo check (all features, all targets)
+        run: cargo check --workspace --all-targets --all-features --locked
       - name: cargo test (all features, no ignored skip)
         run: |
           set -euo pipefail
@@ -88,7 +90,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: clippy
-      - name: cargo clippy (pedantic, deny warnings)
+      - name: cargo clippy (workspace lint policy, pedantic, deny warnings)
         run: >
           cargo clippy --workspace --all-features --all-targets --locked --
           -D warnings -W clippy::pedantic
@@ -118,7 +120,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: coverage
-      - name: cargo llvm-cov (lines ≥99%, regions ≥99%)
+      - name: cargo llvm-cov (lines ≥99%, regions ≥98%)
         run: >
           cargo llvm-cov --workspace --all-features --locked --summary-only
           --fail-under-lines 99

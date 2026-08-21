@@ -56,11 +56,11 @@ impl Signature {
 mod bytes_32 {
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub(crate) fn serialize<S: Serializer>(b: &[u8; 32], s: S) -> Result<S::Ok, S::Error> {
+    pub(super) fn serialize<S: Serializer>(b: &[u8; 32], s: S) -> Result<S::Ok, S::Error> {
         s.serialize_bytes(b)
     }
 
-    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 32], D::Error> {
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 32], D::Error> {
         let v = serde_bytes::ByteBuf::deserialize(d)?;
         v.into_vec()
             .try_into()
@@ -71,11 +71,11 @@ mod bytes_32 {
 mod bytes_64 {
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub(crate) fn serialize<S: Serializer>(b: &[u8; 64], s: S) -> Result<S::Ok, S::Error> {
+    pub(super) fn serialize<S: Serializer>(b: &[u8; 64], s: S) -> Result<S::Ok, S::Error> {
         s.serialize_bytes(b)
     }
 
-    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 64], D::Error> {
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 64], D::Error> {
         serde_bytes::ByteBuf::deserialize(d).and_then(|v| {
             v.into_vec()
                 .try_into()

@@ -41,7 +41,7 @@ const OWNTRACKS_RATE_KEYS_MAXIMUM: usize = 64;
 const OWNTRACKS_RATE_STATE_TTL: Duration = Duration::from_mins(15);
 
 macro_rules! submit {
-    ($executor:expr, $build:expr) => {{
+    ($executor:expr_2021, $build:expr_2021) => {{
         let deadline = Instant::now() + $executor.command_deadline();
         let lifecycle = Arc::new(CommandLifecycle::new());
         let (reply, result) = oneshot::channel();
@@ -645,7 +645,7 @@ impl StoreExecutor {
                 Ok(ordinal) => *ordinal,
                 Err(poisoned) => *poisoned.into_inner(),
             };
-            match self.control.tx.try_send(CommandEnvelope {
+            let send_result = self.control.tx.try_send(CommandEnvelope {
                 deadline,
                 lifecycle,
                 class,
@@ -653,7 +653,8 @@ impl StoreExecutor {
                 global_permit,
                 read_permit,
                 command,
-            }) {
+            });
+            match send_result {
                 Ok(()) => {
                     let mut ordinal = match self.control.next_admission_ordinal.lock() {
                         Ok(ordinal) => ordinal,
@@ -927,16 +928,16 @@ async fn await_command_result<T>(
     lifecycle: Arc<CommandLifecycle>,
     deadline: Instant,
 ) -> Result<T, StoreExecutorError> {
-    let result = if let Ok(result) =
-        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), &mut reply).await
-    {
-        result
-    } else {
-        if lifecycle.expire_if_queued() {
-            return Err(StoreExecutorError::DeadlineExceeded);
-        }
-        reply.await
-    };
+    let result =
+        match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), &mut reply).await {
+            Ok(result) => result,
+            Err(_) => {
+                if lifecycle.expire_if_queued() {
+                    return Err(StoreExecutorError::DeadlineExceeded);
+                }
+                reply.await
+            }
+        };
     match result {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(error)) => Err(error),
@@ -1016,7 +1017,8 @@ async fn worker_loop_async(
     loop {
         if pending.is_empty() && !disconnected {
             if draining {
-                match receiver.try_recv() {
+                let received = receiver.try_recv();
+                match received {
                     Ok(envelope) => pending.push_back(envelope),
                     Err(
                         mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected,
@@ -1024,20 +1026,22 @@ async fn worker_loop_async(
                         break;
                     }
                 }
-            } else if let Some(envelope) = {
-                tokio::select! {
+            } else {
+                let received = tokio::select! {
                     biased;
                     envelope = receiver.recv() => envelope,
                     () = shutdown.notified() => {
                         draining = true;
                         continue;
                     }
+                };
+                match received {
+                    Some(envelope) => pending.push_back(envelope),
+                    None => {
+                        disconnected = true;
+                        continue;
+                    }
                 }
-            } {
-                pending.push_back(envelope);
-            } else {
-                disconnected = true;
-                continue;
             }
         }
 

@@ -42,11 +42,11 @@ mod serde_bytes_wrapper {
     use bytes::Bytes;
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub(crate) fn serialize<S: Serializer>(b: &Bytes, s: S) -> Result<S::Ok, S::Error> {
+    pub(super) fn serialize<S: Serializer>(b: &Bytes, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_bytes(b)
     }
 
-    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Bytes, D::Error> {
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Bytes, D::Error> {
         let v = serde_bytes::ByteBuf::deserialize(d)?;
         Ok(Bytes::from(v.into_vec()))
     }
@@ -166,7 +166,7 @@ pub struct EventDraft {
 }
 
 impl EventDraft {
-    pub fn new(entity: EntityId, event_type: Kind, payload: CanonicalBytes) -> Self {
+    pub const fn new(entity: EntityId, event_type: Kind, payload: CanonicalBytes) -> Self {
         Self {
             entity,
             event_type,
@@ -183,7 +183,7 @@ impl EventDraft {
     /// Use during deterministic replay to re-inject the original timestamp so that
     /// re-appended events are bit-identical to the originals.
     #[must_use]
-    pub fn with_wall_time(mut self, t: WallTime) -> Self {
+    pub const fn with_wall_time(mut self, t: WallTime) -> Self {
         self.wall_time = Some(t);
         self
     }

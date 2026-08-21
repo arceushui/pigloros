@@ -61,11 +61,13 @@ impl TomlLedgerStore {
                 path: path.display().to_string(),
                 reason: e.to_string(),
             })?;
-            let stem = path
-                .file_stem()
-                .expect("read_dir entries always have file names")
-                .to_string_lossy()
-                .into_owned();
+            let Some(stem) = path.file_stem() else {
+                return Err(LedgerError::InvalidPrediction(format!(
+                    "TOML path has no filename stem: {}",
+                    path.display()
+                )));
+            };
+            let stem = stem.to_string_lossy().into_owned();
             items.push((stem, value));
         }
         Ok(items)
@@ -112,7 +114,7 @@ impl LedgerStore for TomlLedgerStore {
 
     fn register(&mut self, new: NewPrediction) -> Result<String, LedgerError> {
         new.validate()?;
-        let prediction = new.into_prediction(ulid::Ulid::gen().to_string());
+        let prediction = new.into_prediction(ulid::Ulid::r#gen().to_string());
         std::fs::create_dir_all(self.predictions_dir())?;
         let path = self
             .predictions_dir()

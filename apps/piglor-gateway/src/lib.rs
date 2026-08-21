@@ -1262,6 +1262,7 @@ impl Gateway {
             Ok(draft) => draft,
             Err(error) => return Err(error.into()),
         };
+        drop(proposal);
         self.append_identified_draft(timeline, draft, ingress_id)
             .await
     }
@@ -1399,7 +1400,8 @@ impl Gateway {
                 }
                 Err(error) => return Err(error.into()),
             };
-            match committed.pop() {
+            let last_committed = committed.pop();
+            match last_committed {
                 Some(event) => event,
                 None => {
                     return Err(GatewayError::Store(CoreError::Storage(

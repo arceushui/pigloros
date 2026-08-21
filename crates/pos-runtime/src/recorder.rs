@@ -45,7 +45,7 @@ pub struct RecordedOutput {
 
 impl RecordedOutput {
     #[must_use]
-    pub fn new(bytes: Vec<u8>) -> Self {
+    pub const fn new(bytes: Vec<u8>) -> Self {
         Self {
             bytes,
             seq_hint: None,
@@ -73,7 +73,7 @@ pub struct Recorder {
 impl Recorder {
     /// Create a new Recorder in `Live` mode.
     #[must_use]
-    pub fn new_live(entity: EntityId) -> Self {
+    pub const fn new_live(entity: EntityId) -> Self {
         Self {
             mode: RunMode::Live,
             entity,
@@ -84,7 +84,7 @@ impl Recorder {
 
     /// Create a Recorder in `Replay` mode, preloaded with recorded events.
     #[must_use]
-    pub fn new_replay(entity: EntityId, recorded: Vec<Vec<u8>>) -> Self {
+    pub const fn new_replay(entity: EntityId, recorded: Vec<Vec<u8>>) -> Self {
         Self {
             mode: RunMode::Replay,
             entity,
@@ -117,7 +117,7 @@ impl Recorder {
 
     /// Current run mode.
     #[must_use]
-    pub fn mode(&self) -> RunMode {
+    pub const fn mode(&self) -> RunMode {
         self.mode
     }
 
@@ -167,7 +167,7 @@ impl Recorder {
 
     /// How many replay events remain.
     #[must_use]
-    pub fn remaining(&self) -> usize {
+    pub const fn remaining(&self) -> usize {
         self.replay_events.len().saturating_sub(self.replay_cursor)
     }
 }

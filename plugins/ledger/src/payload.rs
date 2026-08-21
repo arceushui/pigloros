@@ -45,7 +45,7 @@ pub struct LedgerPrediction {
 }
 
 /// Payload for a `ledger.outcome` event (also the TOML resolution file form).
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LedgerOutcome {
     /// Must match a prior [`LedgerPrediction::prediction_id`].
     pub prediction_id: String,
@@ -62,6 +62,7 @@ const DAYS_IN_MONTH: [u8; 13] = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 
 /// `YYYY-MM-DD` with real month/day ranges. Hand-rolled on purpose:
 /// canonical UTC strings sort lexicographically, so no date crate is
 /// needed (ADR-017).
+#[allow(clippy::redundant_pub_crate)]
 pub(crate) fn is_valid_date(s: &str) -> bool {
     let b = s.as_bytes();
     if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
@@ -78,6 +79,7 @@ pub(crate) fn is_valid_date(s: &str) -> bool {
 
 /// `YYYY-MM-DDTHH:MM:SSZ` (UTC only — offsets are rejected so strings
 /// stay canonically sortable).
+#[allow(clippy::redundant_pub_crate)]
 pub(crate) fn is_valid_datetime(s: &str) -> bool {
     let b = s.as_bytes();
     if b.len() != 20 || b[10] != b'T' || b[13] != b':' || b[16] != b':' || b[19] != b'Z' {
@@ -120,6 +122,7 @@ impl LedgerOutcome {
 }
 
 /// Validate a [`LedgerOutcome`].
+#[allow(clippy::redundant_pub_crate)]
 pub(crate) fn validate_outcome(outcome: &LedgerOutcome) -> Result<(), LedgerError> {
     if ulid::Ulid::from_string(&outcome.prediction_id).is_err() {
         return Err(LedgerError::InvalidResolution(format!(
@@ -151,8 +154,7 @@ pub(crate) fn expect_invalid(result: Result<(), LedgerError>, needle: &str) {
 /// Never panics; CBOR encoding of [`LedgerPrediction`] is infallible.
 #[must_use]
 pub fn draft_prediction(entity: EntityId, prediction: &LedgerPrediction) -> EventDraft {
-    let mut buf = Vec::new();
-    let _ = ciborium::into_writer(prediction, &mut buf);
+    let buf = encode_to_vec(prediction);
     EventDraft::new(
         entity,
         Kind::new(EVENT_TYPE_PREDICTION),
@@ -166,13 +168,18 @@ pub fn draft_prediction(entity: EntityId, prediction: &LedgerPrediction) -> Even
 /// Never panics; CBOR encoding of [`LedgerOutcome`] is infallible.
 #[must_use]
 pub fn draft_outcome(entity: EntityId, outcome: &LedgerOutcome) -> EventDraft {
-    let mut buf = Vec::new();
-    ciborium::into_writer(outcome, &mut buf).expect("ciborium write to Vec<u8> is infallible");
+    let buf = encode_to_vec(outcome);
     EventDraft::new(
         entity,
         Kind::new(EVENT_TYPE_OUTCOME),
         CanonicalBytes::from_vec(buf),
     )
+}
+
+fn encode_to_vec<T: Serialize>(value: &T) -> Vec<u8> {
+    let mut buf = Vec::new();
+    assert!(ciborium::into_writer(value, &mut buf).is_ok());
+    buf
 }
 
 /// Decode a `ledger.prediction` payload.

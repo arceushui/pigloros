@@ -6,7 +6,6 @@ const SEMI_MAJOR_AXIS_METRES: f64 = 6_378_137.0;
 const INVERSE_FLATTENING: f64 = 298.257_223_563;
 const FLATTENING: f64 = 1.0 / INVERSE_FLATTENING;
 const FIRST_ECCENTRICITY_SQUARED: f64 = FLATTENING * (2.0 - FLATTENING);
-const PI: f64 = std::f64::consts::PI;
 const MAX_V1_RADIUS_METRES: f64 = 10_000.0;
 const INVERSE_ITERATIONS: usize = 16;
 const INVERSE_LATITUDE_TOLERANCE_RADIANS: f64 = 1.0 / 281_474_976_710_656.0;
@@ -190,7 +189,7 @@ impl WorldCoordinateV1 {
         }
     }
 
-    fn from_components(
+    const fn from_components(
         east_metres: f64,
         north_metres: f64,
         up_metres: f64,
@@ -424,15 +423,25 @@ impl WorldTransformV1 {
         let dx = x - self.origin.origin_ecef[0];
         let dy = y - self.origin.origin_ecef[1];
         let dz = z - self.origin.origin_ecef[2];
-        let east = -self.origin_sin_longitude * dx + self.origin_cos_longitude * dy;
-        let north = -self.origin_sin_latitude * self.origin_cos_longitude * dx
-            - self.origin_sin_latitude * self.origin_sin_longitude * dy
-            + self.origin_cos_latitude * dz;
-        let up = self.origin_cos_latitude * self.origin_cos_longitude * dx
-            + self.origin_cos_latitude * self.origin_sin_longitude * dy
-            + self.origin_sin_latitude * dz;
+        let east = self
+            .origin_cos_longitude
+            .mul_add(dy, -self.origin_sin_longitude * dx);
+        let north = self.origin_cos_latitude.mul_add(
+            dz,
+            (self.origin_sin_latitude * self.origin_sin_longitude).mul_add(
+                -dy,
+                -self.origin_sin_latitude * self.origin_cos_longitude * dx,
+            ),
+        );
+        let up = self.origin_sin_latitude.mul_add(
+            dz,
+            (self.origin_cos_latitude * self.origin_sin_longitude).mul_add(
+                dy,
+                self.origin_cos_latitude * self.origin_cos_longitude * dx,
+            ),
+        );
         let coordinate = WorldCoordinateV1::from_components(east, north, up)?;
-        let radius = (east * east + north * north + up * up).sqrt();
+        let radius = up.mul_add(up, north.mul_add(north, east * east)).sqrt();
         if !radius.is_finite() {
             return Err(WorldTransformError::NonFiniteCoordinate);
         }
@@ -457,20 +466,26 @@ impl WorldTransformV1 {
         let east = coordinate.east;
         let north = coordinate.north;
         let up = coordinate.up;
-        let radius = (east * east + north * north + up * up).sqrt();
+        let radius = up.mul_add(up, north.mul_add(north, east * east)).sqrt();
         if !radius.is_finite() {
             return Err(WorldTransformError::NonFiniteCoordinate);
         }
         if radius > self.origin.max_radius_metres {
             return Err(WorldTransformError::OutOfRadius);
         }
-        let dx = -self.origin_sin_longitude * east
-            - self.origin_sin_latitude * self.origin_cos_longitude * north
-            + self.origin_cos_latitude * self.origin_cos_longitude * up;
-        let dy = self.origin_cos_longitude * east
-            - self.origin_sin_latitude * self.origin_sin_longitude * north
-            + self.origin_cos_latitude * self.origin_sin_longitude * up;
-        let dz = self.origin_cos_latitude * north + self.origin_sin_latitude * up;
+        let dx = (self.origin_cos_latitude * self.origin_cos_longitude).mul_add(
+            up,
+            (self.origin_sin_latitude * self.origin_cos_longitude)
+                .mul_add(-north, -self.origin_sin_longitude * east),
+        );
+        let dy = (self.origin_cos_latitude * self.origin_sin_longitude).mul_add(
+            up,
+            (self.origin_sin_latitude * self.origin_sin_longitude)
+                .mul_add(-north, self.origin_cos_longitude * east),
+        );
+        let dz = self
+            .origin_sin_latitude
+            .mul_add(up, self.origin_cos_latitude * north);
         let ecef_x = self.origin.origin_ecef[0] + dx;
         let ecef_y = self.origin.origin_ecef[1] + dy;
         let ecef_z = self.origin.origin_ecef[2] + dz;
@@ -512,8 +527,8 @@ impl WorldTransformV1 {
             return Err(WorldTransformError::NonConvergent);
         }
         let position = Wgs84PositionV1::new(
-            latitude * 180.0 / PI,
-            normalize_longitude_degrees(longitude * 180.0 / PI),
+            latitude.to_degrees(),
+            normalize_longitude_degrees(longitude.to_degrees()),
             height,
         )?;
         let recovered = geodetic_to_ecef(position)?;
@@ -539,7 +554,7 @@ pub struct WorldOriginRegistryV1 {
 impl WorldOriginRegistryV1 {
     /// Create an empty registry.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             origins: BTreeMap::new(),
         }
@@ -696,7 +711,7 @@ fn validate_radius(max_radius_metres: f64) -> Result<(), WorldTransformError> {
     Ok(())
 }
 
-fn validate_capability(capability: &WorldGeographicEvidenceCapabilityV1) {
+const fn validate_capability(capability: &WorldGeographicEvidenceCapabilityV1) {
     std::hint::black_box(capability.private);
 }
 
@@ -709,15 +724,18 @@ fn normalize_longitude_degrees(longitude_degrees: f64) -> f64 {
     }
 }
 
-fn radians(position: Wgs84PositionV1) -> (f64, f64) {
+const fn radians(position: Wgs84PositionV1) -> (f64, f64) {
     (
-        position.latitude_degrees * PI / 180.0,
-        position.longitude_degrees * PI / 180.0,
+        position.latitude_degrees.to_radians(),
+        position.longitude_degrees.to_radians(),
     )
 }
 
 fn prime_vertical_radius(latitude: f64) -> f64 {
-    SEMI_MAJOR_AXIS_METRES / (1.0 - FIRST_ECCENTRICITY_SQUARED * latitude.sin().powi(2)).sqrt()
+    SEMI_MAJOR_AXIS_METRES
+        / FIRST_ECCENTRICITY_SQUARED
+            .mul_add(-latitude.sin().powi(2), 1.0)
+            .sqrt()
 }
 
 fn geodetic_to_ecef(position: Wgs84PositionV1) -> Result<[f64; 3], WorldTransformError> {
@@ -730,7 +748,7 @@ fn geodetic_to_ecef(position: Wgs84PositionV1) -> Result<[f64; 3], WorldTransfor
     let height = position.ellipsoidal_height_metres;
     let x = (n + height) * cosine_latitude * cosine_longitude;
     let y = (n + height) * cosine_latitude * sine_longitude;
-    let z = (n * (1.0 - FIRST_ECCENTRICITY_SQUARED) + height) * sine_latitude;
+    let z = n.mul_add(1.0 - FIRST_ECCENTRICITY_SQUARED, height) * sine_latitude;
     if x.is_finite() && y.is_finite() && z.is_finite() {
         Ok([x, y, z])
     } else {
@@ -740,7 +758,7 @@ fn geodetic_to_ecef(position: Wgs84PositionV1) -> Result<[f64; 3], WorldTransfor
 
 fn within_residual(actual: f64, expected: f64) -> bool {
     (actual - expected).abs()
-        <= FORWARD_ABSOLUTE_TOLERANCE_METRES + FORWARD_RELATIVE_TOLERANCE * expected.abs()
+        <= FORWARD_RELATIVE_TOLERANCE.mul_add(expected.abs(), FORWARD_ABSOLUTE_TOLERANCE_METRES)
 }
 
 fn canonical_zero(value: f64) -> f64 {
