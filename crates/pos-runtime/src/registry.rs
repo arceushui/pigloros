@@ -2063,7 +2063,12 @@ mod tests {
                 .iter()
                 .map(|schema| schema.event_type.as_str())
                 .collect::<Vec<_>>(),
-            vec!["a.event", "runtime.recorded_output", "z.event"]
+            vec![
+                "a.event",
+                "pos.host.consent.revoked.v1",
+                "runtime.recorded_output",
+                "z.event",
+            ]
         );
     }
 
