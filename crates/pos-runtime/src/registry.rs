@@ -102,6 +102,18 @@ fn reject_geographic_drafts(output: &StepOutput) -> Result<(), RuntimeError> {
     }
 }
 
+fn invoke_driver(
+    driver: &mut dyn Driver,
+    timeline: pos_core::ids::TimelineId,
+    observations: crate::driver::ObservationView<'_>,
+) -> Result<StepOutput, RuntimeError> {
+    let name = driver.name().to_owned();
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        driver.step(timeline, observations)
+    }))
+    .map_err(|_| RuntimeError::DriverPanicked { name })?
+}
+
 /// A registered plugin entry.
 struct PluginEntry {
     name: String,
@@ -262,6 +274,7 @@ impl PluginRegistry {
         timeline: pos_core::ids::TimelineId,
         observed_through: Seq,
         selection: AnchoredSelection,
+        committed_events: &[Event],
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.ensure_no_pending_step()?;
         let mut driver_ids = Vec::new();
@@ -322,9 +335,12 @@ impl PluginRegistry {
                     .driver
                     .as_mut()
                     .expect("selected IDs refer to registered drivers");
-                let observations = snapshot.view_for(driver.subscriptions());
-                driver
-                    .step(timeline, observations)
+                let observations = snapshot.view_for_events(
+                    driver.subscriptions(),
+                    committed_events,
+                    driver.event_subscriptions(),
+                );
+                invoke_driver(driver.as_mut(), timeline, observations)
                     .and_then(|output| reject_geographic_drafts(&output).map(|()| output))
             };
             match result {
@@ -711,7 +727,7 @@ impl PluginRegistry {
                     .as_mut()
                     .expect("due IDs are collected only from registered drivers");
                 let observations = snapshot.view_for(driver.subscriptions());
-                let output = driver.step(timeline, observations)?;
+                let output = invoke_driver(driver.as_mut(), timeline, observations)?;
                 reject_geographic_drafts(&output)?;
                 entry.last_tick = Some(now_ns);
                 all_drafts.extend(output.drafts);
@@ -742,6 +758,26 @@ impl PluginRegistry {
             timeline,
             observed_through,
             AnchoredSelection::Cadenced { now_ns },
+            &[],
+        )
+    }
+
+    /// Step cadence-ready Drivers with a host-filtered committed Event prefix.
+    ///
+    /// # Errors
+    /// Returns a staged-step, cadence, Driver, or draft validation error.
+    pub fn tick_cadenced_anchored_with_events(
+        &mut self,
+        timeline: pos_core::ids::TimelineId,
+        now_ns: u128,
+        observed_through: Seq,
+        committed_events: &[Event],
+    ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
+        self.step_anchored_transaction(
+            timeline,
+            observed_through,
+            AnchoredSelection::Cadenced { now_ns },
+            committed_events,
         )
     }
 
@@ -769,7 +805,7 @@ impl PluginRegistry {
         for entry in self.plugins.values_mut() {
             if let Some(driver) = entry.driver.as_mut() {
                 let observations = snapshot.view_for(driver.subscriptions());
-                let output = driver.step(timeline, observations)?;
+                let output = invoke_driver(driver.as_mut(), timeline, observations)?;
                 reject_geographic_drafts(&output)?;
                 all_drafts.extend(output.drafts);
             }
@@ -792,7 +828,25 @@ impl PluginRegistry {
         timeline: pos_core::ids::TimelineId,
         observed_through: Seq,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
-        self.step_anchored_transaction(timeline, observed_through, AnchoredSelection::All)
+        self.step_anchored_transaction(timeline, observed_through, AnchoredSelection::All, &[])
+    }
+
+    /// Step all Drivers with a host-filtered committed Event prefix.
+    ///
+    /// # Errors
+    /// Returns a staged-step, Driver, or draft validation error.
+    pub fn step_all_anchored_with_events(
+        &mut self,
+        timeline: pos_core::ids::TimelineId,
+        observed_through: Seq,
+        committed_events: &[Event],
+    ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
+        self.step_anchored_transaction(
+            timeline,
+            observed_through,
+            AnchoredSelection::All,
+            committed_events,
+        )
     }
 }
 
@@ -889,6 +943,21 @@ mod tests {
         }
     }
 
+    struct PanickingDriver;
+    impl crate::driver::Driver for PanickingDriver {
+        fn name(&self) -> &'static str {
+            "panicking"
+        }
+
+        fn step(
+            &mut self,
+            _: pos_core::ids::TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<crate::driver::StepOutput, RuntimeError> {
+            panic!("test driver panic");
+        }
+    }
+
     #[derive(Default)]
     struct TransactionState {
         steps: usize,
@@ -965,6 +1034,21 @@ mod tests {
     }
 
     // ── Tests ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn anchored_step_converts_driver_panic_to_abortable_error() {
+        let mut registry = PluginRegistry::new();
+        let plugin = plugin_with_caps("panicking", &["probe.event"], true, false);
+        registry
+            .register(&plugin, None, Some(Box::new(PanickingDriver)))
+            .unwrap();
+
+        let error = registry
+            .step_all_anchored(TimelineId::new(), Seq::ZERO)
+            .unwrap_err();
+        assert!(matches!(error, RuntimeError::DriverPanicked { .. }));
+        registry.abort_step();
+    }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]

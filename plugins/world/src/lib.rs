@@ -17,7 +17,9 @@ use pos_core::{
     ActionApprover, ActionRejected, ProposedAction, WorldCoordinateV1, WorldTransformError,
     MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
-use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
+use pos_runtime::{
+    Driver, DriverRecoveryEvidence, ObservationView, RecoveryEventHeader, RuntimeError, StepOutput,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -901,6 +903,9 @@ impl Plugin for WorldPlugin {
             owned_event_types: vec![
                 Kind::new(EVENT_TYPE_OBSERVATION),
                 Kind::new(EVENT_TYPE_ACTION),
+                Kind::new(EVENT_TYPE_ACTION_V1),
+                Kind::new(EVENT_TYPE_OBSERVATION_V1),
+                Kind::new(EVENT_TYPE_CONFIG_V1),
             ],
             owned_entity_kinds: vec![ENTITY_KIND.to_owned()],
             has_driver: true,
@@ -914,6 +919,51 @@ impl ActionApprover for WorldPlugin {
         &self,
         proposal: &ProposedAction,
     ) -> Result<pos_core::event::EventDraft, ActionRejected> {
+        if proposal.event_type.as_str() == EVENT_TYPE_ACTION_V1 {
+            if proposal.capability.as_str() != "world.action.v1.submit" {
+                return Err(ActionRejected::CapabilityNotGranted);
+            }
+            if proposal.payload.len() > MAX_PROPOSED_ACTION_PAYLOAD_BYTES {
+                return Err(ActionRejected::PayloadTooLarge {
+                    size: proposal.payload.len(),
+                    max: MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+                });
+            }
+            let action = WorldActionV1::decode(&proposal.payload)
+                .map_err(|error| ActionRejected::DomainValidationFailed(error.to_string()))?;
+            if action.actor_entity_id != proposal.actor_entity_id {
+                return Err(ActionRejected::InvalidActorEntityId);
+            }
+            if action.action_scope != ACTION_SCOPE_SINGLE_BODY {
+                return Err(ActionRejected::DomainValidationFailed(
+                    "invalid action scope".to_owned(),
+                ));
+            }
+            if action.catalogue_version != self.catalogue_version {
+                return Err(ActionRejected::DomainValidationFailed(
+                    "catalogue version mismatch".to_owned(),
+                ));
+            }
+            if !self
+                .allowed_action_kinds
+                .iter()
+                .any(|kind| kind == action.action_kind.as_str())
+            {
+                return Err(ActionRejected::DomainValidationFailed(
+                    "action kind is not in the allow-list".to_owned(),
+                ));
+            }
+            if !self.known_bodies.contains(&action.body_entity_id) {
+                return Err(ActionRejected::DomainValidationFailed(
+                    "unknown body entity ID".to_owned(),
+                ));
+            }
+            return Ok(pos_core::event::EventDraft::new(
+                proposal.actor_entity_id,
+                proposal.event_type.clone(),
+                proposal.payload.clone(),
+            ));
+        }
         if proposal.event_type.as_str() != EVENT_TYPE_ACTION {
             return Err(ActionRejected::UnknownEventType);
         }
@@ -981,6 +1031,7 @@ impl ActionApprover for WorldPlugin {
 
 /// Produces `world.config.v1` once on the first tick and `world.observation.v1` per body per step.
 pub struct WorldDriver {
+    initial_entities: Vec<Body>,
     entities: Vec<Body>,
     backend: Box<dyn WorldBackend>,
     tick: u64,
@@ -988,6 +1039,19 @@ pub struct WorldDriver {
     step_index: u64,
     config: WorldConfigV1,
     config_emitted: bool,
+    applied_action_seqs: Vec<u64>,
+    config_entity: EntityId,
+    staged_step: Option<WorldDriverState>,
+    staged_restore: Option<WorldDriverState>,
+}
+
+#[derive(Clone)]
+struct WorldDriverState {
+    entities: Vec<Body>,
+    tick: u64,
+    step_index: u64,
+    config_emitted: bool,
+    applied_action_seqs: Vec<u64>,
 }
 
 impl WorldDriver {
@@ -995,13 +1059,66 @@ impl WorldDriver {
     #[must_use]
     pub fn new(entities: Vec<Body>, backend: Box<dyn WorldBackend>, config: WorldConfigV1) -> Self {
         Self {
+            initial_entities: entities.clone(),
             entities,
             backend,
             tick: 0,
             step_index: 0,
             config,
             config_emitted: false,
+            applied_action_seqs: Vec::new(),
+            config_entity: EntityId::new(),
+            staged_step: None,
+            staged_restore: None,
         }
+    }
+
+    /// Pin the session-global configuration entity for reproducible evidence.
+    #[must_use]
+    pub const fn with_config_entity(mut self, entity: EntityId) -> Self {
+        self.config_entity = entity;
+        self
+    }
+
+    fn state(&self) -> WorldDriverState {
+        WorldDriverState {
+            entities: self.entities.clone(),
+            tick: self.tick,
+            step_index: self.step_index,
+            config_emitted: self.config_emitted,
+            applied_action_seqs: self.applied_action_seqs.clone(),
+        }
+    }
+
+    fn restore_state(&mut self, state: WorldDriverState) {
+        self.entities = state.entities;
+        self.tick = state.tick;
+        self.step_index = state.step_index;
+        self.config_emitted = state.config_emitted;
+        self.applied_action_seqs = state.applied_action_seqs;
+    }
+
+    fn apply_action_to_entities(entities: &mut [Body], action: &WorldActionV1) -> bool {
+        let Some(body) = entities
+            .iter_mut()
+            .find(|body| body.entity_id == action.body_entity_id)
+        else {
+            return false;
+        };
+        let Some((vx, vy)) = decode_velocity_params(&action.params_cbor) else {
+            return false;
+        };
+        match action.action_kind {
+            ActionKindV1::Impulse => {
+                body.vx += f64::from(vx);
+                body.vy += f64::from(vy);
+            }
+            ActionKindV1::TargetVelocity => {
+                body.vx = f64::from(vx);
+                body.vy = f64::from(vy);
+            }
+        }
+        true
     }
 
     /// Quantize a raw sensor value to the session's minimum resolution.
@@ -1041,11 +1158,120 @@ impl Driver for WorldDriver {
         "world-driver"
     }
 
+    fn event_subscriptions(&self) -> &[Kind] {
+        static SUBSCRIPTIONS: std::sync::OnceLock<Vec<Kind>> = std::sync::OnceLock::new();
+        SUBSCRIPTIONS.get_or_init(|| vec![Kind::new(EVENT_TYPE_ACTION_V1)])
+    }
+
+    fn needs_recovery_payload(&self, header: &RecoveryEventHeader) -> bool {
+        matches!(
+            header.event_type().as_str(),
+            EVENT_TYPE_ACTION_V1 | EVENT_TYPE_OBSERVATION_V1 | EVENT_TYPE_CONFIG_V1
+        )
+    }
+
+    fn stage_restore_from_history(
+        &mut self,
+        evidence: &DriverRecoveryEvidence,
+    ) -> Result<(), RuntimeError> {
+        let mut restored = WorldDriverState {
+            entities: self.initial_entities.clone(),
+            tick: 0,
+            step_index: 0,
+            config_emitted: false,
+            applied_action_seqs: Vec::new(),
+        };
+        for event in evidence.events() {
+            let Some(payload) = event.payload() else {
+                continue;
+            };
+            match event.header().event_type().as_str() {
+                EVENT_TYPE_ACTION_V1 => {
+                    let action = WorldActionV1::decode(payload).map_err(|error| {
+                        RuntimeError::InvalidPayload {
+                            event_type: EVENT_TYPE_ACTION_V1.to_owned(),
+                            reason: error.to_string(),
+                        }
+                    })?;
+                    if !Self::apply_action_to_entities(&mut restored.entities, &action) {
+                        return Err(RuntimeError::InvalidPayload {
+                            event_type: EVENT_TYPE_ACTION_V1.to_owned(),
+                            reason: "action target or velocity parameters are invalid".to_owned(),
+                        });
+                    }
+                    restored
+                        .applied_action_seqs
+                        .push(event.header().seq().as_u64());
+                    restored.tick = restored.tick.max(action.tick.saturating_add(1));
+                }
+                EVENT_TYPE_OBSERVATION_V1 => {
+                    let observation = WorldObservationV1::decode(payload).map_err(|error| {
+                        RuntimeError::InvalidPayload {
+                            event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
+                            reason: error.to_string(),
+                        }
+                    })?;
+                    if let Some(body) = restored
+                        .entities
+                        .iter_mut()
+                        .find(|body| body.entity_id == observation.body_entity_id)
+                    {
+                        body.x = f64::from(observation.pos_x);
+                        body.y = f64::from(observation.pos_y);
+                    }
+                    restored.tick = restored.tick.max(observation.tick.saturating_add(1));
+                    restored.step_index = restored
+                        .step_index
+                        .max(observation.step_index.saturating_add(1));
+                }
+                EVENT_TYPE_CONFIG_V1 => {
+                    let config = WorldConfigV1::decode(payload).map_err(|error| {
+                        RuntimeError::InvalidPayload {
+                            event_type: EVENT_TYPE_CONFIG_V1.to_owned(),
+                            reason: error.to_string(),
+                        }
+                    })?;
+                    if config != self.config {
+                        return Err(RuntimeError::InvalidPayload {
+                            event_type: EVENT_TYPE_CONFIG_V1.to_owned(),
+                            reason: "recovered world configuration differs from the pinned configuration".to_owned(),
+                        });
+                    }
+                    restored.config_emitted = true;
+                }
+                _ => {}
+            }
+        }
+        self.staged_restore = Some(restored);
+        Ok(())
+    }
+
+    fn commit_restore_from_history(&mut self) {
+        if let Some(restored) = self.staged_restore.take() {
+            self.restore_state(restored);
+        }
+    }
+
+    fn abort_restore_from_history(&mut self) {
+        self.staged_restore = None;
+    }
+
+    fn commit_step(&mut self) {
+        self.staged_step = None;
+    }
+
+    fn abort_step(&mut self) {
+        if let Some(previous) = self.staged_step.take() {
+            self.restore_state(previous);
+        }
+    }
+
     fn step(
         &mut self,
         _timeline: TimelineId,
         observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
+        self.staged_step = Some(self.state());
         let mut drafts = Vec::new();
 
         // Emit world.config.v1 once at session creation (first step).
@@ -1057,9 +1283,9 @@ impl Driver for WorldDriver {
                         event_type: EVENT_TYPE_CONFIG_V1.to_owned(),
                         reason: error.to_string(),
                     })?;
-            // Use EntityId::new() as the config event's entity — config is session-global.
+            // The config entity is session-global and host-pinned for evidence.
             drafts.push(pos_core::event::EventDraft::new(
-                EntityId::new(),
+                self.config_entity,
                 Kind::new(EVENT_TYPE_CONFIG_V1),
                 config_payload,
             ));
@@ -1068,33 +1294,28 @@ impl Driver for WorldDriver {
 
         // Fold world.action.v1 events (in seq order) into entity velocities before
         // stepping the backend.
+        let mut causation_by_body = Vec::new();
         for event in observations.events() {
             if event.event_type.as_str() != EVENT_TYPE_ACTION_V1 {
                 continue;
             }
-            let Ok(action) = WorldActionV1::decode(&event.payload) else {
+            if self.applied_action_seqs.contains(&event.seq.as_u64()) {
                 continue;
-            };
-            if let Some(body) = self
-                .entities
-                .iter_mut()
-                .find(|b| b.entity_id == action.body_entity_id)
-            {
-                match action.action_kind {
-                    ActionKindV1::Impulse => {
-                        if let Some((dvx, dvy)) = decode_velocity_params(&action.params_cbor) {
-                            body.vx += f64::from(dvx);
-                            body.vy += f64::from(dvy);
-                        }
-                    }
-                    ActionKindV1::TargetVelocity => {
-                        if let Some((vx, vy)) = decode_velocity_params(&action.params_cbor) {
-                            body.vx = f64::from(vx);
-                            body.vy = f64::from(vy);
-                        }
-                    }
-                }
             }
+            let action = WorldActionV1::decode(&event.payload).map_err(|error| {
+                RuntimeError::InvalidPayload {
+                    event_type: EVENT_TYPE_ACTION_V1.to_owned(),
+                    reason: error.to_string(),
+                }
+            })?;
+            if !Self::apply_action_to_entities(&mut self.entities, &action) {
+                return Err(RuntimeError::InvalidPayload {
+                    event_type: EVENT_TYPE_ACTION_V1.to_owned(),
+                    reason: "action target or velocity parameters are invalid".to_owned(),
+                });
+            }
+            self.applied_action_seqs.push(event.seq.as_u64());
+            causation_by_body.push((action.body_entity_id, event.id));
         }
 
         let step_obs = self.backend.step(&self.entities);
@@ -1140,11 +1361,17 @@ impl Driver for WorldDriver {
                 event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
                 reason: error.to_string(),
             })?;
-            drafts.push(pos_core::event::EventDraft::new(
+            let mut draft = pos_core::event::EventDraft::new(
                 obs.entity_id,
                 Kind::new(EVENT_TYPE_OBSERVATION_V1),
                 payload,
-            ));
+            );
+            draft.causation_id = causation_by_body
+                .iter()
+                .rev()
+                .find(|(body, _)| *body == obs.entity_id)
+                .map(|(_, event_id)| *event_id);
+            drafts.push(draft);
         }
 
         self.tick = self.tick.wrapping_add(1);
@@ -1169,7 +1396,10 @@ impl Reducer for WorldReducer {
     }
 
     fn apply(&self, state: &mut State, event: &Event) {
-        if event.event_type.as_str() == EVENT_TYPE_OBSERVATION {
+        if matches!(
+            event.event_type.as_str(),
+            EVENT_TYPE_OBSERVATION | EVENT_TYPE_OBSERVATION_V1
+        ) {
             let observation_count = state
                 .get("observation_count")
                 .and_then(serde_json::Value::as_u64)
@@ -1178,6 +1408,12 @@ impl Reducer for WorldReducer {
                 "observation_count",
                 serde_json::Value::Number((observation_count + 1).into()),
             );
+            if event.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1 {
+                if let Ok(observation) = WorldObservationV1::decode(&event.payload) {
+                    state.set("last_x", serde_json::json!(observation.pos_x));
+                    state.set("last_y", serde_json::json!(observation.pos_y));
+                }
+            }
         }
     }
 }
@@ -1195,6 +1431,7 @@ mod tests {
         event::{CanonicalBytes, SchemaVersion},
         ids::{EntityId, EventId},
     };
+    use pos_runtime::{PluginRegistry, TimelineHistorySegment};
     use pos_store::{open_store, StoreConfig};
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1241,6 +1478,27 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
+        }
+    }
+
+    fn make_versioned_event(
+        seq: u64,
+        entity: EntityId,
+        event_type: &str,
+        payload: CanonicalBytes,
+    ) -> Event {
+        Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new(event_type),
+            payload,
+            wall_time: WallTime::from_micros(seq),
+            seq: Seq::from_u64(seq),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0; 32]),
         }
     }
 
@@ -1349,6 +1607,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_rejects_non_finite_observation_payload() {
+        assert_eq!(NonFiniteBackend.name(), "non-finite-test-backend");
         let entity = EntityId::new();
         let mut driver = WorldDriver::new(
             vec![Body {
@@ -1458,6 +1717,16 @@ mod tests {
         a.params_cbor = vec![0x19, 0x00, 0x01];
         assert!(matches!(
             a.encode(),
+            Err(WorldCodecError::NonCanonicalParamsCbor)
+        ));
+    }
+
+    #[test]
+    fn world_action_v1_trailing_params_are_rejected() {
+        let mut action = sample_action();
+        action.params_cbor = vec![0xf6, 0x00];
+        assert!(matches!(
+            action.encode(),
             Err(WorldCodecError::NonCanonicalParamsCbor)
         ));
     }
@@ -1901,6 +2170,144 @@ mod tests {
     }
 
     #[test]
+    fn world_driver_recovers_versioned_history_atomically() {
+        let body = EntityId::new();
+        let config_entity = EntityId::new();
+        let timeline = TimelineId::new();
+        let mut params = Vec::new();
+        ciborium::into_writer(&vec![1.0_f32, 0.0_f32], &mut params).unwrap();
+        let action = WorldActionV1 {
+            actor_entity_id: body,
+            body_entity_id: body,
+            action_kind: ActionKindV1::TargetVelocity,
+            params_cbor: params,
+            action_scope: ACTION_SCOPE_SINGLE_BODY,
+            catalogue_version: 1,
+            tick: 0,
+        };
+        let observation = WorldObservationV1 {
+            body_entity_id: body,
+            tick: 0,
+            step_index: 0,
+            pos_x: 1.0,
+            pos_y: 2.0,
+            pos_z: 0.0,
+            orient_w: 1.0,
+            orient_x: 0.0,
+            orient_y: 0.0,
+            orient_z: 0.0,
+            vel_lin_x: 1.0,
+            vel_lin_y: 0.0,
+            vel_lin_z: 0.0,
+            vel_ang_x: 0.0,
+            vel_ang_y: 0.0,
+            vel_ang_z: 0.0,
+            sensor_kind: 0,
+            sensor_value: vec![],
+        };
+        let events = vec![
+            make_versioned_event(
+                1,
+                config_entity,
+                EVENT_TYPE_CONFIG_V1,
+                sample_config().encode().unwrap(),
+            ),
+            make_versioned_event(2, body, EVENT_TYPE_ACTION_V1, action.encode().unwrap()),
+            make_versioned_event(
+                3,
+                body,
+                EVENT_TYPE_OBSERVATION_V1,
+                observation.encode().unwrap(),
+            ),
+            make_versioned_event(
+                4,
+                body,
+                "other.event",
+                CanonicalBytes::from_static(b"other"),
+            ),
+        ];
+        let plugin = WorldPlugin::new().with_bodies([body]);
+        let mut registry = PluginRegistry::new();
+        registry
+            .register(
+                &plugin,
+                Some(Box::new(WorldReducer)),
+                Some(Box::new(
+                    WorldDriver::new(
+                        vec![Body {
+                            entity_id: body,
+                            x: 0.0,
+                            y: 0.0,
+                            vx: 0.0,
+                            vy: 0.0,
+                        }],
+                        Box::new(SimpleKinematicBackend::new()),
+                        sample_config(),
+                    )
+                    .with_config_entity(config_entity),
+                )),
+            )
+            .unwrap();
+        registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(timeline, Seq::from_u64(4))],
+                &events,
+            )
+            .unwrap();
+        registry
+            .step_all_anchored_with_events(timeline, Seq::from_u64(4), &events)
+            .unwrap();
+        registry.abort_step();
+        registry
+            .step_all_anchored_with_events(timeline, Seq::from_u64(4), &events)
+            .unwrap();
+        let mut reduced = WorldReducer.initial();
+        WorldReducer.apply(&mut reduced, &events[2]);
+        assert_eq!(reduced.get("last_x"), Some(&serde_json::json!(1.0)));
+        registry.commit_step();
+    }
+
+    #[test]
+    fn world_driver_rejects_malformed_recovery_payloads() {
+        let body = EntityId::new();
+        let timeline = TimelineId::new();
+        let plugin = WorldPlugin::new().with_bodies([body]);
+        let mut registry = PluginRegistry::new();
+        registry
+            .register(
+                &plugin,
+                Some(Box::new(WorldReducer)),
+                Some(Box::new(WorldDriver::new(
+                    vec![Body {
+                        entity_id: body,
+                        x: 0.0,
+                        y: 0.0,
+                        vx: 0.0,
+                        vy: 0.0,
+                    }],
+                    Box::new(SimpleKinematicBackend::new()),
+                    sample_config(),
+                ))),
+            )
+            .unwrap();
+
+        for event_type in [EVENT_TYPE_ACTION_V1, EVENT_TYPE_OBSERVATION_V1] {
+            let malformed = make_versioned_event(
+                1,
+                body,
+                event_type,
+                CanonicalBytes::from_static(b"malformed"),
+            );
+            assert!(registry
+                .restore_driver_state(
+                    &[TimelineHistorySegment::new(timeline, Seq::from_u64(1))],
+                    &[malformed],
+                )
+                .is_err());
+        }
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_driver_default_emits_its_default_config() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
@@ -2028,9 +2435,12 @@ mod tests {
         let plugin = WorldPlugin::new();
         let cap = plugin.capability();
 
-        assert_eq!(cap.owned_event_types.len(), 2);
+        assert_eq!(cap.owned_event_types.len(), 5);
         assert_eq!(cap.owned_event_types[0].as_str(), EVENT_TYPE_OBSERVATION);
         assert_eq!(cap.owned_event_types[1].as_str(), EVENT_TYPE_ACTION);
+        assert_eq!(cap.owned_event_types[2].as_str(), EVENT_TYPE_ACTION_V1);
+        assert_eq!(cap.owned_event_types[3].as_str(), EVENT_TYPE_OBSERVATION_V1);
+        assert_eq!(cap.owned_event_types[4].as_str(), EVENT_TYPE_CONFIG_V1);
         assert_eq!(cap.owned_entity_kinds.len(), 1);
         assert_eq!(cap.owned_entity_kinds[0], ENTITY_KIND);
         assert!(cap.has_driver);
@@ -2711,14 +3121,9 @@ mod tests {
             catalogue_version: 1,
             tick: 0,
         };
-        let unknown_body_action = WorldActionV1 {
-            body_entity_id: EntityId::new(),
-            ..action.clone()
-        };
         let events = vec![
             make_other_event(entity),
             make_action_event_from(entity, &action),
-            make_action_event_from(entity, &unknown_body_action),
         ];
         let out = driver
             .step(tl.id(), ObservationView::from_events(&events))
@@ -2732,6 +3137,22 @@ mod tests {
         // 100 mm quantization; 1.5 m and 2.0 m are exact multiples of 0.1 m.
         assert!((obs.pos_x - 1.5_f32).abs() < 0.15);
         assert!((obs.pos_y - 2.0_f32).abs() < 0.15);
+
+        // The host supplies the complete committed prefix on every Tick. The
+        // same impulse must not be applied a second time when that prefix is
+        // replayed for the next step.
+        driver.commit_step();
+        let out = driver
+            .step(tl.id(), ObservationView::from_events(&events))
+            .unwrap();
+        let obs_draft = out
+            .drafts
+            .iter()
+            .find(|d| d.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
+            .unwrap();
+        let obs = WorldObservationV1::decode(&obs_draft.payload).unwrap();
+        assert!((obs.pos_x - 3.0_f32).abs() < 0.15);
+        assert!((obs.pos_y - 4.0_f32).abs() < 0.15);
     }
 
     #[test]
@@ -2780,7 +3201,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn driver_ignores_malformed_action_payload() {
+    fn driver_rejects_malformed_action_payload() {
         let mut store = open_store(StoreConfig::Memory).unwrap();
         let tl = store.create_timeline("test").unwrap();
         let entity = EntityId::new();
@@ -2811,18 +3232,17 @@ mod tests {
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
         let events = vec![bad_event];
-        // Must not panic; body moves with original velocity (1,1) → pos (1,1).
-        let out = driver
+        let error = driver
             .step(tl.id(), ObservationView::from_events(&events))
-            .unwrap();
-        let obs_draft = out
-            .drafts
-            .iter()
-            .find(|d| d.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
-            .unwrap();
-        let obs = WorldObservationV1::decode(&obs_draft.payload).unwrap();
-        assert!((obs.pos_x - 1.0_f32).abs() < 0.15);
-        assert!((obs.pos_y - 1.0_f32).abs() < 0.15);
+            .expect_err("malformed committed action must abort the step");
+        match error {
+            RuntimeError::InvalidPayload { event_type, reason } => {
+                assert_eq!(event_type, EVENT_TYPE_ACTION_V1);
+                assert_eq!(reason, "CBOR decode error");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        driver.abort_step();
     }
 
     #[test]

@@ -13,13 +13,18 @@ pos-state = { path = "../../crates/pos-state" }
 pos-time = { path = "../../crates/pos-time" }
 pos-query = { path = "../../crates/pos-query" }
 pos-runtime = { path = "../../crates/pos-runtime" }
+pos-conformance = { path = "../../crates/pos-conformance" }
+pos-reference = { path = "../../crates/pos-reference" }
 pos-plugin-eval = { path = "../../plugins/eval" }
 pos-plugin-agent = { path = "../../plugins/agent" }
 pos-plugin-society = { path = "../../plugins/society" }
+pos-plugin-world = { path = "../../plugins/world" }
 blake3 = { workspace = true }
+ciborium = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+ulid = { workspace = true }
 
 [dev-dependencies]
 pos-plugin-rule-agent = { path = "../../plugins/entities/rule-agent" }

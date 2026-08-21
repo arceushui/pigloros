@@ -4316,6 +4316,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pos-conformance"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "pos-core"
 version = "0.1.0"
 dependencies = [
@@ -4354,13 +4364,17 @@ name = "pos-experiment"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "ciborium",
+ "pos-conformance",
  "pos-core",
  "pos-plugin-agent",
  "pos-plugin-eval",
  "pos-plugin-rule-agent",
  "pos-plugin-society",
  "pos-plugin-synthetic-obs",
+ "pos-plugin-world",
  "pos-query",
+ "pos-reference",
  "pos-runtime",
  "pos-state",
  "pos-store",
@@ -4371,6 +4385,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
+ "ulid",
 ]
 
 [[package]]
@@ -4522,6 +4537,14 @@ dependencies = [
  "pos-store",
  "proptest",
  "serde",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "pos-reference"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
  "thiserror 2.0.20",
 ]
 

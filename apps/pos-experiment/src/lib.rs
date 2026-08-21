@@ -14,6 +14,8 @@ use pos_runtime::PluginRegistry;
 use pos_store::{open_store, StoreConfig};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+pub mod moat_proof;
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -154,6 +156,7 @@ pub struct ExperimentSession {
     boundary: TickBoundaryCoordinator,
     step_mode: Option<StepMode>,
     last_simulation_time_ns: Option<u128>,
+    consent_revoked: bool,
 }
 
 /// Result of one interactive tick-boundary attempt.
@@ -243,6 +246,8 @@ type SharedEventStore = Arc<Mutex<Box<dyn pos_core::store::EventStore>>>;
 pub enum ExperimentError {
     #[error("runtime error: {0}")]
     Runtime(#[from] pos_runtime::RuntimeError),
+    #[error("action rejected: {0}")]
+    ActionRejected(#[from] pos_core::ActionRejected),
     #[error("store error: {0}")]
     Store(#[from] pos_core::CoreError),
     #[error("a fresh PluginRegistry factory is required to run a forked experiment session")]
@@ -255,6 +260,8 @@ pub enum ExperimentError {
     IncompatibleForkRegistry,
     #[error("the experiment session is faulted; rebuild it from persisted Timeline history")]
     SessionFaulted,
+    #[error("consent has been revoked at the completed Tick Boundary")]
+    ConsentRevoked,
     #[error("cadence time regressed from {previous_ns}ns to {requested_ns}ns")]
     CadenceTimeRegressed {
         previous_ns: u128,
@@ -663,6 +670,7 @@ impl Experiment {
             },
             step_mode: None,
             last_simulation_time_ns: None,
+            consent_revoked: false,
         })
     }
 
@@ -746,6 +754,7 @@ impl Experiment {
             boundary: TickBoundaryCoordinator { folded_through },
             step_mode: None,
             last_simulation_time_ns: None,
+            consent_revoked: false,
         })
     }
 
@@ -880,6 +889,76 @@ impl ExperimentSession {
         })
     }
 
+    /// Append host-approved Events at the current completed Tick Boundary.
+    ///
+    /// This is the external-input seam used by counterfactual interventions.
+    /// The batch is schema-validated and atomically appended before the new
+    /// range is folded, so a failed append cannot expose a partial Tick.
+    ///
+    /// # Errors
+    /// Returns a runtime validation, store, or post-append capture error.
+    fn append_events(
+        &mut self,
+        drafts: &[pos_core::event::EventDraft],
+    ) -> Result<u64, ExperimentError> {
+        if self.health == SessionHealth::Faulted {
+            return Err(ExperimentError::SessionFaulted);
+        }
+        if self.consent_revoked {
+            return Err(ExperimentError::ConsentRevoked);
+        }
+        self.registry.schemas.validate_batch(drafts)?;
+        if drafts.is_empty() {
+            return Ok(0);
+        }
+        let emitted = lock_store(&self.store).and_then(|mut store| {
+            store
+                .append(self.timeline.id(), drafts)
+                .map_err(ExperimentError::from)
+        })?;
+        let after = match lock_store(&self.store).and_then(|store| {
+            capture_pending_range(
+                store.as_ref(),
+                self.timeline.id(),
+                self.boundary.folded_through,
+            )
+        }) {
+            Ok(captured) => captured,
+            Err(error) => {
+                self.health = SessionHealth::Faulted;
+                return Err(error);
+            }
+        };
+        fold_captured_range(&mut self.boundary, &mut self.registry, &after);
+        self.total_events = self.boundary.folded_through.as_u64();
+        Ok(u64::try_from(emitted.len()).unwrap_or(u64::MAX))
+    }
+
+    /// Submit one external action through the owning Plugin's authority seam.
+    ///
+    /// The approved Event is appended only at the current completed Tick
+    /// Boundary. Callers cannot bypass the Plugin's actor, capability, schema,
+    /// and domain validation by supplying an arbitrary `EventDraft`.
+    ///
+    /// # Errors
+    /// Returns the owning Plugin's action rejection or a store/runtime error
+    /// when the approved Event cannot be appended and folded.
+    pub fn submit_action(
+        &mut self,
+        proposal: &pos_core::ProposedAction,
+    ) -> Result<u64, ExperimentError> {
+        let draft = self.registry.submit_action(proposal)?;
+        self.append_events(std::slice::from_ref(&draft))
+    }
+
+    /// Revoke consent effective at the next Tick Boundary.
+    ///
+    /// The current completed boundary remains readable. The next step returns
+    /// [`TickOutcome::Stopped`] without invoking or committing any Driver.
+    pub fn revoke_consent_at_boundary(&mut self) {
+        self.consent_revoked = true;
+    }
+
     fn step_with_mode(&mut self, request: StepRequest) -> Result<TickOutcome, ExperimentError> {
         if self.health == SessionHealth::Faulted {
             return Err(ExperimentError::SessionFaulted);
@@ -915,7 +994,7 @@ impl ExperimentSession {
     }
 
     fn step_boundary(&mut self, request: StepRequest) -> Result<TickOutcome, ExperimentError> {
-        if self.complete || self.reached_stop_condition() {
+        if self.consent_revoked || self.complete || self.reached_stop_condition() {
             self.complete = true;
             return Ok(TickOutcome::Stopped);
         }
@@ -927,17 +1006,27 @@ impl ExperimentSession {
                 self.boundary.folded_through,
             )
         })?;
+        let committed_events = lock_store(&self.store).and_then(|store| {
+            read_completed_prefix(
+                store.as_ref(),
+                self.timeline.id(),
+                self.boundary.folded_through,
+            )
+        })?;
         let mut folded_events =
             fold_captured_range(&mut self.boundary, &mut self.registry, &before);
 
         let selected = match request {
-            StepRequest::AllDrivers => self
-                .registry
-                .step_all_anchored(self.timeline.id(), self.boundary.folded_through),
-            StepRequest::Cadenced(now_ns) => self.registry.tick_cadenced_anchored(
+            StepRequest::AllDrivers => self.registry.step_all_anchored_with_events(
+                self.timeline.id(),
+                self.boundary.folded_through,
+                &committed_events,
+            ),
+            StepRequest::Cadenced(now_ns) => self.registry.tick_cadenced_anchored_with_events(
                 self.timeline.id(),
                 now_ns,
                 self.boundary.folded_through,
+                &committed_events,
             ),
         };
         let drafts = match selected {
@@ -1076,6 +1165,7 @@ impl ExperimentSession {
                 },
                 step_mode: None,
                 last_simulation_time_ns: None,
+                consent_revoked: self.consent_revoked,
             })
     }
 

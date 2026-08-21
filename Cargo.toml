@@ -7,6 +7,8 @@ members = [
   "crates/pos-time",
   "crates/pos-query",
   "crates/pos-runtime",
+  "crates/pos-conformance",
+  "crates/pos-reference",
   "plugins/entities/rule-agent",
   "plugins/observations/synthetic",
   "plugins/eval",
