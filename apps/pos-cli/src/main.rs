@@ -8,7 +8,7 @@
 //!   pos store init|info `<path>`
 //!   pos timeline list|fork|replay|snapshot|compare|merge …
 //!   pos events log …
-//!   pos experiment run|verify|backtest …
+//!   pos experiment run|verify|reproduce …
 //!   pos version
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
@@ -486,15 +486,6 @@ fn handle_experiment(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             let ticks = parse_ticks_flag(&args[2..])?;
             cmd_experiment_run(path, ticks)
         }
-        Some("backtest") => {
-            // pos experiment backtest <path> --train-ticks <N> --eval-ticks <M>
-            let path = args.get(1).ok_or(
-                "Usage: pos experiment backtest <path> --train-ticks <N> --eval-ticks <M>",
-            )?;
-            let train_ticks = parse_ticks_flag(&args[2..])?;
-            let eval_ticks = parse_eval_ticks_flag(&args[2..])?;
-            cmd_experiment_backtest(path, train_ticks, eval_ticks)
-        }
         Some("verify") => {
             let manifest_path = args
                 .get(1)
@@ -508,7 +499,7 @@ fn handle_experiment(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             cmd_experiment_reproduce(manifest_path)
         }
         _ => {
-            eprintln!("Usage: pos experiment <run|backtest|verify|reproduce> ...");
+            eprintln!("Usage: pos experiment <run|verify|reproduce> ...");
             Ok(())
         }
     }
@@ -636,88 +627,6 @@ fn validate_experiment_ticks(ticks: u64) -> Result<(), &'static str> {
         .ok_or(TICK_LIMIT_ERROR)
 }
 
-fn cmd_experiment_backtest(
-    path: &str,
-    train_ticks: u64,
-    eval_ticks: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use pos_core::ids::EntityId;
-    use pos_experiment::{BacktestConfig, BacktestRunner};
-    use pos_plugin_eval::{EvalPlugin, EvalReducer};
-    use pos_plugin_persona::{PersonaEvalDriver, PersonaModel, PersonaPlugin, PersonaReducer};
-    use pos_plugin_rule_agent::{RuleAgentDriver, RuleAgentPlugin, RuleAgentReducer};
-    use pos_plugin_synthetic_obs::{SyntheticDriver, SyntheticObsPlugin, SyntheticReducer};
-
-    let config = BacktestConfig {
-        experiment_name: "cli-backtest".to_owned(),
-        train_ticks,
-        eval_ticks,
-        store_config: StoreConfig::Sqlite {
-            path: path.to_owned(),
-        },
-    };
-
-    let registry_factory = || {
-        let mut reg = pos_runtime::PluginRegistry::new();
-
-        let agent_entity = EntityId::new();
-        let agent_plugin = RuleAgentPlugin::new();
-        reg.register(
-            &agent_plugin,
-            Some(Box::new(RuleAgentReducer)),
-            Some(Box::new(RuleAgentDriver::new(
-                agent_entity,
-                agent_plugin.actions().to_vec(),
-            ))),
-        )
-        .expect("fresh plugin id cannot conflict");
-
-        let obs_entity = EntityId::new();
-        let obs_plugin = SyntheticObsPlugin::new();
-        reg.register(
-            &obs_plugin,
-            Some(Box::new(SyntheticReducer)),
-            Some(Box::new(SyntheticDriver::new(obs_entity))),
-        )
-        .expect("fresh plugin id cannot conflict");
-
-        let persona_entity = EntityId::new();
-        let persona_model = PersonaModel::new(vec![
-            ("nature".to_owned(), 0.8),
-            ("city".to_owned(), 0.5),
-            ("food".to_owned(), 0.9),
-            ("quiet".to_owned(), 0.7),
-        ]);
-        let persona_plugin = PersonaPlugin::new();
-        reg.register(
-            &persona_plugin,
-            Some(Box::new(PersonaReducer)),
-            Some(Box::new(PersonaEvalDriver::trip_preview(
-                persona_entity,
-                persona_model,
-            ))),
-        )
-        .expect("fresh plugin id cannot conflict");
-
-        let eval_plugin = EvalPlugin::new();
-        reg.register(&eval_plugin, Some(Box::new(EvalReducer)), None)
-            .expect("fresh plugin id cannot conflict");
-
-        reg
-    };
-
-    let runner = BacktestRunner::new(config, registry_factory);
-    let result = runner.run()?;
-
-    println!("train_events: {}", result.train_events);
-    println!("eval_events: {}", result.eval_events);
-    println!("persistence_lift: {:.6}", result.persistence_lift);
-    println!("lift_vs_persistence: {:.6}", result.lift_vs_persistence);
-    print_eval_report(&result.eval_report);
-
-    Ok(())
-}
-
 fn verify_manifest_against_store(
     manifest: &pos_core::manifest::ReproManifest,
     store: &dyn pos_core::store::EventStore,
@@ -787,20 +696,6 @@ fn parse_ticks_flag(args: &[String]) -> Result<u64, Box<dyn std::error::Error>> 
     Err("missing --ticks or --train-ticks <N>".into())
 }
 
-/// Parse `--eval-ticks <M>` from a slice of args, returning `M`.
-fn parse_eval_ticks_flag(args: &[String]) -> Result<u64, Box<dyn std::error::Error>> {
-    let mut it = args.iter();
-    while let Some(flag) = it.next() {
-        if flag == "--eval-ticks" {
-            let val = it.next().ok_or("--eval-ticks requires a value")?;
-            return val
-                .parse::<u64>()
-                .map_err(|e| format!("invalid eval-ticks: {e}").into());
-        }
-    }
-    Err("missing --eval-ticks <M>".into())
-}
-
 /// Parse `--limit <N>` from a slice of args, returning `Some(N)` or `None` if not present.
 fn parse_limit_flag(args: &[String]) -> Result<Option<usize>, Box<dyn std::error::Error>> {
     let mut it = args.iter();
@@ -860,14 +755,6 @@ fn save_run_manifest(
     serde_json::to_string_pretty(manifest)
         .map_err(Into::into)
         .and_then(|manifest_json| std::fs::write(path, manifest_json).map_err(Into::into))
-}
-
-/// Print eval calibration metrics when a report is present.
-fn print_eval_report(report: &pos_plugin_eval::CalibrationReport) {
-    println!("brier_score: {:.6}", report.brier_score);
-    println!("ece: {:.6}", report.ece);
-    println!("n_resolved: {}", report.n_resolved);
-    println!("n_predictions: {}", report.n_predictions);
 }
 
 /// Parse a ULID string into a [`TimelineId`].
@@ -1387,77 +1274,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_eval_ticks_flag_extracts_value() {
-        let a: Vec<String> = vec!["--eval-ticks".to_owned(), "5".to_owned()];
-        let n = parse_eval_ticks_flag(&a).unwrap();
-        assert_eq!(n, 5);
-    }
-
-    #[test]
-    fn parse_eval_ticks_flag_missing_returns_err() {
-        let a: Vec<String> = vec!["--other".to_owned()];
-        assert!(parse_eval_ticks_flag(&a).is_err());
-    }
-
-    #[test]
-    fn parse_eval_ticks_flag_invalid_number_returns_err() {
-        let a: Vec<String> = vec!["--eval-ticks".to_owned(), "notanumber".to_owned()];
-        assert!(parse_eval_ticks_flag(&a).is_err());
-    }
-
-    #[test]
-    fn parse_eval_ticks_flag_skips_non_eval_ticks_flags() {
-        let a: Vec<String> = vec![
-            "--other".to_owned(),
-            "val".to_owned(),
-            "--eval-ticks".to_owned(),
-            "8".to_owned(),
-        ];
-        let n = parse_eval_ticks_flag(&a).unwrap();
-        assert_eq!(n, 8);
-    }
-
-    #[test]
-    fn handle_experiment_backtest_executes() {
-        let (_dir, path) = tmp_db();
-        let a = args(&["backtest", &path, "--train-ticks", "2", "--eval-ticks", "1"]);
-        handle_experiment(&a).unwrap();
-    }
-
-    #[test]
-    fn handle_experiment_backtest_missing_path_returns_err() {
-        let a = args(&["backtest"]);
-        assert!(handle_experiment(&a).is_err());
-    }
-
-    #[test]
-    fn handle_experiment_backtest_missing_train_ticks_returns_err() {
-        let (_dir, path) = tmp_db();
-        let a = args(&["backtest", &path]);
-        assert!(handle_experiment(&a).is_err());
-    }
-
-    #[test]
-    fn handle_experiment_backtest_missing_eval_ticks_returns_err() {
-        let (_dir, path) = tmp_db();
-        let a = args(&["backtest", &path, "--train-ticks", "2"]);
-        assert!(handle_experiment(&a).is_err());
-    }
-
-    #[test]
-    fn cmd_experiment_backtest_wires_all_plugins() {
-        // Directly call cmd_experiment_backtest to cover all plugin registration lines.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir
-            .path()
-            .join("backtest-test.db")
-            .to_str()
-            .unwrap()
-            .to_owned();
-        cmd_experiment_backtest(&path, 2, 1).unwrap();
-    }
-
-    #[test]
     fn parse_limit_flag_extracts_value() {
         let a: Vec<String> = vec!["--limit".to_owned(), "10".to_owned()];
         let n = parse_limit_flag(&a).unwrap();
@@ -1724,27 +1540,6 @@ mod tests {
         let missing_b = TimelineId::new().to_string();
         let a = args(&["merge", &path, &missing_a, &missing_b, "0", "merged"]);
         assert!(handle_timeline(&a).is_err());
-    }
-
-    #[test]
-    fn cmd_experiment_backtest_resolves_eval() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir
-            .path()
-            .join("backtest-resolved.db")
-            .to_str()
-            .unwrap()
-            .to_owned();
-        cmd_experiment_backtest(&path, 3, 2).unwrap();
-        // compute_report on the store to assert n_resolved > 0
-        let store = open_store(StoreConfig::Sqlite { path }).unwrap();
-        let tls = store.list_timelines().unwrap();
-        let eval_tl = tls
-            .iter()
-            .find(|t| t.meta.name.as_deref() == Some("cli-backtest-eval"))
-            .expect("eval timeline");
-        let report = pos_plugin_eval::compute_report(store.as_ref(), eval_tl.id()).unwrap();
-        assert!(report.n_resolved > 0, "n_resolved={}", report.n_resolved);
     }
 }
 
@@ -2451,27 +2246,6 @@ mod fault_injection_tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_experiment_backtest_fails_on_bad_store_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().to_str().unwrap().to_owned();
-        assert!(cmd_experiment_backtest(&path, 1, 1).is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_experiment_backtest_prints_eval_report_when_resolved() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir
-            .path()
-            .join("eval-report.db")
-            .to_str()
-            .unwrap()
-            .to_owned();
-        cmd_experiment_backtest(&path, 8, 6).unwrap();
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn cmd_experiment_verify_fails_when_events_corrupt() {
         let (_dir, path, tl_id) = seeded_db();
         let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
@@ -2515,13 +2289,6 @@ mod fault_injection_tests {
     fn parse_ticks_flag_missing_value_returns_err() {
         let a: Vec<String> = vec!["--ticks".to_owned()];
         assert!(parse_ticks_flag(&a).is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn parse_eval_ticks_flag_missing_value_returns_err() {
-        let a: Vec<String> = vec!["--eval-ticks".to_owned()];
-        assert!(parse_eval_ticks_flag(&a).is_err());
     }
 
     #[test]

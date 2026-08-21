@@ -1563,7 +1563,7 @@ pub struct CreateTimelineRequest {
 #[derive(Debug, Deserialize)]
 pub struct ActionRequest {
     pub entity_id: String,
-    /// Must be `world.action` in this MVP slice.
+    /// Must be `world.action` in the current Gateway foundation.
     #[serde(default = "default_action_type")]
     pub event_type: String,
     pub payload: serde_json::Value,

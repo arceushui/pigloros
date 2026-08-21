@@ -101,8 +101,11 @@ jobs:
     timeout-minutes: 45
     env:
       RUSTC_BOOTSTRAP: "1"
+      # Keep instrumentation bounded on the hosted runner; local runs may use
+      # substantially more memory when compiling the Bevy workspace.
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
