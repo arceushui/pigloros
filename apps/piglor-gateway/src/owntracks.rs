@@ -19,6 +19,74 @@ const CREDENTIAL_BYTES: usize = 32;
 const VERIFIER_DOMAIN: &[u8] = b"pigloros/owntracks/verifier/v1\0";
 const CONSENT_DOMAIN: &[u8] = b"pigloros/owntracks/consent/v1\0";
 
+#[cfg(test)]
+const OWNER_KEY_FAULT_NONE: u8 = 0;
+#[cfg(test)]
+const OWNER_KEY_FAULT_METADATA: u8 = 1;
+#[cfg(test)]
+const OWNER_KEY_FAULT_UNSAFE_METADATA: u8 = 2;
+#[cfg(test)]
+const OWNER_KEY_FAULT_WRITE: u8 = 3;
+#[cfg(test)]
+const OWNER_KEY_FAULT_PARENT_SYNC: u8 = 4;
+
+#[cfg(test)]
+thread_local! {
+    static OWNER_KEY_FAULT: std::cell::Cell<u8> = const { std::cell::Cell::new(OWNER_KEY_FAULT_NONE) };
+}
+
+#[cfg(test)]
+fn with_owner_key_fault<T>(fault: u8, operation: impl FnOnce() -> T) -> T {
+    OWNER_KEY_FAULT.with(|current| {
+        let previous = current.replace(fault);
+        let result = operation();
+        current.set(previous);
+        result
+    })
+}
+
+#[cfg(unix)]
+fn owner_key_metadata(file: &std::fs::File) -> std::io::Result<std::fs::Metadata> {
+    #[cfg(test)]
+    if OWNER_KEY_FAULT.with(std::cell::Cell::get) == OWNER_KEY_FAULT_METADATA {
+        return Err(std::io::Error::other("owner-key metadata fault"));
+    }
+    file.metadata()
+}
+
+#[cfg(unix)]
+fn owner_key_metadata_is_safe(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    #[cfg(test)]
+    if OWNER_KEY_FAULT.with(std::cell::Cell::get) == OWNER_KEY_FAULT_UNSAFE_METADATA {
+        return false;
+    }
+    metadata.is_file()
+        && !metadata.file_type().is_symlink()
+        && metadata.mode().is_multiple_of(0o100)
+}
+
+#[cfg(unix)]
+fn write_owner_key(file: &mut std::fs::File, owner_key: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    #[cfg(test)]
+    if OWNER_KEY_FAULT.with(std::cell::Cell::get) == OWNER_KEY_FAULT_WRITE {
+        return Err(std::io::Error::other("owner-key write fault"));
+    }
+    file.write_all(owner_key).and_then(|()| file.sync_all())
+}
+
+#[cfg(unix)]
+fn sync_owner_key_parent(parent: &std::fs::File) -> std::io::Result<()> {
+    #[cfg(test)]
+    if OWNER_KEY_FAULT.with(std::cell::Cell::get) == OWNER_KEY_FAULT_PARENT_SYNC {
+        return Err(std::io::Error::other("owner-key parent sync fault"));
+    }
+    parent.sync_all()
+}
+
 /// A local owner key, never printable by this module.
 pub type OwnerKey = [u8; OWNER_KEY_BYTES];
 
@@ -437,8 +505,7 @@ fn load_existing_owner_key(
 
 #[cfg(unix)]
 fn create_owner_key(path: &Path) -> Result<OwnerKey, OwnTracksMaterialError> {
-    use std::io::Write;
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::unix::fs::OpenOptionsExt;
 
     let parent = path
         .parent()
@@ -453,27 +520,23 @@ fn create_owner_key(path: &Path) -> Result<OwnerKey, OwnTracksMaterialError> {
         .mode(0o600)
         .open(path)
         .map_err(|_| OwnTracksMaterialError::OwnerKeyIo)?;
-    let Ok(created) = file.metadata() else {
+    let Ok(created) = owner_key_metadata(&file) else {
         drop(file);
         cleanup_owner_key(path, &parent_file);
         return Err(OwnTracksMaterialError::OwnerKeyIo);
     };
-    if !created.is_file() || created.mode() & 0o077 != 0 {
+    if !owner_key_metadata_is_safe(&created) {
         drop(file);
         cleanup_owner_key(path, &parent_file);
         return Err(OwnTracksMaterialError::UnsafeOwnerKeyPath);
     }
-    if file
-        .write_all(&owner_key)
-        .and_then(|()| file.sync_all())
-        .is_err()
-    {
+    if write_owner_key(&mut file, &owner_key).is_err() {
         drop(file);
         cleanup_owner_key(path, &parent_file);
         return Err(OwnTracksMaterialError::OwnerKeyIo);
     }
     drop(file);
-    if parent_file.sync_all().is_err() {
+    if sync_owner_key_parent(&parent_file).is_err() {
         cleanup_owner_key(path, &parent_file);
         return Err(OwnTracksMaterialError::OwnerKeyIo);
     }
@@ -958,6 +1021,16 @@ mod coverage_entrypoints {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn test_err<T: std::fmt::Debug, E>(result: Result<T, E>) -> E {
+        match result {
+            Ok(value) => std::panic::resume_unwind(Box::new(format!(
+                "unexpected coverage success: {value:?}"
+            ))),
+            Err(error) => error,
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn expect_err<T, E: std::fmt::Debug>(result: Result<T, E>) {
         if result.is_ok() {
             std::panic::resume_unwind(Box::new("expected a fail-closed error"));
@@ -1209,6 +1282,41 @@ mod coverage_entrypoints {
         let metadata = test_ok(std::fs::metadata(&removed));
         test_ok(std::fs::remove_file(&removed));
         expect_err(super::load_existing_owner_key(&removed, &metadata));
+
+        test_ok(std::fs::remove_dir_all(directory));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_key_creation_cleans_up_after_each_durable_write_failure() {
+        let directory = temporary_directory("fault-injection");
+        let cases = [
+            (
+                super::OWNER_KEY_FAULT_METADATA,
+                OwnTracksMaterialError::OwnerKeyIo,
+            ),
+            (
+                super::OWNER_KEY_FAULT_UNSAFE_METADATA,
+                OwnTracksMaterialError::UnsafeOwnerKeyPath,
+            ),
+            (
+                super::OWNER_KEY_FAULT_WRITE,
+                OwnTracksMaterialError::OwnerKeyIo,
+            ),
+            (
+                super::OWNER_KEY_FAULT_PARENT_SYNC,
+                OwnTracksMaterialError::OwnerKeyIo,
+            ),
+        ];
+
+        for (fault, expected) in cases {
+            let path = directory.join(format!("owner-{fault}.key"));
+            let error = test_err(super::with_owner_key_fault(fault, || {
+                super::create_owner_key(&path)
+            }));
+            assert_eq!(error, expected);
+            assert!(!path.exists());
+        }
 
         test_ok(std::fs::remove_dir_all(directory));
     }

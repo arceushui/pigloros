@@ -9359,6 +9359,51 @@ mod coverage_entrypoints {
         store.conn.commit_hook(Some(|| true));
         expect_err(store.prepare_owntracks_ingress(input));
         store.conn.commit_hook::<fn() -> bool>(None);
+
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("ingress-commit"));
+        let request = OwnTracksEnrollmentRequestV1::new(
+            timeline.id(),
+            EntityId::new(),
+            pos_core::geo_admission::GeoLocationAdmissionFenceV1::new(
+                7,
+                ([1; 32], 8, [2; 32]),
+                (1, false, 9),
+            ),
+            [42; 32],
+        );
+        ok(store.pair_owntracks_enrollment(request));
+        let active_input = OwnTracksIngressInputV1::new(
+            [42; 32],
+            [2; 32],
+            [3; 32],
+            [4; 32],
+            CanonicalBytes::from_vec(vec![5]),
+        );
+        store.conn.commit_hook(Some(|| true));
+        let active_result = store.prepare_owntracks_ingress(active_input);
+        assert!(
+            active_result.is_ok(),
+            "active ingress result: {active_result:?}"
+        );
+        store.conn.commit_hook::<fn() -> bool>(None);
+
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("ingress-locked-transition"));
+        let request = OwnTracksEnrollmentRequestV1::new(
+            timeline.id(),
+            EntityId::new(),
+            pos_core::geo_admission::GeoLocationAdmissionFenceV1::new(
+                7,
+                ([1; 32], 8, [2; 32]),
+                (1, false, 9),
+            ),
+            [42; 32],
+        );
+        ok(store.pair_owntracks_enrollment(request));
+        ok(store.conn.execute_batch("BEGIN IMMEDIATE"));
+        expect_err(store.revoke_owntracks_enrollment());
+        ok(store.conn.execute_batch("ROLLBACK"));
     }
 
     #[test]
@@ -9413,6 +9458,47 @@ mod coverage_entrypoints {
         store.conn.commit_hook::<fn() -> bool>(None);
         std::mem::drop(
             store.resolve_admission_consent(request.fence().draft().consent_record_id(), 12),
+        );
+    }
+
+    #[test]
+    fn geographic_cell_dedup_verification_rejects_tampered_sidecars() {
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("geo-cell-consent-tamper"));
+        let entity = EntityId::new();
+        let (consent, fence, request) = tests::geo_cell_request(timeline.id(), entity);
+        ok(store.set_geo_cell_admission_consent_record(consent));
+        ok(store.set_geo_cell_admission_fence(timeline.id(), entity, fence));
+        ok(store.conn.execute_batch(
+            "CREATE TRIGGER tamper_geo_cell_consent AFTER INSERT ON geographic_cell_admission_dedup
+             BEGIN
+                 UPDATE geographic_cell_admission_consent_records
+                 SET consent_record_hash = zeroblob(32);
+             END",
+        ));
+        let outcome = store.admit(request);
+        assert!(
+            matches!(outcome, Err(CoreError::GeographicAdmissionValidationFailed)),
+            "consent tamper outcome: {outcome:?}"
+        );
+
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("geo-cell-link-tamper"));
+        let entity = EntityId::new();
+        let (consent, fence, request) = tests::geo_cell_request(timeline.id(), entity);
+        ok(store.set_geo_cell_admission_consent_record(consent));
+        ok(store.set_geo_cell_admission_fence(timeline.id(), entity, fence));
+        ok(store.conn.execute_batch(
+            "CREATE TRIGGER tamper_geo_cell_link AFTER INSERT ON geographic_cell_admission_dedup
+             BEGIN
+                 UPDATE geographic_cell_admission_links
+                 SET snapshot_hash = zeroblob(32);
+             END",
+        ));
+        let outcome = store.admit(request);
+        assert!(
+            matches!(outcome, Ok(GeographicAdmissionOutcome::OutcomeUnknown)),
+            "link tamper outcome: {outcome:?}"
         );
     }
 

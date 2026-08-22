@@ -889,6 +889,28 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn reducer_maps_non_finite_cell_coordinates_to_zero() {
+        let reducer = GeoReducer;
+        let entity = EntityId::new();
+        let mut state = reducer.initial();
+        reducer.apply(&mut state, &make_geo_event(entity, f64::NAN, f64::NAN, 0.1));
+
+        assert_eq!(
+            state
+                .get("last_cell_lat")
+                .and_then(serde_json::Value::as_f64),
+            Some(0.0)
+        );
+        assert_eq!(
+            state
+                .get("last_cell_lng")
+                .and_then(serde_json::Value::as_f64),
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_ignores_other_event_types() {
         let reducer = GeoReducer;
         let entity = EntityId::new();
