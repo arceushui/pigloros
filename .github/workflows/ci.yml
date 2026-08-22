@@ -136,7 +136,7 @@ jobs:
       - name: Export coverage details
         if: always()
         continue-on-error: true
-        run: cargo llvm-cov report --workspace --all-features --locked --json
+        run: cargo llvm-cov report --json
           --output-path "${{ runner.temp }}/coverage.json"
       - name: Upload coverage details
         if: always()
