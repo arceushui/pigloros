@@ -72,10 +72,13 @@ pub enum BridgeError {
     /// Store read failed.
     #[error("store error: {0}")]
     Store(#[from] pos_core::CoreError),
+    /// Canonical observation encoding failed before a draft could be emitted.
+    #[error("bridge observation encoding failed: {0}")]
+    Encoding(String),
 }
 
 /// Errors returned while decoding a transient `OwnTracks` V1 location body.
-#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum OwnTracksDecodeError {
     /// The body exceeds the bounded V1 decoder input.
     #[error("OwnTracks body exceeds the V1 size limit")]
@@ -239,22 +242,21 @@ pub struct BridgeIngestor {
 impl BridgeIngestor {
     /// Create a new ingestor for the given entity.
     #[must_use]
-    pub fn new(entity: EntityId) -> Self {
+    pub const fn new(entity: EntityId) -> Self {
         Self { entity }
     }
 
     /// Ingest external data and produce an [`EventDraft`].
     ///
-    /// # Panics
-    /// Panics if CBOR serialization fails. In practice this never happens when
-    /// writing to a `Vec<u8>` with valid `BridgeObservation` data.
-    #[must_use]
+    /// # Errors
+    ///
+    /// Returns [`BridgeError::Encoding`] when the observation cannot be encoded.
     pub fn ingest(
         &self,
         source: &str,
         value: serde_json::Value,
         timestamp_micros: u64,
-    ) -> EventDraft {
+    ) -> Result<EventDraft, BridgeError> {
         let observation = BridgeObservation {
             source: source.to_owned(),
             value,
@@ -262,15 +264,14 @@ impl BridgeIngestor {
         };
 
         let mut buf = Vec::new();
-        // Writing to Vec<u8> is infallible with ciborium.
         ciborium::into_writer(&observation, &mut buf)
-            .expect("ciborium write to Vec<u8> is infallible");
+            .map_err(|error| BridgeError::Encoding(error.to_string()))?;
 
-        EventDraft::new(
+        Ok(EventDraft::new(
             self.entity,
             Kind::new(EVENT_TYPE),
             CanonicalBytes::from_vec(buf),
-        )
+        ))
     }
 }
 
@@ -324,7 +325,26 @@ impl Reducer for BridgeReducer {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected test value")))
+        }
+    }
+
     use super::*;
     use pos_core::{
         clock::{Seq, WallTime},
@@ -347,7 +367,7 @@ mod tests {
         );
 
         let Ok(OwnTracksDecoded::Location(location)) = decoded else {
-            panic!("valid OwnTracks location must minimize");
+            std::panic::resume_unwind(Box::new("valid OwnTracks location must minimize"));
         };
         assert!((location.cell_latitude() - 37.8).abs() < 1e-9);
         assert!((location.cell_longitude() - (-122.4)).abs() < 1e-9);
@@ -374,10 +394,10 @@ mod tests {
         ));
 
         let Ok(OwnTracksDecoded::Location(android)) = android else {
-            panic!("Android fixture must minimize");
+            std::panic::resume_unwind(Box::new("Android fixture must minimize"));
         };
         let Ok(OwnTracksDecoded::Location(ios)) = ios else {
-            panic!("iOS fixture must minimize");
+            std::panic::resume_unwind(Box::new("iOS fixture must minimize"));
         };
         assert!((android.cell_latitude() - 1.4).abs() < 1e-9);
         assert!((android.cell_longitude() - 103.8).abs() < 1e-9);
@@ -394,12 +414,12 @@ mod tests {
             "../tests/fixtures/owntracks-android-location.json"
         ));
         let Ok(OwnTracksDecoded::Location(location)) = decoded else {
-            panic!("Android fixture must minimize");
+            std::panic::resume_unwind(Box::new("Android fixture must minimize"));
         };
         let decoded: ciborium::value::Value =
-            ciborium::from_reader(location.canonical_bytes().as_slice()).unwrap();
+            ciborium::from_reader(location.canonical_bytes().test_ok().as_slice()).test_ok();
         let ciborium::value::Value::Map(entries) = decoded else {
-            panic!("compact location must encode as a CBOR map");
+            std::panic::resume_unwind(Box::new("compact location must encode as a CBOR map"));
         };
         let fields: Vec<&str> = entries
             .iter()
@@ -432,10 +452,10 @@ mod tests {
         );
 
         let Ok(OwnTracksDecoded::Location(first)) = first else {
-            panic!("first location must minimize");
+            std::panic::resume_unwind(Box::new("first location must minimize"));
         };
         let Ok(OwnTracksDecoded::Location(second)) = second else {
-            panic!("second location must minimize");
+            std::panic::resume_unwind(Box::new("second location must minimize"));
         };
         assert_eq!(first.canonical_bytes(), second.canonical_bytes());
     }
@@ -492,7 +512,7 @@ mod tests {
             let body = format!(r#"{{"_type":"location","lat":0,"lon":0,"tst":{timestamp}}}"#);
             let decoded = decode_owntracks_location(body.as_bytes());
             let Ok(OwnTracksDecoded::Location(location)) = decoded else {
-                panic!("signed integer tst must minimize");
+                std::panic::resume_unwind(Box::new("signed integer tst must minimize"));
             };
             assert_eq!(location.source_time_bucket().value(), bucket);
         }
@@ -555,14 +575,16 @@ mod tests {
         let ingestor = BridgeIngestor::new(entity);
 
         let value = serde_json::json!({"lat": 37.7749, "lon": -122.4194});
-        let draft = ingestor.ingest("owntracks", value.clone(), 1_000_000);
+        let draft = ingestor
+            .ingest("owntracks", value.clone(), 1_000_000)
+            .test_ok();
 
         assert_eq!(draft.entity, entity);
         assert_eq!(draft.event_type.as_str(), EVENT_TYPE);
 
         // Decode the payload to verify it roundtrips.
         let observation: BridgeObservation =
-            ciborium::from_reader(draft.payload.as_slice()).unwrap();
+            ciborium::from_reader(draft.payload.as_slice()).test_ok();
         assert_eq!(observation.source, "owntracks");
         assert_eq!(observation.value, value);
         assert_eq!(observation.timestamp_micros, 1_000_000);
@@ -585,9 +607,9 @@ mod tests {
         ];
 
         for value in test_values {
-            let draft = ingestor.ingest("test-source", value.clone(), 0);
+            let draft = ingestor.ingest("test-source", value.clone(), 0).test_ok();
             let observation: BridgeObservation =
-                ciborium::from_reader(draft.payload.as_slice()).unwrap();
+                ciborium::from_reader(draft.payload.as_slice()).test_ok();
             assert_eq!(observation.value, value);
         }
     }
@@ -606,7 +628,7 @@ mod tests {
             timestamp_micros,
         };
         let mut buf = Vec::new();
-        ciborium::into_writer(&observation, &mut buf).unwrap();
+        ciborium::into_writer(&observation, &mut buf).test_ok();
 
         Event {
             id: EventId::new(),
@@ -787,7 +809,9 @@ mod tests {
         let mut state = reducer.initial();
 
         let value = serde_json::json!({"temperature": 23.5});
-        let draft = ingestor.ingest("thermo-1", value.clone(), 5_000_000);
+        let draft = ingestor
+            .ingest("thermo-1", value.clone(), 5_000_000)
+            .test_ok();
 
         // Convert draft to a full Event (normally the store does this).
         let event = Event {
@@ -835,8 +859,8 @@ mod tests {
         };
 
         let mut buf = Vec::new();
-        ciborium::into_writer(&obs, &mut buf).unwrap();
-        let decoded: BridgeObservation = ciborium::from_reader(buf.as_slice()).unwrap();
+        ciborium::into_writer(&obs, &mut buf).test_ok();
+        let decoded: BridgeObservation = ciborium::from_reader(buf.as_slice()).test_ok();
 
         assert_eq!(decoded.source, obs.source);
         assert_eq!(decoded.value, obs.value);

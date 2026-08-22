@@ -57,13 +57,13 @@ fn clamp_pitch(pitch: f32) -> f32 {
 #[must_use]
 fn mouse_look(current: Vec2, delta: Vec2, sensitivity: f32) -> Vec2 {
     Vec2::new(
-        current.x + delta.x * sensitivity,
-        clamp_pitch(current.y + delta.y * sensitivity),
+        delta.x.mul_add(sensitivity, current.x),
+        clamp_pitch(delta.y.mul_add(sensitivity, current.y)),
     )
 }
 
 #[must_use]
-fn cursor_state(current: CursorState, left_click: bool, escape: bool) -> CursorState {
+const fn cursor_state(current: CursorState, left_click: bool, escape: bool) -> CursorState {
     if escape {
         CursorState::Released
     } else if left_click {
@@ -254,7 +254,9 @@ fn update_cursor(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::fmt::Debug;
     use std::time::Duration;
 
     use bevy::{
@@ -277,42 +279,72 @@ mod tests {
         window_plugin, CursorState, FirstPersonCamera, ShellProjection, MOUSE_SENSITIVITY,
     };
 
+    trait TestResultExt<T, E> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error>>;
+    }
+
+    impl<T, E: Debug> TestResultExt<T, E> for Result<T, E> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error>> {
+            self.map_err(|error| format!("unexpected error: {error:?}").into())
+        }
+    }
+
+    trait TestOptionExt<T> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error>>;
+    }
+
+    impl<T> TestOptionExt<T> for Option<T> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error>> {
+            self.ok_or_else(|| "expected a value".into())
+        }
+    }
+
     #[test]
-    fn install_shell_registers_fixture_shell_resources_and_systems() {
-        let digest = fixture_digest().expect("embedded fixture should project");
+    fn install_shell_registers_fixture_shell_resources_and_systems(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let digest = fixture_digest().test_ok()?;
         let mut app = App::new();
         install_shell(&mut app, digest);
 
         assert_eq!(app.world().resource::<ShellProjection>().0, digest);
+
+        Ok(())
     }
 
     #[test]
-    fn public_builder_installs_default_plugins_and_fixture_shell() {
-        let digest = fixture_digest().expect("embedded fixture should project");
+    fn public_builder_installs_default_plugins_and_fixture_shell(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let digest = fixture_digest().test_ok()?;
         let app = build_app(digest);
 
         assert_eq!(app.world().resource::<ShellProjection>().0, digest);
+
+        Ok(())
     }
 
     #[test]
-    fn window_plugin_targets_the_world_canvas() {
+    fn window_plugin_targets_the_world_canvas() -> Result<(), Box<dyn std::error::Error>> {
         let plugin = window_plugin();
-        let window = plugin
-            .primary_window
-            .expect("world client should configure a primary window");
+        let window = plugin.primary_window.test_ok()?;
 
         assert_eq!(window.canvas.as_deref(), Some("#piglor-world"));
         assert!(window.fit_canvas_to_parent);
+
+        Ok(())
     }
 
     #[test]
-    fn public_native_runner_projects_and_starts_the_app() {
-        run_native().expect("embedded fixture should project");
+    fn public_native_runner_projects_and_starts_the_app() -> Result<(), Box<dyn std::error::Error>>
+    {
+        run_native().test_ok()?;
+
+        Ok(())
     }
 
     #[test]
-    fn setup_scene_builds_fixture_backed_camera_and_landmark() {
-        let digest = fixture_digest().expect("embedded fixture should project");
+    fn setup_scene_builds_fixture_backed_camera_and_landmark(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let digest = fixture_digest().test_ok()?;
         let mut app = App::new();
         app.insert_resource(ShellProjection(digest))
             .init_resource::<Assets<Mesh>>()
@@ -327,10 +359,12 @@ mod tests {
         assert!(transforms
             .iter(app.world())
             .any(|transform| transform.translation == Vec3::new(digest.landmark_x(), 1.0, -3.0)));
+
+        Ok(())
     }
 
     #[test]
-    fn camera_systems_apply_movement_and_mouse_look() {
+    fn camera_systems_apply_movement_and_mouse_look() -> Result<(), Box<dyn std::error::Error>> {
         let mut app = App::new();
         let camera = app
             .world_mut()
@@ -359,9 +393,7 @@ mod tests {
         app.update();
 
         let mut cameras = app.world_mut().query::<(&Transform, &FirstPersonCamera)>();
-        let (transform, camera_state) = cameras
-            .get(app.world(), camera)
-            .expect("camera should remain in the world");
+        let (transform, camera_state) = cameras.get(app.world(), camera).test_ok()?;
         assert_eq!(transform.translation.y.to_bits(), 1.5f32.to_bits());
         assert!(transform.translation.z < 0.0);
         assert_eq!(camera_state.yaw.to_bits(), MOUSE_SENSITIVITY.to_bits());
@@ -369,10 +401,12 @@ mod tests {
             camera_state.pitch.to_bits(),
             (2.0 * MOUSE_SENSITIVITY).to_bits()
         );
+
+        Ok(())
     }
 
     #[test]
-    fn camera_systems_ignore_idle_input() {
+    fn camera_systems_ignore_idle_input() -> Result<(), Box<dyn std::error::Error>> {
         let mut app = App::new();
         let camera = app
             .world_mut()
@@ -392,16 +426,17 @@ mod tests {
         app.update();
 
         let mut cameras = app.world_mut().query::<(&Transform, &FirstPersonCamera)>();
-        let (transform, camera_state) = cameras
-            .get(app.world(), camera)
-            .expect("camera should remain in the world");
+        let (transform, camera_state) = cameras.get(app.world(), camera).test_ok()?;
         assert_eq!(transform.translation, Vec3::ZERO);
         assert_eq!(camera_state.yaw.to_bits(), 0.0f32.to_bits());
         assert_eq!(camera_state.pitch.to_bits(), 0.0f32.to_bits());
+
+        Ok(())
     }
 
     #[test]
-    fn cursor_system_locks_on_click_and_releases_on_escape() {
+    fn cursor_system_locks_on_click_and_releases_on_escape(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut app = App::new();
         let cursor_entity = app.world_mut().spawn(CursorOptions::default()).id();
         app.insert_resource(ButtonInput::<MouseButton>::default())
@@ -411,18 +446,18 @@ mod tests {
         app.update();
         let mut cursors = app.world_mut().query::<&CursorOptions>();
         assert_eq!(
-            cursors.single(app.world()).unwrap().grab_mode,
+            cursors.single(app.world()).test_ok()?.grab_mode,
             CursorGrabMode::None
         );
         app.world_mut()
             .get_mut::<CursorOptions>(cursor_entity)
-            .unwrap()
+            .test_ok()?
             .grab_mode = CursorGrabMode::Confined;
         app.world_mut()
             .resource_mut::<ButtonInput<MouseButton>>()
             .press(MouseButton::Left);
         app.update();
-        let cursor = cursors.single(app.world()).unwrap();
+        let cursor = cursors.single(app.world()).test_ok()?;
         assert!(!cursor.visible);
         assert_eq!(cursor.grab_mode, CursorGrabMode::Locked);
 
@@ -433,9 +468,11 @@ mod tests {
             .resource_mut::<ButtonInput<KeyCode>>()
             .press(KeyCode::Escape);
         app.update();
-        let cursor = cursors.single(app.world()).unwrap();
+        let cursor = cursors.single(app.world()).test_ok()?;
         assert!(cursor.visible);
         assert_eq!(cursor.grab_mode, CursorGrabMode::None);
+
+        Ok(())
     }
 
     #[test]

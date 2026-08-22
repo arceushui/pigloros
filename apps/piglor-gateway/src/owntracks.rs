@@ -19,30 +19,98 @@ const CREDENTIAL_BYTES: usize = 32;
 const VERIFIER_DOMAIN: &[u8] = b"pigloros/owntracks/verifier/v1\0";
 const CONSENT_DOMAIN: &[u8] = b"pigloros/owntracks/consent/v1\0";
 
+#[cfg(test)]
+const OWNER_KEY_FAULT_NONE: u8 = 0;
+#[cfg(test)]
+const OWNER_KEY_FAULT_METADATA: u8 = 1;
+#[cfg(test)]
+const OWNER_KEY_FAULT_UNSAFE_METADATA: u8 = 2;
+#[cfg(test)]
+const OWNER_KEY_FAULT_WRITE: u8 = 3;
+#[cfg(test)]
+const OWNER_KEY_FAULT_PARENT_SYNC: u8 = 4;
+
+#[cfg(test)]
+thread_local! {
+    static OWNER_KEY_FAULT: std::cell::Cell<u8> = const { std::cell::Cell::new(OWNER_KEY_FAULT_NONE) };
+}
+
+#[cfg(test)]
+fn with_owner_key_fault<T>(fault: u8, operation: impl FnOnce() -> T) -> T {
+    OWNER_KEY_FAULT.with(|current| {
+        let previous = current.replace(fault);
+        let result = operation();
+        current.set(previous);
+        result
+    })
+}
+
+#[cfg(unix)]
+fn owner_key_metadata(file: &std::fs::File) -> std::io::Result<std::fs::Metadata> {
+    #[cfg(test)]
+    if OWNER_KEY_FAULT.with(std::cell::Cell::get) == OWNER_KEY_FAULT_METADATA {
+        return Err(std::io::Error::other("owner-key metadata fault"));
+    }
+    file.metadata()
+}
+
+#[cfg(unix)]
+fn owner_key_metadata_is_safe(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    #[cfg(test)]
+    if OWNER_KEY_FAULT.with(std::cell::Cell::get) == OWNER_KEY_FAULT_UNSAFE_METADATA {
+        return false;
+    }
+    metadata.is_file()
+        && !metadata.file_type().is_symlink()
+        && metadata.mode().is_multiple_of(0o100)
+}
+
+#[cfg(unix)]
+fn write_owner_key(file: &mut std::fs::File, owner_key: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    #[cfg(test)]
+    if OWNER_KEY_FAULT.with(std::cell::Cell::get) == OWNER_KEY_FAULT_WRITE {
+        return Err(std::io::Error::other("owner-key write fault"));
+    }
+    file.write_all(owner_key).and_then(|()| file.sync_all())
+}
+
+#[cfg(unix)]
+fn sync_owner_key_parent(parent: &std::fs::File) -> std::io::Result<()> {
+    #[cfg(test)]
+    if OWNER_KEY_FAULT.with(std::cell::Cell::get) == OWNER_KEY_FAULT_PARENT_SYNC {
+        return Err(std::io::Error::other("owner-key parent sync fault"));
+    }
+    parent.sync_all()
+}
+
 /// A local owner key, never printable by this module.
-pub(crate) type OwnerKey = [u8; OWNER_KEY_BYTES];
+pub type OwnerKey = [u8; OWNER_KEY_BYTES];
 
 /// The plaintext enrollment material displayed exactly once by the CLI layer.
 #[derive(PartialEq, Eq)]
-pub(crate) struct PairingCredential {
+pub struct PairingCredential {
     handle: [u8; CREDENTIAL_BYTES],
     secret: [u8; CREDENTIAL_BYTES],
 }
 
 impl PairingCredential {
     #[must_use]
-    pub(crate) fn handle(&self) -> &[u8; CREDENTIAL_BYTES] {
+    pub const fn handle(&self) -> &[u8; CREDENTIAL_BYTES] {
         &self.handle
     }
 
     #[must_use]
-    pub(crate) fn secret(&self) -> &[u8; CREDENTIAL_BYTES] {
+    pub const fn secret(&self) -> &[u8; CREDENTIAL_BYTES] {
         &self.secret
     }
 
     /// Render the only intended plaintext representation for the local CLI.
     #[must_use]
-    pub(crate) fn terminal_display(&self) -> String {
+    pub fn terminal_display(&self) -> String {
         format!(
             "OwnTracks handle: {}\nOwnTracks secret: {}\nStore these values securely; the secret is shown only once.",
             hex(self.handle()),
@@ -53,7 +121,7 @@ impl PairingCredential {
 
 /// Fail-closed local owner-key errors. No variant carries credential bytes.
 #[derive(Debug, Error, PartialEq, Eq)]
-pub(crate) enum OwnTracksMaterialError {
+pub enum OwnTracksMaterialError {
     /// Unix owner-only filesystem guarantees are unavailable.
     #[cfg(not(unix))]
     #[error("OwnTracks owner-key files require Unix owner-only permissions")]
@@ -74,7 +142,7 @@ pub(crate) enum OwnTracksMaterialError {
 
 /// Bounded local-command errors that never include key or credential material.
 #[derive(Debug, Error, PartialEq, Eq)]
-pub(crate) enum OwnTracksCommandError {
+pub enum OwnTracksCommandError {
     /// The supplied command arguments do not match the accepted local surface.
     #[error("Usage: piglor-gateway owntracks <pair|status|rotate|revoke> ...")]
     Usage,
@@ -170,7 +238,7 @@ fn decode_lower_hex_32(value: &str) -> Result<[u8; 32], OwnTracksCommandError> {
 }
 
 // Callers pre-validate that byte is in b'0'..=b'9' or b'a'..=b'f'.
-fn hex_nibble(byte: u8) -> u8 {
+const fn hex_nibble(byte: u8) -> u8 {
     match byte {
         b'0'..=b'9' => byte - b'0',
         _ => byte - b'a' + 10,
@@ -178,7 +246,12 @@ fn hex_nibble(byte: u8) -> u8 {
 }
 
 /// Execute one local `OwnTracks` administration command and return safe terminal output.
-pub(crate) fn execute(arguments: &[String]) -> Result<String, OwnTracksCommandError> {
+///
+/// # Errors
+///
+/// Returns an error when the command arguments, policy, store, or local key
+/// material cannot be validated.
+pub fn execute(arguments: &[String]) -> Result<String, OwnTracksCommandError> {
     match arguments {
         [command, sqlite_path, owner_key_path, option, policy_path, timeline, entity]
             if command == "pair" && option == "--consent-policy" =>
@@ -292,18 +365,30 @@ const fn status_label(status: OwnTracksEnrollmentStatusV1) -> &'static str {
 /// On Unix, creation follows the established signing-key policy: every path
 /// component is checked, output creation is atomic and owner-only, and both the
 /// file and containing directory are synchronized before success.
-pub(crate) fn create_or_load_owner_key(path: &Path) -> Result<OwnerKey, OwnTracksMaterialError> {
+/// Create or load the owner-only key at `path`.
+///
+/// # Errors
+///
+/// Returns an error when the path is unsafe or the key cannot be read or
+/// created with the required owner-only guarantees.
+pub fn create_or_load_owner_key(path: &Path) -> Result<OwnerKey, OwnTracksMaterialError> {
     create_or_load_owner_key_platform(path)
 }
 
 /// Load an existing safe owner key without generating replacement material.
-pub(crate) fn load_owner_key(path: &Path) -> Result<OwnerKey, OwnTracksMaterialError> {
+/// Load an existing owner-only key from `path`.
+///
+/// # Errors
+///
+/// Returns an error when the path is unsafe, missing, malformed, or cannot be
+/// read with the required owner-only guarantees.
+pub fn load_owner_key(path: &Path) -> Result<OwnerKey, OwnTracksMaterialError> {
     load_owner_key_platform(path)
 }
 
 /// Generate independent Basic handle and secret values from the operating-system RNG.
 #[must_use]
-pub(crate) fn generate_pairing_credential() -> PairingCredential {
+pub fn generate_pairing_credential() -> PairingCredential {
     let mut handle = [0_u8; CREDENTIAL_BYTES];
     let mut secret = [0_u8; CREDENTIAL_BYTES];
     let mut rng = rand::rng();
@@ -314,7 +399,7 @@ pub(crate) fn generate_pairing_credential() -> PairingCredential {
 
 /// Derive the durable verifier; plaintext credential values are not persisted.
 #[must_use]
-pub(crate) fn derive_owntracks_verifier(
+pub fn derive_owntracks_verifier(
     owner_key: &OwnerKey,
     credential: &PairingCredential,
 ) -> [u8; CREDENTIAL_BYTES] {
@@ -420,8 +505,7 @@ fn load_existing_owner_key(
 
 #[cfg(unix)]
 fn create_owner_key(path: &Path) -> Result<OwnerKey, OwnTracksMaterialError> {
-    use std::io::Write;
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::unix::fs::OpenOptionsExt;
 
     let parent = path
         .parent()
@@ -436,27 +520,23 @@ fn create_owner_key(path: &Path) -> Result<OwnerKey, OwnTracksMaterialError> {
         .mode(0o600)
         .open(path)
         .map_err(|_| OwnTracksMaterialError::OwnerKeyIo)?;
-    let Ok(created) = file.metadata() else {
+    let Ok(created) = owner_key_metadata(&file) else {
         drop(file);
         cleanup_owner_key(path, &parent_file);
         return Err(OwnTracksMaterialError::OwnerKeyIo);
     };
-    if !created.is_file() || created.mode() & 0o077 != 0 {
+    if !owner_key_metadata_is_safe(&created) {
         drop(file);
         cleanup_owner_key(path, &parent_file);
         return Err(OwnTracksMaterialError::UnsafeOwnerKeyPath);
     }
-    if file
-        .write_all(&owner_key)
-        .and_then(|()| file.sync_all())
-        .is_err()
-    {
+    if write_owner_key(&mut file, &owner_key).is_err() {
         drop(file);
         cleanup_owner_key(path, &parent_file);
         return Err(OwnTracksMaterialError::OwnerKeyIo);
     }
     drop(file);
-    if parent_file.sync_all().is_err() {
+    if sync_owner_key_parent(&parent_file).is_err() {
         cleanup_owner_key(path, &parent_file);
         return Err(OwnTracksMaterialError::OwnerKeyIo);
     }
@@ -465,8 +545,8 @@ fn create_owner_key(path: &Path) -> Result<OwnerKey, OwnTracksMaterialError> {
 
 #[cfg(unix)]
 fn cleanup_owner_key(path: &Path, parent: &std::fs::File) {
-    let _ = std::fs::remove_file(path);
-    let _ = parent.sync_all();
+    drop(std::fs::remove_file(path));
+    drop(parent.sync_all());
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -482,6 +562,31 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    trait TestResultExt<T, E> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error>>;
+        fn test_err(self) -> Result<E, Box<dyn std::error::Error>>;
+    }
+
+    impl<T, E: std::fmt::Debug> TestResultExt<T, E> for Result<T, E> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error>> {
+            self.map_err(|error| format!("unexpected error: {error:?}").into())
+        }
+
+        fn test_err(self) -> Result<E, Box<dyn std::error::Error>> {
+            self.err().ok_or_else(|| "expected an error".into())
+        }
+    }
+
+    trait TestOptionExt<T> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error>>;
+    }
+
+    impl<T> TestOptionExt<T> for Option<T> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error>> {
+            self.ok_or_else(|| "expected a value".into())
+        }
+    }
+
     use super::{
         create_or_load_owner_key, derive_owntracks_verifier, generate_pairing_credential,
         load_owner_key, OwnTracksMaterialError,
@@ -502,49 +607,49 @@ mod tests {
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock after Unix epoch")
+                .unwrap_or_default()
                 .as_nanos()
         ))
     }
 
     #[cfg(unix)]
     #[test]
-    fn creates_a_32_byte_owner_only_key_and_rejects_unsafe_existing_paths() {
+    fn creates_a_32_byte_owner_only_key_and_rejects_unsafe_existing_paths(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let directory = temporary_path("owner-key");
-        std::fs::create_dir(&directory).expect("create private temporary directory");
+        std::fs::create_dir(&directory).test_ok()?;
         let key_path = directory.join("owner.key");
 
-        let key = create_or_load_owner_key(&key_path).expect("create owner key");
+        let key = create_or_load_owner_key(&key_path).test_ok()?;
         assert_eq!(key.len(), 32);
-        let metadata = std::fs::metadata(&key_path).expect("inspect created owner key");
+        let metadata = std::fs::metadata(&key_path).test_ok()?;
         assert_eq!(metadata.mode() & 0o777, 0o600);
-        assert_eq!(std::fs::read(&key_path).expect("read owner key"), key);
+        assert_eq!(std::fs::read(&key_path).test_ok()?, key);
 
-        std::fs::write(directory.join("bad.key"), b"not-a-32-byte-owner-key")
-            .expect("write malformed existing key");
-        let existing_error = create_or_load_owner_key(&directory.join("bad.key"))
-            .expect_err("malformed existing key is rejected");
+        std::fs::write(directory.join("bad.key"), b"not-a-32-byte-owner-key").test_ok()?;
+        let existing_error = create_or_load_owner_key(&directory.join("bad.key")).test_err()?;
         assert!(!existing_error
             .to_string()
             .contains("not-a-32-byte-owner-key"));
 
-        symlink(&key_path, directory.join("link.key")).expect("create owner key symlink");
-        let symlink_error = create_or_load_owner_key(&directory.join("link.key"))
-            .expect_err("symlink owner key is rejected");
+        symlink(&key_path, directory.join("link.key")).test_ok()?;
+        let symlink_error = create_or_load_owner_key(&directory.join("link.key")).test_err()?;
         assert!(!symlink_error.to_string().contains("owner.key"));
 
-        std::fs::remove_dir_all(directory).expect("remove temporary directory");
+        std::fs::remove_dir_all(directory).test_ok()?;
+
+        Ok(())
     }
 
     #[cfg(unix)]
     #[test]
-    fn owner_key_paths_cover_relative_and_io_error_branches() {
-        let relative = super::absolute_path(Path::new("relative-owner.key"))
-            .expect("relative path resolves against the current directory");
+    fn owner_key_paths_cover_relative_and_io_error_branches(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let relative = super::absolute_path(Path::new("relative-owner.key")).test_ok()?;
         assert!(relative.is_absolute());
 
         let directory = temporary_path("invalid-owner-key");
-        std::fs::create_dir(&directory).expect("create private temporary directory");
+        std::fs::create_dir(&directory).test_ok()?;
         let invalid_path = directory.join("owner\0.key");
         let create_result = create_or_load_owner_key(&invalid_path);
         assert!(matches!(
@@ -555,7 +660,9 @@ mod tests {
             load_owner_key(&invalid_path),
             Err(OwnTracksMaterialError::OwnerKeyIo)
         ));
-        std::fs::remove_dir_all(directory).expect("remove temporary directory");
+        std::fs::remove_dir_all(directory).test_ok()?;
+
+        Ok(())
     }
 
     #[test]
@@ -578,9 +685,10 @@ mod tests {
     }
 
     #[test]
-    fn consent_policy_is_strict_and_its_hash_is_domain_separated() {
+    fn consent_policy_is_strict_and_its_hash_is_domain_separated(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let policy = "schema_version = 1\nconsent_identity = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\nconsent_revision = 1\npolicy_version = 1\nbinding_revision = 1\nwithdrawn = false\npurpose = \"local_pairing\"\nprecision = \"exact\"\nsource_time_bucket = \"minute\"\nvisibility = \"paired_devices_only\"\n";
-        let parsed = super::parse_consent_policy(policy).expect("parse V1 consent policy");
+        let parsed = super::parse_consent_policy(policy).test_ok()?;
         assert_ne!(parsed.consent_hash, [0; 32]);
         assert!(super::parse_consent_policy(&format!("{policy}extra = 1\n")).is_err());
         assert!(super::parse_consent_policy(
@@ -610,27 +718,28 @@ mod tests {
             super::parse_consent_policy(
                 &policy.replace("consent_revision = 1", "consent_revision = 2")
             )
-            .expect("parse changed policy")
+            .test_ok()?
             .consent_hash
         );
+
+        Ok(())
     }
 
     #[test]
-    fn local_commands_are_bounded_and_pair_fails_before_creating_material_without_policy() {
+    fn local_commands_are_bounded_and_pair_fails_before_creating_material_without_policy(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let directory = temporary_path("commands");
-        std::fs::create_dir(&directory).expect("create private temporary directory");
+        std::fs::create_dir(&directory).test_ok()?;
         let database = directory.join("owntracks.db");
         let key_path = directory.join("owner.key");
         let policy_path = directory.join("invalid-consent.toml");
-        std::fs::write(&policy_path, "schema_version = 1\ninvalid = true\n")
-            .expect("write invalid policy");
-        let database = database.to_str().expect("UTF-8 database path").to_owned();
-        let key_path = key_path.to_str().expect("UTF-8 owner key path").to_owned();
+        std::fs::write(&policy_path, "schema_version = 1\ninvalid = true\n").test_ok()?;
+        let database = database.to_str().test_ok()?.to_owned();
+        let key_path = key_path.to_str().test_ok()?.to_owned();
         let timeline = TimelineId::new().to_string();
         let entity = EntityId::new().to_string();
 
-        let status = super::execute(&["status".to_owned(), database.clone()])
-            .expect("status command succeeds");
+        let status = super::execute(&["status".to_owned(), database.clone()]).test_ok()?;
         assert_eq!(status, "OwnTracks status: unpaired\nPolicy version: none");
 
         let pair_error = super::execute(&[
@@ -642,7 +751,7 @@ mod tests {
             timeline,
             entity,
         ])
-        .expect_err("invalid policy is rejected before creating material");
+        .test_err()?;
         assert_eq!(
             pair_error.to_string(),
             "OwnTracks policy configuration is unavailable"
@@ -652,41 +761,42 @@ mod tests {
         let target_error = super::execute(&[
             "pair".to_owned(),
             "unused.db".to_owned(),
-            key_path.clone(),
+            key_path,
             "--consent-policy".to_owned(),
             "missing-consent.toml".to_owned(),
             "not-a-timeline".to_owned(),
             "not-an-entity".to_owned(),
         ])
-        .expect_err("invalid pair target is rejected before policy lookup");
+        .test_err()?;
         assert_eq!(
             target_error.to_string(),
             "OwnTracks pair requires valid timeline and entity identifiers"
         );
 
-        let usage = super::execute(&["rotate".to_owned()])
-            .expect_err("missing rotate arguments are rejected");
+        let usage = super::execute(&["rotate".to_owned()]).test_err()?;
         assert!(usage.to_string().contains("Usage:"));
 
-        std::fs::remove_dir_all(directory).expect("remove temporary directory");
+        std::fs::remove_dir_all(directory).test_ok()?;
+
+        Ok(())
     }
 
     #[test]
-    fn pair_validated_policy_creates_one_active_enrollment() {
+    fn pair_validated_policy_creates_one_active_enrollment(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let directory = temporary_path("pair");
-        std::fs::create_dir(&directory).expect("create private temporary directory");
+        std::fs::create_dir(&directory).test_ok()?;
         let database = directory.join("owntracks.db");
         let owner_key = directory.join("owner.key");
         let policy = directory.join("consent.toml");
         let timeline = {
-            let mut store = SqliteStore::open(database.to_str().expect("UTF-8 database path"))
-                .expect("open fixture store");
+            let mut store = SqliteStore::open(database.to_str().test_ok()?).test_ok()?;
             store
                 .create_timeline("OwnTracks pair fixture")
-                .expect("create fixture timeline")
+                .test_ok()?
                 .id()
         };
-        std::fs::write(&policy, "schema_version = 1\nconsent_identity = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\nconsent_revision = 1\npolicy_version = 1\nbinding_revision = 1\nwithdrawn = false\npurpose = \"local_pairing\"\nprecision = \"exact\"\nsource_time_bucket = \"minute\"\nvisibility = \"paired_devices_only\"\n").expect("write policy");
+        std::fs::write(&policy, "schema_version = 1\nconsent_identity = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\nconsent_revision = 1\npolicy_version = 1\nbinding_revision = 1\nwithdrawn = false\npurpose = \"local_pairing\"\nprecision = \"exact\"\nsource_time_bucket = \"minute\"\nvisibility = \"paired_devices_only\"\n").test_ok()?;
         let output = super::execute(&[
             "pair".to_owned(),
             database.display().to_string(),
@@ -696,11 +806,11 @@ mod tests {
             timeline.to_string(),
             EntityId::new().to_string(),
         ])
-        .expect("pair");
+        .test_ok()?;
         assert!(output.contains("OwnTracks secret:"));
         assert!(owner_key.is_file());
         assert_eq!(
-            super::execute(&["status".to_owned(), database.display().to_string()]).expect("status"),
+            super::execute(&["status".to_owned(), database.display().to_string()]).test_ok()?,
             "OwnTracks status: active\nPolicy version: 1"
         );
         let second_pair = super::execute(&[
@@ -712,30 +822,28 @@ mod tests {
             timeline.to_string(),
             EntityId::new().to_string(),
         ])
-        .expect_err("active enrollment rejects a replacement pair");
+        .test_err()?;
         assert_eq!(
             second_pair.to_string(),
             "OwnTracks enrollment transition is unavailable"
         );
-        std::fs::remove_dir_all(directory).expect("remove temporary directory");
+        std::fs::remove_dir_all(directory).test_ok()?;
+
+        Ok(())
     }
 
     #[test]
-    fn rotate_and_revoke_use_only_the_enrollment_capability() {
+    fn rotate_and_revoke_use_only_the_enrollment_capability(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let directory = temporary_path("rotate-revoke");
-        std::fs::create_dir(&directory).expect("create private temporary directory");
+        std::fs::create_dir(&directory).test_ok()?;
         let database_path = directory.join("owntracks.db");
-        let database = database_path
-            .to_str()
-            .expect("UTF-8 database path")
-            .to_owned();
+        let database = database_path.to_str().test_ok()?.to_owned();
         let owner_key = directory.join("owner.key");
-        let owner_key = owner_key.to_str().expect("UTF-8 owner key path").to_owned();
+        let owner_key = owner_key.to_str().test_ok()?.to_owned();
 
-        let mut store = SqliteStore::open(&database).expect("open fixture store");
-        let timeline = store
-            .create_timeline("OwnTracks fixture")
-            .expect("create timeline");
+        let mut store = SqliteStore::open(&database).test_ok()?;
+        let timeline = store.create_timeline("OwnTracks fixture").test_ok()?;
         let entity = EntityId::new();
         store
             .pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
@@ -744,97 +852,96 @@ mod tests {
                 GeoLocationAdmissionFenceV1::new(1, ([1; 32], 1, [2; 32]), (1, false, 1)),
                 [3; 32],
             ))
-            .expect("seed active enrollment");
+            .test_ok()?;
         drop(store);
 
         assert_eq!(
             super::execute(&["rotate".to_owned(), database.clone(), owner_key.clone(),])
-                .expect_err("rotation cannot replace a missing owner key")
+                .test_err()?
                 .to_string(),
             "OwnTracks owner-key file is unavailable"
         );
         assert!(!std::path::Path::new(&owner_key).exists());
-        create_or_load_owner_key(std::path::Path::new(&owner_key))
-            .expect("create fixture owner key");
+        create_or_load_owner_key(std::path::Path::new(&owner_key)).test_ok()?;
 
         let rotation = super::execute(&["rotate".to_owned(), database.clone(), owner_key.clone()])
-            .expect("rotate active enrollment");
+            .test_ok()?;
         assert!(rotation.contains("OwnTracks handle:"));
         assert!(rotation.contains("OwnTracks secret:"));
         assert!(std::path::Path::new(&owner_key).is_file());
 
         let second_rotation =
             super::execute(&["rotate".to_owned(), database.clone(), owner_key.clone()])
-                .expect("rotate with existing owner key");
+                .test_ok()?;
         assert_ne!(rotation, second_rotation);
 
-        let revoke = super::execute(&["revoke".to_owned(), database.clone()])
-            .expect("revoke active enrollment");
+        let revoke = super::execute(&["revoke".to_owned(), database.clone()]).test_ok()?;
         assert_eq!(revoke, "OwnTracks enrollment revoked");
-        let status = super::execute(&["status".to_owned(), database.clone()])
-            .expect("read revoked enrollment status");
+        let status = super::execute(&["status".to_owned(), database.clone()]).test_ok()?;
         assert_eq!(status, "OwnTracks status: revoked\nPolicy version: 1");
         assert_eq!(
             super::execute(&["rotate".to_owned(), database, owner_key])
-                .expect_err("revoked enrollment cannot rotate")
+                .test_err()?
                 .to_string(),
             "OwnTracks enrollment transition is unavailable"
         );
 
-        std::fs::remove_dir_all(directory).expect("remove temporary directory");
+        std::fs::remove_dir_all(directory).test_ok()?;
+
+        Ok(())
     }
 
     #[test]
     fn cover_parse_consent_policy_error_paths() {
         // Invalid TOML
-        let _ = super::parse_consent_policy("not-valid-toml[[[");
+        drop(super::parse_consent_policy("not-valid-toml[[["));
         // Wrong schema_version
-        let _ = super::parse_consent_policy(
+        drop(super::parse_consent_policy(
             "schema_version = 2\nconsent_revision = 1\npolicy_version = 1\n\
              binding_revision = 1\nwithdrawn = false\npurpose = \"local_pairing\"\n\
              precision = \"exact\"\nsource_time_bucket = \"minute\"\n\
              visibility = \"paired_devices_only\"\nconsent_identity = \"\
              0000000000000000000000000000000000000000000000000000000000000000\"",
-        );
+        ));
         // consent_revision == 0 (schema_version=1 passes, this fails)
-        let _ = super::parse_consent_policy(
+        drop(super::parse_consent_policy(
             "schema_version = 1\nconsent_revision = 0\npolicy_version = 1\n\
              binding_revision = 1\nwithdrawn = false\npurpose = \"local_pairing\"\n\
              precision = \"exact\"\nsource_time_bucket = \"minute\"\n\
              visibility = \"paired_devices_only\"\nconsent_identity = \"\
              0000000000000000000000000000000000000000000000000000000000000000\"",
-        );
+        ));
         // withdrawn = true
-        let _ = super::parse_consent_policy(
+        drop(super::parse_consent_policy(
             "schema_version = 1\nconsent_revision = 1\npolicy_version = 1\n\
              binding_revision = 1\nwithdrawn = true\npurpose = \"local_pairing\"\n\
              precision = \"exact\"\nsource_time_bucket = \"minute\"\n\
              visibility = \"paired_devices_only\"\nconsent_identity = \"\
              0000000000000000000000000000000000000000000000000000000000000000\"",
-        );
+        ));
         // wrong purpose
-        let _ = super::parse_consent_policy(
+        drop(super::parse_consent_policy(
             "schema_version = 1\nconsent_revision = 1\npolicy_version = 1\n\
              binding_revision = 1\nwithdrawn = false\npurpose = \"other\"\n\
              precision = \"exact\"\nsource_time_bucket = \"minute\"\n\
              visibility = \"paired_devices_only\"\nconsent_identity = \"\
              0000000000000000000000000000000000000000000000000000000000000000\"",
-        );
+        ));
         // invalid consent_identity (not 64 hex chars)
-        let _ = super::parse_consent_policy(
+        drop(super::parse_consent_policy(
             "schema_version = 1\nconsent_revision = 1\npolicy_version = 1\n\
              binding_revision = 1\nwithdrawn = false\npurpose = \"local_pairing\"\n\
              precision = \"exact\"\nsource_time_bucket = \"minute\"\n\
              visibility = \"paired_devices_only\"\nconsent_identity = \"notvalidhex\"",
-        );
+        ));
     }
 
     #[test]
     fn cover_decode_lower_hex_32_error_paths() {
         // Wrong length
-        let _ = super::decode_lower_hex_32("abc");
+        drop(super::decode_lower_hex_32("abc"));
         // Correct length but invalid char (uppercase not in a-f)
-        let _ = super::decode_lower_hex_32(&"A".repeat(64));
+        drop(super::decode_lower_hex_32(&"A".repeat(64)));
     }
 
     #[test]
@@ -848,42 +955,467 @@ mod tests {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_tests {
+    trait TestResultExt<T, E> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error>>;
+    }
+
+    impl<T, E: std::fmt::Debug> TestResultExt<T, E> for Result<T, E> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error>> {
+            self.map_err(|error| format!("unexpected error: {error:?}").into())
+        }
+    }
+
     use super::{create_or_load_owner_key, OwnTracksMaterialError};
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
-    fn unsafe_ancestor_and_existing_key_lengths_fail_closed() {
+    fn unsafe_ancestor_and_existing_key_lengths_fail_closed(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let directory = std::env::temp_dir().join(format!(
             "piglor-gateway-owntracks-coverage-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .test_ok()?
                 .as_nanos()
         ));
-        std::fs::create_dir(&directory).unwrap();
-        let mut permissions = std::fs::metadata(&directory).unwrap().permissions();
+        std::fs::create_dir(&directory).test_ok()?;
+        let mut permissions = std::fs::metadata(&directory).test_ok()?.permissions();
         permissions.set_mode(0o777);
-        std::fs::set_permissions(&directory, permissions).unwrap();
+        std::fs::set_permissions(&directory, permissions).test_ok()?;
         let unsafe_result = create_or_load_owner_key(&directory.join("owner.key"));
         assert!(matches!(
             unsafe_result,
             Err(OwnTracksMaterialError::UnsafeOwnerKeyPath)
         ));
 
-        let mut permissions = std::fs::metadata(&directory).unwrap().permissions();
+        let mut permissions = std::fs::metadata(&directory).test_ok()?.permissions();
         permissions.set_mode(0o700);
-        std::fs::set_permissions(&directory, permissions).unwrap();
+        std::fs::set_permissions(&directory, permissions).test_ok()?;
         let malformed = directory.join("malformed.key");
-        std::fs::write(&malformed, [0_u8; 31]).unwrap();
-        let mut permissions = std::fs::metadata(&malformed).unwrap().permissions();
+        std::fs::write(&malformed, [0_u8; 31]).test_ok()?;
+        let mut permissions = std::fs::metadata(&malformed).test_ok()?.permissions();
         permissions.set_mode(0o600);
-        std::fs::set_permissions(&malformed, permissions).unwrap();
+        std::fs::set_permissions(&malformed, permissions).test_ok()?;
         assert!(matches!(
             create_or_load_owner_key(&malformed),
             Err(OwnTracksMaterialError::InvalidOwnerKeyLength)
         ));
-        std::fs::remove_dir_all(directory).unwrap();
+        std::fs::remove_dir_all(directory).test_ok()?;
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod coverage_entrypoints {
+    use super::*;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn test_ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+        result.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("unexpected coverage error: {error:?}")))
+        })
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn test_err<T: std::fmt::Debug, E>(result: Result<T, E>) -> E {
+        match result {
+            Ok(value) => std::panic::resume_unwind(Box::new(format!(
+                "unexpected coverage success: {value:?}"
+            ))),
+            Err(error) => error,
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn expect_err<T, E: std::fmt::Debug>(result: Result<T, E>) {
+        if result.is_ok() {
+            std::panic::resume_unwind(Box::new("expected a fail-closed error"));
+        }
+        std::mem::drop(result);
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn expect_equal<T: PartialEq + std::fmt::Debug>(left: T, right: T) {
+        let equal = left == right;
+        if !equal {
+            std::panic::resume_unwind(Box::new(format!(
+                "coverage fixture values differed: {left:?} != {right:?}"
+            )));
+        }
+        std::mem::drop((left, right));
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn temporary_directory(label: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "piglor-gateway-owntracks-entry-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        test_ok(std::fs::create_dir(&path));
+        path
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn policy_text() -> &'static str {
+        "schema_version = 1\nconsent_identity = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\nconsent_revision = 1\npolicy_version = 1\nbinding_revision = 1\nwithdrawn = false\npurpose = \"local_pairing\"\nprecision = \"exact\"\nsource_time_bucket = \"minute\"\nvisibility = \"paired_devices_only\"\n"
+    }
+
+    #[test]
+    fn command_entrypoints_fail_closed_at_each_local_boundary() {
+        let directory = temporary_directory("commands");
+        let database = directory.join("enrollment.db");
+        let policy = directory.join("consent.toml");
+        test_ok(std::fs::write(&policy, policy_text()));
+        let timeline = TimelineId::new().to_string();
+        let entity = EntityId::new().to_string();
+
+        expect_err(execute(&[
+            "pair".to_owned(),
+            database.display().to_string(),
+            directory.join("owner.key").display().to_string(),
+            "--consent-policy".to_owned(),
+            directory.join("missing.toml").display().to_string(),
+            timeline.clone(),
+            entity.clone(),
+        ]));
+        expect_err(execute(&[
+            "pair".to_owned(),
+            database.display().to_string(),
+            directory.join("owner.key").display().to_string(),
+            "--consent-policy".to_owned(),
+            policy.display().to_string(),
+            "bad-timeline".to_owned(),
+            entity.clone(),
+        ]));
+        expect_err(execute(&[
+            "pair".to_owned(),
+            database.display().to_string(),
+            directory.join("owner.key").display().to_string(),
+            "--consent-policy".to_owned(),
+            policy.display().to_string(),
+            timeline.clone(),
+            "bad-entity".to_owned(),
+        ]));
+
+        let unsafe_parent = directory.join("unsafe");
+        test_ok(std::fs::create_dir(&unsafe_parent));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = test_ok(std::fs::metadata(&unsafe_parent)).permissions();
+            permissions.set_mode(0o777);
+            test_ok(std::fs::set_permissions(&unsafe_parent, permissions));
+        }
+        expect_err(execute(&[
+            "pair".to_owned(),
+            database.display().to_string(),
+            unsafe_parent.join("owner.key").display().to_string(),
+            "--consent-policy".to_owned(),
+            policy.display().to_string(),
+            timeline.clone(),
+            entity.clone(),
+        ]));
+
+        let directory_path = directory.join("database-directory");
+        test_ok(std::fs::create_dir(&directory_path));
+        expect_err(execute(&[
+            "status".to_owned(),
+            directory_path.display().to_string(),
+        ]));
+        expect_err(execute(&[
+            "rotate".to_owned(),
+            directory_path.display().to_string(),
+            directory.join("missing.key").display().to_string(),
+        ]));
+        expect_err(execute(&[
+            "revoke".to_owned(),
+            directory_path.display().to_string(),
+        ]));
+        expect_err(execute(&[
+            "pair".to_owned(),
+            directory_path.display().to_string(),
+            directory.join("owner.key").display().to_string(),
+            "--consent-policy".to_owned(),
+            policy.display().to_string(),
+            timeline,
+            entity,
+        ]));
+        expect_err(execute(&[
+            "rotate".to_owned(),
+            database.display().to_string(),
+            directory.join("missing.key").display().to_string(),
+        ]));
+        expect_err(execute(&[
+            "revoke".to_owned(),
+            database.display().to_string(),
+        ]));
+        expect_err(execute(&["unknown".to_owned()]));
+
+        test_ok(std::fs::remove_dir_all(directory));
+    }
+
+    #[test]
+    fn active_enrollment_commands_cover_terminal_states() {
+        let directory = temporary_directory("active");
+        let database = directory.join("enrollment.db");
+        let policy = directory.join("consent.toml");
+        let owner_key = directory.join("owner.key");
+        test_ok(std::fs::write(&policy, policy_text()));
+        let mut store = test_ok(pos_store::sqlite::SqliteStore::open(
+            &database.display().to_string(),
+        ));
+        let timeline = test_ok(pos_core::EventStore::create_timeline(
+            &mut store,
+            "active-enrollment",
+        ));
+        test_ok(
+            pos_core::OwnTracksEnrollmentStore::pair_owntracks_enrollment(
+                &mut store,
+                pos_core::OwnTracksEnrollmentRequestV1::new(
+                    timeline.id(),
+                    pos_core::EntityId::new(),
+                    pos_core::GeoLocationAdmissionFenceV1::new(
+                        1,
+                        ([1; 32], 1, [2; 32]),
+                        (1, false, 1),
+                    ),
+                    [3; 32],
+                ),
+            ),
+        );
+        drop(store);
+
+        expect_err(execute(&[
+            "pair".to_owned(),
+            database.display().to_string(),
+            owner_key.display().to_string(),
+            "--consent-policy".to_owned(),
+            policy.display().to_string(),
+            timeline.id().to_string(),
+            pos_core::EntityId::new().to_string(),
+        ]));
+        let _ = test_ok(execute(&[
+            "status".to_owned(),
+            database.display().to_string(),
+        ]));
+        test_ok(create_or_load_owner_key(&owner_key));
+        let _ = test_ok(execute(&[
+            "rotate".to_owned(),
+            database.display().to_string(),
+            owner_key.display().to_string(),
+        ]));
+        let _ = test_ok(execute(&[
+            "revoke".to_owned(),
+            database.display().to_string(),
+        ]));
+        let _ = test_ok(execute(&[
+            "status".to_owned(),
+            database.display().to_string(),
+        ]));
+        expect_err(execute(&[
+            "rotate".to_owned(),
+            database.display().to_string(),
+            owner_key.display().to_string(),
+        ]));
+
+        test_ok(std::fs::remove_dir_all(directory));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_key_entrypoints_cover_missing_malformed_and_unsafe_paths() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = temporary_directory("keys");
+        let key_path = directory.join("owner.key");
+        let key = test_ok(create_or_load_owner_key(&key_path));
+        expect_equal(test_ok(load_owner_key(&key_path)), key);
+        expect_err(load_owner_key(&directory.join("missing.key")));
+
+        let malformed = directory.join("malformed.key");
+        test_ok(std::fs::write(&malformed, [0_u8; 31]));
+        let mut permissions = test_ok(std::fs::metadata(&malformed)).permissions();
+        permissions.set_mode(0o600);
+        test_ok(std::fs::set_permissions(&malformed, permissions));
+        expect_err(load_owner_key(&malformed));
+
+        let unsafe_parent = directory.join("unsafe");
+        test_ok(std::fs::create_dir(&unsafe_parent));
+        let mut permissions = test_ok(std::fs::metadata(&unsafe_parent)).permissions();
+        permissions.set_mode(0o777);
+        test_ok(std::fs::set_permissions(&unsafe_parent, permissions));
+        expect_err(create_or_load_owner_key(&unsafe_parent.join("owner.key")));
+        expect_err(create_or_load_owner_key(
+            &directory.join("missing-parent").join("owner.key"),
+        ));
+
+        test_ok(std::fs::remove_dir_all(directory));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_key_filesystem_boundaries_fail_closed() {
+        let directory = temporary_directory("filesystem-errors");
+        let target_directory = directory.join("target-directory");
+        test_ok(std::fs::create_dir(&target_directory));
+        expect_err(create_or_load_owner_key(&target_directory));
+        expect_err(load_owner_key(std::path::Path::new("/")));
+        expect_err(super::create_owner_key(std::path::Path::new("/")));
+
+        let missing_parent = directory.join("missing-parent").join("owner.key");
+        expect_err(super::create_owner_key(&missing_parent));
+
+        let existing = directory.join("existing.key");
+        test_ok(std::fs::write(&existing, [0_u8; 32]));
+        expect_err(super::create_owner_key(&existing));
+
+        let removed = directory.join("removed.key");
+        test_ok(std::fs::write(&removed, [0_u8; 32]));
+        let metadata = test_ok(std::fs::metadata(&removed));
+        test_ok(std::fs::remove_file(&removed));
+        expect_err(super::load_existing_owner_key(&removed, &metadata));
+
+        test_ok(std::fs::remove_dir_all(directory));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_key_creation_cleans_up_after_each_durable_write_failure() {
+        let directory = temporary_directory("fault-injection");
+        let cases = [
+            (
+                super::OWNER_KEY_FAULT_METADATA,
+                OwnTracksMaterialError::OwnerKeyIo,
+            ),
+            (
+                super::OWNER_KEY_FAULT_UNSAFE_METADATA,
+                OwnTracksMaterialError::UnsafeOwnerKeyPath,
+            ),
+            (
+                super::OWNER_KEY_FAULT_WRITE,
+                OwnTracksMaterialError::OwnerKeyIo,
+            ),
+            (
+                super::OWNER_KEY_FAULT_PARENT_SYNC,
+                OwnTracksMaterialError::OwnerKeyIo,
+            ),
+        ];
+
+        for (fault, expected) in cases {
+            let path = directory.join(format!("owner-{fault}.key"));
+            let error = test_err(super::with_owner_key_fault(fault, || {
+                super::create_owner_key(&path)
+            }));
+            assert_eq!(error, expected);
+            assert!(!path.exists());
+        }
+
+        test_ok(std::fs::remove_dir_all(directory));
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn initialize_database(path: &std::path::Path) {
+        test_ok(pos_store::sqlite::SqliteStore::open(
+            &path.display().to_string(),
+        ));
+    }
+
+    #[test]
+    fn command_store_boundaries_fail_closed_on_malformed_and_rejected_state() {
+        let directory = temporary_directory("store-errors");
+        let policy = directory.join("consent.toml");
+        let owner_key = directory.join("owner.key");
+        test_ok(std::fs::write(&policy, policy_text()));
+        let timeline = TimelineId::new().to_string();
+        let entity = EntityId::new().to_string();
+
+        let malformed_database = directory.join("malformed.db");
+        initialize_database(&malformed_database);
+        let connection = test_ok(rusqlite::Connection::open(&malformed_database));
+        test_ok(connection.execute(
+            "INSERT INTO owntracks_enrollment (singleton, state_cbor) VALUES (1, zeroblob(1))",
+            [],
+        ));
+        drop(connection);
+        expect_err(execute(&[
+            "status".to_owned(),
+            malformed_database.display().to_string(),
+        ]));
+        expect_err(execute(&[
+            "pair".to_owned(),
+            malformed_database.display().to_string(),
+            owner_key.display().to_string(),
+            "--consent-policy".to_owned(),
+            policy.display().to_string(),
+            timeline,
+            entity,
+        ]));
+        expect_err(execute(&[
+            "rotate".to_owned(),
+            malformed_database.display().to_string(),
+            owner_key.display().to_string(),
+        ]));
+        expect_err(execute(&[
+            "revoke".to_owned(),
+            malformed_database.display().to_string(),
+        ]));
+
+        let pair_database = directory.join("pair-error.db");
+        initialize_database(&pair_database);
+        expect_err(execute(&[
+            "pair".to_owned(),
+            pair_database.display().to_string(),
+            owner_key.display().to_string(),
+            "--consent-policy".to_owned(),
+            policy.display().to_string(),
+            TimelineId::new().to_string(),
+            EntityId::new().to_string(),
+        ]));
+
+        let active_database = directory.join("active-error.db");
+        initialize_database(&active_database);
+        let active_entity = EntityId::new().to_string();
+        let mut active_store = test_ok(pos_store::sqlite::SqliteStore::open(
+            &active_database.display().to_string(),
+        ));
+        let active_timeline = test_ok(pos_core::EventStore::create_timeline(
+            &mut active_store,
+            "active-errors",
+        ));
+        drop(active_store);
+        test_ok(execute(&[
+            "pair".to_owned(),
+            active_database.display().to_string(),
+            owner_key.display().to_string(),
+            "--consent-policy".to_owned(),
+            policy.display().to_string(),
+            active_timeline.id().to_string(),
+            active_entity,
+        ]));
+        let connection = test_ok(rusqlite::Connection::open(&active_database));
+        test_ok(connection.execute_batch(
+            "CREATE TRIGGER deny_enrollment_write BEFORE INSERT ON owntracks_enrollment
+             BEGIN SELECT RAISE(ABORT, 'enrollment write denied'); END;",
+        ));
+        drop(connection);
+        expect_err(execute(&[
+            "rotate".to_owned(),
+            active_database.display().to_string(),
+            owner_key.display().to_string(),
+        ]));
+        expect_err(execute(&[
+            "revoke".to_owned(),
+            active_database.display().to_string(),
+        ]));
+
+        test_ok(std::fs::remove_dir_all(directory));
     }
 }

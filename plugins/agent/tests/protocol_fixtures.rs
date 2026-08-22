@@ -8,6 +8,24 @@ use pos_plugin_agent::protocol::{
 use std::fmt::Write as _;
 use ulid::Ulid;
 
+trait TestValueExt<T> {
+    fn test_ok(self) -> T;
+}
+
+impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+    fn test_ok(self) -> T {
+        self.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("unexpected fixture error: {error:?}")))
+        })
+    }
+}
+
+impl<T> TestValueExt<T> for Option<T> {
+    fn test_ok(self) -> T {
+        self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing fixture value")))
+    }
+}
+
 const CATALOGUE_HEX: &str = "8344504143310181646d6f7665";
 const REQUEST_HEX: &str = concat!(
     "8d44505152310150",
@@ -100,7 +118,7 @@ fn decode_hex(value: &str) -> Vec<u8> {
             std::str::from_utf8(pair)
                 .ok()
                 .and_then(|digits| u8::from_str_radix(digits, 16).ok())
-                .expect("fixture hex")
+                .test_ok()
         })
         .collect()
 }
@@ -108,7 +126,7 @@ fn decode_hex(value: &str) -> Vec<u8> {
 fn encode_hex(value: &[u8]) -> String {
     let mut encoded = String::with_capacity(value.len() * 2);
     for byte in value {
-        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+        write!(&mut encoded, "{byte:02x}").test_ok();
     }
     encoded
 }
@@ -129,7 +147,7 @@ fn provenance() -> AgentProviderProvenanceV1 {
         "v1".to_owned(),
         [0xcc; 32],
     )
-    .expect("fixed provenance is valid")
+    .test_ok()
 }
 
 fn request() -> AgentDecisionRequestV1 {
@@ -148,93 +166,77 @@ fn request() -> AgentDecisionRequestV1 {
 
 #[test]
 fn golden_codecs_and_domain_hashes_match_frozen_external_fixtures() {
-    let catalogue = ActionCatalogueV1::try_new(vec!["move".to_owned()]).expect("valid catalogue");
+    let catalogue = ActionCatalogueV1::try_new(vec!["move".to_owned()]).test_ok();
     let request = request();
-    let accepted = ProviderDecisionV1::accepted(0, 1_000_000).expect("valid accepted decision");
+    let accepted = ProviderDecisionV1::accepted(0, 1_000_000).test_ok();
     let accepted_record = DecisionRecordV1::try_new(
         request.clone(),
         [0xdd; 32],
         Some([0xee; 32]),
         DecisionResultV1::from(accepted),
     )
-    .expect("accepted record digest matrix");
+    .test_ok();
     let no_action_record = DecisionRecordV1::try_new(
         request.clone(),
         [0xdd; 32],
         None,
         DecisionResultV1::NoAction(DecisionNoActionCodeV1::ProviderNoAction),
     )
-    .expect("no-action record digest matrix");
-    let action = AgentActionV1::try_new("move".to_owned(), 1_000_000, 7, [0xaa; 32], [0xff; 32])
-        .expect("valid derived action");
+    .test_ok();
+    let action =
+        AgentActionV1::try_new("move".to_owned(), 1_000_000, 7, [0xaa; 32], [0xff; 32]).test_ok();
 
+    assert_eq!(encode_hex(&catalogue.encode().test_ok()), CATALOGUE_HEX);
+    assert_eq!(encode_hex(&request.encode().test_ok()), REQUEST_HEX);
+    assert_eq!(encode_hex(&accepted.encode().test_ok()), PDP_ACCEPTED_HEX);
     assert_eq!(
-        encode_hex(&catalogue.encode().expect("catalogue encode")),
-        CATALOGUE_HEX
-    );
-    assert_eq!(
-        encode_hex(&request.encode().expect("request encode")),
-        REQUEST_HEX
-    );
-    assert_eq!(
-        encode_hex(&accepted.encode().expect("accepted encode")),
-        PDP_ACCEPTED_HEX
-    );
-    assert_eq!(
-        encode_hex(
-            &ProviderDecisionV1::no_action()
-                .encode()
-                .expect("no-action encode")
-        ),
+        encode_hex(&ProviderDecisionV1::no_action().encode().test_ok()),
         PDP_NO_ACTION_HEX
     );
     assert_eq!(
-        encode_hex(&accepted_record.encode().expect("record encode")),
+        encode_hex(&accepted_record.encode().test_ok()),
         RECORD_ACCEPTED_HEX
     );
     assert_eq!(
-        encode_hex(&no_action_record.encode().expect("record encode")),
+        encode_hex(&no_action_record.encode().test_ok()),
         RECORD_NO_ACTION_HEX
     );
-    assert_eq!(
-        encode_hex(&action.encode().expect("action encode")),
-        ACTION_HEX
-    );
+    assert_eq!(encode_hex(&action.encode().test_ok()), ACTION_HEX);
 
-    assert_eq!(catalogue.hash().expect("catalogue hash"), CATALOGUE_HASH);
-    assert_eq!(request.hash().expect("request hash"), REQUEST_HASH);
+    assert_eq!(catalogue.hash().test_ok(), CATALOGUE_HASH);
+    assert_eq!(request.hash().test_ok(), REQUEST_HASH);
     assert_eq!(
         ProviderDecisionV1::hash_response(&decode_hex(PDP_ACCEPTED_HEX)),
         RESPONSE_HASH
     );
-    assert_eq!(accepted_record.hash().expect("record hash"), RECORD_HASH);
+    assert_eq!(accepted_record.hash().test_ok(), RECORD_HASH);
 
     assert_eq!(
-        ActionCatalogueV1::decode(&decode_hex(CATALOGUE_HEX)).expect("catalogue decode"),
+        ActionCatalogueV1::decode(&decode_hex(CATALOGUE_HEX)).test_ok(),
         catalogue
     );
     assert_eq!(
-        AgentDecisionRequestV1::decode(&decode_hex(REQUEST_HEX)).expect("request decode"),
+        AgentDecisionRequestV1::decode(&decode_hex(REQUEST_HEX)).test_ok(),
         request
     );
     assert_eq!(
-        ProviderDecisionV1::decode(&decode_hex(PDP_ACCEPTED_HEX)).expect("accepted decode"),
+        ProviderDecisionV1::decode(&decode_hex(PDP_ACCEPTED_HEX)).test_ok(),
         accepted
     );
     assert_eq!(
-        ProviderDecisionV1::decode(&decode_hex(PDP_NO_ACTION_HEX)).expect("no-action decode"),
+        ProviderDecisionV1::decode(&decode_hex(PDP_NO_ACTION_HEX)).test_ok(),
         ProviderDecisionV1::no_action()
     );
     assert_eq!(
-        DecisionRecordV1::decode(&decode_hex(RECORD_ACCEPTED_HEX)).expect("record decode"),
+        DecisionRecordV1::decode(&decode_hex(RECORD_ACCEPTED_HEX)).test_ok(),
         accepted_record
     );
     assert_eq!(
-        DecisionRecordV1::decode(&decode_hex(RECORD_NO_ACTION_HEX)).expect("record decode"),
+        DecisionRecordV1::decode(&decode_hex(RECORD_NO_ACTION_HEX)).test_ok(),
         no_action_record
     );
     assert_eq!(
-        AgentActionV1::decode(&decode_hex(ACTION_HEX)).expect("action decode"),
+        AgentActionV1::decode(&decode_hex(ACTION_HEX)).test_ok(),
         action
     );
 }
@@ -263,7 +265,7 @@ fn public_decoders_reject_trailing_bytes_after_an_empty_array() {
 
 #[test]
 fn validated_protocol_values_expose_their_bounded_host_owned_fields() {
-    let catalogue = ActionCatalogueV1::try_new(vec!["move".to_owned()]).expect("catalogue");
+    let catalogue = ActionCatalogueV1::try_new(vec!["move".to_owned()]).test_ok();
     assert_eq!(catalogue.action(0), Some("move"));
     assert_eq!(catalogue.action(1), None);
     assert_eq!(catalogue.len(), 1);
@@ -300,10 +302,10 @@ fn validated_protocol_values_expose_their_bounded_host_owned_fields() {
     assert_eq!(request.catalogue_hash(), [0xaa; 32]);
     assert_eq!(request.provenance(), &provenance);
 
-    let response = BoundedProviderBytes::try_from(vec![1, 2]).expect("bounded response");
+    let response = BoundedProviderBytes::try_from(vec![1, 2]).test_ok();
     assert_eq!(response.as_slice(), &[1, 2]);
 
-    let decision = ProviderDecisionV1::accepted(3, 4).expect("accepted decision");
+    let decision = ProviderDecisionV1::accepted(3, 4).test_ok();
     assert_eq!(
         ProviderDecisionV1::no_action(),
         ProviderDecisionV1::NoAction
@@ -328,21 +330,19 @@ fn validated_protocol_values_expose_their_bounded_host_owned_fields() {
         Some([0xee; 32]),
         decision.into(),
     )
-    .expect("accepted record digest matrix");
+    .test_ok();
     assert_eq!(record.request(), &request);
     assert_eq!(record.request_hash(), [0xdd; 32]);
     assert_eq!(record.response_digest(), Some([0xee; 32]));
     assert_eq!(
         record.result(),
         DecisionResultV1::Accepted {
-            action_index: pos_plugin_agent::protocol::ActionIndexV1::try_from(3).expect("index"),
-            confidence: pos_plugin_agent::protocol::ConfidencePpmV1::try_from(4)
-                .expect("confidence"),
+            action_index: pos_plugin_agent::protocol::ActionIndexV1::try_from(3).test_ok(),
+            confidence: pos_plugin_agent::protocol::ConfidencePpmV1::try_from(4).test_ok(),
         }
     );
 
-    let action =
-        AgentActionV1::try_new("move".to_owned(), 4, 7, [0xaa; 32], [0xff; 32]).expect("action");
+    let action = AgentActionV1::try_new("move".to_owned(), 4, 7, [0xaa; 32], [0xff; 32]).test_ok();
     assert_eq!(action.action_id(), "move");
     assert_eq!(action.confidence().get(), 4);
     assert_eq!(action.driver_tick(), 7);
@@ -355,9 +355,8 @@ fn catalogue_constructor_enforces_the_exact_pac1_encoded_size_boundary() {
     let mut accepted_lengths = vec![64; 64];
     accepted_lengths[..3].copy_from_slice(&[24; 3]);
     accepted_lengths[3] = 47;
-    let accepted = ActionCatalogueV1::try_new(catalogue_ids(&accepted_lengths))
-        .expect("4,096-byte PAC1 catalogue");
-    assert_eq!(accepted.encode().expect("accepted PAC1").len(), 4096);
+    let accepted = ActionCatalogueV1::try_new(catalogue_ids(&accepted_lengths)).test_ok();
+    assert_eq!(accepted.encode().test_ok().len(), 4096);
 
     let mut rejected_lengths = accepted_lengths;
     rejected_lengths[3] = 48;
@@ -411,9 +410,9 @@ fn provider_decision_rejects_noncanonical_values_before_range_validation() {
 
 #[test]
 fn exact_encoders_use_shortest_integer_widths() {
-    let decision = ProviderDecisionV1::accepted(24, 500).expect("in-range decision");
+    let decision = ProviderDecisionV1::accepted(24, 500).test_ok();
     assert_eq!(
-        encode_hex(&decision.encode().expect("encode decision")),
+        encode_hex(&decision.encode().test_ok()),
         "854450445031010018181901f4"
     );
     assert_eq!(
@@ -808,7 +807,7 @@ fn record_decoder_reaches_every_result_branch() {
 fn record_decoder_accepts_each_no_action_code_and_rejects_other_result_values() {
     for code in no_action_codes() {
         let wire = record_no_action_wire(code.code());
-        let decoded = DecisionRecordV1::decode(&wire).expect("authoritative no-action record");
+        let decoded = DecisionRecordV1::decode(&wire).test_ok();
         assert_eq!(
             decoded.result(),
             DecisionResultV1::NoAction(code),
@@ -924,10 +923,9 @@ fn action_decoder_has_a_field_specific_malformed_matrix() {
 
 #[test]
 fn exact_writers_cover_all_integer_widths_and_no_action_assignments() {
-    let action = AgentActionV1::try_new("move".to_owned(), 1, u64::MAX, [0; 32], [1; 32])
-        .expect("valid max tick action");
+    let action = AgentActionV1::try_new("move".to_owned(), 1, u64::MAX, [0; 32], [1; 32]).test_ok();
     assert_eq!(
-        AgentActionV1::decode(&action.encode().expect("max tick encode")),
+        AgentActionV1::decode(&action.encode().test_ok()),
         Ok(action)
     );
 
@@ -944,8 +942,8 @@ fn exact_writers_cover_all_integer_widths_and_no_action_assignments() {
             response_digest,
             DecisionResultV1::NoAction(code),
         )
-        .expect("valid no-action digest matrix");
-        let encoded = record.encode().expect("no-action record encode");
+        .test_ok();
+        let encoded = record.encode().test_ok();
         assert_eq!(encoded.last().copied(), Some(code.code()));
     }
 }
@@ -955,7 +953,7 @@ fn replace_once(bytes: &mut [u8], needle: &[u8], replacement: &[u8]) {
     let start = bytes
         .windows(needle.len())
         .position(|window| window == needle)
-        .expect("fixture marker exists");
+        .test_ok();
     bytes[start..start + replacement.len()].copy_from_slice(replacement);
 }
 
@@ -993,16 +991,16 @@ fn extra_outer_item(bytes: &[u8], outer_header: u8) -> Vec<u8> {
 
 fn text_bytes(length: usize, byte: u8) -> Vec<u8> {
     let mut result = if length <= 23 {
-        vec![0x60 | u8::try_from(length).expect("short test text")]
+        vec![0x60 | u8::try_from(length).test_ok()]
     } else {
-        vec![0x78, u8::try_from(length).expect("one-byte test text")]
+        vec![0x78, u8::try_from(length).test_ok()]
     };
     result.extend(std::iter::repeat_n(byte, length));
     result
 }
 
 fn bytes_of(length: usize, byte: u8) -> Vec<u8> {
-    let mut result = vec![0x58, u8::try_from(length).expect("short test bytes")];
+    let mut result = vec![0x58, u8::try_from(length).test_ok()];
     result.extend(std::iter::repeat_n(byte, length));
     result
 }
@@ -1011,7 +1009,7 @@ fn replace_once_with(bytes: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8>
     let start = bytes
         .windows(needle.len())
         .position(|window| window == needle)
-        .expect("fixture marker exists");
+        .test_ok();
     let mut replaced = Vec::with_capacity(bytes.len() - needle.len() + replacement.len());
     replaced.extend_from_slice(&bytes[..start]);
     replaced.extend_from_slice(replacement);
@@ -1050,7 +1048,7 @@ fn too_many_catalogue_actions() -> Vec<u8> {
     wire
 }
 
-fn no_action_codes() -> [DecisionNoActionCodeV1; 9] {
+const fn no_action_codes() -> [DecisionNoActionCodeV1; 9] {
     [
         DecisionNoActionCodeV1::ProviderUnavailable,
         DecisionNoActionCodeV1::ProviderTimeout,
@@ -1073,7 +1071,7 @@ fn record_no_action_wire(code: u8) -> Vec<u8> {
         )
     } else {
         let mut wire = decode_hex(RECORD_NO_ACTION_HEX);
-        *wire.last_mut().expect("record fixture has a result code") = code;
+        *wire.last_mut().test_ok() = code;
         wire
     }
 }

@@ -117,7 +117,7 @@ pub struct RuleAgentDriver {
 impl RuleAgentDriver {
     /// Create a new driver for the given entity.
     #[must_use]
-    pub fn new(entity: EntityId, actions: Vec<String>) -> Self {
+    pub const fn new(entity: EntityId, actions: Vec<String>) -> Self {
         Self {
             entity,
             tick: 0,
@@ -136,6 +136,12 @@ impl Driver for RuleAgentDriver {
         _timeline: TimelineId,
         _observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
+        if self.actions.is_empty() {
+            return Err(RuntimeError::InvalidPayload {
+                event_type: EVENT_TYPE_DECISION.to_owned(),
+                reason: "rule-agent action catalogue is empty".to_owned(),
+            });
+        }
         let action = self.actions[self.tick as usize % self.actions.len()].clone();
         let payload = DecisionPayload {
             action,
@@ -143,8 +149,8 @@ impl Driver for RuleAgentDriver {
         };
 
         let mut buf = Vec::new();
-        // Writing to Vec<u8> is infallible with ciborium.
-        ciborium::into_writer(&payload, &mut buf).expect("ciborium write to Vec<u8> is infallible");
+        // `Vec<u8>` is an infallible CBOR sink.
+        drop(ciborium::into_writer(&payload, &mut buf));
 
         let draft = pos_core::event::EventDraft::new(
             self.entity,
@@ -190,7 +196,30 @@ impl Reducer for RuleAgentReducer {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected rule-agent fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("missing rule-agent fixture value"))
+            })
+        }
+    }
+
     use super::*;
     use pos_core::{
         clock::{Seq, WallTime},
@@ -207,7 +236,7 @@ mod tests {
             tick: 0,
         };
         let mut buf = Vec::new();
-        ciborium::into_writer(&payload, &mut buf).unwrap();
+        ciborium::into_writer(&payload, &mut buf).test_ok();
 
         Event {
             id: EventId::new(),
@@ -241,23 +270,35 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_produces_decision_events() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("test").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("test").test_ok();
         let entity = EntityId::new();
         let plugin = RuleAgentPlugin::new();
         let mut driver = RuleAgentDriver::new(entity, plugin.actions().to_vec());
 
         let expected = ["idle", "move", "interact", "observe"];
         for expected_action in &expected {
-            let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
+            let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
             assert_eq!(out.drafts.len(), 1);
             assert_eq!(out.drafts[0].event_type.as_str(), EVENT_TYPE_DECISION);
 
             // Decode the payload and verify the action
             let payload: DecisionPayload =
-                ciborium::from_reader(out.drafts[0].payload.as_slice()).unwrap();
+                ciborium::from_reader(out.drafts[0].payload.as_slice()).test_ok();
             assert_eq!(&payload.action, expected_action);
         }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn empty_action_catalogue_fails_closed() {
+        let mut driver = RuleAgentDriver::new(EntityId::new(), Vec::new());
+        let result = driver.step(TimelineId::new(), ObservationView::empty());
+        assert!(matches!(
+            result,
+            Err(RuntimeError::InvalidPayload { event_type, .. })
+                if event_type == EVENT_TYPE_DECISION
+        ));
     }
 
     #[test]
@@ -310,17 +351,17 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn cbor_payload_is_valid() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("test").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("test").test_ok();
         let entity = EntityId::new();
         let plugin = RuleAgentPlugin::new();
         let mut driver = RuleAgentDriver::new(entity, plugin.actions().to_vec());
 
-        let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
+        let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
         assert_eq!(out.drafts.len(), 1);
 
         let payload: DecisionPayload =
-            ciborium::from_reader(out.drafts[0].payload.as_slice()).unwrap();
+            ciborium::from_reader(out.drafts[0].payload.as_slice()).test_ok();
 
         assert_eq!(payload.action, "idle");
         assert_eq!(payload.tick, 0);

@@ -86,6 +86,7 @@ pub fn causal_chain(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use pos_core::{
@@ -94,6 +95,47 @@ mod tests {
     };
     use pos_store::{open_store, StoreConfig};
 
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected traversal fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("missing traversal fixture value"))
+            })
+        }
+    }
+
+    trait TestErrorExt<T, E> {
+        fn test_err(self) -> E;
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
+        fn test_err(self) -> E {
+            match self {
+                Ok(value) => std::panic::resume_unwind(Box::new(format!(
+                    "unexpected successful traversal fixture value: {value:?}"
+                ))),
+                Err(error) => error,
+            }
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn make_draft(entity: EntityId, event_type: &str) -> EventDraft {
         EventDraft::new(
             entity,
@@ -102,6 +144,7 @@ mod tests {
         )
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn make_draft_with_cause(entity: EntityId, event_type: &str, cause: EventId) -> EventDraft {
         let mut d = make_draft(entity, event_type);
         d.causation_id = Some(cause);
@@ -111,15 +154,15 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn causal_chain_single_event_no_cause() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("causal").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("causal").test_ok();
         let entity = EntityId::new();
         let events = store
             .append(tl.id(), &[make_draft(entity, "root.event")])
-            .unwrap();
+            .test_ok();
         let root = &events[0];
 
-        let chain = causal_chain(&*store, tl.id(), root.id).unwrap();
+        let chain = causal_chain(&*store, tl.id(), root.id).test_ok();
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].id, root.id);
     }
@@ -127,14 +170,14 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn causal_chain_follows_causation_ids() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("causal").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("causal").test_ok();
         let entity = EntityId::new();
 
         // Append root event.
         let root_events = store
             .append(tl.id(), &[make_draft(entity, "root.event")])
-            .unwrap();
+            .test_ok();
         let root = root_events[0].clone();
 
         // Append middle event caused by root.
@@ -143,7 +186,7 @@ mod tests {
                 tl.id(),
                 &[make_draft_with_cause(entity, "mid.event", root.id)],
             )
-            .unwrap();
+            .test_ok();
         let mid = mid_events[0].clone();
 
         // Append leaf event caused by mid.
@@ -152,10 +195,10 @@ mod tests {
                 tl.id(),
                 &[make_draft_with_cause(entity, "leaf.event", mid.id)],
             )
-            .unwrap();
+            .test_ok();
         let leaf = leaf_events[0].clone();
 
-        let chain = causal_chain(&*store, tl.id(), leaf.id).unwrap();
+        let chain = causal_chain(&*store, tl.id(), leaf.id).test_ok();
         assert_eq!(chain.len(), 3);
         assert_eq!(chain[0].id, root.id, "oldest cause should be first");
         assert_eq!(chain[1].id, mid.id);
@@ -165,19 +208,19 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn causal_chain_unknown_event_returns_empty() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("causal").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("causal").test_ok();
         let missing_id = EventId::new();
 
-        let chain = causal_chain(&*store, tl.id(), missing_id).unwrap();
+        let chain = causal_chain(&*store, tl.id(), missing_id).test_ok();
         assert!(chain.is_empty());
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn trace_relationships_returns_matching_events() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("rel").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("rel").test_ok();
         let entity = EntityId::new();
 
         let drafts = vec![
@@ -186,9 +229,9 @@ mod tests {
             make_draft(entity, "relationship.link"),
             make_draft(entity, "entity.action"),
         ];
-        store.append(tl.id(), &drafts).unwrap();
+        store.append(tl.id(), &drafts).test_ok();
 
-        let rels = trace_relationships(&*store, tl.id(), entity, "relationship.link").unwrap();
+        let rels = trace_relationships(&*store, tl.id(), entity, "relationship.link").test_ok();
         assert_eq!(rels.len(), 2);
         for e in &rels {
             assert_eq!(e.event_type.as_str(), "relationship.link");
@@ -199,15 +242,15 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn trace_relationships_empty_when_no_match() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("rel").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("rel").test_ok();
         let entity = EntityId::new();
 
         store
             .append(tl.id(), &[make_draft(entity, "entity.action")])
-            .unwrap();
+            .test_ok();
 
-        let rels = trace_relationships(&*store, tl.id(), entity, "relationship.link").unwrap();
+        let rels = trace_relationships(&*store, tl.id(), entity, "relationship.link").test_ok();
         assert!(rels.is_empty());
     }
 
@@ -216,18 +259,18 @@ mod tests {
     fn causal_chain_stops_at_broken_causation_link() {
         // Covers the `else { break }` branch: causation_id points to an event
         // not present in the store (e.g. it was on a different timeline).
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("t").test_ok();
         let entity = EntityId::new();
 
         // First event has a causation_id that won't exist in the store.
         let phantom_cause = EventId::new();
         let mut draft = make_draft(entity, "test.event");
         draft.causation_id = Some(phantom_cause);
-        let committed = store.append(tl.id(), &[draft]).unwrap();
+        let committed = store.append(tl.id(), &[draft]).test_ok();
 
         // causal_chain should return just the one event (can't follow the broken link).
-        let chain = causal_chain(&*store, tl.id(), committed[0].id).unwrap();
+        let chain = causal_chain(&*store, tl.id(), committed[0].id).test_ok();
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].id, committed[0].id);
     }
@@ -235,19 +278,19 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn trace_relationships_unknown_timeline_returns_error() {
-        let store = open_store(StoreConfig::Memory).unwrap();
+        let store = open_store(StoreConfig::Memory).test_ok();
         let unknown = TimelineId::new();
         let entity = EntityId::new();
-        let err = trace_relationships(&*store, unknown, entity, "relationship.link").unwrap_err();
+        let err = trace_relationships(&*store, unknown, entity, "relationship.link").test_err();
         assert!(matches!(err, CoreError::TimelineNotFound(_)));
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn causal_chain_unknown_timeline_returns_error() {
-        let store = open_store(StoreConfig::Memory).unwrap();
+        let store = open_store(StoreConfig::Memory).test_ok();
         let unknown = TimelineId::new();
-        let err = causal_chain(&*store, unknown, EventId::new()).unwrap_err();
+        let err = causal_chain(&*store, unknown, EventId::new()).test_err();
         assert!(matches!(err, CoreError::TimelineNotFound(_)));
     }
 }

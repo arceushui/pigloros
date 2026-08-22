@@ -18,6 +18,43 @@ use pos_core::{
 use pos_store::memory::MemoryStore;
 use pos_store::sqlite::SqliteStore;
 
+trait TestValueExt<T> {
+    fn test_ok(self) -> T;
+}
+
+impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+    fn test_ok(self) -> T {
+        self.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "unexpected admission fixture error: {error:?}"
+            )))
+        })
+    }
+}
+
+impl<T> TestValueExt<T> for Option<T> {
+    fn test_ok(self) -> T {
+        self.unwrap_or_else(|| {
+            std::panic::resume_unwind(Box::new("missing admission fixture value"))
+        })
+    }
+}
+
+trait TestErrorExt<T, E> {
+    fn test_err(self) -> E;
+}
+
+impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
+    fn test_err(self) -> E {
+        match self {
+            Ok(value) => std::panic::resume_unwind(Box::new(format!(
+                "unexpected successful admission fixture value: {value:?}"
+            ))),
+            Err(error) => error,
+        }
+    }
+}
+
 fn request(
     timeline: TimelineId,
     entity: EntityId,
@@ -67,7 +104,7 @@ fn request_with_admission_state(
     ))
 }
 
-fn initial_admission_state() -> AdmissionState {
+const fn initial_admission_state() -> AdmissionState {
     AdmissionState {
         binding_revision: 7,
         consent: ([1; 32], 8, [2; 32]),
@@ -79,7 +116,7 @@ fn pair_state<S>(store: &mut S, timeline: TimelineId, entity: EntityId, state: A
 where
     S: OwnTracksEnrollmentStore,
 {
-    let epoch = state.policy.2.checked_sub(1).unwrap();
+    let epoch = state.policy.2.checked_sub(1).test_ok();
     store
         .pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
             timeline,
@@ -91,14 +128,14 @@ where
             ),
             [42; 32],
         ))
-        .unwrap();
+        .test_ok();
 }
 
 fn replace_state<S>(store: &mut S, timeline: TimelineId, entity: EntityId, state: AdmissionState)
 where
     S: OwnTracksEnrollmentStore,
 {
-    store.revoke_owntracks_enrollment().unwrap();
+    store.revoke_owntracks_enrollment().test_ok();
     pair_state(store, timeline, entity, state);
 }
 
@@ -106,7 +143,7 @@ fn assert_admission_contract<S>(store: &mut S)
 where
     S: EventStore + GeoLocationAdmissionStore + OwnTracksEnrollmentStore,
 {
-    let unfenced_timeline = store.create_timeline("unfenced-geo-admission").unwrap();
+    let unfenced_timeline = store.create_timeline("unfenced-geo-admission").test_ok();
     let unfenced_entity = EntityId::new();
     let missing_fence = store
         .admit_geo_location(request(
@@ -114,23 +151,23 @@ where
             unfenced_entity,
             ([3; 32], [3; 32]),
         ))
-        .unwrap_err();
+        .test_err();
     assert!(matches!(
         missing_fence,
         pos_core::CoreError::GeographicAdmissionValidationFailed
     ));
     assert!(store
         .read(unfenced_timeline.id(), pos_core::SeqRange::all())
-        .unwrap()
+        .test_ok()
         .is_empty());
 
-    let timeline = store.create_timeline("geo-admission").unwrap();
+    let timeline = store.create_timeline("geo-admission").test_ok();
     let entity = EntityId::new();
     pair_state(store, timeline.id(), entity, initial_admission_state());
 
     let accepted = store
         .admit_geo_location(request(timeline.id(), entity, ([4; 32], [5; 32])))
-        .unwrap();
+        .test_ok();
     assert!(accepted.is_accepted());
     assert!(store
         .read(timeline.id(), pos_core::SeqRange::all())
@@ -138,19 +175,19 @@ where
 
     let duplicate = store
         .admit_geo_location(request(timeline.id(), entity, ([4; 32], [5; 32])))
-        .unwrap();
+        .test_ok();
     assert!(duplicate.is_duplicate());
     assert_eq!(duplicate.event_id(), accepted.event_id());
 
     let conflict = store
         .admit_geo_location(request(timeline.id(), entity, ([6; 32], [5; 32])))
-        .unwrap();
+        .test_ok();
     assert!(conflict.is_conflict());
 
-    store.revoke_owntracks_enrollment().unwrap();
+    store.revoke_owntracks_enrollment().test_ok();
     let denied = store
         .admit_geo_location(request(timeline.id(), entity, ([4; 32], [5; 32])))
-        .unwrap_err();
+        .test_err();
     assert!(matches!(
         denied,
         pos_core::CoreError::GeographicAdmissionValidationFailed
@@ -193,7 +230,7 @@ impl FenceReplacingClock {
         replaced: Arc<AtomicBool>,
     ) -> Self {
         Self {
-            store: SqliteStore::open(path).unwrap(),
+            store: SqliteStore::open(path).test_ok(),
             timeline,
             entity,
             replacement,
@@ -231,15 +268,15 @@ fn assert_expired_dedup_allows_one_new_admission<S>(store: &mut S)
 where
     S: EventStore + GeoLocationAdmissionStore + OwnTracksEnrollmentStore,
 {
-    let timeline = store.create_timeline("dedup-expiry").unwrap();
+    let timeline = store.create_timeline("dedup-expiry").test_ok();
     let entity = EntityId::new();
     pair_state(store, timeline.id(), entity, initial_admission_state());
     let first = store
         .admit_geo_location(request(timeline.id(), entity, ([4; 32], [5; 32])))
-        .unwrap();
+        .test_ok();
     let after_expiry = store
         .admit_geo_location(request(timeline.id(), entity, ([6; 32], [5; 32])))
-        .unwrap();
+        .test_ok();
     assert!(first.is_accepted());
     assert!(after_expiry.is_accepted());
     assert_ne!(first.event_id(), after_expiry.event_id());
@@ -249,7 +286,7 @@ fn assert_replaced_fence_rejects_stale_epoch<S>(store: &mut S)
 where
     S: EventStore + GeoLocationAdmissionStore + OwnTracksEnrollmentStore,
 {
-    let timeline = store.create_timeline("re-pair").unwrap();
+    let timeline = store.create_timeline("re-pair").test_ok();
     let entity = EntityId::new();
     pair_state(store, timeline.id(), entity, initial_admission_state());
     let stale = request(timeline.id(), entity, ([4; 32], [5; 32]));
@@ -274,7 +311,7 @@ where
             12,
             ([4; 32], [5; 32]),
         ))
-        .unwrap()
+        .test_ok()
         .is_accepted());
 }
 
@@ -321,7 +358,7 @@ where
     for (index, (replacement, dedup)) in
         replacements.into_iter().zip(replacement_dedups).enumerate()
     {
-        let timeline = store.create_timeline("re-consent-field").unwrap();
+        let timeline = store.create_timeline("re-consent-field").test_ok();
         let entity = EntityId::new();
         pair_state(store, timeline.id(), entity, initial);
         let stale =
@@ -330,7 +367,7 @@ where
             policy: (
                 replacement.policy.0,
                 replacement.policy.1,
-                12 + u64::try_from(index).unwrap() * 4,
+                12 + u64::try_from(index).test_ok() * 4,
             ),
             ..replacement
         };
@@ -347,9 +384,9 @@ where
                 replacement,
                 dedup,
             ))
-            .unwrap()
+            .test_ok()
             .is_accepted());
-        store.revoke_owntracks_enrollment().unwrap();
+        store.revoke_owntracks_enrollment().test_ok();
     }
 }
 
@@ -360,7 +397,7 @@ fn memory_admission_is_atomic_and_revalidates_before_deduplication() {
 
 #[test]
 fn sqlite_admission_is_atomic_and_revalidates_before_deduplication() {
-    assert_admission_contract(&mut SqliteStore::open_in_memory().unwrap());
+    assert_admission_contract(&mut SqliteStore::open_in_memory().test_ok());
 }
 
 #[test]
@@ -370,8 +407,10 @@ fn sqlite_rejects_a_missing_fence_before_consulting_the_admission_clock() {
         ":memory:",
         Box::new(CountingFixedClock(Arc::clone(&called))),
     )
-    .unwrap();
-    let timeline = store.create_timeline("missing-fence-before-clock").unwrap();
+    .test_ok();
+    let timeline = store
+        .create_timeline("missing-fence-before-clock")
+        .test_ok();
 
     assert!(matches!(
         store.admit_geo_location(request(timeline.id(), EntityId::new(), ([4; 32], [5; 32]))),
@@ -382,8 +421,8 @@ fn sqlite_rejects_a_missing_fence_before_consulting_the_admission_clock() {
 
 #[test]
 fn sqlite_rejects_a_withdrawn_request_before_writing_an_event() {
-    let mut store = SqliteStore::open_in_memory().unwrap();
-    let timeline = store.create_timeline("withdrawn-request").unwrap();
+    let mut store = SqliteStore::open_in_memory().test_ok();
+    let timeline = store.create_timeline("withdrawn-request").test_ok();
     let entity = EntityId::new();
     let withdrawn = AdmissionState {
         policy: (1, true, 10),
@@ -401,13 +440,13 @@ fn sqlite_rejects_a_withdrawn_request_before_writing_an_event() {
     ));
     assert!(store
         .read(timeline.id(), pos_core::SeqRange::all())
-        .unwrap()
+        .test_ok()
         .is_empty());
 }
 
 #[test]
 fn sqlite_refuses_to_pair_an_unknown_timeline() {
-    let mut store = SqliteStore::open_in_memory().unwrap();
+    let mut store = SqliteStore::open_in_memory().test_ok();
     let timeline = TimelineId::new();
 
     assert!(matches!(
@@ -423,10 +462,10 @@ fn sqlite_refuses_to_pair_an_unknown_timeline() {
 
 #[test]
 fn sqlite_rechecks_a_revoked_fence_before_committing_geographic_admission() {
-    let database = tempfile::NamedTempFile::new().unwrap();
-    let path = database.path().to_str().unwrap();
-    let mut setup = SqliteStore::open(path).unwrap();
-    let timeline = setup.create_timeline("recheck-revoked-fence").unwrap();
+    let database = tempfile::NamedTempFile::new().test_ok();
+    let path = database.path().to_str().test_ok();
+    let mut setup = SqliteStore::open(path).test_ok();
+    let timeline = setup.create_timeline("recheck-revoked-fence").test_ok();
     let original_timeline = timeline.clone();
     let entity = EntityId::new();
     let revoked = Arc::new(AtomicBool::new(false));
@@ -446,10 +485,10 @@ fn sqlite_rechecks_a_revoked_fence_before_committing_geographic_admission() {
             Arc::clone(&revoked),
         )),
     )
-    .unwrap();
+    .test_ok();
     let error = store
         .admit_geo_location(request(timeline.id(), entity, ([4; 32], [5; 32])))
-        .unwrap_err();
+        .test_err();
     assert!(matches!(
         error,
         CoreError::GeographicAdmissionValidationFailed
@@ -458,13 +497,13 @@ fn sqlite_rechecks_a_revoked_fence_before_committing_geographic_admission() {
 
     assert!(store
         .read(timeline.id(), pos_core::SeqRange::all())
-        .unwrap()
+        .test_ok()
         .is_empty());
     assert_eq!(
-        store.get_timeline(timeline.id()).unwrap(),
+        store.get_timeline(timeline.id()).test_ok(),
         Some(original_timeline)
     );
-    let mut reopened = SqliteStore::open(path).unwrap();
+    let mut reopened = SqliteStore::open(path).test_ok();
     assert!(matches!(
         reopened.admit_geo_location(request(timeline.id(), entity, ([6; 32], [7; 32]))),
         Err(CoreError::GeographicAdmissionValidationFailed)
@@ -473,10 +512,10 @@ fn sqlite_rechecks_a_revoked_fence_before_committing_geographic_admission() {
 
 #[test]
 fn sqlite_rechecks_a_reconsented_fence_before_committing_geographic_admission() {
-    let database = tempfile::NamedTempFile::new().unwrap();
-    let path = database.path().to_str().unwrap();
-    let mut setup = SqliteStore::open(path).unwrap();
-    let timeline = setup.create_timeline("recheck-reconsented-fence").unwrap();
+    let database = tempfile::NamedTempFile::new().test_ok();
+    let path = database.path().to_str().test_ok();
+    let mut setup = SqliteStore::open(path).test_ok();
+    let timeline = setup.create_timeline("recheck-reconsented-fence").test_ok();
     let original_timeline = timeline.clone();
     let entity = EntityId::new();
     let replaced = Arc::new(AtomicBool::new(false));
@@ -498,7 +537,7 @@ fn sqlite_rechecks_a_reconsented_fence_before_committing_geographic_admission() 
             Arc::clone(&replaced),
         )),
     )
-    .unwrap();
+    .test_ok();
     assert!(matches!(
         store.admit_geo_location(request(timeline.id(), entity, ([4; 32], [5; 32]))),
         Err(CoreError::GeographicAdmissionValidationFailed)
@@ -506,10 +545,10 @@ fn sqlite_rechecks_a_reconsented_fence_before_committing_geographic_admission() 
     assert!(replaced.load(Ordering::Relaxed));
     assert!(store
         .read(timeline.id(), pos_core::SeqRange::all())
-        .unwrap()
+        .test_ok()
         .is_empty());
     assert_eq!(
-        store.get_timeline(timeline.id()).unwrap(),
+        store.get_timeline(timeline.id()).test_ok(),
         Some(original_timeline)
     );
 }
@@ -532,7 +571,7 @@ fn sqlite_expired_geographic_dedup_allows_one_new_admission() {
             WallTime::from_micros(APPEND_IDENTITY_RETENTION_MICROS.saturating_add(2)),
         ])),
     )
-    .unwrap();
+    .test_ok();
     assert_expired_dedup_allows_one_new_admission(&mut store);
 }
 
@@ -543,7 +582,7 @@ fn memory_replaced_geographic_fence_rejects_stale_epoch() {
 
 #[test]
 fn sqlite_replaced_geographic_fence_rejects_stale_epoch() {
-    assert_replaced_fence_rejects_stale_epoch(&mut SqliteStore::open_in_memory().unwrap());
+    assert_replaced_fence_rejects_stale_epoch(&mut SqliteStore::open_in_memory().test_ok());
 }
 
 #[test]
@@ -554,27 +593,27 @@ fn memory_reconsent_fields_reject_stale_admission() {
 #[test]
 fn sqlite_reconsent_fields_reject_stale_admission() {
     assert_each_reconsent_field_rejects_stale_admission(
-        &mut SqliteStore::open_in_memory().unwrap(),
+        &mut SqliteStore::open_in_memory().test_ok(),
     );
 }
 
 #[test]
 fn sqlite_rejects_invalid_or_unreadable_geographic_dedup_records() {
-    let database = tempfile::NamedTempFile::new().unwrap();
-    let path = database.path().to_str().unwrap();
-    let mut store = SqliteStore::open(path).unwrap();
-    let timeline = store.create_timeline("dedup-corruption").unwrap();
+    let database = tempfile::NamedTempFile::new().test_ok();
+    let path = database.path().to_str().test_ok();
+    let mut store = SqliteStore::open(path).test_ok();
+    let timeline = store.create_timeline("dedup-corruption").test_ok();
     let entity = EntityId::new();
     let admission = request(timeline.id(), entity, ([4; 32], [5; 32]));
     pair_state(&mut store, timeline.id(), entity, initial_admission_state());
     assert!(store
         .admit_geo_location(admission.clone())
-        .unwrap()
+        .test_ok()
         .is_accepted());
-    let inspection = rusqlite::Connection::open(path).unwrap();
+    let inspection = rusqlite::Connection::open(path).test_ok();
     inspection
         .execute_batch("PRAGMA ignore_check_constraints = ON")
-        .unwrap();
+        .test_ok();
     inspection
         .execute(
             "UPDATE geographic_admission_dedup SET intent = ?1 WHERE fingerprint = ?2",
@@ -583,44 +622,44 @@ fn sqlite_rejects_invalid_or_unreadable_geographic_dedup_records() {
                 admission.fingerprint().as_owner_keyed_bytes().as_slice()
             ],
         )
-        .unwrap();
+        .test_ok();
     assert!(store
         .admit_geo_location(admission.clone())
-        .unwrap_err()
+        .test_err()
         .to_string()
         .contains("invalid intent length"));
     inspection
         .execute_batch("DROP TABLE geographic_admission_dedup")
-        .unwrap();
+        .test_ok();
     assert!(store
         .admit_geo_location(admission)
-        .unwrap_err()
+        .test_err()
         .to_string()
         .contains("no such table"));
 }
 
 #[test]
 fn sqlite_admission_rolls_back_every_artifact_when_link_write_fails() {
-    let database = tempfile::NamedTempFile::new().unwrap();
-    let path = database.path().to_str().unwrap();
-    let mut store = SqliteStore::open(path).unwrap();
-    let timeline = store.create_timeline("rollback-geo-admission").unwrap();
+    let database = tempfile::NamedTempFile::new().test_ok();
+    let path = database.path().to_str().test_ok();
+    let mut store = SqliteStore::open(path).test_ok();
+    let timeline = store.create_timeline("rollback-geo-admission").test_ok();
     let entity = EntityId::new();
     pair_state(&mut store, timeline.id(), entity, initial_admission_state());
-    let inspection = rusqlite::Connection::open(path).unwrap();
+    let inspection = rusqlite::Connection::open(path).test_ok();
     inspection
         .execute_batch(
             "CREATE TRIGGER deny_geo_link BEFORE INSERT ON geographic_admission_links
              BEGIN SELECT RAISE(ABORT, 'deny geo link'); END;",
         )
-        .unwrap();
+        .test_ok();
 
     assert!(store
         .admit_geo_location(request(timeline.id(), entity, ([4; 32], [5; 32])))
         .is_err());
     assert!(store
         .read(timeline.id(), pos_core::SeqRange::all())
-        .unwrap()
+        .test_ok()
         .is_empty());
 
     for table in [
@@ -634,7 +673,7 @@ fn sqlite_admission_rolls_back_every_artifact_when_link_write_fails() {
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
                 row.get(0)
             })
-            .unwrap();
+            .test_ok();
         assert_eq!(count, 0, "{table} must roll back with the admission");
     }
     let head: i64 = inspection
@@ -643,29 +682,29 @@ fn sqlite_admission_rolls_back_every_artifact_when_link_write_fails() {
             [timeline.id().to_string()],
             |row| row.get(0),
         )
-        .unwrap();
+        .test_ok();
     assert_eq!(head, 0);
 }
 
 #[test]
 fn sqlite_rejects_a_preexisting_unlinked_geographic_marker_before_deduplication() {
-    let database = tempfile::NamedTempFile::new().unwrap();
-    let path = database.path().to_str().unwrap();
-    let mut store = SqliteStore::open(path).unwrap();
-    let timeline = store.create_timeline("unlinked-geographic-state").unwrap();
+    let database = tempfile::NamedTempFile::new().test_ok();
+    let path = database.path().to_str().test_ok();
+    let mut store = SqliteStore::open(path).test_ok();
+    let timeline = store.create_timeline("unlinked-geographic-state").test_ok();
     let entity = EntityId::new();
     pair_state(&mut store, timeline.id(), entity, initial_admission_state());
     rusqlite::Connection::open(path)
-        .unwrap()
+        .test_ok()
         .execute(
             "INSERT INTO geographic_presence (timeline_id, has_evidence) VALUES (?1, 1)",
             [timeline.id().to_string()],
         )
-        .unwrap();
+        .test_ok();
 
     let error = store
         .admit_geo_location(request(timeline.id(), entity, ([4; 32], [5; 32])))
-        .unwrap_err();
+        .test_err();
     assert!(matches!(
         error,
         pos_core::CoreError::GeographicAdmissionValidationFailed
@@ -674,25 +713,25 @@ fn sqlite_rejects_a_preexisting_unlinked_geographic_marker_before_deduplication(
 
 #[test]
 fn sqlite_rejects_an_orphaned_geographic_snapshot_before_deduplication() {
-    let database = tempfile::NamedTempFile::new().unwrap();
-    let path = database.path().to_str().unwrap();
-    let mut store = SqliteStore::open(path).unwrap();
+    let database = tempfile::NamedTempFile::new().test_ok();
+    let path = database.path().to_str().test_ok();
+    let mut store = SqliteStore::open(path).test_ok();
     let timeline = store
         .create_timeline("orphaned-geographic-snapshot")
-        .unwrap();
+        .test_ok();
     let entity = EntityId::new();
     pair_state(&mut store, timeline.id(), entity, initial_admission_state());
     rusqlite::Connection::open(path)
-        .unwrap()
+        .test_ok()
         .execute(
             "INSERT INTO geographic_admission_snapshots (event_id, snapshot_cbor) VALUES (?1, ?2)",
             ["orphaned-event", "orphaned-snapshot"],
         )
-        .unwrap();
+        .test_ok();
 
     let error = store
         .admit_geo_location(request(timeline.id(), entity, ([4; 32], [5; 32])))
-        .unwrap_err();
+        .test_err();
     assert!(matches!(
         error,
         pos_core::CoreError::GeographicAdmissionValidationFailed

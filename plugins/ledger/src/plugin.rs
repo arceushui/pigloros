@@ -84,10 +84,11 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn registers_with_runtime_without_reducer() {
+    fn registers_with_runtime_without_reducer() -> Result<(), Box<dyn std::error::Error>> {
         let mut registry = PluginRegistry::new();
         let plugin = LedgerPlugin::new();
-        registry.register(&plugin, None, None).unwrap();
+        registry.register(&plugin, None, None)?;
         assert!(registry.plugin_names().any(|n| n == "ledger"));
+        Ok(())
     }
 }

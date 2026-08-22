@@ -7,6 +7,41 @@ use pos_store::{
     AppendDedupScope, AppendIdentity, EventStore, TimelineExport,
 };
 
+trait TestValueExt<T> {
+    fn test_ok(self) -> T;
+}
+
+impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+    fn test_ok(self) -> T {
+        self.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "unexpected store fixture error: {error:?}"
+            )))
+        })
+    }
+}
+
+impl<T> TestValueExt<T> for Option<T> {
+    fn test_ok(self) -> T {
+        self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing store fixture value")))
+    }
+}
+
+trait TestErrorExt<T, E> {
+    fn test_err(self) -> E;
+}
+
+impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
+    fn test_err(self) -> E {
+        match self {
+            Ok(value) => std::panic::resume_unwind(Box::new(format!(
+                "unexpected successful store fixture value: {value:?}"
+            ))),
+            Err(error) => error,
+        }
+    }
+}
+
 fn geographic_event(kind: &str, entity: EntityId) -> Event {
     let payload = CanonicalBytes::from_vec(b"protected".to_vec());
     Event {
@@ -25,7 +60,7 @@ fn geographic_event(kind: &str, entity: EntityId) -> Event {
 }
 
 fn assert_generic_geographic_admission_is_closed(store: &mut dyn EventStore) {
-    let timeline = store.create_timeline("generic-admission").unwrap();
+    let timeline = store.create_timeline("generic-admission").test_ok();
     let entity = EntityId::new();
 
     for kind in ["geo.location", "geo.cell"] {
@@ -69,8 +104,11 @@ fn assert_generic_geographic_admission_is_closed(store: &mut dyn EventStore) {
                 CanonicalBytes::from_vec(b"allowed".to_vec()),
             )],
         )
-        .unwrap();
-    assert_eq!(store.read(timeline.id(), SeqRange::all()).unwrap().len(), 1);
+        .test_ok();
+    assert_eq!(
+        store.read(timeline.id(), SeqRange::all()).test_ok().len(),
+        1
+    );
 
     for kind in ["geo.location", "geo.cell"] {
         let imported = TimelineExport {
@@ -79,7 +117,7 @@ fn assert_generic_geographic_admission_is_closed(store: &mut dyn EventStore) {
             parent_fork_hash: None,
         };
         assert!(import_timeline(store, imported).is_err());
-        assert_eq!(store.list_timelines().unwrap().len(), 1);
+        assert_eq!(store.list_timelines().test_ok().len(), 1);
 
         let imported = TimelineExport {
             timeline: Timeline::new(TimelineMeta::root("sensitive-import-with-id")),
@@ -87,7 +125,7 @@ fn assert_generic_geographic_admission_is_closed(store: &mut dyn EventStore) {
             parent_fork_hash: None,
         };
         assert!(import_timeline_with_id(store, imported).is_err());
-        assert_eq!(store.list_timelines().unwrap().len(), 1);
+        assert_eq!(store.list_timelines().test_ok().len(), 1);
     }
 }
 
@@ -98,17 +136,17 @@ fn memory_generic_geographic_admission_is_closed() {
 
 #[test]
 fn sqlite_generic_geographic_admission_is_closed() {
-    let mut store = pos_store::sqlite::SqliteStore::open_in_memory().unwrap();
+    let mut store = pos_store::sqlite::SqliteStore::open_in_memory().test_ok();
     assert_generic_geographic_admission_is_closed(&mut store);
 }
 
 #[test]
 fn sqlite_existing_geo_rows_are_detected_at_read_time_without_marker_backfill() {
-    let database = tempfile::NamedTempFile::new().unwrap();
+    let database = tempfile::NamedTempFile::new().test_ok();
     let mut store =
-        pos_store::sqlite::SqliteStore::open(database.path().to_str().unwrap()).unwrap();
-    let timeline = store.create_timeline("pre-existing-v1").unwrap();
-    let connection = rusqlite::Connection::open(database.path()).unwrap();
+        pos_store::sqlite::SqliteStore::open(database.path().to_str().test_ok()).test_ok();
+    let timeline = store.create_timeline("pre-existing-v1").test_ok();
+    let connection = rusqlite::Connection::open(database.path()).test_ok();
     let event = geographic_event("geo.location", EntityId::new());
     connection
         .execute(
@@ -125,29 +163,29 @@ fn sqlite_existing_geo_rows_are_detected_at_read_time_without_marker_backfill() 
                 event.payload_hash.as_bytes(),
             ],
         )
-        .unwrap();
+        .test_ok();
     let marker_count: i64 = connection
         .query_row("SELECT COUNT(*) FROM geographic_presence", [], |row| {
             row.get(0)
         })
-        .unwrap();
+        .test_ok();
     assert_eq!(marker_count, 0);
 
-    assert_eq!(store.root_timeline_count_bounded(1).unwrap(), 0);
+    assert_eq!(store.root_timeline_count_bounded(1).test_ok(), 0);
 
     assert!(store.read(timeline.id(), SeqRange::all()).is_err());
     let marker_count: i64 = connection
         .query_row("SELECT COUNT(*) FROM geographic_presence", [], |row| {
             row.get(0)
         })
-        .unwrap();
+        .test_ok();
     assert_eq!(marker_count, 0);
 }
 
 #[test]
 fn sqlite_public_adapter_still_reads_ordinary_events() {
-    let mut store = pos_store::sqlite::SqliteStore::open_in_memory().unwrap();
-    let timeline = store.create_timeline("ordinary").unwrap();
+    let mut store = pos_store::sqlite::SqliteStore::open_in_memory().test_ok();
+    let timeline = store.create_timeline("ordinary").test_ok();
     store
         .append(
             timeline.id(),
@@ -157,22 +195,25 @@ fn sqlite_public_adapter_still_reads_ordinary_events() {
                 CanonicalBytes::from_vec(b"payload".to_vec()),
             )],
         )
-        .unwrap();
-    assert_eq!(store.read(timeline.id(), SeqRange::all()).unwrap().len(), 1);
+        .test_ok();
+    assert_eq!(
+        store.read(timeline.id(), SeqRange::all()).test_ok().len(),
+        1
+    );
 }
 
 #[test]
 fn sqlite_event_id_lookup_propagates_storage_errors() {
-    let database = tempfile::NamedTempFile::new().unwrap();
+    let database = tempfile::NamedTempFile::new().test_ok();
     let mut store =
-        pos_store::sqlite::SqliteStore::open(database.path().to_str().unwrap()).unwrap();
-    let timeline = store.create_timeline("event-id-storage-error").unwrap();
-    let connection = rusqlite::Connection::open(database.path()).unwrap();
-    connection.execute("DROP TABLE events", []).unwrap();
+        pos_store::sqlite::SqliteStore::open(database.path().to_str().test_ok()).test_ok();
+    let timeline = store.create_timeline("event-id-storage-error").test_ok();
+    let connection = rusqlite::Connection::open(database.path()).test_ok();
+    connection.execute("DROP TABLE events", []).test_ok();
 
     assert!(store
         .read_event_by_id(timeline.id(), EventId::new())
-        .unwrap_err()
+        .test_err()
         .to_string()
         .contains("storage error"));
 }

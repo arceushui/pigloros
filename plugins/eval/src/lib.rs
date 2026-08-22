@@ -91,7 +91,7 @@ pub fn draft_prediction(
         prediction_id: prediction_id.to_owned(),
     };
     let mut buf = Vec::new();
-    ciborium::into_writer(&payload, &mut buf).expect("CBOR encoding infallible for payload");
+    assert!(ciborium::into_writer(&payload, &mut buf).is_ok());
     EventDraft::new(
         entity,
         Kind::new(EVENT_TYPE_PREDICTION),
@@ -116,7 +116,7 @@ pub fn draft_outcome(
         outcome,
     };
     let mut buf = Vec::new();
-    ciborium::into_writer(&payload, &mut buf).expect("CBOR encoding infallible for payload");
+    assert!(ciborium::into_writer(&payload, &mut buf).is_ok());
     EventDraft::new(
         entity,
         Kind::new(EVENT_TYPE_OUTCOME),
@@ -503,7 +503,43 @@ pub fn compute_report(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected eval fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing fixture value")))
+        }
+    }
+
+    trait TestErrorExt<T, E> {
+        fn test_err(self) -> E;
+    }
+
+    impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
+        fn test_err(self) -> E {
+            match self {
+                Ok(value) => std::panic::resume_unwind(Box::new(format!(
+                    "unexpected successful eval fixture value: {value:?}"
+                ))),
+                Err(error) => error,
+            }
+        }
+    }
     use super::*;
     use pos_core::{
         clock::{Seq, WallTime},
@@ -522,7 +558,7 @@ mod tests {
             prediction_id: prediction_id.to_owned(),
         };
         let mut buf = Vec::new();
-        ciborium::into_writer(&p, &mut buf).expect("infallible");
+        ciborium::into_writer(&p, &mut buf).test_ok();
         buf
     }
 
@@ -532,7 +568,7 @@ mod tests {
             outcome,
         };
         let mut buf = Vec::new();
-        ciborium::into_writer(&o, &mut buf).expect("infallible");
+        ciborium::into_writer(&o, &mut buf).test_ok();
         buf
     }
 
@@ -566,7 +602,7 @@ mod tests {
             Kind::new(EVENT_TYPE_PREDICTION),
             CanonicalBytes::from_vec(payload),
         );
-        store.append(timeline_id, &[draft]).unwrap();
+        store.append(timeline_id, &[draft]).test_ok();
     }
 
     fn append_outcome(
@@ -582,7 +618,7 @@ mod tests {
             Kind::new(EVENT_TYPE_OUTCOME),
             CanonicalBytes::from_vec(payload),
         );
-        store.append(timeline_id, &[draft]).unwrap();
+        store.append(timeline_id, &[draft]).test_ok();
     }
 
     // ── EvalPlugin tests ─────────────────────────────────────────────────────
@@ -787,10 +823,10 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_zero_predictions() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("eval-zero").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("eval-zero").test_ok();
 
-        let report = compute_report(store.as_ref(), tl.id()).unwrap();
+        let report = compute_report(store.as_ref(), tl.id()).test_ok();
         assert_eq!(report.n_predictions, 0);
         assert_eq!(report.n_resolved, 0);
         assert!((report.brier_score).abs() < f64::EPSILON);
@@ -805,14 +841,14 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_predictions_without_outcomes() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("eval-no-outcomes").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("eval-no-outcomes").test_ok();
         let entity = EntityId::new();
 
         append_prediction(store.as_mut(), tl.id(), entity, "e1", 0.8, "p1");
         append_prediction(store.as_mut(), tl.id(), entity, "e1", 0.3, "p2");
 
-        let report = compute_report(store.as_ref(), tl.id()).unwrap();
+        let report = compute_report(store.as_ref(), tl.id()).test_ok();
         assert_eq!(report.n_predictions, 2);
         assert_eq!(report.n_resolved, 0);
         assert!((report.brier_score).abs() < f64::EPSILON);
@@ -822,8 +858,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_perfect_predictor() {
         // A perfect predictor: all probs=1.0 for positive outcomes, 0.0 for negative.
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("eval-perfect").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("eval-perfect").test_ok();
         let entity = EntityId::new();
 
         append_prediction(store.as_mut(), tl.id(), entity, "e1", 1.0, "p1");
@@ -831,7 +867,7 @@ mod tests {
         append_outcome(store.as_mut(), tl.id(), entity, "p1", true);
         append_outcome(store.as_mut(), tl.id(), entity, "p2", false);
 
-        let report = compute_report(store.as_ref(), tl.id()).unwrap();
+        let report = compute_report(store.as_ref(), tl.id()).test_ok();
         assert_eq!(report.n_predictions, 2);
         assert_eq!(report.n_resolved, 2);
         // Perfect predictor → Brier score = 0.
@@ -844,8 +880,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_worst_predictor() {
         // Worst predictor: probs=1.0 for negative, 0.0 for positive.
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("eval-worst").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("eval-worst").test_ok();
         let entity = EntityId::new();
 
         append_prediction(store.as_mut(), tl.id(), entity, "e1", 1.0, "p1");
@@ -853,7 +889,7 @@ mod tests {
         append_outcome(store.as_mut(), tl.id(), entity, "p1", false);
         append_outcome(store.as_mut(), tl.id(), entity, "p2", true);
 
-        let report = compute_report(store.as_ref(), tl.id()).unwrap();
+        let report = compute_report(store.as_ref(), tl.id()).test_ok();
         // Brier score = mean((1-0)^2, (0-1)^2) = 1.0.
         assert!((report.brier_score - 1.0).abs() < 1e-10);
     }
@@ -865,8 +901,8 @@ mod tests {
         // Pairs: (0.9, true), (0.2, false), (0.7, true), (0.4, false)
         // Squared errors: (0.9-1)^2=0.01, (0.2-0)^2=0.04, (0.7-1)^2=0.09, (0.4-0)^2=0.16
         // Mean = (0.01+0.04+0.09+0.16)/4 = 0.075
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("eval-brier").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("eval-brier").test_ok();
         let entity = EntityId::new();
 
         append_prediction(store.as_mut(), tl.id(), entity, "e", 0.9, "p1");
@@ -878,7 +914,7 @@ mod tests {
         append_outcome(store.as_mut(), tl.id(), entity, "p3", true);
         append_outcome(store.as_mut(), tl.id(), entity, "p4", false);
 
-        let report = compute_report(store.as_ref(), tl.id()).unwrap();
+        let report = compute_report(store.as_ref(), tl.id()).test_ok();
         assert_eq!(report.n_resolved, 4);
         let expected_brier = 0.075;
         assert!(
@@ -898,14 +934,14 @@ mod tests {
         // population_avg = 0.9
         // brier_constant(0.9) = (0.9-1)^2 = 0.01
         // lift_vs_population_avg = 0.01 - 0.01 = 0.0
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("eval-lift-pop").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("eval-lift-pop").test_ok();
         let entity = EntityId::new();
 
         append_prediction(store.as_mut(), tl.id(), entity, "e", 0.9, "p1");
         append_outcome(store.as_mut(), tl.id(), entity, "p1", true);
 
-        let report = compute_report(store.as_ref(), tl.id()).unwrap();
+        let report = compute_report(store.as_ref(), tl.id()).test_ok();
         // lift_vs_population_avg = 0 because the model IS the population avg predictor.
         assert!(
             report.lift_vs_population_avg.abs() < 1e-10,
@@ -923,8 +959,8 @@ mod tests {
         // brier_constant(0.5) = mean((0.5-1)^2, (0.5-0)^2) = mean(0.25, 0.25) = 0.25
         // model brier = mean((0.9-1)^2, (0.1-0)^2) = mean(0.01, 0.01) = 0.01
         // lift = 0.25 - 0.01 = 0.24
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("eval-lift-pers").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("eval-lift-pers").test_ok();
         let entity = EntityId::new();
 
         append_prediction(store.as_mut(), tl.id(), entity, "e", 0.9, "p1");
@@ -932,7 +968,7 @@ mod tests {
         append_outcome(store.as_mut(), tl.id(), entity, "p1", true);
         append_outcome(store.as_mut(), tl.id(), entity, "p2", false);
 
-        let report = compute_report(store.as_ref(), tl.id()).unwrap();
+        let report = compute_report(store.as_ref(), tl.id()).test_ok();
         let expected_lift = 0.25 - 0.01;
         assert!(
             (report.lift_vs_persistence - expected_lift).abs() < 1e-10,
@@ -948,8 +984,8 @@ mod tests {
         // 10 predictions each in a different bin, all well-calibrated.
         // pred=0.05 (bin 0), outcome=false; pred=0.15 (bin 1), outcome=false; etc.
         // For a well-calibrated predictor ECE is non-zero but small.
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("eval-ece").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("eval-ece").test_ok();
         let entity = EntityId::new();
 
         let probs = [0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95];
@@ -960,7 +996,7 @@ mod tests {
             append_outcome(store.as_mut(), tl.id(), entity, &pid, prob > 0.5);
         }
 
-        let report = compute_report(store.as_ref(), tl.id()).unwrap();
+        let report = compute_report(store.as_ref(), tl.id()).test_ok();
         assert_eq!(report.n_resolved, 10);
         // ECE should be > 0 (predictions do not perfectly match outcomes).
         // Specifically for bins 0-4: mean_predicted ~ prob, fraction_positive=0.0 → |prob-0|
@@ -972,15 +1008,15 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_reliability_bins_populated() {
         // Put one prediction in each bin and verify bin fields.
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("eval-bins").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("eval-bins").test_ok();
         let entity = EntityId::new();
 
         // prob=0.75 → bin 7
         append_prediction(store.as_mut(), tl.id(), entity, "e", 0.75, "p1");
         append_outcome(store.as_mut(), tl.id(), entity, "p1", true);
 
-        let report = compute_report(store.as_ref(), tl.id()).unwrap();
+        let report = compute_report(store.as_ref(), tl.id()).test_ok();
         let bin7 = &report.reliability_bins[7];
         assert_eq!(bin7.n, 1);
         assert!((bin7.mean_predicted - 0.75).abs() < 1e-10);
@@ -993,14 +1029,14 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_bin_boundary_exact_1_goes_to_last_bin() {
         // predicted_prob=1.0 exactly should go to bin 9 (the last bin).
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("eval-bin-boundary").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("eval-bin-boundary").test_ok();
         let entity = EntityId::new();
 
         append_prediction(store.as_mut(), tl.id(), entity, "e", 1.0, "p1");
         append_outcome(store.as_mut(), tl.id(), entity, "p1", true);
 
-        let report = compute_report(store.as_ref(), tl.id()).unwrap();
+        let report = compute_report(store.as_ref(), tl.id()).test_ok();
         let last_bin = &report.reliability_bins[9];
         assert_eq!(last_bin.n, 1, "prob=1.0 should land in bin 9");
     }
@@ -1009,14 +1045,14 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_bin_boundary_exactly_zero() {
         // predicted_prob=0.0 should go to bin 0.
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("eval-bin-zero").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("eval-bin-zero").test_ok();
         let entity = EntityId::new();
 
         append_prediction(store.as_mut(), tl.id(), entity, "e", 0.0, "p1");
         append_outcome(store.as_mut(), tl.id(), entity, "p1", false);
 
-        let report = compute_report(store.as_ref(), tl.id()).unwrap();
+        let report = compute_report(store.as_ref(), tl.id()).test_ok();
         let bin0 = &report.reliability_bins[0];
         assert_eq!(bin0.n, 1, "prob=0.0 should land in bin 0");
     }
@@ -1025,19 +1061,19 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_all_bins_populated() {
         // Add one prediction per bin to verify all 10 bins have n>0.
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("eval-all-bins").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("eval-all-bins").test_ok();
         let entity = EntityId::new();
 
         // Centers of each bin: 0.05, 0.15, ..., 0.95
         for i in 0..10_usize {
-            let prob = (f64::from(u32::try_from(i).unwrap()) + 0.5) / 10.0;
+            let prob = (f64::from(u32::try_from(i).test_ok()) + 0.5) / 10.0;
             let pid = format!("pred{i}");
             append_prediction(store.as_mut(), tl.id(), entity, "e", prob, &pid);
             append_outcome(store.as_mut(), tl.id(), entity, &pid, i >= 5);
         }
 
-        let report = compute_report(store.as_ref(), tl.id()).unwrap();
+        let report = compute_report(store.as_ref(), tl.id()).test_ok();
         assert_eq!(report.reliability_bins.len(), 10);
         for (i, bin) in report.reliability_bins.iter().enumerate() {
             assert_eq!(bin.n, 1, "bin {i} should have 1 prediction");
@@ -1048,14 +1084,14 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_non_matching_prediction_ids() {
         // Outcomes don't match any prediction_id → n_resolved=0.
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("eval-no-match").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("eval-no-match").test_ok();
         let entity = EntityId::new();
 
         append_prediction(store.as_mut(), tl.id(), entity, "e", 0.7, "p1");
         append_outcome(store.as_mut(), tl.id(), entity, "p999", true); // no match
 
-        let report = compute_report(store.as_ref(), tl.id()).unwrap();
+        let report = compute_report(store.as_ref(), tl.id()).test_ok();
         assert_eq!(report.n_predictions, 1);
         assert_eq!(report.n_resolved, 0);
     }
@@ -1064,8 +1100,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_unrelated_events_ignored() {
         // Events with other type should not affect the report.
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("eval-other-events").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("eval-other-events").test_ok();
         let entity = EntityId::new();
 
         // Some random other event
@@ -1074,12 +1110,12 @@ mod tests {
             Kind::new("some.unrelated.event"),
             CanonicalBytes::from_vec(vec![]),
         );
-        store.append(tl.id(), &[draft]).unwrap();
+        store.append(tl.id(), &[draft]).test_ok();
 
         append_prediction(store.as_mut(), tl.id(), entity, "e", 0.6, "p1");
         append_outcome(store.as_mut(), tl.id(), entity, "p1", true);
 
-        let report = compute_report(store.as_ref(), tl.id()).unwrap();
+        let report = compute_report(store.as_ref(), tl.id()).test_ok();
         assert_eq!(report.n_predictions, 1);
         assert_eq!(report.n_resolved, 1);
     }
@@ -1088,8 +1124,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn reliability_bin_all_fields_populated() {
         // Verify all ReliabilityBin fields are correctly populated.
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("eval-bin-fields").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("eval-bin-fields").test_ok();
         let entity = EntityId::new();
 
         // Two predictions in bin 3 (0.3-0.4): probs 0.31 and 0.39, outcomes true/false.
@@ -1098,7 +1134,7 @@ mod tests {
         append_outcome(store.as_mut(), tl.id(), entity, "p1", true);
         append_outcome(store.as_mut(), tl.id(), entity, "p2", false);
 
-        let report = compute_report(store.as_ref(), tl.id()).unwrap();
+        let report = compute_report(store.as_ref(), tl.id()).test_ok();
         let bin3 = &report.reliability_bins[3];
 
         assert_eq!(bin3.n, 2);
@@ -1114,8 +1150,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_multiple_predictions_one_entity() {
         // 5 predictions + 5 outcomes → n_resolved=5, correct metrics.
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("eval-multi").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("eval-multi").test_ok();
         let entity = EntityId::new();
 
         let probs = [0.1, 0.3, 0.5, 0.7, 0.9];
@@ -1126,7 +1162,7 @@ mod tests {
             append_outcome(store.as_mut(), tl.id(), entity, &pid, outcome);
         }
 
-        let report = compute_report(store.as_ref(), tl.id()).unwrap();
+        let report = compute_report(store.as_ref(), tl.id()).test_ok();
         assert_eq!(report.n_predictions, 5);
         assert_eq!(report.n_resolved, 5);
         assert!(report.brier_score >= 0.0);
@@ -1189,16 +1225,14 @@ mod tests {
         let entity = EntityId::new();
         let pred = draft_prediction(entity, "e1", 0.75, "p1");
         assert_eq!(pred.event_type.as_str(), EVENT_TYPE_PREDICTION);
-        let decoded: PredictionPayload =
-            ciborium::from_reader(pred.payload.as_slice()).expect("valid CBOR");
+        let decoded: PredictionPayload = ciborium::from_reader(pred.payload.as_slice()).test_ok();
         assert_eq!(decoded.entity_id, "e1");
         assert!((decoded.predicted_prob - 0.75).abs() < 1e-10);
         assert_eq!(decoded.prediction_id, "p1");
 
         let out = draft_outcome(entity, "p1", true);
         assert_eq!(out.event_type.as_str(), EVENT_TYPE_OUTCOME);
-        let decoded_o: OutcomePayload =
-            ciborium::from_reader(out.payload.as_slice()).expect("valid CBOR");
+        let decoded_o: OutcomePayload = ciborium::from_reader(out.payload.as_slice()).test_ok();
         assert_eq!(decoded_o.prediction_id, "p1");
         assert!(decoded_o.outcome);
     }
@@ -1206,63 +1240,63 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_store_error_on_unknown_timeline() {
-        let store = open_store(StoreConfig::Memory).unwrap();
+        let store = open_store(StoreConfig::Memory).test_ok();
         let missing = TimelineId::new();
-        let err = compute_report(store.as_ref(), missing).unwrap_err();
+        let err = compute_report(store.as_ref(), missing).test_err();
         assert!(matches!(err, EvalError::Store(_)));
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_decode_error_on_bad_prediction_payload() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("eval-bad-pred").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("eval-bad-pred").test_ok();
         let entity = EntityId::new();
         let draft = EventDraft::new(
             entity,
             Kind::new(EVENT_TYPE_PREDICTION),
             CanonicalBytes::from_vec(vec![0xFF, 0x00]),
         );
-        store.append(tl.id(), &[draft]).unwrap();
-        let err = compute_report(store.as_ref(), tl.id()).unwrap_err();
+        store.append(tl.id(), &[draft]).test_ok();
+        let err = compute_report(store.as_ref(), tl.id()).test_err();
         assert!(matches!(err, EvalError::Decode(_)));
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_decode_error_on_bad_outcome_payload() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("eval-bad-out").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("eval-bad-out").test_ok();
         let entity = EntityId::new();
         let draft = EventDraft::new(
             entity,
             Kind::new(EVENT_TYPE_OUTCOME),
             CanonicalBytes::from_vec(vec![0xFF, 0x00]),
         );
-        store.append(tl.id(), &[draft]).unwrap();
-        let err = compute_report(store.as_ref(), tl.id()).unwrap_err();
+        store.append(tl.id(), &[draft]).test_ok();
+        let err = compute_report(store.as_ref(), tl.id()).test_err();
         assert!(matches!(err, EvalError::Decode(_)));
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn crps_equals_brier_for_binary_outcomes() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("eval-crps").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("eval-crps").test_ok();
         let entity = EntityId::new();
         append_prediction(store.as_mut(), tl.id(), entity, "e1", 0.8, "p1");
         append_prediction(store.as_mut(), tl.id(), entity, "e1", 0.3, "p2");
         append_outcome(store.as_mut(), tl.id(), entity, "p1", true);
         append_outcome(store.as_mut(), tl.id(), entity, "p2", false);
-        let report = compute_report(store.as_ref(), tl.id()).unwrap();
+        let report = compute_report(store.as_ref(), tl.id()).test_ok();
         assert!((report.crps - report.brier_score).abs() < 1e-10);
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn lift_vs_personal_base_rate_with_multiple_entities() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("eval-personal").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("eval-personal").test_ok();
         let e1 = EntityId::new();
         let e2 = EntityId::new();
         append_prediction(store.as_mut(), tl.id(), e1, "a", 1.0, "p1");
@@ -1271,7 +1305,7 @@ mod tests {
         append_outcome(store.as_mut(), tl.id(), e1, "p2", false);
         append_prediction(store.as_mut(), tl.id(), e2, "b", 0.5, "p3");
         append_outcome(store.as_mut(), tl.id(), e2, "p3", false);
-        let report = compute_report(store.as_ref(), tl.id()).unwrap();
+        let report = compute_report(store.as_ref(), tl.id()).test_ok();
         assert_eq!(report.n_resolved, 3);
         assert!((report.crps - report.brier_score).abs() < 1e-10);
         // personal base rate with leave-one-out: entity e1 (2 preds) gives

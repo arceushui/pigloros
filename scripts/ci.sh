@@ -50,11 +50,11 @@ cargo clippy --workspace --all-features --all-targets --locked -- -D warnings -W
 
 # Coverage floor: production code is fully instrumented (coverage(off) is test-only).
 # Unnecessary code is deleted/simplified rather than left as dead branches.
-echo "==> coverage (99% lines + 98% regions)"
+echo "==> coverage (99% lines + 99% regions)"
 export RUSTC_BOOTSTRAP=1
 cargo llvm-cov --workspace --all-features --locked --summary-only \
   --fail-under-lines 99 \
-  --fail-under-regions 98 \
+  --fail-under-regions 99 \
   -- --include-ignored
 
 echo "==> CI gates OK"

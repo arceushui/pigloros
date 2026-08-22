@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 pub mod fixture;
 pub mod projection;

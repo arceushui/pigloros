@@ -64,15 +64,15 @@ fn json_value_to_cbor(json: serde_json::Value) -> Result<Value, CoreError> {
     match json {
         J::Null => Ok(Value::Null),
         J::Bool(b) => Ok(Value::Bool(b)),
-        J::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(Value::Integer(i.into()))
-            } else if let Some(u) = n.as_u64() {
-                Ok(Value::Integer(u.into()))
-            } else {
-                cbor_float(n.as_f64())
-            }
-        }
+        J::Number(n) => n.as_i64().map_or_else(
+            || {
+                n.as_u64().map_or_else(
+                    || cbor_float(n.as_f64()),
+                    |value| Ok(Value::Integer(value.into())),
+                )
+            },
+            |value| Ok(Value::Integer(value.into())),
+        ),
         J::String(s) => Ok(Value::Text(s)),
         J::Array(items) => items
             .into_iter()
@@ -88,16 +88,17 @@ fn json_value_to_cbor(json: serde_json::Value) -> Result<Value, CoreError> {
 }
 
 fn cbor_float(value: Option<f64>) -> Result<Value, CoreError> {
-    value
-        .map(Value::Float)
-        .ok_or(CoreError::CanonicalCborNumericConversion)
+    value.map_or_else(
+        || Err(CoreError::CanonicalCborNumericConversion),
+        |value| Ok(Value::Float(value)),
+    )
 }
 
 /// Sort map keys recursively per RFC 8949 §4.2.1: sort by (`key_length`, `key_bytes`) ascending.
 fn sort_map_keys(value: Value) -> Result<Value, CoreError> {
     match value {
-        Value::Map(mut pairs) => pairs
-            .drain(..)
+        Value::Map(pairs) => pairs
+            .into_iter()
             .map(|(key, value)| {
                 cbor_key_bytes(&key)
                     .and_then(|key_bytes| sort_map_keys(value).map(|value| (key_bytes, key, value)))
@@ -142,8 +143,35 @@ fn write_cbor<W: Write>(value: &Value, writer: W) -> Result<(), CoreError> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use std::fmt::Debug;
+
+    trait TestResultExt<T, E> {
+        fn test_err(self) -> Result<E, Box<dyn std::error::Error>>;
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error>>;
+    }
+
+    impl<T, E: Debug> TestResultExt<T, E> for Result<T, E> {
+        fn test_err(self) -> Result<E, Box<dyn std::error::Error>> {
+            self.err().ok_or_else(|| "expected an error".into())
+        }
+
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error>> {
+            self.map_err(|error| format!("unexpected error: {error:?}").into())
+        }
+    }
+
+    trait TestOptionExt<T> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error>>;
+    }
+
+    impl<T> TestOptionExt<T> for Option<T> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error>> {
+            self.ok_or_else(|| "expected a value".into())
+        }
+    }
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -160,21 +188,24 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn canonical_cbor_is_same_regardless_of_field_declaration_order() {
+    fn canonical_cbor_is_same_regardless_of_field_declaration_order(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let zebra_first = ZebraFirst { zebra: 1, apple: 2 };
         let apple_first = AppleFirst { apple: 2, zebra: 1 };
-        let encoded_zebra = encode(&zebra_first).unwrap();
-        let encoded_apple = encode(&apple_first).unwrap();
+        let encoded_zebra = encode(&zebra_first).test_ok()?;
+        let encoded_apple = encode(&apple_first).test_ok()?;
         assert_eq!(
             encoded_zebra.as_slice(),
             encoded_apple.as_slice(),
             "canonical CBOR must be identical regardless of struct field order"
         );
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn canonical_key_order_is_by_length_then_lex() {
+    fn canonical_key_order_is_by_length_then_lex() -> Result<(), Box<dyn std::error::Error>> {
         #[derive(Serialize, Deserialize, Debug, PartialEq)]
         struct Multi {
             zebra: u32,
@@ -186,10 +217,10 @@ mod tests {
             apple: 2,
             a: 3,
         };
-        let encoded = encode(&m).unwrap();
-        let decoded: Value = ciborium::from_reader(encoded.as_slice()).unwrap();
+        let encoded = encode(&m).test_ok()?;
+        let decoded: Value = ciborium::from_reader(encoded.as_slice()).test_ok()?;
         let Value::Map(pairs) = decoded else {
-            unreachable!("struct encodes as CBOR map")
+            return Err("struct encodes as CBOR map".into());
         };
         let keys: Vec<&str> = pairs
             .iter()
@@ -202,47 +233,55 @@ mod tests {
             })
             .collect();
         assert_eq!(keys, vec!["a", "apple", "zebra"]);
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn encode_decode_round_trip() {
+    fn encode_decode_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let zf = ZebraFirst {
             zebra: 42,
             apple: 99,
         };
-        let encoded = encode(&zf).unwrap();
-        let decoded: serde_json::Value = decode(&encoded).unwrap();
-        let back: ZebraFirst = serde_json::from_value(decoded).unwrap();
+        let encoded = encode(&zf).test_ok()?;
+        let decoded: serde_json::Value = decode(&encoded).test_ok()?;
+        let back: ZebraFirst = serde_json::from_value(decoded).test_ok()?;
         assert_eq!(zf, back);
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn encode_bool() {
+    fn encode_bool() -> Result<(), Box<dyn std::error::Error>> {
         let b = true;
-        let enc = encode(&b).unwrap();
-        let back: serde_json::Value = decode(&enc).unwrap();
+        let enc = encode(&b).test_ok()?;
+        let back: serde_json::Value = decode(&enc).test_ok()?;
         assert_eq!(back, serde_json::Value::Bool(true));
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn encode_null() {
+    fn encode_null() -> Result<(), Box<dyn std::error::Error>> {
         #[derive(Serialize, Deserialize, Debug, PartialEq)]
         struct WithNull {
             x: Option<u32>,
         }
         let v = WithNull { x: None };
-        let enc = encode(&v).unwrap();
-        let back: serde_json::Value = decode(&enc).unwrap();
-        let back: WithNull = serde_json::from_value(back).unwrap();
+        let enc = encode(&v).test_ok()?;
+        let back: serde_json::Value = decode(&enc).test_ok()?;
+        let back: WithNull = serde_json::from_value(back).test_ok()?;
         assert_eq!(v, back);
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn encode_nested_map() {
+    fn encode_nested_map() -> Result<(), Box<dyn std::error::Error>> {
         #[derive(Serialize, Deserialize, Debug, PartialEq)]
         struct Inner {
             z: u32,
@@ -255,44 +294,52 @@ mod tests {
         let v = Outer {
             inner: Inner { z: 1, a: 2 },
         };
-        let enc = encode(&v).unwrap();
-        let back: serde_json::Value = decode(&enc).unwrap();
-        let back: Outer = serde_json::from_value(back).unwrap();
+        let enc = encode(&v).test_ok()?;
+        let back: serde_json::Value = decode(&enc).test_ok()?;
+        let back: Outer = serde_json::from_value(back).test_ok()?;
         assert_eq!(v, back);
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn encode_array() {
+    fn encode_array() -> Result<(), Box<dyn std::error::Error>> {
         let arr = vec![1u32, 2, 3];
-        let enc = encode(&arr).unwrap();
-        let back: serde_json::Value = decode(&enc).unwrap();
-        let back: Vec<u32> = serde_json::from_value(back).unwrap();
+        let enc = encode(&arr).test_ok()?;
+        let back: serde_json::Value = decode(&enc).test_ok()?;
+        let back: Vec<u32> = serde_json::from_value(back).test_ok()?;
         assert_eq!(arr, back);
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn same_input_always_same_bytes() {
+    fn same_input_always_same_bytes() -> Result<(), Box<dyn std::error::Error>> {
         let v = ZebraFirst { zebra: 7, apple: 8 };
-        let enc1 = encode(&v).unwrap();
-        let enc2 = encode(&v).unwrap();
+        let enc1 = encode(&v).test_ok()?;
+        let enc2 = encode(&v).test_ok()?;
         assert_eq!(enc1.as_slice(), enc2.as_slice());
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn encode_f64_number_round_trips() {
+    fn encode_f64_number_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         let v: f64 = std::f64::consts::PI;
-        let enc = encode(&v).unwrap();
-        let back: serde_json::Value = decode(&enc).unwrap();
-        let back = back.as_f64().unwrap();
+        let enc = encode(&v).test_ok()?;
+        let back: serde_json::Value = decode(&enc).test_ok()?;
+        let back = back.as_f64().test_ok()?;
         assert!((back - std::f64::consts::PI).abs() < 1e-10);
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn encode_float_values_with_struct() {
+    fn encode_float_values_with_struct() -> Result<(), Box<dyn std::error::Error>> {
         #[derive(Serialize, Deserialize, Debug, PartialEq)]
         struct WithFloat {
             value: f64,
@@ -304,17 +351,19 @@ mod tests {
             small: 2.7f32,
             fraction: 0.123_456_789,
         };
-        let enc = encode(&v).unwrap();
-        let back: serde_json::Value = decode(&enc).unwrap();
-        let back: WithFloat = serde_json::from_value(back).unwrap();
+        let enc = encode(&v).test_ok()?;
+        let back: serde_json::Value = decode(&enc).test_ok()?;
+        let back: WithFloat = serde_json::from_value(back).test_ok()?;
         assert!((back.value - v.value).abs() < f64::EPSILON);
         assert!((back.small - v.small).abs() < f32::EPSILON);
         assert!((back.fraction - v.fraction).abs() < f64::EPSILON);
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn encode_large_float_values() {
+    fn encode_large_float_values() -> Result<(), Box<dyn std::error::Error>> {
         #[derive(Serialize, Deserialize, Debug)]
         struct LargeFloats {
             very_large: f64,
@@ -326,34 +375,38 @@ mod tests {
             very_small: f64::MIN_POSITIVE,
             large_negative: -1e100,
         };
-        let enc = encode(&v).unwrap();
-        let back: serde_json::Value = decode(&enc).unwrap();
-        let back: LargeFloats = serde_json::from_value(back).unwrap();
+        let enc = encode(&v).test_ok()?;
+        let back: serde_json::Value = decode(&enc).test_ok()?;
+        let back: LargeFloats = serde_json::from_value(back).test_ok()?;
         assert!((back.very_large - v.very_large).abs() < f64::EPSILON);
         assert!((back.very_small - v.very_small).abs() < f64::EPSILON);
         assert!((back.large_negative - v.large_negative).abs() < f64::EPSILON);
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn canonical_key_order_with_non_map_root_array() {
+    fn canonical_key_order_with_non_map_root_array() -> Result<(), Box<dyn std::error::Error>> {
         #[derive(Serialize, Deserialize, Debug, PartialEq)]
         struct Item {
             zebra: u32,
             a: u32,
         }
         let items = vec![Item { zebra: 1, a: 2 }, Item { zebra: 3, a: 4 }];
-        let enc = encode(&items).unwrap();
-        let decoded: Value = ciborium::from_reader(enc.as_slice()).unwrap();
+        let enc = encode(&items).test_ok()?;
+        let decoded: Value = ciborium::from_reader(enc.as_slice()).test_ok()?;
         assert!(matches!(decoded, Value::Array(_)));
-        let back: serde_json::Value = decode(&enc).unwrap();
-        let back: Vec<Item> = serde_json::from_value(back).unwrap();
+        let back: serde_json::Value = decode(&enc).test_ok()?;
+        let back: Vec<Item> = serde_json::from_value(back).test_ok()?;
         assert_eq!(back, items);
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn encode_string_value_round_trips() {
+    fn encode_string_value_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         #[derive(Serialize, Deserialize, Debug, PartialEq)]
         struct WithString {
             label: String,
@@ -361,15 +414,17 @@ mod tests {
         let v = WithString {
             label: "hello".to_owned(),
         };
-        let enc = encode(&v).unwrap();
-        let back: serde_json::Value = decode(&enc).unwrap();
-        let back: WithString = serde_json::from_value(back).unwrap();
+        let enc = encode(&v).test_ok()?;
+        let back: serde_json::Value = decode(&enc).test_ok()?;
+        let back: WithString = serde_json::from_value(back).test_ok()?;
         assert_eq!(v, back);
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn canonical_key_order_test_is_a_map() {
+    fn canonical_key_order_test_is_a_map() -> Result<(), Box<dyn std::error::Error>> {
         #[derive(Serialize, Deserialize, Debug, PartialEq)]
         struct Multi {
             zebra: u32,
@@ -381,9 +436,11 @@ mod tests {
             apple: 2,
             a: 3,
         };
-        let encoded = encode(&m).unwrap();
-        let decoded: Value = ciborium::from_reader(encoded.as_slice()).unwrap();
+        let encoded = encode(&m).test_ok()?;
+        let decoded: Value = ciborium::from_reader(encoded.as_slice()).test_ok()?;
         assert!(matches!(decoded, Value::Map(_)));
+
+        Ok(())
     }
 
     #[test]
@@ -396,15 +453,15 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn sort_map_keys_orders_by_length_then_lex() {
+    fn sort_map_keys_orders_by_length_then_lex() -> Result<(), Box<dyn std::error::Error>> {
         let map = Value::Map(vec![
             (Value::Text("zebra".to_owned()), Value::Integer(1.into())),
             (Value::Text("apple".to_owned()), Value::Integer(2.into())),
             (Value::Text("a".to_owned()), Value::Integer(3.into())),
         ]);
-        let sorted = sort_map_keys(map).unwrap();
+        let sorted = sort_map_keys(map).test_ok()?;
         let Value::Map(pairs) = sorted else {
-            panic!("expected map");
+            return Err("expected map".into());
         };
         let keys: Vec<&str> = pairs
             .iter()
@@ -417,6 +474,8 @@ mod tests {
             })
             .collect();
         assert_eq!(keys, vec!["a", "apple", "zebra"]);
+
+        Ok(())
     }
 
     #[test]
@@ -438,34 +497,41 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn encode_propagates_serialize_errors() {
+    fn encode_propagates_serialize_errors() -> Result<(), Box<dyn std::error::Error>> {
         struct Boom;
         impl Serialize for Boom {
             fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
                 Err(serde::ser::Error::custom("boom"))
             }
         }
-        let err = encode(&Boom).unwrap_err();
+        let err = encode(&Boom).test_err()?;
         assert!(err.to_string().contains("boom"));
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn canonical_cbor_rejects_missing_float_conversion() {
-        let error = cbor_float(None).unwrap_err();
+    fn canonical_cbor_rejects_missing_float_conversion() -> Result<(), Box<dyn std::error::Error>> {
+        let error = cbor_float(None).test_err()?;
         assert!(error.to_string().contains("numeric conversion"));
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn canonical_cbor_preserves_large_unsigned_integers() {
-        let converted = json_value_to_cbor(serde_json::json!(u64::MAX)).unwrap();
+    fn canonical_cbor_preserves_large_unsigned_integers() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let converted = json_value_to_cbor(serde_json::json!(u64::MAX)).test_ok()?;
         assert_eq!(converted, Value::Integer(u64::MAX.into()));
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn canonical_cbor_surfaces_writer_failures() {
+    fn canonical_cbor_surfaces_writer_failures() -> Result<(), Box<dyn std::error::Error>> {
         struct FailingWriter;
 
         impl Write for FailingWriter {
@@ -478,7 +544,9 @@ mod tests {
             }
         }
 
-        let error = write_cbor(&Value::Null, FailingWriter).unwrap_err();
+        let error = write_cbor(&Value::Null, FailingWriter).test_err()?;
         assert!(error.to_string().contains("writer failed"));
+
+        Ok(())
     }
 }

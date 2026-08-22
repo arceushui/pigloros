@@ -293,6 +293,7 @@ impl RelationshipIndex {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use pos_core::{
@@ -370,7 +371,9 @@ mod tests {
             .state_for_reducer("main", &entity)
             .and_then(|s| s.get("event_count"))
             .and_then(serde_json::Value::as_u64)
-            .expect("event_count should be present");
+            .unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("event_count should be present"))
+            });
         assert_eq!(count, 5);
     }
 
@@ -384,7 +387,9 @@ mod tests {
         let entity = EntityId::new();
         registry.apply_event(&make_event(entity));
 
-        let state = registry.state_for(&entity).expect("state should exist");
+        let state = registry
+            .state_for(&entity)
+            .unwrap_or_else(|| std::panic::resume_unwind(Box::new("state should exist")));
         let count = state
             .get("event_count")
             .and_then(serde_json::Value::as_u64)
@@ -486,7 +491,9 @@ mod tests {
             .get(&entity)
             .and_then(|s| s.get("event_count"))
             .and_then(serde_json::Value::as_u64)
-            .expect("event_count should be present");
+            .unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("event_count should be present"))
+            });
         assert_eq!(count, 3);
     }
 
@@ -530,7 +537,9 @@ mod tests {
             .get(&entity)
             .and_then(|s| s.get("last_event_type"))
             .and_then(serde_json::Value::as_str)
-            .expect("last_event_type should be present");
+            .unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("last_event_type should be present"))
+            });
         assert_eq!(last, "second.type");
     }
 
@@ -636,6 +645,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod extra_tests {
     use super::*;
 
@@ -652,6 +662,7 @@ mod extra_tests {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod wave3_tests {
     use super::*;
     use pos_core::{
@@ -730,7 +741,8 @@ mod wave3_tests {
         reg.apply_event(&ev(entity));
         let diff = reg.diff_against_snapshot(&snap, &[entity]);
         assert!(diff.is_some());
-        let (name, eid) = diff.unwrap();
+        let (name, eid) =
+            diff.unwrap_or_else(|| std::panic::resume_unwind(Box::new("diff should be present")));
         assert_eq!(name, "r");
         assert_eq!(eid, entity);
     }

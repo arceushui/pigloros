@@ -4,9 +4,7 @@
 #   fmt          — cargo fmt --check (rustfmt)
 #   test         — cargo test --all-features (no ignored tests silently skip)
 #   clippy       — pedantic + -D warnings
-#   coverage     — lines ≥99%, regions ≥98%
-#                  (region floor accounts for LLVM short-circuit / inlining
-#                   artifacts that have no independently executable branch)
+#   coverage     — lines ≥99%, regions ≥99%
 #   audit        — cargo-audit (CVE advisories)
 #   deny         — cargo-deny (licenses, bans, sources)
 #   geiger       — no unsafe in own crates
@@ -50,6 +48,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           toolchain: 1.97.1
@@ -71,6 +71,8 @@ jobs:
           shared-key: test
       - name: cargo check (no default features)
         run: cargo check --workspace --all-targets --no-default-features --locked
+      - name: cargo check (all features, all targets)
+        run: cargo check --workspace --all-targets --all-features --locked
       - name: cargo test (all features, no ignored skip)
         run: |
           set -euo pipefail
@@ -83,6 +85,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           toolchain: 1.97.1
@@ -90,7 +94,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: clippy
-      - name: cargo clippy (pedantic, deny warnings)
+      - name: Reject new lint suppressions
+        run: bash scripts/check-no-new-lint-suppressions.sh origin/main
+      - name: cargo clippy (workspace lint policy, pedantic, deny warnings)
         run: >
           cargo clippy --workspace --all-features --all-targets --locked --
           -D warnings -W clippy::pedantic
@@ -120,12 +126,25 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: coverage
-      - name: cargo llvm-cov (lines ≥99%, regions ≥98%)
+      - name: cargo llvm-cov (lines ≥99%, regions ≥99%)
         run: >
           cargo llvm-cov --workspace --all-features --locked --summary-only
+          --show-missing-lines
           --fail-under-lines 99
-          --fail-under-regions 98
+          --fail-under-regions 99
           -- --include-ignored
+      - name: Export coverage details
+        if: always()
+        continue-on-error: true
+        run: cargo llvm-cov report --json
+          --output-path "${{ runner.temp }}/coverage.json"
+      - name: Upload coverage details
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-details
+          path: ${{ runner.temp }}/coverage.json
+          if-no-files-found: ignore
 
 # ── Security & compliance ────────────────────────────────────────────────────
 
@@ -167,9 +186,7 @@ jobs:
         with:
           tool: cargo-geiger
       - name: cargo geiger (assert no unsafe in own crates)
-        run: |
-          cargo geiger --all-features --locked --workspace 2>&1 | tee /tmp/geiger.log
-          ! grep -E "^(crates|apps|plugins)/" /tmp/geiger.log | grep -v "0 unsafe"
+        run: bash scripts/check-geiger.sh
 
 # ── Platform verification ────────────────────────────────────────────────────
 

@@ -56,11 +56,11 @@ impl Signature {
 mod bytes_32 {
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub(crate) fn serialize<S: Serializer>(b: &[u8; 32], s: S) -> Result<S::Ok, S::Error> {
+    pub(super) fn serialize<S: Serializer>(b: &[u8; 32], s: S) -> Result<S::Ok, S::Error> {
         s.serialize_bytes(b)
     }
 
-    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 32], D::Error> {
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 32], D::Error> {
         let v = serde_bytes::ByteBuf::deserialize(d)?;
         v.into_vec()
             .try_into()
@@ -71,11 +71,11 @@ mod bytes_32 {
 mod bytes_64 {
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub(crate) fn serialize<S: Serializer>(b: &[u8; 64], s: S) -> Result<S::Ok, S::Error> {
+    pub(super) fn serialize<S: Serializer>(b: &[u8; 64], s: S) -> Result<S::Ok, S::Error> {
         s.serialize_bytes(b)
     }
 
-    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 64], D::Error> {
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 64], D::Error> {
         serde_bytes::ByteBuf::deserialize(d).and_then(|v| {
             v.into_vec()
                 .try_into()
@@ -85,25 +85,28 @@ mod bytes_64 {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn hash_json_round_trip() {
+    fn hash_json_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let h = Hash::from_bytes([42u8; 32]);
-        let back: Hash = serde_json::from_str(&serde_json::to_string(&h).unwrap()).unwrap();
+        let back: Hash = serde_json::from_str(&serde_json::to_string(&h)?)?;
         assert_eq!(h, back);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn hash_cbor_round_trip() {
+    fn hash_cbor_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let h = Hash::from_bytes([0xABu8; 32]);
         let mut buf = Vec::new();
-        ciborium::into_writer(&h, &mut buf).unwrap();
-        let back: Hash = ciborium::from_reader(buf.as_slice()).unwrap();
+        ciborium::into_writer(&h, &mut buf)?;
+        let back: Hash = ciborium::from_reader(buf.as_slice())?;
         assert_eq!(h, back);
+        Ok(())
     }
 
     #[test]
@@ -114,28 +117,31 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn public_key_round_trip() {
+    fn public_key_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let pk = PublicKey::from_bytes([1u8; 32]);
-        let back: PublicKey = serde_json::from_str(&serde_json::to_string(&pk).unwrap()).unwrap();
+        let back: PublicKey = serde_json::from_str(&serde_json::to_string(&pk)?)?;
         assert_eq!(pk, back);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn signature_round_trip() {
+    fn signature_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let sig = Signature::from_bytes([7u8; 64]);
-        let back: Signature = serde_json::from_str(&serde_json::to_string(&sig).unwrap()).unwrap();
+        let back: Signature = serde_json::from_str(&serde_json::to_string(&sig)?)?;
         assert_eq!(sig, back);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn signature_cbor_round_trip() {
+    fn signature_cbor_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let sig = Signature::from_bytes([0xFFu8; 64]);
         let mut buf = Vec::new();
-        ciborium::into_writer(&sig, &mut buf).unwrap();
-        let back: Signature = ciborium::from_reader(buf.as_slice()).unwrap();
+        ciborium::into_writer(&sig, &mut buf)?;
+        let back: Signature = ciborium::from_reader(buf.as_slice())?;
         assert_eq!(sig, back);
+        Ok(())
     }
 
     #[test]
@@ -148,20 +154,22 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn hash_rejects_wrong_byte_length() {
+    fn hash_rejects_wrong_byte_length() -> Result<(), Box<dyn std::error::Error>> {
         let mut buf = Vec::new();
-        ciborium::into_writer(&[0u8; 16], &mut buf).unwrap();
+        ciborium::into_writer(&[0u8; 16], &mut buf)?;
         let result: Result<Hash, _> = ciborium::from_reader(buf.as_slice());
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn signature_rejects_wrong_byte_length() {
+    fn signature_rejects_wrong_byte_length() -> Result<(), Box<dyn std::error::Error>> {
         let mut buf = Vec::new();
-        ciborium::into_writer(&[0u8; 32], &mut buf).unwrap();
+        ciborium::into_writer(&[0u8; 32], &mut buf)?;
         let result: Result<Signature, _> = ciborium::from_reader(buf.as_slice());
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]

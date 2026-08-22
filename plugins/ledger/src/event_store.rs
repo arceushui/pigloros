@@ -24,7 +24,7 @@ impl From<CoreError> for LedgerError {
 
 fn to_canonical(value: &impl serde::Serialize) -> CanonicalBytes {
     let mut buf = Vec::new();
-    let _ = ciborium::into_writer(value, &mut buf);
+    assert!(ciborium::into_writer(value, &mut buf).is_ok());
     CanonicalBytes::from_vec(buf)
 }
 
@@ -127,7 +127,7 @@ impl LedgerStore for EventLedgerStore {
 
     fn register(&mut self, new: NewPrediction) -> Result<String, LedgerError> {
         new.validate()?;
-        let prediction = new.into_prediction(ulid::Ulid::gen().to_string());
+        let prediction = new.into_prediction(ulid::Ulid::r#gen().to_string());
         let payload = to_canonical(&prediction);
 
         self.append_signed(payload, Kind::new(EVENT_TYPE_PREDICTION))?;
@@ -171,117 +171,113 @@ mod tests {
     use pos_crypto::chain::{hash_payload, Blake3Hasher};
     use pos_store::memory::MemoryStore;
 
-    fn make_store() -> EventLedgerStore {
+    fn make_store() -> Result<EventLedgerStore, Box<dyn std::error::Error>> {
         let (sk, _vk) = pos_crypto::signing::generate_keypair();
         let mut mem = MemoryStore::new();
-        let tl = mem.create_timeline("ledger").unwrap();
-        EventLedgerStore::new(
+        let tl = mem.create_timeline("ledger")?;
+        Ok(EventLedgerStore::new(
             Box::new(mem),
             tl.id(),
             EntityId::new(),
             sk,
             Box::new(Blake3Hasher),
-        )
+        ))
     }
 
     #[test]
-    fn port_contract() {
-        contract::run(&mut |_path| Box::new(make_store()) as Box<dyn LedgerStore>);
+    fn port_contract() -> Result<(), Box<dyn std::error::Error>> {
+        contract::run(&mut |_path| Ok(Box::new(make_store()?) as Box<dyn LedgerStore>))?;
+        Ok(())
     }
 
     #[test]
-    fn load_empty_ledger() {
-        let store = make_store();
-        let ledger = store.load("2026-07-25").unwrap();
+    fn load_empty_ledger() -> Result<(), Box<dyn std::error::Error>> {
+        let store = make_store()?;
+        let ledger = store.load("2026-07-25")?;
         assert!(ledger.entries().is_empty());
+        Ok(())
     }
 
     #[test]
-    fn register_and_load() {
-        let mut store = make_store();
-        let id = store
-            .register(contract::sample_new_prediction("2026-08-01"))
-            .unwrap();
-        let ledger = store.load("2026-07-25").unwrap();
+    fn register_and_load() -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = make_store()?;
+        let id = store.register(contract::sample_new_prediction("2026-08-01"))?;
+        let ledger = store.load("2026-07-25")?;
         assert_eq!(ledger.entries().len(), 1);
         assert_eq!(ledger.entries()[0].prediction.prediction_id, id);
+        Ok(())
     }
 
     #[test]
-    fn resolve_and_load() {
-        let mut store = make_store();
-        let id = store
-            .register(contract::sample_new_prediction("2026-08-01"))
-            .unwrap();
-        store
-            .resolve(
-                LedgerOutcome::try_new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned())
-                    .unwrap(),
-            )
-            .unwrap();
-        let ledger = store.load("2026-07-25").unwrap();
+    fn resolve_and_load() -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = make_store()?;
+        let id = store.register(contract::sample_new_prediction("2026-08-01"))?;
+        store.resolve(LedgerOutcome::try_new(
+            id,
+            true,
+            "2026-07-30T09:00:00Z".to_owned(),
+        )?)?;
+        let ledger = store.load("2026-07-25")?;
         assert_eq!(ledger.entries().len(), 1);
         assert_eq!(ledger.entries()[0].status.as_str(), "resolved");
+        Ok(())
     }
 
     #[test]
-    fn double_resolve_rejected() {
-        let mut store = make_store();
-        let id = store
-            .register(contract::sample_new_prediction("2026-08-01"))
-            .unwrap();
-        store
-            .resolve(
-                LedgerOutcome::try_new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned())
-                    .unwrap(),
-            )
-            .unwrap();
+    fn double_resolve_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = make_store()?;
+        let id = store.register(contract::sample_new_prediction("2026-08-01"))?;
+        store.resolve(LedgerOutcome::try_new(
+            id.clone(),
+            true,
+            "2026-07-30T09:00:00Z".to_owned(),
+        )?)?;
         let err = store
-            .resolve(
-                LedgerOutcome::try_new(id.clone(), false, "2026-07-31T09:00:00Z".to_owned())
-                    .unwrap(),
-            )
-            .unwrap_err();
+            .resolve(LedgerOutcome::try_new(
+                id,
+                false,
+                "2026-07-31T09:00:00Z".to_owned(),
+            )?)
+            .err()
+            .ok_or("expected error")?;
         assert!(matches!(err, LedgerError::AlreadyResolved(_)));
+        Ok(())
     }
 
     #[test]
-    fn unknown_prediction_rejected() {
-        let mut store = make_store();
+    fn unknown_prediction_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = make_store()?;
         let err = store
             .resolve(LedgerOutcome {
                 prediction_id: "01J3B0Y5ZK2J6MGK8D7QW3N0P9".to_owned(),
                 outcome: true,
                 resolved_at: "2026-07-30T09:00:00Z".to_owned(),
             })
-            .unwrap_err();
+            .err()
+            .ok_or("expected error")?;
         assert!(matches!(err, LedgerError::UnknownPrediction(_)));
+        Ok(())
     }
 
     #[test]
-    fn events_are_signed() {
-        let mut store = make_store();
-        store
-            .register(contract::sample_new_prediction("2026-08-01"))
-            .unwrap();
-        let events = store
-            .store
-            .read(store.timeline_id, SeqRange::all())
-            .unwrap();
+    fn events_are_signed() -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = make_store()?;
+        store.register(contract::sample_new_prediction("2026-08-01"))?;
+        let events = store.store.read(store.timeline_id, SeqRange::all())?;
         assert_eq!(events.len(), 1);
         assert!(events[0].signature.is_some(), "event must be signed");
+        Ok(())
     }
 
     #[test]
-    fn load_orphan_outcome_returns_error() {
-        let mut store = make_store();
-        let head = store.head_seq().unwrap();
+    fn load_orphan_outcome_returns_error() -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = make_store()?;
+        let head = store.head_seq()?;
         let outcome = LedgerOutcome::try_new(
             "01J3B0Y5ZK2J6MGK8D7QW3N0P9".to_owned(),
             true,
             "2026-07-30T09:00:00Z".to_owned(),
-        )
-        .unwrap();
+        )?;
         let payload = to_canonical(&outcome);
         let payload_hash = hash_payload(&payload);
         let event = Event {
@@ -297,18 +293,16 @@ mod tests {
             signature: None,
             payload_hash,
         };
-        store
-            .store
-            .append_committed(store.timeline_id, &[event])
-            .unwrap();
-        let err = store.load("2026-07-25").unwrap_err();
+        store.store.append_committed(store.timeline_id, &[event])?;
+        let err = store.load("2026-07-25").err().ok_or("expected error")?;
         assert!(matches!(err, LedgerError::OrphanResolution(_)));
+        Ok(())
     }
 
     #[test]
-    fn load_skips_unknown_event_types() {
-        let mut store = make_store();
-        let head = store.head_seq().unwrap();
+    fn load_skips_unknown_event_types() -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = make_store()?;
+        let head = store.head_seq()?;
         let payload = CanonicalBytes::from_vec(b"some_unrelated_data".to_vec());
         let payload_hash = hash_payload(&payload);
         let event = Event {
@@ -324,18 +318,16 @@ mod tests {
             signature: None,
             payload_hash,
         };
-        store
-            .store
-            .append_committed(store.timeline_id, &[event])
-            .unwrap();
-        let ledger = store.load("2026-07-25").unwrap();
+        store.store.append_committed(store.timeline_id, &[event])?;
+        let ledger = store.load("2026-07-25")?;
         assert!(ledger.entries().is_empty());
+        Ok(())
     }
 
     #[test]
-    fn resolve_skips_decode_error_prediction() {
-        let mut store = make_store();
-        let head = store.head_seq().unwrap();
+    fn resolve_skips_decode_error_prediction() -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = make_store()?;
+        let head = store.head_seq()?;
         let payload = CanonicalBytes::from_vec(b"not cbor".to_vec());
         let payload_hash = hash_payload(&payload);
         let event = Event {
@@ -351,30 +343,24 @@ mod tests {
             signature: None,
             payload_hash,
         };
-        store
-            .store
-            .append_committed(store.timeline_id, &[event])
-            .unwrap();
+        store.store.append_committed(store.timeline_id, &[event])?;
         let err = store
-            .resolve(
-                LedgerOutcome::try_new(
-                    "01J3B0Y5ZK2J6MGK8D7QW3N0P9".to_owned(),
-                    true,
-                    "2026-07-30T09:00:00Z".to_owned(),
-                )
-                .unwrap(),
-            )
-            .unwrap_err();
+            .resolve(LedgerOutcome::try_new(
+                "01J3B0Y5ZK2J6MGK8D7QW3N0P9".to_owned(),
+                true,
+                "2026-07-30T09:00:00Z".to_owned(),
+            )?)
+            .err()
+            .ok_or("expected error")?;
         assert!(matches!(err, LedgerError::UnknownPrediction(_)));
+        Ok(())
     }
 
     #[test]
-    fn resolve_skips_decode_error_outcome() {
-        let mut store = make_store();
-        let id = store
-            .register(contract::sample_new_prediction("2026-08-01"))
-            .unwrap();
-        let head = store.head_seq().unwrap();
+    fn resolve_skips_decode_error_outcome() -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = make_store()?;
+        let id = store.register(contract::sample_new_prediction("2026-08-01"))?;
+        let head = store.head_seq()?;
         let payload = CanonicalBytes::from_vec(b"not cbor".to_vec());
         let payload_hash = hash_payload(&payload);
         let event = Event {
@@ -390,23 +376,21 @@ mod tests {
             signature: None,
             payload_hash,
         };
-        store
-            .store
-            .append_committed(store.timeline_id, &[event])
-            .unwrap();
-        let result = store.resolve(
-            LedgerOutcome::try_new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned()).unwrap(),
-        );
+        store.store.append_committed(store.timeline_id, &[event])?;
+        let result = store.resolve(LedgerOutcome::try_new(
+            id,
+            true,
+            "2026-07-30T09:00:00Z".to_owned(),
+        )?);
         assert!(result.is_ok(), "resolve should succeed: {result:?}");
+        Ok(())
     }
 
     #[test]
-    fn resolve_skips_unknown_event_types() {
-        let mut store = make_store();
-        let id = store
-            .register(contract::sample_new_prediction("2026-08-01"))
-            .unwrap();
-        let head = store.head_seq().unwrap();
+    fn resolve_skips_unknown_event_types() -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = make_store()?;
+        let id = store.register(contract::sample_new_prediction("2026-08-01"))?;
+        let head = store.head_seq()?;
         let payload = CanonicalBytes::from_vec(b"irrelevant".to_vec());
         let payload_hash = hash_payload(&payload);
         let event = Event {
@@ -422,22 +406,19 @@ mod tests {
             signature: None,
             payload_hash,
         };
-        store
-            .store
-            .append_committed(store.timeline_id, &[event])
-            .unwrap();
-        store
-            .resolve(
-                LedgerOutcome::try_new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned())
-                    .unwrap(),
-            )
-            .unwrap();
+        store.store.append_committed(store.timeline_id, &[event])?;
+        store.resolve(LedgerOutcome::try_new(
+            id,
+            true,
+            "2026-07-30T09:00:00Z".to_owned(),
+        )?)?;
+        Ok(())
     }
 
     #[test]
-    fn load_fails_on_corrupt_prediction_payload() {
-        let mut store = make_store();
-        let head = store.head_seq().unwrap();
+    fn load_fails_on_corrupt_prediction_payload() -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = make_store()?;
+        let head = store.head_seq()?;
         let payload = CanonicalBytes::from_vec(b"not cbor".to_vec());
         let payload_hash = hash_payload(&payload);
         let event = Event {
@@ -453,18 +434,16 @@ mod tests {
             signature: None,
             payload_hash,
         };
-        store
-            .store
-            .append_committed(store.timeline_id, &[event])
-            .unwrap();
-        let err = store.load("2026-07-25").unwrap_err();
+        store.store.append_committed(store.timeline_id, &[event])?;
+        let err = store.load("2026-07-25").err().ok_or("expected error")?;
         assert!(matches!(err, LedgerError::Decode(_)));
+        Ok(())
     }
 
     #[test]
-    fn load_fails_on_corrupt_outcome_payload() {
-        let mut store = make_store();
-        let head = store.head_seq().unwrap();
+    fn load_fails_on_corrupt_outcome_payload() -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = make_store()?;
+        let head = store.head_seq()?;
         let payload = CanonicalBytes::from_vec(b"not cbor".to_vec());
         let payload_hash = hash_payload(&payload);
         let event = Event {
@@ -480,16 +459,14 @@ mod tests {
             signature: None,
             payload_hash,
         };
-        store
-            .store
-            .append_committed(store.timeline_id, &[event])
-            .unwrap();
-        let err = store.load("2026-07-25").unwrap_err();
+        store.store.append_committed(store.timeline_id, &[event])?;
+        let err = store.load("2026-07-25").err().ok_or("expected error")?;
         assert!(matches!(err, LedgerError::Decode(_)));
+        Ok(())
     }
 
     #[test]
-    fn load_fails_on_missing_timeline() {
+    fn load_fails_on_missing_timeline() -> Result<(), Box<dyn std::error::Error>> {
         let (sk, _vk) = pos_crypto::signing::generate_keypair();
         let mem = MemoryStore::new();
         let tl_id = pos_core::ids::TimelineId::new();
@@ -500,12 +477,13 @@ mod tests {
             sk,
             Box::new(Blake3Hasher),
         );
-        let err = store.load("2026-07-25").unwrap_err();
+        let err = store.load("2026-07-25").err().ok_or("expected error")?;
         assert!(matches!(err, LedgerError::Store(_)));
+        Ok(())
     }
 
     #[test]
-    fn resolve_fails_on_missing_timeline() {
+    fn resolve_fails_on_missing_timeline() -> Result<(), Box<dyn std::error::Error>> {
         let (sk, _vk) = pos_crypto::signing::generate_keypair();
         let mem = MemoryStore::new();
         let tl_id = pos_core::ids::TimelineId::new();
@@ -517,16 +495,15 @@ mod tests {
             Box::new(Blake3Hasher),
         );
         let err = store
-            .resolve(
-                LedgerOutcome::try_new(
-                    "01J3B0Y5ZK2J6MGK8D7QW3N0P9".to_owned(),
-                    true,
-                    "2026-07-30T09:00:00Z".to_owned(),
-                )
-                .unwrap(),
-            )
-            .unwrap_err();
+            .resolve(LedgerOutcome::try_new(
+                "01J3B0Y5ZK2J6MGK8D7QW3N0P9".to_owned(),
+                true,
+                "2026-07-30T09:00:00Z".to_owned(),
+            )?)
+            .err()
+            .ok_or("expected error")?;
         assert!(matches!(err, LedgerError::Store(_)));
+        Ok(())
     }
 
     #[test]
@@ -538,7 +515,7 @@ mod tests {
     }
 
     #[test]
-    fn register_fails_on_missing_timeline() {
+    fn register_fails_on_missing_timeline() -> Result<(), Box<dyn std::error::Error>> {
         let (sk, _vk) = pos_crypto::signing::generate_keypair();
         let mem = MemoryStore::new();
         let tl_id = pos_core::ids::TimelineId::new();
@@ -551,7 +528,9 @@ mod tests {
         );
         let err = store
             .register(contract::sample_new_prediction("2026-08-01"))
-            .unwrap_err();
+            .err()
+            .ok_or("expected error")?;
         assert!(matches!(err, LedgerError::Store(_)));
+        Ok(())
     }
 }

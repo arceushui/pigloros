@@ -165,7 +165,7 @@ pub struct PersonaModel {
 impl PersonaModel {
     /// Create a new `PersonaModel` from a list of (dimension, score) tuples.
     #[must_use]
-    pub fn new(preferences: Vec<(String, f64)>) -> Self {
+    pub const fn new(preferences: Vec<(String, f64)>) -> Self {
         Self { preferences }
     }
 
@@ -199,8 +199,6 @@ impl PersonaModel {
     /// Chooses the option with the higher score and computes a regret probability
     /// based on score difference (closer scores = higher regret).
     ///
-    /// # Panics
-    /// Never panics; CBOR encoding of `DecisionPayload` is infallible.
     #[must_use]
     pub fn to_draft(&self, entity: EntityId, option_a: &str, option_b: &str) -> EventDraft {
         let score_a = self.score_option(option_a);
@@ -225,7 +223,8 @@ impl PersonaModel {
         };
 
         let mut buf = Vec::new();
-        ciborium::into_writer(&payload, &mut buf).expect("CBOR encoding infallible for payload");
+        // `Vec<u8>` is an infallible CBOR sink.
+        drop(ciborium::into_writer(&payload, &mut buf));
 
         EventDraft::new(
             entity,
@@ -267,14 +266,8 @@ pub struct PersonaEvalDriver {
 impl PersonaEvalDriver {
     /// Create a driver over the given preference pairs.
     ///
-    /// # Panics
-    /// Panics if `pairs` is empty.
     #[must_use]
-    pub fn new(entity: EntityId, model: PersonaModel, pairs: Vec<PreferencePair>) -> Self {
-        assert!(
-            !pairs.is_empty(),
-            "PersonaEvalDriver requires at least one pair"
-        );
+    pub const fn new(entity: EntityId, model: PersonaModel, pairs: Vec<PreferencePair>) -> Self {
         Self {
             entity,
             model,
@@ -294,6 +287,12 @@ impl Driver for PersonaEvalDriver {
         _timeline: TimelineId,
         _observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
+        if self.pairs.is_empty() {
+            return Err(RuntimeError::InvalidPayload {
+                event_type: EVENT_TYPE_DECISION.to_owned(),
+                reason: "persona evaluation pair catalogue is empty".to_owned(),
+            });
+        }
         let idx =
             usize::try_from(self.tick % u64::try_from(self.pairs.len()).unwrap_or(1)).unwrap_or(0);
         let pair = &self.pairs[idx];
@@ -317,6 +316,7 @@ impl Driver for PersonaEvalDriver {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use pos_core::{
@@ -325,6 +325,28 @@ mod tests {
         event::SchemaVersion,
         ids::EventId,
     };
+
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected persona fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("missing persona fixture value"))
+            })
+        }
+    }
 
     fn quiet_workspace_pair() -> PreferencePair {
         PreferencePair {
@@ -370,6 +392,19 @@ mod tests {
         assert_eq!(cap.owned_entity_kinds, vec![ENTITY_KIND.to_owned()]);
         assert!(cap.has_driver);
         assert!(cap.has_reducer);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn empty_preference_pairs_fail_closed() {
+        let mut driver =
+            PersonaEvalDriver::new(EntityId::new(), PersonaModel::new(Vec::new()), Vec::new());
+        let result = driver.step(TimelineId::new(), ObservationView::empty());
+        assert!(matches!(
+            result,
+            Err(RuntimeError::InvalidPayload { event_type, .. })
+                if event_type == EVENT_TYPE_DECISION
+        ));
     }
 
     // ── PersonaReducer tests ──────────────────────────────────────────────────
@@ -422,7 +457,7 @@ mod tests {
             confidence,
         };
         let mut buf = Vec::new();
-        ciborium::into_writer(&p, &mut buf).expect("infallible");
+        ciborium::into_writer(&p, &mut buf).test_ok();
         buf
     }
 
@@ -434,7 +469,7 @@ mod tests {
             regret_prob,
         };
         let mut buf = Vec::new();
-        ciborium::into_writer(&d, &mut buf).expect("infallible");
+        ciborium::into_writer(&d, &mut buf).test_ok();
         buf
     }
 
@@ -682,8 +717,7 @@ mod tests {
         assert_eq!(draft.entity, entity);
 
         // Decode payload
-        let payload: DecisionPayload =
-            ciborium::from_reader(draft.payload.as_slice()).expect("valid CBOR");
+        let payload: DecisionPayload = ciborium::from_reader(draft.payload.as_slice()).test_ok();
         assert_eq!(payload.chosen, "spicy pizza");
         assert_eq!(payload.option_a, "spicy pizza");
         assert_eq!(payload.option_b, "bland soup");
@@ -696,8 +730,7 @@ mod tests {
         let entity = EntityId::new();
         let draft = model.to_draft(entity, "spicy pizza", "bland soup");
 
-        let payload: DecisionPayload =
-            ciborium::from_reader(draft.payload.as_slice()).expect("valid CBOR");
+        let payload: DecisionPayload = ciborium::from_reader(draft.payload.as_slice()).test_ok();
         assert!(payload.regret_prob >= 0.0);
         assert!(payload.regret_prob <= 0.5);
     }
@@ -710,8 +743,7 @@ mod tests {
         let draft = model.to_draft(entity, "a", "b");
 
         // Both options score 0.5 (no match) → diff=0.0 → regret=0.5
-        let payload: DecisionPayload =
-            ciborium::from_reader(draft.payload.as_slice()).expect("valid CBOR");
+        let payload: DecisionPayload = ciborium::from_reader(draft.payload.as_slice()).test_ok();
         assert!((payload.regret_prob - 0.5).abs() < 1e-10);
     }
 
@@ -723,8 +755,7 @@ mod tests {
         let draft = model.to_draft(entity, "best option", "worst option");
 
         // score_a = 1.0, score_b = 0.5, diff = 0.5 → regret = (1.0 - 0.5) * 0.5 = 0.25
-        let payload: DecisionPayload =
-            ciborium::from_reader(draft.payload.as_slice()).expect("valid CBOR");
+        let payload: DecisionPayload = ciborium::from_reader(draft.payload.as_slice()).test_ok();
         assert!((payload.regret_prob - 0.25).abs() < 1e-10);
     }
 
@@ -736,8 +767,7 @@ mod tests {
         let draft = model.to_draft(entity, "option a", "option b");
 
         // Both score 0.5 → tie, chooses option_a due to `>=` in comparison
-        let payload: DecisionPayload =
-            ciborium::from_reader(draft.payload.as_slice()).expect("valid CBOR");
+        let payload: DecisionPayload = ciborium::from_reader(draft.payload.as_slice()).test_ok();
         assert_eq!(payload.chosen, "option a");
     }
 
@@ -757,11 +787,10 @@ mod tests {
         let draft = model.to_draft(entity, "good choice", "bad choice");
 
         // Verify CBOR round-trip
-        let payload: DecisionPayload =
-            ciborium::from_reader(draft.payload.as_slice()).expect("valid CBOR");
+        let payload: DecisionPayload = ciborium::from_reader(draft.payload.as_slice()).test_ok();
         let mut buf2 = Vec::new();
-        ciborium::into_writer(&payload, &mut buf2).expect("re-encode");
-        let payload2: DecisionPayload = ciborium::from_reader(buf2.as_slice()).expect("round-trip");
+        ciborium::into_writer(&payload, &mut buf2).test_ok();
+        let payload2: DecisionPayload = ciborium::from_reader(buf2.as_slice()).test_ok();
         assert_eq!(payload.chosen, payload2.chosen);
         assert_eq!(payload.option_a, payload2.option_a);
         assert_eq!(payload.option_b, payload2.option_b);
@@ -777,8 +806,8 @@ mod tests {
             confidence: 0.9,
         };
         let mut buf = Vec::new();
-        ciborium::into_writer(&p, &mut buf).expect("encode");
-        let p2: PreferencePayload = ciborium::from_reader(buf.as_slice()).expect("decode");
+        ciborium::into_writer(&p, &mut buf).test_ok();
+        let p2: PreferencePayload = ciborium::from_reader(buf.as_slice()).test_ok();
         assert_eq!(p.dimension, p2.dimension);
         assert!((p.score - p2.score).abs() < 1e-10);
         assert!((p.confidence - p2.confidence).abs() < 1e-10);
@@ -794,8 +823,8 @@ mod tests {
             regret_prob: 0.2,
         };
         let mut buf = Vec::new();
-        ciborium::into_writer(&d, &mut buf).expect("encode");
-        let d2: DecisionPayload = ciborium::from_reader(buf.as_slice()).expect("decode");
+        ciborium::into_writer(&d, &mut buf).test_ok();
+        let d2: DecisionPayload = ciborium::from_reader(buf.as_slice()).test_ok();
         assert_eq!(d.option_a, d2.option_a);
         assert_eq!(d.option_b, d2.option_b);
         assert_eq!(d.chosen, d2.chosen);
@@ -818,8 +847,7 @@ mod tests {
         let entity = EntityId::new();
         let draft = model.to_draft(entity, "worst", "best option");
 
-        let payload: DecisionPayload =
-            ciborium::from_reader(draft.payload.as_slice()).expect("valid CBOR");
+        let payload: DecisionPayload = ciborium::from_reader(draft.payload.as_slice()).test_ok();
         assert_eq!(payload.chosen, "best option");
     }
 
@@ -835,9 +863,9 @@ mod tests {
         let mut driver = PersonaEvalDriver::new(entity, model, vec![quiet_workspace_pair()]);
         assert_eq!(driver.name(), "persona-eval");
 
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("persona-eval").unwrap();
-        let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("persona-eval").test_ok();
+        let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
 
         assert_eq!(out.drafts.len(), 3);
         assert_eq!(out.drafts[0].event_type.as_str(), EVENT_TYPE_DECISION);
@@ -872,21 +900,21 @@ mod tests {
                     vec![quiet_workspace_pair()],
                 ))),
             )
-            .unwrap();
+            .test_ok();
         let eval = EvalPlugin::new();
         registry
             .register(&eval, Some(Box::new(EvalReducer)), None)
-            .unwrap();
+            .test_ok();
 
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("loop").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("loop").test_ok();
         for _ in 0..5 {
-            let drafts = registry.step_all(tl.id()).unwrap();
-            registry.schemas.validate_batch(&drafts).unwrap();
-            store.append(tl.id(), &drafts).unwrap();
+            let drafts = registry.step_all(tl.id()).test_ok();
+            registry.schemas.validate_batch(&drafts).test_ok();
+            store.append(tl.id(), &drafts).test_ok();
         }
 
-        let report = compute_report(store.as_ref(), tl.id()).unwrap();
+        let report = compute_report(store.as_ref(), tl.id()).test_ok();
         assert_eq!(report.n_predictions, 5);
         assert_eq!(report.n_resolved, 5);
         assert!(report.brier_score >= 0.0);

@@ -3,27 +3,53 @@
 //! All CLI logic and renderer code lives in the `piglor_ledger` library so
 //! downstream crates (#111, #113) can depend on it, and so tests can
 //! exercise the public API without spawning a process.
+#![forbid(unsafe_code)]
+#![deny(clippy::all)]
+#![warn(clippy::pedantic)]
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
+
+macro_rules! output_stderr {
+    ($($arg:tt)*) => {{
+        let mut output = std::io::stderr().lock();
+        drop(std::io::Write::write_fmt(&mut output, format_args!($($arg)*)));
+        drop(std::io::Write::write_all(&mut output, b"\n"));
+    }};
+}
 
 use piglor_ledger::run;
 
 #[cfg(not(test))]
-fn handle_run_error(e: &dyn std::error::Error) -> ! {
-    eprintln!("Error: {e}");
-    std::process::exit(1);
+fn handle_run_error(e: &dyn std::error::Error) -> std::process::ExitCode {
+    output_stderr!("Error: {e}");
+    std::process::ExitCode::FAILURE
 }
 
 #[cfg(test)]
 fn handle_run_error(e: &dyn std::error::Error) {
-    eprintln!("Error (test): {e}");
+    output_stderr!("Error (test): {e}");
 }
 
+#[cfg(not(test))]
+fn run_with_args(args: &[String]) -> std::process::ExitCode {
+    match run(args) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => handle_run_error(&error),
+    }
+}
+
+#[cfg(test)]
 fn run_with_args(args: &[String]) {
     if let Err(e) = run(args) {
         handle_run_error(&e);
     }
 }
 
+#[cfg(not(test))]
+fn main() -> std::process::ExitCode {
+    run_with_args(&std::env::args().collect::<Vec<_>>())
+}
+
+#[cfg(test)]
 fn main() {
     run_with_args(&std::env::args().collect::<Vec<_>>());
 }
@@ -32,6 +58,7 @@ fn main() {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use piglor_ledger::test_helpers::{TestOptionExt, TestResultExt};
     use piglor_ledger::{open_store, CliError, Source};
     use tempfile::TempDir;
 
@@ -61,19 +88,19 @@ mod tests {
     #[test]
     #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn binary_context_toml_subcommands() {
-        let tmp = TempDir::new().unwrap();
+    fn binary_context_toml_subcommands() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&dir).test_ok()?;
         let site = tmp.path().join("site");
         let key_path = tmp.path().join("sk");
 
-        run(&["piglor-ledger".into(), "version".into()]).unwrap();
-        bin_keygen(&key_path);
-        bin_predict_toml(&dir);
+        run(&["piglor-ledger".into(), "version".into()]).test_ok()?;
+        bin_keygen(&key_path)?;
+        bin_predict_toml(&dir)?;
 
         let id = piglor_ledger::test_helpers::first_prediction_id(&dir);
-        bin_resolve_toml(&dir, &id, "false");
+        bin_resolve_toml(&dir, &id, "false")?;
 
         run(&[
             "piglor-ledger".into(),
@@ -81,7 +108,7 @@ mod tests {
             "--source".into(),
             format!("toml:{}", dir.display()),
         ])
-        .unwrap();
+        .test_ok()?;
 
         let manifest = tmp.path().join("manifest.json");
         run(&[
@@ -90,9 +117,9 @@ mod tests {
             "--source".into(),
             format!("toml:{}", dir.display()),
             "--out".into(),
-            manifest.to_str().unwrap().to_owned(),
+            manifest.to_str().test_ok()?.to_owned(),
         ])
-        .unwrap();
+        .test_ok()?;
 
         run(&[
             "piglor-ledger".into(),
@@ -100,11 +127,11 @@ mod tests {
             "--source".into(),
             format!("toml:{}", dir.display()),
             "--site".into(),
-            site.to_str().unwrap().to_owned(),
+            site.to_str().test_ok()?.to_owned(),
             "--today".into(),
             "2026-07-25".into(),
         ])
-        .unwrap();
+        .test_ok()?;
 
         run(&[
             "piglor-ledger".into(),
@@ -112,7 +139,7 @@ mod tests {
             "--source".into(),
             format!("toml:{}", dir.display()),
         ])
-        .unwrap();
+        .test_ok()?;
 
         run(&[
             "piglor-ledger".into(),
@@ -120,21 +147,23 @@ mod tests {
             "--source".into(),
             format!("toml:{}", dir.display()),
             "--manifest".into(),
-            manifest.to_str().unwrap().to_owned(),
+            manifest.to_str().test_ok()?.to_owned(),
         ])
-        .unwrap();
+        .test_ok()?;
+
+        Ok(())
     }
 
     #[test]
     #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn binary_context_store_subcommands() {
-        let tmp = TempDir::new().unwrap();
+    fn binary_context_store_subcommands() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new().test_ok()?;
         let key_path = tmp.path().join("sk");
         let store_db = tmp.path().join("store.db");
 
-        bin_keygen(&key_path);
-        bin_predict_store(&store_db, &key_path);
+        bin_keygen(&key_path)?;
+        bin_predict_store(&store_db, &key_path)?;
 
         let store_manifest = tmp.path().join("store_manifest.json");
         run(&[
@@ -143,11 +172,11 @@ mod tests {
             "--source".into(),
             format!("store:{}", store_db.display()),
             "--out".into(),
-            store_manifest.to_str().unwrap().to_owned(),
+            store_manifest.to_str().test_ok()?.to_owned(),
         ])
-        .unwrap();
+        .test_ok()?;
 
-        let pubkey_hex = derive_pubkey_hex(&key_path);
+        let pubkey_hex = derive_pubkey_hex(&key_path)?;
         run(&[
             "piglor-ledger".into(),
             "verify".into(),
@@ -156,7 +185,7 @@ mod tests {
             "--pubkey".into(),
             pubkey_hex.clone(),
         ])
-        .unwrap();
+        .test_ok()?;
 
         // Also exercise build and export-with-pubkey on the store tier.
         let site = tmp.path().join("site-store");
@@ -166,11 +195,11 @@ mod tests {
             "--source".into(),
             format!("store:{}", store_db.display()),
             "--site".into(),
-            site.to_str().unwrap().to_owned(),
+            site.to_str().test_ok()?.to_owned(),
             "--today".into(),
             "2026-07-25".into(),
         ])
-        .unwrap();
+        .test_ok()?;
         // Export with --pubkey exercises the pubkey field in ExportManifest::Store.
         let manifest2 = tmp.path().join("manifest2.json");
         run(&[
@@ -181,23 +210,25 @@ mod tests {
             "--pubkey".into(),
             pubkey_hex,
             "--out".into(),
-            manifest2.to_str().unwrap().to_owned(),
+            manifest2.to_str().test_ok()?.to_owned(),
         ])
-        .unwrap();
+        .test_ok()?;
+
+        Ok(())
     }
 
     #[test]
     #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn binary_context_error_paths() {
-        let tmp = TempDir::new().unwrap();
+    fn binary_context_error_paths() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&dir).test_ok()?;
         let key_path = tmp.path().join("sk");
-        bin_keygen(&key_path);
+        bin_keygen(&key_path)?;
 
         let bad_key = tmp.path().join("bad.key");
-        std::fs::write(&bad_key, "not-valid-hex").unwrap();
+        std::fs::write(&bad_key, "not-valid-hex").test_ok()?;
         assert!(open_store(&Source::Store(tmp.path().join("x.db")), Some(&bad_key)).is_err());
 
         assert!(run(&[
@@ -276,27 +307,31 @@ mod tests {
         corrupt_db.push(0x00);
         corrupt_db.extend_from_slice(&[0u8; 4078]);
         let corrupt_path = tmp.path().join("corrupt.db");
-        std::fs::write(&corrupt_path, &corrupt_db).unwrap();
-        let _ = open_store(&Source::Store(corrupt_path), Some(&key_path));
+        std::fs::write(&corrupt_path, &corrupt_db).test_ok()?;
+        assert!(open_store(&Source::Store(corrupt_path), Some(&key_path)).is_err());
 
         let core_err: CliError = pos_core::CoreError::Storage("test".into()).into();
         assert!(core_err.to_string().contains("store error"));
+
+        Ok(())
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
     #[cfg(unix)]
-    fn bin_keygen(key_path: &std::path::Path) {
+    fn bin_keygen(key_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
         run(&[
             "piglor-ledger".into(),
             "keygen".into(),
             "--out".into(),
-            key_path.to_str().unwrap().to_owned(),
+            key_path.to_str().test_ok()?.to_owned(),
         ])
-        .unwrap();
+        .test_ok()?;
+
+        Ok(())
     }
 
-    fn bin_predict_toml(dir: &std::path::Path) {
+    fn bin_predict_toml(dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
         run(&[
             "piglor-ledger".into(),
             "predict".into(),
@@ -317,17 +352,22 @@ mod tests {
             "--osf".into(),
             "https://osf.io/example".into(),
         ])
-        .unwrap();
+        .test_ok()?;
+
+        Ok(())
     }
 
-    fn bin_predict_store(db: &std::path::Path, key_path: &std::path::Path) {
+    fn bin_predict_store(
+        db: &std::path::Path,
+        key_path: &std::path::Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         run(&[
             "piglor-ledger".into(),
             "predict".into(),
             "--source".into(),
             format!("store:{}", db.display()),
             "--key".into(),
-            key_path.to_str().unwrap().to_owned(),
+            key_path.to_str().test_ok()?.to_owned(),
             "--title".into(),
             "T".into(),
             "--statement".into(),
@@ -343,10 +383,16 @@ mod tests {
             "--osf".into(),
             "https://osf.io/x".into(),
         ])
-        .unwrap();
+        .test_ok()?;
+
+        Ok(())
     }
 
-    fn bin_resolve_toml(dir: &std::path::Path, id: &str, outcome: &str) {
+    fn bin_resolve_toml(
+        dir: &std::path::Path,
+        id: &str,
+        outcome: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         run(&[
             "piglor-ledger".into(),
             "resolve".into(),
@@ -359,12 +405,14 @@ mod tests {
             "--resolved-at".into(),
             "2026-07-30T09:00:00Z".into(),
         ])
-        .unwrap();
+        .test_ok()?;
+
+        Ok(())
     }
 
-    fn derive_pubkey_hex(key_path: &std::path::Path) -> String {
-        let sk_text = std::fs::read_to_string(key_path).unwrap();
-        piglor_ledger::test_helpers::derive_pubkey_hex(&sk_text)
+    fn derive_pubkey_hex(key_path: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
+        let sk_text = std::fs::read_to_string(key_path).test_ok()?;
+        Ok(piglor_ledger::test_helpers::derive_pubkey_hex(&sk_text))
     }
 
     #[test]

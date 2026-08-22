@@ -98,7 +98,7 @@ impl ProviderBackedAgentDriver {
 
     /// Overrides the host cadence for this driver.
     #[must_use]
-    pub fn with_tick_interval(mut self, tick_interval: Duration) -> Self {
+    pub const fn with_tick_interval(mut self, tick_interval: Duration) -> Self {
         self.tick_interval = tick_interval;
         self
     }
@@ -120,11 +120,11 @@ impl ProviderBackedAgentDriver {
         &self,
         timeline: TimelineId,
         anchor: SnapshotAnchor,
-    ) -> (AgentDecisionRequestV1, [u8; 32]) {
+    ) -> Result<(AgentDecisionRequestV1, [u8; 32]), RuntimeError> {
         let catalogue_hash = self
             .catalogue
             .hash()
-            .expect("validated action catalogue must hash");
+            .map_err(|_| invalid_payload(RECORDER_EVENT_TYPE, RECORD_ERROR))?;
         let request = AgentDecisionRequestV1::new(
             timeline,
             anchor.observed_through.as_u64(),
@@ -135,14 +135,14 @@ impl ProviderBackedAgentDriver {
         );
         let request_hash = request
             .hash()
-            .expect("validated agent decision request must hash");
-        (request, request_hash)
+            .map_err(|_| invalid_payload(RECORDER_EVENT_TYPE, RECORD_ERROR))?;
+        Ok((request, request_hash))
     }
 
     fn record_draft(&mut self, record: &DecisionRecordV1) -> Result<EventDraft, RuntimeError> {
         let record_bytes = record
             .encode()
-            .expect("validated agent decision record must encode");
+            .map_err(|_| invalid_payload(RECORDER_EVENT_TYPE, RECORD_ERROR))?;
         self.recorder
             .record(record_bytes)
             .map_err(|_| invalid_payload(RECORDER_EVENT_TYPE, RECORDER_ERROR))
@@ -159,7 +159,7 @@ impl ProviderBackedAgentDriver {
         confidence: u32,
         catalogue_hash: [u8; 32],
         record_hash: [u8; 32],
-    ) -> EventDraft {
+    ) -> Result<EventDraft, RuntimeError> {
         let action = AgentActionV1::try_new(
             action_id,
             confidence,
@@ -167,13 +167,15 @@ impl ProviderBackedAgentDriver {
             catalogue_hash,
             record_hash,
         )
-        .expect("catalogue action must create an agent action");
-        let payload = action.encode().expect("validated agent action must encode");
-        EventDraft::new(
+        .map_err(|_| invalid_payload(EVENT_TYPE_ACTION, RECORD_ERROR))?;
+        let payload = action
+            .encode()
+            .map_err(|_| invalid_payload(EVENT_TYPE_ACTION, RECORD_ERROR))?;
+        Ok(EventDraft::new(
             self.entity,
             Kind::new(EVENT_TYPE_ACTION),
             CanonicalBytes::from_vec(payload),
-        )
+        ))
     }
 }
 
@@ -192,10 +194,9 @@ impl Driver for ProviderBackedAgentDriver {
                 .ok_or_else(|| RuntimeError::DriverTickOverflow {
                     driver: DRIVER_NAME.to_owned(),
                 })?;
-        validate_snapshot_anchor(timeline, observations.anchor()).and_then(|anchor| {
-            let (request, request_hash) = self.prepared_request(timeline, anchor);
-            self.record_decision(request, request_hash, staged_tick)
-        })
+        let anchor = validate_snapshot_anchor(timeline, observations.anchor())?;
+        let (request, request_hash) = self.prepared_request(timeline, anchor)?;
+        self.record_decision(request, request_hash, staged_tick)
     }
 
     fn name(&self) -> &'static str {
@@ -280,13 +281,12 @@ impl ProviderBackedAgentDriver {
                 .map_err(|_| invalid_payload(RECORDER_EVENT_TYPE, RECORD_ERROR))?;
         let record_hash = record
             .hash()
-            .expect("validated agent decision record must hash");
-        self.record_draft(&record).map(|drafts| {
-            let drafts =
-                self.drafts_for_normalized(normalized, drafts, catalogue_hash, record_hash);
-            self.staged_tick = Some(staged_tick);
-            StepOutput::new(drafts)
-        })
+            .map_err(|_| invalid_payload(RECORDER_EVENT_TYPE, RECORD_ERROR))?;
+        let record_draft = self.record_draft(&record)?;
+        let drafts =
+            self.drafts_for_normalized(normalized, record_draft, catalogue_hash, record_hash)?;
+        self.staged_tick = Some(staged_tick);
+        Ok(StepOutput::new(drafts))
     }
 
     fn drafts_for_normalized(
@@ -295,17 +295,17 @@ impl ProviderBackedAgentDriver {
         record_draft: EventDraft,
         catalogue_hash: [u8; 32],
         record_hash: [u8; 32],
-    ) -> Vec<EventDraft> {
+    ) -> Result<Vec<EventDraft>, RuntimeError> {
         match normalized {
             NormalizedAttempt::Accepted {
                 action_id,
                 confidence,
                 ..
-            } => vec![
+            } => Ok(vec![
                 record_draft,
-                self.action_draft(action_id, confidence, catalogue_hash, record_hash),
-            ],
-            NormalizedAttempt::NoAction { .. } => vec![record_draft],
+                self.action_draft(action_id, confidence, catalogue_hash, record_hash)?,
+            ]),
+            NormalizedAttempt::NoAction { .. } => Ok(vec![record_draft]),
         }
     }
 }
@@ -357,8 +357,12 @@ fn normalize_attempt(attempt: ProviderAttempt, catalogue: &ActionCatalogueV1) ->
                 Ok(ProviderDecisionV1::Accepted {
                     action_index,
                     confidence,
-                }) => match catalogue.action(action_index.get()) {
-                    Some(action_id) => NormalizedAttempt::Accepted {
+                }) => catalogue.action(action_index.get()).map_or(
+                    NormalizedAttempt::NoAction {
+                        code: DecisionNoActionCodeV1::ResponseValueInvalid,
+                        response_digest,
+                    },
+                    |action_id| NormalizedAttempt::Accepted {
                         action_id: action_id.to_owned(),
                         confidence: confidence.get(),
                         result: DecisionResultV1::Accepted {
@@ -367,11 +371,7 @@ fn normalize_attempt(attempt: ProviderAttempt, catalogue: &ActionCatalogueV1) ->
                         },
                         response_digest,
                     },
-                    None => NormalizedAttempt::NoAction {
-                        code: DecisionNoActionCodeV1::ResponseValueInvalid,
-                        response_digest,
-                    },
-                },
+                ),
                 Err(AgentDecisionError::UnsupportedWireVersion) => NormalizedAttempt::NoAction {
                     code: DecisionNoActionCodeV1::ResponseVersionUnsupported,
                     response_digest,
@@ -392,7 +392,44 @@ fn normalize_attempt(attempt: ProviderAttempt, catalogue: &ActionCatalogueV1) ->
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected provider driver fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing fixture value")))
+        }
+    }
+
+    trait TestErrorExt<T, E> {
+        fn test_err(self) -> E;
+    }
+
+    impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
+        fn test_err(self) -> E {
+            match self {
+                Ok(value) => std::panic::resume_unwind(Box::new(format!(
+                    "unexpected successful provider driver fixture value: {value:?}"
+                ))),
+                Err(error) => error,
+            }
+        }
+    }
+
     use crate::{
         protocol::{
             ActionCatalogueV1, AgentActionV1, AgentDecisionError, AgentDecisionRequestV1,
@@ -443,7 +480,7 @@ mod tests {
             "2026.08".to_owned(),
             PROVIDER_HASH,
         )
-        .unwrap()
+        .test_ok()
     }
 
     fn provider_driver(attempts: Vec<ProviderAttempt>) -> DriverFixture {
@@ -465,7 +502,7 @@ mod tests {
                 .map(|action_id| (*action_id).to_owned())
                 .collect(),
         )
-        .unwrap();
+        .test_ok();
         let provenance = AgentProviderProvenanceV1::try_new(
             host.plugin_id,
             host.plugin_version.to_owned(),
@@ -474,7 +511,7 @@ mod tests {
             host.provider_version.to_owned(),
             host.provider_content_hash,
         )
-        .unwrap();
+        .test_ok();
         let driver =
             ProviderBackedAgentDriver::new(entity, catalogue, provenance, Box::new(provider));
         let mut registry = PluginRegistry::new();
@@ -489,11 +526,11 @@ mod tests {
     }
 
     fn response(decision: ProviderDecisionV1) -> Vec<u8> {
-        decision.encode().unwrap()
+        decision.encode().test_ok()
     }
 
     fn record_from_drafts(drafts: &[pos_core::event::EventDraft]) -> DecisionRecordV1 {
-        DecisionRecordV1::decode(drafts[0].payload.as_slice()).unwrap()
+        DecisionRecordV1::decode(drafts[0].payload.as_slice()).test_ok()
     }
 
     #[derive(Default)]
@@ -501,13 +538,13 @@ mod tests {
 
     impl IndependentCanonicalCbor {
         fn array(&mut self, length: usize) {
-            let length = u8::try_from(length).expect("fixture array length fits u8");
+            let length = u8::try_from(length).test_ok();
             assert!(length <= 23, "fixture arrays use direct CBOR lengths");
             self.0.push(0x80 | length);
         }
 
         fn bytes(&mut self, value: &[u8]) {
-            let length = u8::try_from(value.len()).expect("fixture byte string length fits u8");
+            let length = u8::try_from(value.len()).test_ok();
             if length <= 23 {
                 self.0.push(0x40 | length);
             } else {
@@ -517,21 +554,17 @@ mod tests {
         }
 
         fn text(&mut self, value: &str) {
-            let length = u8::try_from(value.len()).expect("fixture text length fits u8");
+            let length = u8::try_from(value.len()).test_ok();
             assert!(length <= 23, "fixture text uses direct CBOR lengths");
             self.0.push(0x60 | length);
             self.0.extend_from_slice(value.as_bytes());
         }
 
         fn uint(&mut self, value: u64) {
-            if value <= 23 {
-                self.0
-                    .push(u8::try_from(value).expect("direct CBOR uint fits u8"));
-            } else {
+            if value > 23 {
                 self.0.push(0x18);
-                self.0
-                    .push(u8::try_from(value).expect("fixture CBOR uint fits u8"));
             }
+            self.0.push(u8::try_from(value).test_ok());
         }
 
         fn finish(self) -> Vec<u8> {
@@ -674,7 +707,9 @@ mod tests {
                 assert_eq!(code.code(), expected, "normalization case {case}");
             }
             (actual, expected) => {
-                panic!("normalization case {case}: decoded {actual:?}, expected {expected:?}");
+                std::panic::resume_unwind(Box::new(format!(
+                    "normalization case {case}: decoded {actual:?}, expected {expected:?}"
+                )));
             }
         }
     }
@@ -691,7 +726,7 @@ mod tests {
         let drafts = fixture
             .registry
             .step_all_anchored(fixture.timeline, Seq::from_u64(7))
-            .unwrap();
+            .test_ok();
         assert_eq!(fixture.calls.get(), 1);
         assert_eq!(drafts[0].event_type.as_str(), RECORDER_EVENT_TYPE);
         assert_eq!(drafts[0].entity, fixture.entity);
@@ -751,7 +786,9 @@ mod tests {
             assert_eq!(drafts[1].event_type.as_str(), EVENT_TYPE_ACTION);
             assert_eq!(drafts[1].entity, fixture.entity);
             let ExpectedResult::Accepted { confidence, .. } = expected_result else {
-                panic!("normalization case {case}: action requires accepted result");
+                std::panic::resume_unwind(Box::new(format!(
+                    "normalization case {case}: action requires accepted result"
+                )));
             };
             let record_hash = blake3::derive_key("pigloros.agent.record.v1", &record_bytes);
             let action_bytes =
@@ -761,7 +798,7 @@ mod tests {
                 action_bytes.as_slice(),
                 "normalization case {case}"
             );
-            let action = AgentActionV1::decode(drafts[1].payload.as_slice()).unwrap();
+            let action = AgentActionV1::decode(drafts[1].payload.as_slice()).test_ok();
             assert_eq!(action.action_id(), expected_action);
             assert_eq!(action.confidence().get(), confidence);
             assert_eq!(action.driver_tick(), 0);
@@ -892,7 +929,7 @@ mod tests {
 
     #[test]
     fn provider_response_attempts_normalize_with_exact_output_contract() {
-        let accepted = response(ProviderDecisionV1::accepted(1, 42).unwrap());
+        let accepted = response(ProviderDecisionV1::accepted(1, 42).test_ok());
         let no_action = response(ProviderDecisionV1::no_action());
         let malformed = vec![0x83, 0x44, b'P', b'D', b'P', b'1', 0x01];
         let unsupported = vec![0x83, 0x44, b'P', b'D', b'P', b'1', 0x02, 0x00, 0xf6];
@@ -907,33 +944,17 @@ mod tests {
             Err(AgentDecisionError::UnsupportedWireVersion)
         );
         let cases = vec![
+            (malformed, ExpectedResult::NoAction { code: 7 }, None),
+            (unsupported, ExpectedResult::NoAction { code: 8 }, None),
+            (invalid_index, ExpectedResult::NoAction { code: 9 }, None),
             (
-                malformed.clone(),
-                ExpectedResult::NoAction { code: 7 },
-                None,
-            ),
-            (
-                unsupported.clone(),
-                ExpectedResult::NoAction { code: 8 },
-                None,
-            ),
-            (
-                invalid_index.clone(),
+                invalid_confidence,
                 ExpectedResult::NoAction { code: 9 },
                 None,
             ),
+            (no_action, ExpectedResult::NoAction { code: 5 }, None),
             (
-                invalid_confidence.clone(),
-                ExpectedResult::NoAction { code: 9 },
-                None,
-            ),
-            (
-                no_action.clone(),
-                ExpectedResult::NoAction { code: 5 },
-                None,
-            ),
-            (
-                accepted.clone(),
+                accepted,
                 ExpectedResult::Accepted {
                     action_index: 1,
                     confidence: 42,
@@ -945,7 +966,7 @@ mod tests {
         for (case, (wire, expected_result, expected_action)) in cases.into_iter().enumerate() {
             let expected_digest = Some(blake3::derive_key("pigloros.agent.response.v1", &wire));
             assert_normalized_attempt(
-                ProviderAttempt::Response(wire.try_into().unwrap()),
+                ProviderAttempt::Response(wire.try_into().test_ok()),
                 expected_result,
                 expected_digest,
                 expected_action,
@@ -962,7 +983,7 @@ mod tests {
             0x85, 0x44, b'P', b'D', b'P', b'1', 0x01, 0x00, 0x19, 0x00, 0x40, 0x00,
         ];
         let noncanonical_no_action = vec![0x83, 0x44, b'P', b'D', b'P', b'1', 0x18, 0x01, 0x01];
-        let catalogue_out_of_range = response(ProviderDecisionV1::accepted(2, 0).unwrap());
+        let catalogue_out_of_range = response(ProviderDecisionV1::accepted(2, 0).test_ok());
         let cases = [
             (
                 unsupported_with_invalid_shape,
@@ -985,11 +1006,11 @@ mod tests {
         for (wire, expected) in cases {
             let expected_digest = ProviderDecisionV1::hash_response(&wire);
             let mut fixture =
-                provider_driver(vec![ProviderAttempt::Response(wire.try_into().unwrap())]);
+                provider_driver(vec![ProviderAttempt::Response(wire.try_into().test_ok())]);
             let drafts = fixture
                 .registry
                 .step_all_anchored(fixture.timeline, Seq::ZERO)
-                .unwrap();
+                .test_ok();
             let record = record_from_drafts(&drafts);
             assert_eq!(record.result(), expected);
             assert_eq!(record.response_digest(), Some(expected_digest));
@@ -1003,12 +1024,12 @@ mod tests {
         let calls = provider.call_count_handle();
         let mut driver = ProviderBackedAgentDriver::new(
             EntityId::new(),
-            ActionCatalogueV1::try_new(vec!["wait".to_owned()]).unwrap(),
+            ActionCatalogueV1::try_new(vec!["wait".to_owned()]).test_ok(),
             provenance(),
             Box::new(provider),
         );
         let timeline = TimelineId::new();
-        let missing = driver.step(timeline, ObservationView::empty()).unwrap_err();
+        let missing = driver.step(timeline, ObservationView::empty()).test_err();
         assert_eq!(
             missing.to_string(),
             "driver 'provider-backed-agent-driver' requires a snapshot anchor"
@@ -1020,7 +1041,7 @@ mod tests {
                 timeline,
                 ObservationView::anchored_empty(SnapshotAnchor::new(actual, Seq::ZERO)),
             )
-            .unwrap_err();
+            .test_err();
         assert_eq!(
             mismatch.to_string(),
             format!("snapshot Timeline mismatch: expected {timeline}, got {actual}")
@@ -1030,21 +1051,21 @@ mod tests {
 
     #[test]
     fn staged_steps_abort_and_commit_without_duplicate_provider_calls_or_tick_advancement() {
-        let response = response(ProviderDecisionV1::accepted(0, 77).unwrap());
+        let response = response(ProviderDecisionV1::accepted(0, 77).test_ok());
         let mut fixture = provider_driver(vec![
-            ProviderAttempt::Response(response.clone().try_into().unwrap()),
-            ProviderAttempt::Response(response.clone().try_into().unwrap()),
-            ProviderAttempt::Response(response.try_into().unwrap()),
+            ProviderAttempt::Response(response.clone().try_into().test_ok()),
+            ProviderAttempt::Response(response.clone().try_into().test_ok()),
+            ProviderAttempt::Response(response.try_into().test_ok()),
         ]);
         let first = fixture
             .registry
             .step_all_anchored(fixture.timeline, Seq::from_u64(4))
-            .unwrap();
+            .test_ok();
         assert_eq!(fixture.calls.get(), 1);
         let pending = fixture
             .registry
             .step_all_anchored(fixture.timeline, Seq::from_u64(4))
-            .unwrap_err();
+            .test_err();
         assert_eq!(
             pending.to_string(),
             "an anchored Driver step is already pending"
@@ -1055,7 +1076,7 @@ mod tests {
         let retry = fixture
             .registry
             .step_all_anchored(fixture.timeline, Seq::from_u64(4))
-            .unwrap();
+            .test_ok();
         assert_eq!(fixture.calls.get(), 2);
         assert_eq!(first[0].payload, retry[0].payload);
         fixture.registry.commit_step();
@@ -1064,7 +1085,7 @@ mod tests {
         let next = fixture
             .registry
             .step_all_anchored(fixture.timeline, Seq::from_u64(5))
-            .unwrap();
+            .test_ok();
         let record = record_from_drafts(&next);
         assert_eq!(record.request().driver_tick(), 1);
         fixture.registry.abort_step();
@@ -1076,7 +1097,7 @@ mod tests {
         let key = pos_runtime::ProjectionKey::new(EntityId::new());
         let driver = ProviderBackedAgentDriver::new(
             entity,
-            ActionCatalogueV1::try_new(vec!["wait".to_owned()]).unwrap(),
+            ActionCatalogueV1::try_new(vec!["wait".to_owned()]).test_ok(),
             provenance(),
             Box::new(FixtureAgentDecisionProvider::new(vec![])),
         )
@@ -1096,7 +1117,7 @@ mod tests {
         let entity = EntityId::new();
         let mut driver = ProviderBackedAgentDriver::new(
             entity,
-            ActionCatalogueV1::try_new(vec!["wait".to_owned()]).unwrap(),
+            ActionCatalogueV1::try_new(vec!["wait".to_owned()]).test_ok(),
             provenance(),
             Box::new(provider),
         );
@@ -1105,7 +1126,7 @@ mod tests {
         driver.staged_tick = Some(1);
         let pending = driver
             .step(TimelineId::new(), ObservationView::empty())
-            .unwrap_err();
+            .test_err();
         assert_eq!(
             pending.to_string(),
             "an anchored Driver step is already pending"
@@ -1124,21 +1145,21 @@ mod tests {
             None,
             DecisionResultV1::NoAction(DecisionNoActionCodeV1::ProviderNoAction),
         )
-        .unwrap();
+        .test_ok();
         let mut driver = ProviderBackedAgentDriver::new(
             entity,
-            ActionCatalogueV1::try_new(vec!["wait".to_owned()]).unwrap(),
+            ActionCatalogueV1::try_new(vec!["wait".to_owned()]).test_ok(),
             provenance(),
             Box::new(FixtureAgentDecisionProvider::new(vec![])),
         );
         driver.recorder = Recorder::new_replay(entity, vec![]);
         assert_eq!(
-            driver.record_draft(&record).unwrap_err().to_string(),
+            driver.record_draft(&record).test_err().to_string(),
             "payload validation failed for event type 'runtime.recorded_output': agent decision recorder unavailable"
         );
         driver.recorder = Recorder::new_replay(entity, vec![vec![0]]);
         assert_eq!(
-            driver.record_draft(&record).unwrap_err().to_string(),
+            driver.record_draft(&record).test_err().to_string(),
             "payload validation failed for event type 'runtime.recorded_output': agent decision recorder unavailable"
         );
     }
@@ -1149,7 +1170,7 @@ mod tests {
         let calls = provider.call_count_handle();
         let mut driver = ProviderBackedAgentDriver::new(
             EntityId::new(),
-            ActionCatalogueV1::try_new(vec!["wait".to_owned()]).unwrap(),
+            ActionCatalogueV1::try_new(vec!["wait".to_owned()]).test_ok(),
             provenance(),
             Box::new(provider),
         );
@@ -1160,7 +1181,7 @@ mod tests {
                 timeline,
                 ObservationView::anchored_empty(SnapshotAnchor::new(timeline, Seq::ZERO)),
             )
-            .unwrap_err();
+            .test_err();
         assert!(matches!(error, RuntimeError::DriverTickOverflow { .. }));
         assert_eq!(calls.get(), 0);
     }
@@ -1170,7 +1191,7 @@ mod tests {
     fn abort_restore_from_history_clears_staged_restore_tick_and_is_idempotent() {
         let mut driver = ProviderBackedAgentDriver::new(
             EntityId::new(),
-            ActionCatalogueV1::try_new(vec!["wait".to_owned()]).unwrap(),
+            ActionCatalogueV1::try_new(vec!["wait".to_owned()]).test_ok(),
             provenance(),
             Box::new(FixtureAgentDecisionProvider::new(vec![])),
         );
@@ -1188,7 +1209,7 @@ mod tests {
     fn commit_restore_from_history_preserves_committed_tick_when_nothing_is_staged() {
         let mut driver = ProviderBackedAgentDriver::new(
             EntityId::new(),
-            ActionCatalogueV1::try_new(vec!["wait".to_owned()]).unwrap(),
+            ActionCatalogueV1::try_new(vec!["wait".to_owned()]).test_ok(),
             provenance(),
             Box::new(FixtureAgentDecisionProvider::new(vec![])),
         );
@@ -1204,14 +1225,14 @@ mod tests {
         let _ = fixture
             .registry
             .step_all_anchored(fixture.timeline, Seq::ZERO)
-            .unwrap();
+            .test_ok();
         let segments = [TimelineHistorySegment::new(fixture.timeline, Seq::ZERO)];
         // The registry guards restore_driver_state with PendingDriverStep when
         // any driver has a staged step, so the error surfaces at registry level.
         let err = fixture
             .registry
             .restore_driver_state(&segments, &[])
-            .unwrap_err();
+            .test_err();
         assert!(matches!(err, RuntimeError::PendingDriverStep), "{err:?}");
         fixture.registry.abort_step();
     }
@@ -1225,14 +1246,14 @@ mod tests {
         fixture
             .registry
             .step_all_anchored(fixture.timeline, Seq::ZERO)
-            .unwrap();
+            .test_ok();
         fixture.registry.commit_step();
         // committed_tick is now 1; the guard fires before verifying evidence.
         let segments = [TimelineHistorySegment::new(fixture.timeline, Seq::ZERO)];
         let err = fixture
             .registry
             .restore_driver_state(&segments, &[])
-            .unwrap_err();
+            .test_err();
         assert!(
             matches!(err, RuntimeError::DriverRecoveryNotFresh { .. }),
             "{err:?}"
@@ -1243,7 +1264,7 @@ mod tests {
     fn stage_restore_from_history_fails_when_a_restore_is_already_staged() {
         let mut driver = ProviderBackedAgentDriver::new(
             EntityId::new(),
-            ActionCatalogueV1::try_new(vec!["wait".to_owned()]).unwrap(),
+            ActionCatalogueV1::try_new(vec!["wait".to_owned()]).test_ok(),
             provenance(),
             Box::new(FixtureAgentDecisionProvider::new(vec![])),
         );
@@ -1252,7 +1273,7 @@ mod tests {
         registry.register_driver(Box::new(driver));
         let timeline = TimelineId::new();
         let segments = [TimelineHistorySegment::new(timeline, Seq::ZERO)];
-        let err = registry.restore_driver_state(&segments, &[]).unwrap_err();
+        let err = registry.restore_driver_state(&segments, &[]).test_err();
         assert!(
             matches!(err, RuntimeError::DriverRecoveryNotFresh { .. }),
             "{err:?}"

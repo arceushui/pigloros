@@ -35,9 +35,11 @@
 mod entry;
 mod event_store;
 mod ledger;
-mod payload;
+#[doc(hidden)]
+pub mod payload;
 mod plugin;
-mod store;
+#[doc(hidden)]
+pub mod store;
 mod toml_store;
 
 pub use entry::{LedgerEntry, LedgerEntryView, LedgerView, Status};
@@ -52,4 +54,6 @@ pub use store::{is_valid_osf_link, LedgerError, LedgerStore, NewPrediction, Reso
 pub use toml_store::TomlLedgerStore;
 
 #[cfg(test)]
-mod contract;
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[doc(hidden)]
+pub mod contract;

@@ -25,6 +25,24 @@ const PROVIDER_VERSION: &str = "v1";
 const PLUGIN_HASH: [u8; 32] = [0x31; 32];
 const PROVIDER_HASH: [u8; 32] = [0x32; 32];
 
+trait TestValueExt<T> {
+    fn test_ok(self) -> T;
+}
+
+impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+    fn test_ok(self) -> T {
+        self.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("unexpected fixture error: {error:?}")))
+        })
+    }
+}
+
+impl<T> TestValueExt<T> for Option<T> {
+    fn test_ok(self) -> T {
+        self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing fixture value")))
+    }
+}
+
 #[derive(Clone)]
 struct HostFixture {
     timeline: TimelineId,
@@ -42,8 +60,8 @@ impl HostFixture {
         let agent = EntityId::from_ulid(fixed_ulid(0x20));
         let other_agent = EntityId::from_ulid(fixed_ulid(0x21));
         let plugin = PluginId::from_ulid(fixed_ulid(0x30));
-        let catalogue = ActionCatalogueV1::try_new(vec!["move".to_owned(), "wait".to_owned()])
-            .expect("fixture catalogue is valid");
+        let catalogue =
+            ActionCatalogueV1::try_new(vec!["move".to_owned(), "wait".to_owned()]).test_ok();
         let provenance = AgentProviderProvenanceV1::try_new(
             plugin,
             PLUGIN_VERSION.to_owned(),
@@ -52,7 +70,7 @@ impl HostFixture {
             PROVIDER_VERSION.to_owned(),
             PROVIDER_HASH,
         )
-        .expect("fixture provenance is valid");
+        .test_ok();
         let catalogue_hash = catalogue_hash(&["move", "wait"]);
         Self {
             timeline,
@@ -75,7 +93,7 @@ impl HostFixture {
             self.provenance.clone(),
             self.catalogue.clone(),
         )
-        .unwrap()
+        .test_ok()
     }
 
     fn record(&self, observed_through: u64, tick: u64, result: FixtureResult) -> RecordFixture {
@@ -217,18 +235,12 @@ impl IndependentCbor {
     }
 
     fn bytes(&mut self, value: &[u8]) {
-        self.major(
-            2,
-            u64::try_from(value.len()).expect("fixture length fits u64"),
-        );
+        self.major(2, u64::try_from(value.len()).test_ok());
         self.0.extend_from_slice(value);
     }
 
     fn text(&mut self, value: &str) {
-        self.major(
-            3,
-            u64::try_from(value.len()).expect("fixture length fits u64"),
-        );
+        self.major(3, u64::try_from(value.len()).test_ok());
         self.0.extend_from_slice(value.as_bytes());
     }
 
@@ -239,29 +251,20 @@ impl IndependentCbor {
     fn major(&mut self, major: u8, value: u64) {
         let prefix = major << 5;
         match value {
-            0..=23 => self
-                .0
-                .push(prefix | u8::try_from(value).expect("direct value fits u8")),
+            0..=23 => self.0.push(prefix | u8::try_from(value).test_ok()),
             24..=0xff => {
                 self.0.push(prefix | 0x18);
-                self.0
-                    .push(u8::try_from(value).expect("one-byte value fits u8"));
+                self.0.push(u8::try_from(value).test_ok());
             }
             0x100..=0xffff => {
                 self.0.push(prefix | 0x19);
-                self.0.extend_from_slice(
-                    &u16::try_from(value)
-                        .expect("two-byte value fits u16")
-                        .to_be_bytes(),
-                );
+                self.0
+                    .extend_from_slice(&u16::try_from(value).test_ok().to_be_bytes());
             }
             0x1_0000..=0xffff_ffff => {
                 self.0.push(prefix | 0x1a);
-                self.0.extend_from_slice(
-                    &u32::try_from(value)
-                        .expect("four-byte value fits u32")
-                        .to_be_bytes(),
-                );
+                self.0
+                    .extend_from_slice(&u32::try_from(value).test_ok().to_be_bytes());
             }
             _ => {
                 self.0.push(prefix | 0x1b);
@@ -286,7 +289,7 @@ fn catalogue_hash(actions: &[&str]) -> [u8; 32] {
     output.array(3);
     output.bytes(b"PAC1");
     output.uint(1);
-    output.array(u64::try_from(actions.len()).expect("fixture action count fits u64"));
+    output.array(u64::try_from(actions.len()).test_ok());
     for action in actions {
         output.text(action);
     }
@@ -422,10 +425,10 @@ fn registry_passes_recovery_evidence_to_the_driver_verifier() {
     let verifier = AgentDecisionReplayVerifier::try_new_with_timeline_ancestry(
         vec![TimelineHistorySegment::new(TimelineId::new(), Seq::ZERO)],
         host.agent,
-        host.provenance,
+        host.provenance.clone(),
         host.catalogue,
     )
-    .unwrap();
+    .test_ok();
     let mut registry = PluginRegistry::new();
     registry.register_driver(Box::new(AncestryCheckingDriver { verifier }));
 
@@ -487,7 +490,7 @@ fn verifier_rejects_empty_duplicate_and_decreasing_timeline_ancestry() {
 
 #[test]
 fn provider_attempt_debug_redacts_response_data_in_every_variant() {
-    let response = BoundedProviderBytes::try_from(vec![0xab]).unwrap();
+    let response = BoundedProviderBytes::try_from(vec![0xab]).test_ok();
     let cases = [
         (
             ProviderAttempt::Response(response),
@@ -524,7 +527,7 @@ fn accepted_and_no_action_records_verify_without_mutating_source_events() {
     ));
     let original = events.clone();
 
-    let checkpoint = host.verifier().verify(&events, None).unwrap();
+    let checkpoint = host.verifier().verify(&events, None).test_ok();
 
     assert_eq!(checkpoint.last_verified(), Seq::from_u64(3));
     assert_eq!(events, original);
@@ -546,10 +549,10 @@ fn sequence_bounded_ancestry_rejects_an_ancestor_record_after_a_fork() {
             TimelineHistorySegment::new(child, Seq::from_u64(3)),
         ],
         host.agent,
-        host.provenance.clone(),
-        host.catalogue.clone(),
+        host.provenance,
+        host.catalogue,
     )
-    .unwrap();
+    .test_ok();
 
     assert!(verifier.verify(&events, None).is_err());
 }
@@ -560,7 +563,7 @@ fn malformed_and_unsupported_target_records_fail_closed() {
     let valid = host
         .record(0, 0, FixtureResult::NoAction { code: 5 })
         .record_bytes();
-    let mut unsupported = valid.clone();
+    let mut unsupported = valid;
     unsupported[6] = 2;
     let cases = [
         ("malformed", vec![0xff]),
@@ -876,7 +879,7 @@ fn unrelated_recorder_actions_and_generic_events_pass_through() {
         event(3, host.agent, "world.observation", vec![0xff]),
     ];
 
-    let checkpoint = host.verifier().verify(&events, None).unwrap();
+    let checkpoint = host.verifier().verify(&events, None).test_ok();
 
     assert_eq!(checkpoint.last_verified(), Seq::from_u64(3));
 }
@@ -885,7 +888,7 @@ fn unrelated_recorder_actions_and_generic_events_pass_through() {
 fn resume_requires_the_complete_revalidated_prefix_and_matches_one_shot() {
     let host = HostFixture::new();
     let prefix = accepted_events(&host);
-    let checkpoint = host.verifier().verify(&prefix, None).unwrap();
+    let checkpoint = host.verifier().verify(&prefix, None).test_ok();
     let no_action = host.record(2, 1, FixtureResult::NoAction { code: 5 });
     let mut full = prefix.clone();
     full.push(event(
@@ -895,8 +898,8 @@ fn resume_requires_the_complete_revalidated_prefix_and_matches_one_shot() {
         no_action.record_bytes(),
     ));
 
-    let resumed = host.verifier().verify(&full, Some(checkpoint)).unwrap();
-    let one_shot = host.verifier().verify(&full, None).unwrap();
+    let resumed = host.verifier().verify(&full, Some(checkpoint)).test_ok();
+    let one_shot = host.verifier().verify(&full, None).test_ok();
     assert_eq!(resumed, one_shot);
 
     let absent = host.verifier().verify(&prefix, Some(one_shot));
@@ -914,7 +917,7 @@ fn resume_requires_the_complete_revalidated_prefix_and_matches_one_shot() {
             )],
             None,
         )
-        .unwrap();
+        .test_ok();
     let changed_to_accepted = accepted_events(&host);
     assert!(host
         .verifier()
@@ -974,15 +977,15 @@ fn resume_requires_the_complete_revalidated_prefix_and_matches_one_shot() {
 #[test]
 fn empty_source_has_zero_checkpoint_and_cannot_satisfy_a_later_resume() {
     let host = HostFixture::new();
-    let empty = host.verifier().verify(&[], None).unwrap();
+    let empty = host.verifier().verify(&[], None).test_ok();
     assert_eq!(empty.last_verified(), Seq::ZERO);
 
     let later = host
         .verifier()
         .verify(&accepted_events(&host), None)
-        .unwrap();
+        .test_ok();
     assert!(host.verifier().verify(&[], Some(later)).is_err());
-    assert_eq!(host.verifier().verify(&[], Some(empty)).unwrap(), empty);
+    assert_eq!(host.verifier().verify(&[], Some(empty)).test_ok(), empty);
 }
 
 #[test]
@@ -1001,15 +1004,15 @@ fn provider_driver_recovers_only_from_selected_evidence_and_remains_fresh_only()
     registry.register_driver(Box::new(driver));
     let segments = [TimelineHistorySegment::new(host.timeline, Seq::from_u64(2))];
 
-    registry.restore_driver_state(&segments, &events).unwrap();
+    registry.restore_driver_state(&segments, &events).test_ok();
     assert_eq!(calls.get(), 0, "recovery must not call the provider");
     assert!(registry.restore_driver_state(&segments, &events).is_err());
 
     let drafts = registry
         .step_all_anchored(host.timeline, Seq::from_u64(2))
-        .unwrap();
+        .test_ok();
     assert_eq!(calls.get(), 1);
-    let record = DecisionRecordV1::decode(drafts[0].payload.as_slice()).unwrap();
+    let record = DecisionRecordV1::decode(drafts[0].payload.as_slice()).test_ok();
     assert_eq!(record.request().driver_tick(), 1);
     registry.abort_step();
 }
@@ -1154,7 +1157,9 @@ fn provider_driver_recovery_accepts_no_action_and_unrelated_evidence_without_pro
         registry.register_driver(Box::new(driver));
         let segments = [TimelineHistorySegment::new(host.timeline, Seq::from_u64(1))];
 
-        registry.restore_driver_state(&segments, &evidence).unwrap();
+        registry
+            .restore_driver_state(&segments, &evidence)
+            .test_ok();
         assert_eq!(calls.get(), 0, "recovery must not call the provider");
     }
 }
@@ -1162,8 +1167,7 @@ fn provider_driver_recovery_accepts_no_action_and_unrelated_evidence_without_pro
 #[test]
 fn live_driver_provider_call_count_does_not_change_during_replay() {
     let host = HostFixture::new();
-    let response = BoundedProviderBytes::try_from(provider_accepted_bytes(0, 900_000))
-        .expect("fixture response is bounded");
+    let response = BoundedProviderBytes::try_from(provider_accepted_bytes(0, 900_000)).test_ok();
     let provider = FixtureAgentDecisionProvider::new(vec![ProviderAttempt::Response(response)]);
     let calls = provider.call_count_handle();
     let driver = ProviderBackedAgentDriver::new(
@@ -1179,14 +1183,14 @@ fn live_driver_provider_call_count_does_not_change_during_replay() {
     registry.register_driver(Box::new(driver));
     let drafts = registry
         .step_all_anchored(host.timeline, Seq::ZERO)
-        .expect("live boundary succeeds");
+        .test_ok();
     assert_eq!(calls.get(), 1);
     let events: Vec<Event> = drafts
         .into_iter()
         .enumerate()
         .map(|(index, draft)| {
             event(
-                u64::try_from(index + 1).expect("fixture sequence fits u64"),
+                u64::try_from(index + 1).test_ok(),
                 draft.entity,
                 draft.event_type.as_str(),
                 draft.payload.as_slice().to_vec(),
@@ -1194,7 +1198,7 @@ fn live_driver_provider_call_count_does_not_change_during_replay() {
         })
         .collect();
 
-    let checkpoint = host.verifier().verify(&events, None).unwrap();
+    let checkpoint = host.verifier().verify(&events, None).test_ok();
 
     assert_eq!(checkpoint.last_verified(), Seq::from_u64(3));
     assert_eq!(calls.get(), 1);
@@ -1245,7 +1249,7 @@ fn restore_driver_state_rejects_empty_timeline_ancestry() {
     let driver = ProviderBackedAgentDriver::new(
         host.agent,
         host.catalogue.clone(),
-        host.provenance.clone(),
+        host.provenance,
         Box::new(provider),
     );
     let mut registry = PluginRegistry::new();

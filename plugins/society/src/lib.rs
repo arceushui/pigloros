@@ -26,9 +26,9 @@
 //!
 //! let mut registry = PluginRegistry::new();
 //! let plugin = SocietyPlugin::new();
-//! registry
+//! assert!(registry
 //!     .register(&plugin, Some(Box::new(SocietyReducer)), None)
-//!     .unwrap();
+//!     .is_ok());
 //!
 //! let draft = draft_signal(
 //!     EntityId::new(),
@@ -175,7 +175,7 @@ impl Plugin for SocietyPlugin {
 #[must_use]
 pub fn draft_signal(entity: EntityId, signal: &SocietySignal) -> EventDraft {
     let mut buf = Vec::new();
-    ciborium::into_writer(signal, &mut buf).expect("ciborium write to Vec<u8> is infallible");
+    assert!(ciborium::into_writer(signal, &mut buf).is_ok());
     EventDraft::new(
         entity,
         Kind::new(EVENT_TYPE_SIGNAL),
@@ -258,7 +258,30 @@ impl Reducer for SocietyReducer {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected society fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("missing society fixture value"))
+            })
+        }
+    }
+
     use super::*;
     use pos_core::{
         clock::{Seq, WallTime},
@@ -331,7 +354,7 @@ mod tests {
         let draft = draft_signal(entity, &signal);
         assert_eq!(draft.entity, entity);
         assert_eq!(draft.event_type.as_str(), EVENT_TYPE_SIGNAL);
-        let decoded: SocietySignal = ciborium::from_reader(draft.payload.as_slice()).unwrap();
+        let decoded: SocietySignal = ciborium::from_reader(draft.payload.as_slice()).test_ok();
         assert_eq!(decoded, signal);
     }
 
@@ -528,8 +551,8 @@ mod tests {
             object: None,
         };
         let mut buf = Vec::new();
-        ciborium::into_writer(&signal, &mut buf).unwrap();
-        assert_eq!(decode_signal(&buf).unwrap(), signal);
+        ciborium::into_writer(&signal, &mut buf).test_ok();
+        assert_eq!(decode_signal(&buf).test_ok(), signal);
         assert!(matches!(
             decode_signal(&[0xFF]),
             Err(SocietyError::Decode(_))
@@ -543,7 +566,7 @@ mod tests {
         let mut state = reducer.initial();
         let entity = EntityId::new();
         for (i, dim) in SocietyDimension::all().into_iter().enumerate() {
-            let value = (f64::from(u32::try_from(i).unwrap()) + 1.0) / 10.0;
+            let value = (f64::from(u32::try_from(i).test_ok()) + 1.0) / 10.0;
             reducer.apply(
                 &mut state,
                 &make_signal_event(

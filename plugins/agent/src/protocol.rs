@@ -98,12 +98,12 @@ impl ActionCatalogueV1 {
     }
 
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.action_ids.len()
     }
 
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.action_ids.is_empty()
     }
 
@@ -255,7 +255,7 @@ pub struct AgentDecisionRequestV1 {
 
 impl AgentDecisionRequestV1 {
     #[must_use]
-    pub fn new(
+    pub const fn new(
         timeline_id: TimelineId,
         observed_through: u64,
         agent_id: EntityId,
@@ -735,7 +735,7 @@ impl DecisionRecordV1 {
     }
 }
 
-fn validate_response_digest(
+const fn validate_response_digest(
     response_digest: Option<[u8; 32]>,
     result: DecisionResultV1,
 ) -> Result<(), AgentDecisionError> {
@@ -1189,7 +1189,7 @@ fn decode_result(value: Option<&Value>) -> Result<DecisionResultV1, AgentDecisio
     }
 }
 
-fn decode_no_action_code(code: Option<u64>) -> Result<DecisionResultV1, AgentDecisionError> {
+const fn decode_no_action_code(code: Option<u64>) -> Result<DecisionResultV1, AgentDecisionError> {
     let Some(code) = code else {
         return Err(AgentDecisionError::MalformedWire);
     };
@@ -1402,7 +1402,29 @@ fn validate_printable_ascii(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected agent protocol fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing fixture value")))
+        }
+    }
+
     use super::*;
     use pos_core::ids::PluginId;
 
@@ -1438,6 +1460,78 @@ mod tests {
             let catalogue = ActionCatalogueV1::try_new(vec!["a".repeat(length)]);
             assert_eq!(catalogue.is_ok(), valid, "identifier byte length {length}");
         }
+    }
+
+    #[test]
+    fn raw_action_wire_helpers_reject_empty_and_truncated_headers() {
+        assert_eq!(raw_tagged_array_payload_offset(&[]), Err(()));
+        assert_eq!(raw_tag_header_len(&[]), Err(()));
+        assert_eq!(raw_array_header_len(&[]), Err(()));
+        assert_eq!(raw_definite_byte_string(&[]), Err(()));
+
+        for input in [
+            vec![0xd8],
+            vec![0xd9, 0],
+            vec![0xda, 0, 0, 0],
+            vec![0xdb, 0, 0, 0, 0, 0, 0, 0],
+        ] {
+            assert!(raw_tag_header_len(&input).is_err());
+        }
+        for input in [
+            vec![0x98],
+            vec![0x99, 0],
+            vec![0x9a, 0, 0, 0],
+            vec![0x9b, 0, 0, 0, 0, 0, 0, 0],
+        ] {
+            assert!(raw_array_header_len(&input).is_err());
+        }
+        for input in [
+            vec![0x58],
+            vec![0x59, 0],
+            vec![0x5a, 0, 0, 0],
+            vec![0x5b, 0, 0, 0, 0, 0, 0, 0],
+        ] {
+            assert!(raw_definite_byte_string(&input).is_err());
+        }
+        for payload_len in 0..4 {
+            let mut input = vec![0x5a];
+            input.extend(std::iter::repeat_n(0, payload_len));
+            assert!(raw_definite_byte_string(&input).is_err());
+        }
+        for payload_len in 0..8 {
+            let mut input = vec![0x5b];
+            input.extend(std::iter::repeat_n(0, payload_len));
+            assert!(raw_definite_byte_string(&input).is_err());
+        }
+
+        assert_eq!(raw_tag_header_len(&[0xd8, 0]), Ok(Some(2)));
+        assert_eq!(raw_array_header_len(&[0x98, 0]), Ok(Some(2)));
+
+        assert!(raw_byte_string_starts_with_action_magic(
+            &[0x44, b'P', b'A', b'A', b'1'],
+            false
+        ));
+        assert!(!raw_byte_string_starts_with_action_magic(
+            &[0x44, b'P', b'A', b'A', b'2'],
+            false
+        ));
+        assert!(!raw_byte_string_starts_with_action_magic(&[0x40], false));
+        assert!(raw_byte_string_starts_with_action_magic(
+            &[0x5f, 0x42, b'P', b'A', 0x42, b'A', b'1', 0xff],
+            false
+        ));
+        assert!(!raw_byte_string_starts_with_action_magic(
+            &[0x5f, 0xff],
+            false
+        ));
+        assert!(!raw_byte_string_starts_with_action_magic(
+            &[0x5f, 0x42, b'P'],
+            false
+        ));
+        assert!(raw_byte_string_starts_with_action_magic(
+            &[0x5f, 0x42, b'P'],
+            true
+        ));
     }
 
     #[test]
@@ -1549,7 +1643,7 @@ mod tests {
         );
         assert_eq!(
             ProviderDecisionV1::decode(&encode_accepted_decision(0, 1)),
-            Ok(ProviderDecisionV1::accepted(0, 1).expect("bounded fixture"))
+            Ok(ProviderDecisionV1::accepted(0, 1).test_ok())
         );
 
         assert_eq!(format!("{:?}", ProviderAttempt::NoResponse), "NoResponse");
@@ -1586,10 +1680,10 @@ mod tests {
             pos_core::ids::EntityId::new(),
             0,
             HASH,
-            provenance("local-provider", "1.0.0", "2026.08").unwrap(),
+            provenance("local-provider", "1.0.0", "2026.08").test_ok(),
         );
         let results = std::iter::once(DecisionResultV1::from(
-            ProviderDecisionV1::accepted(0, 1).unwrap(),
+            ProviderDecisionV1::accepted(0, 1).test_ok(),
         ))
         .chain(
             [
@@ -1641,7 +1735,7 @@ mod tests {
             }
         }
 
-        let response = BoundedProviderBytes::try_from(vec![0xde, 0xad, 0xbe, 0xef]).unwrap();
+        let response = BoundedProviderBytes::try_from(vec![0xde, 0xad, 0xbe, 0xef]).test_ok();
         let bytes_debug = format!("{response:?}");
         let attempt_debug = format!("{:?}", ProviderAttempt::Response(response));
         assert!(!bytes_debug.contains("222"));
@@ -1664,19 +1758,20 @@ mod tests {
 
     #[test]
     fn bounded_protocol_values_preserve_validated_inputs() {
-        let catalogue = ActionCatalogueV1::try_new(vec!["move".to_owned()]).unwrap();
-        let provenance = provenance("local-provider", "1.0.0", "2026.08").unwrap();
+        let catalogue = ActionCatalogueV1::try_new(vec!["move".to_owned()]).test_ok();
+        let provenance = provenance("local-provider", "1.0.0", "2026.08").test_ok();
         let request = AgentDecisionRequestV1::new(
             pos_core::ids::TimelineId::new(),
             0,
             pos_core::ids::EntityId::new(),
             0,
             HASH,
-            provenance.clone(),
+            provenance,
         );
-        let decision = ProviderDecisionV1::accepted(0, 1_000_000).unwrap();
-        let record = DecisionRecordV1::try_new(request, HASH, Some(HASH), decision.into()).unwrap();
-        let action = AgentActionV1::try_new("move".to_owned(), 0, 0, HASH, HASH).unwrap();
+        let decision = ProviderDecisionV1::accepted(0, 1_000_000).test_ok();
+        let record =
+            DecisionRecordV1::try_new(request, HASH, Some(HASH), decision.into()).test_ok();
+        let action = AgentActionV1::try_new("move".to_owned(), 0, 0, HASH, HASH).test_ok();
 
         assert_eq!(catalogue.action(0), Some("move"));
         assert_eq!(record.response_digest(), Some(HASH));
@@ -1720,7 +1815,7 @@ mod tests {
 
     #[test]
     fn request_encoder_uses_four_byte_cbor_width_for_large_integer_fields() {
-        let provenance = provenance("local-provider", "1.0.0", "2026.08").unwrap();
+        let provenance = provenance("local-provider", "1.0.0", "2026.08").test_ok();
         // observed_through = 65_536 exercises the 4-byte CBOR uint encoding arm.
         let request = AgentDecisionRequestV1::new(
             pos_core::ids::TimelineId::new(),
@@ -1730,13 +1825,13 @@ mod tests {
             HASH,
             provenance,
         );
-        let encoded = request.encode().expect("encoding must succeed");
+        let encoded = request.encode().test_ok();
         // A 4-byte uint header (0x1a) appears in the encoded output.
         assert!(
             encoded.contains(&0x1a),
             "4-byte CBOR uint marker must appear"
         );
-        let decoded = AgentDecisionRequestV1::decode(&encoded).expect("roundtrip must succeed");
+        let decoded = AgentDecisionRequestV1::decode(&encoded).test_ok();
         assert_eq!(decoded.observed_through(), 65_536);
         assert_eq!(decoded.driver_tick(), 65_536);
     }
@@ -1756,13 +1851,13 @@ mod tests {
         ];
         for (code, expected) in codes {
             assert_eq!(code.code(), expected);
-            let _ = format!("{code:?}");
+            drop(format!("{code:?}"));
         }
     }
 
     #[test]
     fn provider_attempt_debug_redacts_response_and_formats_all_variants() {
-        let response = ProviderAttempt::Response(vec![0u8; 10].try_into().unwrap());
+        let response = ProviderAttempt::Response(vec![0u8; 10].try_into().test_ok());
         assert_eq!(format!("{response:?}"), "Response(<redacted>)");
 
         let no_response = ProviderAttempt::NoResponse;
@@ -1785,7 +1880,7 @@ mod tests {
 
     #[test]
     fn provider_decision_v1_converts_to_decision_result() {
-        let accepted = ProviderDecisionV1::accepted(0, 100).expect("valid accepted decision");
+        let accepted = ProviderDecisionV1::accepted(0, 100).test_ok();
         let result = DecisionResultV1::from(accepted);
         assert!(matches!(result, DecisionResultV1::Accepted { .. }));
 
@@ -1799,7 +1894,7 @@ mod tests {
 
     #[test]
     fn request_encoder_uses_eight_byte_cbor_width_for_very_large_integer_fields() {
-        let provenance = provenance("local-provider", "1.0.0", "2026.08").unwrap();
+        let provenance = provenance("local-provider", "1.0.0", "2026.08").test_ok();
         let request = AgentDecisionRequestV1::new(
             pos_core::ids::TimelineId::new(),
             u64::MAX,
@@ -1808,13 +1903,13 @@ mod tests {
             HASH,
             provenance,
         );
-        let encoded = request.encode().expect("encoding must succeed");
+        let encoded = request.encode().test_ok();
         // 0x1b = 8-byte CBOR uint header (major 0, additional info 27)
         assert!(
             encoded.contains(&0x1b),
             "8-byte CBOR uint marker must appear for u64::MAX"
         );
-        let decoded = AgentDecisionRequestV1::decode(&encoded).expect("roundtrip must succeed");
+        let decoded = AgentDecisionRequestV1::decode(&encoded).test_ok();
         assert_eq!(decoded.observed_through(), u64::MAX);
     }
 
@@ -1847,10 +1942,10 @@ mod tests {
             pos_core::ids::EntityId::new(),
             0,
             HASH,
-            provenance("local-provider", "1.0.0", "2026.08").unwrap(),
+            provenance("local-provider", "1.0.0", "2026.08").test_ok(),
         );
-        let action_index = ActionIndexV1::try_from(0).unwrap();
-        let confidence = ConfidencePpmV1::try_from(1_000).unwrap();
+        let action_index = ActionIndexV1::try_from(0).test_ok();
+        let confidence = ConfidencePpmV1::try_from(1_000).test_ok();
         // Accepted result requires a response digest — None is invalid.
         assert_eq!(
             DecisionRecordV1::try_new(
@@ -1888,7 +1983,7 @@ mod tests {
 
     #[test]
     fn bounded_provider_bytes_debug_is_always_redacted() {
-        let bytes: BoundedProviderBytes = vec![1u8; 10].try_into().unwrap();
+        let bytes: BoundedProviderBytes = vec![1u8; 10].try_into().test_ok();
         assert!(format!("{bytes:?}").contains("BoundedProviderBytes"));
     }
 
@@ -1900,12 +1995,12 @@ mod tests {
             pos_core::ids::EntityId::new(),
             0,
             HASH,
-            provenance("local-provider", "1.0.0", "2026.08").unwrap(),
+            provenance("local-provider", "1.0.0", "2026.08").test_ok(),
         );
-        let action_index = ActionIndexV1::try_from(0).unwrap();
-        let confidence = ConfidencePpmV1::try_from(100).unwrap();
+        let action_index = ActionIndexV1::try_from(0).test_ok();
+        let confidence = ConfidencePpmV1::try_from(100).test_ok();
         // Accepted with None digest → InvalidResponseDigest
-        let _ = DecisionRecordV1::try_new(
+        drop(DecisionRecordV1::try_new(
             request.clone(),
             HASH,
             None,
@@ -1913,21 +2008,21 @@ mod tests {
                 action_index,
                 confidence,
             },
-        );
+        ));
         // ProviderUnavailable with Some digest → InvalidResponseDigest
-        let _ = DecisionRecordV1::try_new(
+        drop(DecisionRecordV1::try_new(
             request.clone(),
             HASH,
             Some([0; 32]),
             DecisionResultV1::NoAction(DecisionNoActionCodeV1::ProviderUnavailable),
-        );
+        ));
         // ResponseMalformed with None digest → InvalidResponseDigest
-        let _ = DecisionRecordV1::try_new(
+        drop(DecisionRecordV1::try_new(
             request,
             HASH,
             None,
             DecisionResultV1::NoAction(DecisionNoActionCodeV1::ResponseMalformed),
-        );
+        ));
     }
 
     #[test]
@@ -1936,10 +2031,10 @@ mod tests {
             Value::Integer(1u64.into()),
             Value::Integer(255u64.into()),
         ]);
-        let _ = decode_result(Some(&invalid_code));
+        assert!(decode_result(Some(&invalid_code)).is_err());
         let unknown_kind = Value::Array(vec![Value::Integer(99u64.into())]);
-        let _ = decode_result(Some(&unknown_kind));
-        let _ = decode_result(None);
+        assert!(decode_result(Some(&unknown_kind)).is_err());
+        assert!(decode_result(None).is_err());
     }
 
     #[test]

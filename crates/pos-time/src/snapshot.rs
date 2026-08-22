@@ -119,7 +119,43 @@ pub fn verify_snapshot_consistency(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected snapshot fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing fixture value")))
+        }
+    }
+
+    trait TestErrorExt<T, E> {
+        fn test_err(self) -> E;
+    }
+
+    impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
+        fn test_err(self) -> E {
+            match self {
+                Ok(value) => std::panic::resume_unwind(Box::new(format!(
+                    "unexpected successful snapshot fixture value: {value:?}"
+                ))),
+                Err(error) => error,
+            }
+        }
+    }
     use super::*;
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
@@ -219,15 +255,15 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn snapshot_captures_state_at_head() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("snap").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("snap").test_ok();
         let entity = EntityId::new();
 
         let drafts: Vec<EventDraft> = (0..4).map(|_| draft(entity)).collect();
-        store.append(tl.id(), &drafts).unwrap();
+        store.append(tl.id(), &drafts).test_ok();
 
         let mut reg = make_registry();
-        let snap = snapshot(store.as_ref(), tl.id(), &mut reg).unwrap();
+        let snap = snapshot(store.as_ref(), tl.id(), &mut reg).test_ok();
 
         // State should show 4 events applied.
         assert_eq!(count_in_snapshot(&snap, &entity), 4);
@@ -240,59 +276,59 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn verify_snapshot_consistency_passes_on_fresh_store() {
         // No tail events: snapshot IS the full replay.
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("consistent").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("consistent").test_ok();
         let entity = EntityId::new();
 
         let drafts: Vec<EventDraft> = (0..3).map(|_| draft(entity)).collect();
-        store.append(tl.id(), &drafts).unwrap();
+        store.append(tl.id(), &drafts).test_ok();
 
         let mut reg = make_registry();
-        let snap = snapshot(store.as_ref(), tl.id(), &mut reg).unwrap();
+        let snap = snapshot(store.as_ref(), tl.id(), &mut reg).test_ok();
 
         let mut verify_reg = make_registry();
-        verify_snapshot_consistency(store.as_ref(), &snap, &mut verify_reg).unwrap();
+        verify_snapshot_consistency(store.as_ref(), &snap, &mut verify_reg).test_ok();
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn verify_snapshot_consistency_with_tail_events() {
         // Take a snapshot, then append more events. Verification should still pass.
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("with-tail").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("with-tail").test_ok();
         let entity = EntityId::new();
 
         // Initial 3 events -> snapshot
         let drafts: Vec<EventDraft> = (0..3).map(|_| draft(entity)).collect();
-        store.append(tl.id(), &drafts).unwrap();
+        store.append(tl.id(), &drafts).test_ok();
         let mut reg = make_registry();
-        let snap = snapshot(store.as_ref(), tl.id(), &mut reg).unwrap();
+        let snap = snapshot(store.as_ref(), tl.id(), &mut reg).test_ok();
 
         // Append 2 more events after the snapshot.
         let tail: Vec<EventDraft> = (0..2).map(|_| draft(entity)).collect();
-        store.append(tl.id(), &tail).unwrap();
+        store.append(tl.id(), &tail).test_ok();
 
         // Consistency should hold: snapshot(3) + tail(2) == full replay(5).
         let mut verify_reg = make_registry();
-        verify_snapshot_consistency(store.as_ref(), &snap, &mut verify_reg).unwrap();
+        verify_snapshot_consistency(store.as_ref(), &snap, &mut verify_reg).test_ok();
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn snapshot_isolates_multiple_reducers() {
         // Register two reducers — their states should be tracked independently.
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("multi-reducer").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("multi-reducer").test_ok();
         let entity = EntityId::new();
 
         let drafts: Vec<EventDraft> = (0..5).map(|_| draft(entity)).collect();
-        store.append(tl.id(), &drafts).unwrap();
+        store.append(tl.id(), &drafts).test_ok();
 
         let mut reg = ProjectionRegistry::new();
         reg.register("count", Box::new(CountReducer));
         reg.register("entity_state", Box::new(EntityStateProjection));
 
-        let snap = snapshot(store.as_ref(), tl.id(), &mut reg).unwrap();
+        let snap = snapshot(store.as_ref(), tl.id(), &mut reg).test_ok();
 
         // "count" reducer sees n=5.
         assert_eq!(count_in_snapshot(&snap, &entity), 5);
@@ -312,13 +348,49 @@ mod tests {
     fn snapshot_read_err_propagates() {
         let store = ReadFailStore;
         let mut reg = make_registry();
-        let err = snapshot(&store, TimelineId::new(), &mut reg).unwrap_err();
+        let err = snapshot(&store, TimelineId::new(), &mut reg).test_err();
         assert!(matches!(err, CoreError::Storage(_)));
     }
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod extra_tests {
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected snapshot fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing fixture value")))
+        }
+    }
+
+    trait TestErrorExt<T, E> {
+        fn test_err(self) -> E;
+    }
+
+    impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
+        fn test_err(self) -> E {
+            match self {
+                Ok(value) => std::panic::resume_unwind(Box::new(format!(
+                    "unexpected successful snapshot fixture value: {value:?}"
+                ))),
+                Err(error) => error,
+            }
+        }
+    }
+
     use super::*;
     use pos_core::{
         clock::WallTime,
@@ -449,13 +521,13 @@ mod extra_tests {
         // Covers the case where snapshot.registry has been tampered with.
         // Build a valid snapshot via normal snapshot(), then manually corrupt
         // the registry map before verifying.
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("t").test_ok();
         let entity = EntityId::new();
 
-        store.append(tl.id(), &[draft(entity)]).unwrap();
+        store.append(tl.id(), &[draft(entity)]).test_ok();
         let mut reg = make_registry();
-        let mut snap = snapshot(store.as_ref(), tl.id(), &mut reg).unwrap();
+        let mut snap = snapshot(store.as_ref(), tl.id(), &mut reg).test_ok();
 
         // Corrupt the snapshot by injecting a bogus extra count for the entity.
         if let Some(count_reg) = snap.registry.get_mut("count") {
@@ -497,7 +569,7 @@ mod extra_tests {
             registry: HashMap::new(),
         };
         let mut reg = make_registry();
-        let err = verify_snapshot_consistency(&store, &snap, &mut reg).unwrap_err();
+        let err = verify_snapshot_consistency(&store, &snap, &mut reg).test_err();
         assert!(matches!(err, SnapshotError::Store(_)));
     }
 
@@ -511,7 +583,7 @@ mod extra_tests {
             registry: HashMap::new(),
         };
         let mut reg = make_registry();
-        let err = verify_snapshot_consistency(&store, &snap, &mut reg).unwrap_err();
+        let err = verify_snapshot_consistency(&store, &snap, &mut reg).test_err();
         assert!(matches!(err, SnapshotError::Store(_)));
     }
 }

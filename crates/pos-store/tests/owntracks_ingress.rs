@@ -7,6 +7,26 @@ use pos_core::{
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 
+trait TestValueExt<T> {
+    fn test_ok(self) -> T;
+}
+
+impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+    fn test_ok(self) -> T {
+        self.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "unexpected ingress fixture error: {error:?}"
+            )))
+        })
+    }
+}
+
+impl<T> TestValueExt<T> for Option<T> {
+    fn test_ok(self) -> T {
+        self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing ingress fixture value")))
+    }
+}
+
 const OWNER_KEY: [u8; 32] = [17; 32];
 const BASIC_HANDLE: [u8; 32] = [23; 32];
 const BASIC_SECRET: [u8; 32] = [29; 32];
@@ -74,7 +94,7 @@ where
     let valid = input(OWNER_KEY, BASIC_SECRET);
     assert!(store.prepare_owntracks_ingress(valid.clone()).is_err());
 
-    let timeline = store.create_timeline("owntracks-ingress").unwrap();
+    let timeline = store.create_timeline("owntracks-ingress").test_ok();
     let entity = EntityId::new();
     store
         .pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
@@ -83,14 +103,14 @@ where
             GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
             verifier(),
         ))
-        .unwrap();
+        .test_ok();
 
-    let prepared = store.prepare_owntracks_ingress(valid.clone()).unwrap();
+    let prepared = store.prepare_owntracks_ingress(valid.clone()).test_ok();
     assert_eq!(
         prepared.rate_key(),
         store
             .prepare_owntracks_ingress(input(OWNER_KEY, BASIC_SECRET))
-            .unwrap()
+            .test_ok()
             .rate_key()
     );
     let admission = prepared.into_admission_request();
@@ -108,7 +128,7 @@ where
         .prepare_owntracks_ingress(input(OWNER_KEY, [0; 32]))
         .is_err());
 
-    store.revoke_owntracks_enrollment().unwrap();
+    store.revoke_owntracks_enrollment().test_ok();
     assert!(store.prepare_owntracks_ingress(valid).is_err());
 }
 
@@ -119,5 +139,5 @@ fn memory_authenticated_ingress_contract() {
 
 #[test]
 fn sqlite_authenticated_ingress_contract() {
-    assert_ingress_contract(&mut SqliteStore::open_in_memory().unwrap());
+    assert_ingress_contract(&mut SqliteStore::open_in_memory().test_ok());
 }

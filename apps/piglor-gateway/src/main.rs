@@ -4,19 +4,33 @@
 //! `piglor-gateway` binary — bind local HTTP/WS listener (ADR-014 / #69).
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
+macro_rules! output_stdout {
+    ($($arg:tt)*) => {{
+        let mut output = std::io::stdout().lock();
+        drop(std::io::Write::write_fmt(&mut output, format_args!($($arg)*)));
+        drop(std::io::Write::write_all(&mut output, b"\n"));
+    }};
+}
+
+macro_rules! output_stderr {
+    ($($arg:tt)*) => {{
+        let mut output = std::io::stderr().lock();
+        drop(std::io::Write::write_fmt(&mut output, format_args!($($arg)*)));
+        drop(std::io::Write::write_all(&mut output, b"\n"));
+    }};
+}
+
 use piglor_gateway::{
-    router_for_addr, AppState, Gateway, LedgerConfig, LedgerWriteMode, OwnTracksOwnerKey,
+    owntracks, router_for_addr, AppState, Gateway, LedgerConfig, LedgerWriteMode, OwnTracksOwnerKey,
 };
 use piglor_ledger::LedgerView;
 use pos_store::{open_store, StoreConfig};
-use std::{future::Future, net::SocketAddr, path::PathBuf, pin::Pin};
-
-mod owntracks;
+use std::{ffi::OsString, future::Future, net::SocketAddr, path::PathBuf, pin::Pin};
 
 type ShutdownFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 fn handle_run_error(e: &dyn std::error::Error) {
-    eprintln!("Error: {e}");
+    output_stderr!("Error: {e}");
 }
 
 fn main() -> std::process::ExitCode {
@@ -44,26 +58,48 @@ fn run_with_args(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send
     )
 }
 
+#[derive(Clone, Debug, Default)]
+struct LedgerEnvironment {
+    source: Option<OsString>,
+    write_enabled: bool,
+}
+
+impl LedgerEnvironment {
+    fn from_process() -> Self {
+        Self {
+            source: std::env::var_os("LEDGER_SOURCE"),
+            write_enabled: std::env::var("LEDGER_WRITE").unwrap_or_default() == "1",
+        }
+    }
+}
+
 fn run_with_args_and_shutdown(
     args: &[String],
     shutdown: ShutdownFuture,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    run_with_args_and_shutdown_with_environment(args, shutdown, LedgerEnvironment::from_process())
+}
+
+fn run_with_args_and_shutdown_with_environment(
+    args: &[String],
+    shutdown: ShutdownFuture,
+    environment: LedgerEnvironment,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match args.get(1).map(String::as_str) {
         Some("owntracks") => {
             let output = owntracks::execute(&args[2..])?;
-            println!("{output}");
+            output_stdout!("{output}");
             Ok(())
         }
         Some("serve") => {
             let serve_args = parse_serve_args(&args[2..])?;
-            let (ledger_view, ledger_write) = match load_ledger() {
+            let (ledger_view, ledger_write) = match load_ledger_with_environment(environment) {
                 Ok(ledger) => ledger,
                 Err(error) => return Err(Box::new(error)),
             };
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
-                .build()
-                .expect("gateway Tokio runtime initialization failed");
+                .build()?;
             rt.block_on(serve_with_owntracks(
                 serve_args.addr,
                 serve_args.sqlite_path.as_deref(),
@@ -74,17 +110,17 @@ fn run_with_args_and_shutdown(
             ))
         }
         Some("version") => {
-            println!("piglor-gateway {}", env!("CARGO_PKG_VERSION"));
+            output_stdout!("piglor-gateway {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         _ => {
-            eprintln!("Usage: piglor-gateway <owntracks|serve [addr] [sqlite-path] [--owntracks-owner-key <path>]|version>");
-            eprintln!("  owntracks pair <sqlite-path> <owner-key-path> --consent-policy <path> <timeline-id> <entity-id>");
-            eprintln!("  owntracks status <sqlite-path>");
-            eprintln!("  owntracks rotate <sqlite-path> <owner-key-path>");
-            eprintln!("  owntracks revoke <sqlite-path>");
-            eprintln!("  serve 127.0.0.1:8080           # Memory store");
-            eprintln!("  serve 127.0.0.1:8080 /tmp/g.db # SQLite store");
+            output_stderr!("Usage: piglor-gateway <owntracks|serve [addr] [sqlite-path] [--owntracks-owner-key <path>]|version>");
+            output_stderr!("  owntracks pair <sqlite-path> <owner-key-path> --consent-policy <path> <timeline-id> <entity-id>");
+            output_stderr!("  owntracks status <sqlite-path>");
+            output_stderr!("  owntracks rotate <sqlite-path> <owner-key-path>");
+            output_stderr!("  owntracks revoke <sqlite-path>");
+            output_stderr!("  serve 127.0.0.1:8080           # Memory store");
+            output_stderr!("  serve 127.0.0.1:8080 /tmp/g.db # SQLite store");
             Ok(())
         }
     }
@@ -135,15 +171,16 @@ fn parse_serve_args(
     })
 }
 
-fn is_spectator_deployment(addr: SocketAddr) -> bool {
+const fn is_spectator_deployment(addr: SocketAddr) -> bool {
     !addr.ip().is_loopback()
 }
 
-fn load_ledger() -> Result<(LedgerView, LedgerWriteMode), pos_plugin_ledger::LedgerError> {
-    let source = std::env::var_os("LEDGER_SOURCE").map(PathBuf::from);
+fn load_ledger_with_environment(
+    environment: LedgerEnvironment,
+) -> Result<(LedgerView, LedgerWriteMode), pos_plugin_ledger::LedgerError> {
     LedgerConfig::new(
-        source,
-        std::env::var("LEDGER_WRITE").unwrap_or_default() == "1",
+        environment.source.map(PathBuf::from),
+        environment.write_enabled,
     )
     .load(&piglor_ledger::today_utc())
 }
@@ -152,7 +189,7 @@ async fn shutdown_signal_from<F>(signal: F)
 where
     F: std::future::Future<Output = Result<(), std::io::Error>>,
 {
-    let _ = signal.await;
+    drop(signal.await);
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -174,12 +211,9 @@ async fn serve_with_owntracks(
     ledger_view: LedgerView,
     ledger_write: LedgerWriteMode,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let config = match sqlite_path {
-        Some(path) => StoreConfig::Sqlite {
-            path: path.to_owned(),
-        },
-        None => StoreConfig::Memory,
-    };
+    let config = sqlite_path.map_or(StoreConfig::Memory, |path| StoreConfig::Sqlite {
+        path: path.to_owned(),
+    });
     let owntracks_owner_key = if is_spectator_deployment(addr) {
         None
     } else {
@@ -195,24 +229,37 @@ async fn serve_with_owntracks(
         (None, _) => Gateway::new(open_store(config)?),
         (Some(_), None) => return Err("OwnTracks ingress requires an SQLite path".into()),
     };
-    let state = AppState {
-        gateway: gateway.clone(),
-        ledger_view,
-        ledger_write,
-    };
-    let app = router_for_addr(addr, state);
+    let app = router_for_addr(
+        addr,
+        AppState {
+            gateway: gateway.clone(),
+            ledger_view,
+            ledger_write,
+        },
+    );
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(listener) => listener,
         Err(error) => {
-            let _ = gateway.shutdown().await;
+            drop(gateway.shutdown().await);
             return Err(Box::new(error));
         }
     };
-    eprintln!("piglor-gateway listening on http://{addr}");
+    output_stderr!("piglor-gateway listening on http://{addr}");
     let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await;
     let shutdown_result = gateway.shutdown().await;
+    drop(gateway);
+    finish_run(serve_result, shutdown_result)
+}
+
+fn finish_run<E>(
+    serve_result: Result<(), std::io::Error>,
+    shutdown_result: Result<(), E>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
     match (serve_result, shutdown_result) {
         (Err(error), _) => Err(Box::new(error)),
         (Ok(()), Err(error)) => Err(Box::new(error)),
@@ -221,11 +268,20 @@ async fn serve_with_owntracks(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_tests {
-    use super::handle_run_error;
+    use super::{finish_run, handle_run_error};
     use std::fmt;
 
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    trait TestResultExt<T, E> {
+        fn test_err(self) -> Result<E, Box<dyn std::error::Error>>;
+    }
+
+    impl<T, E: std::fmt::Debug> TestResultExt<T, E> for Result<T, E> {
+        fn test_err(self) -> Result<E, Box<dyn std::error::Error>> {
+            self.err().ok_or_else(|| "expected an error".into())
+        }
+    }
 
     #[derive(Debug)]
     struct ProbeError;
@@ -244,8 +300,23 @@ mod coverage_tests {
     }
 
     #[test]
+    fn finish_run_reports_serve_and_shutdown_failures() {
+        assert!(finish_run(
+            Err(std::io::Error::other("serve")),
+            Ok::<(), std::io::Error>(()),
+        )
+        .is_err());
+        assert!(finish_run(
+            Ok::<(), std::io::Error>(()),
+            Err(std::io::Error::other("shutdown")),
+        )
+        .is_err());
+        assert!(finish_run(Ok::<(), std::io::Error>(()), Ok::<(), std::io::Error>(()),).is_ok());
+    }
+
+    #[test]
     fn main_error_returns_failure_exit_code() {
-        let _ = super::main_with_args(&[
+        let _exit_code = super::main_with_args(&[
             "piglor-gateway".to_owned(),
             "serve".to_owned(),
             "not-an-address".to_owned(),
@@ -253,30 +324,42 @@ mod coverage_tests {
     }
 
     #[test]
-    fn run_with_args_reports_parse_and_bind_errors() {
+    fn run_with_args_reports_parse_and_bind_errors() -> Result<(), Box<dyn std::error::Error>> {
+        let owntracks_error = super::run_with_args(&[
+            "piglor-gateway".to_owned(),
+            "owntracks".to_owned(),
+            "invalid".to_owned(),
+        ])
+        .test_err()?;
+        assert!(!owntracks_error.to_string().is_empty());
+
         let parse_error = super::run_with_args(&[
             "piglor-gateway".to_owned(),
             "serve".to_owned(),
             "not-an-address".to_owned(),
         ])
-        .unwrap_err();
+        .test_err()?;
         assert!(!parse_error.to_string().is_empty());
 
-        let _environment = ENV_LOCK.lock().unwrap();
-        std::env::set_var(
-            "LEDGER_SOURCE",
-            std::env::temp_dir()
-                .join("piglor-gateway-missing-ledger")
-                .as_os_str(),
-        );
-        let ledger_error = super::run_with_args(&[
-            "piglor-gateway".to_owned(),
-            "serve".to_owned(),
-            "127.0.0.1:0".to_owned(),
-        ])
-        .unwrap_err();
-        std::env::remove_var("LEDGER_SOURCE");
+        let ledger_error = super::run_with_args_and_shutdown_with_environment(
+            &[
+                "piglor-gateway".to_owned(),
+                "serve".to_owned(),
+                "127.0.0.1:0".to_owned(),
+            ],
+            Box::pin(async {}),
+            super::LedgerEnvironment {
+                source: Some(
+                    std::env::temp_dir()
+                        .join("piglor-gateway-missing-ledger")
+                        .into_os_string(),
+                ),
+                write_enabled: false,
+            },
+        )
+        .test_err()?;
         assert!(!ledger_error.to_string().is_empty());
+        Ok(())
     }
 }
 
@@ -284,19 +367,45 @@ mod coverage_tests {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use std::ffi::{OsStr, OsString};
+    use std::ffi::OsString;
     use std::io::{Read, Write};
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::Duration;
 
+    trait TestResultExt<T, E> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error + Send + Sync>>;
+        fn test_err(self) -> Result<E, Box<dyn std::error::Error + Send + Sync>>;
+    }
+
+    impl<T, E: std::fmt::Debug> TestResultExt<T, E> for Result<T, E> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
+            self.map_err(|error| format!("unexpected error: {error:?}").into())
+        }
+
+        fn test_err(self) -> Result<E, Box<dyn std::error::Error + Send + Sync>> {
+            self.err().ok_or_else(|| "expected an error".into())
+        }
+    }
+
+    trait TestOptionExt<T> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error + Send + Sync>>;
+    }
+
+    impl<T> TestOptionExt<T> for Option<T> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
+            self.ok_or_else(|| "expected a value".into())
+        }
+    }
+
     #[test]
-    fn owntracks_activation_requires_sqlite_and_parses_one_existing_key_path() {
+    fn owntracks_activation_requires_sqlite_and_parses_one_existing_key_path(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let missing_sqlite = parse_serve_args(&[
             "127.0.0.1:0".to_owned(),
             "--owntracks-owner-key".to_owned(),
             "/private/owner.key".to_owned(),
         ])
-        .unwrap_err();
+        .test_err()?;
         assert!(missing_sqlite.to_string().contains("SQLite"));
 
         let parsed = parse_serve_args(&[
@@ -305,7 +414,7 @@ mod tests {
             "--owntracks-owner-key".to_owned(),
             "/private/owner.key".to_owned(),
         ])
-        .unwrap();
+        .test_ok()?;
         assert_eq!(parsed.sqlite_path.as_deref(), Some("/private/store.db"));
         assert_eq!(
             parsed.owntracks_owner_key.as_deref(),
@@ -320,13 +429,16 @@ mod tests {
             "--owntracks-owner-key".to_owned(),
             "/private/two.key".to_owned(),
         ])
-        .unwrap_err();
+        .test_err()?;
         assert!(repeated.to_string().contains("once"));
+
+        Ok(())
     }
 
     #[test]
-    fn owntracks_argument_parser_rejects_missing_path_and_extra_positionals() {
-        let missing_path = parse_serve_args(&["--owntracks-owner-key".to_owned()]).unwrap_err();
+    fn owntracks_argument_parser_rejects_missing_path_and_extra_positionals(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let missing_path = parse_serve_args(&["--owntracks-owner-key".to_owned()]).test_err()?;
         assert!(missing_path.to_string().contains("path is required"));
 
         let too_many = parse_serve_args(&[
@@ -334,13 +446,20 @@ mod tests {
             "one.db".to_owned(),
             "extra".to_owned(),
         ])
-        .unwrap_err();
+        .test_err()?;
         assert!(too_many.to_string().contains("at most"));
+
+        Ok(())
     }
 
-    async fn serve_http_requests(bind_ip: IpAddr, requests: &[&str]) -> Vec<String> {
-        let listener = tokio::net::TcpListener::bind((bind_ip, 0)).await.unwrap();
-        let addr = listener.local_addr().unwrap();
+    async fn serve_http_requests(
+        bind_ip: IpAddr,
+        requests: &[&str],
+    ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+        let listener = tokio::net::TcpListener::bind((bind_ip, 0))
+            .await
+            .test_ok()?;
+        let addr = listener.local_addr().test_ok()?;
         drop(listener);
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let server = tokio::spawn(async move {
@@ -348,7 +467,9 @@ mod tests {
                 addr,
                 None,
                 async move {
-                    let _ = rx.await;
+                    match rx.await {
+                        Ok(()) | Err(_) => {}
+                    }
                 },
                 LedgerView::default(),
                 LedgerWriteMode::Disabled,
@@ -363,95 +484,85 @@ mod tests {
         let responses = tokio::task::spawn_blocking(move || {
             requests
                 .iter()
-                .map(|request| {
-                    let mut stream = std::net::TcpStream::connect(connect_addr).unwrap();
-                    stream.write_all(request.as_bytes()).unwrap();
-                    let mut response = String::new();
-                    stream.read_to_string(&mut response).unwrap();
-                    response
-                })
-                .collect::<Vec<_>>()
+                .map(
+                    |request| -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+                        let mut stream = std::net::TcpStream::connect(connect_addr).test_ok()?;
+                        stream.write_all(request.as_bytes()).test_ok()?;
+                        let mut response = String::new();
+                        stream.read_to_string(&mut response).test_ok()?;
+                        Ok(response)
+                    },
+                )
+                .collect::<Result<Vec<_>, _>>()
         })
         .await
-        .unwrap();
+        .test_ok()?
+        .test_ok()?;
 
-        let _ = tx.send(());
-        server.await.unwrap().unwrap();
-        responses
+        match tx.send(()) {
+            Ok(()) | Err(()) => {}
+        }
+        server.await.test_ok()?.test_ok()?;
+        Ok(responses)
     }
 
     const HEALTH_REQUEST: &str =
         "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     const CREATE_TIMELINE_REQUEST: &str = "POST /v1/timelines HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 16\r\nConnection: close\r\n\r\n{\"name\":\"local\"}";
 
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    struct EnvVarGuard {
-        key: &'static str,
-        previous: Option<OsString>,
-    }
-
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: &OsStr) -> Self {
-            let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
-            Self { key, previous }
-        }
-
-        fn remove(key: &'static str) -> Self {
-            let previous = std::env::var_os(key);
-            std::env::remove_var(key);
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            if let Some(previous) = &self.previous {
-                std::env::set_var(self.key, previous);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
-
-    fn clean_ledger_environment() -> [EnvVarGuard; 2] {
-        [
-            EnvVarGuard::remove("LEDGER_SOURCE"),
-            EnvVarGuard::remove("LEDGER_WRITE"),
-        ]
-    }
-
     fn ledger_temp_path(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("piglor-gw-ledger-{label}-{}", std::process::id()))
     }
 
-    fn malformed_ledger_dir(label: &str) -> PathBuf {
+    fn malformed_ledger_dir(
+        label: &str,
+    ) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
         let dir = ledger_temp_path(label);
         let predictions = dir.join("predictions");
-        std::fs::create_dir_all(&predictions).unwrap();
-        std::fs::write(predictions.join("invalid.toml"), "not valid = [").unwrap();
-        dir
+        std::fs::create_dir_all(&predictions).test_ok()?;
+        std::fs::write(predictions.join("invalid.toml"), "not valid = [").test_ok()?;
+        Ok(dir)
     }
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn non_loopback_server_is_public_read_only() {
+        let result = non_loopback_server_is_public_read_only_impl().await;
+        assert!(
+            result.is_ok(),
+            "non_loopback_server_is_public_read_only failed: {result:?}"
+        );
+    }
+
+    async fn non_loopback_server_is_public_read_only_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let responses = serve_http_requests(
             IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             &[HEALTH_REQUEST, CREATE_TIMELINE_REQUEST],
         )
-        .await;
+        .await?;
         assert!(responses[0].starts_with("HTTP/1.1 200 OK"));
         assert!(responses[1].starts_with("HTTP/1.1 404 Not Found"));
+        Ok(())
     }
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn loopback_server_retains_timeline_api() {
+        let result = loopback_server_retains_timeline_api_impl().await;
+        assert!(
+            result.is_ok(),
+            "loopback_server_retains_timeline_api failed: {result:?}"
+        );
+    }
+
+    async fn loopback_server_retains_timeline_api_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let responses =
-            serve_http_requests(IpAddr::V4(Ipv4Addr::LOCALHOST), &[CREATE_TIMELINE_REQUEST]).await;
+            serve_http_requests(IpAddr::V4(Ipv4Addr::LOCALHOST), &[CREATE_TIMELINE_REQUEST])
+                .await?;
         assert!(responses[0].starts_with("HTTP/1.1 201 Created"));
+        Ok(())
     }
 
     #[test]
@@ -463,18 +574,22 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn version_and_usage_paths() {
-        let _ = run_main(&[String::from("piglor-gateway"), String::from("version")]);
-        let _ = run_main(&[String::from("piglor-gateway")]);
+        drop(run_main(&[
+            String::from("piglor-gateway"),
+            String::from("version"),
+        ]));
+        drop(run_main(&[String::from("piglor-gateway")]));
     }
 
     #[test]
-    fn owntracks_subcommand_is_dispatched_by_the_binary_entrypoint() {
+    fn owntracks_subcommand_is_dispatched_by_the_binary_entrypoint(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let database = std::env::temp_dir().join(format!(
             "piglor-gw-owntracks-dispatch-{}-{}.db",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .test_ok()?
                 .as_nanos()
         ));
         run_with_args_and_shutdown(
@@ -486,28 +601,29 @@ mod tests {
             ],
             Box::pin(async {}),
         )
-        .unwrap();
-        let _ = std::fs::remove_file(database);
+        .test_ok()?;
+        drop(std::fs::remove_file(database));
+
+        Ok(())
     }
 
     #[test]
-    fn serve_dispatches_owner_key_and_sqlite_configuration() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _environment = clean_ledger_environment();
+    fn serve_dispatches_owner_key_and_sqlite_configuration(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let directory = std::env::temp_dir().join(format!(
             "piglor-gw-owner-serve-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .test_ok()?
                 .as_nanos()
         ));
-        std::fs::create_dir(&directory).unwrap();
+        std::fs::create_dir(&directory).test_ok()?;
         let database = directory.join("gateway.db");
         let owner_key = directory.join("owner.key");
-        owntracks::create_or_load_owner_key(&owner_key).unwrap();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
+        owntracks::create_or_load_owner_key(&owner_key).test_ok()?;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").test_ok()?;
+        let addr = listener.local_addr().test_ok()?;
         drop(listener);
         run_with_args_and_shutdown(
             &[
@@ -522,11 +638,11 @@ mod tests {
                 tokio::task::yield_now().await;
             }),
         )
-        .unwrap();
+        .test_ok()?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .unwrap();
+            .test_ok()?;
         let missing_sqlite = runtime
             .block_on(serve_with_owntracks(
                 addr,
@@ -536,28 +652,50 @@ mod tests {
                 LedgerView::default(),
                 LedgerWriteMode::Disabled,
             ))
-            .unwrap_err();
+            .test_err()?;
         assert!(missing_sqlite.to_string().contains("SQLite"));
-        std::fs::remove_dir_all(directory).unwrap();
+        let missing_owner = runtime
+            .block_on(serve_with_owntracks(
+                addr,
+                Some(database.to_str().test_ok()?),
+                Some(&directory.join("missing.key")),
+                async {},
+                LedgerView::default(),
+                LedgerWriteMode::Disabled,
+            ))
+            .test_err()?;
+        assert!(!missing_owner.to_string().is_empty());
+        let invalid_sqlite = runtime
+            .block_on(serve_with_owntracks(
+                addr,
+                Some(directory.as_path().to_str().test_ok()?),
+                Some(&owner_key),
+                async {},
+                LedgerView::default(),
+                LedgerWriteMode::Disabled,
+            ))
+            .test_err()?;
+        assert!(!invalid_sqlite.to_string().is_empty());
+        std::fs::remove_dir_all(directory).test_ok()?;
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_main_error_path() {
-        let _ = run_main(&[
+        drop(run_main(&[
             String::from("piglor-gateway"),
             String::from("serve"),
             String::from("not-an-addr"),
-        ]);
+        ]));
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn run_main_serve_memory_shuts_down() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _environment = clean_ledger_environment();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
+    fn run_main_serve_memory_shuts_down() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").test_ok()?;
+        let addr = listener.local_addr().test_ok()?;
         drop(listener);
         run_with_args_and_shutdown(
             &[
@@ -569,16 +707,16 @@ mod tests {
                 tokio::task::yield_now().await;
             }),
         )
-        .unwrap();
+        .test_ok()?;
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn run_main_serve_sqlite_shuts_down() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _environment = clean_ledger_environment();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
+    fn run_main_serve_sqlite_shuts_down() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").test_ok()?;
+        let addr = listener.local_addr().test_ok()?;
         drop(listener);
         let path = std::env::temp_dir().join(format!("piglor-gw-cli-{}.db", std::process::id()));
         run_with_args_and_shutdown(
@@ -586,14 +724,16 @@ mod tests {
                 String::from("piglor-gateway"),
                 String::from("serve"),
                 addr.to_string(),
-                path.to_str().unwrap().to_owned(),
+                path.to_str().test_ok()?.to_owned(),
             ],
             Box::pin(async {
                 tokio::task::yield_now().await;
             }),
         )
-        .unwrap();
-        let _ = std::fs::remove_file(path);
+        .test_ok()?;
+        drop(std::fs::remove_file(path));
+
+        Ok(())
     }
 
     #[test]
@@ -605,9 +745,20 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn serve_memory_and_sqlite_shut_down() {
+        let result = serve_memory_and_sqlite_shut_down_impl().await;
+        assert!(
+            result.is_ok(),
+            "serve_memory_and_sqlite_shut_down failed: {result:?}"
+        );
+    }
+
+    async fn serve_memory_and_sqlite_shut_down_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Memory bind + immediate shutdown.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .test_ok()?;
+        let addr = listener.local_addr().test_ok()?;
         drop(listener);
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let serve_mem = tokio::spawn(async move {
@@ -615,7 +766,9 @@ mod tests {
                 addr,
                 None,
                 async move {
-                    let _ = rx.await;
+                    match rx.await {
+                        Ok(()) | Err(_) => {}
+                    }
                 },
                 LedgerView::default(),
                 LedgerWriteMode::Disabled,
@@ -623,14 +776,18 @@ mod tests {
             .await
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let _ = tx.send(());
-        serve_mem.await.unwrap().unwrap();
+        match tx.send(()) {
+            Ok(()) | Err(()) => {}
+        }
+        serve_mem.await.test_ok()?.test_ok()?;
 
         // SQLite path arm.
         let dir = std::env::temp_dir().join(format!("piglor-gw-{}.db", std::process::id()));
-        let path = dir.to_str().unwrap().to_owned();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let path = dir.to_str().test_ok()?.to_owned();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .test_ok()?;
+        let addr = listener.local_addr().test_ok()?;
         drop(listener);
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let path_clone = path.clone();
@@ -639,7 +796,9 @@ mod tests {
                 addr,
                 Some(path_clone.as_str()),
                 async move {
-                    let _ = rx.await;
+                    match rx.await {
+                        Ok(()) | Err(_) => {}
+                    }
                 },
                 LedgerView::default(),
                 LedgerWriteMode::Disabled,
@@ -647,71 +806,89 @@ mod tests {
             .await
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let _ = tx.send(());
-        serve_sql.await.unwrap().unwrap();
-        let _ = std::fs::remove_file(path);
+        match tx.send(()) {
+            Ok(()) | Err(()) => {}
+        }
+        serve_sql.await.test_ok()?.test_ok()?;
+        drop(std::fs::remove_file(path));
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn run_main_serve_open_store_error() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _environment = clean_ledger_environment();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
+    fn run_main_serve_open_store_error() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").test_ok()?;
+        let addr = listener.local_addr().test_ok()?;
         drop(listener);
         let dir = std::env::temp_dir().join(format!("piglor-gw-dir-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&dir).test_ok()?;
         let err = run_with_args(&[
             String::from("piglor-gateway"),
             String::from("serve"),
             addr.to_string(),
-            dir.to_str().unwrap().to_owned(),
+            dir.to_str().test_ok()?.to_owned(),
         ])
-        .unwrap_err();
+        .test_err()?;
         assert!(!err.to_string().is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
+        drop(std::fs::remove_dir_all(&dir));
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn run_main_serve_bind_error() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _environment = clean_ledger_environment();
-        let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = occupied.local_addr().unwrap();
+    fn run_main_serve_bind_error() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").test_ok()?;
+        let addr = occupied.local_addr().test_ok()?;
         let err = run_with_args(&[
             String::from("piglor-gateway"),
             String::from("serve"),
             addr.to_string(),
         ])
-        .unwrap_err();
+        .test_err()?;
         assert!(!err.to_string().is_empty());
         drop(occupied);
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn run_main_serve_invalid_ledger_returns_error() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _environment = clean_ledger_environment();
-        let dir = malformed_ledger_dir("startup");
-        let _source = EnvVarGuard::set("LEDGER_SOURCE", dir.as_os_str());
-        let error = run_with_args(&[
-            String::from("piglor-gateway"),
-            String::from("serve"),
-            String::from("127.0.0.1:0"),
-        ])
-        .unwrap_err();
-        let _ = std::fs::remove_dir_all(&dir);
+    fn run_main_serve_invalid_ledger_returns_error(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let dir = malformed_ledger_dir("startup")?;
+        let error = run_with_args_and_shutdown_with_environment(
+            &[
+                String::from("piglor-gateway"),
+                String::from("serve"),
+                String::from("127.0.0.1:0"),
+            ],
+            Box::pin(async {}),
+            LedgerEnvironment {
+                source: Some(dir.clone().into_os_string()),
+                write_enabled: false,
+            },
+        )
+        .test_err()?;
+        drop(std::fs::remove_dir_all(&dir));
         assert!(error.to_string().contains("TOML"));
+
+        Ok(())
     }
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn serve_bind_error_direct() {
-        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = occupied.local_addr().unwrap();
+        let result = serve_bind_error_direct_impl().await;
+        assert!(result.is_ok(), "serve_bind_error_direct failed: {result:?}");
+    }
+
+    async fn serve_bind_error_direct_impl() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    {
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .test_ok()?;
+        let addr = occupied.local_addr().test_ok()?;
         let err = serve(
             addr,
             None,
@@ -720,30 +897,43 @@ mod tests {
             LedgerWriteMode::Disabled,
         )
         .await
-        .unwrap_err();
+        .test_err()?;
         assert!(!err.to_string().is_empty());
         drop(occupied);
+        Ok(())
     }
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn serve_open_store_error_direct() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let result = serve_open_store_error_direct_impl().await;
+        assert!(
+            result.is_ok(),
+            "serve_open_store_error_direct failed: {result:?}"
+        );
+    }
+
+    async fn serve_open_store_error_direct_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .test_ok()?;
+        let addr = listener.local_addr().test_ok()?;
         drop(listener);
         let dir = std::env::temp_dir().join(format!("piglor-gw-sql-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&dir).test_ok()?;
         let err = serve(
             addr,
-            Some(dir.to_str().unwrap()),
+            Some(dir.to_str().test_ok()?),
             async {},
             LedgerView::default(),
             LedgerWriteMode::Disabled,
         )
         .await
-        .unwrap_err();
+        .test_err()?;
         assert!(!err.to_string().is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
+        drop(std::fs::remove_dir_all(&dir));
+        Ok(())
     }
 
     #[derive(Debug)]
@@ -757,91 +947,111 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn startup_without_source_marks_writes_unconfigured() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _environment = clean_ledger_environment();
-        let _write = EnvVarGuard::set("LEDGER_WRITE", OsStr::new("1"));
-        let (view, mode) = load_ledger().unwrap();
+    fn startup_without_source_marks_writes_unconfigured(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let (view, mode) = load_ledger_with_environment(LedgerEnvironment {
+            source: None,
+            write_enabled: true,
+        })
+        .test_ok()?;
         assert!(matches!(mode, LedgerWriteMode::Unconfigured));
         assert!(view.entries.is_empty());
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn startup_reads_configured_source_and_write_flag() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _environment = clean_ledger_environment();
+    fn startup_reads_configured_source_and_write_flag(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let dir = ledger_temp_path("startup-ready");
-        std::fs::create_dir_all(&dir).unwrap();
-        let _source = EnvVarGuard::set("LEDGER_SOURCE", dir.as_os_str());
-        let (_, disabled) = load_ledger().unwrap();
+        std::fs::create_dir_all(&dir).test_ok()?;
+        let (_, disabled) = load_ledger_with_environment(LedgerEnvironment {
+            source: Some(dir.clone().into_os_string()),
+            write_enabled: false,
+        })
+        .test_ok()?;
         assert!(matches!(disabled, LedgerWriteMode::Disabled));
-        {
-            let _write = EnvVarGuard::set("LEDGER_WRITE", OsStr::new("1"));
-            let (_, ready) = load_ledger().unwrap();
-            assert!(matches!(ready, LedgerWriteMode::Ready(_)));
-        }
-        let _ = std::fs::remove_dir_all(&dir);
+        let (_, ready) = load_ledger_with_environment(LedgerEnvironment {
+            source: Some(dir.clone().into_os_string()),
+            write_enabled: true,
+        })
+        .test_ok()?;
+        assert!(matches!(ready, LedgerWriteMode::Ready(_)));
+        drop(std::fs::remove_dir_all(&dir));
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn startup_rejects_explicitly_configured_empty_source() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _environment = clean_ledger_environment();
-        let _source = EnvVarGuard::set("LEDGER_SOURCE", OsStr::new(""));
-        let Err(error) = load_ledger() else {
-            panic!("an explicitly configured empty Ledger source must fail");
-        };
+    fn startup_rejects_explicitly_configured_empty_source(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let result = load_ledger_with_environment(LedgerEnvironment {
+            source: Some(OsString::new()),
+            write_enabled: false,
+        });
+        let error = result.test_err()?;
         assert!(!error.to_string().is_empty());
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn startup_rejects_configured_non_directory_source() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _environment = clean_ledger_environment();
+    fn startup_rejects_configured_non_directory_source(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let path = ledger_temp_path("startup-not-directory");
-        std::fs::write(&path, "not a directory").unwrap();
-        let _source = EnvVarGuard::set("LEDGER_SOURCE", path.as_os_str());
-        let Err(error) = load_ledger() else {
-            panic!("a configured non-directory Ledger source must fail");
-        };
-        let _ = std::fs::remove_file(path);
+        std::fs::write(&path, "not a directory").test_ok()?;
+        let error = load_ledger_with_environment(LedgerEnvironment {
+            source: Some(path.clone().into_os_string()),
+            write_enabled: false,
+        })
+        .test_err()?;
+        drop(std::fs::remove_file(path));
         assert!(!error.to_string().is_empty());
+
+        Ok(())
     }
 
     #[cfg(unix)]
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn startup_preserves_non_unicode_ledger_source() {
+    fn startup_preserves_non_unicode_ledger_source(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use std::os::unix::ffi::OsStringExt as _;
 
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _environment = clean_ledger_environment();
         let temporary = std::env::temp_dir().join(format!(
             "piglor-gw-ledger-non-unicode-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .test_ok()?
                 .as_nanos()
         ));
         let mut path = temporary.into_os_string().into_vec();
         path.push(0xff);
         let source = OsString::from_vec(path);
-        let _source = EnvVarGuard::set("LEDGER_SOURCE", &source);
-        let error = run_with_args(&[
-            String::from("piglor-gateway"),
-            String::from("serve"),
-            String::from("127.0.0.1:0"),
-        ])
-        .unwrap_err();
+        let error = run_with_args_and_shutdown_with_environment(
+            &[
+                String::from("piglor-gateway"),
+                String::from("serve"),
+                String::from("127.0.0.1:0"),
+            ],
+            Box::pin(async {}),
+            LedgerEnvironment {
+                source: Some(source),
+                write_enabled: false,
+            },
+        )
+        .test_err()?;
         assert!(error.to_string().contains("No such file or directory"));
+
+        Ok(())
     }
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod shutdown_signal_tests {
     #[tokio::test]
     async fn completed_signal_is_observed_without_process_signals() {

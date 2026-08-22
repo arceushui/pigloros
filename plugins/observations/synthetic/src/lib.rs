@@ -95,7 +95,7 @@ pub struct SyntheticDriver {
 impl SyntheticDriver {
     /// Create a new driver for the given entity with default amplitude 1.0.
     #[must_use]
-    pub fn new(entity: EntityId) -> Self {
+    pub const fn new(entity: EntityId) -> Self {
         Self {
             entity,
             tick: 0,
@@ -105,7 +105,7 @@ impl SyntheticDriver {
 
     /// Create a new driver with a custom amplitude.
     #[must_use]
-    pub fn with_amplitude(entity: EntityId, amplitude: f64) -> Self {
+    pub const fn with_amplitude(entity: EntityId, amplitude: f64) -> Self {
         Self {
             entity,
             tick: 0,
@@ -132,8 +132,8 @@ impl Driver for SyntheticDriver {
         };
 
         let mut buf = Vec::new();
-        // Writing to Vec<u8> is infallible with ciborium.
-        ciborium::into_writer(&payload, &mut buf).expect("ciborium write to Vec<u8> is infallible");
+        // `Vec<u8>` is an infallible CBOR sink.
+        drop(ciborium::into_writer(&payload, &mut buf));
 
         let draft = pos_core::event::EventDraft::new(
             self.entity,
@@ -190,7 +190,29 @@ impl Reducer for SyntheticReducer {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected synthetic fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing fixture value")))
+        }
+    }
+
     use super::*;
     use pos_core::{
         clock::{Seq, WallTime},
@@ -203,7 +225,7 @@ mod tests {
     fn make_obs_event(entity: EntityId, value: f64, tick: u64) -> Event {
         let payload = ObsPayload { value, tick };
         let mut buf = Vec::new();
-        ciborium::into_writer(&payload, &mut buf).unwrap();
+        ciborium::into_writer(&payload, &mut buf).test_ok();
 
         Event {
             id: EventId::new(),
@@ -266,12 +288,12 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn with_amplitude_driver_scales_values() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("test-amp").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("test-amp").test_ok();
         let entity = EntityId::new();
         let mut driver = SyntheticDriver::with_amplitude(entity, 2.0);
-        let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
-        let payload: ObsPayload = ciborium::from_reader(out.drafts[0].payload.as_slice()).unwrap();
+        let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
+        let payload: ObsPayload = ciborium::from_reader(out.drafts[0].payload.as_slice()).test_ok();
         // tick=0 → sin(0) * 2.0 = 0.0
         assert!((payload.value - 0.0_f64).abs() < f64::EPSILON);
     }
@@ -279,8 +301,8 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_produces_deterministic_values() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("test").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("test").test_ok();
         let entity = EntityId::new();
 
         // Compute expected values from the formula
@@ -296,11 +318,11 @@ mod tests {
         for _ in 0..2 {
             let mut driver = SyntheticDriver::new(entity);
             for &expected_val in &expected {
-                let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
+                let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
                 assert_eq!(out.drafts.len(), 1);
 
                 let payload: ObsPayload =
-                    ciborium::from_reader(out.drafts[0].payload.as_slice()).unwrap();
+                    ciborium::from_reader(out.drafts[0].payload.as_slice()).test_ok();
                 assert!(
                     (payload.value - expected_val).abs() < f64::EPSILON,
                     "value mismatch: got {}, expected {}",
@@ -432,7 +454,7 @@ mod tests {
             tick: 0,
         };
         let mut buf = Vec::new();
-        ciborium::into_writer(&payload, &mut buf).unwrap();
+        ciborium::into_writer(&payload, &mut buf).test_ok();
 
         let event = Event {
             id: EventId::new(),

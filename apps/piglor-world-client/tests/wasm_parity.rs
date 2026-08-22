@@ -11,13 +11,14 @@ const EXPECTED_DIGEST: [u8; 32] = [
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
-fn native_and_wasm_use_the_same_fixture_projection_path() {
-    let export =
-        piglor_world_client::decode_fixture(&piglor_world_client::fixture_bytes()).unwrap();
-    let digest = piglor_world_client::project_fixture(&export).unwrap();
+fn native_and_wasm_use_the_same_fixture_projection_path() -> Result<(), Box<dyn std::error::Error>>
+{
+    let export = piglor_world_client::decode_fixture(&piglor_world_client::fixture_bytes())?;
+    let digest = piglor_world_client::project_fixture(&export)?;
 
     assert_eq!(digest.signals, 2);
     assert_eq!(digest.trust_mean_bits, 0.75f64.to_bits());
     assert_eq!(digest.landmark_x_bits, 1.0f64.to_bits());
     assert_eq!(digest.digest_bytes(), EXPECTED_DIGEST);
+    Ok(())
 }

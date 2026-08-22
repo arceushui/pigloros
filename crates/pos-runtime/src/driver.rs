@@ -10,9 +10,10 @@
 use pos_core::{
     clock::Seq,
     event::{CanonicalBytes, Event, EventDraft, Kind},
-    ids::{EntityId, TimelineId},
+    ids::{EntityId, EventId, TimelineId},
     State,
 };
+use std::borrow::Cow;
 
 /// One host-validated Timeline interval in recovery evidence.
 ///
@@ -47,12 +48,18 @@ impl TimelineHistorySegment {
 /// Header-only view of one immutable Event supplied while constructing recovery evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryEventHeader {
+    id: EventId,
     seq: Seq,
     entity: EntityId,
     event_type: Kind,
 }
 
 impl RecoveryEventHeader {
+    #[must_use]
+    pub const fn id(&self) -> EventId {
+        self.id
+    }
+
     #[must_use]
     pub const fn seq(&self) -> Seq {
         self.seq
@@ -64,7 +71,7 @@ impl RecoveryEventHeader {
     }
 
     #[must_use]
-    pub fn event_type(&self) -> &Kind {
+    pub const fn event_type(&self) -> &Kind {
         &self.event_type
     }
 }
@@ -78,12 +85,12 @@ pub struct RecoveryEvent {
 
 impl RecoveryEvent {
     #[must_use]
-    pub fn header(&self) -> &RecoveryEventHeader {
+    pub const fn header(&self) -> &RecoveryEventHeader {
         &self.header
     }
 
     #[must_use]
-    pub fn payload(&self) -> Option<&CanonicalBytes> {
+    pub const fn payload(&self) -> Option<&CanonicalBytes> {
         self.payload.as_ref()
     }
 }
@@ -106,6 +113,7 @@ impl DriverRecoveryEvidence {
             .iter()
             .map(|event| {
                 let header = RecoveryEventHeader {
+                    id: event.id,
                     seq: event.seq,
                     entity: event.entity,
                     event_type: event.event_type.clone(),
@@ -150,12 +158,12 @@ pub struct ProjectionKey(EntityId);
 
 impl ProjectionKey {
     #[must_use]
-    pub fn new(entity: EntityId) -> Self {
+    pub const fn new(entity: EntityId) -> Self {
         Self(entity)
     }
 
     #[must_use]
-    pub fn entity_id(&self) -> &EntityId {
+    pub const fn entity_id(&self) -> &EntityId {
         &self.0
     }
 }
@@ -235,6 +243,27 @@ impl ObservationSnapshot {
 
     #[must_use]
     pub(crate) fn view_for<'a>(&'a self, subscriptions: &[ProjectionKey]) -> ObservationView<'a> {
+        self.view_for_events(subscriptions, &[], &[])
+    }
+
+    #[must_use]
+    pub(crate) fn view_for_events<'a>(
+        &'a self,
+        subscriptions: &[ProjectionKey],
+        events: &'a [Event],
+        event_subscriptions: &[Kind],
+    ) -> ObservationView<'a> {
+        self.view_for_events_after(subscriptions, events, event_subscriptions, Seq::ZERO)
+    }
+
+    #[must_use]
+    pub(crate) fn view_for_events_after<'a>(
+        &'a self,
+        subscriptions: &[ProjectionKey],
+        events: &'a [Event],
+        event_subscriptions: &[Kind],
+        after_seq: Seq,
+    ) -> ObservationView<'a> {
         let mut unique = 0usize;
         let mut seen = HashSet::with_capacity(subscriptions.len());
         for key in subscriptions {
@@ -246,7 +275,19 @@ impl ObservationSnapshot {
             snapshot: Some(self),
             direct_anchor: None,
             len: unique,
-            events: &[],
+            events: if event_subscriptions.is_empty() {
+                Cow::Borrowed(&[])
+            } else {
+                Cow::Owned(
+                    events
+                        .iter()
+                        .filter(|event| {
+                            event.seq > after_seq && event_subscriptions.contains(&event.event_type)
+                        })
+                        .cloned()
+                        .collect(),
+                )
+            },
         }
     }
 }
@@ -266,17 +307,17 @@ pub struct ObservationView<'a> {
     snapshot: Option<&'a ObservationSnapshot>,
     direct_anchor: Option<SnapshotAnchor>,
     len: usize,
-    events: &'a [Event],
+    events: Cow<'a, [Event]>,
 }
 
 impl ObservationView<'_> {
     #[must_use]
-    pub fn empty() -> Self {
+    pub const fn empty() -> Self {
         Self {
             snapshot: None,
             direct_anchor: None,
             len: 0,
-            events: &[],
+            events: Cow::Borrowed(&[]),
         }
     }
 
@@ -290,7 +331,7 @@ impl ObservationView<'_> {
             snapshot: None,
             direct_anchor: Some(anchor),
             len: 0,
-            events: &[],
+            events: Cow::Borrowed(&[]),
         }
     }
 
@@ -306,20 +347,20 @@ impl ObservationView<'_> {
     }
 
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.len
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.len == 0 && self.events.is_empty()
     }
 
     /// Committed events forwarded to this driver for the current tick, in
     /// Timeline `seq` order.
     #[must_use]
     pub fn events(&self) -> &[Event] {
-        self.events
+        self.events.as_ref()
     }
 }
 
@@ -328,24 +369,24 @@ impl<'a> ObservationView<'a> {
     ///
     /// Primarily for tests and drivers that only need to fold incoming events.
     #[must_use]
-    pub fn from_events(events: &'a [Event]) -> Self {
+    pub const fn from_events(events: &'a [Event]) -> Self {
         Self {
             snapshot: None,
             direct_anchor: None,
             len: 0,
-            events,
+            events: Cow::Borrowed(events),
         }
     }
 }
 
 impl StepOutput {
     #[must_use]
-    pub fn new(drafts: Vec<EventDraft>) -> Self {
+    pub const fn new(drafts: Vec<EventDraft>) -> Self {
         Self { drafts }
     }
 
     #[must_use]
-    pub fn empty() -> Self {
+    pub const fn empty() -> Self {
         Self { drafts: Vec::new() }
     }
 }
@@ -378,6 +419,15 @@ pub trait Driver: Send + Sync {
     /// Minimum interval between ticks (default 100ms = 10 Hz).
     fn tick_interval(&self) -> std::time::Duration {
         std::time::Duration::from_millis(100)
+    }
+
+    /// Event types this Driver is allowed to observe at a Tick Boundary.
+    ///
+    /// The host filters committed Events before exposing them. The default is
+    /// an empty set, preserving the least-authority behavior for Drivers that
+    /// only need projection state.
+    fn event_subscriptions(&self) -> &[Kind] {
+        &[]
     }
 
     /// Projection states this driver observes (default empty).
@@ -430,14 +480,38 @@ pub trait Driver: Send + Sync {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use pos_core::{
-        clock::Seq,
-        event::{CanonicalBytes, EventDraft, Kind},
-        ids::EntityId,
+        clock::{Seq, WallTime},
+        crypto::Hash,
+        event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
+        ids::{EntityId, EventId},
     };
     use pos_store::{open_store, StoreConfig};
+
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected driver fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("missing driver fixture value"))
+            })
+        }
+    }
 
     struct TickDriver {
         entity: EntityId,
@@ -480,11 +554,11 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_produces_drafts() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("t").test_ok();
         let entity = EntityId::new();
         let mut driver = TickDriver { entity, ticks: 0 };
-        let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
+        let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
         assert_eq!(out.drafts.len(), 1);
         assert_eq!(out.drafts[0].event_type.as_str(), "tick.event");
     }
@@ -492,13 +566,13 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_tick_increments() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("t").test_ok();
         let entity = EntityId::new();
         let mut driver = TickDriver { entity, ticks: 0 };
-        driver.step(tl.id(), ObservationView::empty()).unwrap();
-        driver.step(tl.id(), ObservationView::empty()).unwrap();
-        let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
+        driver.step(tl.id(), ObservationView::empty()).test_ok();
+        driver.step(tl.id(), ObservationView::empty()).test_ok();
+        let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
         // tick 3 — payload contains 3u32 as le bytes
         assert_eq!(out.drafts[0].payload.as_slice(), &3u32.to_le_bytes());
     }
@@ -506,10 +580,10 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn idle_driver_returns_empty() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("t").test_ok();
         let mut driver = IdleDriver;
-        let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
+        let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
         assert!(out.drafts.is_empty());
     }
 
@@ -593,6 +667,44 @@ mod tests {
         assert!(!view.is_empty());
         assert_eq!(view.state_for(&seen), Some(&state));
         assert_eq!(view.state_for(&absent), None);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn observation_view_filters_forwarded_events_by_declared_type() {
+        let snapshot = ObservationSnapshot::default();
+        let events = vec![
+            Event {
+                id: EventId::new(),
+                entity: EntityId::new(),
+                event_type: Kind::new("visible.event"),
+                payload: CanonicalBytes::from_static(b"visible"),
+                wall_time: WallTime::from_micros(1),
+                seq: Seq::from_u64(1),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: SchemaVersion::V1,
+                signature: None,
+                payload_hash: Hash::from_bytes([0; 32]),
+            },
+            Event {
+                id: EventId::new(),
+                entity: EntityId::new(),
+                event_type: Kind::new("hidden.event"),
+                payload: CanonicalBytes::from_static(b"hidden"),
+                wall_time: WallTime::from_micros(2),
+                seq: Seq::from_u64(2),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: SchemaVersion::V1,
+                signature: None,
+                payload_hash: Hash::from_bytes([0; 32]),
+            },
+        ];
+        let view = snapshot.view_for_events(&[], &events, &[Kind::new("visible.event")]);
+        assert_eq!(view.events().len(), 1);
+        assert!(!view.is_empty());
+        assert_eq!(view.events()[0].event_type, Kind::new("visible.event"));
     }
 
     #[test]

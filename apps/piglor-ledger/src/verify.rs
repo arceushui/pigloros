@@ -15,7 +15,7 @@ use pos_plugin_ledger::EVENT_TYPE_PREDICTION;
 use crate::{cli::Source, export::ExportManifest, hex::hex_decode, CliError};
 
 /// Summary of a verify run; printed to stdout and asserted on in tests.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifyReport {
     /// Tier that was verified.
     pub tier: String,
@@ -26,7 +26,7 @@ pub struct VerifyReport {
 }
 
 /// Outcome of a verify run.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VerifyOutcome {
     /// All checks passed.
     Ok,
@@ -223,32 +223,30 @@ mod tests {
     use super::{run, Source, VerifyOutcome, VerifyReport};
     use crate::cli::run as cli_run;
     use crate::hex::{hex_decode, nib};
+    use crate::test_helpers::{running_as_root, TestOptionExt, TestResultExt};
     use std::path::PathBuf;
     use tempfile::TempDir;
 
-    /// Assert the outcome is `Mismatch` and return the `(which, reason)` fields.
-    /// The `Ok` arm is exercised by `expect_mismatch_never_panics` below.
-    fn expect_mismatch(outcome: VerifyOutcome) -> (String, String) {
+    /// Return the `(which, reason)` fields from a mismatch outcome.
+    fn expect_mismatch(
+        outcome: VerifyOutcome,
+    ) -> Result<(String, String), Box<dyn std::error::Error>> {
         match outcome {
-            VerifyOutcome::Mismatch { which, reason } => (which, reason),
-            VerifyOutcome::Ok => panic!("expected Mismatch, got Ok"),
+            VerifyOutcome::Mismatch { which, reason } => Ok((which, reason)),
+            VerifyOutcome::Ok => Err("expected Mismatch, got Ok".into()),
         }
     }
 
-    /// Covers the `Ok` arm of `expect_mismatch` — verifies the helper panics
-    /// when it receives `Ok` (so both match arms are instrumented and hit).
+    /// Covers the `Ok` arm of `expect_mismatch`.
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn expect_mismatch_panics_on_ok() {
-        let result = std::panic::catch_unwind(|| {
-            expect_mismatch(VerifyOutcome::Ok);
-        });
-        assert!(result.is_err(), "expect_mismatch must panic when given Ok");
+    fn expect_mismatch_rejects_ok() {
+        assert!(expect_mismatch(VerifyOutcome::Ok).is_err());
     }
 
-    fn populated_toml(tmp: &TempDir) -> PathBuf {
+    fn populated_toml(tmp: &TempDir) -> Result<PathBuf, Box<dyn std::error::Error>> {
         let dir = tmp.path().join("ledger");
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&dir).test_ok()?;
         cli_run(&[
             "piglor-ledger".into(),
             "predict".into(),
@@ -269,29 +267,33 @@ mod tests {
             "--osf".into(),
             "https://osf.io/example".into(),
         ])
-        .unwrap();
-        dir
+        .test_ok()?;
+        Ok(dir)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verify_toml_no_manifest_returns_ok_after_predict() {
-        let tmp = TempDir::new().unwrap();
-        let dir = populated_toml(&tmp);
-        let report = run(&Source::Toml(dir), None, None).unwrap();
+    fn verify_toml_no_manifest_returns_ok_after_predict() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let tmp = TempDir::new().test_ok()?;
+        let dir = populated_toml(&tmp)?;
+        let report = run(&Source::Toml(dir), None, None).test_ok()?;
         assert_eq!(report.tier, "toml");
         assert_eq!(report.outcome, VerifyOutcome::Ok);
         assert!(report.n >= 1);
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verify_toml_with_resolved_entry_covers_sort_closure() {
+    fn verify_toml_with_resolved_entry_covers_sort_closure(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Covers L93: the sort closure `a.0.cmp(&b.0)` in verify_toml which
         // only runs when there are 2+ files to compare AND a manifest is provided.
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&dir).test_ok()?;
         cli_run(&[
             "piglor-ledger".into(),
             "predict".into(),
@@ -312,7 +314,7 @@ mod tests {
             "--osf".into(),
             "https://osf.io/example".into(),
         ])
-        .unwrap();
+        .test_ok()?;
         let id = crate::test_helpers::first_prediction_id(&dir);
         cli_run(&[
             "piglor-ledger".into(),
@@ -326,7 +328,7 @@ mod tests {
             "--resolved-at".into(),
             "2026-07-30T09:00:00Z".into(),
         ])
-        .unwrap();
+        .test_ok()?;
         // Export manifest with 2 files (prediction + resolution).
         let manifest_path = tmp.path().join("manifest.json");
         cli_run(&[
@@ -335,21 +337,23 @@ mod tests {
             "--source".into(),
             format!("toml:{}", dir.display()),
             "--out".into(),
-            manifest_path.to_str().unwrap().to_owned(),
+            manifest_path.to_str().test_ok()?.to_owned(),
         ])
-        .unwrap();
+        .test_ok()?;
         // Verify WITH manifest — this enters the `if let Some(path) = manifest_path`
         // branch and sorts both the expected (2 files) and actual (2 files) vectors.
-        let report = run(&Source::Toml(dir), None, Some(&manifest_path)).unwrap();
+        let report = run(&Source::Toml(dir), None, Some(&manifest_path)).test_ok()?;
         assert_eq!(report.outcome, VerifyOutcome::Ok);
         assert_eq!(report.n, 2);
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verify_toml_with_manifest_round_trips_ok() {
-        let tmp = TempDir::new().unwrap();
-        let dir = populated_toml(&tmp);
+    fn verify_toml_with_manifest_round_trips_ok() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new().test_ok()?;
+        let dir = populated_toml(&tmp)?;
         let manifest_path = tmp.path().join("manifest.json");
         cli_run(&[
             "piglor-ledger".into(),
@@ -357,18 +361,20 @@ mod tests {
             "--source".into(),
             format!("toml:{}", dir.display()),
             "--out".into(),
-            manifest_path.to_str().unwrap().to_owned(),
+            manifest_path.to_str().test_ok()?.to_owned(),
         ])
-        .unwrap();
-        let report = run(&Source::Toml(dir), None, Some(&manifest_path)).unwrap();
+        .test_ok()?;
+        let report = run(&Source::Toml(dir), None, Some(&manifest_path)).test_ok()?;
         assert_eq!(report.outcome, VerifyOutcome::Ok);
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verify_toml_detects_tampered_prediction_file() {
-        let tmp = TempDir::new().unwrap();
-        let dir = populated_toml(&tmp);
+    fn verify_toml_detects_tampered_prediction_file() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new().test_ok()?;
+        let dir = populated_toml(&tmp)?;
         let manifest_path = tmp.path().join("manifest.json");
         cli_run(&[
             "piglor-ledger".into(),
@@ -376,27 +382,29 @@ mod tests {
             "--source".into(),
             format!("toml:{}", dir.display()),
             "--out".into(),
-            manifest_path.to_str().unwrap().to_owned(),
+            manifest_path.to_str().test_ok()?.to_owned(),
         ])
-        .unwrap();
+        .test_ok()?;
         let pred_path = std::fs::read_dir(dir.join("predictions"))
-            .unwrap()
+            .test_ok()?
             .next()
-            .unwrap()
-            .unwrap()
+            .test_ok()?
+            .test_ok()?
             .path();
-        std::fs::write(&pred_path, "tampered = true\n").unwrap();
-        let report = run(&Source::Toml(dir), None, Some(&manifest_path)).unwrap();
-        let (which, reason) = expect_mismatch(report.outcome);
+        std::fs::write(&pred_path, "tampered = true\n").test_ok()?;
+        let report = run(&Source::Toml(dir), None, Some(&manifest_path)).test_ok()?;
+        let (which, reason) = expect_mismatch(report.outcome)?;
         assert!(which.starts_with("predictions/"), "{which}");
         assert!(reason.contains("hash differs"), "{reason}");
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verify_toml_detects_removed_file() {
-        let tmp = TempDir::new().unwrap();
-        let dir = populated_toml(&tmp);
+    fn verify_toml_detects_removed_file() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new().test_ok()?;
+        let dir = populated_toml(&tmp)?;
         let manifest_path = tmp.path().join("manifest.json");
         cli_run(&[
             "piglor-ledger".into(),
@@ -404,29 +412,31 @@ mod tests {
             "--source".into(),
             format!("toml:{}", dir.display()),
             "--out".into(),
-            manifest_path.to_str().unwrap().to_owned(),
+            manifest_path.to_str().test_ok()?.to_owned(),
         ])
-        .unwrap();
+        .test_ok()?;
         std::fs::remove_file(
             std::fs::read_dir(dir.join("predictions"))
-                .unwrap()
+                .test_ok()?
                 .next()
-                .unwrap()
-                .unwrap()
+                .test_ok()?
+                .test_ok()?
                 .path(),
         )
-        .unwrap();
-        let report = run(&Source::Toml(dir), None, Some(&manifest_path)).unwrap();
-        let (which, reason) = expect_mismatch(report.outcome);
+        .test_ok()?;
+        let report = run(&Source::Toml(dir), None, Some(&manifest_path)).test_ok()?;
+        let (which, reason) = expect_mismatch(report.outcome)?;
         assert!(which.starts_with("predictions/"), "{which}");
         assert!(reason.contains("removed"), "{reason}");
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verify_toml_detects_added_file() {
-        let tmp = TempDir::new().unwrap();
-        let dir = populated_toml(&tmp);
+    fn verify_toml_detects_added_file() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new().test_ok()?;
+        let dir = populated_toml(&tmp)?;
         let manifest_path = tmp.path().join("manifest.json");
         cli_run(&[
             "piglor-ledger".into(),
@@ -434,31 +444,33 @@ mod tests {
             "--source".into(),
             format!("toml:{}", dir.display()),
             "--out".into(),
-            manifest_path.to_str().unwrap().to_owned(),
+            manifest_path.to_str().test_ok()?.to_owned(),
         ])
-        .unwrap();
-        std::fs::write(dir.join("predictions").join("rogue.toml"), "x = 1\n").unwrap();
-        let report = run(&Source::Toml(dir), None, Some(&manifest_path)).unwrap();
-        let (which, reason) = expect_mismatch(report.outcome);
+        .test_ok()?;
+        std::fs::write(dir.join("predictions").join("rogue.toml"), "x = 1\n").test_ok()?;
+        let report = run(&Source::Toml(dir), None, Some(&manifest_path)).test_ok()?;
+        let (which, reason) = expect_mismatch(report.outcome)?;
         assert!(which.ends_with("rogue.toml"), "{which}");
         assert!(reason.contains("added"), "{reason}");
+
+        Ok(())
     }
 
     #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verify_store_with_signed_events_passes() {
-        let tmp = TempDir::new().unwrap();
+    fn verify_store_with_signed_events_passes() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
         let key_path = tmp.path().join("sk");
         cli_run(&[
             "piglor-ledger".into(),
             "keygen".into(),
             "--out".into(),
-            key_path.to_str().unwrap().to_owned(),
+            key_path.to_str().test_ok()?.to_owned(),
         ])
-        .unwrap();
-        let sk_text = std::fs::read_to_string(&key_path).unwrap();
+        .test_ok()?;
+        let sk_text = std::fs::read_to_string(&key_path).test_ok()?;
         let pubkey = crate::test_helpers::derive_pubkey_hex(sk_text.trim());
 
         cli_run(&[
@@ -467,7 +479,7 @@ mod tests {
             "--source".into(),
             format!("store:{}", db.display()),
             "--key".into(),
-            key_path.to_str().unwrap().to_owned(),
+            key_path.to_str().test_ok()?.to_owned(),
             "--title".into(),
             "T".into(),
             "--statement".into(),
@@ -483,47 +495,51 @@ mod tests {
             "--osf".into(),
             "https://osf.io/example".into(),
         ])
-        .unwrap();
-        let report = run(&Source::Store(db), Some(&pubkey), None).unwrap();
+        .test_ok()?;
+        let report = run(&Source::Store(db), Some(&pubkey), None).test_ok()?;
         assert_eq!(report.tier, "store");
         assert_eq!(report.outcome, VerifyOutcome::Ok);
         assert!(report.n >= 1);
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verify_store_without_pubkey_returns_bad_source() {
-        let tmp = TempDir::new().unwrap();
+    fn verify_store_without_pubkey_returns_bad_source() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
         let _store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
             path: db.to_string_lossy().into_owned(),
         })
-        .unwrap();
-        let err = run(&Source::Store(db), None, None).unwrap_err();
+        .test_ok()?;
+        let err = run(&Source::Store(db), None, None).test_err()?;
         assert!(err.to_string().contains("--pubkey"));
+
+        Ok(())
     }
 
     #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verify_store_with_wrong_pubkey_reports_mismatch() {
-        let tmp = TempDir::new().unwrap();
+    fn verify_store_with_wrong_pubkey_reports_mismatch() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
         let key_path = tmp.path().join("sk");
         cli_run(&[
             "piglor-ledger".into(),
             "keygen".into(),
             "--out".into(),
-            key_path.to_str().unwrap().to_owned(),
+            key_path.to_str().test_ok()?.to_owned(),
         ])
-        .unwrap();
+        .test_ok()?;
         cli_run(&[
             "piglor-ledger".into(),
             "predict".into(),
             "--source".into(),
             format!("store:{}", db.display()),
             "--key".into(),
-            key_path.to_str().unwrap().to_owned(),
+            key_path.to_str().test_ok()?.to_owned(),
             "--title".into(),
             "T".into(),
             "--statement".into(),
@@ -539,63 +555,70 @@ mod tests {
             "--osf".into(),
             "https://osf.io/example".into(),
         ])
-        .unwrap();
+        .test_ok()?;
         let other_key = tmp.path().join("other_sk");
         cli_run(&[
             "piglor-ledger".into(),
             "keygen".into(),
             "--out".into(),
-            other_key.to_str().unwrap().to_owned(),
+            other_key.to_str().test_ok()?.to_owned(),
         ])
-        .unwrap();
-        let other_text = std::fs::read_to_string(&other_key).unwrap();
+        .test_ok()?;
+        let other_text = std::fs::read_to_string(&other_key).test_ok()?;
         let wrong_pubkey = crate::test_helpers::derive_pubkey_hex(other_text.trim());
 
-        let report = run(&Source::Store(db), Some(&wrong_pubkey), None).unwrap();
-        let (_which, reason) = expect_mismatch(report.outcome);
+        let report = run(&Source::Store(db), Some(&wrong_pubkey), None).test_ok()?;
+        let (_which, reason) = expect_mismatch(report.outcome)?;
         // Ed25519 signature verification failures include "signature" (case-insensitive).
         assert!(
             reason.to_lowercase().contains("signature"),
             "expected signature error, got: {reason}"
         );
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verify_store_handles_unreadable_pubkey_gracefully() {
-        let tmp = TempDir::new().unwrap();
+    fn verify_store_handles_unreadable_pubkey_gracefully() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
         let _ = pos_store::open_store(pos_store::StoreConfig::Sqlite {
             path: db.to_string_lossy().into_owned(),
         })
-        .unwrap();
+        .test_ok()?;
         // Odd-length: fails before nib() is called (hex_decode returns early).
-        let err = run(&Source::Store(db.clone()), Some("not-hex"), None).unwrap_err();
+        let err = run(&Source::Store(db.clone()), Some("not-hex"), None).test_err()?;
         assert!(err.to_string().contains("--pubkey"), "{err}");
 
         // Even-length with non-hex char: exercises the `_` error arm in nib().
-        let err2 = run(&Source::Store(db), Some("zz"), None).unwrap_err();
+        let err2 = run(&Source::Store(db), Some("zz"), None).test_err()?;
         assert!(err2.to_string().contains("--pubkey"), "{err2}");
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verify_store_wrong_length_pubkey_rejected() {
+    fn verify_store_wrong_length_pubkey_rejected() -> Result<(), Box<dyn std::error::Error>> {
         // Covers L173: "--pubkey must be 32 bytes" when hex decodes to != 32 bytes.
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
         let _ = pos_store::open_store(pos_store::StoreConfig::Sqlite {
             path: db.to_string_lossy().into_owned(),
         })
-        .unwrap();
+        .test_ok()?;
         // "aabb" is valid hex (2 bytes) but not 32 bytes.
-        let err = run(&Source::Store(db), Some("aabb"), None).unwrap_err();
+        let err = run(&Source::Store(db), Some("aabb"), None).test_err()?;
         assert!(err.to_string().contains("--pubkey"), "{err}");
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verify_store_invalid_ed25519_key_rejected() {
+    fn verify_store_invalid_ed25519_key_rejected() -> Result<(), Box<dyn std::error::Error>> {
         // Covers L175: `e.to_string()` in verifying_key_from_public_key error.
         // Find a 32-byte value that is invalid for ed25519-dalek by scanning.
         use pos_core::PublicKey;
@@ -610,53 +633,61 @@ mod tests {
                 verifying_key_from_public_key(&pk).is_err()
             })
             .map(|c| format!("{c:02x}").repeat(32))
-            .expect("must find an invalid Ed25519 key among 1..=255");
+            .test_ok()?;
 
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
         let _ = pos_store::open_store(pos_store::StoreConfig::Sqlite {
             path: db.to_string_lossy().into_owned(),
         })
-        .unwrap();
-        let err = run(&Source::Store(db), Some(&invalid_hex), None).unwrap_err();
+        .test_ok()?;
+        let err = run(&Source::Store(db), Some(&invalid_hex), None).test_err()?;
         assert!(err.to_string().contains("invalid --key"), "{err}");
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verify_store_handles_missing_ledger_timeline() {
-        let tmp = TempDir::new().unwrap();
+    fn verify_store_handles_missing_ledger_timeline() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("novelty.db");
         let _store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
             path: db.to_string_lossy().into_owned(),
         })
-        .unwrap();
-        let err = run(&Source::Store(db), Some(&"0".repeat(64)), None).unwrap_err();
+        .test_ok()?;
+        let err = run(&Source::Store(db), Some(&"0".repeat(64)), None).test_err()?;
         assert!(err.to_string().contains("ledger"));
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verify_store_with_invalid_sqlite_path_errors() {
+    fn verify_store_with_invalid_sqlite_path_errors() -> Result<(), Box<dyn std::error::Error>> {
         // Covers L180: `format!("open sqlite: {e}")` in verify_store.
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().test_ok()?;
         let bad_db = tmp.path().join("no_such_dir").join("ledger.db");
         // "a" * 64 is a valid 32-byte hex (all 0xaa bytes) to get past pubkey check.
-        let err = run(&Source::Store(bad_db), Some(&"a".repeat(64)), None).unwrap_err();
+        let err = run(&Source::Store(bad_db), Some(&"a".repeat(64)), None).test_err()?;
         assert!(!err.to_string().is_empty(), "{err}");
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verify_store_with_corrupted_db_errors() {
+    fn verify_store_with_corrupted_db_errors() -> Result<(), Box<dyn std::error::Error>> {
         // Covers L183: `format!("list timelines: {e}")` in verify_store.
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().test_ok()?;
         let bad_db = tmp.path().join("corrupt.db");
-        std::fs::write(&bad_db, b"not sqlite data at all\n").unwrap();
+        std::fs::write(&bad_db, b"not sqlite data at all\n").test_ok()?;
         // Use a valid 32-byte pubkey (all 'aa') to get past the pubkey validation.
         let err = run(&Source::Store(bad_db), Some(&"aa".repeat(32)), None);
         // Either open fails (L180) or list_timelines fails (L183).
         assert!(err.is_err(), "expected error for corrupted DB");
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -684,12 +715,13 @@ mod tests {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verify_toml_with_store_tier_manifest_reports_mismatch() {
+    fn verify_toml_with_store_tier_manifest_reports_mismatch(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // verify_toml() receives a Store-tier manifest → the `else` branch
         // on lines 82-89 (manifest is not a toml-tier export).
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&dir).test_ok()?;
 
         // Write a store-tier manifest JSON to a file.
         let store_manifest = crate::export::ExportManifest::Store {
@@ -708,61 +740,69 @@ mod tests {
         let manifest_path = tmp.path().join("store-manifest.json");
         std::fs::write(
             &manifest_path,
-            serde_json::to_string_pretty(&store_manifest).unwrap(),
+            serde_json::to_string_pretty(&store_manifest).test_ok()?,
         )
-        .unwrap();
+        .test_ok()?;
 
-        let report = run(&Source::Toml(dir), None, Some(&manifest_path)).unwrap();
-        let (which, reason) = expect_mismatch(report.outcome);
+        let report = run(&Source::Toml(dir), None, Some(&manifest_path)).test_ok()?;
+        let (which, reason) = expect_mismatch(report.outcome)?;
         assert_eq!(which, "manifest");
         assert!(reason.contains("not a toml-tier export"), "{reason}");
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verify_toml_with_bad_json_manifest_is_error() {
+    fn verify_toml_with_bad_json_manifest_is_error() -> Result<(), Box<dyn std::error::Error>> {
         // Exercises the serde_json::from_str error path (line 240-241).
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&dir).test_ok()?;
         let manifest_path = tmp.path().join("bad.json");
-        std::fs::write(&manifest_path, "not json at all").unwrap();
-        let err = run(&Source::Toml(dir), None, Some(&manifest_path)).unwrap_err();
+        std::fs::write(&manifest_path, "not json at all").test_ok()?;
+        let err = run(&Source::Toml(dir), None, Some(&manifest_path)).test_err()?;
         assert!(err.to_string().contains("json error"), "{err}");
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn collect_hashes_skips_unreadable_predictions_dir() {
+    fn collect_hashes_skips_unreadable_predictions_dir() -> Result<(), Box<dyn std::error::Error>> {
         // collect_hashes is now lenient — any read_dir error just skips that
         // subdir (returns empty rather than propagating the error).
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&dir).test_ok()?;
         // predictions/ is a file, so read_dir skips it silently.
-        std::fs::write(dir.join("predictions"), "not a dir").unwrap();
-        let report = run(&Source::Toml(dir), None, None).unwrap();
+        std::fs::write(dir.join("predictions"), "not a dir").test_ok()?;
+        let report = run(&Source::Toml(dir), None, None).test_ok()?;
         assert_eq!(report.n, 0);
         assert_eq!(report.outcome, VerifyOutcome::Ok);
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn collect_hashes_skips_non_toml_files() {
+    fn collect_hashes_skips_non_toml_files() -> Result<(), Box<dyn std::error::Error>> {
         // Exercises the `continue` on line 148: a non-.toml file is ignored.
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
-        std::fs::create_dir_all(dir.join("predictions")).unwrap();
-        std::fs::write(dir.join("predictions").join("README.md"), "hi").unwrap();
-        let report = run(&Source::Toml(dir), None, None).unwrap();
+        std::fs::create_dir_all(dir.join("predictions")).test_ok()?;
+        std::fs::write(dir.join("predictions").join("README.md"), "hi").test_ok()?;
+        let report = run(&Source::Toml(dir), None, None).test_ok()?;
         assert_eq!(report.n, 0); // README was skipped
         assert_eq!(report.outcome, VerifyOutcome::Ok);
+
+        Ok(())
     }
 
     #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verify_store_unsigned_event_reports_mismatch() {
+    fn verify_store_unsigned_event_reports_mismatch() -> Result<(), Box<dyn std::error::Error>> {
         // Exercises the `None => return Ok(VerifyReport { unsigned })` branch
         // (lines 196-203) in verify_store.
         use pos_core::{
@@ -773,17 +813,17 @@ mod tests {
         use pos_crypto::chain::hash_payload;
         use pos_plugin_ledger::{draft_prediction, LedgerPrediction};
 
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
         let key_path = tmp.path().join("sk");
         cli_run(&[
             "piglor-ledger".into(),
             "keygen".into(),
             "--out".into(),
-            key_path.to_str().unwrap().to_owned(),
+            key_path.to_str().test_ok()?.to_owned(),
         ])
-        .unwrap();
-        let sk_text = std::fs::read_to_string(&key_path).unwrap();
+        .test_ok()?;
+        let sk_text = std::fs::read_to_string(&key_path).test_ok()?;
         let pubkey = crate::test_helpers::derive_pubkey_hex(sk_text.trim());
 
         // Write a prediction event but strip the signature directly via
@@ -791,8 +831,8 @@ mod tests {
         let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
             path: db.to_string_lossy().into_owned(),
         })
-        .unwrap();
-        let tl = store.create_timeline("ledger").unwrap();
+        .test_ok()?;
+        let tl = store.create_timeline("ledger").test_ok()?;
 
         // Build a valid-looking prediction payload (minimal CBOR map).
         let pred = LedgerPrediction {
@@ -823,18 +863,20 @@ mod tests {
             signature: None, // unsigned
             payload_hash,
         };
-        store.append_committed(tl.id(), &[event]).unwrap();
+        store.append_committed(tl.id(), &[event]).test_ok()?;
         drop(store);
 
-        let report = run(&Source::Store(db), Some(&pubkey), None).unwrap();
-        let (_which, reason) = expect_mismatch(report.outcome);
+        let report = run(&Source::Store(db), Some(&pubkey), None).test_ok()?;
+        let (_which, reason) = expect_mismatch(report.outcome)?;
         assert!(reason.contains("unsigned"), "{reason}");
+
+        Ok(())
     }
 
     #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verify_store_skips_unknown_event_types() {
+    fn verify_store_skips_unknown_event_types() -> Result<(), Box<dyn std::error::Error>> {
         // Exercises the `continue` on line 193 — event_type not in ledger types.
         use pos_core::{
             clock::{Seq, WallTime},
@@ -843,24 +885,24 @@ mod tests {
         };
         use pos_crypto::chain::hash_payload;
 
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
         let key_path = tmp.path().join("sk");
         cli_run(&[
             "piglor-ledger".into(),
             "keygen".into(),
             "--out".into(),
-            key_path.to_str().unwrap().to_owned(),
+            key_path.to_str().test_ok()?.to_owned(),
         ])
-        .unwrap();
-        let sk_text = std::fs::read_to_string(&key_path).unwrap();
+        .test_ok()?;
+        let sk_text = std::fs::read_to_string(&key_path).test_ok()?;
         let pubkey = crate::test_helpers::derive_pubkey_hex(sk_text.trim());
 
         let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
             path: db.to_string_lossy().into_owned(),
         })
-        .unwrap();
-        let tl = store.create_timeline("ledger").unwrap();
+        .test_ok()?;
+        let tl = store.create_timeline("ledger").test_ok()?;
         let payload = CanonicalBytes::from_vec(b"irrelevant".to_vec());
         let payload_hash = hash_payload(&payload);
         let event = Event {
@@ -876,13 +918,15 @@ mod tests {
             signature: None,
             payload_hash,
         };
-        store.append_committed(tl.id(), &[event]).unwrap();
+        store.append_committed(tl.id(), &[event]).test_ok()?;
         drop(store);
 
         // verify_store should skip the unknown event and return Ok (n=1).
-        let report = run(&Source::Store(db), Some(&pubkey), None).unwrap();
+        let report = run(&Source::Store(db), Some(&pubkey), None).test_ok()?;
         assert_eq!(report.outcome, VerifyOutcome::Ok);
         assert_eq!(report.n, 1);
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -895,102 +939,113 @@ mod tests {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verify_toml_manifest_read_error() {
+    fn verify_toml_manifest_read_error() -> Result<(), Box<dyn std::error::Error>> {
         // Covers L79: `?` on std::fs::read_to_string(path) in verify_toml
         // when the manifest file doesn't exist.
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&dir).test_ok()?;
         let missing_manifest = tmp.path().join("nonexistent.json");
-        let err = run(&Source::Toml(dir), None, Some(&missing_manifest)).unwrap_err();
+        let err = run(&Source::Toml(dir), None, Some(&missing_manifest)).test_err()?;
         assert!(err.to_string().contains("io error"), "{err}");
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn collect_hashes_readdir_entry_error() {
+    fn collect_hashes_readdir_entry_error() -> Result<(), Box<dyn std::error::Error>> {
         // Covers L148: `entry?` in collect_hashes when a readdir entry fails.
         // Also covers L152: `std::fs::read(&path)?` when a file is unreadable.
         use std::os::unix::fs::PermissionsExt;
-        let tmp = TempDir::new().unwrap();
+        if running_as_root() {
+            return Ok(());
+        }
+        let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
-        std::fs::create_dir_all(dir.join("predictions")).unwrap();
+        std::fs::create_dir_all(dir.join("predictions")).test_ok()?;
         let pred_file = dir.join("predictions").join("test.toml");
-        std::fs::write(&pred_file, "[data]\n").unwrap();
+        std::fs::write(&pred_file, "[data]\n").test_ok()?;
         // Make the file unreadable so fs::read fails at L152.
-        std::fs::set_permissions(&pred_file, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let err = run(&Source::Toml(dir), None, None).unwrap_err();
-        std::fs::set_permissions(&pred_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&pred_file, std::fs::Permissions::from_mode(0o000)).test_ok()?;
+        let err = run(&Source::Toml(dir), None, None).test_err()?;
+        std::fs::set_permissions(&pred_file, std::fs::Permissions::from_mode(0o644)).test_ok()?;
         assert!(err.to_string().contains("io error"), "{err}");
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verify_store_corrupted_db_errors() {
+    fn verify_store_corrupted_db_errors() -> Result<(), Box<dyn std::error::Error>> {
         // Covers L182: `?` on list_timelines in verify_store when DB is corrupt.
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().test_ok()?;
         let bad_db = tmp.path().join("corrupt.db");
         let mut content = b"SQLite format 3\x00".to_vec();
         content.push(0x10);
         content.push(0x00);
         content.extend_from_slice(&[0u8; 4078]);
-        std::fs::write(&bad_db, content).unwrap();
+        std::fs::write(&bad_db, content).test_ok()?;
         // Use a valid 32-byte pubkey hex (all 'aa').
         let err = run(&Source::Store(bad_db), Some(&"aa".repeat(32)), None);
         // Either open or list_timelines fails — either is acceptable.
         assert!(err.is_err(), "expected error for corrupted DB");
+
+        Ok(())
     }
 
     #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verify_store_list_timelines_fails_on_corrupt_db() {
+    fn verify_store_list_timelines_fails_on_corrupt_db() -> Result<(), Box<dyn std::error::Error>> {
         // Covers L181: `?` on list_timelines in verify_store when the timeline
         // id column is corrupt (same SQLite injection technique as pos-cli).
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().test_ok()?;
         let key_path = tmp.path().join("sk");
         cli_run(&[
             "piglor-ledger".into(),
             "keygen".into(),
             "--out".into(),
-            key_path.to_str().unwrap().to_owned(),
+            key_path.to_str().test_ok()?.to_owned(),
         ])
-        .unwrap();
+        .test_ok()?;
         let db = tmp.path().join("corrupt.db");
-        let sk_text = std::fs::read_to_string(&key_path).unwrap();
+        let sk_text = std::fs::read_to_string(&key_path).test_ok()?;
         let pubkey = crate::test_helpers::derive_pubkey_hex(sk_text.trim());
         {
             let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
                 path: db.to_string_lossy().into_owned(),
             })
-            .unwrap();
-            store.create_timeline("ledger").unwrap();
+            .test_ok()?;
+            store.create_timeline("ledger").test_ok()?;
         }
         {
-            let conn = rusqlite::Connection::open(&db).expect("open for corruption");
+            let conn = rusqlite::Connection::open(&db).test_ok()?;
             conn.execute("UPDATE timelines SET id = X'0102'", [])
-                .expect("corrupt id");
+                .test_ok()?;
         }
-        let err = run(&Source::Store(db), Some(&pubkey), None).unwrap_err();
+        let err = run(&Source::Store(db), Some(&pubkey), None).test_err()?;
         assert!(!err.to_string().is_empty(), "{err}");
+
+        Ok(())
     }
 
     #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verify_store_read_fails_on_corrupt_events() {
+    fn verify_store_read_fails_on_corrupt_events() -> Result<(), Box<dyn std::error::Error>> {
         // Covers L186: `?` on store.read when an Event identifier is corrupt.
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().test_ok()?;
         let key_path = tmp.path().join("sk");
         cli_run(&[
             "piglor-ledger".into(),
             "keygen".into(),
             "--out".into(),
-            key_path.to_str().unwrap().to_owned(),
+            key_path.to_str().test_ok()?.to_owned(),
         ])
-        .unwrap();
+        .test_ok()?;
         let db = tmp.path().join("corrupt_events.db");
-        let sk_text = std::fs::read_to_string(&key_path).unwrap();
+        let sk_text = std::fs::read_to_string(&key_path).test_ok()?;
         let pubkey = crate::test_helpers::derive_pubkey_hex(sk_text.trim());
         // Add a real event so events table has data to corrupt.
         cli_run(&[
@@ -999,7 +1054,7 @@ mod tests {
             "--source".into(),
             format!("store:{}", db.display()),
             "--key".into(),
-            key_path.to_str().unwrap().to_owned(),
+            key_path.to_str().test_ok()?.to_owned(),
             "--title".into(),
             "T".into(),
             "--statement".into(),
@@ -1015,40 +1070,46 @@ mod tests {
             "--osf".into(),
             "https://osf.io/x".into(),
         ])
-        .unwrap();
+        .test_ok()?;
         // Corrupt event seq so store.read() fails.
         {
-            let conn = rusqlite::Connection::open(&db).expect("open for corruption");
+            let conn = rusqlite::Connection::open(&db).test_ok()?;
             conn.execute("UPDATE events SET event_id = 'not-a-ulid'", [])
-                .expect("corrupt Event identifier");
+                .test_ok()?;
         }
-        let err = run(&Source::Store(db), Some(&pubkey), None).unwrap_err();
+        let err = run(&Source::Store(db), Some(&pubkey), None).test_err()?;
         assert!(!err.to_string().is_empty(), "{err}");
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn hex_decode_second_nibble_error_in_verify() {
+    fn hex_decode_second_nibble_error_in_verify() -> Result<(), Box<dyn std::error::Error>> {
         // Covers L230: `?` on nib(l) in hex_decode when second nibble is bad.
         // This exercises the `?` for the second nibble via a hex string where
         // the first nibble is valid but the second is not.
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
         let _ = pos_store::open_store(pos_store::StoreConfig::Sqlite {
             path: db.to_string_lossy().into_owned(),
         })
-        .unwrap();
+        .test_ok()?;
         // "ag" = valid 'a' then invalid 'g' — triggers nib(l) error
-        let err = run(&Source::Store(db), Some("ag"), None).unwrap_err();
+        let err = run(&Source::Store(db), Some("ag"), None).test_err()?;
         assert!(err.to_string().contains("--pubkey"), "{err}");
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn nib_covers_uppercase() {
+    fn nib_covers_uppercase() -> Result<(), Box<dyn std::error::Error>> {
         // Exercises 'A'..='F' arm in the test module's nib helper.
-        assert_eq!(nib('A').unwrap(), 10);
-        assert_eq!(nib('F').unwrap(), 15);
+        assert_eq!(nib('A').test_ok()?, 10);
+        assert_eq!(nib('F').test_ok()?, 15);
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]

@@ -93,12 +93,50 @@ impl SchemaRegistry {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         ids::EntityId,
     };
+
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected schema fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("missing schema fixture value"))
+            })
+        }
+    }
+
+    trait TestErrorExt<T, E> {
+        fn test_err(self) -> E;
+    }
+
+    impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
+        fn test_err(self) -> E {
+            match self {
+                Ok(value) => std::panic::resume_unwind(Box::new(format!(
+                    "unexpected successful schema fixture value: {value:?}"
+                ))),
+                Err(error) => error,
+            }
+        }
+    }
 
     fn draft(event_type: &str) -> EventDraft {
         EventDraft::new(
@@ -120,7 +158,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn empty_registry_rejects_all() {
         let reg = SchemaRegistry::new();
-        let err = reg.validate(&draft("world.observation")).unwrap_err();
+        let err = reg.validate(&draft("world.observation")).test_err();
         assert!(matches!(err, RuntimeError::UnknownEventType(_)));
     }
 
@@ -129,7 +167,7 @@ mod tests {
     fn registered_type_passes_validation() {
         let mut reg = SchemaRegistry::new();
         reg.register(schema("world.observation"));
-        reg.validate(&draft("world.observation")).unwrap();
+        reg.validate(&draft("world.observation")).test_ok();
     }
 
     #[test]
@@ -137,7 +175,7 @@ mod tests {
     fn unregistered_type_fails_validation() {
         let mut reg = SchemaRegistry::new();
         reg.register(schema("world.observation"));
-        let err = reg.validate(&draft("agent.action")).unwrap_err();
+        let err = reg.validate(&draft("agent.action")).test_err();
         assert!(matches!(err, RuntimeError::UnknownEventType(ref t) if t == "agent.action"));
     }
 
@@ -147,7 +185,7 @@ mod tests {
         let mut reg = SchemaRegistry::new();
         reg.register(schema("a.ok"));
         let drafts = vec![draft("a.ok"), draft("b.unknown"), draft("a.ok")];
-        let err = reg.validate_batch(&drafts).unwrap_err();
+        let err = reg.validate_batch(&drafts).test_err();
         assert!(matches!(err, RuntimeError::UnknownEventType(ref t) if t == "b.unknown"));
     }
 
@@ -158,7 +196,7 @@ mod tests {
         reg.register(schema("a.event"));
         reg.register(schema("b.event"));
         let drafts = vec![draft("a.event"), draft("b.event"), draft("a.event")];
-        reg.validate_batch(&drafts).unwrap();
+        reg.validate_batch(&drafts).test_ok();
     }
 
     #[test]
@@ -186,7 +224,7 @@ mod tests {
             json_schema: Some("{}".to_owned()),
         });
         assert_eq!(reg.len(), 1);
-        let s = reg.iter().next().unwrap();
+        let s = reg.iter().next().test_ok();
         assert_eq!(s.description, "second");
     }
 

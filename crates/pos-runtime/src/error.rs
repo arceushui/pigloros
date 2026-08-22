@@ -15,6 +15,27 @@ pub enum RuntimeError {
     #[error("plugin '{name}' has no driver but was asked to step")]
     NoDriver { name: String },
 
+    #[error("driver '{name}' panicked; its Tick Boundary was aborted")]
+    DriverPanicked { name: String },
+
+    #[error("driver '{name}' panicked while aborting; its Tick Boundary was discarded")]
+    DriverAbortPanicked { name: String },
+
+    #[error("driver '{name}' panicked while committing; the runtime is faulted")]
+    DriverCommitPanicked { name: String },
+
+    #[error("driver '{name}' panicked while restoring; the runtime is faulted")]
+    DriverRestorePanicked { name: String },
+
+    #[error(
+        "driver '{driver}' exceeded its deterministic resource budget: requested={requested}, limit={limit}"
+    )]
+    ResourceExhausted {
+        driver: String,
+        requested: u64,
+        limit: u64,
+    },
+
     #[error("plugin '{name}' capability mismatch: {reason}")]
     CapabilityMismatch { name: String, reason: String },
 
@@ -62,6 +83,7 @@ pub enum RuntimeError {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use pos_core::ids::{PluginId, TimelineId};
@@ -101,6 +123,27 @@ mod tests {
             name: "static-plugin".to_owned(),
         };
         assert!(e.to_string().contains("static-plugin"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn driver_panicked_displays() {
+        let error = RuntimeError::DriverPanicked {
+            name: "unstable".to_owned(),
+        };
+        assert!(error.to_string().contains("unstable"));
+        assert!(error.to_string().contains("aborted"));
+    }
+
+    #[test]
+    fn resource_exhausted_displays() {
+        let error = RuntimeError::ResourceExhausted {
+            driver: "bounded".to_owned(),
+            requested: 11,
+            limit: 10,
+        };
+        assert!(error.to_string().contains("bounded"));
+        assert!(error.to_string().contains("requested=11"));
     }
 
     #[test]

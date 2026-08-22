@@ -12,6 +12,22 @@
 //!   pos version
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
+macro_rules! output_stdout {
+    ($($arg:tt)*) => {{
+        let mut output = std::io::stdout().lock();
+        drop(std::io::Write::write_fmt(&mut output, format_args!($($arg)*)));
+        drop(std::io::Write::write_all(&mut output, b"\n"));
+    }};
+}
+
+macro_rules! output_stderr {
+    ($($arg:tt)*) => {{
+        let mut output = std::io::stderr().lock();
+        drop(std::io::Write::write_fmt(&mut output, format_args!($($arg)*)));
+        drop(std::io::Write::write_all(&mut output, b"\n"));
+    }};
+}
+
 use pos_core::{
     clock::{Seq, WallTime},
     crypto::Hash,
@@ -114,23 +130,38 @@ impl From<StrictReproductionManifest> for ReproductionManifest {
 }
 
 #[cfg(not(test))]
-fn handle_run_error(e: &dyn std::error::Error) -> ! {
-    eprintln!("Error: {e}");
-    std::process::exit(1);
+fn handle_run_error(e: &dyn std::error::Error) -> std::process::ExitCode {
+    output_stderr!("Error: {e}");
+    std::process::ExitCode::FAILURE
 }
 
 #[cfg(test)]
 fn handle_run_error(e: &dyn std::error::Error) {
-    eprintln!("Error (test): {e}");
+    output_stderr!("Error (test): {e}");
     // In tests, don't exit — just print
 }
 
+#[cfg(not(test))]
+fn run_main(args: &[String]) -> std::process::ExitCode {
+    if let Err(e) = run_with_args(args) {
+        return handle_run_error(e.as_ref());
+    }
+    std::process::ExitCode::SUCCESS
+}
+
+#[cfg(test)]
 fn run_main(args: &[String]) {
     if let Err(e) = run_with_args(args) {
         handle_run_error(e.as_ref());
     }
 }
 
+#[cfg(not(test))]
+fn main() -> std::process::ExitCode {
+    run_main(&std::env::args().collect::<Vec<_>>())
+}
+
+#[cfg(test)]
 fn main() {
     run_main(&std::env::args().collect::<Vec<_>>());
 }
@@ -142,11 +173,11 @@ fn run_with_args(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         Some("events") => handle_events(&args[2..]),
         Some("experiment") => handle_experiment(&args[2..]),
         Some("version") => {
-            println!("pos-cli {}", env!("CARGO_PKG_VERSION"));
+            output_stdout!("pos-cli {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         _ => {
-            eprintln!("Usage: pos <store|timeline|events|experiment|version>");
+            output_stderr!("Usage: pos <store|timeline|events|experiment|version>");
             Ok(())
         }
     }
@@ -167,7 +198,7 @@ fn handle_store(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             cmd_store_info(path)
         }
         _ => {
-            eprintln!("Usage: pos store <init|info> <path>");
+            output_stderr!("Usage: pos store <init|info> <path>");
             Ok(())
         }
     }
@@ -178,7 +209,7 @@ fn cmd_store_init(path: &str) -> Result<(), Box<dyn std::error::Error>> {
         path: path.to_owned(),
     })?;
     store.create_timeline("default")?;
-    println!("Initialized store at {path}");
+    output_stdout!("Initialized store at {path}");
     Ok(())
 }
 
@@ -209,8 +240,8 @@ fn cmd_store_info(path: &str) -> Result<(), Box<dyn std::error::Error>> {
         };
         total_events += events.len();
     }
-    println!("Timelines: {}", timelines.len());
-    println!("Total events: {total_events}");
+    output_stdout!("Timelines: {}", timelines.len());
+    output_stdout!("Total events: {total_events}");
     Ok(())
 }
 
@@ -261,7 +292,7 @@ fn handle_timeline(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             cmd_timeline_merge(&args[1], &args[2], &args[3], &args[4], &args[5], strategy)
         }
         _ => {
-            eprintln!("Usage: pos timeline <list|fork|replay|snapshot|compare|merge> ...");
+            output_stderr!("Usage: pos timeline <list|fork|replay|snapshot|compare|merge> ...");
             Ok(())
         }
     }
@@ -272,7 +303,7 @@ fn cmd_timeline_list(path: &str) -> Result<(), Box<dyn std::error::Error>> {
         path: path.to_owned(),
     })?;
     for tl in store.list_timelines()? {
-        println!(
+        output_stdout!(
             "{} | {} | head={}",
             tl.id(),
             tl.meta.name.unwrap_or_default(),
@@ -294,7 +325,7 @@ fn cmd_timeline_fork(
         path: path.to_owned(),
     })?;
     let forked = store.fork(tl_id, at_seq, name)?;
-    println!("Forked timeline: {}", forked.id());
+    output_stdout!("Forked timeline: {}", forked.id());
     Ok(())
 }
 
@@ -313,8 +344,8 @@ fn cmd_timeline_replay(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std::e
         .collect::<std::collections::HashSet<_>>()
         .len();
 
-    println!("events: {}", events.len());
-    println!("entity_count: {entity_count}");
+    output_stdout!("events: {}", events.len());
+    output_stdout!("entity_count: {entity_count}");
     Ok(())
 }
 
@@ -331,8 +362,8 @@ fn cmd_timeline_snapshot(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std:
 
     let entity_count = count_snapshot_entities(&snapshot);
 
-    println!("at_seq: {}", snapshot.at_seq.as_u64());
-    println!("entity_count: {entity_count}");
+    output_stdout!("at_seq: {}", snapshot.at_seq.as_u64());
+    output_stdout!("entity_count: {entity_count}");
 
     Ok(())
 }
@@ -366,9 +397,9 @@ fn cmd_timeline_compare(
         &mut reg_b,
     )?;
 
-    println!("only_in_a: {}", diff.only_in_a.len());
-    println!("only_in_b: {}", diff.only_in_b.len());
-    println!("diverged_entities: {}", diff.diverged_entities.len());
+    output_stdout!("only_in_a: {}", diff.only_in_a.len());
+    output_stdout!("only_in_b: {}", diff.only_in_b.len());
+    output_stdout!("diverged_entities: {}", diff.diverged_entities.len());
 
     Ok(())
 }
@@ -405,10 +436,10 @@ fn cmd_timeline_merge(
         path: path.to_owned(),
     })?;
 
-    println!("strategy: {strategy:?}");
+    output_stdout!("strategy: {strategy:?}");
     match pos_time::can_merge_conflict_free(store.as_ref(), timeline_a, timeline_b, fork_seq) {
-        Ok(conflict_free) => println!("conflict_free: {conflict_free}"),
-        Err(e) => println!("conflict_free: check-failed ({e})"),
+        Ok(conflict_free) => output_stdout!("conflict_free: {conflict_free}"),
+        Err(e) => output_stdout!("conflict_free: check-failed ({e})"),
     }
 
     let merged = pos_time::merge_with_strategy(
@@ -419,8 +450,8 @@ fn cmd_timeline_merge(
         name,
         strategy,
     )?;
-    println!("merged_timeline: {}", merged.id());
-    println!("head: {}", merged.head.as_u64());
+    output_stdout!("merged_timeline: {}", merged.id());
+    output_stdout!("head: {}", merged.head.as_u64());
 
     Ok(())
 }
@@ -430,14 +461,14 @@ fn cmd_timeline_merge(
 // ---------------------------------------------------------------------------
 
 fn handle_events(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some("log") = args.first().map(String::as_str) {
+    if args.first().map(String::as_str) == Some("log") {
         if args.len() < 3 {
             return Err("Usage: pos events log <path> <timeline-id> [--limit N]".into());
         }
         let limit = parse_limit_flag(&args[3..])?;
         cmd_events_log(&args[1], &args[2], limit)
     } else {
-        eprintln!("Usage: pos events <log> ...");
+        output_stderr!("Usage: pos events <log> ...");
         Ok(())
     }
 }
@@ -453,14 +484,10 @@ fn cmd_events_log(
     })?;
 
     let events = store.read(tl_id, SeqRange::all())?;
-    let events_to_show = if let Some(n) = limit {
-        &events[..events.len().min(n)]
-    } else {
-        &events[..]
-    };
+    let events_to_show = limit.map_or(&events[..], |n| &events[..events.len().min(n)]);
 
     for event in events_to_show {
-        println!(
+        output_stdout!(
             "{} | {} | {} | {}",
             event.seq.as_u64(),
             event.entity,
@@ -499,7 +526,7 @@ fn handle_experiment(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             cmd_experiment_reproduce(manifest_path)
         }
         _ => {
-            eprintln!("Usage: pos experiment <run|verify|reproduce> ...");
+            output_stderr!("Usage: pos experiment <run|verify|reproduce> ...");
             Ok(())
         }
     }
@@ -529,8 +556,7 @@ fn run_builtin_reference_experiment(
             agent_entity,
             agent_plugin.actions().to_vec(),
         ))),
-    )
-    .expect("fresh plugin id cannot conflict");
+    )?;
 
     let obs_entity = EntityId::new();
     let obs_plugin = SyntheticObsPlugin::new();
@@ -538,8 +564,7 @@ fn run_builtin_reference_experiment(
         &obs_plugin,
         Some(Box::new(SyntheticReducer)),
         Some(Box::new(SyntheticDriver::new(obs_entity))),
-    )
-    .expect("fresh plugin id cannot conflict");
+    )?;
 
     exp.run().map_err(Into::into)
 }
@@ -563,7 +588,7 @@ fn cmd_experiment_run(path: &str, ticks: u64) -> Result<(), Box<dyn std::error::
             let manifest_path = path.replace(".db", "-manifest.json");
 
             save_run_manifest(&manifest_path, &reproduction).map(|()| {
-                println!(
+                output_stdout!(
                     "Experiment complete: {completed_ticks} ticks, {total_events} events, \
                      timeline={timeline_id}, manifest={manifest_path}"
                 );
@@ -597,10 +622,10 @@ fn reproduce_manifest(
     run_builtin_reference_experiment(StoreConfig::Memory, recipe.builtin_reference_v1.ticks)
         .and_then(|reproduced| {
             if reproduced.manifest.head_hash == reproduction.manifest.head_hash {
-                println!("OK");
+                output_stdout!("OK");
                 Ok(())
             } else {
-                println!("MISMATCH");
+                output_stdout!("MISMATCH");
                 Err("reproduced chain_head does not match manifest".into())
             }
         })
@@ -651,10 +676,10 @@ fn verify_manifest_against_store(
     };
 
     if matched {
-        println!("OK");
+        output_stdout!("OK");
         Ok(())
     } else {
-        println!("MISMATCH");
+        output_stdout!("MISMATCH");
         Err("hash mismatch".into())
     }
 }
@@ -783,6 +808,35 @@ fn parse_seq(s: &str) -> Result<Seq, Box<dyn std::error::Error>> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected test value")))
+        }
+    }
+
+    trait TestErrorExt<E> {
+        fn test_err(self) -> E;
+    }
+
+    impl<T, E> TestErrorExt<E> for Result<T, E> {
+        fn test_err(self) -> E {
+            self.err()
+                .unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected test error")))
+        }
+    }
+
     use super::*;
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
@@ -839,13 +893,13 @@ mod tests {
 
     #[test]
     fn open_memory_store_ok() {
-        let _store = open_memory_store().expect("memory store");
+        let _store = open_memory_store().test_ok();
     }
 
     #[test]
     fn parse_ticks_flag_extracts_value() {
         let args: Vec<String> = vec!["--ticks".to_owned(), "42".to_owned()];
-        let n = parse_ticks_flag(&args).unwrap();
+        let n = parse_ticks_flag(&args).test_ok();
         assert_eq!(n, 42);
     }
 
@@ -863,13 +917,13 @@ mod tests {
 
     #[test]
     fn parse_seq_valid() {
-        let seq = parse_seq("100").unwrap();
+        let seq = parse_seq("100").test_ok();
         assert_eq!(seq.as_u64(), 100);
     }
 
     #[test]
     fn parse_seq_zero() {
-        let seq = parse_seq("0").unwrap();
+        let seq = parse_seq("0").test_ok();
         assert_eq!(seq, Seq::ZERO);
     }
 
@@ -888,15 +942,15 @@ mod tests {
         // Create a TimelineId, format it as a string, then parse it back.
         let original = TimelineId::new();
         let s = original.to_string();
-        let parsed = parse_timeline_id(&s).unwrap();
+        let parsed = parse_timeline_id(&s).test_ok();
         assert_eq!(original, parsed);
     }
 
     // ── CLI command integration tests ────────────────────────────────────────
 
     fn tmp_db() -> (tempfile::TempDir, String) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.db").to_str().unwrap().to_owned();
+        let dir = tempfile::tempdir().test_ok();
+        let path = dir.path().join("test.db").to_str().test_ok().to_owned();
         (dir, path)
     }
 
@@ -908,22 +962,22 @@ mod tests {
     fn handle_store_init_creates_store() {
         let (_dir, path) = tmp_db();
         let a = args(&["init", &path]);
-        handle_store(&a).unwrap();
+        handle_store(&a).test_ok();
     }
 
     #[test]
     fn handle_store_info_shows_stats() {
         let (_dir, path) = tmp_db();
         // Init first
-        handle_store(&args(&["init", &path])).unwrap();
+        handle_store(&args(&["init", &path])).test_ok();
         // Info should succeed
-        handle_store(&args(&["info", &path])).unwrap();
+        handle_store(&args(&["info", &path])).test_ok();
     }
 
     #[test]
     fn handle_store_unknown_subcommand_is_ok() {
         let a = args(&["unknown"]);
-        handle_store(&a).unwrap();
+        handle_store(&a).test_ok();
     }
 
     #[test]
@@ -941,14 +995,14 @@ mod tests {
     #[test]
     fn handle_timeline_list_shows_timelines() {
         let (_dir, path) = tmp_db();
-        handle_store(&args(&["init", &path])).unwrap();
-        handle_timeline(&args(&["list", &path])).unwrap();
+        handle_store(&args(&["init", &path])).test_ok();
+        handle_timeline(&args(&["list", &path])).test_ok();
     }
 
     #[test]
     fn handle_timeline_unknown_subcommand_is_ok() {
         let a = args(&["unknown"]);
-        handle_timeline(&a).unwrap();
+        handle_timeline(&a).test_ok();
     }
 
     #[test]
@@ -973,30 +1027,35 @@ mod tests {
     fn handle_experiment_run_executes() {
         let (_dir, path) = tmp_db();
         let a = args(&["run", &path, "--ticks", "3"]);
-        handle_experiment(&a).unwrap();
+        handle_experiment(&a).test_ok();
     }
 
     #[test]
     fn cmd_experiment_run_wires_plugins_and_produces_events() {
         // Directly call cmd_experiment_run to cover the plugin registration lines.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("run-test.db").to_str().unwrap().to_owned();
-        cmd_experiment_run(&path, 2).unwrap();
+        let dir = tempfile::tempdir().test_ok();
+        let path = dir.path().join("run-test.db").to_str().test_ok().to_owned();
+        cmd_experiment_run(&path, 2).test_ok();
         // Verify manifest was written alongside store
         let manifest_path = path.replace(".db", "-manifest.json");
         assert!(std::path::Path::new(&manifest_path).exists());
         let manifest: ReproductionManifest =
-            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).test_ok()).test_ok();
         assert_eq!(manifest.recipe, cli_reproduction_recipe(2));
     }
 
     #[test]
     fn cmd_experiment_reproduce_matches_builtin_recipe() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("reproduce.db").to_str().unwrap().to_owned();
-        cmd_experiment_run(&path, 3).unwrap();
+        let dir = tempfile::tempdir().test_ok();
+        let path = dir
+            .path()
+            .join("reproduce.db")
+            .to_str()
+            .test_ok()
+            .to_owned();
+        cmd_experiment_run(&path, 3).test_ok();
         let manifest_path = path.replace(".db", "-manifest.json");
-        cmd_experiment_reproduce(&manifest_path).unwrap();
+        cmd_experiment_reproduce(&manifest_path).test_ok();
     }
 
     #[test]
@@ -1006,16 +1065,16 @@ mod tests {
             pos_core::Hash::zero(),
             pos_core::clock::WallTime::from_micros(0),
         );
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), serde_json::to_string(&manifest).unwrap()).unwrap();
-        assert!(cmd_experiment_reproduce(file.path().to_str().unwrap()).is_err());
+        let file = tempfile::NamedTempFile::new().test_ok();
+        std::fs::write(file.path(), serde_json::to_string(&manifest).test_ok()).test_ok();
+        assert!(cmd_experiment_reproduce(file.path().to_str().test_ok()).is_err());
     }
 
     #[test]
     fn cmd_experiment_reproduce_rejects_bad_manifest_json() {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), "not-json").unwrap();
-        assert!(cmd_experiment_reproduce(file.path().to_str().unwrap()).is_err());
+        let file = tempfile::NamedTempFile::new().test_ok();
+        std::fs::write(file.path(), "not-json").test_ok();
+        assert!(cmd_experiment_reproduce(file.path().to_str().test_ok()).is_err());
     }
 
     #[test]
@@ -1028,9 +1087,9 @@ mod tests {
             ),
             recipe: cli_reproduction_recipe(1),
         };
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), serde_json::to_string(&manifest).unwrap()).unwrap();
-        assert!(cmd_experiment_reproduce(file.path().to_str().unwrap()).is_err());
+        let file = tempfile::NamedTempFile::new().test_ok();
+        std::fs::write(file.path(), serde_json::to_string(&manifest).test_ok()).test_ok();
+        assert!(cmd_experiment_reproduce(file.path().to_str().test_ok()).is_err());
     }
 
     #[test]
@@ -1075,33 +1134,31 @@ mod tests {
     #[test]
     fn reproduce_cli_recipe_rejects_excessive_tick_count() {
         let recipe = cli_reproduction_recipe(MAX_EXPERIMENT_TICKS + 1);
-        let error = reproduce_cli_recipe(recipe)
-            .err()
-            .expect("excessive ticks fail");
+        let error = reproduce_cli_recipe(recipe).err().test_ok();
         assert_eq!(error.to_string(), TICK_LIMIT_ERROR);
     }
 
     #[test]
     fn maximum_tick_count_is_accepted_for_export_and_reproduction() {
         assert!(validate_experiment_ticks(MAX_EXPERIMENT_TICKS).is_ok());
-        let decoded = reproduce_cli_recipe(cli_reproduction_recipe(MAX_EXPERIMENT_TICKS)).unwrap();
+        let decoded = reproduce_cli_recipe(cli_reproduction_recipe(MAX_EXPERIMENT_TICKS)).test_ok();
         assert_eq!(decoded.builtin_reference_v1.ticks, MAX_EXPERIMENT_TICKS);
     }
 
     #[test]
     fn excessive_tick_count_is_rejected_before_run_or_reproduction() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().test_ok();
         let path = directory.path().join("too-many-ticks.db");
-        let path = path.to_str().unwrap();
+        let path = path.to_str().test_ok();
 
-        let run_error = cmd_experiment_run(path, MAX_EXPERIMENT_TICKS + 1).unwrap_err();
+        let run_error = cmd_experiment_run(path, MAX_EXPERIMENT_TICKS + 1).test_err();
         assert_eq!(run_error.to_string(), TICK_LIMIT_ERROR);
         assert!(!std::path::Path::new(path).exists());
 
         let reproduce_error =
             reproduce_cli_recipe(cli_reproduction_recipe(MAX_EXPERIMENT_TICKS + 1))
                 .err()
-                .expect("excessive ticks fail");
+                .test_ok();
         assert_eq!(reproduce_error.to_string(), TICK_LIMIT_ERROR);
     }
 
@@ -1115,13 +1172,13 @@ mod tests {
             ),
             recipe: cli_reproduction_recipe(1),
         };
-        let mut json = serde_json::to_value(reproduction).unwrap();
+        let mut json = serde_json::to_value(reproduction).test_ok();
         json.as_object_mut()
-            .unwrap()
+            .test_ok()
             .insert("extra".to_owned(), serde_json::Value::Null);
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), serde_json::to_string(&json).unwrap()).unwrap();
-        assert!(cmd_experiment_reproduce(file.path().to_str().unwrap()).is_err());
+        let file = tempfile::NamedTempFile::new().test_ok();
+        std::fs::write(file.path(), serde_json::to_string(&json).test_ok()).test_ok();
+        assert!(cmd_experiment_reproduce(file.path().to_str().test_ok()).is_err());
     }
 
     #[test]
@@ -1134,25 +1191,25 @@ mod tests {
             ),
             recipe: cli_reproduction_recipe(1),
         };
-        let mut json = serde_json::to_value(reproduction).unwrap();
+        let mut json = serde_json::to_value(reproduction).test_ok();
         json.get_mut("manifest")
             .and_then(serde_json::Value::as_object_mut)
-            .unwrap()
+            .test_ok()
             .insert(
                 "unexpected_kernel_field".to_owned(),
                 serde_json::Value::Null,
             );
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), serde_json::to_string(&json).unwrap()).unwrap();
+        let file = tempfile::NamedTempFile::new().test_ok();
+        std::fs::write(file.path(), serde_json::to_string(&json).test_ok()).test_ok();
 
-        assert!(cmd_experiment_reproduce(file.path().to_str().unwrap()).is_err());
+        assert!(cmd_experiment_reproduce(file.path().to_str().test_ok()).is_err());
     }
 
     #[test]
     fn handle_experiment_reproduce_dispatches_and_requires_manifest() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("dispatch.db").to_str().unwrap().to_owned();
-        cmd_experiment_run(&path, 1).unwrap();
+        let dir = tempfile::tempdir().test_ok();
+        let path = dir.path().join("dispatch.db").to_str().test_ok().to_owned();
+        cmd_experiment_run(&path, 1).test_ok();
         let manifest_path = path.replace(".db", "-manifest.json");
         assert!(handle_experiment(&args(&["reproduce", &manifest_path])).is_ok());
         assert!(handle_experiment(&args(&["reproduce"])).is_err());
@@ -1164,35 +1221,32 @@ mod tests {
         // Also covers the `if matched { Ok(()) }` path when head_hash matches.
         use pos_store::{open_store, StoreConfig};
 
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("test.db").to_str().unwrap().to_owned();
+        let dir = tempfile::tempdir().test_ok();
+        let db_path = dir.path().join("test.db").to_str().test_ok().to_owned();
         let manifest_path = dir
             .path()
             .join("test-manifest.json")
             .to_str()
-            .unwrap()
+            .test_ok()
             .to_owned();
 
         // Create store with a timeline and empty head_hash = zero manifest
-        let mut store = open_store(StoreConfig::Sqlite {
-            path: db_path.clone(),
-        })
-        .unwrap();
-        let tl = store.create_timeline("verify-real").unwrap();
+        let mut store = open_store(StoreConfig::Sqlite { path: db_path }).test_ok();
+        let tl = store.create_timeline("verify-real").test_ok();
 
         let manifest = pos_core::ReproManifest::new(
             tl.id(),
             pos_core::crypto::Hash::zero(), // empty timeline → zero hash
             pos_core::clock::WallTime::from_micros(0),
         );
-        let json = serde_json::to_string(&manifest).unwrap();
-        std::fs::write(&manifest_path, &json).unwrap();
+        let json = serde_json::to_string(&manifest).test_ok();
+        std::fs::write(&manifest_path, &json).test_ok();
 
         // cmd_experiment_verify finds the companion .db (via -manifest.json → .db)
         // The timeline exists with zero head_hash → matched = true → OK
         let result = cmd_experiment_verify(&manifest_path);
         // May be Ok or Err depending on store state — just check it runs
-        let _ = result;
+        drop(result);
     }
 
     #[test]
@@ -1223,16 +1277,16 @@ mod tests {
     #[test]
     fn handle_experiment_unknown_subcommand_is_ok() {
         let a = args(&["unknown"]);
-        handle_experiment(&a).unwrap();
+        handle_experiment(&a).test_ok();
     }
 
     #[test]
     fn handle_experiment_verify_bad_json_returns_err() {
         // Write a non-JSON file as manifest
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().test_ok();
         let path = dir.path().join("bad.json");
-        std::fs::write(&path, b"not json").unwrap();
-        let path_str = path.to_str().unwrap().to_owned();
+        std::fs::write(&path, b"not json").test_ok();
+        let path_str = path.to_str().test_ok().to_owned();
         let a = args(&["verify", &path_str]);
         assert!(handle_experiment(&a).is_err());
     }
@@ -1241,16 +1295,16 @@ mod tests {
     fn handle_timeline_fork_executes() {
         // Init store, list timeline to get its ID, then fork it.
         let (_dir, path) = tmp_db();
-        handle_store(&args(&["init", &path])).unwrap();
+        handle_store(&args(&["init", &path])).test_ok();
 
         // Get the timeline ID by reading the store directly.
-        let store = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
-        let timelines = store.list_timelines().unwrap();
+        let store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
+        let timelines = store.list_timelines().test_ok();
         assert!(!timelines.is_empty());
         let tl_id = timelines[0].id().to_string();
 
         let a = args(&["fork", &path, &tl_id, "0", "child-branch"]);
-        handle_timeline(&a).unwrap();
+        handle_timeline(&a).test_ok();
     }
 
     #[test]
@@ -1262,28 +1316,28 @@ mod tests {
             "--ticks".to_owned(),
             "7".to_owned(),
         ];
-        let n = parse_ticks_flag(&a).unwrap();
+        let n = parse_ticks_flag(&a).test_ok();
         assert_eq!(n, 7);
     }
 
     #[test]
     fn parse_ticks_flag_accepts_train_ticks_flag() {
         let a: Vec<String> = vec!["--train-ticks".to_owned(), "10".to_owned()];
-        let n = parse_ticks_flag(&a).unwrap();
+        let n = parse_ticks_flag(&a).test_ok();
         assert_eq!(n, 10);
     }
 
     #[test]
     fn parse_limit_flag_extracts_value() {
         let a: Vec<String> = vec!["--limit".to_owned(), "10".to_owned()];
-        let n = parse_limit_flag(&a).unwrap();
+        let n = parse_limit_flag(&a).test_ok();
         assert_eq!(n, Some(10));
     }
 
     #[test]
     fn parse_limit_flag_missing_returns_none() {
         let a: Vec<String> = vec!["--other".to_owned()];
-        let n = parse_limit_flag(&a).unwrap();
+        let n = parse_limit_flag(&a).test_ok();
         assert_eq!(n, None);
     }
 
@@ -1301,18 +1355,18 @@ mod tests {
             "--limit".to_owned(),
             "5".to_owned(),
         ];
-        let n = parse_limit_flag(&a).unwrap();
+        let n = parse_limit_flag(&a).test_ok();
         assert_eq!(n, Some(5));
     }
 
     #[test]
     fn handle_events_log_executes() {
         let (_dir, path) = tmp_db();
-        handle_store(&args(&["init", &path])).unwrap();
+        handle_store(&args(&["init", &path])).test_ok();
 
         // Add some events to log
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
-        let timelines = store.list_timelines().unwrap();
+        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
+        let timelines = store.list_timelines().test_ok();
         let tl_id = timelines[0].id();
         let entity = EntityId::new();
         let drafts = vec![EventDraft::new(
@@ -1320,29 +1374,29 @@ mod tests {
             Kind::new("test.event"),
             CanonicalBytes::from_vec(vec![]),
         )];
-        store.append(tl_id, &drafts).unwrap();
+        store.append(tl_id, &drafts).test_ok();
         drop(store);
 
         let tl_id_str = tl_id.to_string();
         let a = args(&["log", &path, &tl_id_str]);
-        handle_events(&a).unwrap();
+        handle_events(&a).test_ok();
     }
 
     #[test]
     fn handle_events_log_with_limit() {
         let (_dir, path) = tmp_db();
-        handle_store(&args(&["init", &path])).unwrap();
-        let store = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
-        let timelines = store.list_timelines().unwrap();
+        handle_store(&args(&["init", &path])).test_ok();
+        let store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
+        let timelines = store.list_timelines().test_ok();
         let tl_id = timelines[0].id().to_string();
         let a = args(&["log", &path, &tl_id, "--limit", "5"]);
-        handle_events(&a).unwrap();
+        handle_events(&a).test_ok();
     }
 
     #[test]
     fn handle_events_unknown_subcommand_is_ok() {
         let a = args(&["unknown"]);
-        handle_events(&a).unwrap();
+        handle_events(&a).test_ok();
     }
 
     #[test]
@@ -1354,11 +1408,11 @@ mod tests {
     #[test]
     fn handle_timeline_replay_executes() {
         let (_dir, path) = tmp_db();
-        handle_store(&args(&["init", &path])).unwrap();
+        handle_store(&args(&["init", &path])).test_ok();
 
         // Add some events to replay
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
-        let timelines = store.list_timelines().unwrap();
+        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
+        let timelines = store.list_timelines().test_ok();
         let tl_id = timelines[0].id();
         let entity = EntityId::new();
         let drafts = vec![EventDraft::new(
@@ -1366,38 +1420,38 @@ mod tests {
             Kind::new("test.event"),
             CanonicalBytes::from_vec(vec![]),
         )];
-        store.append(tl_id, &drafts).unwrap();
+        store.append(tl_id, &drafts).test_ok();
         drop(store);
 
         let tl_id_str = tl_id.to_string();
         let a = args(&["replay", &path, &tl_id_str]);
-        handle_timeline(&a).unwrap();
+        handle_timeline(&a).test_ok();
     }
 
     #[test]
     fn handle_timeline_snapshot_executes() {
         let (_dir, path) = tmp_db();
-        handle_store(&args(&["init", &path])).unwrap();
-        let store = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
-        let timelines = store.list_timelines().unwrap();
+        handle_store(&args(&["init", &path])).test_ok();
+        let store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
+        let timelines = store.list_timelines().test_ok();
         let tl_id = timelines[0].id().to_string();
         let a = args(&["snapshot", &path, &tl_id]);
-        handle_timeline(&a).unwrap();
+        handle_timeline(&a).test_ok();
     }
 
     #[test]
     fn handle_timeline_compare_executes() {
         let (_dir, path) = tmp_db();
-        handle_store(&args(&["init", &path])).unwrap();
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
-        let timelines = store.list_timelines().unwrap();
+        handle_store(&args(&["init", &path])).test_ok();
+        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
+        let timelines = store.list_timelines().test_ok();
         let tl_id = timelines[0].id().to_string();
         let forked = store
             .fork(timelines[0].id(), timelines[0].head, "fork-b")
-            .unwrap();
+            .test_ok();
         let fork_id = forked.id().to_string();
         let a = args(&["compare", &path, &tl_id, &fork_id, "0"]);
-        handle_timeline(&a).unwrap();
+        handle_timeline(&a).test_ok();
     }
 
     #[test]
@@ -1421,9 +1475,9 @@ mod tests {
     #[test]
     fn handle_timeline_merge_executes() {
         let (_dir, path) = tmp_db();
-        handle_store(&args(&["init", &path])).unwrap();
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
-        let timelines = store.list_timelines().unwrap();
+        handle_store(&args(&["init", &path])).test_ok();
+        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
+        let timelines = store.list_timelines().test_ok();
         let base_id = timelines[0].id();
         let entity_a = EntityId::new();
         let entity_b = EntityId::new();
@@ -1436,17 +1490,17 @@ mod tests {
                     CanonicalBytes::from_vec(vec![]),
                 )],
             )
-            .unwrap();
-        let fork_a = store.fork(base_id, timelines[0].head, "fork-a").unwrap();
+            .test_ok();
+        let fork_a = store.fork(base_id, timelines[0].head, "fork-a").test_ok();
         // head may have advanced; re-read
         let base_head = store
             .list_timelines()
-            .unwrap()
+            .test_ok()
             .into_iter()
             .find(|t| t.id() == base_id)
-            .unwrap()
+            .test_ok()
             .head;
-        let fork_b = store.fork(base_id, base_head, "fork-b").unwrap();
+        let fork_b = store.fork(base_id, base_head, "fork-b").test_ok();
         store
             .append(
                 fork_a.id(),
@@ -1456,7 +1510,7 @@ mod tests {
                     CanonicalBytes::from_vec(vec![]),
                 )],
             )
-            .unwrap();
+            .test_ok();
         store
             .append(
                 fork_b.id(),
@@ -1466,7 +1520,7 @@ mod tests {
                     CanonicalBytes::from_vec(vec![]),
                 )],
             )
-            .unwrap();
+            .test_ok();
         let fork_seq = base_head.as_u64().to_string();
         let a_id = fork_a.id().to_string();
         let b_id = fork_b.id().to_string();
@@ -1482,7 +1536,7 @@ mod tests {
             "--strategy",
             "disjoint",
         ]);
-        handle_timeline(&a).unwrap();
+        handle_timeline(&a).test_ok();
     }
 
     #[test]
@@ -1494,12 +1548,12 @@ mod tests {
     #[test]
     fn parse_merge_strategy_flag_defaults_and_parses() {
         assert!(matches!(
-            parse_merge_strategy_flag(&[]).unwrap(),
+            parse_merge_strategy_flag(&[]).test_ok(),
             pos_time::MergeStrategy::DisjointCrdt
         ));
         let a: Vec<String> = vec!["--strategy".to_owned(), "prefer-a".to_owned()];
         assert!(matches!(
-            parse_merge_strategy_flag(&a).unwrap(),
+            parse_merge_strategy_flag(&a).test_ok(),
             pos_time::MergeStrategy::PreferA
         ));
     }
@@ -1514,7 +1568,7 @@ mod tests {
             "prefer-b".to_owned(),
         ];
         assert!(matches!(
-            parse_merge_strategy_flag(&a).unwrap(),
+            parse_merge_strategy_flag(&a).test_ok(),
             pos_time::MergeStrategy::PreferB
         ));
     }
@@ -1535,7 +1589,7 @@ mod tests {
     fn handle_timeline_merge_missing_timeline_returns_err() {
         // Covers cmd_timeline_merge error path when merge_with_strategy fails.
         let (_dir, path) = tmp_db();
-        handle_store(&args(&["init", &path])).unwrap();
+        handle_store(&args(&["init", &path])).test_ok();
         let missing_a = TimelineId::new().to_string();
         let missing_b = TimelineId::new().to_string();
         let a = args(&["merge", &path, &missing_a, &missing_b, "0", "merged"]);
@@ -1547,6 +1601,24 @@ mod tests {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_tests {
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected test value")))
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -1605,53 +1677,83 @@ mod coverage_tests {
             pos_core::crypto::Hash::from_bytes([0xAB; 32]),
             WallTime::from_micros(0),
         );
-        let json = serde_json::to_string(&manifest).unwrap();
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(json.as_bytes()).unwrap();
+        let json = serde_json::to_string(&manifest).test_ok();
+        let mut f = NamedTempFile::new().test_ok();
+        f.write_all(json.as_bytes()).test_ok();
 
         // cmd_experiment_verify reads the manifest and checks the store.
         // With a non-existent timeline_id it hits the `matched = false` → MISMATCH path.
         // We can't let it call process::exit(2) so we use a separate test approach:
         // cmd_experiment_verify opens a fresh Memory store so the timeline won't be found
         // → matched = false → returns Err("hash mismatch")
-        let result = cmd_experiment_verify(f.path().to_str().unwrap());
+        let result = cmd_experiment_verify(f.path().to_str().test_ok());
         assert!(result.is_err());
     }
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod store_info_coverage {
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected test value")))
+        }
+    }
+
+    trait TestErrorExt<E> {
+        fn test_err(self) -> E;
+    }
+
+    impl<T, E> TestErrorExt<E> for Result<T, E> {
+        fn test_err(self) -> E {
+            self.err()
+                .unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected test error")))
+        }
+    }
+
     use super::*;
 
     #[test]
     fn list_failure_retains_operation_and_root_cause() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().test_ok();
         let path = directory.path().join("corrupt.db");
-        let path = path.to_str().unwrap();
-        cmd_store_init(path).unwrap();
+        let path = path.to_str().test_ok();
+        cmd_store_init(path).test_ok();
 
-        let connection = rusqlite::Connection::open(path).unwrap();
+        let connection = rusqlite::Connection::open(path).test_ok();
         connection
             .execute("UPDATE timelines SET name = X'0102'", [])
-            .unwrap();
+            .test_ok();
 
-        let error = cmd_store_info(path).unwrap_err().to_string();
+        let error = cmd_store_info(path).test_err().to_string();
         assert!(error.contains("failed to list Timelines"));
         assert!(error.contains("Invalid column type"));
     }
 
     #[test]
     fn read_failure_retains_timeline_and_root_cause() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().test_ok();
         let path = directory.path().join("corrupt.db");
-        let path = path.to_str().unwrap();
-        cmd_store_init(path).unwrap();
+        let path = path.to_str().test_ok();
+        cmd_store_init(path).test_ok();
 
         let mut store = open_store(StoreConfig::Sqlite {
             path: path.to_owned(),
         })
-        .unwrap();
-        let timeline_id = store.list_timelines().unwrap()[0].id();
+        .test_ok();
+        let timeline_id = store.list_timelines().test_ok()[0].id();
         store
             .append(
                 timeline_id,
@@ -1661,15 +1763,15 @@ mod store_info_coverage {
                     pos_core::event::CanonicalBytes::from_vec(vec![]),
                 )],
             )
-            .unwrap();
+            .test_ok();
         drop(store);
 
-        let connection = rusqlite::Connection::open(path).unwrap();
+        let connection = rusqlite::Connection::open(path).test_ok();
         connection
             .execute("UPDATE events SET payload_hash = X'01'", [])
-            .unwrap();
+            .test_ok();
 
-        let error = cmd_store_info(path).unwrap_err().to_string();
+        let error = cmd_store_info(path).test_err().to_string();
         assert!(error.contains(&format!("failed to read Timeline {timeline_id}")));
         assert!(error.contains("serialization error: bad hash"));
     }
@@ -1678,6 +1780,24 @@ mod store_info_coverage {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod main_coverage {
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected test value")))
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -1691,7 +1811,7 @@ mod main_coverage {
 
     #[test]
     fn verify_ok_path_when_manifest_matches_empty_store() {
-        // Cover the `if matched { println!("OK"); Ok(()) }` path.
+        // Cover the `if matched { output_stdout!("OK"); Ok(()) }` path.
         // A fresh Memory store has no timelines, so `tl = None` → `matched = false`.
         // To hit the OK path we need a matching manifest. Use a zero timeline_id
         // and zero hash — the `else { false }` branch gives matched=false, which
@@ -1709,14 +1829,11 @@ mod main_coverage {
         use tempfile::NamedTempFile;
 
         // Create a SQLite store, create a timeline in it
-        let db = NamedTempFile::new().unwrap();
-        let db_path = db.path().to_str().unwrap().to_owned();
+        let db = NamedTempFile::new().test_ok();
+        let db_path = db.path().to_str().test_ok().to_owned();
         {
-            let mut store = open_store(StoreConfig::Sqlite {
-                path: db_path.clone(),
-            })
-            .unwrap();
-            let tl = store.create_timeline("verify-test").unwrap();
+            let mut store = open_store(StoreConfig::Sqlite { path: db_path }).test_ok();
+            let tl = store.create_timeline("verify-test").test_ok();
 
             // Build a manifest pointing at this timeline with head_hash = zero
             // (no events appended → last().map_or(zero, ...) = zero)
@@ -1725,16 +1842,16 @@ mod main_coverage {
                 pos_core::crypto::Hash::zero(),
                 WallTime::from_micros(0),
             );
-            let json = serde_json::to_string(&manifest).unwrap();
-            let mut f = NamedTempFile::new().unwrap();
-            std::io::Write::write_all(&mut f, json.as_bytes()).unwrap();
+            let json = serde_json::to_string(&manifest).test_ok();
+            let mut f = NamedTempFile::new().test_ok();
+            std::io::Write::write_all(&mut f, json.as_bytes()).test_ok();
 
             // cmd_experiment_verify uses Memory store internally so it won't find
             // the SQLite timeline. Use the in-memory path instead.
             // Create an in-memory store with the same timeline_id via import.
-            let export = pos_core::store::export_timeline(store.as_ref(), tl.id()).unwrap();
-            let mut mem = open_store(StoreConfig::Memory).unwrap();
-            pos_core::store::import_timeline(mem.as_mut(), export).unwrap();
+            let export = pos_core::store::export_timeline(store.as_ref(), tl.id()).test_ok();
+            let mut mem = open_store(StoreConfig::Memory).test_ok();
+            pos_core::store::import_timeline(mem.as_mut(), export).test_ok();
 
             // For the OK path, just verify the manifest json round-trips correctly.
             // The actual verify calls open_store(Memory) so it won't find the timeline,
@@ -1747,7 +1864,7 @@ mod main_coverage {
             }
 
             // The real test: cmd_experiment_verify with non-matching timeline returns Err
-            let result = cmd_experiment_verify(f.path().to_str().unwrap());
+            let result = cmd_experiment_verify(f.path().to_str().test_ok());
             assert!(result.is_err()); // Memory store has no timelines
         }
         drop(db);
@@ -1757,14 +1874,32 @@ mod main_coverage {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod final_coverage {
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected test value")))
+        }
+    }
+
     use super::*;
     use pos_store::{open_store, StoreConfig};
 
     #[test]
     fn verify_manifest_ok_path_when_hash_matches() {
-        // Cover the `if matched { println!("OK"); Ok(()) }` branch.
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("match-test").unwrap();
+        // Cover the `if matched { output_stdout!("OK"); Ok(()) }` branch.
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("match-test").test_ok();
 
         // Empty timeline → last event = None → head_hash = Hash::zero()
         let manifest = pos_core::ReproManifest::new(
@@ -1780,8 +1915,8 @@ mod final_coverage {
     #[test]
     fn verify_manifest_mismatch_when_hash_differs() {
         // Cover the `else { false }` branch (timeline exists but hash differs).
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("mismatch-test").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("mismatch-test").test_ok();
 
         // Use a non-zero hash — won't match empty timeline's zero hash
         let manifest = pos_core::ReproManifest::new(
@@ -1796,7 +1931,7 @@ mod final_coverage {
 
     #[test]
     fn handle_run_error_is_callable() {
-        // Cover the test version of handle_run_error (eprintln! without exit).
+        // Cover the test version of handle_run_error (output_stderr! without exit).
         let e: Box<dyn std::error::Error> = "test error".into();
         handle_run_error(e.as_ref()); // calls the #[cfg(test)] version — no exit
     }
@@ -1820,7 +1955,7 @@ mod final_coverage {
         use pos_core::ids::TimelineId;
         use pos_store::{open_store, StoreConfig};
 
-        let store = open_store(StoreConfig::Memory).unwrap();
+        let store = open_store(StoreConfig::Memory).test_ok();
         // Manifest points at a timeline that was never created in this store.
         let manifest = pos_core::ReproManifest::new(
             TimelineId::new(),
@@ -1839,7 +1974,7 @@ mod final_coverage {
         // Cover the Memory fallback branch: store_path doesn't exist → use Memory.
         use pos_core::ids::TimelineId;
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().test_ok();
         // Write a manifest.json whose companion .db does NOT exist.
         let manifest_path = dir.path().join("no-companion-manifest.json");
         let manifest = pos_core::ReproManifest::new(
@@ -1847,12 +1982,12 @@ mod final_coverage {
             pos_core::crypto::Hash::from_bytes([0xCC; 32]),
             pos_core::clock::WallTime::from_micros(0),
         );
-        let json = serde_json::to_string(&manifest).unwrap();
-        std::fs::write(&manifest_path, &json).unwrap();
+        let json = serde_json::to_string(&manifest).test_ok();
+        std::fs::write(&manifest_path, &json).test_ok();
 
         // The companion .db would be "no-companion.db" — it doesn't exist.
         // verify falls back to Memory store → timeline not found → MISMATCH.
-        let result = cmd_experiment_verify(manifest_path.to_str().unwrap());
+        let result = cmd_experiment_verify(manifest_path.to_str().test_ok());
         assert!(result.is_err(), "Memory fallback should give MISMATCH");
     }
 
@@ -1869,19 +2004,19 @@ mod final_coverage {
         use pos_core::event::{CanonicalBytes, EventDraft, Kind};
         use pos_core::ids::EntityId;
 
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("chain-verify-test").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("chain-verify-test").test_ok();
         let entity = EntityId::new();
         let draft = EventDraft::new(
             entity,
             Kind::new("test.event"),
             CanonicalBytes::from_vec(vec![]),
         );
-        let committed = store.append(tl.id(), &[draft]).unwrap();
+        let committed = store.append(tl.id(), &[draft]).test_ok();
         assert!(!committed.is_empty());
 
         // Compute the expected chain_head manually
-        let events = store.read(tl.id(), SeqRange::all()).unwrap();
+        let events = store.read(tl.id(), SeqRange::all()).test_ok();
         let mut hasher = blake3::Hasher::new();
         for e in &events {
             hasher.update(e.payload_hash.as_bytes());
@@ -1914,6 +2049,24 @@ mod final_coverage {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod fault_injection_tests {
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected test value")))
+        }
+    }
+
     use super::*;
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
@@ -1921,37 +2074,51 @@ mod fault_injection_tests {
     };
     use rusqlite::Connection;
 
+    #[cfg(unix)]
+    fn running_as_root() -> bool {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Uid:\t"))
+                    .and_then(|uids| uids.split_whitespace().next())
+                    .and_then(|uid| uid.parse::<u32>().ok())
+            })
+            == Some(0)
+    }
+
     fn corrupt_timeline_names(path: &str) {
-        let conn = Connection::open(path).expect("open sqlite for corruption");
+        let conn = Connection::open(path).test_ok();
         conn.execute("UPDATE timelines SET name = X'0102'", [])
-            .expect("corrupt timeline names");
+            .test_ok();
     }
 
     fn corrupt_event_ids(path: &str) {
-        let conn = Connection::open(path).expect("open sqlite for corruption");
+        let conn = Connection::open(path).test_ok();
         conn.execute("UPDATE events SET event_id = 'not-a-ulid'", [])
-            .expect("corrupt Event identifier");
+            .test_ok();
     }
 
     #[cfg(unix)]
     fn set_readonly(path: &std::path::Path) {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o444)).test_ok();
     }
 
     #[cfg(unix)]
     fn set_writable(path: &std::path::Path) {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).test_ok();
     }
 
     #[cfg(unix)]
     fn readonly_db(path: &std::path::Path) {
         let mut store = open_store(StoreConfig::Sqlite {
-            path: path.to_str().unwrap().to_owned(),
+            path: path.to_str().test_ok().to_owned(),
         })
-        .unwrap();
-        store.create_timeline("seed").unwrap();
+        .test_ok();
+        store.create_timeline("seed").test_ok();
         drop(store);
         set_readonly(path);
     }
@@ -1961,21 +2128,24 @@ mod fault_injection_tests {
     }
 
     fn seeded_db() -> (tempfile::TempDir, String, String) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fault.db").to_str().unwrap().to_owned();
-        cmd_store_init(&path).unwrap();
-        let store = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
-        let tl_id = store.list_timelines().unwrap()[0].id().to_string();
+        let dir = tempfile::tempdir().test_ok();
+        let path = dir.path().join("fault.db").to_str().test_ok().to_owned();
+        cmd_store_init(&path).test_ok();
+        let store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
+        let tl_id = store.list_timelines().test_ok()[0].id().to_string();
         (dir, path, tl_id)
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn cmd_store_init_create_timeline_fails_on_readonly_database() {
-        let dir = tempfile::tempdir().unwrap();
+        if running_as_root() {
+            return;
+        }
+        let dir = tempfile::tempdir().test_ok();
         let path = dir.path().join("init-fault.db");
         readonly_db(&path);
-        let result = cmd_store_init(path.to_str().unwrap());
+        let result = cmd_store_init(path.to_str().test_ok());
         set_writable(&path);
         assert!(result.is_err());
     }
@@ -1998,6 +2168,9 @@ mod fault_injection_tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn cmd_timeline_fork_fails_on_readonly_database() {
+        if running_as_root() {
+            return;
+        }
         let (_dir, path, tl_id) = seeded_db();
         set_readonly(std::path::Path::new(&path));
         let result = cmd_timeline_fork(&path, &tl_id, "0", "child");
@@ -2016,8 +2189,8 @@ mod fault_injection_tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn cmd_timeline_replay_fails_when_events_corrupt() {
         let (_dir, path, tl_id) = seeded_db();
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
-        let tl = store.list_timelines().unwrap()[0].id();
+        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
+        let tl = store.list_timelines().test_ok()[0].id();
         let entity = EntityId::new();
         store
             .append(
@@ -2028,7 +2201,7 @@ mod fault_injection_tests {
                     CanonicalBytes::from_vec(vec![]),
                 )],
             )
-            .unwrap();
+            .test_ok();
         drop(store);
         corrupt_event_ids(&path);
         assert!(cmd_timeline_replay(&path, &tl_id).is_err());
@@ -2045,8 +2218,8 @@ mod fault_injection_tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn cmd_timeline_snapshot_fails_when_events_corrupt() {
         let (_dir, path, tl_id) = seeded_db();
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
-        let tl = store.list_timelines().unwrap()[0].id();
+        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
+        let tl = store.list_timelines().test_ok()[0].id();
         let entity = EntityId::new();
         store
             .append(
@@ -2057,7 +2230,7 @@ mod fault_injection_tests {
                     CanonicalBytes::from_vec(vec![]),
                 )],
             )
-            .unwrap();
+            .test_ok();
         drop(store);
         corrupt_event_ids(&path);
         assert!(cmd_timeline_snapshot(&path, &tl_id).is_err());
@@ -2067,8 +2240,8 @@ mod fault_injection_tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn cmd_timeline_snapshot_counts_entities_from_projection_state() {
         let (_dir, path, tl_id) = seeded_db();
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
-        let tl = store.list_timelines().unwrap()[0].id();
+        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
+        let tl = store.list_timelines().test_ok()[0].id();
         let entity = EntityId::new();
         store
             .append(
@@ -2079,9 +2252,9 @@ mod fault_injection_tests {
                     CanonicalBytes::from_vec(vec![]),
                 )],
             )
-            .unwrap();
+            .test_ok();
         drop(store);
-        cmd_timeline_snapshot(&path, &tl_id).unwrap();
+        cmd_timeline_snapshot(&path, &tl_id).test_ok();
     }
 
     #[test]
@@ -2097,8 +2270,8 @@ mod fault_injection_tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn cmd_timeline_compare_fails_when_events_corrupt() {
         let (_dir, path, tl_id) = seeded_db();
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
-        let base = store.list_timelines().unwrap()[0].clone();
+        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
+        let base = store.list_timelines().test_ok()[0].clone();
         let entity = EntityId::new();
         store
             .append(
@@ -2109,8 +2282,8 @@ mod fault_injection_tests {
                     CanonicalBytes::from_vec(vec![]),
                 )],
             )
-            .unwrap();
-        let forked = store.fork(base.id(), base.head, "cmp-fork").unwrap();
+            .test_ok();
+        let forked = store.fork(base.id(), base.head, "cmp-fork").test_ok();
         let fork_id = forked.id().to_string();
         drop(store);
         corrupt_event_ids(&path);
@@ -2171,6 +2344,9 @@ mod fault_injection_tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn cmd_timeline_merge_fails_on_readonly_database() {
+        if running_as_root() {
+            return;
+        }
         let (_dir, path, tl_id) = seeded_db();
         set_readonly(std::path::Path::new(&path));
         let result = cmd_timeline_merge(
@@ -2204,8 +2380,8 @@ mod fault_injection_tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn cmd_events_log_fails_when_events_corrupt() {
         let (_dir, path, tl_id) = seeded_db();
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
-        let tl = store.list_timelines().unwrap()[0].id();
+        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
+        let tl = store.list_timelines().test_ok()[0].id();
         let entity = EntityId::new();
         store
             .append(
@@ -2216,7 +2392,7 @@ mod fault_injection_tests {
                     CanonicalBytes::from_vec(vec![]),
                 )],
             )
-            .unwrap();
+            .test_ok();
         drop(store);
         corrupt_event_ids(&path);
         assert!(cmd_events_log(&path, &tl_id, None).is_err());
@@ -2225,6 +2401,9 @@ mod fault_injection_tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn cmd_experiment_run_fails_on_readonly_database() {
+        if running_as_root() {
+            return;
+        }
         let (_dir, path, _) = seeded_db();
         set_readonly(std::path::Path::new(&path));
         let result = cmd_experiment_run(&path, 1);
@@ -2235,12 +2414,12 @@ mod fault_injection_tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn cmd_experiment_run_manifest_write_fails_when_path_is_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("run.db").to_str().unwrap().to_owned();
-        cmd_experiment_run(&path, 1).unwrap();
+        let dir = tempfile::tempdir().test_ok();
+        let path = dir.path().join("run.db").to_str().test_ok().to_owned();
+        cmd_experiment_run(&path, 1).test_ok();
         let manifest_path = path.replace(".db", "-manifest.json");
-        std::fs::remove_file(&manifest_path).unwrap();
-        std::fs::create_dir_all(&manifest_path).unwrap();
+        std::fs::remove_file(&manifest_path).test_ok();
+        std::fs::create_dir_all(&manifest_path).test_ok();
         assert!(cmd_experiment_run(&path, 1).is_err());
     }
 
@@ -2248,13 +2427,13 @@ mod fault_injection_tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn cmd_experiment_verify_fails_when_events_corrupt() {
         let (_dir, path, tl_id) = seeded_db();
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
+        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
         let tl = store
             .list_timelines()
-            .unwrap()
+            .test_ok()
             .into_iter()
             .find(|t| t.id().to_string() == tl_id)
-            .unwrap();
+            .test_ok();
         let entity = EntityId::new();
         store
             .append(
@@ -2265,8 +2444,8 @@ mod fault_injection_tests {
                     CanonicalBytes::from_vec(vec![]),
                 )],
             )
-            .unwrap();
-        let events = store.read(tl.id(), SeqRange::all()).unwrap();
+            .test_ok();
+        let events = store.read(tl.id(), SeqRange::all()).test_ok();
         let mut hasher = blake3::Hasher::new();
         for e in &events {
             hasher.update(e.payload_hash.as_bytes());
@@ -2278,7 +2457,7 @@ mod fault_injection_tests {
             pos_core::clock::WallTime::from_micros(0),
         );
         let manifest_path = path.replace(".db", "-manifest.json");
-        std::fs::write(&manifest_path, serde_json::to_string(&manifest).unwrap()).unwrap();
+        std::fs::write(&manifest_path, serde_json::to_string(&manifest).test_ok()).test_ok();
         drop(store);
         corrupt_event_ids(&path);
         assert!(cmd_experiment_verify(&manifest_path).is_err());
@@ -2301,58 +2480,58 @@ mod fault_injection_tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn cmd_store_info_open_store_fails_on_directory_path() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(cmd_store_info(dir.path().to_str().unwrap()).is_err());
+        let dir = tempfile::tempdir().test_ok();
+        assert!(cmd_store_info(dir.path().to_str().test_ok()).is_err());
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn cmd_timeline_list_open_store_fails_on_directory_path() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(cmd_timeline_list(dir.path().to_str().unwrap()).is_err());
+        let dir = tempfile::tempdir().test_ok();
+        assert!(cmd_timeline_list(dir.path().to_str().test_ok()).is_err());
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn cmd_timeline_fork_open_store_fails_on_directory_path() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().test_ok();
         let tl_id = TimelineId::new().to_string();
-        assert!(cmd_timeline_fork(dir.path().to_str().unwrap(), &tl_id, "0", "child").is_err());
+        assert!(cmd_timeline_fork(dir.path().to_str().test_ok(), &tl_id, "0", "child").is_err());
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn cmd_timeline_replay_open_store_fails_on_directory_path() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().test_ok();
         let tl_id = TimelineId::new().to_string();
-        assert!(cmd_timeline_replay(dir.path().to_str().unwrap(), &tl_id).is_err());
+        assert!(cmd_timeline_replay(dir.path().to_str().test_ok(), &tl_id).is_err());
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn cmd_timeline_snapshot_open_store_fails_on_directory_path() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().test_ok();
         let tl_id = TimelineId::new().to_string();
-        assert!(cmd_timeline_snapshot(dir.path().to_str().unwrap(), &tl_id).is_err());
+        assert!(cmd_timeline_snapshot(dir.path().to_str().test_ok(), &tl_id).is_err());
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn cmd_timeline_compare_open_store_fails_on_directory_path() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().test_ok();
         let tl_a = TimelineId::new().to_string();
         let tl_b = TimelineId::new().to_string();
-        assert!(cmd_timeline_compare(dir.path().to_str().unwrap(), &tl_a, &tl_b, "0").is_err());
+        assert!(cmd_timeline_compare(dir.path().to_str().test_ok(), &tl_a, &tl_b, "0").is_err());
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn cmd_timeline_merge_open_store_fails_on_directory_path() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().test_ok();
         let tl_a = TimelineId::new().to_string();
         let tl_b = TimelineId::new().to_string();
         assert!(cmd_timeline_merge(
-            dir.path().to_str().unwrap(),
+            dir.path().to_str().test_ok(),
             &tl_a,
             &tl_b,
             "0",
@@ -2365,29 +2544,29 @@ mod fault_injection_tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn cmd_events_log_open_store_fails_on_directory_path() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().test_ok();
         let tl_id = TimelineId::new().to_string();
-        assert!(cmd_events_log(dir.path().to_str().unwrap(), &tl_id, None).is_err());
+        assert!(cmd_events_log(dir.path().to_str().test_ok(), &tl_id, None).is_err());
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn cmd_experiment_verify_list_timelines_fails_when_timelines_corrupt() {
         let (_dir, path, tl_id) = seeded_db();
-        let store = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
+        let store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
         let tl = store
             .list_timelines()
-            .unwrap()
+            .test_ok()
             .into_iter()
             .find(|t| t.id().to_string() == tl_id)
-            .unwrap();
+            .test_ok();
         let manifest = pos_core::ReproManifest::new(
             tl.id(),
             pos_core::crypto::Hash::zero(),
             pos_core::clock::WallTime::from_micros(0),
         );
         let manifest_path = path.replace(".db", "-manifest.json");
-        std::fs::write(&manifest_path, serde_json::to_string(&manifest).unwrap()).unwrap();
+        std::fs::write(&manifest_path, serde_json::to_string(&manifest).test_ok()).test_ok();
         drop(store);
         corrupt_timeline_names(&path);
         assert!(cmd_experiment_verify(&manifest_path).is_err());

@@ -355,9 +355,18 @@ fn constant_time_equal(left: &[u8; 32], right: &[u8; 32]) -> bool {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::CanonicalBytes;
+
+    fn ok<T, E: std::fmt::Debug>(value: Result<T, E>) -> T {
+        value.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "unexpected enrollment fixture error: {error:?}"
+            )))
+        })
+    }
 
     fn dummy_input() -> OwnTracksIngressInputV1 {
         OwnTracksIngressInputV1::new(
@@ -372,12 +381,102 @@ mod tests {
     #[test]
     fn cover_prepare_ingress_auth_failure_when_absent() {
         // Absent enrollment → _ arm → GeographicAdmissionAuthenticationFailed
-        let _ = OwnTracksEnrollmentStateV1::absent().prepare_owntracks_ingress(&dummy_input());
+        assert!(OwnTracksEnrollmentStateV1::absent()
+            .prepare_owntracks_ingress(&dummy_input())
+            .is_err());
     }
 
     #[test]
     fn cover_from_persistence_bytes_error_path() {
         // Invalid bytes → Serialization error
-        let _ = OwnTracksEnrollmentStateV1::from_persistence_bytes(b"not-valid-cbor");
+        assert!(OwnTracksEnrollmentStateV1::from_persistence_bytes(b"not-valid-cbor").is_err());
+    }
+
+    #[test]
+    fn cover_from_persistence_bytes_validation_path() {
+        let invalid = OwnTracksEnrollmentStateV1 {
+            schema_version: OWNTRACKS_ENROLLMENT_SCHEMA_VERSION,
+            status: OwnTracksEnrollmentStatusV1::Active,
+            timeline: None,
+            entity: None,
+            fence: None,
+            verifier: None,
+        };
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&invalid, &mut bytes).unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("unexpected CBOR error: {error:?}")))
+        });
+        assert!(OwnTracksEnrollmentStateV1::from_persistence_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn cover_prepare_ingress_rejects_withdrawn_consent() {
+        let state = OwnTracksEnrollmentStateV1 {
+            schema_version: OWNTRACKS_ENROLLMENT_SCHEMA_VERSION,
+            status: OwnTracksEnrollmentStatusV1::Active,
+            timeline: Some(TimelineId::new()),
+            entity: Some(EntityId::new()),
+            fence: Some(GeoLocationAdmissionFenceV1::new(
+                1,
+                ([0; 32], 1, [0; 32]),
+                (1, true, 1),
+            )),
+            verifier: Some([0; 32]),
+        };
+        assert!(matches!(
+            state.prepare_owntracks_ingress(&dummy_input()),
+            Err(CoreError::GeographicAdmissionValidationFailed)
+        ));
+    }
+
+    #[test]
+    fn active_enrollment_rotates_and_revokes_with_epoch_progression() {
+        let state = OwnTracksEnrollmentStateV1 {
+            schema_version: OWNTRACKS_ENROLLMENT_SCHEMA_VERSION,
+            status: OwnTracksEnrollmentStatusV1::Active,
+            timeline: Some(TimelineId::new()),
+            entity: Some(EntityId::new()),
+            fence: Some(GeoLocationAdmissionFenceV1::new(
+                1,
+                ([0; 32], 1, [0; 32]),
+                (1, false, 1),
+            )),
+            verifier: Some([0; 32]),
+        };
+        let rotated = ok(state.rotate([1; 32]));
+        assert_eq!(rotated.status(), OwnTracksEnrollmentStatusV1::Active);
+        assert_eq!(rotated.admission_epoch(), 2);
+        let revoked = ok(rotated.revoke());
+        assert_eq!(revoked.status(), OwnTracksEnrollmentStatusV1::Revoked);
+        assert!(!revoked.has_pairing_verifier());
+    }
+
+    #[test]
+    fn enrollment_epoch_overflow_is_rejected() {
+        let request = OwnTracksEnrollmentRequestV1::new(
+            TimelineId::new(),
+            EntityId::new(),
+            GeoLocationAdmissionFenceV1::new(1, ([0; 32], 1, [0; 32]), (1, false, u64::MAX)),
+            [0; 32],
+        );
+        assert!(matches!(
+            OwnTracksEnrollmentStateV1::absent().pair(&request),
+            Err(CoreError::GeographicAdmissionValidationFailed)
+        ));
+
+        let active = OwnTracksEnrollmentStateV1 {
+            schema_version: OWNTRACKS_ENROLLMENT_SCHEMA_VERSION,
+            status: OwnTracksEnrollmentStatusV1::Active,
+            timeline: Some(TimelineId::new()),
+            entity: Some(EntityId::new()),
+            fence: Some(GeoLocationAdmissionFenceV1::new(
+                1,
+                ([0; 32], 1, [0; 32]),
+                (1, false, u64::MAX),
+            )),
+            verifier: Some([0; 32]),
+        };
+        assert!(active.clone().rotate([1; 32]).is_err());
+        assert!(active.revoke().is_err());
     }
 }

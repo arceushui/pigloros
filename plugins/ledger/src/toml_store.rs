@@ -61,11 +61,13 @@ impl TomlLedgerStore {
                 path: path.display().to_string(),
                 reason: e.to_string(),
             })?;
-            let stem = path
-                .file_stem()
-                .expect("read_dir entries always have file names")
-                .to_string_lossy()
-                .into_owned();
+            let Some(stem) = path.file_stem() else {
+                return Err(LedgerError::InvalidPrediction(format!(
+                    "TOML path has no filename stem: {}",
+                    path.display()
+                )));
+            };
+            let stem = stem.to_string_lossy().into_owned();
             items.push((stem, value));
         }
         Ok(items)
@@ -112,7 +114,7 @@ impl LedgerStore for TomlLedgerStore {
 
     fn register(&mut self, new: NewPrediction) -> Result<String, LedgerError> {
         new.validate()?;
-        let prediction = new.into_prediction(ulid::Ulid::gen().to_string());
+        let prediction = new.into_prediction(ulid::Ulid::r#gen().to_string());
         std::fs::create_dir_all(self.predictions_dir())?;
         let path = self
             .predictions_dir()
@@ -147,226 +149,249 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn port_contract() {
-        contract::run(&mut |dir| Box::new(TomlLedgerStore::new(dir)) as Box<dyn LedgerStore>);
+    fn running_as_root() -> bool {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Uid:\t"))
+                    .and_then(|uids| uids.split_whitespace().next())
+                    .and_then(|uid| uid.parse::<u32>().ok())
+            })
+            == Some(0)
     }
 
-    fn make_store() -> (TomlLedgerStore, TempDir) {
-        let tmp = TempDir::new().unwrap();
-        (TomlLedgerStore::new(tmp.path()), tmp)
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn port_contract() -> Result<(), Box<dyn std::error::Error>> {
+        contract::run(&mut |dir| Ok(Box::new(TomlLedgerStore::new(dir)) as Box<dyn LedgerStore>))?;
+        Ok(())
+    }
+
+    fn make_store() -> Result<(TomlLedgerStore, TempDir), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new()?;
+        Ok((TomlLedgerStore::new(tmp.path()), tmp))
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn read_dir_on_file_path_is_io_error() {
-        let tmp = TempDir::new().unwrap();
+    fn read_dir_on_file_path_is_io_error() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new()?;
         let file = tmp.path().join("predictions");
-        std::fs::write(&file, "not a dir").unwrap();
+        std::fs::write(&file, "not a dir")?;
         let store = TomlLedgerStore::new(tmp.path());
-        let err = store.load("2026-07-25").unwrap_err();
+        let err = store.load("2026-07-25").err().ok_or("expected error")?;
         assert!(matches!(err, LedgerError::Io(_)));
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn resolutions_read_dir_failure_is_io_error() {
-        let tmp = TempDir::new().unwrap();
+    fn resolutions_read_dir_failure_is_io_error() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new()?;
         // Create predictions dir so the first read_dir_toml succeeds.
-        std::fs::create_dir_all(tmp.path().join("predictions")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("predictions"))?;
         // Make resolutions a file so the second read_dir_toml fails.
-        std::fs::write(tmp.path().join("resolutions"), "not a dir").unwrap();
+        std::fs::write(tmp.path().join("resolutions"), "not a dir")?;
         let store = TomlLedgerStore::new(tmp.path());
-        let err = store.load("2026-07-25").unwrap_err();
+        let err = store.load("2026-07-25").err().ok_or("expected error")?;
         assert!(matches!(err, LedgerError::Io(_)));
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn unparseable_toml_is_toml_error() {
-        let (mut store, tmp) = make_store();
-        let id = store
-            .register(contract::sample_new_prediction("2026-08-01"))
-            .unwrap();
+    fn unparseable_toml_is_toml_error() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut store, tmp) = make_store()?;
+        let id = store.register(contract::sample_new_prediction("2026-08-01"))?;
         let path = tmp.path().join("predictions").join(format!("{id}.toml"));
-        std::fs::write(&path, "{ not toml").unwrap();
-        let err = store.load("2026-07-25").unwrap_err();
+        std::fs::write(&path, "{ not toml")?;
+        let err = store.load("2026-07-25").err().ok_or("expected error")?;
         assert!(matches!(err, LedgerError::Toml { .. }));
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn directory_named_toml_is_read_error() {
-        let tmp = TempDir::new().unwrap();
-        std::fs::create_dir_all(tmp.path().join("predictions")).unwrap();
-        std::fs::create_dir(tmp.path().join("predictions").join("bad.toml")).unwrap();
+    fn directory_named_toml_is_read_error() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new()?;
+        std::fs::create_dir_all(tmp.path().join("predictions"))?;
+        std::fs::create_dir(tmp.path().join("predictions").join("bad.toml"))?;
         let store = TomlLedgerStore::new(tmp.path());
-        let err = store.load("2026-07-25").unwrap_err();
+        let err = store.load("2026-07-25").err().ok_or("expected error")?;
         assert!(matches!(err, LedgerError::Io(_)));
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn stem_mismatch_is_invalid_prediction() {
-        let (mut store, tmp) = make_store();
-        store
-            .register(contract::sample_new_prediction("2026-08-01"))
-            .unwrap();
+    fn stem_mismatch_is_invalid_prediction() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut store, tmp) = make_store()?;
+        store.register(contract::sample_new_prediction("2026-08-01"))?;
         let dir = tmp.path().join("predictions");
-        let file = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap();
-        std::fs::rename(file.path(), dir.join("01J3B0Y5ZK2J6MGK8D7QW3N0P9.toml")).unwrap();
-        let err = store.load("2026-07-25").unwrap_err();
+        let file = std::fs::read_dir(&dir)?
+            .next()
+            .ok_or("missing prediction file")??;
+        std::fs::rename(file.path(), dir.join("01J3B0Y5ZK2J6MGK8D7QW3N0P9.toml"))?;
+        let err = store.load("2026-07-25").err().ok_or("expected error")?;
         assert!(matches!(err, LedgerError::InvalidPrediction(_)));
         assert!(err.to_string().contains("stem"));
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn resolution_stem_mismatch_is_invalid_resolution() {
-        let (mut store, tmp) = make_store();
-        let id = store
-            .register(contract::sample_new_prediction("2026-08-01"))
-            .unwrap();
-        store
-            .resolve(
-                LedgerOutcome::try_new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned())
-                    .unwrap(),
-            )
-            .unwrap();
+    fn resolution_stem_mismatch_is_invalid_resolution() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut store, tmp) = make_store()?;
+        let id = store.register(contract::sample_new_prediction("2026-08-01"))?;
+        store.resolve(LedgerOutcome::try_new(
+            id.clone(),
+            true,
+            "2026-07-30T09:00:00Z".to_owned(),
+        )?)?;
         let dir = tmp.path().join("resolutions");
         std::fs::rename(
             dir.join(format!("{id}.toml")),
             dir.join("01J3B0Y5ZK2J6MGK8D7QW3N0P9.toml"),
-        )
-        .unwrap();
-        let err = store.load("2026-07-25").unwrap_err();
+        )?;
+        let err = store.load("2026-07-25").err().ok_or("expected error")?;
         assert!(matches!(err, LedgerError::InvalidResolution(_)));
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn orphan_resolution_is_error() {
-        let tmp = TempDir::new().unwrap();
-        std::fs::create_dir_all(tmp.path().join("resolutions")).unwrap();
+    fn orphan_resolution_is_error() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new()?;
+        std::fs::create_dir_all(tmp.path().join("resolutions"))?;
         std::fs::write(
             tmp.path()
                 .join("resolutions")
                 .join("01J3B0Y5ZK2J6MGK8D7QW3N0P9.toml"),
             "prediction_id = \"01J3B0Y5ZK2J6MGK8D7QW3N0P9\"\noutcome = true\nresolved_at = \"2026-07-30T09:00:00Z\"\n",
         )
-        .unwrap();
+        ?;
         let store = TomlLedgerStore::new(tmp.path());
-        let err = store.load("2026-07-25").unwrap_err();
+        let err = store.load("2026-07-25").err().ok_or("expected error")?;
         assert!(matches!(err, LedgerError::OrphanResolution(_)));
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn missing_osf_link_file_is_excluded_with_warning() {
-        let tmp = TempDir::new().unwrap();
-        std::fs::create_dir_all(tmp.path().join("predictions")).unwrap();
+    fn missing_osf_link_file_is_excluded_with_warning() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new()?;
+        std::fs::create_dir_all(tmp.path().join("predictions"))?;
         std::fs::write(
             tmp.path()
                 .join("predictions")
                 .join("01J3B0Y5ZK2J6MGK8D7QW3N0P9.toml"),
             "prediction_id = \"01J3B0Y5ZK2J6MGK8D7QW3N0P9\"\ntitle = \"t\"\nstatement = \"s\"\npredicted_outcome = \"o\"\nconfidence = 0.5\nmade_at = \"2026-07-25T12:00:00Z\"\nresolve_by = \"2026-08-01\"\nosf_link = \"\"\n",
         )
-        .unwrap();
+        ?;
         let store = TomlLedgerStore::new(tmp.path());
-        let ledger = store.load("2026-07-25").unwrap();
+        let ledger = store.load("2026-07-25")?;
         assert!(ledger.entries().is_empty());
         assert_eq!(ledger.warnings().len(), 1);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn register_with_predictions_path_blocked_by_file() {
-        let tmp = TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("predictions"), "a file").unwrap();
+    fn register_with_predictions_path_blocked_by_file() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new()?;
+        std::fs::write(tmp.path().join("predictions"), "a file")?;
         let mut store = TomlLedgerStore::new(tmp.path());
         let err = store
             .register(contract::sample_new_prediction("2026-08-01"))
-            .unwrap_err();
+            .err()
+            .ok_or("expected error")?;
         assert!(matches!(err, LedgerError::Io(_)));
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn resolve_with_resolutions_path_blocked_by_file() {
-        let (mut store, tmp) = make_store();
-        let id = store
-            .register(contract::sample_new_prediction("2026-08-01"))
-            .unwrap();
-        std::fs::write(tmp.path().join("resolutions"), "a file").unwrap();
+    fn resolve_with_resolutions_path_blocked_by_file() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut store, tmp) = make_store()?;
+        let id = store.register(contract::sample_new_prediction("2026-08-01"))?;
+        std::fs::write(tmp.path().join("resolutions"), "a file")?;
         let err = store
-            .resolve(
-                LedgerOutcome::try_new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned())
-                    .unwrap(),
-            )
-            .unwrap_err();
+            .resolve(LedgerOutcome::try_new(
+                id,
+                true,
+                "2026-07-30T09:00:00Z".to_owned(),
+            )?)
+            .err()
+            .ok_or("expected error")?;
         assert!(matches!(err, LedgerError::Io(_)));
+        Ok(())
     }
 
     #[test]
-    fn resolve_write_failure_is_io_error() {
-        let (mut store, tmp) = make_store();
-        let id = store
-            .register(contract::sample_new_prediction("2026-08-01"))
-            .unwrap();
+    fn resolve_write_failure_is_io_error() -> Result<(), Box<dyn std::error::Error>> {
+        if running_as_root() {
+            return Ok(());
+        }
+        let (mut store, tmp) = make_store()?;
+        let id = store.register(contract::sample_new_prediction("2026-08-01"))?;
         // Make resolutions/ read-only so write_toml fails.
-        std::fs::create_dir_all(tmp.path().join("resolutions")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("resolutions"))?;
         std::fs::set_permissions(
             tmp.path().join("resolutions"),
             std::fs::Permissions::from_mode(0o444),
-        )
-        .unwrap();
+        )?;
         let err = store
-            .resolve(
-                LedgerOutcome::try_new(id.clone(), true, "2026-07-30T09:00:00Z".to_owned())
-                    .unwrap(),
-            )
-            .unwrap_err();
+            .resolve(LedgerOutcome::try_new(
+                id,
+                true,
+                "2026-07-30T09:00:00Z".to_owned(),
+            )?)
+            .err()
+            .ok_or("expected error")?;
         assert!(matches!(err, LedgerError::Io(_)));
         // Restore permissions so TempDir cleanup doesn't fail.
         std::fs::set_permissions(
             tmp.path().join("resolutions"),
             std::fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
+        )?;
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn register_write_failure_is_io_error() {
-        let tmp = TempDir::new().unwrap();
-        std::fs::create_dir_all(tmp.path().join("predictions")).unwrap();
+    fn register_write_failure_is_io_error() -> Result<(), Box<dyn std::error::Error>> {
+        if running_as_root() {
+            return Ok(());
+        }
+        let tmp = TempDir::new()?;
+        std::fs::create_dir_all(tmp.path().join("predictions"))?;
         std::fs::set_permissions(
             tmp.path().join("predictions"),
             std::fs::Permissions::from_mode(0o444),
-        )
-        .unwrap();
+        )?;
         let mut store = TomlLedgerStore::new(tmp.path());
         let err = store
             .register(contract::sample_new_prediction("2026-08-01"))
-            .unwrap_err();
+            .err()
+            .ok_or("expected error")?;
         assert!(matches!(err, LedgerError::Io(_)));
         std::fs::set_permissions(
             tmp.path().join("predictions"),
             std::fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
+        )?;
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn non_toml_files_are_ignored() {
-        let (mut store, tmp) = make_store();
-        store
-            .register(contract::sample_new_prediction("2026-08-01"))
-            .unwrap();
-        std::fs::write(tmp.path().join("predictions").join("README.md"), "hi").unwrap();
-        let ledger = store.load("2026-07-25").unwrap();
+    fn non_toml_files_are_ignored() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut store, tmp) = make_store()?;
+        store.register(contract::sample_new_prediction("2026-08-01"))?;
+        std::fs::write(tmp.path().join("predictions").join("README.md"), "hi")?;
+        let ledger = store.load("2026-07-25")?;
         assert_eq!(ledger.entries().len(), 1);
+        Ok(())
     }
 }

@@ -12,7 +12,6 @@
 //! between validation and creation remains a residual TOCTOU boundary. Callers
 //! should therefore choose a stable private directory. The final output
 //! component is still protected atomically by create-new semantics.
-
 use std::path::Path;
 
 use crate::CliError;
@@ -22,7 +21,7 @@ const NO_OUTPUT: &str = "no output was created; retry is safe";
 
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum FaultStage {
+pub enum FaultStage {
     ResolveRelative,
     InspectAncestor,
     OpenParent,
@@ -38,6 +37,7 @@ pub(crate) enum FaultStage {
 }
 
 #[cfg(all(test, unix))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod injected_fault {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
@@ -47,25 +47,37 @@ mod injected_fault {
     static PLAN: Mutex<Option<(PathBuf, Vec<FaultStage>)>> = Mutex::new(None);
 
     pub(super) fn install(path: &Path, stages: &[FaultStage]) {
-        *PLAN.lock().expect("keygen fault plan lock") = Some((path.to_path_buf(), stages.to_vec()));
+        let mut plan = PLAN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *plan = Some((path.to_path_buf(), stages.to_vec()));
     }
 
     pub(super) fn clear() {
-        *PLAN.lock().expect("keygen fault plan lock") = None;
+        let mut plan = PLAN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *plan = None;
     }
 
     pub(super) fn take(path: &Path, stage: FaultStage) -> bool {
-        let mut plan = PLAN.lock().expect("keygen fault plan lock");
+        let mut plan = PLAN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some((planned_path, stages)) = plan.as_mut() else {
+            drop(plan);
             return false;
         };
         if planned_path != path {
+            drop(plan);
             return false;
         }
         let Some(index) = stages.iter().position(|candidate| *candidate == stage) else {
+            drop(plan);
             return false;
         };
         stages.remove(index);
+        drop(plan);
         true
     }
 }
@@ -93,14 +105,14 @@ fn injected_fault_result(path: &Path, stage: FaultStage) -> std::io::Result<()> 
 
 #[cfg(all(test, unix))]
 macro_rules! fault {
-    ($path:expr, $stage:expr) => {
+    ($path:expr_2021, $stage:expr_2021) => {
         injected_fault_result($path, $stage)
     };
 }
 
 #[cfg(all(not(test), unix))]
 macro_rules! fault {
-    ($path:expr, $stage:expr) => {{
+    ($path:expr_2021, $stage:expr_2021) => {{
         let _ = ($path, $stage);
         Ok::<(), std::io::Error>(())
     }};
@@ -120,12 +132,12 @@ struct ValidatedOutput {
 /// attempts to remove the partial output and synchronize its containing
 /// directory; the error reports whether retry is safe or cleanup is uncertain.
 #[cfg(unix)]
-pub(crate) fn write_new_secret_key(out: &Path, key: &[u8]) -> Result<(), CliError> {
+pub fn write_new_secret_key(out: &Path, key: &[u8]) -> Result<(), CliError> {
     validate_output(out).and_then(|validated| create_and_persist(validated, key))
 }
 
 #[cfg(not(unix))]
-pub(crate) fn write_new_secret_key(out: &Path, _key: &[u8]) -> Result<(), CliError> {
+pub fn write_new_secret_key(out: &Path, _key: &[u8]) -> Result<(), CliError> {
     Err(CliError::UnsupportedKeyOutput {
         path: out.display().to_string(),
     })

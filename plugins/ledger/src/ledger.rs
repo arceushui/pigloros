@@ -212,76 +212,88 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn empty_ledger_has_no_scores() {
-        let ledger = Ledger::from_pairs(vec![], "2026-07-25").unwrap();
+    fn empty_ledger_has_no_scores() -> Result<(), Box<dyn std::error::Error>> {
+        let ledger = Ledger::from_pairs(vec![], "2026-07-25")?;
         assert!(ledger.entries().is_empty());
         assert!(ledger.warnings().is_empty());
         assert_eq!(ledger.n_pending(), 0);
         assert_eq!(ledger.n_overdue(), 0);
         assert_eq!(ledger.n_resolved(), 0);
         assert_eq!(ledger.mean_brier(), None);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn invalid_today_rejected() {
-        let err = Ledger::from_pairs(vec![], "25-07-2026").unwrap_err();
+    fn invalid_today_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let err = Ledger::from_pairs(vec![], "25-07-2026")
+            .err()
+            .ok_or("invalid today was accepted")?;
         assert!(matches!(err, LedgerError::InvalidToday(_)));
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn invalid_prediction_and_resolution_propagate() {
+    fn invalid_prediction_and_resolution_propagate() -> Result<(), Box<dyn std::error::Error>> {
         let mut bad = sample_prediction(ID1);
         bad.confidence = 2.0;
-        let err = Ledger::from_pairs(vec![(bad, None)], "2026-07-25").unwrap_err();
+        let err = Ledger::from_pairs(vec![(bad, None)], "2026-07-25")
+            .err()
+            .ok_or("invalid prediction was accepted")?;
         assert!(matches!(err, LedgerError::InvalidPrediction(_)));
 
         let good = sample_prediction(ID1);
         let bad_outcome = outcome("not-a-ulid", "2026-07-30T09:00:00Z", true);
-        let err = Ledger::from_pairs(vec![(good, Some(bad_outcome))], "2026-07-25").unwrap_err();
+        let err = Ledger::from_pairs(vec![(good, Some(bad_outcome))], "2026-07-25")
+            .err()
+            .ok_or("invalid resolution was accepted")?;
         assert!(matches!(err, LedgerError::InvalidResolution(_)));
 
         let good = sample_prediction(ID1);
         let mismatched = outcome(ID2, "2026-07-30T09:00:00Z", true);
-        let err = Ledger::from_pairs(vec![(good, Some(mismatched))], "2026-07-25").unwrap_err();
+        let err = Ledger::from_pairs(vec![(good, Some(mismatched))], "2026-07-25")
+            .err()
+            .ok_or("mismatched resolution was accepted")?;
         assert!(matches!(err, LedgerError::InvalidResolution(_)));
         assert!(err.to_string().contains("does not match"));
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn missing_osf_link_excluded_with_warning() {
+    fn missing_osf_link_excluded_with_warning() -> Result<(), Box<dyn std::error::Error>> {
         let mut unregistered = sample_prediction(ID1);
         unregistered.osf_link = " ".to_owned();
         let ledger = Ledger::from_pairs(
             vec![(unregistered, None), (sample_prediction(ID2), None)],
             "2026-07-25",
-        )
-        .unwrap();
+        )?;
         assert_eq!(ledger.entries().len(), 1);
         assert_eq!(ledger.entries()[0].prediction.prediction_id, ID2);
         assert_eq!(ledger.warnings().len(), 1);
         let warning = ledger.warnings()[0].to_string();
         assert!(warning.contains(ID1));
         assert!(warning.contains("osf_link"));
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn unsafe_osf_link_is_excluded_with_warning() {
+    fn unsafe_osf_link_is_excluded_with_warning() -> Result<(), Box<dyn std::error::Error>> {
         let mut unsafe_prediction = sample_prediction(ID1);
         unsafe_prediction.osf_link = "javascript:alert(1)".to_owned();
-        let ledger = Ledger::from_pairs(vec![(unsafe_prediction, None)], "2026-07-25").unwrap();
+        let ledger = Ledger::from_pairs(vec![(unsafe_prediction, None)], "2026-07-25")?;
 
         assert!(ledger.entries().is_empty());
         assert_eq!(ledger.warnings().len(), 1);
         assert!(ledger.warnings()[0].to_string().contains("unsafe osf_link"));
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn status_derivation() {
+    fn status_derivation() -> Result<(), Box<dyn std::error::Error>> {
         let mut pending = sample_prediction(ID1);
         pending.resolve_by = "2026-08-01".to_owned();
         let mut overdue = sample_prediction(ID2);
@@ -295,21 +307,21 @@ mod tests {
                 (resolved, Some(outcome(ID3, "2026-07-24T10:00:00Z", true))),
             ],
             "2026-07-25",
-        )
-        .unwrap();
+        )?;
         assert_eq!(ledger.n_pending(), 1);
         assert_eq!(ledger.n_overdue(), 1);
         assert_eq!(ledger.n_resolved(), 1);
         // resolve_by equal to today is NOT yet overdue.
         let mut due_today = sample_prediction(ID1);
         due_today.resolve_by = "2026-07-25".to_owned();
-        let ledger = Ledger::from_pairs(vec![(due_today, None)], "2026-07-25").unwrap();
+        let ledger = Ledger::from_pairs(vec![(due_today, None)], "2026-07-25")?;
         assert_eq!(ledger.n_pending(), 1);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn ordering_unresolved_first_then_resolved() {
+    fn ordering_unresolved_first_then_resolved() -> Result<(), Box<dyn std::error::Error>> {
         let mut later = sample_prediction(ID1);
         later.resolve_by = "2026-09-01".to_owned();
         let mut sooner = sample_prediction(ID2);
@@ -331,36 +343,36 @@ mod tests {
                 (sooner, None),
             ],
             "2026-07-25",
-        )
-        .unwrap();
+        )?;
         let ids: Vec<&str> = ledger
             .entries()
             .iter()
             .map(|e| e.prediction.prediction_id.as_str())
             .collect();
         assert_eq!(ids, vec![ID2, ID1, resolved_new_id, ID3]);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn ordering_tie_breaks_on_id() {
+    fn ordering_tie_breaks_on_id() -> Result<(), Box<dyn std::error::Error>> {
         let mut a = sample_prediction(ID1);
         a.resolve_by = "2026-08-01".to_owned();
         let mut b = sample_prediction(ID2);
         b.resolve_by = "2026-08-01".to_owned();
-        let ledger =
-            Ledger::from_pairs(vec![(b.clone(), None), (a.clone(), None)], "2026-07-25").unwrap();
+        let ledger = Ledger::from_pairs(vec![(b.clone(), None), (a.clone(), None)], "2026-07-25")?;
         assert_eq!(ledger.entries()[0].prediction.prediction_id, ID1);
 
         let ra = outcome(ID1, "2026-07-24T10:00:00Z", true);
         let rb = outcome(ID2, "2026-07-24T10:00:00Z", true);
-        let ledger = Ledger::from_pairs(vec![(b, Some(rb)), (a, Some(ra))], "2026-07-25").unwrap();
+        let ledger = Ledger::from_pairs(vec![(b, Some(rb)), (a, Some(ra))], "2026-07-25")?;
         assert_eq!(ledger.entries()[0].prediction.prediction_id, ID1);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn mean_brier_over_resolved_only() {
+    fn mean_brier_over_resolved_only() -> Result<(), Box<dyn std::error::Error>> {
         let p1 = sample_prediction(ID1); // confidence 0.8
         let p2 = sample_prediction(ID2);
         let ledger = Ledger::from_pairs(
@@ -370,9 +382,9 @@ mod tests {
                 (sample_prediction(ID3), None),                         // unscored
             ],
             "2026-07-25",
-        )
-        .unwrap();
-        let mean = ledger.mean_brier().unwrap();
+        )?;
+        let mean = ledger.mean_brier().ok_or("mean score missing")?;
         assert!((mean - 0.34).abs() < 1e-12);
+        Ok(())
     }
 }

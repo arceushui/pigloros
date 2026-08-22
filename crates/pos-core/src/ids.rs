@@ -30,7 +30,7 @@ fn gen_ulid() -> Ulid {
 }
 
 fn generated_or_fallback(generated: Result<Ulid, CoreError>) -> Ulid {
-    generated.unwrap_or_else(|_| Ulid::gen())
+    generated.unwrap_or_else(|_| Ulid::r#gen())
 }
 
 macro_rules! ulid_newtype {
@@ -103,8 +103,10 @@ ulid_newtype!(PluginId, "Identifies a registered plugin.");
 ulid_newtype!(RelationshipId, "Unique identifier for a relationship.");
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use proptest::{prop_assert, prop_assert_eq};
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -116,8 +118,9 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn try_new_produces_an_id() {
-        assert_ne!(EntityId::try_new().unwrap().inner(), Ulid::nil());
+    fn try_new_produces_an_id() -> Result<(), Box<dyn std::error::Error>> {
+        assert_ne!(EntityId::try_new()?.inner(), Ulid::nil());
+        Ok(())
     }
 
     #[test]
@@ -138,21 +141,23 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn id_serde_json_round_trip() {
+    fn id_serde_json_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let id = EventId::new();
-        let s = serde_json::to_string(&id).unwrap();
-        let back: EventId = serde_json::from_str(&s).unwrap();
+        let s = serde_json::to_string(&id)?;
+        let back: EventId = serde_json::from_str(&s)?;
         assert_eq!(id, back);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn id_serde_cbor_round_trip() {
+    fn id_serde_cbor_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let id = TimelineId::new();
         let mut buf = Vec::new();
-        ciborium::into_writer(&id, &mut buf).unwrap();
-        let back: TimelineId = ciborium::from_reader(buf.as_slice()).unwrap();
+        ciborium::into_writer(&id, &mut buf)?;
+        let back: TimelineId = ciborium::from_reader(buf.as_slice())?;
         assert_eq!(id, back);
+        Ok(())
     }
 
     #[test]
@@ -170,7 +175,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn id_from_ulid_round_trip() {
-        let ulid = Ulid::gen();
+        let ulid = Ulid::r#gen();
         let id = EntityId::from_ulid(ulid);
         assert_eq!(id.inner(), ulid);
     }
@@ -178,7 +183,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn id_display_is_ulid_string() {
-        let ulid = Ulid::gen();
+        let ulid = Ulid::r#gen();
         let id = EntityId::from_ulid(ulid);
         assert_eq!(id.to_string(), ulid.to_string());
     }
@@ -233,9 +238,19 @@ mod tests {
         fn ord_stable_after_serde(a: u128, b: u128) {
             let ia = EntityId::from_ulid(Ulid::from(a));
             let ib = EntityId::from_ulid(Ulid::from(b));
-            let ia2: EntityId = serde_json::from_str(&serde_json::to_string(&ia).unwrap()).unwrap();
-            let ib2: EntityId = serde_json::from_str(&serde_json::to_string(&ib).unwrap()).unwrap();
-            assert_eq!(ia.cmp(&ib), ia2.cmp(&ib2));
+            let ia_json = serde_json::to_string(&ia);
+            prop_assert!(ia_json.is_ok(), "EntityId JSON serialization failed");
+            let ib_json = serde_json::to_string(&ib);
+            prop_assert!(ib_json.is_ok(), "EntityId JSON serialization failed");
+            if let (Ok(ia_json), Ok(ib_json)) = (ia_json, ib_json) {
+                let ia2 = serde_json::from_str::<EntityId>(&ia_json);
+                let ib2 = serde_json::from_str::<EntityId>(&ib_json);
+                prop_assert!(ia2.is_ok(), "EntityId JSON deserialization failed");
+                prop_assert!(ib2.is_ok(), "EntityId JSON deserialization failed");
+                if let (Ok(ia2), Ok(ib2)) = (ia2, ib2) {
+                    prop_assert_eq!(ia.cmp(&ib), ia2.cmp(&ib2));
+                }
+            }
         }
     }
 }

@@ -61,6 +61,7 @@ impl ReproManifest {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::ids::TimelineId;
@@ -77,26 +78,27 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn manifest_json_round_trip() {
+    fn manifest_json_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let m = sample_manifest();
-        let back: ReproManifest =
-            serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        let back: ReproManifest = serde_json::from_str(&serde_json::to_string(&m)?)?;
         assert_eq!(m, back);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn manifest_cbor_round_trip() {
+    fn manifest_cbor_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let m = sample_manifest();
         let mut buf = Vec::new();
-        ciborium::into_writer(&m, &mut buf).unwrap();
-        let back: ReproManifest = ciborium::from_reader(buf.as_slice()).unwrap();
+        ciborium::into_writer(&m, &mut buf)?;
+        let back: ReproManifest = ciborium::from_reader(buf.as_slice())?;
         assert_eq!(m, back);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn adapter_record_json_round_trip() {
+    fn adapter_record_json_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let ar = AdapterRecord {
             plugin_id: PluginId::new(),
             call_index: 7,
@@ -104,14 +106,14 @@ mod tests {
             output_hash: Hash::from_bytes([3u8; 32]),
             wall_time: WallTime::from_micros(500),
         };
-        let back: AdapterRecord =
-            serde_json::from_str(&serde_json::to_string(&ar).unwrap()).unwrap();
+        let back: AdapterRecord = serde_json::from_str(&serde_json::to_string(&ar)?)?;
         assert_eq!(ar, back);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn manifest_with_adapter_records() {
+    fn manifest_with_adapter_records() -> Result<(), Box<dyn std::error::Error>> {
         let mut m = sample_manifest();
         m.adapter_records.push(AdapterRecord {
             plugin_id: PluginId::new(),
@@ -120,9 +122,9 @@ mod tests {
             output_hash: Hash::zero(),
             wall_time: WallTime::from_micros(0),
         });
-        let back: ReproManifest =
-            serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        let back: ReproManifest = serde_json::from_str(&serde_json::to_string(&m)?)?;
         assert_eq!(m.adapter_records.len(), back.adapter_records.len());
+        Ok(())
     }
 
     #[test]

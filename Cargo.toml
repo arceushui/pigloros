@@ -7,6 +7,8 @@ members = [
   "crates/pos-time",
   "crates/pos-query",
   "crates/pos-runtime",
+  "crates/pos-conformance",
+  "crates/pos-reference",
   "plugins/entities/rule-agent",
   "plugins/observations/synthetic",
   "plugins/eval",
@@ -56,6 +58,7 @@ thiserror = "2"
 
 # Ordered maps (insertion-order guaranteed)
 indexmap = "2"
+num-traits = "0.2"
 
 # SQLite
 rusqlite = { version = "0.36", features = ["bundled", "hooks", "functions"] }
@@ -85,8 +88,32 @@ lto = true
 codegen-units = 1
 
 [workspace.lints.rust]
+unsafe_code = "forbid"
+warnings = { level = "deny", priority = -2 }
+future_incompatible = { level = "deny", priority = -1 }
+rust_2024_compatibility = { level = "deny", priority = -1 }
 unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(coverage_nightly)",
   "cfg(coverage)",
 ] }
 unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = "deny"
+pedantic = "deny"
+nursery = "deny"
+
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+
+exit = "deny"
+mem_forget = "deny"
+let_underscore_must_use = "deny"

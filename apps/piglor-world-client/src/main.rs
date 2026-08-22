@@ -1,5 +1,14 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+#[cfg(all(feature = "runtime", not(target_arch = "wasm32")))]
+macro_rules! output_stderr {
+    ($($arg:tt)*) => {{
+        let mut output = std::io::stderr().lock();
+        drop(std::io::Write::write_fmt(&mut output, format_args!($($arg)*)));
+        drop(std::io::Write::write_all(&mut output, b"\n"));
+    }};
+}
+
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(all(feature = "runtime", not(target_arch = "wasm32"), not(test)))]
 #[rustfmt::skip]
@@ -12,7 +21,7 @@ fn run_main(run: impl FnOnce() -> Result<(), piglor_world_client::ClientError>) 
     match run() {
         Ok(()) => 0,
         Err(error) => {
-            eprintln!("{error}");
+            output_stderr!("{error}");
             1
         }
     }

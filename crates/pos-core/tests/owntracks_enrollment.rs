@@ -4,7 +4,7 @@ use pos_core::{
 };
 
 #[test]
-fn absent_enrollment_pairs_once_and_advances_the_epoch() {
+fn absent_enrollment_pairs_once_and_advances_the_epoch() -> Result<(), Box<dyn std::error::Error>> {
     let state = OwnTracksEnrollmentStateV1::absent();
     let request = OwnTracksEnrollmentRequestV1::new(
         pos_core::TimelineId::new(),
@@ -13,32 +13,32 @@ fn absent_enrollment_pairs_once_and_advances_the_epoch() {
         [9; 32],
     );
 
-    let active = state.pair(&request).expect("absent enrollment pairs");
+    let active = state.pair(&request)?;
 
     assert_eq!(active.status(), OwnTracksEnrollmentStatusV1::Active);
     assert_eq!(active.admission_epoch(), 4);
     assert!(active.has_pairing_verifier());
+    Ok(())
 }
 
 #[test]
-fn rotate_replaces_the_verifier_and_revoke_removes_it() {
-    let state = OwnTracksEnrollmentStateV1::absent()
-        .pair(&OwnTracksEnrollmentRequestV1::new(
-            pos_core::TimelineId::new(),
-            pos_core::EntityId::new(),
-            GeoLocationAdmissionFenceV1::new(1, ([7; 32], 2, [8; 32]), (1, false, 3)),
-            [9; 32],
-        ))
-        .unwrap();
+fn rotate_replaces_the_verifier_and_revoke_removes_it() -> Result<(), Box<dyn std::error::Error>> {
+    let state = OwnTracksEnrollmentStateV1::absent().pair(&OwnTracksEnrollmentRequestV1::new(
+        pos_core::TimelineId::new(),
+        pos_core::EntityId::new(),
+        GeoLocationAdmissionFenceV1::new(1, ([7; 32], 2, [8; 32]), (1, false, 3)),
+        [9; 32],
+    ))?;
 
-    let rotated = state.rotate([10; 32]).expect("active enrollment rotates");
+    let rotated = state.rotate([10; 32])?;
     assert!(rotated.has_pairing_verifier());
     assert_eq!(rotated.admission_epoch(), 5);
 
-    let revoked = rotated.revoke().expect("active enrollment revokes");
+    let revoked = rotated.revoke()?;
     assert_eq!(revoked.status(), OwnTracksEnrollmentStatusV1::Revoked);
     assert!(!revoked.has_pairing_verifier());
     assert_eq!(revoked.admission_epoch(), 6);
+    Ok(())
 }
 
 #[test]
@@ -54,13 +54,12 @@ fn withdrawn_consent_cannot_pair_an_enrollment() {
 }
 
 #[test]
-fn absent_enrollment_persistence_round_trips_and_garbage_is_rejected() {
+fn absent_enrollment_persistence_round_trips_and_garbage_is_rejected(
+) -> Result<(), Box<dyn std::error::Error>> {
     let absent = OwnTracksEnrollmentStateV1::absent();
-    let bytes = absent
-        .persistence_bytes()
-        .expect("encode absent enrollment");
-    let restored = OwnTracksEnrollmentStateV1::from_persistence_bytes(&bytes)
-        .expect("decode absent enrollment");
+    let bytes = absent.persistence_bytes()?;
+    let restored = OwnTracksEnrollmentStateV1::from_persistence_bytes(&bytes)?;
     assert_eq!(restored.status(), OwnTracksEnrollmentStatusV1::Absent);
     assert!(OwnTracksEnrollmentStateV1::from_persistence_bytes(&[0xff]).is_err());
+    Ok(())
 }

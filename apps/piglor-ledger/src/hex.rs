@@ -34,25 +34,32 @@ pub fn nib(c: char) -> Result<u8, String> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::test_helpers::TestResultExt;
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn round_trip_lowercase() {
+    fn round_trip_lowercase() -> Result<(), Box<dyn std::error::Error>> {
         let bytes = [0x00, 0xab, 0xff];
         let hex = "00abff";
-        assert_eq!(hex_decode(hex).unwrap(), bytes);
+        assert_eq!(hex_decode(hex).test_ok()?, bytes);
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn round_trip_uppercase() {
-        assert_eq!(hex_decode("00ABFF").unwrap(), [0x00, 0xab, 0xff]);
+    fn round_trip_uppercase() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(hex_decode("00ABFF").test_ok()?, [0x00, 0xab, 0xff]);
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn round_trip_mixed_case() {
-        assert_eq!(hex_decode("aAbB").unwrap(), [0xaa, 0xbb]);
+    fn round_trip_mixed_case() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(hex_decode("aAbB").test_ok()?, [0xaa, 0xbb]);
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -70,12 +77,14 @@ mod tests {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn nib_covers_all_ranges() {
-        assert_eq!(nib('0').unwrap(), 0);
-        assert_eq!(nib('9').unwrap(), 9);
-        assert_eq!(nib('a').unwrap(), 10);
-        assert_eq!(nib('f').unwrap(), 15);
-        assert_eq!(nib('A').unwrap(), 10);
-        assert_eq!(nib('F').unwrap(), 15);
+    fn nib_covers_all_ranges() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(nib('0').test_ok()?, 0);
+        assert_eq!(nib('9').test_ok()?, 9);
+        assert_eq!(nib('a').test_ok()?, 10);
+        assert_eq!(nib('f').test_ok()?, 15);
+        assert_eq!(nib('A').test_ok()?, 10);
+        assert_eq!(nib('F').test_ok()?, 15);
+
+        Ok(())
     }
 }

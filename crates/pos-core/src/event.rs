@@ -42,11 +42,11 @@ mod serde_bytes_wrapper {
     use bytes::Bytes;
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub(crate) fn serialize<S: Serializer>(b: &Bytes, s: S) -> Result<S::Ok, S::Error> {
+    pub(super) fn serialize<S: Serializer>(b: &Bytes, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_bytes(b)
     }
 
-    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Bytes, D::Error> {
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Bytes, D::Error> {
         let v = serde_bytes::ByteBuf::deserialize(d)?;
         Ok(Bytes::from(v.into_vec()))
     }
@@ -166,7 +166,7 @@ pub struct EventDraft {
 }
 
 impl EventDraft {
-    pub fn new(entity: EntityId, event_type: Kind, payload: CanonicalBytes) -> Self {
+    pub const fn new(entity: EntityId, event_type: Kind, payload: CanonicalBytes) -> Self {
         Self {
             entity,
             event_type,
@@ -183,13 +183,14 @@ impl EventDraft {
     /// Use during deterministic replay to re-inject the original timestamp so that
     /// re-appended events are bit-identical to the originals.
     #[must_use]
-    pub fn with_wall_time(mut self, t: WallTime) -> Self {
+    pub const fn with_wall_time(mut self, t: WallTime) -> Self {
         self.wall_time = Some(t);
         self
     }
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::ids::EventId;
@@ -212,59 +213,64 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn event_json_round_trip() {
+    fn event_json_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let e = sample_event();
-        let s = serde_json::to_string(&e).unwrap();
-        let back: Event = serde_json::from_str(&s).unwrap();
+        let s = serde_json::to_string(&e)?;
+        let back: Event = serde_json::from_str(&s)?;
         assert_eq!(e, back);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn event_cbor_round_trip() {
+    fn event_cbor_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let e = sample_event();
         let mut buf = Vec::new();
-        ciborium::into_writer(&e, &mut buf).unwrap();
-        let back: Event = ciborium::from_reader(buf.as_slice()).unwrap();
+        ciborium::into_writer(&e, &mut buf)?;
+        let back: Event = ciborium::from_reader(buf.as_slice())?;
         assert_eq!(e, back);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn event_draft_cbor_round_trip() {
+    fn event_draft_cbor_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let d = EventDraft::new(
             EntityId::new(),
             Kind::new("agent.decision"),
             CanonicalBytes::from_vec(vec![1, 2, 3]),
         );
         let mut buf = Vec::new();
-        ciborium::into_writer(&d, &mut buf).unwrap();
-        let back: EventDraft = ciborium::from_reader(buf.as_slice()).unwrap();
+        ciborium::into_writer(&d, &mut buf)?;
+        let back: EventDraft = ciborium::from_reader(buf.as_slice())?;
         assert_eq!(d, back);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn canonical_bytes_payload_is_opaque() {
+    fn canonical_bytes_payload_is_opaque() -> Result<(), Box<dyn std::error::Error>> {
         // Kernel round-trips arbitrary bytes unchanged — no interpretation.
         let raw = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xFF, 0x00, 0x01];
         let cb = CanonicalBytes::from_vec(raw.clone());
         let mut buf = Vec::new();
-        ciborium::into_writer(&cb, &mut buf).unwrap();
-        let back: CanonicalBytes = ciborium::from_reader(buf.as_slice()).unwrap();
+        ciborium::into_writer(&cb, &mut buf)?;
+        let back: CanonicalBytes = ciborium::from_reader(buf.as_slice())?;
         assert_eq!(cb.as_slice(), back.as_slice());
         assert_eq!(back.as_slice(), &raw[..]);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn canonical_bytes_empty_round_trip() {
+    fn canonical_bytes_empty_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let cb = CanonicalBytes::from_vec(vec![]);
         assert!(cb.is_empty());
         let mut buf = Vec::new();
-        ciborium::into_writer(&cb, &mut buf).unwrap();
-        let back: CanonicalBytes = ciborium::from_reader(buf.as_slice()).unwrap();
+        ciborium::into_writer(&cb, &mut buf)?;
+        let back: CanonicalBytes = ciborium::from_reader(buf.as_slice())?;
         assert!(back.is_empty());
+        Ok(())
     }
 
     #[test]
@@ -285,46 +291,50 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn kind_json_round_trip() {
+    fn kind_json_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let k = Kind::new("agent.decision");
-        let back: Kind = serde_json::from_str(&serde_json::to_string(&k).unwrap()).unwrap();
+        let back: Kind = serde_json::from_str(&serde_json::to_string(&k)?)?;
         assert_eq!(k, back);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn schema_version_is_v1_only() {
+    fn schema_version_is_v1_only() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(SchemaVersion::V1.as_u32(), 1);
-        assert_eq!(serde_json::to_string(&SchemaVersion::V1).unwrap(), "1");
+        assert_eq!(serde_json::to_string(&SchemaVersion::V1)?, "1");
         assert_eq!(
-            serde_json::from_str::<SchemaVersion>("1").unwrap(),
+            serde_json::from_str::<SchemaVersion>("1")?,
             SchemaVersion::V1
         );
         assert!(serde_json::from_str::<SchemaVersion>("2").is_err());
         let mut cbor = Vec::new();
-        ciborium::into_writer(&2_u8, &mut cbor).unwrap();
+        ciborium::into_writer(&2_u8, &mut cbor)?;
         assert!(ciborium::from_reader::<SchemaVersion, _>(cbor.as_slice()).is_err());
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn determinism_serde() {
+    fn determinism_serde() -> Result<(), Box<dyn std::error::Error>> {
         let d = Determinism::Recorded;
-        let back: Determinism = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        let back: Determinism = serde_json::from_str(&serde_json::to_string(&d)?)?;
         assert_eq!(d, back);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn run_mode_serde() {
+    fn run_mode_serde() -> Result<(), Box<dyn std::error::Error>> {
         let m = RunMode::Replay;
-        let back: RunMode = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        let back: RunMode = serde_json::from_str(&serde_json::to_string(&m)?)?;
         assert_eq!(m, back);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn event_with_all_optional_fields_round_trip() {
+    fn event_with_all_optional_fields_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let e = Event {
             id: EventId::new(),
             entity: EntityId::new(),
@@ -338,9 +348,10 @@ mod tests {
             signature: None,
             payload_hash: Hash::from_bytes([255u8; 32]),
         };
-        let s = serde_json::to_string(&e).unwrap();
-        let back: Event = serde_json::from_str(&s).unwrap();
+        let s = serde_json::to_string(&e)?;
+        let back: Event = serde_json::from_str(&s)?;
         assert_eq!(e, back);
+        Ok(())
     }
 
     #[test]
@@ -386,16 +397,16 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn event_draft_json_decode_rejects_bad_payload() {
+    fn event_draft_json_decode_rejects_bad_payload() -> Result<(), Box<dyn std::error::Error>> {
         let draft = EventDraft::new(
             EntityId::new(),
             Kind::new("test"),
             CanonicalBytes::from_vec(vec![1, 2, 3]),
         );
-        let mut value: serde_json::Value =
-            serde_json::from_str(&serde_json::to_string(&draft).unwrap()).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&serde_json::to_string(&draft)?)?;
         value["payload"] = serde_json::json!(42);
         let result: Result<EventDraft, _> = serde_json::from_value(value);
         assert!(result.is_err());
+        Ok(())
     }
 }

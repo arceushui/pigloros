@@ -30,7 +30,7 @@ pub struct GeoLocationAdmissionInputV1 {
 impl GeoLocationAdmissionInputV1 {
     /// Create the bounded input captured by the gateway before storage begins.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         timeline: TimelineId,
         entity: EntityId,
         payload: CanonicalBytes,
@@ -122,7 +122,7 @@ pub struct GeoLocationAdmissionFenceV1 {
 impl GeoLocationAdmissionFenceV1 {
     /// Create current core-owned state for a trusted composition root.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         binding_revision: u64,
         consent: ([u8; 32], u64, [u8; 32]),
         policy: (u32, bool, u64),
@@ -184,7 +184,7 @@ impl GeoLocationAdmissionSnapshotV1 {
 
     fn deterministic_cbor(&self) -> CanonicalBytes {
         let mut bytes = Vec::new();
-        ciborium::into_writer(
+        let result = ciborium::into_writer(
             &(
                 self.timeline,
                 self.entity,
@@ -197,8 +197,11 @@ impl GeoLocationAdmissionSnapshotV1 {
                 self.consent.admission_epoch,
             ),
             &mut bytes,
-        )
-        .expect("writing deterministic CBOR to a Vec cannot fail");
+        );
+        assert!(
+            result.is_ok(),
+            "writing deterministic CBOR to a Vec cannot fail"
+        );
         CanonicalBytes::from_vec(bytes)
     }
 
@@ -612,7 +615,7 @@ impl GeoLocationAdmissionOutcome {
     }
 
     #[must_use]
-    pub fn error(&self) -> Option<CoreError> {
+    pub const fn error(&self) -> Option<CoreError> {
         match self.kind {
             GeoLocationAdmissionOutcomeKind::Accepted
             | GeoLocationAdmissionOutcomeKind::Duplicate
@@ -628,6 +631,7 @@ impl GeoLocationAdmissionOutcome {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::{EntityId, EventId, Seq, TimelineId};
@@ -744,30 +748,36 @@ mod tests {
     }
 
     #[test]
-    fn canonical_snapshot_round_trip_retains_identity_and_consent_state() {
+    fn canonical_snapshot_round_trip_retains_identity_and_consent_state(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let request = GeoLocationAdmissionRequestV1::from_input(input(TimelineId::new()));
         let snapshot = request.snapshot();
-        let decoded =
-            GeoLocationAdmissionSnapshotV1::from_deterministic_cbor(&snapshot.deterministic_cbor())
-                .unwrap();
+        let decoded = GeoLocationAdmissionSnapshotV1::from_deterministic_cbor(
+            &snapshot.deterministic_cbor(),
+        )?;
 
         assert_eq!(decoded, *snapshot);
+        Ok(())
     }
 
     #[test]
-    fn canonical_snapshot_decode_rejects_malformed_bytes() {
+    fn canonical_snapshot_decode_rejects_malformed_bytes() -> Result<(), Box<dyn std::error::Error>>
+    {
         let result = GeoLocationAdmissionSnapshotV1::from_deterministic_cbor(
             &CanonicalBytes::from_static(b"not-canonical-cbor"),
         );
 
         assert!(result
-            .unwrap_err()
+            .err()
+            .ok_or("expected error")?
             .to_string()
             .contains("serialization error"));
+        Ok(())
     }
 
     #[test]
-    fn owner_keyed_retry_classification_distinguishes_duplicate_conflict_and_unknown() {
+    fn owner_keyed_retry_classification_distinguishes_duplicate_conflict_and_unknown(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let timeline = TimelineId::new();
         let request = request(timeline);
         let event_id = EventId::new();
@@ -800,7 +810,7 @@ mod tests {
         assert!(unavailable.is_unavailable());
         assert!(unavailable
             .error()
-            .expect("unavailable outcome has an explicit error category")
+            .ok_or("unavailable outcome has no error")?
             .to_string()
             .contains("unavailable"));
         assert_eq!(unavailable.event_id(), None);
@@ -809,22 +819,29 @@ mod tests {
         assert!(unknown.is_outcome_unknown());
         assert!(unknown
             .error()
-            .expect("unknown outcome has an explicit error category")
+            .ok_or("unknown outcome has no error")?
             .to_string()
             .contains("outcome unknown"));
         assert_eq!(unknown.event_id(), None);
+        Ok(())
     }
 
     #[test]
     fn cover_permits_short_circuit_branches() {
         let timeline = TimelineId::new();
         let req = request(timeline);
-        let _ =
-            GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 0)).permits(&req);
-        let _ =
-            GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, true, 9)).permits(&req);
-        let _ = GeoLocationAdmissionFenceV1::new(99, ([1; 32], 8, [2; 32]), (1, false, 9))
-            .permits(&req);
+        assert!(
+            !GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 0),)
+                .permits(&req)
+        );
+        assert!(
+            !GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, true, 9),)
+                .permits(&req)
+        );
+        assert!(
+            !GeoLocationAdmissionFenceV1::new(99, ([1; 32], 8, [2; 32]), (1, false, 9),)
+                .permits(&req)
+        );
     }
 
     #[test]
@@ -836,6 +853,16 @@ mod tests {
         let event_seq = Seq::from_u64(1);
         let link =
             GeoLocationAdmissionLinkV1::for_snapshot(timeline, event_id, event_seq, &snapshot);
-        let _ = link.validate_for(&snapshot, timeline, EventId::new(), event_seq);
+        assert!(link
+            .validate_for(&snapshot, timeline, EventId::new(), event_seq)
+            .is_err());
+    }
+
+    #[test]
+    fn snapshot_exposes_its_immutable_consent() {
+        let admission_request = request(TimelineId::new());
+        let snapshot = admission_request.snapshot();
+        assert_eq!(snapshot.consent().policy_version(), 1);
+        assert_eq!(snapshot.consent().admission_epoch(), 9);
     }
 }

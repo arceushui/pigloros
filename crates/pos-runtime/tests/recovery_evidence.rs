@@ -14,6 +14,41 @@ use std::{
     time::Duration,
 };
 
+trait TestValueExt<T> {
+    fn test_ok(self) -> T;
+}
+
+impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+    fn test_ok(self) -> T {
+        self.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "unexpected runtime fixture error: {error:?}"
+            )))
+        })
+    }
+}
+
+impl<T> TestValueExt<T> for Option<T> {
+    fn test_ok(self) -> T {
+        self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing runtime fixture value")))
+    }
+}
+
+trait TestErrorExt<T, E> {
+    fn test_err(self) -> E;
+}
+
+impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
+    fn test_err(self) -> E {
+        match self {
+            Ok(value) => std::panic::resume_unwind(Box::new(format!(
+                "unexpected successful runtime fixture value: {value:?}"
+            ))),
+            Err(error) => error,
+        }
+    }
+}
+
 fn event(seq: u64, entity: EntityId, event_type: &str, payload: Vec<u8>) -> Event {
     Event {
         id: EventId::new(),
@@ -26,7 +61,7 @@ fn event(seq: u64, entity: EntityId, event_type: &str, payload: Vec<u8>) -> Even
         correlation_id: None,
         schema_version: SchemaVersion::V1,
         signature: None,
-        payload_hash: Hash::from_bytes([u8::try_from(seq).expect("fixture sequence fits u8"); 32]),
+        payload_hash: Hash::from_bytes([u8::try_from(seq).test_ok(); 32]),
     }
 }
 
@@ -88,12 +123,12 @@ impl Driver for InspectingRecoveryDriver {
             .events()
             .iter()
             .map(|event| {
-                let _ = event.header().seq();
+                let sequence = event.header().seq();
+                assert_eq!(sequence, event.header().seq());
                 event.payload().map(|payload| payload.as_slice().to_vec())
             })
             .collect();
-        *self.observed.lock().expect("fixture lock") =
-            Some((evidence.timeline_segments().to_vec(), payloads));
+        *self.observed.lock().test_ok() = Some((evidence.timeline_segments().to_vec(), payloads));
         Ok(())
     }
 }
@@ -137,9 +172,9 @@ fn recovery_evidence_exposes_all_headers_only_selected_payloads_and_is_atomic() 
         selected_entity: selected,
         observed: Arc::clone(&observed),
     }));
-    registry.restore_driver_state(&segments, &events).unwrap();
+    registry.restore_driver_state(&segments, &events).test_ok();
 
-    let (actual_segments, payloads) = observed.lock().expect("fixture lock").take().unwrap();
+    let (actual_segments, payloads) = observed.lock().test_ok().take().test_ok();
     assert_eq!(actual_segments, segments);
     assert_eq!(actual_segments[0].timeline_id(), timeline);
     assert_eq!(actual_segments[0].through(), Seq::from_u64(2));
@@ -166,15 +201,13 @@ fn registry_rejects_incomplete_recovery_before_any_driver_is_staged() {
         event(1, EntityId::new(), "selected", vec![1]),
         event(3, EntityId::new(), "selected", vec![3]),
     ];
-    let error = registry
-        .restore_driver_state(&segments, &events)
-        .unwrap_err();
+    let error = registry.restore_driver_state(&segments, &events).test_err();
 
     assert!(matches!(
         error,
         RuntimeError::InvalidRecoveryEvidence { .. }
     ));
-    assert!(observed.lock().unwrap().is_none());
+    assert!(observed.lock().test_ok().is_none());
 }
 
 #[test]
@@ -233,12 +266,12 @@ fn recovery_ignores_driverless_plugins_and_rejects_pending_transactions() {
     let plugin = MetadataOnlyPlugin {
         id: PluginId::new(),
     };
-    driverless.register(&plugin, None, None).unwrap();
-    driverless.restore_driver_state(&segments, &[]).unwrap();
+    driverless.register(&plugin, None, None).test_ok();
+    driverless.restore_driver_state(&segments, &[]).test_ok();
 
     let mut pending = PluginRegistry::new();
     pending.register_driver(Box::new(DefaultRecoveryDriver));
-    pending.step_all_anchored(timeline, Seq::ZERO).unwrap();
+    pending.step_all_anchored(timeline, Seq::ZERO).test_ok();
     assert!(matches!(
         pending.restore_driver_state(&segments, &[]),
         Err(RuntimeError::PendingDriverStep)
@@ -253,9 +286,9 @@ fn scheduler_skips_metadata_only_plugins_and_rejects_cadence_overflow() {
     let plugin = MetadataOnlyPlugin {
         id: PluginId::new(),
     };
-    registry.register(&plugin, None, None).unwrap();
+    registry.register(&plugin, None, None).test_ok();
     registry.register_driver(Box::new(DefaultRecoveryDriver));
-    registry.step_all_anchored(timeline, Seq::ZERO).unwrap();
+    registry.step_all_anchored(timeline, Seq::ZERO).test_ok();
     registry.commit_step();
     registry.commit_step();
 
@@ -265,7 +298,7 @@ fn scheduler_skips_metadata_only_plugins_and_rejects_cadence_overflow() {
     }));
     cadenced
         .tick_cadenced_anchored(timeline, u128::MAX, Seq::ZERO)
-        .unwrap();
+        .test_ok();
     cadenced.commit_step();
     assert!(matches!(
         cadenced.tick_cadenced_anchored(timeline, u128::MAX, Seq::ZERO),

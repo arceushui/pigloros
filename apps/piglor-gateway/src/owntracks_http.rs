@@ -3,7 +3,7 @@
 use crate::{Gateway, GatewayError, OwnTracksIngressResult};
 use axum::{
     body::{to_bytes, Body},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
 use pos_core::{CanonicalBytes, CoreError};
@@ -35,16 +35,20 @@ pub(crate) async fn post_owntracks(gateway: Gateway, headers: HeaderMap, body: B
             return error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_location");
         }
     };
-    match gateway
+    drop(bytes);
+    let result = gateway
         .admit_owntracks_ingress(handle, secret, payload)
-        .await
-    {
+        .await;
+    owntracks_response(&result)
+}
+
+fn owntracks_response(result: &Result<OwnTracksIngressResult, GatewayError>) -> Response {
+    match result {
         Ok(OwnTracksIngressResult::RateLimited) => {
             let mut response = error(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
-            response.headers_mut().insert(
-                header::RETRY_AFTER,
-                "1".parse().expect("static Retry-After value"),
-            );
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
             response
         }
         Ok(OwnTracksIngressResult::Accepted | OwnTracksIngressResult::Duplicate) => {
@@ -78,7 +82,7 @@ fn basic_credentials(headers: &HeaderMap) -> Option<([u8; 32], [u8; 32])> {
     let decoded = decode_base64(encoded)?;
     let separator = decoded.iter().position(|byte| *byte == b':')?;
     let (handle, secret_with_separator) = decoded.split_at(separator);
-    let secret = secret_with_separator.get(1..)?;
+    let secret = &secret_with_separator[1..];
     Some((decode_hex_32(handle)?, decode_hex_32(secret)?))
 }
 
@@ -114,7 +118,9 @@ fn minimize_location(bytes: &[u8]) -> Result<CanonicalBytes, LocationDecodeError
     let cell = V1SpatialCloaker::new().cloak(point);
     let metadata =
         CompactLocationMetadata::v1(SourceTimeBucket::new(source_time.div_euclid(15 * 60)));
-    Ok(CompactLocationObservation::new(cell, metadata).canonical_bytes())
+    CompactLocationObservation::new(cell, metadata)
+        .canonical_bytes()
+        .map_err(|_| LocationDecodeError::InvalidLocation)
 }
 
 fn decode_hex_32(value: &[u8]) -> Option<[u8; 32]> {
@@ -128,7 +134,7 @@ fn decode_hex_32(value: &[u8]) -> Option<[u8; 32]> {
     Some(decoded)
 }
 
-fn hex_nibble(value: u8) -> Option<u8> {
+const fn hex_nibble(value: u8) -> Option<u8> {
     match value {
         b'0'..=b'9' => Some(value - b'0'),
         b'a'..=b'f' => Some(value - b'a' + 10),
@@ -170,7 +176,7 @@ fn decode_base64(value: &str) -> Option<Vec<u8>> {
     Some(decoded)
 }
 
-fn base64_value(value: u8) -> Option<u8> {
+const fn base64_value(value: u8) -> Option<u8> {
     match value {
         b'A'..=b'Z' => Some(value - b'A'),
         b'a'..=b'z' => Some(value - b'a' + 26),
@@ -188,22 +194,33 @@ fn error(status: StatusCode, code: &'static str) -> Response {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::{basic_credentials, minimize_location, post_owntracks};
-    use crate::Gateway;
+    trait TestResultExt<T> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error + Send + Sync>>;
+    }
+
+    impl<T, E: std::fmt::Debug> TestResultExt<T> for Result<T, E> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
+            self.map_err(|error| format!("unexpected error: {error:?}").into())
+        }
+    }
+
+    use super::{basic_credentials, minimize_location, owntracks_response, post_owntracks};
+    use crate::{Gateway, GatewayError, OwnTracksIngressResult};
     use axum::{
         body::{to_bytes, Body},
         http::{header, HeaderMap, HeaderValue, StatusCode},
     };
     use pos_core::{
-        EntityId, EventStore, GeoLocationAdmissionFenceV1, OwnTracksEnrollmentRequestV1,
+        CoreError, EntityId, EventStore, GeoLocationAdmissionFenceV1, OwnTracksEnrollmentRequestV1,
         OwnTracksEnrollmentStore,
     };
     use pos_store::{memory::MemoryStore, open_store, StoreConfig};
     use tokio::sync::mpsc;
 
     #[test]
-    fn basic_credentials_reject_malformed_values() {
+    fn basic_credentials_reject_malformed_values() -> Result<(), Box<dyn std::error::Error>> {
         let mut headers = HeaderMap::new();
+        assert_eq!(basic_credentials(&headers), None);
         headers.insert(
             header::AUTHORIZATION,
             HeaderValue::from_static(
@@ -216,17 +233,41 @@ mod tests {
             HeaderValue::from_static("Basic not-base64"),
         );
         assert_eq!(basic_credentials(&headers), None);
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer YWJj"),
+        );
+        assert_eq!(basic_credentials(&headers), None);
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Basic YWJj"),
+        );
+        assert_eq!(basic_credentials(&headers), None);
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Basic OmJi"),
+        );
+        assert_eq!(basic_credentials(&headers), None);
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_bytes(b"Basic \xff")?,
+        );
+        assert_eq!(basic_credentials(&headers), None);
+        Ok(())
     }
 
     #[test]
-    fn basic_credentials_accept_pairing_hex() {
+    fn basic_credentials_accept_pairing_hex() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    {
         let credential = format!("{}:{}", "0".repeat(64), "1".repeat(64));
         let mut headers = HeaderMap::new();
         headers.insert(
             header::AUTHORIZATION,
-            HeaderValue::from_str(&format!("Basic {}", base64_encode(&credential))).unwrap(),
+            HeaderValue::from_str(&format!("Basic {}", base64_encode(&credential))).test_ok()?,
         );
         assert_eq!(basic_credentials(&headers), Some(([0; 32], [17; 32])));
+
+        Ok(())
     }
 
     fn base64_encode(value: &str) -> String {
@@ -255,22 +296,24 @@ mod tests {
         encoded
     }
 
-    fn authenticated_headers(content_type: &'static str) -> HeaderMap {
+    fn authenticated_headers(
+        content_type: &'static str,
+    ) -> Result<HeaderMap, Box<dyn std::error::Error + Send + Sync>> {
         let credential = format!("{}:{}", "0".repeat(64), "1".repeat(64));
         let mut headers = HeaderMap::new();
         headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
         headers.insert(
             header::AUTHORIZATION,
-            HeaderValue::from_str(&format!("Basic {}", base64_encode(&credential))).unwrap(),
+            HeaderValue::from_str(&format!("Basic {}", base64_encode(&credential))).test_ok()?,
         );
-        headers
+        Ok(headers)
     }
 
     fn location_body() -> Body {
         Body::from(&br#"{"_type":"location","lat":37.7749,"lon":-122.4194,"tst":1}"#[..])
     }
 
-    fn enrolled_store() -> MemoryStore {
+    fn enrolled_store() -> Result<MemoryStore, Box<dyn std::error::Error + Send + Sync>> {
         const OWNER_KEY: [u8; 32] = [7; 32];
         let handle = [0; 32];
         let secret = [17; 32];
@@ -279,7 +322,7 @@ mod tests {
         material.extend_from_slice(&handle);
         material.extend_from_slice(&secret);
         let mut store = MemoryStore::new();
-        let timeline = store.create_timeline("owntracks-http-test").unwrap();
+        let timeline = store.create_timeline("owntracks-http-test").test_ok()?;
         store
             .pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
                 timeline.id(),
@@ -287,24 +330,36 @@ mod tests {
                 GeoLocationAdmissionFenceV1::new(1, ([1; 32], 2, [2; 32]), (1, false, 3)),
                 *blake3::keyed_hash(&OWNER_KEY, &material).as_bytes(),
             ))
-            .unwrap();
-        store
+            .test_ok()?;
+        Ok(store)
     }
 
     #[test]
-    fn minimization_discards_extra_telemetry_and_rejects_invalid_locations() {
+    fn minimization_discards_extra_telemetry_and_rejects_invalid_locations(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let first = minimize_location(
             br#"{"_type":"location","lat":37.7749,"lon":-122.4194,"tst":1,"acc":2,"tid":"x"}"#,
         )
-        .unwrap();
+        .test_ok()?;
         let second = minimize_location(
             br#"{"_type":"location","lat":37.7749,"lon":-122.4194,"tst":901,"acc":2,"tid":"x"}"#,
         )
-        .unwrap();
+        .test_ok()?;
         assert_ne!(first, second);
         assert!(minimize_location(br#"{"_type":"waypoint","lat":0,"lon":0,"tst":1}"#).is_err());
         assert!(minimize_location(br#"{"_type":"location","lat":91,"lon":0,"tst":1}"#).is_err());
         assert!(minimize_location(br#"{"_type":"location","lat":0,"lon":0,"tst":1.5}"#).is_err());
+        for missing in [
+            br"{}".as_slice(),
+            br"[]".as_slice(),
+            br#"{"_type":"location","lon":0,"tst":1}"#.as_slice(),
+            br#"{"_type":"location","lat":0,"tst":1}"#.as_slice(),
+            br#"{"_type":"location","lat":0,"lon":0}"#.as_slice(),
+        ] {
+            assert!(minimize_location(missing).is_err());
+        }
+
+        Ok(())
     }
 
     #[test]
@@ -326,39 +381,105 @@ mod tests {
     }
 
     #[test]
+    fn maps_conflict_and_unavailable_ingress_results() {
+        assert_eq!(
+            owntracks_response(&Ok(OwnTracksIngressResult::Accepted)).status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            owntracks_response(&Ok(OwnTracksIngressResult::Duplicate)).status(),
+            StatusCode::OK
+        );
+        let rate_limited = owntracks_response(&Ok(OwnTracksIngressResult::RateLimited));
+        assert_eq!(rate_limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            rate_limited
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("1")
+        );
+        assert_eq!(
+            owntracks_response(&Ok(OwnTracksIngressResult::Conflict)).status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            owntracks_response(&Ok(OwnTracksIngressResult::Unavailable)).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            owntracks_response(&Err(GatewayError::Store(
+                CoreError::GeographicAdmissionAuthenticationFailed,
+            )))
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            owntracks_response(&Err(GatewayError::Store(CoreError::Storage(
+                "closed".to_owned(),
+            ))))
+            .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[test]
     fn decode_base64_covers_all_branching_paths() {
         // is_empty() → None
-        let _ = super::decode_base64("");
+        drop(super::decode_base64(""));
         // non-multiple-of-4 length → None
-        let _ = super::decode_base64("ab");
+        drop(super::decode_base64("ab"));
         // single padding '=' (c=valid, d='=') — "hello" is "aGVsbG8="
-        let _ = super::decode_base64("aGVsbG8=");
+        drop(super::decode_base64("aGVsbG8="));
         // double padding '==' — "a" is "YQ=="
-        let _ = super::decode_base64("YQ==");
+        drop(super::decode_base64("YQ=="));
         // invalid char → base64_value returns None → outer None
-        let _ = super::decode_base64("!abc");
+        drop(super::decode_base64("!abc"));
         // URL-safe base64 chars '-' and '_'
-        let _ = super::decode_base64("ab-_");
+        drop(super::decode_base64("ab-_"));
     }
 
     #[tokio::test]
     async fn empty_body_is_the_only_unauthenticated_success() {
+        let result = empty_body_is_the_only_unauthenticated_success_impl().await;
+        assert!(
+            result.is_ok(),
+            "empty_body_is_the_only_unauthenticated_success failed: {result:?}"
+        );
+    }
+
+    async fn empty_body_is_the_only_unauthenticated_success_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let response = post_owntracks(
-            Gateway::new(open_store(StoreConfig::Memory).unwrap()),
+            Gateway::new(open_store(StoreConfig::Memory).test_ok()?),
             HeaderMap::new(),
             Body::empty(),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
-            to_bytes(response.into_body(), 1024).await.unwrap().as_ref(),
+            to_bytes(response.into_body(), 1024)
+                .await
+                .test_ok()?
+                .as_ref(),
             b"[]"
         );
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn rejects_unsupported_media_type_unauthorized_and_invalid_location() {
-        let gateway = Gateway::new(open_store(StoreConfig::Memory).unwrap());
+        let result = rejects_unsupported_media_type_unauthorized_and_invalid_location_impl().await;
+        assert!(
+            result.is_ok(),
+            "rejects_unsupported_media_type_unauthorized_and_invalid_location failed: {result:?}"
+        );
+    }
+
+    async fn rejects_unsupported_media_type_unauthorized_and_invalid_location_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let gateway = Gateway::new(open_store(StoreConfig::Memory).test_ok()?);
         let response = post_owntracks(gateway.clone(), HeaderMap::new(), location_body()).await;
         assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
 
@@ -370,7 +491,7 @@ mod tests {
         let response = post_owntracks(gateway.clone(), json_headers, location_body()).await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
-        let malformed_headers = authenticated_headers("application/json");
+        let malformed_headers = authenticated_headers("application/json")?;
         let response = post_owntracks(
             gateway.clone(),
             malformed_headers,
@@ -380,16 +501,29 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
         let response = post_owntracks(
-            gateway,
-            authenticated_headers("application/json"),
+            gateway.clone(),
+            authenticated_headers("application/json")?,
             Body::from(&br#"{"_type":"location","lat":91,"lon":0,"tst":1}"#[..]),
         )
         .await;
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        drop(gateway);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn rejects_unauthorized_location_and_closed_executor() {
+        let result = rejects_unauthorized_location_and_closed_executor_impl().await;
+        assert!(
+            result.is_ok(),
+            "rejects_unauthorized_location_and_closed_executor failed: {result:?}"
+        );
+    }
+
+    async fn rejects_unauthorized_location_and_closed_executor_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         const OWNER_KEY: [u8; 32] = [7; 32];
         const HANDLE: [u8; 32] = [0; 32];
         const SECRET: [u8; 32] = [17; 32];
@@ -398,7 +532,7 @@ mod tests {
                 pos_store::memory::MemoryStore::new(),
                 [0; 32],
             ),
-            authenticated_headers("application/json"),
+            authenticated_headers("application/json")?,
             location_body(),
         )
         .await;
@@ -409,7 +543,7 @@ mod tests {
         material.extend_from_slice(&HANDLE);
         material.extend_from_slice(&SECRET);
         let mut store = pos_store::memory::MemoryStore::new();
-        let timeline = store.create_timeline("owntracks-auth-status").unwrap();
+        let timeline = store.create_timeline("owntracks-auth-status").test_ok()?;
         store
             .pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
                 timeline.id(),
@@ -417,13 +551,13 @@ mod tests {
                 GeoLocationAdmissionFenceV1::new(1, ([1; 32], 2, [2; 32]), (1, false, 3)),
                 *blake3::keyed_hash(&OWNER_KEY, &material).as_bytes(),
             ))
-            .unwrap();
-        let mut invalid_headers = authenticated_headers("application/json");
+            .test_ok()?;
+        let mut invalid_headers = authenticated_headers("application/json")?;
         let invalid_credential = format!("{}:{}", "0".repeat(64), "2".repeat(64));
         invalid_headers.insert(
             header::AUTHORIZATION,
             HeaderValue::from_str(&format!("Basic {}", base64_encode(&invalid_credential)))
-                .unwrap(),
+                .test_ok()?,
         );
         let response = post_owntracks(
             Gateway::new_with_owntracks_ingress_for_test(store, OWNER_KEY),
@@ -439,27 +573,51 @@ mod tests {
             crate::executor::StoreExecutor::from_sender_for_test(tx),
         );
         let response = post_owntracks(
-            gateway,
-            authenticated_headers("application/json"),
+            gateway.clone(),
+            authenticated_headers("application/json")?,
             location_body(),
         )
         .await;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        drop(gateway);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn oversized_body_is_rejected_before_authentication() {
+        let result = oversized_body_is_rejected_before_authentication_impl().await;
+        assert!(
+            result.is_ok(),
+            "oversized_body_is_rejected_before_authentication failed: {result:?}"
+        );
+    }
+
+    async fn oversized_body_is_rejected_before_authentication_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let response = post_owntracks(
-            Gateway::new(open_store(StoreConfig::Memory).unwrap()),
+            Gateway::new(open_store(StoreConfig::Memory).test_ok()?),
             HeaderMap::new(),
             Body::from(vec![0; super::OWNTRACKS_MAX_BODY_BYTES + 1]),
         )
         .await;
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn authenticated_location_is_minimized_and_admitted() {
+        let result = authenticated_location_is_minimized_and_admitted_impl().await;
+        assert!(
+            result.is_ok(),
+            "authenticated_location_is_minimized_and_admitted failed: {result:?}"
+        );
+    }
+
+    async fn authenticated_location_is_minimized_and_admitted_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         const OWNER_KEY: [u8; 32] = [7; 32];
         let handle = [0; 32];
         let secret = [17; 32];
@@ -468,7 +626,7 @@ mod tests {
         material.extend_from_slice(&handle);
         material.extend_from_slice(&secret);
         let mut store = pos_store::memory::MemoryStore::new();
-        let timeline = store.create_timeline("owntracks-http").unwrap();
+        let timeline = store.create_timeline("owntracks-http").test_ok()?;
         store
             .pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
                 timeline.id(),
@@ -476,12 +634,12 @@ mod tests {
                 GeoLocationAdmissionFenceV1::new(1, ([1; 32], 2, [2; 32]), (1, false, 3)),
                 *blake3::keyed_hash(&OWNER_KEY, &material).as_bytes(),
             ))
-            .unwrap();
+            .test_ok()?;
         let gateway = Gateway::new_with_owntracks_ingress_for_test(store, OWNER_KEY);
         let mut notices = gateway.subscribe();
         let response = post_owntracks(
             gateway.clone(),
-            authenticated_headers("application/json"),
+            authenticated_headers("application/json")?,
             Body::from(
                 &br#"{"_type":"location","lat":37.7749,"lon":-122.4194,"tst":1,"batt":90}"#[..],
             ),
@@ -489,59 +647,86 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
-            to_bytes(response.into_body(), 1024).await.unwrap().as_ref(),
+            to_bytes(response.into_body(), 1024)
+                .await
+                .test_ok()?
+                .as_ref(),
             b"[]"
         );
-        assert_eq!(notices.recv().await.unwrap().event_type, "geo.location");
+        assert_eq!(notices.recv().await.test_ok()?.event_type, "geo.location");
 
         let response = post_owntracks(
-            gateway,
-            authenticated_headers("application/json"),
+            gateway.clone(),
+            authenticated_headers("application/json")?,
             Body::from(
                 &br#"{"_type":"location","lat":37.7749,"lon":-122.4194,"tst":901,"batt":90}"#[..],
             ),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(notices.recv().await.unwrap().event_type, "geo.location");
+        assert_eq!(notices.recv().await.test_ok()?.event_type, "geo.location");
+
+        drop(gateway);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn duplicate_is_successful_without_a_second_notice_and_revocation_denies() {
+        let result =
+            duplicate_is_successful_without_a_second_notice_and_revocation_denies_impl().await;
+        assert!(result.is_ok(), "duplicate_is_successful_without_a_second_notice_and_revocation_denies failed: {result:?}");
+    }
+
+    async fn duplicate_is_successful_without_a_second_notice_and_revocation_denies_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         const OWNER_KEY: [u8; 32] = [7; 32];
-        let gateway = Gateway::new_with_owntracks_ingress_for_test(enrolled_store(), OWNER_KEY);
+        let gateway = Gateway::new_with_owntracks_ingress_for_test(enrolled_store()?, OWNER_KEY);
         let mut notices = gateway.subscribe();
         let response = post_owntracks(
             gateway.clone(),
-            authenticated_headers("application/json"),
+            authenticated_headers("application/json")?,
             location_body(),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(notices.recv().await.unwrap().event_type, "geo.location");
+        assert_eq!(notices.recv().await.test_ok()?.event_type, "geo.location");
 
         let response = post_owntracks(
-            gateway,
-            authenticated_headers("application/json"),
+            gateway.clone(),
+            authenticated_headers("application/json")?,
             location_body(),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         assert!(notices.try_recv().is_err());
 
-        let mut revoked_store = enrolled_store();
-        revoked_store.revoke_owntracks_enrollment().unwrap();
+        let mut revoked_store = enrolled_store()?;
+        revoked_store.revoke_owntracks_enrollment().test_ok()?;
         let response = post_owntracks(
             Gateway::new_with_owntracks_ingress_for_test(revoked_store, OWNER_KEY),
-            authenticated_headers("application/json"),
+            authenticated_headers("application/json")?,
             location_body(),
         )
         .await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        drop(gateway);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn rate_limit_response_is_retryable_after_authentication() {
+        let result = rate_limit_response_is_retryable_after_authentication_impl().await;
+        assert!(
+            result.is_ok(),
+            "rate_limit_response_is_retryable_after_authentication failed: {result:?}"
+        );
+    }
+
+    async fn rate_limit_response_is_retryable_after_authentication_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         const OWNER_KEY: [u8; 32] = [7; 32];
         let handle = [0; 32];
         let secret = [17; 32];
@@ -550,7 +735,7 @@ mod tests {
         material.extend_from_slice(&handle);
         material.extend_from_slice(&secret);
         let mut store = pos_store::memory::MemoryStore::new();
-        let timeline = store.create_timeline("owntracks-rate-http").unwrap();
+        let timeline = store.create_timeline("owntracks-rate-http").test_ok()?;
         store
             .pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
                 timeline.id(),
@@ -558,25 +743,29 @@ mod tests {
                 GeoLocationAdmissionFenceV1::new(1, ([1; 32], 2, [2; 32]), (1, false, 3)),
                 *blake3::keyed_hash(&OWNER_KEY, &material).as_bytes(),
             ))
-            .unwrap();
+            .test_ok()?;
         let gateway = Gateway::new_with_owntracks_ingress_for_test(store, OWNER_KEY);
 
         for _ in 0..5 {
             let response = post_owntracks(
                 gateway.clone(),
-                authenticated_headers("application/json"),
+                authenticated_headers("application/json")?,
                 location_body(),
             )
             .await;
             assert_eq!(response.status(), StatusCode::OK);
         }
         let response = post_owntracks(
-            gateway,
-            authenticated_headers("application/json"),
+            gateway.clone(),
+            authenticated_headers("application/json")?,
             location_body(),
         )
         .await;
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(response.headers()[header::RETRY_AFTER], "1");
+
+        drop(gateway);
+
+        Ok(())
     }
 }

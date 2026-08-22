@@ -22,7 +22,7 @@ pub struct EventQuery {
 impl EventQuery {
     /// Create a new query targeting the given timeline.
     #[must_use]
-    pub fn on(timeline: TimelineId) -> Self {
+    pub const fn on(timeline: TimelineId) -> Self {
         Self {
             timeline,
             from_seq: None,
@@ -34,21 +34,21 @@ impl EventQuery {
 
     /// Only return events at or after `seq`.
     #[must_use]
-    pub fn from_seq(mut self, seq: Seq) -> Self {
+    pub const fn from_seq(mut self, seq: Seq) -> Self {
         self.from_seq = Some(seq);
         self
     }
 
     /// Only return events at or before `seq`.
     #[must_use]
-    pub fn to_seq(mut self, seq: Seq) -> Self {
+    pub const fn to_seq(mut self, seq: Seq) -> Self {
         self.to_seq = Some(seq);
         self
     }
 
     /// Only return events whose `entity` matches `entity`.
     #[must_use]
-    pub fn for_entity(mut self, entity: EntityId) -> Self {
+    pub const fn for_entity(mut self, entity: EntityId) -> Self {
         self.entity_filter = Some(entity);
         self
     }
@@ -95,6 +95,7 @@ impl EventQuery {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use pos_core::{
@@ -104,6 +105,31 @@ mod tests {
     };
     use pos_store::{open_store, StoreConfig};
 
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected query fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("missing query fixture value"))
+            })
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn make_draft(entity: EntityId, event_type: &str) -> EventDraft {
         EventDraft::new(
             entity,
@@ -112,9 +138,10 @@ mod tests {
         )
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn setup_store() -> (Box<dyn EventStore>, TimelineId, EntityId, EntityId) {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("test").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("test").test_ok();
         let entity_a = EntityId::new();
         let entity_b = EntityId::new();
 
@@ -124,7 +151,7 @@ mod tests {
             make_draft(entity_b, "type.a"),
             make_draft(entity_b, "type.c"),
         ];
-        store.append(tl.id(), &drafts).unwrap();
+        store.append(tl.id(), &drafts).test_ok();
 
         (store, tl.id(), entity_a, entity_b)
     }
@@ -133,7 +160,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn event_query_returns_all_events_with_no_filters() {
         let (store, tl_id, _, _) = setup_store();
-        let events = EventQuery::on(tl_id).execute(&*store).unwrap();
+        let events = EventQuery::on(tl_id).execute(&*store).test_ok();
         assert_eq!(events.len(), 4);
     }
 
@@ -144,7 +171,7 @@ mod tests {
         let events = EventQuery::on(tl_id)
             .for_entity(entity_a)
             .execute(&*store)
-            .unwrap();
+            .test_ok();
         assert_eq!(events.len(), 2);
         for e in &events {
             assert_eq!(e.entity, entity_a);
@@ -158,7 +185,7 @@ mod tests {
         let events = EventQuery::on(tl_id)
             .of_type("type.a")
             .execute(&*store)
-            .unwrap();
+            .test_ok();
         assert_eq!(events.len(), 2);
         for e in &events {
             assert_eq!(e.event_type.as_str(), "type.a");
@@ -174,7 +201,7 @@ mod tests {
             .from_seq(Seq::from_u64(2))
             .to_seq(Seq::from_u64(3))
             .execute(&*store)
-            .unwrap();
+            .test_ok();
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].seq, Seq::from_u64(2));
         assert_eq!(events[1].seq, Seq::from_u64(3));
@@ -188,7 +215,7 @@ mod tests {
             .for_entity(entity_a)
             .of_type("type.a")
             .execute(&*store)
-            .unwrap();
+            .test_ok();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].entity, entity_a);
         assert_eq!(events[0].event_type.as_str(), "type.a");
@@ -197,7 +224,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn event_query_unknown_timeline_returns_error() {
-        let store = open_store(StoreConfig::Memory).unwrap();
+        let store = open_store(StoreConfig::Memory).test_ok();
         let unknown_tl = TimelineId::new();
         let result = EventQuery::on(unknown_tl).execute(&*store);
         assert!(matches!(result, Err(CoreError::TimelineNotFound(_))));
@@ -217,33 +244,33 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn event_query_filters_by_from_seq_only() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("t").test_ok();
         let entity = EntityId::new();
         let drafts: Vec<EventDraft> = (0..5).map(|_| make_draft(entity, "test.event")).collect();
-        let committed = store.append(tl.id(), &drafts).unwrap();
+        let committed = store.append(tl.id(), &drafts).test_ok();
         let third_seq = committed[2].seq;
         // from_seq only: returns events from seq 3 onward (events 3, 4, 5)
         let events = EventQuery::on(tl.id())
             .from_seq(third_seq)
             .execute(store.as_ref())
-            .unwrap();
+            .test_ok();
         assert_eq!(events.len(), 3);
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn event_query_filters_by_to_seq_only() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("t").test_ok();
         let entity = EntityId::new();
         let drafts: Vec<EventDraft> = (0..5).map(|_| make_draft(entity, "test.event")).collect();
-        let committed = store.append(tl.id(), &drafts).unwrap();
+        let committed = store.append(tl.id(), &drafts).test_ok();
         let third_seq = committed[2].seq;
         let events = EventQuery::on(tl.id())
             .to_seq(third_seq)
             .execute(store.as_ref())
-            .unwrap();
+            .test_ok();
         assert_eq!(events.len(), 3);
     }
 }

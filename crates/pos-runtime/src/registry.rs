@@ -40,6 +40,156 @@ fn extend_unique_subscriptions(
     }
 }
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod coverage_paths {
+    use super::*;
+    use crate::driver::{ObservationView, StepOutput, TimelineHistorySegment};
+    use pos_core::{
+        clock::{Seq, WallTime},
+        crypto::Hash,
+        event::{CanonicalBytes, Kind, SchemaVersion},
+        ids::{EntityId, EventId, TimelineId},
+        Event,
+    };
+    use std::sync::{Arc, Mutex};
+
+    struct RestoreDriver {
+        committed: Arc<Mutex<bool>>,
+    }
+
+    impl Driver for RestoreDriver {
+        fn name(&self) -> &'static str {
+            "coverage-restore"
+        }
+
+        fn step(
+            &mut self,
+            _: TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            Ok(StepOutput::empty())
+        }
+
+        fn commit_restore_from_history(&mut self) {
+            *self
+                .committed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        }
+    }
+
+    struct RestoreFailureDriver {
+        aborts: Arc<Mutex<u32>>,
+    }
+
+    impl Driver for RestoreFailureDriver {
+        fn name(&self) -> &'static str {
+            "coverage-restore-failure"
+        }
+
+        fn step(
+            &mut self,
+            _: TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            Ok(StepOutput::empty())
+        }
+
+        fn stage_restore_from_history(
+            &mut self,
+            _: &DriverRecoveryEvidence,
+        ) -> Result<(), RuntimeError> {
+            Err(RuntimeError::InvalidRecoveryEvidence {
+                reason: "coverage restore failure",
+            })
+        }
+
+        fn abort_restore_from_history(&mut self) {
+            *self
+                .aborts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+        }
+    }
+
+    #[test]
+    fn restore_with_history_commits_and_advances_driver_cursor() {
+        let timeline = TimelineId::new();
+        let committed = Arc::new(Mutex::new(false));
+        let mut registry = PluginRegistry::new();
+        registry.register_driver(Box::new(RestoreDriver {
+            committed: Arc::clone(&committed),
+        }));
+        assert!(registry.step_all(timeline).is_ok());
+        let event = Event {
+            id: EventId::new(),
+            entity: EntityId::new(),
+            event_type: Kind::new("coverage.restore"),
+            payload: CanonicalBytes::from_static(b"history"),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        };
+        let result = registry.restore_driver_state(
+            &[TimelineHistorySegment::new(timeline, Seq::from_u64(1))],
+            &[event],
+        );
+        assert!(result.is_ok());
+        assert!(*committed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner));
+    }
+
+    #[test]
+    fn transaction_cleanup_ignores_unresolvable_staged_identifiers() {
+        let id = PluginId::new();
+        let mut registry = PluginRegistry::new();
+        registry.pending_step = Some(PendingStep {
+            driver_ids: vec![id],
+            cadence_updates: Vec::new(),
+            event_cursors: Vec::new(),
+        });
+        registry.abort_step();
+
+        registry.pending_step = Some(PendingStep {
+            driver_ids: vec![id],
+            cadence_updates: vec![(id, 1)],
+            event_cursors: vec![(id, Seq::ZERO)],
+        });
+        registry.commit_step();
+    }
+
+    #[test]
+    fn restore_failure_aborts_drivers_that_staged_before_the_failure() {
+        let timeline = TimelineId::new();
+        let aborts = Arc::new(Mutex::new(0));
+        let mut registry = PluginRegistry::new();
+        registry.register_driver(Box::new(RestoreDriver {
+            committed: Arc::new(Mutex::new(false)),
+        }));
+        registry.register_driver(Box::new(RestoreFailureDriver {
+            aborts: Arc::clone(&aborts),
+        }));
+
+        assert!(matches!(
+            registry
+                .restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[],),
+            Err(RuntimeError::InvalidRecoveryEvidence { .. })
+        ));
+        assert_eq!(
+            *aborts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            1
+        );
+    }
+}
+
 fn validate_recovery_evidence(
     timeline_segments: &[TimelineHistorySegment],
     events: &[Event],
@@ -90,16 +240,27 @@ fn validate_recovery_evidence(
 }
 
 fn reject_geographic_drafts(output: &StepOutput) -> Result<(), RuntimeError> {
-    match output
+    output
         .drafts
         .iter()
         .find(|draft| pos_core::is_geographic_event_type(&draft.event_type))
-    {
-        Some(draft) => Err(RuntimeError::GeographicDraft {
-            event_type: draft.event_type.as_str().to_owned(),
-        }),
-        None => Ok(()),
-    }
+        .map_or(Ok(()), |draft| {
+            Err(RuntimeError::GeographicDraft {
+                event_type: draft.event_type.as_str().to_owned(),
+            })
+        })
+}
+
+fn invoke_driver(
+    driver: &mut dyn Driver,
+    timeline: pos_core::ids::TimelineId,
+    observations: crate::driver::ObservationView<'_>,
+) -> Result<StepOutput, RuntimeError> {
+    let name = driver.name().to_owned();
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        driver.step(timeline, observations)
+    }))
+    .map_err(|_| RuntimeError::DriverPanicked { name })?
 }
 
 /// A registered plugin entry.
@@ -109,11 +270,13 @@ struct PluginEntry {
     driver: Option<Box<dyn Driver>>,
     approver: Option<Box<dyn ActionApprover>>,
     last_tick: Option<u128>,
+    event_cursor: Seq,
 }
 
 struct PendingStep {
     driver_ids: Vec<PluginId>,
     cadence_updates: Vec<(PluginId, u128)>,
+    event_cursors: Vec<(PluginId, Seq)>,
 }
 
 #[derive(Clone, Copy)]
@@ -135,6 +298,8 @@ pub struct PluginRegistry {
     pub projections: ProjectionRegistry,
     pending_step: Option<PendingStep>,
     run_mode: RunMode,
+    resource_limit: Option<u64>,
+    poisoned_driver: Option<String>,
 }
 
 impl PluginRegistry {
@@ -213,6 +378,11 @@ impl PluginRegistry {
             description: "Internal: nondeterministic output recorded by the Recorder".to_owned(),
             json_schema: None,
         });
+        schemas.register(EventTypeSchema {
+            event_type: pos_core::event::Kind::new(crate::HOST_CONSENT_REVOCATION_EVENT_TYPE),
+            description: "Host-owned durable consent revocation marker".to_owned(),
+            json_schema: None,
+        });
         Self {
             plugins: IndexMap::new(),
             approver_map: IndexMap::new(),
@@ -220,24 +390,34 @@ impl PluginRegistry {
             projections: ProjectionRegistry::new(),
             pending_step: None,
             run_mode,
+            resource_limit: None,
+            poisoned_driver: None,
         }
+    }
+
+    /// Bound the number of Event drafts one atomic Tick may stage.
+    #[must_use]
+    pub const fn with_resource_limit(mut self, limit: u64) -> Self {
+        self.resource_limit = Some(limit);
+        self
     }
 
     fn reject_unanchored_drivers(&self) -> Result<(), RuntimeError> {
-        match self
-            .plugins
+        self.plugins
             .values()
             .filter_map(|entry| entry.driver.as_deref())
             .find(|driver| driver.requires_snapshot_anchor())
-        {
-            Some(driver) => Err(RuntimeError::MissingSnapshotAnchor {
-                driver: driver.name().to_owned(),
-            }),
-            None => Ok(()),
-        }
+            .map_or(Ok(()), |driver| {
+                Err(RuntimeError::MissingSnapshotAnchor {
+                    driver: driver.name().to_owned(),
+                })
+            })
     }
 
     fn ensure_no_pending_step(&self) -> Result<(), RuntimeError> {
+        if let Some(name) = &self.poisoned_driver {
+            return Err(RuntimeError::DriverCommitPanicked { name: name.clone() });
+        }
         if self.pending_step.is_some() {
             Err(RuntimeError::PendingDriverStep)
         } else {
@@ -245,16 +425,51 @@ impl PluginRegistry {
         }
     }
 
-    fn abort_drivers(&mut self, driver_ids: &[PluginId]) {
+    fn abort_drivers(&mut self, driver_ids: &[PluginId]) -> Option<RuntimeError> {
+        let mut first_error = None;
         for id in driver_ids {
             if let Some(driver) = self
                 .plugins
                 .get_mut(id)
                 .and_then(|entry| entry.driver.as_mut())
             {
-                driver.abort_step();
+                let name = driver.name().to_owned();
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| driver.abort_step()))
+                    .is_err()
+                {
+                    self.poisoned_driver = Some(name.clone());
+                    first_error.get_or_insert(RuntimeError::DriverAbortPanicked { name });
+                }
             }
         }
+        first_error
+    }
+
+    fn invoke_selected_driver(
+        &mut self,
+        id: PluginId,
+        timeline: pos_core::ids::TimelineId,
+        snapshot: &ObservationSnapshot,
+        committed_events: &[Event],
+    ) -> Result<StepOutput, RuntimeError> {
+        let Some(entry) = self.plugins.get_mut(&id) else {
+            return Err(RuntimeError::NoDriver {
+                name: id.to_string(),
+            });
+        };
+        let Some(driver) = entry.driver.as_mut() else {
+            return Err(RuntimeError::NoDriver {
+                name: entry.name.clone(),
+            });
+        };
+        let observations = snapshot.view_for_events_after(
+            driver.subscriptions(),
+            committed_events,
+            driver.event_subscriptions(),
+            entry.event_cursor,
+        );
+        invoke_driver(driver.as_mut(), timeline, observations)
+            .and_then(|output| reject_geographic_drafts(&output).map(|()| output))
     }
 
     fn step_anchored_transaction(
@@ -262,10 +477,12 @@ impl PluginRegistry {
         timeline: pos_core::ids::TimelineId,
         observed_through: Seq,
         selection: AnchoredSelection,
+        committed_events: &[Event],
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.ensure_no_pending_step()?;
         let mut driver_ids = Vec::new();
         let mut cadence_updates = Vec::new();
+        let mut event_cursors = Vec::new();
         let mut seen_subscriptions = HashSet::new();
         let mut subscriptions = Vec::new();
 
@@ -313,28 +530,30 @@ impl PluginRegistry {
         let mut all_drafts = Vec::new();
         let mut staged_driver_ids = Vec::new();
         for id in driver_ids {
-            let result = {
-                let entry = self
-                    .plugins
-                    .get_mut(&id)
-                    .expect("selected IDs refer to registered entries");
-                let driver = entry
-                    .driver
-                    .as_mut()
-                    .expect("selected IDs refer to registered drivers");
-                let observations = snapshot.view_for(driver.subscriptions());
-                driver
-                    .step(timeline, observations)
-                    .and_then(|output| reject_geographic_drafts(&output).map(|()| output))
-            };
+            let result = self.invoke_selected_driver(id, timeline, &snapshot, committed_events);
             match result {
                 Ok(output) => {
+                    let requested = u64::try_from(all_drafts.len())
+                        .unwrap_or(u64::MAX)
+                        .saturating_add(u64::try_from(output.drafts.len()).unwrap_or(u64::MAX));
+                    if let Some(limit) = self.resource_limit {
+                        if requested > limit {
+                            staged_driver_ids.push(id);
+                            let _ = self.abort_drivers(&staged_driver_ids);
+                            return Err(RuntimeError::ResourceExhausted {
+                                driver: "host-tick-budget".to_owned(),
+                                requested,
+                                limit,
+                            });
+                        }
+                    }
                     staged_driver_ids.push(id);
+                    event_cursors.push((id, observed_through));
                     all_drafts.extend(output.drafts);
                 }
                 Err(error) => {
                     staged_driver_ids.push(id);
-                    self.abort_drivers(&staged_driver_ids);
+                    let _ = self.abort_drivers(&staged_driver_ids);
                     return Err(error);
                 }
             }
@@ -343,6 +562,7 @@ impl PluginRegistry {
         self.pending_step = Some(PendingStep {
             driver_ids: staged_driver_ids,
             cadence_updates,
+            event_cursors,
         });
         Ok(all_drafts)
     }
@@ -358,7 +578,12 @@ impl PluginRegistry {
                 .get_mut(id)
                 .and_then(|entry| entry.driver.as_mut())
             {
-                driver.commit_step();
+                let name = driver.name().to_owned();
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| driver.commit_step()))
+                    .is_err()
+                {
+                    self.poisoned_driver = Some(name);
+                }
             }
         }
         for (id, now_ns) in pending.cadence_updates {
@@ -366,12 +591,17 @@ impl PluginRegistry {
                 entry.last_tick = Some(now_ns);
             }
         }
+        for (id, cursor) in pending.event_cursors {
+            if let Some(entry) = self.plugins.get_mut(&id) {
+                entry.event_cursor = cursor;
+            }
+        }
     }
 
     /// Abort the Driver and cadence state staged by an anchored step.
     pub fn abort_step(&mut self) {
         if let Some(pending) = self.pending_step.take() {
-            self.abort_drivers(&pending.driver_ids);
+            let _ = self.abort_drivers(&pending.driver_ids);
         }
     }
 
@@ -423,7 +653,18 @@ impl PluginRegistry {
                 .get_mut(&id)
                 .and_then(|entry| entry.driver.as_mut())
             {
-                driver.commit_restore_from_history();
+                let name = driver.name().to_owned();
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    driver.commit_restore_from_history();
+                }))
+                .is_err()
+                {
+                    self.poisoned_driver = Some(name.clone());
+                    return Err(RuntimeError::DriverRestorePanicked { name });
+                }
+            }
+            if let Some(entry) = self.plugins.get_mut(&id) {
+                entry.event_cursor = events.last().map_or(Seq::ZERO, |event| event.seq);
             }
         }
         Ok(())
@@ -559,6 +800,7 @@ impl PluginRegistry {
                 driver,
                 approver,
                 last_tick: None,
+                event_cursor: Seq::ZERO,
             },
         );
         Ok(())
@@ -605,6 +847,7 @@ impl PluginRegistry {
                 driver: Some(driver),
                 approver: None,
                 last_tick: None,
+                event_cursor: Seq::ZERO,
             },
         );
     }
@@ -706,15 +949,13 @@ impl PluginRegistry {
         let snapshot = self.snapshot_for_subscriptions(due_subscriptions.iter());
         for (id, entry) in &mut self.plugins {
             if due_driver_ids.remove(id) {
-                let driver = entry
-                    .driver
-                    .as_mut()
-                    .expect("due IDs are collected only from registered drivers");
-                let observations = snapshot.view_for(driver.subscriptions());
-                let output = driver.step(timeline, observations)?;
-                reject_geographic_drafts(&output)?;
-                entry.last_tick = Some(now_ns);
-                all_drafts.extend(output.drafts);
+                if let Some(driver) = entry.driver.as_mut() {
+                    let observations = snapshot.view_for(driver.subscriptions());
+                    let output = invoke_driver(driver.as_mut(), timeline, observations)?;
+                    reject_geographic_drafts(&output)?;
+                    entry.last_tick = Some(now_ns);
+                    all_drafts.extend(output.drafts);
+                }
             }
         }
         debug_assert!(due_driver_ids.is_empty());
@@ -742,6 +983,26 @@ impl PluginRegistry {
             timeline,
             observed_through,
             AnchoredSelection::Cadenced { now_ns },
+            &[],
+        )
+    }
+
+    /// Step cadence-ready Drivers with a host-filtered committed Event prefix.
+    ///
+    /// # Errors
+    /// Returns a staged-step, cadence, Driver, or draft validation error.
+    pub fn tick_cadenced_anchored_with_events(
+        &mut self,
+        timeline: pos_core::ids::TimelineId,
+        now_ns: u128,
+        observed_through: Seq,
+        committed_events: &[Event],
+    ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
+        self.step_anchored_transaction(
+            timeline,
+            observed_through,
+            AnchoredSelection::Cadenced { now_ns },
+            committed_events,
         )
     }
 
@@ -769,7 +1030,7 @@ impl PluginRegistry {
         for entry in self.plugins.values_mut() {
             if let Some(driver) = entry.driver.as_mut() {
                 let observations = snapshot.view_for(driver.subscriptions());
-                let output = driver.step(timeline, observations)?;
+                let output = invoke_driver(driver.as_mut(), timeline, observations)?;
                 reject_geographic_drafts(&output)?;
                 all_drafts.extend(output.drafts);
             }
@@ -792,7 +1053,25 @@ impl PluginRegistry {
         timeline: pos_core::ids::TimelineId,
         observed_through: Seq,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
-        self.step_anchored_transaction(timeline, observed_through, AnchoredSelection::All)
+        self.step_anchored_transaction(timeline, observed_through, AnchoredSelection::All, &[])
+    }
+
+    /// Step all Drivers with a host-filtered committed Event prefix.
+    ///
+    /// # Errors
+    /// Returns a staged-step, Driver, or draft validation error.
+    pub fn step_all_anchored_with_events(
+        &mut self,
+        timeline: pos_core::ids::TimelineId,
+        observed_through: Seq,
+        committed_events: &[Event],
+    ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
+        self.step_anchored_transaction(
+            timeline,
+            observed_through,
+            AnchoredSelection::All,
+            committed_events,
+        )
     }
 }
 
@@ -803,6 +1082,7 @@ impl Default for PluginRegistry {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::driver::{ObservationView, SnapshotAnchor, StepOutput};
@@ -818,6 +1098,43 @@ mod tests {
         sync::{Arc, Mutex},
         time::Duration,
     };
+
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected registry fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("missing registry fixture value"))
+            })
+        }
+    }
+
+    trait TestErrorExt<T, E> {
+        fn test_err(self) -> E;
+    }
+
+    impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
+        fn test_err(self) -> E {
+            match self {
+                Ok(value) => std::panic::resume_unwind(Box::new(format!(
+                    "unexpected successful registry fixture value: {value:?}"
+                ))),
+                Err(error) => error,
+            }
+        }
+    }
 
     // ── Test helpers ──────────────────────────────────────────────────────────
 
@@ -889,6 +1206,40 @@ mod tests {
         }
     }
 
+    struct PanickingDriver;
+    impl crate::driver::Driver for PanickingDriver {
+        fn name(&self) -> &'static str {
+            "panicking"
+        }
+
+        fn step(
+            &mut self,
+            _: pos_core::ids::TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<crate::driver::StepOutput, RuntimeError> {
+            std::panic::resume_unwind(Box::new("test driver panic"));
+        }
+    }
+
+    struct AbortPanickingDriver;
+    impl crate::driver::Driver for AbortPanickingDriver {
+        fn name(&self) -> &'static str {
+            "abort-panicking"
+        }
+
+        fn step(
+            &mut self,
+            _: pos_core::ids::TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<crate::driver::StepOutput, RuntimeError> {
+            Ok(StepOutput::empty())
+        }
+
+        fn abort_step(&mut self) {
+            std::panic::resume_unwind(Box::new("test abort panic"));
+        }
+    }
+
     #[derive(Default)]
     struct TransactionState {
         steps: usize,
@@ -921,14 +1272,11 @@ mod tests {
                     name: self.name.to_owned(),
                 });
             }
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().test_ok();
             state.steps += 1;
             state.staged = true;
-            state.anchors.push(
-                observations
-                    .anchor()
-                    .expect("anchored step supplies anchor"),
-            );
+            state.anchors.push(observations.anchor().test_ok());
+            drop(state);
             Ok(StepOutput::empty())
         }
 
@@ -941,14 +1289,14 @@ mod tests {
         }
 
         fn commit_step(&mut self) {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().test_ok();
             assert!(state.staged);
             state.staged = false;
             state.commits += 1;
         }
 
         fn abort_step(&mut self) {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().test_ok();
             if state.staged {
                 state.staged = false;
                 state.aborts += 1;
@@ -959,12 +1307,90 @@ mod tests {
             &mut self,
             _evidence: &DriverRecoveryEvidence,
         ) -> Result<(), RuntimeError> {
-            self.state.lock().unwrap().restores += 1;
+            self.state.lock().test_ok().restores += 1;
             Ok(())
         }
     }
 
     // ── Tests ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn anchored_step_converts_driver_panic_to_abortable_error() {
+        let mut registry = PluginRegistry::new();
+        let plugin = plugin_with_caps("panicking", &["probe.event"], true, false);
+        registry
+            .register(&plugin, None, Some(Box::new(PanickingDriver)))
+            .test_ok();
+
+        let error = registry
+            .step_all_anchored(TimelineId::new(), Seq::ZERO)
+            .test_err();
+        assert!(matches!(error, RuntimeError::DriverPanicked { .. }));
+        registry.abort_step();
+    }
+
+    #[test]
+    fn aborting_a_staged_driver_catches_a_driver_abort_panic() {
+        let mut registry = PluginRegistry::new();
+        let plugin = plugin_with_caps("abort-panicking", &[], true, false);
+        registry
+            .register(&plugin, None, Some(Box::new(AbortPanickingDriver)))
+            .test_ok();
+        registry
+            .step_all_anchored(TimelineId::new(), Seq::ZERO)
+            .test_ok();
+        registry.abort_step();
+        assert!(registry
+            .step_all_anchored(TimelineId::new(), Seq::ZERO)
+            .is_err());
+    }
+
+    #[test]
+    fn resource_limit_aborts_before_collecting_a_later_driver_output() {
+        struct BudgetDriver {
+            aborted: Arc<Mutex<bool>>,
+        }
+
+        impl Driver for BudgetDriver {
+            fn name(&self) -> &'static str {
+                "budget"
+            }
+
+            fn step(
+                &mut self,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                Ok(StepOutput::new(vec![
+                    EventDraft::new(
+                        EntityId::new(),
+                        Kind::new("budget.event"),
+                        CanonicalBytes::from_static(b"one"),
+                    ),
+                    EventDraft::new(
+                        EntityId::new(),
+                        Kind::new("budget.event"),
+                        CanonicalBytes::from_static(b"two"),
+                    ),
+                ]))
+            }
+
+            fn abort_step(&mut self) {
+                *self.aborted.lock().test_ok() = true;
+            }
+        }
+
+        let aborted = Arc::new(Mutex::new(false));
+        let mut registry = PluginRegistry::new().with_resource_limit(1);
+        registry.register_driver(Box::new(BudgetDriver {
+            aborted: Arc::clone(&aborted),
+        }));
+        let error = registry
+            .step_all_anchored(TimelineId::new(), Seq::ZERO)
+            .test_err();
+        assert!(matches!(error, RuntimeError::ResourceExhausted { .. }));
+        assert!(*aborted.lock().test_ok());
+    }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -983,14 +1409,14 @@ mod tests {
             registry.step_all(timeline),
             Err(RuntimeError::MissingSnapshotAnchor { .. })
         ));
-        assert_eq!(state.lock().unwrap().steps, 0);
+        assert_eq!(state.lock().test_ok().steps, 0);
 
         assert!(registry
             .step_all_anchored(timeline, Seq::from_u64(7))
-            .unwrap()
+            .test_ok()
             .is_empty());
         {
-            let observed = state.lock().unwrap();
+            let observed = state.lock().test_ok();
             assert_eq!(observed.steps, 1);
             assert_eq!(observed.commits, 0);
             assert!(observed.staged);
@@ -998,6 +1424,7 @@ mod tests {
                 observed.anchors,
                 [SnapshotAnchor::new(timeline, Seq::from_u64(7))]
             );
+            drop(observed);
         }
         assert!(matches!(
             registry.step_all_anchored(timeline, Seq::from_u64(7)),
@@ -1011,18 +1438,18 @@ mod tests {
             registry.tick_cadenced(timeline, 0),
             Err(RuntimeError::PendingDriverStep)
         ));
-        assert_eq!(state.lock().unwrap().steps, 1);
+        assert_eq!(state.lock().test_ok().steps, 1);
 
         registry.commit_step();
-        assert_eq!(state.lock().unwrap().commits, 1);
-        assert!(!state.lock().unwrap().staged);
+        assert_eq!(state.lock().test_ok().commits, 1);
+        assert!(!state.lock().test_ok().staged);
 
         registry
             .step_all_anchored(timeline, Seq::from_u64(7))
-            .unwrap();
+            .test_ok();
         registry.abort_step();
-        assert_eq!(state.lock().unwrap().aborts, 1);
-        assert!(!state.lock().unwrap().staged);
+        assert_eq!(state.lock().test_ok().aborts, 1);
+        assert!(!state.lock().test_ok().staged);
     }
 
     #[test]
@@ -1040,17 +1467,100 @@ mod tests {
 
         registry
             .restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[])
-            .unwrap();
-        assert_eq!(state.lock().unwrap().restores, 1);
+            .test_ok();
+        assert_eq!(state.lock().test_ok().restores, 1);
 
-        registry
-            .step_all_anchored(timeline, Seq::ZERO)
-            .expect("step stages");
+        registry.step_all_anchored(timeline, Seq::ZERO).test_ok();
         assert!(matches!(
             registry.restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[]),
             Err(RuntimeError::PendingDriverStep)
         ));
         registry.abort_step();
+
+        let event = Event {
+            id: EventId::new(),
+            entity: EntityId::new(),
+            event_type: Kind::new("restoration.fixture"),
+            payload: CanonicalBytes::from_static(b"history"),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        };
+        registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(timeline, Seq::from_u64(1))],
+                &[event],
+            )
+            .test_ok();
+        assert_eq!(state.lock().test_ok().restores, 2);
+    }
+
+    #[test]
+    fn panicking_restore_commit_is_reported_and_poisoned() {
+        struct RestoreCommitPanickingDriver;
+
+        impl Driver for RestoreCommitPanickingDriver {
+            fn name(&self) -> &'static str {
+                "restore-commit-panicking"
+            }
+
+            fn step(
+                &mut self,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                Ok(StepOutput::empty())
+            }
+
+            fn commit_restore_from_history(&mut self) {
+                std::panic::resume_unwind(Box::new("restore commit panic"));
+            }
+        }
+
+        let timeline = TimelineId::new();
+        let mut registry = PluginRegistry::new();
+        registry.register_driver(Box::new(RestoreCommitPanickingDriver));
+        let error = registry
+            .restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[])
+            .test_err();
+        assert!(matches!(error, RuntimeError::DriverRestorePanicked { .. }));
+    }
+
+    #[test]
+    fn panicking_step_commit_marks_the_driver_poisoned() {
+        struct StepCommitPanickingDriver;
+
+        impl Driver for StepCommitPanickingDriver {
+            fn name(&self) -> &'static str {
+                "step-commit-panicking"
+            }
+
+            fn step(
+                &mut self,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                Ok(StepOutput::empty())
+            }
+
+            fn commit_step(&mut self) {
+                std::panic::resume_unwind(Box::new("step commit panic"));
+            }
+        }
+
+        let mut registry = PluginRegistry::new();
+        registry.register_driver(Box::new(StepCommitPanickingDriver));
+        registry
+            .step_all_anchored(TimelineId::new(), Seq::ZERO)
+            .test_ok();
+        registry.commit_step();
+        assert!(registry
+            .step_all_anchored(TimelineId::new(), Seq::ZERO)
+            .is_err());
     }
 
     #[test]
@@ -1086,24 +1596,24 @@ mod tests {
                 _: &DriverRecoveryEvidence,
             ) -> Result<(), RuntimeError> {
                 if self.rejects {
-                    self.state.lock().unwrap().staged = true;
+                    self.state.lock().test_ok().staged = true;
                     return Err(RuntimeError::NoDriver {
                         name: "rejected recovery".to_owned(),
                     });
                 }
-                self.state.lock().unwrap().staged = true;
+                self.state.lock().test_ok().staged = true;
                 Ok(())
             }
 
             fn commit_restore_from_history(&mut self) {
-                let mut state = self.state.lock().unwrap();
+                let mut state = self.state.lock().test_ok();
                 assert!(state.staged);
                 state.staged = false;
                 state.commits += 1;
             }
 
             fn abort_restore_from_history(&mut self) {
-                let mut state = self.state.lock().unwrap();
+                let mut state = self.state.lock().test_ok();
                 if state.staged {
                     state.staged = false;
                     state.aborts += 1;
@@ -1129,14 +1639,16 @@ mod tests {
                 &[],
             )
             .is_err());
-        let first = first.lock().unwrap();
+        let first = first.lock().test_ok();
         assert!(!first.staged);
         assert_eq!(first.commits, 0);
         assert_eq!(first.aborts, 1);
-        let second = second.lock().unwrap();
+        drop(first);
+        let second = second.lock().test_ok();
         assert!(!second.staged);
         assert_eq!(second.commits, 0);
         assert_eq!(second.aborts, 1);
+        drop(second);
     }
 
     #[test]
@@ -1160,11 +1672,12 @@ mod tests {
         }));
 
         assert!(registry.step_all_anchored(timeline, Seq::ZERO).is_err());
-        let first = first.lock().unwrap();
+        let first = first.lock().test_ok();
         assert_eq!(first.steps, 1);
         assert_eq!(first.aborts, 1);
         assert!(!first.staged);
-        assert_eq!(failed.lock().unwrap().steps, 0);
+        drop(first);
+        assert_eq!(failed.lock().test_ok().steps, 0);
     }
 
     #[test]
@@ -1182,32 +1695,32 @@ mod tests {
 
         registry
             .tick_cadenced_anchored(timeline, 0, Seq::ZERO)
-            .unwrap();
+            .test_ok();
         registry.abort_step();
         registry
             .tick_cadenced_anchored(timeline, 0, Seq::ZERO)
-            .unwrap();
+            .test_ok();
         registry.commit_step();
-        assert_eq!(state.lock().unwrap().steps, 2);
+        assert_eq!(state.lock().test_ok().steps, 2);
 
         assert!(matches!(
             registry.tick_cadenced(timeline, 50),
             Err(RuntimeError::MissingSnapshotAnchor { .. })
         ));
-        assert_eq!(state.lock().unwrap().steps, 2);
+        assert_eq!(state.lock().test_ok().steps, 2);
 
         assert!(registry
             .tick_cadenced_anchored(timeline, 50, Seq::ZERO)
-            .unwrap()
+            .test_ok()
             .is_empty());
         registry.commit_step();
-        assert_eq!(state.lock().unwrap().steps, 2);
+        assert_eq!(state.lock().test_ok().steps, 2);
 
         registry
             .tick_cadenced_anchored(timeline, 100, Seq::ZERO)
-            .unwrap();
+            .test_ok();
         registry.commit_step();
-        assert_eq!(state.lock().unwrap().steps, 3);
+        assert_eq!(state.lock().test_ok().steps, 3);
     }
 
     #[test]
@@ -1215,7 +1728,7 @@ mod tests {
     fn register_plugin_wires_schemas() {
         let mut reg = PluginRegistry::new();
         let p = simple_plugin("world", &["world.observation", "world.action"]);
-        reg.register(&p, None, None).unwrap();
+        reg.register(&p, None, None).test_ok();
         assert!(reg.schemas.contains("world.observation"));
         assert!(reg.schemas.contains("world.action"));
         assert!(!reg.schemas.contains("agent.decision"));
@@ -1227,13 +1740,11 @@ mod tests {
         let plugin = simple_plugin("malicious-geo", &[pos_core::GEOGRAPHIC_EVENT_TYPE]);
         let error = PluginRegistry::new()
             .register(&plugin, None, None)
-            .unwrap_err();
+            .test_err();
         assert!(error.to_string().contains(pos_core::GEOGRAPHIC_EVENT_TYPE));
 
         let cell = simple_plugin("future-geo", &[pos_core::GEOGRAPHIC_CELL_EVENT_TYPE]);
-        let error = PluginRegistry::new()
-            .register(&cell, None, None)
-            .unwrap_err();
+        let error = PluginRegistry::new().register(&cell, None, None).test_err();
         assert!(error
             .to_string()
             .contains(pos_core::GEOGRAPHIC_CELL_EVENT_TYPE));
@@ -1245,7 +1756,7 @@ mod tests {
         let mut reg = PluginRegistry::new();
         let p = plugin_with_caps("counter", &["counter.tick"], false, true);
         reg.register(&p, Some(Box::new(CountReducer)), None)
-            .unwrap();
+            .test_ok();
         // Apply an event and verify the reducer ran
         let event = Event {
             id: EventId::new(),
@@ -1261,7 +1772,7 @@ mod tests {
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
         reg.projections.apply_event(&event);
-        let state = reg.projections.state_for(&event.entity).unwrap();
+        let state = reg.projections.state_for(&event.entity).test_ok();
         assert_eq!(state.get("n").and_then(serde_json::Value::as_u64), Some(1));
         let mut protected = event;
         protected.event_type = Kind::new(pos_core::GEOGRAPHIC_EVENT_TYPE);
@@ -1290,8 +1801,8 @@ mod tests {
             name: "dup",
             cap: Capability::default(),
         };
-        reg.register(&p1, None, None).unwrap();
-        let err = reg.register(&p2, None, None).unwrap_err();
+        reg.register(&p1, None, None).test_ok();
+        let err = reg.register(&p2, None, None).test_err();
         assert!(matches!(err, RuntimeError::DuplicatePlugin { .. }));
     }
 
@@ -1301,7 +1812,7 @@ mod tests {
         let mut reg = PluginRegistry::new();
         assert!(reg.is_empty());
         let p = simple_plugin("p", &[]);
-        reg.register(&p, None, None).unwrap();
+        reg.register(&p, None, None).test_ok();
         assert_eq!(reg.len(), 1);
         assert_eq!(reg.driver_count(), 0);
         assert!(reg.contains(&p.id));
@@ -1311,12 +1822,12 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn tick_cadenced_skips_driverless_plugins() {
-        let mut store = pos_store::open_store(pos_store::StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("t").unwrap();
+        let mut store = pos_store::open_store(pos_store::StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("t").test_ok();
         let mut reg = PluginRegistry::new();
         let p = simple_plugin("p", &[]);
-        reg.register(&p, None, None).unwrap();
-        let drafts = reg.tick_cadenced(tl.id(), 0).unwrap();
+        reg.register(&p, None, None).test_ok();
+        let drafts = reg.tick_cadenced(tl.id(), 0).test_ok();
         assert!(drafts.is_empty());
     }
 
@@ -1326,8 +1837,8 @@ mod tests {
         let mut reg = PluginRegistry::new();
         let p1 = simple_plugin("alpha", &[]);
         let p2 = simple_plugin("beta", &[]);
-        reg.register(&p1, None, None).unwrap();
-        reg.register(&p2, None, None).unwrap();
+        reg.register(&p1, None, None).test_ok();
+        reg.register(&p2, None, None).test_ok();
         let names: Vec<&str> = reg.plugin_names().collect();
         assert!(names.contains(&"alpha"));
         assert!(names.contains(&"beta"));
@@ -1365,8 +1876,8 @@ mod tests {
             }
         }
 
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("t").test_ok();
 
         let entity = EntityId::new();
         let p = plugin_with_caps("driven", &["driver.tick"], true, false);
@@ -1374,10 +1885,10 @@ mod tests {
         assert_eq!(driver.name(), "simple"); // force coverage of name()
 
         let mut reg = PluginRegistry::new();
-        reg.register(&p, None, Some(Box::new(driver))).unwrap();
+        reg.register(&p, None, Some(Box::new(driver))).test_ok();
         assert_eq!(reg.driver_count(), 1);
 
-        let drafts = reg.step_all(tl.id()).unwrap();
+        let drafts = reg.step_all(tl.id()).test_ok();
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].event_type.as_str(), "driver.tick");
     }
@@ -1386,13 +1897,31 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn step_all_no_drivers_returns_empty() {
         use pos_store::{open_store, StoreConfig};
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("t").test_ok();
         let p = simple_plugin("nodrive", &[]);
         let mut reg = PluginRegistry::new();
-        reg.register(&p, None, None).unwrap();
-        let drafts = reg.step_all(tl.id()).unwrap();
+        reg.register(&p, None, None).test_ok();
+        let drafts = reg.step_all(tl.id()).test_ok();
         assert!(drafts.is_empty());
+    }
+
+    #[test]
+    fn direct_driver_selection_reports_missing_entries() {
+        let mut registry = PluginRegistry::new();
+        let snapshot = ObservationSnapshot::default();
+        let missing = registry
+            .invoke_selected_driver(PluginId::new(), TimelineId::new(), &snapshot, &[])
+            .test_err();
+        assert!(matches!(missing, RuntimeError::NoDriver { .. }));
+
+        let plugin = simple_plugin("registered-without-driver", &[]);
+        let plugin_id = plugin.id;
+        registry.register(&plugin, None, None).test_ok();
+        let absent = registry
+            .invoke_selected_driver(plugin_id, TimelineId::new(), &snapshot, &[])
+            .test_err();
+        assert!(matches!(absent, RuntimeError::NoDriver { .. }));
     }
 
     #[test]
@@ -1416,15 +1945,15 @@ mod tests {
             }
         }
 
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let timeline = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let timeline = store.create_timeline("t").test_ok();
         let mut reg = PluginRegistry::new();
         reg.register_driver(Box::new(FailingDriver));
 
-        let error = reg.step_all(timeline.id()).unwrap_err();
+        let error = reg.step_all(timeline.id()).test_err();
         assert!(error.to_string().contains("failing"));
 
-        let error = reg.tick_cadenced(timeline.id(), 0).unwrap_err();
+        let error = reg.tick_cadenced(timeline.id(), 0).test_err();
         assert!(error.to_string().contains("failing"));
     }
 
@@ -1450,8 +1979,8 @@ mod tests {
             }
         }
 
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let timeline = store.create_timeline("driver-geo").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let timeline = store.create_timeline("driver-geo").test_ok();
         let mut registry = PluginRegistry::new();
         registry.register_driver(Box::new(GeographicDriver));
         assert!(matches!(
@@ -1507,8 +2036,8 @@ mod tests {
             }
         }
 
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let timeline = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let timeline = store.create_timeline("t").test_ok();
         let observed_entity = EntityId::new();
         let event = Event {
             id: EventId::new(),
@@ -1532,11 +2061,11 @@ mod tests {
             entity: EntityId::new(),
         }));
 
-        let drafts = reg.tick_cadenced(timeline.id(), 0).unwrap();
+        let drafts = reg.tick_cadenced(timeline.id(), 0).test_ok();
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].event_type.as_str(), "driver.observed");
 
-        let drafts = reg.step_all(timeline.id()).unwrap();
+        let drafts = reg.step_all(timeline.id()).test_ok();
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].event_type.as_str(), "driver.observed");
     }
@@ -1569,17 +2098,18 @@ mod tests {
             }
         }
 
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let timeline = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let timeline = store.create_timeline("t").test_ok();
         let key = ProjectionKey::new(EntityId::new());
         let driver = DuplicateKeyDriver {
             keys: vec![key.clone(), key],
         };
         let plugin = plugin_with_caps("dup-key-plugin", &[], true, false);
         let mut reg = PluginRegistry::new();
-        reg.register(&plugin, None, Some(Box::new(driver))).unwrap();
+        reg.register(&plugin, None, Some(Box::new(driver)))
+            .test_ok();
 
-        let drafts = reg.tick_cadenced(timeline.id(), 0).unwrap();
+        let drafts = reg.tick_cadenced(timeline.id(), 0).test_ok();
         assert!(drafts.is_empty());
     }
 
@@ -1674,8 +2204,8 @@ mod tests {
         }));
 
         let timeline = TimelineId::new();
-        registry.tick_cadenced(timeline, u128::MAX - 1).unwrap();
-        let error = registry.tick_cadenced(timeline, u128::MAX).unwrap_err();
+        registry.tick_cadenced(timeline, u128::MAX - 1).test_ok();
+        let error = registry.tick_cadenced(timeline, u128::MAX).test_err();
 
         assert!(matches!(
             error,
@@ -1731,8 +2261,8 @@ mod tests {
         }
 
         let timeline = TimelineId::new();
-        assert_eq!(registry.tick_cadenced(timeline, 0).unwrap().len(), 3);
-        let drafts = registry.tick_cadenced(timeline, 1).unwrap();
+        assert_eq!(registry.tick_cadenced(timeline, 0).test_ok().len(), 3);
+        let drafts = registry.tick_cadenced(timeline, 1).test_ok();
         assert_eq!(
             drafts
                 .iter()
@@ -1767,23 +2297,23 @@ mod tests {
             }
         }
 
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let timeline = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let timeline = store.create_timeline("t").test_ok();
         let plugin = plugin_with_caps("interval-plugin", &[], true, false);
         let mut reg = PluginRegistry::new();
         reg.register(&plugin, None, Some(Box::new(IntervalDriver)))
-            .unwrap();
+            .test_ok();
 
-        let first = reg.tick_cadenced(timeline.id(), 0).unwrap();
+        let first = reg.tick_cadenced(timeline.id(), 0).test_ok();
         assert_eq!(first.len(), 1);
 
-        let too_early = reg.tick_cadenced(timeline.id(), 50_000_000).unwrap();
+        let too_early = reg.tick_cadenced(timeline.id(), 50_000_000).test_ok();
         assert!(
             too_early.is_empty(),
             "interval gate should suppress a second tick"
         );
 
-        let ready = reg.tick_cadenced(timeline.id(), 100_000_000).unwrap();
+        let ready = reg.tick_cadenced(timeline.id(), 100_000_000).test_ok();
         assert_eq!(
             ready.len(),
             1,
@@ -1817,13 +2347,13 @@ mod tests {
                 _: TimelineId,
                 observations: ObservationView<'_>,
             ) -> Result<StepOutput, RuntimeError> {
-                self.observed.lock().unwrap().push(observations.len());
+                self.observed.lock().test_ok().push(observations.len());
                 Ok(StepOutput::empty())
             }
         }
 
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let timeline = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let timeline = store.create_timeline("t").test_ok();
         let shared_key = ProjectionKey::new(EntityId::new());
         let observed = Arc::new(Mutex::new(Vec::new()));
         let mut reg = PluginRegistry::new();
@@ -1837,10 +2367,10 @@ mod tests {
             observed: observed.clone(),
         }));
 
-        let drafts = reg.step_all(timeline.id()).unwrap();
+        let drafts = reg.step_all(timeline.id()).test_ok();
         assert_eq!(drafts.len(), 0);
 
-        assert_eq!(observed.lock().unwrap().as_slice(), [1, 1]);
+        assert_eq!(observed.lock().test_ok().as_slice(), [1, 1]);
     }
 
     #[test]
@@ -1855,7 +2385,7 @@ mod tests {
     fn schema_validation_after_registration() {
         let mut reg = PluginRegistry::new();
         let p = simple_plugin("agent", &["agent.decision"]);
-        reg.register(&p, None, None).unwrap();
+        reg.register(&p, None, None).test_ok();
         let valid = EventDraft::new(
             EntityId::new(),
             Kind::new("agent.decision"),
@@ -1866,7 +2396,7 @@ mod tests {
             Kind::new("unknown.type"),
             CanonicalBytes::from_vec(vec![]),
         );
-        reg.schemas.validate(&valid).unwrap();
+        reg.schemas.validate(&valid).test_ok();
         assert!(reg.schemas.validate(&invalid).is_err());
     }
 
@@ -1875,24 +2405,28 @@ mod tests {
     fn register_rejects_capability_mismatch() {
         let mut reg = PluginRegistry::new();
         let p = plugin_with_caps("mismatch", &["x.y"], true, false);
-        let err = reg.register(&p, None, None).unwrap_err();
+        let err = reg.register(&p, None, None).test_err();
         assert!(matches!(err, RuntimeError::CapabilityMismatch { .. }));
 
         let p2 = plugin_with_caps("mismatch2", &["x.y"], false, false);
         let err = reg
             .register(&p2, Some(Box::new(CountReducer)), None)
-            .unwrap_err();
+            .test_err();
         assert!(matches!(err, RuntimeError::CapabilityMismatch { .. }));
 
         let p3 = plugin_with_caps("mismatch3", &["x.y"], false, true);
-        let err = reg.register(&p3, None, None).unwrap_err();
+        let err = reg.register(&p3, None, None).test_err();
         assert!(matches!(err, RuntimeError::CapabilityMismatch { .. }));
 
         let p4 = plugin_with_caps("mismatch4", &["x.y"], false, false);
         let mut noop = NoopDriver;
         assert_eq!(crate::driver::Driver::name(&noop), "noop");
-        let _ = crate::driver::Driver::step(&mut noop, TimelineId::new(), ObservationView::empty());
-        let err = reg.register(&p4, None, Some(Box::new(noop))).unwrap_err();
+        drop(crate::driver::Driver::step(
+            &mut noop,
+            TimelineId::new(),
+            ObservationView::empty(),
+        ));
+        let err = reg.register(&p4, None, Some(Box::new(noop))).test_err();
         assert!(matches!(err, RuntimeError::CapabilityMismatch { .. }));
     }
 
@@ -1920,8 +2454,8 @@ mod tests {
             },
         };
         let mut registry = PluginRegistry::new();
-        registry.register(&first, None, None).unwrap();
-        registry.register(&second, None, None).unwrap();
+        registry.register(&first, None, None).test_ok();
+        registry.register(&second, None, None).test_ok();
         let composition = registry.composition();
         assert_eq!(
             composition
@@ -1937,7 +2471,12 @@ mod tests {
                 .iter()
                 .map(|schema| schema.event_type.as_str())
                 .collect::<Vec<_>>(),
-            vec!["a.event", "runtime.recorded_output", "z.event"]
+            vec![
+                "a.event",
+                "pos.host.consent.revoked.v1",
+                "runtime.recorded_output",
+                "z.event",
+            ]
         );
     }
 
@@ -1945,10 +2484,10 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn cover_validate_recovery_evidence_empty_segments_and_zero_bound_paths() {
         // Empty ancestry → InvalidRecoveryEvidence (first else branch)
-        let _ = validate_recovery_evidence(&[], &[]);
+        drop(validate_recovery_evidence(&[], &[]));
         // Empty events with through=ZERO → early Ok() return
         let zero_segment = TimelineHistorySegment::new(TimelineId::new(), Seq::ZERO);
-        let _ = validate_recovery_evidence(&[zero_segment], &[]);
+        drop(validate_recovery_evidence(&[zero_segment], &[]));
     }
 
     struct MockActionApprover;
@@ -1980,7 +2519,7 @@ mod tests {
             Some(Box::new(MockActionApprover)),
             [Kind::new("action.type")],
         )
-        .unwrap();
+        .test_ok();
 
         assert!(reg.approver_for(&Kind::new("action.type")).is_some());
         assert!(reg.approver_for(&Kind::new("other.type")).is_none());
@@ -1995,13 +2534,13 @@ mod tests {
                 Some(Box::new(MockActionApprover)),
                 [Kind::new("action.type")],
             )
-            .unwrap_err();
+            .test_err();
         assert!(matches!(duplicate, RuntimeError::CapabilityMismatch { .. }));
 
         let no_approver = plugin_with_caps("missing_approver", &["missing.type"], false, false);
         let missing = reg
             .register_with_approver(&no_approver, None, None, None, [Kind::new("missing.type")])
-            .unwrap_err();
+            .test_err();
         assert!(matches!(missing, RuntimeError::CapabilityMismatch { .. }));
 
         let foreign_type = plugin_with_caps("foreign_type", &["owned.type"], false, false);
@@ -2013,7 +2552,7 @@ mod tests {
                 Some(Box::new(MockActionApprover)),
                 [Kind::new("not-owned.type")],
             )
-            .unwrap_err();
+            .test_err();
         assert!(matches!(foreign, RuntimeError::CapabilityMismatch { .. }));
 
         let actor = EntityId::new();
@@ -2023,7 +2562,7 @@ mod tests {
             CanonicalBytes::from_vec(b"ok_payload".to_vec()),
             Kind::new("action.type.submit"),
         );
-        let draft = reg.submit_action(&valid).expect("should succeed");
+        let draft = reg.submit_action(&valid).test_ok();
         assert_eq!(draft.entity, actor);
         assert_eq!(draft.event_type.as_str(), "action.type");
 

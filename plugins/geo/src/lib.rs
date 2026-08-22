@@ -32,7 +32,7 @@ use pos_crypto::canonical;
 use serde::{Deserialize, Serialize};
 
 /// Errors returned when a spatial-cloaking input is not a valid WGS84 value.
-#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, thiserror::Error)]
 pub enum GeoError {
     /// The degree-grid cell size is zero, negative, or non-finite.
     #[error("spatial-cloaking resolution must be finite and greater than zero")]
@@ -52,6 +52,9 @@ pub enum GeoError {
     /// A longitude is outside the WGS84 range `[-180, 180]`.
     #[error("WGS84 longitude must be in [-180, 180]")]
     LongitudeOutOfRange,
+    /// Canonical serialization failed for a validated compact observation.
+    #[error("canonical compact location serialization failed")]
+    CanonicalEncoding,
 }
 
 /// A validated WGS84 latitude/longitude pair in degrees.
@@ -86,13 +89,13 @@ impl Wgs84Point {
 
     /// Return the latitude in decimal degrees.
     #[must_use]
-    pub fn latitude(self) -> f64 {
+    pub const fn latitude(self) -> f64 {
         self.latitude
     }
 
     /// Return the longitude in decimal degrees.
     #[must_use]
-    pub fn longitude(self) -> f64 {
+    pub const fn longitude(self) -> f64 {
         self.longitude
     }
 }
@@ -252,7 +255,7 @@ impl CompactLocationObservation {
     /// V1 observation from a differently resolved cell or retain an exact
     /// coordinate.
     #[must_use]
-    pub fn new(cell: V1CloakedPoint, metadata: CompactLocationMetadata) -> Self {
+    pub const fn new(cell: V1CloakedPoint, metadata: CompactLocationMetadata) -> Self {
         Self {
             cell_latitude: cell.0.latitude(),
             cell_longitude: cell.0.longitude(),
@@ -265,62 +268,62 @@ impl CompactLocationObservation {
 
     /// Return the coarse cell latitude in decimal degrees.
     #[must_use]
-    pub fn cell_latitude(&self) -> f64 {
+    pub const fn cell_latitude(&self) -> f64 {
         self.cell_latitude
     }
 
     /// Return the coarse cell longitude in decimal degrees.
     #[must_use]
-    pub fn cell_longitude(&self) -> f64 {
+    pub const fn cell_longitude(&self) -> f64 {
         self.cell_longitude
     }
 
     /// Return the floor-rounded source-time bucket index.
     #[must_use]
-    pub fn source_time_bucket(&self) -> SourceTimeBucket {
+    pub const fn source_time_bucket(&self) -> SourceTimeBucket {
         self.source_time_bucket
     }
 
     /// Return the immutable compact-observation schema version.
     #[must_use]
-    pub fn schema_version(&self) -> CompactLocationSchemaVersion {
+    pub const fn schema_version(&self) -> CompactLocationSchemaVersion {
         self.schema_version
     }
 
     /// Return the consent/minimization policy version used for this observation.
     #[must_use]
-    pub fn policy_version(&self) -> CompactLocationPolicyVersion {
+    pub const fn policy_version(&self) -> CompactLocationPolicyVersion {
         self.policy_version
     }
 
     /// Return bounded interpretation flags.
     #[must_use]
-    pub fn quality_flags(&self) -> CompactLocationQualityFlags {
+    pub const fn quality_flags(&self) -> CompactLocationQualityFlags {
         self.quality_flags
     }
 
     /// Encode this compact observation as RFC 8949 deterministic CBOR bytes.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// The fields are all serializable scalar values, so canonical encoding can
-    /// only fail if the serialization implementation changes unexpectedly.
-    #[must_use]
-    pub fn canonical_bytes(&self) -> CanonicalBytes {
-        canonical::encode(self).expect("compact location values always encode canonically")
+    /// Returns [`GeoError::CanonicalEncoding`] if the shared deterministic
+    /// encoder rejects the validated scalar envelope.
+    #[must_use = "the canonical observation bytes are required by the event boundary"]
+    pub fn canonical_bytes(&self) -> Result<CanonicalBytes, GeoError> {
+        canonical::encode(self).map_err(|_| GeoError::CanonicalEncoding)
     }
 }
 
 impl CloakedPoint {
     /// Return the cloaked latitude in decimal degrees.
     #[must_use]
-    pub fn latitude(self) -> f64 {
+    pub const fn latitude(self) -> f64 {
         self.latitude
     }
 
     /// Return the cloaked longitude in decimal degrees.
     #[must_use]
-    pub fn longitude(self) -> f64 {
+    pub const fn longitude(self) -> f64 {
         self.longitude
     }
 }
@@ -406,7 +409,7 @@ impl SpatialCloaker {
 
     /// Return the validated degree-grid resolution.
     #[must_use]
-    pub fn resolution(self) -> f64 {
+    pub const fn resolution(self) -> f64 {
         self.resolution
     }
 
@@ -489,11 +492,11 @@ impl Reducer for GeoReducer {
         s.set("location_count", serde_json::Value::Number(0.into()));
         s.set(
             "last_cell_lat",
-            serde_json::Value::Number(serde_json::Number::from_f64(0.0).unwrap_or(0.into())),
+            serde_json::Value::Number(serde_json::Number::from(0)),
         );
         s.set(
             "last_cell_lng",
-            serde_json::Value::Number(serde_json::Number::from_f64(0.0).unwrap_or(0.into())),
+            serde_json::Value::Number(serde_json::Number::from(0)),
         );
         s
     }
@@ -513,8 +516,10 @@ impl Reducer for GeoReducer {
             if let Ok(payload) =
                 ciborium::from_reader::<GeoLocationPayload, _>(event.payload.as_slice())
             {
-                let lat_num = serde_json::Number::from_f64(payload.cell_lat).unwrap_or(0.into());
-                let lng_num = serde_json::Number::from_f64(payload.cell_lng).unwrap_or(0.into());
+                let lat_num =
+                    serde_json::Number::from_f64(payload.cell_lat).unwrap_or_else(|| 0.into());
+                let lng_num =
+                    serde_json::Number::from_f64(payload.cell_lng).unwrap_or_else(|| 0.into());
                 state.set("last_cell_lat", serde_json::Value::Number(lat_num));
                 state.set("last_cell_lng", serde_json::Value::Number(lng_num));
             }
@@ -527,6 +532,7 @@ impl Reducer for GeoReducer {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use pos_core::{
@@ -536,8 +542,43 @@ mod tests {
         ids::{EntityId, EventId},
     };
 
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected geo fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing geo fixture value")))
+        }
+    }
+
+    trait TestErrorExt<T, E> {
+        fn test_err(self) -> E;
+    }
+
+    impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
+        fn test_err(self) -> E {
+            match self {
+                Ok(value) => std::panic::resume_unwind(Box::new(format!(
+                    "unexpected successful geo fixture value: {value:?}"
+                ))),
+                Err(error) => error,
+            }
+        }
+    }
+
     fn wgs84_point(lat: f64, lng: f64) -> Wgs84Point {
-        Wgs84Point::new(lat, lng).unwrap()
+        Wgs84Point::new(lat, lng).test_ok()
     }
 
     fn make_geo_event(entity: EntityId, cell_lat: f64, cell_lng: f64, resolution: f64) -> Event {
@@ -547,7 +588,7 @@ mod tests {
             resolution,
         };
         let mut buf = Vec::new();
-        ciborium::into_writer(&payload, &mut buf).unwrap();
+        ciborium::into_writer(&payload, &mut buf).test_ok();
 
         Event {
             id: EventId::new(),
@@ -621,7 +662,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn spatial_cloaker_snaps_to_grid() {
         const TOLERANCE: f64 = 1e-10;
-        let cloaker = SpatialCloaker::new(0.1).unwrap();
+        let cloaker = SpatialCloaker::new(0.1).test_ok();
 
         // Test exact grid point
         let point = cloaker.cloak(wgs84_point(37.0, -122.0));
@@ -645,7 +686,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn spatial_cloaker_resolution_half_degree() {
-        let cloaker = SpatialCloaker::new(0.5).unwrap();
+        let cloaker = SpatialCloaker::new(0.5).test_ok();
 
         assert!((cloaker.resolution() - 0.5).abs() < f64::EPSILON);
 
@@ -665,7 +706,7 @@ mod tests {
     fn spatial_cloaker_rejects_invalid_resolutions() {
         for resolution in [0.0, -0.1, f64::INFINITY, f64::NAN] {
             assert_eq!(
-                SpatialCloaker::new(resolution).unwrap_err(),
+                SpatialCloaker::new(resolution).test_err(),
                 GeoError::InvalidResolution
             );
         }
@@ -676,7 +717,7 @@ mod tests {
     fn spatial_cloaker_rejects_resolutions_that_do_not_align_to_wgs84() {
         for resolution in [100.0, 7.0] {
             assert_eq!(
-                SpatialCloaker::new(resolution).unwrap_err(),
+                SpatialCloaker::new(resolution).test_err(),
                 GeoError::ResolutionDoesNotPartitionWgs84
             );
         }
@@ -685,7 +726,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn wgs84_point_accepts_boundary_coordinates() {
-        let point = Wgs84Point::new(-90.0, 180.0).unwrap();
+        let point = Wgs84Point::new(-90.0, 180.0).test_ok();
         assert!((point.latitude() - (-90.0)).abs() < f64::EPSILON);
         assert!((point.longitude() - 180.0).abs() < f64::EPSILON);
     }
@@ -724,7 +765,7 @@ mod tests {
         assert_eq!(location.quality_flags(), CompactLocationQualityFlags::NONE);
         assert_eq!(location.quality_flags().bits(), 0);
         assert_eq!(
-            location.canonical_bytes().as_slice(),
+            location.canonical_bytes().test_ok().as_slice(),
             [
                 0xa6, 0x6d, b'c', b'e', b'l', b'l', b'_', b'l', b'a', b't', b'i', b't', b'u', b'd',
                 b'e', 0xf9, 0, 0, 0x6d, b'q', b'u', b'a', b'l', b'i', b't', b'y', b'_', b'f', b'l',
@@ -742,10 +783,10 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn v1_compact_cells_require_the_fixed_v1_resolution() {
         let point = wgs84_point(0.0, 0.0);
-        let valid = SpatialCloaker::new(0.1).unwrap().cloak(point);
+        let valid = SpatialCloaker::new(0.1).test_ok().cloak(point);
         assert!(V1CloakedPoint::try_from(valid).is_ok());
 
-        let invalid = SpatialCloaker::new(1.0).unwrap().cloak(point);
+        let invalid = SpatialCloaker::new(1.0).test_ok().cloak(point);
         assert_eq!(
             V1CloakedPoint::try_from(invalid),
             Err(GeoError::CompactLocationV1Resolution)
@@ -755,7 +796,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn spatial_cloaker_privacy_property() {
-        let cloaker = SpatialCloaker::new(0.1).unwrap();
+        let cloaker = SpatialCloaker::new(0.1).test_ok();
 
         // Two points within resolution/2 should map to same cell
         let point1 = cloaker.cloak(wgs84_point(37.0, -122.0));
@@ -843,6 +884,28 @@ mod tests {
                 - (-123.0))
                 .abs()
                 < f64::EPSILON
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn reducer_maps_non_finite_cell_coordinates_to_zero() {
+        let reducer = GeoReducer;
+        let entity = EntityId::new();
+        let mut state = reducer.initial();
+        reducer.apply(&mut state, &make_geo_event(entity, f64::NAN, f64::NAN, 0.1));
+
+        assert_eq!(
+            state
+                .get("last_cell_lat")
+                .and_then(serde_json::Value::as_f64),
+            Some(0.0)
+        );
+        assert_eq!(
+            state
+                .get("last_cell_lng")
+                .and_then(serde_json::Value::as_f64),
+            Some(0.0)
         );
     }
 
@@ -942,8 +1005,8 @@ mod tests {
         };
 
         let mut buf = Vec::new();
-        ciborium::into_writer(&payload, &mut buf).unwrap();
-        let back: GeoLocationPayload = ciborium::from_reader(buf.as_slice()).unwrap();
+        ciborium::into_writer(&payload, &mut buf).test_ok();
+        let back: GeoLocationPayload = ciborium::from_reader(buf.as_slice()).test_ok();
 
         assert_eq!(payload, back);
     }
@@ -951,7 +1014,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn spatial_cloaker_negative_coordinates() {
-        let cloaker = SpatialCloaker::new(0.1).unwrap();
+        let cloaker = SpatialCloaker::new(0.1).test_ok();
 
         let point = cloaker.cloak(wgs84_point(-37.07, 122.03));
         let (lat, lng) = (point.latitude(), point.longitude());
@@ -962,7 +1025,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn spatial_cloaker_zero_coordinates() {
-        let cloaker = SpatialCloaker::new(0.1).unwrap();
+        let cloaker = SpatialCloaker::new(0.1).test_ok();
 
         let point = cloaker.cloak(wgs84_point(0.0, 0.0));
         let (lat, lng) = (point.latitude(), point.longitude());
@@ -973,7 +1036,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn spatial_cloaker_clone() {
-        let cloaker1 = SpatialCloaker::new(0.1).unwrap();
+        let cloaker1 = SpatialCloaker::new(0.1).test_ok();
         let cloaker2 = cloaker1;
 
         let point1 = cloaker1.cloak(wgs84_point(37.0, -122.0));
@@ -1037,7 +1100,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn spatial_cloaker_extreme_coordinates() {
-        let cloaker = SpatialCloaker::new(0.1).unwrap();
+        let cloaker = SpatialCloaker::new(0.1).test_ok();
 
         let point = cloaker.cloak(wgs84_point(89.99, -179.99));
         let (lat, lng) = (point.latitude(), point.longitude());

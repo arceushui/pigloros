@@ -57,6 +57,9 @@ pub enum GeoCellError {
     /// A parent request attempted to refine a cell.
     #[error("cannot request finer H3 parent: source={source_resolution}, target={target}")]
     FinerParent { source_resolution: u8, target: u8 },
+    /// Canonical serialization rejected the validated wire shape.
+    #[error("canonical GeoCellV1 serialization failed")]
+    CanonicalEncoding,
 }
 
 /// A validated H3 resolution in the inclusive range 0 through 15.
@@ -81,8 +84,8 @@ impl H3Resolution {
         self.0
     }
 
-    fn as_h3o(self) -> h3o::Resolution {
-        h3o::Resolution::try_from(self.0).expect("validated H3 resolution is representable")
+    fn as_h3o(self) -> Result<h3o::Resolution, GeoCellError> {
+        h3o::Resolution::try_from(self.0).map_err(|_| GeoCellError::InvalidResolution(self.0))
     }
 }
 
@@ -113,10 +116,6 @@ impl GeoCellV1 {
     /// The result type is retained for symmetry with decoding; the validated
     /// V1 fields currently make encoding infallible.
     ///
-    /// # Panics
-    ///
-    /// Panics only if the invariant-safe V1 wire fields cannot be canonically
-    /// encoded, which would indicate a repository serializer invariant failure.
     pub fn encode_v1(&self) -> Result<CanonicalBytes, GeoCellError> {
         let wire = GeoCellWireV1 {
             cell_format: GEO_CELL_FORMAT_V1,
@@ -124,7 +123,7 @@ impl GeoCellV1 {
             index: self.index(),
             resolution: self.resolution.value(),
         };
-        Ok(canonical::encode(&wire).expect("GeoCellV1 wire fields always encode canonically"))
+        canonical::encode(&wire).map_err(|_| GeoCellError::CanonicalEncoding)
     }
 
     /// Cross the neutral core boundary after this plugin has completed H3 validation.
@@ -231,8 +230,7 @@ impl GeoCellV1 {
     }
 
     fn from_h3o(index: h3o::CellIndex) -> Self {
-        let resolution = H3Resolution::new(index.resolution().into())
-            .expect("h3o cell resolutions are always in 0..=15");
+        let resolution = H3Resolution(index.resolution().into());
         let text = index.to_string();
         let index = CanonicalH3Index::new(text);
         Self { index, resolution }
@@ -241,21 +239,15 @@ impl GeoCellV1 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CanonicalH3Index {
-    bytes: [u8; 15],
     text: String,
 }
 
 impl CanonicalH3Index {
-    fn new(text: String) -> Self {
-        let bytes = text
-            .as_bytes()
-            .try_into()
-            .expect("h3o always formats a 15-byte canonical cell index");
-        Self { bytes, text }
+    const fn new(text: String) -> Self {
+        Self { text }
     }
 
     fn as_str(&self) -> &str {
-        debug_assert_eq!(self.bytes.as_slice(), self.text.as_bytes());
         &self.text
     }
 }
@@ -286,20 +278,15 @@ impl H3ReferenceCloaker {
     /// The result type is retained for the stable adapter seam; validated
     /// coordinates and resolutions currently make this conversion infallible.
     ///
-    /// # Panics
-    ///
-    /// Panics only if a validated [`Wgs84Point`] is rejected by the h3o
-    /// coordinate constructor, which would indicate a validation invariant
-    /// failure.
     pub fn from_wgs84(
         &self,
         point: Wgs84Point,
         resolution: H3Resolution,
     ) -> Result<GeoCellV1, GeoCellError> {
         let (latitude, longitude) = normalize_h3_input(point);
-        let point = h3o::LatLng::new(latitude, longitude)
-            .expect("validated Wgs84Point coordinates are finite");
-        Ok(GeoCellV1::from_h3o(point.to_cell(resolution.as_h3o())))
+        let point =
+            h3o::LatLng::new(latitude, longitude).map_err(|_| GeoCellError::InvalidH3Index)?;
+        Ok(GeoCellV1::from_h3o(point.to_cell(resolution.as_h3o()?)))
     }
 
     /// Parse one canonical lowercase 15-character H3 cell address.
@@ -326,10 +313,6 @@ impl H3ReferenceCloaker {
     /// Returns [`GeoCellError::FinerParent`] when `target` is finer than the
     /// source cell.
     ///
-    /// # Panics
-    ///
-    /// Panics only if a validated cell cannot be reparsed or coarsened by h3o,
-    /// which would indicate an internal validation invariant failure.
     #[allow(clippy::needless_pass_by_value)]
     pub fn parent(&self, cell: GeoCellV1, target: H3Resolution) -> Result<GeoCellV1, GeoCellError> {
         if target > cell.resolution {
@@ -338,11 +321,11 @@ impl H3ReferenceCloaker {
                 target: target.value(),
             });
         }
-        let parsed = h3o::CellIndex::from_str(cell.index())
-            .expect("GeoCellV1 stores only valid H3 cell indexes");
+        let parsed =
+            h3o::CellIndex::from_str(cell.index()).map_err(|_| GeoCellError::InvalidH3Index)?;
         let parent = parsed
-            .parent(target.as_h3o())
-            .expect("a valid equal or coarser H3 parent always exists");
+            .parent(target.as_h3o()?)
+            .ok_or(GeoCellError::InvalidH3Index)?;
         Ok(GeoCellV1::from_h3o(parent))
     }
 }
@@ -406,21 +389,41 @@ mod tests {
     use serde::Serialize;
     use std::io::Cursor;
 
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected geo fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing geo fixture value")))
+        }
+    }
+
     const KNOWN_INDEX: &str = "8928308280fffff";
     const KNOWN_BYTES: &[u8] =
         b"\xa4eindexo8928308280fffff\x66systemeh3-v4\x6aresolution\x09kcell_format\x01";
 
     fn resolution(value: u8) -> H3Resolution {
-        H3Resolution::new(value).unwrap()
+        H3Resolution::new(value).test_ok()
     }
 
     fn wgs84(latitude: f64, longitude: f64) -> Wgs84Point {
-        Wgs84Point::new(latitude, longitude).unwrap()
+        Wgs84Point::new(latitude, longitude).test_ok()
     }
 
     fn map_bytes(entries: Vec<(Value, Value)>) -> CanonicalBytes {
         let mut bytes = Vec::new();
-        ciborium::into_writer(&Value::Map(entries), &mut bytes).unwrap();
+        ciborium::into_writer(&Value::Map(entries), &mut bytes).test_ok();
         CanonicalBytes::from_vec(bytes)
     }
 
@@ -434,7 +437,7 @@ mod tests {
                 return bytes;
             }
         }
-        panic!("test map could not be padded to 61 bytes");
+        std::panic::resume_unwind(Box::new("test map could not be padded to 61 bytes"));
     }
 
     #[derive(Serialize)]
@@ -455,23 +458,22 @@ mod tests {
 
     #[test]
     fn resolution_accepts_h3_range() {
-        assert_eq!(H3Resolution::new(0).unwrap().value(), 0);
-        assert_eq!(H3Resolution::new(15).unwrap().value(), 15);
+        assert_eq!(H3Resolution::new(0).test_ok().value(), 0);
+        assert_eq!(H3Resolution::new(15).test_ok().value(), 15);
         assert!(H3Resolution::new(16).is_err());
     }
 
     #[test]
     fn parses_and_exposes_a_canonical_cell() {
-        let cell = H3ReferenceCloaker::new().parse(KNOWN_INDEX).unwrap();
+        let cell = H3ReferenceCloaker::new().parse(KNOWN_INDEX).test_ok();
         assert_eq!(cell.index(), KNOWN_INDEX);
-        assert_eq!(cell.index.bytes, *b"8928308280fffff");
         assert_eq!(cell.resolution().value(), 9);
     }
 
     #[test]
     fn validated_cell_crosses_the_neutral_core_boundary() {
-        let cell = H3ReferenceCloaker::new().parse(KNOWN_INDEX).unwrap();
-        let core_cell = cell.into_core_value().unwrap();
+        let cell = H3ReferenceCloaker::new().parse(KNOWN_INDEX).test_ok();
+        let core_cell = cell.into_core_value().test_ok();
         assert_eq!(core_cell.as_bytes().as_slice(), KNOWN_BYTES);
         assert_eq!(core_cell.resolution(), 9);
     }
@@ -496,7 +498,7 @@ mod tests {
     fn converts_wgs84_to_the_h3_core_known_answer() {
         let cell = H3ReferenceCloaker::new()
             .from_wgs84(wgs84(45.0, 40.0), resolution(2))
-            .unwrap();
+            .test_ok();
         assert_eq!(cell.index(), "822d57fffffffff");
     }
 
@@ -505,16 +507,18 @@ mod tests {
         let cloaker = H3ReferenceCloaker::new();
         let east = cloaker
             .from_wgs84(wgs84(0.0, 180.0), resolution(9))
-            .unwrap();
+            .test_ok();
         let west = cloaker
             .from_wgs84(wgs84(0.0, -180.0), resolution(9))
-            .unwrap();
+            .test_ok();
         assert_eq!(east, west);
 
         let north = cloaker
             .from_wgs84(wgs84(90.0, 180.0), resolution(9))
-            .unwrap();
-        let north_zero = cloaker.from_wgs84(wgs84(90.0, 0.0), resolution(9)).unwrap();
+            .test_ok();
+        let north_zero = cloaker
+            .from_wgs84(wgs84(90.0, 0.0), resolution(9))
+            .test_ok();
         assert_eq!(north, north_zero);
     }
 
@@ -524,28 +528,28 @@ mod tests {
         assert_eq!(
             cloaker
                 .from_wgs84(wgs84(-0.0, -0.0), resolution(9))
-                .unwrap(),
-            cloaker.from_wgs84(wgs84(0.0, 0.0), resolution(9)).unwrap()
+                .test_ok(),
+            cloaker.from_wgs84(wgs84(0.0, 0.0), resolution(9)).test_ok()
         );
 
         assert_eq!(
             cloaker
                 .from_wgs84(wgs84(-90.0, 180.0), resolution(9))
-                .unwrap(),
+                .test_ok(),
             cloaker
                 .from_wgs84(wgs84(-90.0, 0.0), resolution(9))
-                .unwrap()
+                .test_ok()
         );
     }
 
     #[test]
     fn converts_coordinates_on_an_h3_cell_boundary() {
         let cloaker = H3ReferenceCloaker::new();
-        let index = h3o::CellIndex::from_str(KNOWN_INDEX).unwrap();
+        let index = h3o::CellIndex::from_str(KNOWN_INDEX).test_ok();
         for vertex in index.boundary().iter().take(2) {
             let cell = cloaker
                 .from_wgs84(wgs84(vertex.lat(), vertex.lng()), resolution(9))
-                .unwrap();
+                .test_ok();
             assert_eq!(cell.index().len(), 15);
         }
     }
@@ -556,9 +560,9 @@ mod tests {
         for value in 0..=15 {
             let cell = cloaker
                 .from_wgs84(wgs84(37.769_377, -122.388_903), resolution(value))
-                .unwrap();
+                .test_ok();
             assert_eq!(cell.resolution().value(), value);
-            assert_eq!(cloaker.parse(cell.index()).unwrap(), cell);
+            assert_eq!(cloaker.parse(cell.index()).test_ok(), cell);
         }
     }
 
@@ -572,12 +576,12 @@ mod tests {
 
         for base in pentagons {
             for value in 0..=15 {
-                let h3_resolution = h3o::Resolution::try_from(value).unwrap();
-                let index = base.center_child(h3_resolution).unwrap().to_string();
-                let cell = cloaker.parse(&index).unwrap();
+                let h3_resolution = h3o::Resolution::try_from(value).test_ok();
+                let index = base.center_child(h3_resolution).test_ok().to_string();
+                let cell = cloaker.parse(&index).test_ok();
                 assert_eq!(cell.resolution().value(), value);
                 assert_eq!(
-                    GeoCellV1::decode_v1(&cell.encode_v1().unwrap()).unwrap(),
+                    GeoCellV1::decode_v1(&cell.encode_v1().test_ok()).test_ok(),
                     cell
                 );
             }
@@ -587,24 +591,24 @@ mod tests {
     #[test]
     fn returns_coarser_parent_and_rejects_refinement() {
         let cloaker = H3ReferenceCloaker::new();
-        let cell = cloaker.parse(KNOWN_INDEX).unwrap();
+        let cell = cloaker.parse(KNOWN_INDEX).test_ok();
         assert_eq!(
-            cloaker.parent(cell.clone(), cell.resolution()).unwrap(),
+            cloaker.parent(cell.clone(), cell.resolution()).test_ok(),
             cell
         );
-        let parent = cloaker.parent(cell.clone(), resolution(5)).unwrap();
+        let parent = cloaker.parent(cell.clone(), resolution(5)).test_ok();
         assert_eq!(parent.resolution().value(), 5);
         assert!(cloaker.parent(cell, resolution(10)).is_err());
     }
 
     #[test]
     fn encodes_the_exact_v1_fixture_and_round_trips() {
-        let cell = H3ReferenceCloaker::new().parse(KNOWN_INDEX).unwrap();
-        let bytes = cell.encode_v1().unwrap();
+        let cell = H3ReferenceCloaker::new().parse(KNOWN_INDEX).test_ok();
+        let bytes = cell.encode_v1().test_ok();
         assert_eq!(bytes.as_slice(), KNOWN_BYTES);
-        assert_eq!(GeoCellV1::decode_v1(&bytes).unwrap(), cell);
+        assert_eq!(GeoCellV1::decode_v1(&bytes).test_ok(), cell);
         for _ in 0..3 {
-            assert_eq!(cell.encode_v1().unwrap(), bytes);
+            assert_eq!(cell.encode_v1().test_ok(), bytes);
         }
 
         let a = WireA {
@@ -620,8 +624,8 @@ mod tests {
             index: KNOWN_INDEX,
         };
         assert_eq!(
-            canonical::encode(&a).unwrap(),
-            canonical::encode(&b).unwrap()
+            canonical::encode(&a).test_ok(),
+            canonical::encode(&b).test_ok()
         );
     }
 
@@ -702,7 +706,7 @@ mod tests {
         assert!(GeoCellV1::decode_v1(&missing).is_err());
 
         let mut non_map = Vec::new();
-        ciborium::into_writer(&Value::Text("x".repeat(59)), &mut non_map).unwrap();
+        ciborium::into_writer(&Value::Text("x".repeat(59)), &mut non_map).test_ok();
         assert_eq!(non_map.len(), 61);
         assert!(GeoCellV1::decode_v1(&CanonicalBytes::from_vec(non_map)).is_err());
     }
@@ -956,5 +960,23 @@ mod tests {
             GeoCellV1::decode_v1(&invalid_resolution),
             Err(GeoCellError::InvalidResolution(16))
         );
+    }
+
+    #[test]
+    fn defensive_h3_conversion_boundaries_fail_closed() {
+        assert!(H3Resolution(16).as_h3o().is_err());
+
+        let cloaker = H3ReferenceCloaker::new();
+        let malformed = GeoCellV1 {
+            index: CanonicalH3Index::new("not-a-cell-idx!".to_owned()),
+            resolution: H3Resolution(9),
+        };
+        assert!(cloaker.parent(malformed, H3Resolution(0)).is_err());
+
+        let non_finite = Wgs84Point {
+            latitude: f64::NAN,
+            longitude: 0.0,
+        };
+        assert!(cloaker.from_wgs84(non_finite, H3Resolution(9)).is_err());
     }
 }
