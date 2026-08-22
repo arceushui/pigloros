@@ -1,3 +1,6 @@
+# The isolated fuzzing workspace is governed by Proposed ADR-063:
+# https://redmine.piglor.com/projects/pigloros/wiki/ADR-063_Isolated_Fuzzing_and_Layered_Rust_Quality_Gates
+# Implementation proceeded while Proposed under explicit user authorization.
 [package]
 name = "pigloros-fuzz"
 version = "0.0.0"
