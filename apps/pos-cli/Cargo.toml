@@ -15,8 +15,6 @@ pos-core = { path = "../../crates/pos-core" }
 pos-store = { path = "../../crates/pos-store" }
 pos-state = { path = "../../crates/pos-state" }
 pos-time = { path = "../../crates/pos-time" }
-pos-query = { path = "../../crates/pos-query" }
-pos-runtime = { path = "../../crates/pos-runtime" }
 pos-experiment = { path = "../pos-experiment" }
 pos-plugin-rule-agent = { path = "../../plugins/entities/rule-agent" }
 pos-plugin-synthetic-obs = { path = "../../plugins/observations/synthetic" }
@@ -24,7 +22,6 @@ blake3 = { workspace = true }
 ulid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

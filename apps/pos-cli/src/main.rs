@@ -762,7 +762,7 @@ fn count_snapshot_entities(snapshot: &pos_time::Snapshot) -> usize {
     entities.len()
 }
 
-/// Pull entity id keys from a serialized [`StateRegistry`]-shaped JSON value.
+/// Pull entity id keys from a serialized [`pos_core::StateRegistry`]-shaped JSON value.
 fn accumulate_entities_from_registry_json(
     value: &serde_json::Value,
     entities: &mut std::collections::HashSet<String>,

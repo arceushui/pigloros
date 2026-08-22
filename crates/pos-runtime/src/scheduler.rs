@@ -22,7 +22,7 @@ impl TickScheduler {
     /// Only drivers whose `tick_interval()` has elapsed since their last
     /// tick will fire.
     ///
-    /// `now_ns` is a nanosecond wall-clock timestamp (e.g. from [`WallTime`]).
+    /// `now_ns` is a nanosecond wall-clock timestamp (e.g. from [`pos_core::WallTime`]).
     ///
     /// # Errors
     /// Propagates any [`RuntimeError`] from drivers.

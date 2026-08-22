@@ -1,7 +1,7 @@
 //! In-memory `EventStore` for tests and single-process use.
 //!
 //! Fork is copy-on-write: a child stores only its own events.
-//! Reading from a forked child transparently stitches parent[`0..fork_seq`] + child events.
+//! Reading from a forked child transparently stitches parent `0..fork_seq` + child events.
 //! Multi-level fork chains are supported: a child of a child walks the chain recursively.
 
 use std::{
@@ -628,7 +628,7 @@ impl MemoryStore {
     }
 
     /// Collect all events for a timeline, walking the fork chain.
-    /// Returns events sorted by seq, stitching parent[`0..fork_seq`] + child events.
+    /// Returns events sorted by seq, stitching parent `0..fork_seq` + child events.
     fn collect_events_in_range(
         &self,
         timeline_id: TimelineId,

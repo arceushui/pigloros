@@ -250,7 +250,7 @@ pub fn open_owntracks_enrollment_store(
     sqlite::SqliteStore::open(sqlite_path).map(|store| Box::new(store) as Box<_>)
 }
 
-/// Like [`open_store`] but with a custom [`Hasher`] for hash-chain computation.
+/// Like [`open_store`] but with a custom [`pos_core::Hasher`] for hash-chain computation.
 ///
 /// # Errors
 /// Returns [`CoreError::Storage`] if the backend cannot be initialised.

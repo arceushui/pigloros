@@ -9,11 +9,6 @@ publish.workspace = true
 [dependencies]
 pos-core = { path = "../pos-core" }
 pos-store = { path = "../pos-store" }
-serde = { workspace = true }
-thiserror = { workspace = true }
-
-[dev-dependencies]
-proptest = { workspace = true }
 
 [lints]
 workspace = true

@@ -1,9 +1,6 @@
-# cargo-deny — dependency policy (crates / licenses / advisories / sources).
-# Docs: https://embarkstudios.github.io/cargo-deny/
-#
-# Does NOT ban Rust source attributes like #[ignore] or coverage(off).
-# coverage(off) / ```ignore: Trunk rust-test-policy.
-# #[ignore]: cargo test -- --include-ignored (CI still runs them).
+# Dependency policy for the isolated libFuzzer workspace.
+# Keep this policy separate from the production workspace because
+# libfuzzer-sys is a fuzz-only dependency with an additional NCSA license.
 
 [graph]
 targets = [{ triple = "x86_64-unknown-linux-gnu" }]
@@ -16,7 +13,6 @@ ignore = []
 [licenses]
 version = 2
 confidence-threshold = 0.8
-# Unused allow-list entries are fine (forward-looking allowlist).
 unused-allowed-license = "allow"
 allow = [
   "MIT",
@@ -31,14 +27,13 @@ allow = [
   "CC0-1.0",
   "MPL-2.0",
 ]
-exceptions = []
+exceptions = [{ crate = "libfuzzer-sys", allow = ["NCSA"] }]
 
 [licenses.private]
 ignore = true
 
 [bans]
 multiple-versions = "warn"
-# Workspace pins often use `"1"` / `"0.2"` — treat as warn, not hard fail.
 wildcards = "warn"
 highlight = "all"
 deny = [
