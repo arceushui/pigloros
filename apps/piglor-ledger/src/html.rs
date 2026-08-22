@@ -77,23 +77,23 @@ pub fn render_html(view: &LedgerView, pubkey_hex: Option<&str>) -> String {
     // Headline (ADR-017 Decision 7): counts always; mean Brier only when
     // n_resolved >= 1, otherwise the explicit "no Brier Score yet" copy.
     s.push_str("<p class=\"headline\">");
-    drop(write!(
+    let _format_result = write!(
         s,
         "{} pending / {} resolved",
         view.n_pending + view.n_overdue,
         view.n_resolved
-    ));
+    );
     if view.n_overdue > 0 {
-        drop(write!(s, " ({} overdue)", view.n_overdue));
+        let _format_result = write!(s, " ({} overdue)", view.n_overdue);
     }
     match view.mean_brier {
         Some(b) => {
-            drop(write!(
+            let _format_result = write!(
                 s,
                 " — mean Brier Score: {} (n={})",
                 fmt_brier(b),
                 view.n_resolved
-            ));
+            );
         }
         None => s.push_str(" — no Brier Score yet"),
     }
@@ -111,7 +111,7 @@ pub fn render_html(view: &LedgerView, pubkey_hex: Option<&str>) -> String {
     s.push_str("<p>Verify each entry matches its OSF registration</p>\n");
     match pubkey_hex {
         Some(pk) => {
-            drop(writeln!(s, "<p>Public key: <code>{}</code></p>", esc(pk)));
+            let _format_result = writeln!(s, "<p>Public key: <code>{}</code></p>", esc(pk));
         }
         None => s.push_str("<p>Demo tier (TOML): entries are unsigned; verify with <code>b3sum</code> on the TOML files.</p>\n"),
     }
