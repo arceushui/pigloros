@@ -5,10 +5,12 @@ name: mutation
 on:
   pull_request:
     paths:
-      - "**/*.rs"
-      - "**/Cargo.toml"
-      - "Cargo.lock"
-      - ".github/workflows/mutation.yml"
+      - >-
+        **/*.rs
+      - >-
+        **/Cargo.toml
+      - Cargo.lock
+      - .github/workflows/mutation.yml
   workflow_dispatch:
 
 permissions:
