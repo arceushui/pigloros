@@ -492,15 +492,11 @@ impl Reducer for GeoReducer {
         s.set("location_count", serde_json::Value::Number(0.into()));
         s.set(
             "last_cell_lat",
-            serde_json::Value::Number(
-                serde_json::Number::from_f64(0.0).unwrap_or_else(|| 0.into()),
-            ),
+            serde_json::Value::Number(serde_json::Number::from(0)),
         );
         s.set(
             "last_cell_lng",
-            serde_json::Value::Number(
-                serde_json::Number::from_f64(0.0).unwrap_or_else(|| 0.into()),
-            ),
+            serde_json::Value::Number(serde_json::Number::from(0)),
         );
         s
     }

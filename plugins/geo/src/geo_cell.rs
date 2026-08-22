@@ -229,31 +229,25 @@ impl GeoCellV1 {
         Ok(cell)
     }
 
-    fn from_h3o(index: h3o::CellIndex) -> Result<Self, GeoCellError> {
-        let resolution = H3Resolution::new(index.resolution().into())?;
+    fn from_h3o(index: h3o::CellIndex) -> Self {
+        let resolution = H3Resolution(index.resolution().into());
         let text = index.to_string();
-        let index = CanonicalH3Index::new(text)?;
-        Ok(Self { index, resolution })
+        let index = CanonicalH3Index::new(text);
+        Self { index, resolution }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CanonicalH3Index {
-    bytes: [u8; 15],
     text: String,
 }
 
 impl CanonicalH3Index {
-    fn new(text: String) -> Result<Self, GeoCellError> {
-        let bytes = text
-            .as_bytes()
-            .try_into()
-            .map_err(|_| GeoCellError::InvalidH3Index)?;
-        Ok(Self { bytes, text })
+    const fn new(text: String) -> Self {
+        Self { text }
     }
 
     fn as_str(&self) -> &str {
-        debug_assert_eq!(self.bytes.as_slice(), self.text.as_bytes());
         &self.text
     }
 }
@@ -292,7 +286,7 @@ impl H3ReferenceCloaker {
         let (latitude, longitude) = normalize_h3_input(point);
         let point =
             h3o::LatLng::new(latitude, longitude).map_err(|_| GeoCellError::InvalidH3Index)?;
-        GeoCellV1::from_h3o(point.to_cell(resolution.as_h3o()?))
+        Ok(GeoCellV1::from_h3o(point.to_cell(resolution.as_h3o()?)))
     }
 
     /// Parse one canonical lowercase 15-character H3 cell address.
@@ -309,7 +303,7 @@ impl H3ReferenceCloaker {
         if parsed.to_string() != index {
             return Err(GeoCellError::NonCanonicalH3Index);
         }
-        GeoCellV1::from_h3o(parsed)
+        Ok(GeoCellV1::from_h3o(parsed))
     }
 
     /// Return an equal or coarser logical H3 ancestor.
@@ -332,7 +326,7 @@ impl H3ReferenceCloaker {
         let parent = parsed
             .parent(target.as_h3o()?)
             .ok_or(GeoCellError::InvalidH3Index)?;
-        GeoCellV1::from_h3o(parent)
+        Ok(GeoCellV1::from_h3o(parent))
     }
 }
 
@@ -473,7 +467,6 @@ mod tests {
     fn parses_and_exposes_a_canonical_cell() {
         let cell = H3ReferenceCloaker::new().parse(KNOWN_INDEX).test_ok();
         assert_eq!(cell.index(), KNOWN_INDEX);
-        assert_eq!(cell.index.bytes, *b"8928308280fffff");
         assert_eq!(cell.resolution().value(), 9);
     }
 
@@ -975,10 +968,7 @@ mod tests {
 
         let cloaker = H3ReferenceCloaker::new();
         let malformed = GeoCellV1 {
-            index: CanonicalH3Index {
-                bytes: *b"not-a-cell-idx!",
-                text: "not-a-cell-idx!".to_owned(),
-            },
+            index: CanonicalH3Index::new("not-a-cell-idx!".to_owned()),
             resolution: H3Resolution(9),
         };
         assert!(cloaker.parent(malformed, H3Resolution(0)).is_err());

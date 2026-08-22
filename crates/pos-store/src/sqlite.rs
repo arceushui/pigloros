@@ -9171,7 +9171,7 @@ mod coverage_entrypoints {
             .execute_batch("ALTER TABLE events RENAME TO events_real"));
         let sql = format!(
             "CREATE VIEW events AS SELECT '{id}' AS timeline_id, 1 AS seq,\
-             'event' AS event_id, 'entity' AS entity_id, 123 AS event_type,\
+             'event' AS event_id, 'entity' AS entity_id, zeroblob(1) AS event_type,\
              zeroblob(1) AS payload, 1 AS wall_time, NULL AS causation_id,\
              NULL AS correlation_id, 1 AS schema_version, zeroblob(32) AS payload_hash,\
              NULL AS signature",
@@ -9334,6 +9334,66 @@ mod coverage_entrypoints {
         store.conn.commit_hook(Some(|| true));
         expect_err(store.revoke_owntracks_enrollment());
         store.conn.commit_hook::<fn() -> bool>(None);
+    }
+
+    #[test]
+    fn owntracks_ingress_preparation_fails_closed_at_each_transaction_boundary() {
+        let input = OwnTracksIngressInputV1::new(
+            [1; 32],
+            [2; 32],
+            [3; 32],
+            [4; 32],
+            CanonicalBytes::from_vec(vec![5]),
+        );
+
+        let mut store = tests::new_store();
+        ok(store.conn.execute_batch("BEGIN IMMEDIATE"));
+        expect_err(store.prepare_owntracks_ingress(input.clone()));
+        ok(store.conn.execute_batch("ROLLBACK"));
+
+        let mut store = tests::new_store();
+        ok(store.conn.execute_batch("DROP TABLE owntracks_enrollment"));
+        expect_err(store.prepare_owntracks_ingress(input.clone()));
+
+        let mut store = tests::new_store();
+        store.conn.commit_hook(Some(|| true));
+        expect_err(store.prepare_owntracks_ingress(input));
+        store.conn.commit_hook::<fn() -> bool>(None);
+    }
+
+    #[test]
+    fn geographic_append_rejects_malformed_timeline_head_rows() {
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("geo-head-row"));
+        let tx = ok(store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate));
+        ok(tx.execute(
+            "UPDATE timelines SET head_seq = zeroblob(1) WHERE id = ?1",
+            rusqlite::params![timeline.id().to_string()],
+        ));
+        expect_err(SqliteStore::append_geo_cell_in_transaction(
+            &tx,
+            store.hasher.as_ref(),
+            timeline.id(),
+            EntityId::new(),
+            EventId::new(),
+            CanonicalBytes::from_vec(vec![6]),
+            WallTime::from_micros(1),
+        ));
+        ok(tx.rollback());
+    }
+
+    #[test]
+    fn deleting_a_timeline_fails_closed_when_enrollment_storage_is_unavailable() {
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("delete-missing-enrollment"));
+        ok(store.conn.execute_batch("DROP TABLE owntracks_enrollment"));
+        expect_err(store.delete_timeline(timeline.id()));
+
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("delete-without-enrollment"));
+        ok(store.delete_timeline(timeline.id()));
     }
 
     #[test]
