@@ -1202,7 +1202,7 @@ impl Gateway {
         }
         let timeline = parse_timeline_id(timeline_id)?;
         let entity = parse_entity_id(entity_id)?;
-        let bytes = json_to_cbor(payload)?;
+        let bytes = json_to_cbor(payload);
         let draft = EventDraft::new(entity, Kind::new(EVENT_TYPE_ACTION), bytes);
         self.append_draft(timeline, draft).await
     }
@@ -1255,7 +1255,7 @@ impl Gateway {
         let proposal = match ProposedAction::try_new(
             Kind::new(event_type),
             entity,
-            json_to_cbor(payload)?,
+            json_to_cbor(payload),
             Kind::new(capability),
         ) {
             Ok(proposal) => proposal,
@@ -1296,7 +1296,7 @@ impl Gateway {
         let proposal = match ProposedAction::try_new(
             Kind::new(event_type),
             entity,
-            json_to_cbor(payload)?,
+            json_to_cbor(payload),
             Kind::new(capability),
         ) {
             Ok(proposal) => proposal,
@@ -1336,7 +1336,7 @@ impl Gateway {
         }
         let timeline = parse_timeline_id(timeline_id)?;
         let entity = parse_entity_id(entity_id)?;
-        let draft = EventDraft::new(entity, Kind::new(EVENT_TYPE_ACTION), json_to_cbor(payload)?);
+        let draft = EventDraft::new(entity, Kind::new(EVENT_TYPE_ACTION), json_to_cbor(payload));
         self.append_identified_draft(timeline, draft, ingress_id)
             .await
     }
@@ -1352,7 +1352,7 @@ impl Gateway {
                 maximum: MAX_EVENT_PAYLOAD_BYTES,
             });
         }
-        if draft_event_response_len(&draft)? > MAX_EVENTS_RESPONSE_BYTES {
+        if draft_event_response_len(&draft) > MAX_EVENTS_RESPONSE_BYTES {
             return Err(GatewayError::EventResponseTooLarge {
                 maximum: MAX_EVENTS_RESPONSE_BYTES,
             });
@@ -1420,7 +1420,7 @@ impl Gateway {
                 maximum: MAX_EVENT_PAYLOAD_BYTES,
             });
         }
-        if draft_event_response_len(&draft)? > MAX_EVENTS_RESPONSE_BYTES {
+        if draft_event_response_len(&draft) > MAX_EVENTS_RESPONSE_BYTES {
             return Err(GatewayError::EventResponseTooLarge {
                 maximum: MAX_EVENTS_RESPONSE_BYTES,
             });
@@ -1577,12 +1577,12 @@ fn parse_entity_id(s: &str) -> Result<EntityId, GatewayError> {
         .map_err(|e| GatewayError::InvalidId(e.to_string()))
 }
 
-fn json_to_cbor(value: &serde_json::Value) -> Result<CanonicalBytes, GatewayError> {
+fn json_to_cbor(value: &serde_json::Value) -> CanonicalBytes {
     let mut buf = Vec::new();
     // `Vec<u8>` is an infallible CBOR sink; JSON values have no fallible
     // serializer hooks at this boundary.
     drop(ciborium::into_writer(value, &mut buf));
-    Ok(CanonicalBytes::from_vec(buf))
+    CanonicalBytes::from_vec(buf)
 }
 
 fn serialized_json_len(value: &serde_json::Value) -> usize {
@@ -1594,7 +1594,7 @@ fn serialized_json_len(value: &serde_json::Value) -> usize {
 
 /// Serialize the exact wire fields derived from a draft, using the longest
 /// possible sequence number and fixed-width ULID placeholders.
-fn draft_event_response_len(draft: &EventDraft) -> Result<usize, GatewayError> {
+fn draft_event_response_len(draft: &EventDraft) -> usize {
     let payload = draft.payload.as_slice();
     let view = EventView {
         id: "0".repeat(26),
@@ -1608,7 +1608,7 @@ fn draft_event_response_len(draft: &EventDraft) -> Result<usize, GatewayError> {
         "events": [view],
         "next_from_seq": u64::MAX,
     });
-    Ok(serialized_json_len(&value))
+    serialized_json_len(&value)
 }
 
 /// Request body for `POST /v1/timelines`.
@@ -2566,7 +2566,7 @@ mod tests {
         let root_draft = EventDraft::new(
             EntityId::new(),
             Kind::new(EVENT_TYPE_ACTION),
-            json_to_cbor(&serde_json::json!({})).test_ok(),
+            json_to_cbor(&serde_json::json!({})),
         );
         store.append(root.id(), &[root_draft]).test_ok();
         let child = store.fork(root.id(), Seq::from_u64(1), "child").test_ok();
@@ -2934,7 +2934,7 @@ mod tests {
         let prefill = EventDraft::new(
             entity,
             Kind::new(EVENT_TYPE_ACTION),
-            json_to_cbor(&serde_json::json!({"writer": "prefill"})).test_ok(),
+            json_to_cbor(&serde_json::json!({"writer": "prefill"})),
         );
         seed.append(
             timeline.id(),
@@ -3013,7 +3013,7 @@ mod tests {
         let small = EventDraft::new(
             EntityId::new(),
             Kind::new(EVENT_TYPE_ACTION),
-            json_to_cbor(&serde_json::json!({})).test_ok(),
+            json_to_cbor(&serde_json::json!({})),
         );
         store
             .append(root.id(), std::slice::from_ref(&small))
@@ -3206,7 +3206,7 @@ mod tests {
             Kind::new("\0".repeat(MAX_EVENT_TYPE_BYTES)),
             CanonicalBytes::from_vec(vec![0xff; MAX_EVENT_PAYLOAD_BYTES]),
         );
-        assert!(draft_event_response_len(&draft).test_ok() <= MAX_EVENTS_RESPONSE_BYTES);
+        assert!(draft_event_response_len(&draft) <= MAX_EVENTS_RESPONSE_BYTES);
     }
 
     #[tokio::test]
@@ -3216,11 +3216,8 @@ mod tests {
         let mut boundary = None;
         for length in (MAX_EVENTS_RESPONSE_BYTES / 8 - 128)..=(MAX_EVENTS_RESPONSE_BYTES / 8) {
             let payload = serde_json::json!({"data": "\0".repeat(length)});
-            let draft = EventDraft::new(
-                entity,
-                Kind::new(EVENT_TYPE_ACTION),
-                json_to_cbor(&payload).test_ok(),
-            );
+            let draft =
+                EventDraft::new(entity, Kind::new(EVENT_TYPE_ACTION), json_to_cbor(&payload));
             let view = EventView {
                 id: "0".repeat(26),
                 entity: entity.to_string(),
@@ -3235,7 +3232,7 @@ mod tests {
             }))
             .test_ok()
             .len();
-            let worst_cursor_len = draft_event_response_len(&draft).test_ok();
+            let worst_cursor_len = draft_event_response_len(&draft);
             if null_cursor_len <= MAX_EVENTS_RESPONSE_BYTES
                 && worst_cursor_len > MAX_EVENTS_RESPONSE_BYTES
             {
@@ -3348,7 +3345,7 @@ mod tests {
                 EventDraft::new(
                     EntityId::new(),
                     Kind::new(EVENT_TYPE_ACTION),
-                    json_to_cbor(&serde_json::json!({})).test_ok(),
+                    json_to_cbor(&serde_json::json!({})),
                 )
             })
             .collect();
@@ -3395,7 +3392,7 @@ mod tests {
                 EventDraft::new(
                     EntityId::new(),
                     Kind::new(EVENT_TYPE_ACTION),
-                    json_to_cbor(&serde_json::json!({})).test_ok(),
+                    json_to_cbor(&serde_json::json!({})),
                 )
             })
             .collect();
@@ -3780,7 +3777,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn decode_cbor_json_roundtrip() {
         let value = serde_json::json!({"n": 1});
-        let bytes = json_to_cbor(&value).test_ok();
+        let bytes = json_to_cbor(&value);
         assert_eq!(decode_cbor_json(bytes.as_slice()), Some(value));
         assert!(decode_cbor_json(&[0xff]).is_none());
     }

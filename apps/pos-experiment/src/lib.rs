@@ -4454,7 +4454,7 @@ mod coverage_entrypoints {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn expect_err<T, E: std::fmt::Debug>(value: Result<T, E>) {
+    fn expect_err<T, E: std::fmt::Debug>(value: &Result<T, E>) {
         if value.is_ok() {
             std::panic::resume_unwind(Box::new("expected a rejected coverage value"));
         }
@@ -4469,7 +4469,7 @@ mod coverage_entrypoints {
     }
 
     #[test]
-    fn recovery_and_branch_entrypoints_fail_closed_without_state() {
+    fn recovery_and_fork_entrypoints_fail_closed_without_state() {
         let result = RunResult {
             timeline_id: pos_core::ids::TimelineId::new(),
             ticks: 0,
@@ -4482,21 +4482,21 @@ mod coverage_entrypoints {
             projections: pos_state::ProjectionRegistry::new(),
             store_config: None,
         };
-        expect_err(result.branch("missing-recipe"));
+        expect_err(&result.branch("missing-recipe"));
 
         let result = RunResult {
             store_config: Some(StoreConfig::Memory),
             ..result
         };
-        expect_err(result.branch("missing-timeline"));
+        expect_err(&result.branch("missing-timeline"));
 
         let store = pos_store::memory::MemoryStore::new();
-        expect_err(read_completed_prefix_at(
+        expect_err(&read_completed_prefix_at(
             &store,
             pos_core::ids::TimelineId::new(),
             pos_core::clock::Seq::ZERO,
         ));
-        expect_err(timeline_ancestry(
+        expect_err(&timeline_ancestry(
             &store,
             pos_core::ids::TimelineId::new(),
             pos_core::clock::Seq::ZERO,
@@ -4511,7 +4511,7 @@ mod coverage_entrypoints {
         let _ = ok(session.step());
         let _ = ok(session.projections());
         let _ = ok(session.source_events());
-        expect_err(session.fork("missing-factory"));
+        expect_err(&session.fork("missing-factory"));
 
         let experiment = Experiment::new(config("supplied-store", StopCondition::MaxTicks(1)));
         let _ = ok(experiment.start_with_store(Box::new(pos_store::memory::MemoryStore::new())));

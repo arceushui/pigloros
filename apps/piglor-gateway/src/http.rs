@@ -259,7 +259,7 @@ fn bounded_events_response(
             "events": events,
             "next_from_seq": next_from_seq,
         });
-        if serialized_len(&candidate)? > maximum_bytes {
+        if serialized_len(&candidate) > maximum_bytes {
             events.pop();
             if events.is_empty() {
                 return Err(GatewayError::EventResponseTooLarge {
@@ -278,8 +278,8 @@ fn bounded_events_response(
     }))
 }
 
-fn serialized_len(value: &serde_json::Value) -> Result<usize, GatewayError> {
-    Ok(crate::serialized_json_len(value))
+fn serialized_len(value: &serde_json::Value) -> usize {
+    crate::serialized_json_len(value)
 }
 
 async fn post_action(
@@ -1059,7 +1059,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(first["events"].as_array().test_ok().len(), 2);
         assert_eq!(first["next_from_seq"], 3);
-        assert!(serialized_len(&first).test_ok() <= MAX_EVENTS_RESPONSE_BYTES);
+        assert!(serialized_len(&first) <= MAX_EVENTS_RESPONSE_BYTES);
 
         let (status, exhausted) = json_request(
             app,
@@ -1071,7 +1071,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(exhausted["events"].as_array().test_ok().len(), 1);
         assert!(exhausted["next_from_seq"].is_null());
-        assert!(serialized_len(&exhausted).test_ok() <= MAX_EVENTS_RESPONSE_BYTES);
+        assert!(serialized_len(&exhausted) <= MAX_EVENTS_RESPONSE_BYTES);
     }
 
     #[tokio::test]

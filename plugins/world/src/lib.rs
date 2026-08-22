@@ -2289,6 +2289,53 @@ mod tests {
         ));
     }
 
+    fn assert_config_decode_boundaries(config: &CanonicalBytes) {
+        for (index, replacement) in [
+            (0, ciborium::Value::Integer(1.into())),
+            (1, ciborium::Value::Text("version".to_owned())),
+            (2, ciborium::Value::Text("timestep".to_owned())),
+            (3, ciborium::Value::Text("convention".to_owned())),
+            (4, ciborium::Value::Text("gravity".to_owned())),
+            (5, ciborium::Value::Text("gravity".to_owned())),
+            (6, ciborium::Value::Text("gravity".to_owned())),
+            (7, ciborium::Value::Integer(1.into())),
+            (8, ciborium::Value::Integer(1.into())),
+            (9, ciborium::Value::Integer(1.into())),
+            (10, ciborium::Value::Text("action-schema".to_owned())),
+            (11, ciborium::Value::Text("observation-schema".to_owned())),
+            (12, ciborium::Value::Text("resolution".to_owned())),
+            (13, ciborium::Value::Text("catalogue".to_owned())),
+        ] {
+            assert!(
+                WorldConfigV1::decode(&rewrite_array_field(config, index, replacement)).is_err()
+            );
+        }
+        assert!(WorldConfigV1::decode(&rewrite_array_field(
+            config,
+            2,
+            ciborium::Value::Integer(u64::MAX.into()),
+        ))
+        .is_err());
+        assert!(WorldConfigV1::decode(&rewrite_array_field(
+            config,
+            12,
+            ciborium::Value::Integer(u64::MAX.into()),
+        ))
+        .is_err());
+        for mutate in [
+            |value: &mut WorldConfigV1| value.gravity_x = f32::NAN,
+            |value: &mut WorldConfigV1| value.gravity_y = f32::NAN,
+            |value: &mut WorldConfigV1| value.gravity_z = f32::NAN,
+        ] {
+            let mut invalid = sample_config();
+            mutate(&mut invalid);
+            assert!(matches!(
+                invalid.encode(),
+                Err(WorldCodecError::NonFiniteFloat)
+            ));
+        }
+    }
+
     #[test]
     fn world_codecs_cover_each_typed_decode_boundary() {
         let action = sample_action().encode().test_ok();
@@ -2354,50 +2401,7 @@ mod tests {
             ));
         }
         let config = sample_config().encode().test_ok();
-        for (index, replacement) in [
-            (0, ciborium::Value::Integer(1.into())),
-            (1, ciborium::Value::Text("version".to_owned())),
-            (2, ciborium::Value::Text("timestep".to_owned())),
-            (3, ciborium::Value::Text("convention".to_owned())),
-            (4, ciborium::Value::Text("gravity".to_owned())),
-            (5, ciborium::Value::Text("gravity".to_owned())),
-            (6, ciborium::Value::Text("gravity".to_owned())),
-            (7, ciborium::Value::Integer(1.into())),
-            (8, ciborium::Value::Integer(1.into())),
-            (9, ciborium::Value::Integer(1.into())),
-            (10, ciborium::Value::Text("action-schema".to_owned())),
-            (11, ciborium::Value::Text("observation-schema".to_owned())),
-            (12, ciborium::Value::Text("resolution".to_owned())),
-            (13, ciborium::Value::Text("catalogue".to_owned())),
-        ] {
-            assert!(
-                WorldConfigV1::decode(&rewrite_array_field(&config, index, replacement)).is_err()
-            );
-        }
-        assert!(WorldConfigV1::decode(&rewrite_array_field(
-            &config,
-            2,
-            ciborium::Value::Integer(u64::MAX.into()),
-        ))
-        .is_err());
-        assert!(WorldConfigV1::decode(&rewrite_array_field(
-            &config,
-            12,
-            ciborium::Value::Integer(u64::MAX.into()),
-        ))
-        .is_err());
-        for mutate in [
-            |value: &mut WorldConfigV1| value.gravity_x = f32::NAN,
-            |value: &mut WorldConfigV1| value.gravity_y = f32::NAN,
-            |value: &mut WorldConfigV1| value.gravity_z = f32::NAN,
-        ] {
-            let mut invalid = sample_config();
-            mutate(&mut invalid);
-            assert!(matches!(
-                invalid.encode(),
-                Err(WorldCodecError::NonFiniteFloat)
-            ));
-        }
+        assert_config_decode_boundaries(&config);
     }
 
     #[test]
@@ -2522,30 +2526,11 @@ mod tests {
         registry.commit_step();
     }
 
-    #[test]
-    fn world_driver_rejects_malformed_recovery_payloads() {
-        let body = EntityId::new();
-        let timeline = TimelineId::new();
-        let plugin = WorldPlugin::new().with_bodies([body]);
-        let mut registry = PluginRegistry::new();
-        registry
-            .register(
-                &plugin,
-                Some(Box::new(WorldReducer)),
-                Some(Box::new(WorldDriver::new(
-                    vec![Body {
-                        entity_id: body,
-                        x: 0.0,
-                        y: 0.0,
-                        vx: 0.0,
-                        vy: 0.0,
-                    }],
-                    Box::new(SimpleKinematicBackend::new()),
-                    sample_config(),
-                ))),
-            )
-            .test_ok();
-
+    fn assert_malformed_recovery_events(
+        registry: &mut PluginRegistry,
+        timeline: TimelineId,
+        body: EntityId,
+    ) {
         for event_type in [EVENT_TYPE_ACTION_V1, EVENT_TYPE_OBSERVATION_V1] {
             let malformed = make_versioned_event(
                 1,
@@ -2582,7 +2567,13 @@ mod tests {
                 &[unknown_target],
             )
             .is_err());
+    }
 
+    fn assert_recovery_sequence(
+        registry: &mut PluginRegistry,
+        timeline: TimelineId,
+        body: EntityId,
+    ) {
         let mut first_action = WorldActionV1 {
             actor_entity_id: body,
             body_entity_id: body,
@@ -2639,6 +2630,33 @@ mod tests {
                 &[mismatched_config],
             )
             .is_err());
+    }
+
+    #[test]
+    fn world_driver_rejects_malformed_recovery_payloads() {
+        let body = EntityId::new();
+        let timeline = TimelineId::new();
+        let plugin = WorldPlugin::new().with_bodies([body]);
+        let mut registry = PluginRegistry::new();
+        registry
+            .register(
+                &plugin,
+                Some(Box::new(WorldReducer)),
+                Some(Box::new(WorldDriver::new(
+                    vec![Body {
+                        entity_id: body,
+                        x: 0.0,
+                        y: 0.0,
+                        vx: 0.0,
+                        vy: 0.0,
+                    }],
+                    Box::new(SimpleKinematicBackend::new()),
+                    sample_config(),
+                ))),
+            )
+            .test_ok();
+        assert_malformed_recovery_events(&mut registry, timeline, body);
+        assert_recovery_sequence(&mut registry, timeline, body);
     }
 
     #[test]
@@ -3923,7 +3941,7 @@ mod tests {
         let wrong_capability = ProposedAction::new(
             Kind::new(EVENT_TYPE_ACTION_V1),
             actor,
-            payload.clone(),
+            payload,
             Kind::new("world.action.submit"),
         );
         assert_eq!(
@@ -3952,6 +3970,19 @@ mod tests {
             plugin.approve(&malformed),
             Err(ActionRejected::DomainValidationFailed(_))
         ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_plugin_v1_approver_enforces_domain_boundaries() {
+        let actor = EntityId::new();
+        let body = EntityId::new();
+        let plugin = WorldPlugin::new().with_bodies(vec![body]);
+        let mut action = sample_action();
+        action.actor_entity_id = actor;
+        action.body_entity_id = body;
+        action.catalogue_version = 1;
+        let payload = action.encode().test_ok();
 
         let mut wrong_actor_action = action.clone();
         wrong_actor_action.actor_entity_id = EntityId::new();

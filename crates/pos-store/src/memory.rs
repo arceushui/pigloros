@@ -4713,6 +4713,7 @@ mod coverage_entrypoints {
             value.is_err(),
             "expected a rejected coverage value: {value:?}"
         );
+        std::mem::drop(value);
     }
 
     fn draft(payload: &'static [u8]) -> EventDraft {

@@ -7,8 +7,8 @@
 
 use crate::{Experiment, ExperimentConfig, ExperimentError, ExperimentSession, StopCondition};
 use pos_conformance::{
-    compare, schema_id_for_event_type, verify_counterfactual_fork, verify_evidence,
-    wave8_non_interference_matrix, wave8_plugin_boundary, AuthoritativeEventV1,
+    compare, compare_authoritative_outputs, schema_id_for_event_type, verify_counterfactual_fork,
+    verify_evidence, wave8_non_interference_matrix, wave8_plugin_boundary, AuthoritativeEventV1,
     AuthorizationDecisionV1, CapabilityGrantV1, CaseOutcomeStatusV1, CaseOutcomeV1,
     CausalTraceEntryV1, ClaimLayerV1, ComparisonV1, ConformanceReportV1, ConsentAuditV1,
     CounterfactualContractV1, DependencyClassV1, DependencyNodeV1, DivergenceClassV1,
@@ -16,7 +16,7 @@ use pos_conformance::{
     InterventionV1, InvalidArtifactV1, KnowledgeSnapshotV1, MoatProofEvidenceV1, MoatProofInputV1,
     ParticipantEventV1, ParticipantViewV1, PluginFailureClassV1, PluginFailureV1, PrincipalRefV1,
     ProjectionEvidenceV1, RecomputationFrontierV1, RedactionStateV1, ReplayClaimV1,
-    ReproManifestV1, ReproducibilityClassV1, ScenarioRoomV1, SuffixInvalidationReasonV1,
+    ReproManifestV1, ReproducibilityClassV1, ScenarioRoomFixtureV1, SuffixInvalidationReasonV1,
     SuffixInvalidationV1, TickAtomicityV1, UncertaintyV1, UnknownEdgePolicyV1,
     Wave8ProofContractV1, EVIDENCE_FORMAT_V1,
 };
@@ -36,7 +36,8 @@ use pos_runtime::{
     Driver, DriverRecoveryEvidence, ObservationView, RecoveryEventHeader, RuntimeError, StepOutput,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::{atomic::AtomicU64, Arc};
 
 const AGENT_EVENT_TYPE: &str = "proof.agent.reaction.v1";
 const AGENT_ENTITY_KIND: &str = "proof-agent";
@@ -44,7 +45,8 @@ const SOCIETY_ENTITY_KIND: &str = "proof-society";
 const WORLD_BACKEND_CONTENT: &[u8] = b"PiglorOS.WorldBackend.simple-kinematic.v1";
 const EXECUTION_PROFILE_CONTENT: &[u8] = b"PiglorOS.ExecutionProfile.deterministic-v1";
 const TRUST_POLICY_CONTENT: &[u8] = b"PiglorOS.TrustPolicySnapshot.wave8-v1";
-const EVALUATOR_CONTENT: &[u8] = b"PiglorOS.Evaluator.pos-reference-json-v1";
+const HOST_SOURCE_CONTENT: &[u8] = include_bytes!("moat_proof.rs");
+const EVALUATOR_CONTENT: &[u8] = include_bytes!("../../../crates/pos-reference/src/lib.rs");
 
 /// Result of one Local or Air-Gapped proof execution.
 #[derive(Debug)]
@@ -172,6 +174,7 @@ impl MoatProofRun {
             timeline_id: parent.timeline().id(),
             fork_cut_seq: Some(fork_cut_seq),
             events: baseline_events.as_slice(),
+            factual_events: baseline_events.as_slice(),
             projections: parent.projections()?,
             topology: &topology,
             plugin_versions: &plugin_versions,
@@ -184,6 +187,7 @@ impl MoatProofRun {
             timeline_id: child.timeline().id(),
             fork_cut_seq: Some(fork_cut_seq),
             events: counterfactual_events.as_slice(),
+            factual_events: baseline_events.as_slice(),
             projections: child.projections()?,
             topology: &topology,
             plugin_versions: &plugin_versions,
@@ -203,6 +207,7 @@ impl MoatProofRun {
             EVENT_TYPE_ACTION_V1,
         )?;
         let divergence = compare(&baseline, &counterfactual)?;
+        verify_independent_fixture_reproduction(&baseline, &counterfactual, &divergence)?;
         compare_with_reference(&baseline, &counterfactual, &divergence)?;
         let physical_reaction = projection_changed(&baseline, &counterfactual, "world");
         let agent_reaction = projection_changed(&baseline, &counterfactual, "proof-agent");
@@ -241,18 +246,13 @@ pub fn run_local_and_air_gapped(
 ) -> Result<(MoatProofReport, MoatProofReport, ComparisonV1), MoatProofError> {
     let local = MoatProofRun::new(input.clone(), ExecutionModeV1::Local)?.run()?;
     let air_gapped = MoatProofRun::new(input, ExecutionModeV1::AirGapped)?.run()?;
-    let comparison = compare(&local.baseline, &air_gapped.baseline)?;
-    let authoritative_equal = local.baseline.authoritative_events
-        == air_gapped.baseline.authoritative_events
-        && local.baseline.projections == air_gapped.baseline.projections;
-    if !authoritative_equal {
+    let comparison = compare_authoritative_outputs(&local.baseline, &air_gapped.baseline)?;
+    if !comparison.equal {
         return Err(MoatProofError::ExecutionModesDiverged(comparison));
     }
-    let counterfactual_comparison = compare(&local.counterfactual, &air_gapped.counterfactual)?;
-    let counterfactual_authoritative_equal = local.counterfactual.authoritative_events
-        == air_gapped.counterfactual.authoritative_events
-        && local.counterfactual.projections == air_gapped.counterfactual.projections;
-    if !counterfactual_authoritative_equal {
+    let counterfactual_comparison =
+        compare_authoritative_outputs(&local.counterfactual, &air_gapped.counterfactual)?;
+    if !counterfactual_comparison.equal {
         return Err(MoatProofError::ExecutionModesDiverged(
             counterfactual_comparison,
         ));
@@ -322,6 +322,21 @@ fn compare_with_reference(
     (divergence == expected.divergence)
         .then_some(())
         .ok_or(MoatProofError::ReferenceDivergenceMismatch)
+}
+
+fn verify_independent_fixture_reproduction(
+    baseline: &MoatProofEvidenceV1,
+    counterfactual: &MoatProofEvidenceV1,
+    expected: &ComparisonV1,
+) -> Result<(), MoatProofError> {
+    let independent_baseline = pos_reference::reproduce_fixture_json(&baseline.to_json()?)?;
+    let independent_counterfactual =
+        pos_reference::reproduce_fixture_json(&counterfactual.to_json()?)?;
+    if (independent_baseline == independent_counterfactual) == expected.equal {
+        Ok(())
+    } else {
+        Err(MoatProofError::ReferenceDivergenceMismatch)
+    }
 }
 
 fn fixed_id(value: u128) -> EntityId {
@@ -500,12 +515,31 @@ fn payload_digest(event: &Event) -> [u8; 32] {
     *blake3::hash(event.payload.as_slice()).as_bytes()
 }
 
+fn authoritative_events(events: &[Event]) -> Vec<AuthoritativeEventV1> {
+    let ids = events
+        .iter()
+        .map(|event| (event.id, event.seq.as_u64()))
+        .collect::<HashMap<_, _>>();
+    events
+        .iter()
+        .map(|event| AuthoritativeEventV1 {
+            seq: event.seq.as_u64(),
+            tick: event_tick(event, events),
+            entity: event.entity.to_string(),
+            event_type: event.event_type.as_str().to_owned(),
+            payload_digest: payload_digest(event),
+            causation_seq: event.causation_id.and_then(|id| ids.get(&id).copied()),
+        })
+        .collect()
+}
+
 struct EvidenceContext<'a> {
     input: &'a MoatProofInputV1,
     mode: ExecutionModeV1,
     timeline_id: TimelineId,
     fork_cut_seq: Option<u64>,
     events: &'a [Event],
+    factual_events: &'a [Event],
     projections: &'a pos_state::ProjectionRegistry,
     topology: &'a ProofTopology,
     plugin_versions: &'a BTreeMap<String, String>,
@@ -516,28 +550,20 @@ struct EvidenceContext<'a> {
 fn evidence(context: &EvidenceContext<'_>) -> Result<MoatProofEvidenceV1, MoatProofError> {
     let input = context.input;
     let mode = context.mode;
-    let timeline_id = context.timeline_id;
     let fork_cut_seq = context.fork_cut_seq;
     let events = context.events;
+    let factual_events = context.factual_events;
     let projections = context.projections;
     let topology = context.topology;
     let plugin_versions = context.plugin_versions;
     let failure_probes = context.failure_probes;
     let consent_audit = context.consent_audit;
-    let mut ids = HashMap::<EventId, u64>::new();
-    for event in events {
-        ids.insert(event.id, event.seq.as_u64());
-    }
-    let authoritative_events = events
+    let ids = events
         .iter()
-        .map(|event| AuthoritativeEventV1 {
-            seq: event.seq.as_u64(),
-            entity: event.entity.to_string(),
-            event_type: event.event_type.as_str().to_owned(),
-            payload_digest: payload_digest(event),
-            causation_seq: event.causation_id.and_then(|id| ids.get(&id).copied()),
-        })
-        .collect::<Vec<_>>();
+        .map(|event| (event.id, event.seq.as_u64()))
+        .collect::<HashMap<_, _>>();
+    let event_summaries = authoritative_events(events);
+    let factual_authoritative_events = authoritative_events(factual_events);
     let mut projection_evidence = Vec::new();
     for (name, entity) in [
         ("world", topology.body),
@@ -556,16 +582,10 @@ fn evidence(context: &EvidenceContext<'_>) -> Result<MoatProofEvidenceV1, MoatPr
     let uncertainty = uncertainty_from_events(events);
     let participant_views = participant_views(events);
     let contract = build_wave8_contract(
-        input,
-        mode,
-        timeline_id,
-        fork_cut_seq,
-        &authoritative_events,
+        context,
+        &event_summaries,
+        &factual_authoritative_events,
         &participant_views,
-        plugin_versions,
-        failure_probes,
-        consent_audit,
-        topology,
     );
     Ok(MoatProofEvidenceV1 {
         format_version: EVIDENCE_FORMAT_V1,
@@ -592,7 +612,7 @@ fn evidence(context: &EvidenceContext<'_>) -> Result<MoatProofEvidenceV1, MoatPr
             scheduler_digest: scheduler_digest(),
             budget_digest: budget_digest(input.resource_limit),
         },
-        authoritative_events,
+        authoritative_events: event_summaries,
         projections: projection_evidence,
         causal_trace,
         uncertainty,
@@ -617,13 +637,22 @@ fn causal_trace(events: &[Event], ids: &HashMap<EventId, u64>) -> Vec<CausalTrac
                         cause_seq: *cause_seq,
                         effect_seq: event.seq.as_u64(),
                         relation: causal_relation(cause_type, event.event_type.as_str()),
-                        visibility: "operator".to_owned(),
+                        visibility: causal_visibility(event.event_type.as_str()),
                         dependency_class: dependency_class(event.event_type.as_str()),
                     }
                 })
             })
         })
         .collect()
+}
+
+fn causal_visibility(event_type: &str) -> String {
+    match event_type {
+        AGENT_EVENT_TYPE => "participant",
+        pos_plugin_society::EVENT_TYPE_SIGNAL => "public",
+        _ => "operator",
+    }
+    .to_owned()
 }
 
 const SOCIETY_NAME: &str = "society";
@@ -739,10 +768,9 @@ fn budget_digest(resource_limit: u64) -> [u8; 32] {
 }
 
 fn serialized_digest<T: Serialize>(value: &T) -> [u8; 32] {
-    match pos_crypto::canonical::encode(value) {
-        Ok(bytes) => digest_domain(b"PiglorOS.Wave8.ContractValue.v1", bytes.as_slice()),
-        Err(_) => [0; 32],
-    }
+    pos_crypto::canonical::encode(value).map_or([0; 32], |bytes| {
+        digest_domain(b"PiglorOS.Wave8.ContractValue.v1", bytes.as_slice())
+    })
 }
 
 fn id16_digest(value: &[u8; 32]) -> [u8; 16] {
@@ -751,9 +779,33 @@ fn id16_digest(value: &[u8; 32]) -> [u8; 16] {
     id
 }
 
+fn event_tick(event: &Event, events: &[Event]) -> u64 {
+    fn resolve(event: &Event, events: &[Event], seen: &mut HashSet<EventId>) -> u64 {
+        if !seen.insert(event.id) {
+            return event.seq.as_u64();
+        }
+        match event.event_type.as_str() {
+            EVENT_TYPE_ACTION_V1 => WorldActionV1::decode(&event.payload)
+                .map_or(event.seq.as_u64(), |action| action.tick),
+            EVENT_TYPE_OBSERVATION_V1 => {
+                pos_plugin_world::WorldObservationV1::decode(&event.payload)
+                    .map_or(event.seq.as_u64(), |observation| observation.tick)
+            }
+            AGENT_EVENT_TYPE => serde_json::from_slice::<AgentReaction>(event.payload.as_slice())
+                .map_or(event.seq.as_u64(), |reaction| reaction.tick),
+            _ => event
+                .causation_id
+                .and_then(|cause| events.iter().find(|candidate| candidate.id == cause))
+                .map_or(event.seq.as_u64(), |cause| resolve(cause, events, seen)),
+        }
+    }
+
+    resolve(event, events, &mut HashSet::new())
+}
+
 fn event_node(event: &AuthoritativeEventV1) -> DependencyNodeV1 {
     DependencyNodeV1 {
-        tick: event.seq,
+        tick: event.tick,
         scheduler_position: match event.event_type.as_str() {
             EVENT_TYPE_ACTION_V1 => 0,
             EVENT_TYPE_OBSERVATION_V1 => 1,
@@ -768,6 +820,35 @@ fn event_node(event: &AuthoritativeEventV1) -> DependencyNodeV1 {
     }
 }
 
+fn event_nodes<F>(
+    events: &[AuthoritativeEventV1],
+    include: F,
+    cut: Option<u64>,
+) -> BTreeMap<u64, DependencyNodeV1>
+where
+    F: Fn(&str) -> bool,
+{
+    let mut ordinals = BTreeMap::<(u64, u32, String, u32), u32>::new();
+    let mut nodes = BTreeMap::new();
+    for event in events.iter().filter(|event| {
+        include(event.event_type.as_str()) && cut.is_none_or(|value| event.seq > value)
+    }) {
+        let mut node = event_node(event);
+        let key = (
+            node.tick,
+            node.scheduler_position,
+            node.owner_id.clone(),
+            node.schema_id,
+        );
+        node.output_ordinal = *ordinals
+            .entry(key)
+            .and_modify(|value| *value += 1)
+            .or_default();
+        nodes.insert(event.seq, node);
+    }
+    nodes
+}
+
 fn zero_node() -> DependencyNodeV1 {
     DependencyNodeV1 {
         tick: 0,
@@ -779,19 +860,22 @@ fn zero_node() -> DependencyNodeV1 {
     }
 }
 
-fn build_wave8_contract(
+struct ContractRoomParts {
+    room: ScenarioRoomFixtureV1,
+    principals: Vec<PrincipalRefV1>,
+    grants: Vec<CapabilityGrantV1>,
+    exogenous_digest: [u8; 32],
+}
+
+fn build_room_parts(
     input: &MoatProofInputV1,
-    mode: ExecutionModeV1,
-    timeline_id: TimelineId,
-    fork_cut_seq: Option<u64>,
-    events: &[AuthoritativeEventV1],
+    input_digest: [u8; 32],
     participant_views: &[ParticipantViewV1],
-    plugin_versions: &BTreeMap<String, String>,
-    failure_probes: &[PluginFailureV1],
-    _consent_audit: &ConsentAuditV1,
-    topology: &ProofTopology,
-) -> Wave8ProofContractV1 {
-    let policy_digest = profile_digest();
+    consent_audit: &ConsentAuditV1,
+    policy_digest: [u8; 32],
+) -> ContractRoomParts {
+    let consent_epoch =
+        u64::from(consent_audit.revocation_event_seq > consent_audit.requested_after_seq);
     let exogenous_digest = digest_domain(
         b"PiglorOS.ScenarioRoom.Exogenous.v1",
         &input
@@ -812,21 +896,24 @@ fn build_wave8_contract(
         .collect::<Vec<_>>();
     let grants = principals
         .iter()
-        .map(|principal| {
-            let grant_id = format!("grant:{}", principal.participant_id);
-            CapabilityGrantV1 {
-                grant_id,
-                principal_id: principal.principal_id.clone(),
-                capability: "observe:authorized-snapshot".to_owned(),
-                resource: "scenario-room".to_owned(),
-                consent_epoch: 0,
-                policy_digest,
-            }
+        .map(|principal| CapabilityGrantV1 {
+            grant_id: format!("grant:{}", principal.participant_id),
+            principal_id: principal.principal_id.clone(),
+            capability: "observe:authorized-snapshot".to_owned(),
+            resource: "scenario-room".to_owned(),
+            consent_epoch: if principal.subject_id.as_deref()
+                == Some(consent_audit.subject.as_str())
+            {
+                consent_epoch
+            } else {
+                0
+            },
+            policy_digest,
         })
         .collect::<Vec<_>>();
-    let room_without_digest = ScenarioRoomV1 {
+    let mut room = ScenarioRoomFixtureV1 {
         room_id: input.scenario_id.clone(),
-        input_digest: topology.input_digest,
+        input_digest,
         horizon_ticks: input.ticks,
         random_seed: input.random_seed,
         network_enabled: input.network_enabled,
@@ -836,13 +923,21 @@ fn build_wave8_contract(
         grants: grants.clone(),
         room_digest: [0; 32],
     };
-    let mut room = room_without_digest;
     room.room_digest = serialized_digest(&room);
+    ContractRoomParts {
+        room,
+        principals,
+        grants,
+        exogenous_digest,
+    }
+}
 
-    let event_by_seq = events
-        .iter()
-        .map(|event| (event.seq, event))
-        .collect::<BTreeMap<_, _>>();
+fn build_knowledge_snapshots(
+    input: &MoatProofInputV1,
+    participant_views: &[ParticipantViewV1],
+    principals: &[PrincipalRefV1],
+    grants: &[CapabilityGrantV1],
+) -> (Vec<KnowledgeSnapshotV1>, Vec<AuthorizationDecisionV1>) {
     let knowledge_snapshots = participant_views
         .iter()
         .zip(principals.iter().zip(grants.iter()))
@@ -853,15 +948,19 @@ fn build_wave8_contract(
                 .iter()
                 .map(|event| event.payload_digest)
                 .collect::<Vec<_>>();
-            let grant_digest = serialized_digest(grant);
+            let revoked = grant.consent_epoch > 0;
             let mut decision = AuthorizationDecisionV1 {
                 principal_id: principal.principal_id.clone(),
                 resource: "scenario-room".to_owned(),
                 operation: "observe".to_owned(),
-                allowed: true,
-                reason: "capability-consent-policy-match".to_owned(),
-                consent_epoch: 0,
-                grant_digest,
+                allowed: !revoked,
+                reason: if revoked {
+                    "consent-revoked-at-tick-boundary".to_owned()
+                } else {
+                    "capability-consent-policy-match".to_owned()
+                },
+                consent_epoch: grant.consent_epoch,
+                grant_digest: serialized_digest(grant),
                 decision_digest: [0; 32],
             };
             decision.decision_digest = serialized_digest(&decision);
@@ -874,7 +973,7 @@ fn build_wave8_contract(
                 visible_event_seqs,
                 visible_event_digests,
                 hidden_event_types: view.hidden_event_types.clone(),
-                consent_epoch: 0,
+                consent_epoch: grant.consent_epoch,
                 snapshot_digest: [0; 32],
             };
             snapshot.snapshot_digest = serialized_digest(&snapshot);
@@ -885,23 +984,30 @@ fn build_wave8_contract(
         .iter()
         .map(|snapshot| snapshot.authorization.clone())
         .collect::<Vec<_>>();
+    (knowledge_snapshots, authorization_decisions)
+}
 
-    let nodes = events
+fn build_dependencies(
+    events: &[AuthoritativeEventV1],
+    policy_digest: [u8; 32],
+) -> (BTreeMap<u64, DependencyNodeV1>, Vec<InputDependencyV1>) {
+    let event_by_seq = events
         .iter()
-        .filter(|event| is_contract_event(event.event_type.as_str()))
-        .map(event_node)
-        .collect::<Vec<_>>();
+        .map(|event| (event.seq, event))
+        .collect::<BTreeMap<_, _>>();
+    let current_nodes = event_nodes(events, is_contract_event, None);
     let source_node = zero_node();
-    let dependencies = events
+    let mut dependencies = events
         .iter()
         .filter(|event| is_contract_event(event.event_type.as_str()))
         .map(|event| {
-            let consumer = event_node(event);
+            let consumer = current_nodes[&event.seq].clone();
             let source = event
                 .causation_seq
                 .and_then(|seq| event_by_seq.get(&seq).copied())
                 .filter(|event| is_contract_event(event.event_type.as_str()))
-                .map_or_else(|| source_node.clone(), event_node);
+                .and_then(|event| current_nodes.get(&event.seq).cloned())
+                .unwrap_or_else(|| source_node.clone());
             InputDependencyV1 {
                 consumer,
                 source,
@@ -911,24 +1017,47 @@ fn build_wave8_contract(
             }
         })
         .collect::<Vec<_>>();
-    let mut dependencies = dependencies;
     dependencies.sort_by(|left, right| {
         (&left.consumer, &left.source.artifact_digest)
             .cmp(&(&right.consumer, &right.source.artifact_digest))
     });
-    let dependency_graph_digest = serialized_digest(&dependencies);
-    let intervention_event = events.iter().find(|event| {
-        event.event_type == EVENT_TYPE_ACTION_V1 && fork_cut_seq.is_some_and(|cut| event.seq > cut)
-    });
-    let intervention = intervention_event.map(|event| {
-        let value_digest = event.payload_digest;
-        let identity = digest_domain(b"PiglorOS.Intervention.v1", &value_digest);
+    (current_nodes, dependencies)
+}
+
+struct CounterfactualParts {
+    dependencies: Vec<InputDependencyV1>,
+    intervention_event: Option<AuthoritativeEventV1>,
+    intervention: Option<InterventionV1>,
+    affected_nodes: Vec<DependencyNodeV1>,
+    frontier: RecomputationFrontierV1,
+}
+
+fn build_counterfactual_parts(
+    input: &MoatProofInputV1,
+    fork_cut_seq: Option<u64>,
+    events: &[AuthoritativeEventV1],
+    factual_events: &[AuthoritativeEventV1],
+    policy_digest: [u8; 32],
+) -> CounterfactualParts {
+    let (current_nodes, dependencies) = build_dependencies(events, policy_digest);
+    let factual_nodes = event_nodes(factual_events, is_endogenous_event, fork_cut_seq)
+        .into_values()
+        .collect::<Vec<_>>();
+    let intervention_event = events
+        .iter()
+        .find(|event| {
+            event.event_type == EVENT_TYPE_ACTION_V1
+                && fork_cut_seq.is_some_and(|cut| event.seq > cut)
+        })
+        .cloned();
+    let intervention = intervention_event.as_ref().map(|event| {
+        let identity = digest_domain(b"PiglorOS.Intervention.v1", &event.payload_digest);
         InterventionV1 {
             intervention_id: id16_digest(&identity),
             target: event.entity.clone(),
             operation: "world.target_velocity".to_owned(),
-            value_digest,
-            effective_tick: event.seq,
+            value_digest: event.payload_digest,
+            effective_tick: event.tick,
             ordinal: 0,
             principal_id: "principal:operator".to_owned(),
             capability: "intervene:world-body".to_owned(),
@@ -936,24 +1065,16 @@ fn build_wave8_contract(
             provenance_digest: serialized_digest(event),
         }
     });
-    let mut affected_nodes = intervention_event.map_or_else(Vec::new, |intervention_event| {
-        nodes
+    let mut affected_nodes = intervention_event.as_ref().map_or_else(Vec::new, |event| {
+        factual_nodes
             .iter()
-            .filter(|node| {
-                node.tick >= intervention_event.seq
-                    && node.schema_id != schema_id_for_event_type(EVENT_TYPE_ACTION_V1)
-            })
+            .filter(|node| node.tick >= event.tick)
             .cloned()
             .collect::<Vec<_>>()
     });
     affected_nodes.sort_unstable();
-    let owner_frontiers = owner_frontiers(&affected_nodes);
-    let global_frontier_tick = affected_nodes.first().map_or(0, |node| node.tick);
-    let global_frontier_scheduler_position = affected_nodes
-        .first()
-        .map_or(0, |node| node.scheduler_position);
     let parent_cut_digest = serialized_digest(
-        &events
+        &factual_events
             .iter()
             .filter(|event| fork_cut_seq.is_some_and(|cut| event.seq <= cut))
             .collect::<Vec<_>>(),
@@ -970,17 +1091,22 @@ fn build_wave8_contract(
         ]
         .concat(),
     );
-    let frontier_id = id16_digest(&plan_digest);
+    let global_frontier_tick = affected_nodes.first().map_or(0, |node| node.tick);
+    let global_frontier_scheduler_position = affected_nodes
+        .first()
+        .map_or(0, |node| node.scheduler_position);
     let mut frontier = RecomputationFrontierV1 {
-        frontier_id,
+        frontier_id: id16_digest(&plan_digest),
         plan_digest,
         parent_cut_digest,
-        dependency_graph_digest,
+        dependency_graph_digest: serialized_digest(&dependencies),
         intervention_seed_nodes: intervention_event
-            .map(|event| vec![event_node(event)])
+            .as_ref()
+            .and_then(|event| current_nodes.get(&event.seq).cloned())
+            .map(|node| vec![node])
             .unwrap_or_default(),
         affected_nodes: affected_nodes.clone(),
-        owner_frontiers,
+        owner_frontiers: owner_frontiers(&affected_nodes),
         global_frontier_tick,
         global_frontier_scheduler_position,
         unknown_edge_policy: UnknownEdgePolicyV1::Reject,
@@ -993,75 +1119,111 @@ fn build_wave8_contract(
         frontier_digest: [0; 32],
     };
     frontier.frontier_digest = serialized_digest(&frontier);
+    CounterfactualParts {
+        dependencies,
+        intervention_event,
+        intervention,
+        affected_nodes,
+        frontier,
+    }
+}
+
+fn build_counterfactual_contract(
+    input: &MoatProofInputV1,
+    timeline_id: TimelineId,
+    fork_cut_seq: Option<u64>,
+    events: &[AuthoritativeEventV1],
+    factual_events: &[AuthoritativeEventV1],
+    policy_digest: [u8; 32],
+    exogenous_digest: [u8; 32],
+) -> CounterfactualContractV1 {
+    let parts =
+        build_counterfactual_parts(input, fork_cut_seq, events, factual_events, policy_digest);
     let fork_id = id16_digest(&digest_domain(
         b"PiglorOS.Fork.v1",
         &input.digest().unwrap_or([0; 32]),
     ));
-    let invalid_start = affected_nodes.first().cloned().unwrap_or_else(zero_node);
-    let invalid_end = affected_nodes
+    let invalid_start = parts
+        .affected_nodes
+        .first()
+        .cloned()
+        .unwrap_or_else(zero_node);
+    let invalid_end = parts
+        .affected_nodes
         .last()
         .cloned()
         .unwrap_or_else(|| invalid_start.clone());
-    let invalid_artifacts = if intervention.is_some() {
-        affected_nodes
-            .iter()
-            .map(|node| InvalidArtifactV1 {
-                artifact_class: "endogenous-event".to_owned(),
-                schema_id: node.schema_id,
-                artifact_digest: node.artifact_digest,
-                producer: node.clone(),
-                prior_generation: 0,
-                reason: SuffixInvalidationReasonV1::NewIntervention,
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let invalid_artifacts = parts
+        .intervention
+        .as_ref()
+        .map(|_| {
+            parts
+                .affected_nodes
+                .iter()
+                .map(|node| InvalidArtifactV1 {
+                    artifact_class: "endogenous-event".to_owned(),
+                    schema_id: node.schema_id,
+                    artifact_digest: node.artifact_digest,
+                    producer: node.clone(),
+                    prior_generation: 0,
+                    reason: SuffixInvalidationReasonV1::NewIntervention,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let mut invalidation = SuffixInvalidationV1 {
         invalidation_id: id16_digest(&digest_domain(
             b"PiglorOS.SuffixInvalidation.v1",
-            &frontier.frontier_digest,
+            &parts.frontier.frontier_digest,
         )),
-        plan_digest,
+        plan_digest: parts.frontier.plan_digest,
         fork_id,
         prior_generation: 0,
-        new_generation: u64::from(intervention.is_some()),
-        frontier_digest: frontier.frontier_digest,
+        new_generation: u64::from(parts.intervention.is_some()),
+        frontier_digest: parts.frontier.frontier_digest,
         invalid_start,
         invalid_end,
         invalid_artifacts,
         invalid_checkpoint_digests: Vec::new(),
         invalid_projection_digests: Vec::new(),
         retained_exogenous_digests: vec![exogenous_digest],
-        reason: if intervention.is_some() {
+        reason: if parts.intervention.is_some() {
             SuffixInvalidationReasonV1::NewIntervention
         } else {
             SuffixInvalidationReasonV1::TrustOrErasureChange
         },
         commit_timeline_id: timeline_id.inner().to_bytes(),
-        commit_tick: global_frontier_tick,
-        commit_seq: fork_cut_seq.unwrap_or(0),
-        provenance_digest: serialized_digest(&frontier),
+        commit_tick: parts.frontier.global_frontier_tick,
+        commit_seq: parts
+            .intervention_event
+            .as_ref()
+            .map_or_else(|| fork_cut_seq.unwrap_or(0), |event| event.seq),
+        provenance_digest: serialized_digest(&parts.frontier),
         invalidation_digest: [0; 32],
     };
     invalidation.invalidation_digest = serialized_digest(&invalidation);
-    let mut recomputed_event_seqs = intervention_event.map_or_else(Vec::new, |event| {
-        events
-            .iter()
-            .filter(|candidate| {
-                candidate.seq > event.seq && is_endogenous_event(candidate.event_type.as_str())
-            })
-            .map(|event| event.seq)
-            .collect()
-    });
+    let mut recomputed_event_seqs =
+        parts
+            .intervention_event
+            .as_ref()
+            .map_or_else(Vec::new, |event| {
+                events
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.seq > event.seq
+                            && is_endogenous_event(candidate.event_type.as_str())
+                    })
+                    .map(|event| event.seq)
+                    .collect()
+            });
     recomputed_event_seqs.sort_unstable();
     let mut counterfactual = CounterfactualContractV1 {
         fork_id,
         prior_generation: 0,
-        generation: u64::from(intervention.is_some()),
-        intervention,
-        dependencies,
-        frontier,
+        generation: u64::from(parts.intervention.is_some()),
+        intervention: parts.intervention,
+        dependencies: parts.dependencies,
+        frontier: parts.frontier,
         invalidation,
         recomputed_event_seqs,
         retained_exogenous_digests: vec![exogenous_digest],
@@ -1069,17 +1231,21 @@ fn build_wave8_contract(
         contract_digest: [0; 32],
     };
     counterfactual.contract_digest = serialized_digest(&counterfactual);
+    counterfactual
+}
+
+fn build_conformance_report(
+    mode: ExecutionModeV1,
+    events: &[AuthoritativeEventV1],
+    plugin_versions: &BTreeMap<String, String>,
+    policy_digest: [u8; 32],
+) -> (ConformanceReportV1, [u8; 32]) {
     let subject_artifact_digest = serialized_digest(&events.to_vec());
-    let cases = [
-        ("scenario-air-gapped", ExecutionModeV1::AirGapped),
-        ("scenario-local", ExecutionModeV1::Local),
-    ]
-    .into_iter()
-    .map(|(case_id, case_mode)| CaseOutcomeV1 {
-        case_id: case_id.to_owned(),
+    let cases = vec![CaseOutcomeV1 {
+        case_id: format!("scenario-{mode:?}").to_lowercase(),
         fixture_digest: subject_artifact_digest,
         execution_profile_digest: policy_digest,
-        mode: case_mode,
+        mode,
         claim_layer: ClaimLayerV1::ReplayConformance,
         outcome: CaseOutcomeStatusV1::Pass,
         first_coordinate: None,
@@ -1090,8 +1256,7 @@ fn build_wave8_contract(
         replay_claim: ReplayClaimV1::Exact,
         redaction_state: RedactionStateV1::None,
         provenance_digest: policy_digest,
-    })
-    .collect::<Vec<_>>();
+    }];
     let mut report = ConformanceReportV1 {
         report_id: id16_digest(&subject_artifact_digest),
         subject_artifact_digest,
@@ -1100,18 +1265,27 @@ fn build_wave8_contract(
         execution_profile_digest: policy_digest,
         fixture_bundle_digest: serialized_digest(plugin_versions),
         evaluator_source_digest: digest_domain(b"PiglorOS.Evaluator.Source.v1", EVALUATOR_CONTENT),
-        evaluator_binary_digest: digest_domain(b"PiglorOS.Evaluator.Binary.v1", EVALUATOR_CONTENT),
+        evaluator_binary_digest: digest_domain(
+            b"PiglorOS.Evaluator.Binary.v1",
+            &[EVALUATOR_CONTENT, EXECUTION_PROFILE_CONTENT].concat(),
+        ),
         evaluator_protocol_digest: digest_domain(b"PiglorOS.Evaluator.Protocol.v1", b"VRR1/DVR1"),
         implementation: ImplementationIdentityV1 {
             implementation_id: "pos-experiment-wave8".to_owned(),
-            source_digest: digest_domain(b"PiglorOS.Host.Source.v1", b"wave8-moat-proof"),
-            build_digest: digest_domain(b"PiglorOS.Host.Build.v1", b"rust-1.97"),
-            binary_digest: digest_domain(b"PiglorOS.Host.Binary.v1", b"pos-experiment"),
-            public_contract_digest: policy_digest,
+            source_digest: digest_domain(b"PiglorOS.Host.Source.v1", HOST_SOURCE_CONTENT),
+            build_digest: digest_domain(
+                b"PiglorOS.Host.Build.v1",
+                concat!(env!("CARGO_PKG_NAME"), "\0", env!("CARGO_PKG_VERSION")).as_bytes(),
+            ),
+            binary_digest: digest_domain(
+                b"PiglorOS.Host.Binary.v1",
+                &[HOST_SOURCE_CONTENT, EXECUTION_PROFILE_CONTENT].concat(),
+            ),
+            public_contract_digest: serialized_digest(&wave8_plugin_boundary()),
             organization_id: None,
         },
         independence: IndependenceEvidenceV1 {
-            technical_independent: false,
+            technical_independent: true,
             authorship_independent: false,
             organizational_independent: false,
             declaration_digest: digest_domain(
@@ -1120,7 +1294,7 @@ fn build_wave8_contract(
             ),
             shared_code_audit_digest: digest_domain(
                 b"PiglorOS.Independence.Audit.v1",
-                b"pos-reference-isolated",
+                EVALUATOR_CONTENT,
             ),
             reviewer_ids: vec!["pos-reference".to_owned()],
         },
@@ -1134,27 +1308,37 @@ fn build_wave8_contract(
         redaction_state: RedactionStateV1::None,
         limitations_digest: digest_domain(
             b"PiglorOS.Conformance.Limitations.v1",
-            b"candidate-two-implementation-gate",
+            b"external-authorship-and-organization-attestation-not-claimed",
         ),
         provenance_digest: policy_digest,
         report_digest: [0; 32],
     };
     report.report_digest = serialized_digest(&report);
-    let atomicity = failure_probes
+    (report, subject_artifact_digest)
+}
+
+fn build_atomicity(
+    input: &MoatProofInputV1,
+    events: &[AuthoritativeEventV1],
+    failure_probes: &[PluginFailureV1],
+    generation: u64,
+    subject_artifact_digest: [u8; 32],
+) -> Vec<TickAtomicityV1> {
+    failure_probes
         .iter()
         .map(|failure| TickAtomicityV1 {
             tick: failure.tick,
-            fork_generation: counterfactual.generation,
-            staged_event_count: 1,
-            committed_event_count: 0,
-            state_digest_before: subject_artifact_digest,
-            state_digest_after: subject_artifact_digest,
+            fork_generation: generation,
+            staged_event_count: failure.staged_event_count,
+            committed_event_count: failure.committed_event_count,
+            state_digest_before: failure.state_digest_before,
+            state_digest_after: failure.state_digest_after,
             committed: failure.committed,
             failure_class: Some(failure.class),
         })
         .chain(std::iter::once(TickAtomicityV1 {
             tick: input.ticks,
-            fork_generation: counterfactual.generation,
+            fork_generation: generation,
             staged_event_count: u64::try_from(events.len()).unwrap_or(u64::MAX),
             committed_event_count: u64::try_from(events.len()).unwrap_or(u64::MAX),
             state_digest_before: input.digest().unwrap_or([0; 32]),
@@ -1162,17 +1346,56 @@ fn build_wave8_contract(
             committed: true,
             failure_class: None,
         }))
-        .collect();
-    let _ = mode;
+        .collect()
+}
+
+fn build_wave8_contract(
+    context: &EvidenceContext<'_>,
+    events: &[AuthoritativeEventV1],
+    factual_events: &[AuthoritativeEventV1],
+    participant_views: &[ParticipantViewV1],
+) -> Wave8ProofContractV1 {
+    let policy_digest = profile_digest();
+    let room_parts = build_room_parts(
+        context.input,
+        context.topology.input_digest,
+        participant_views,
+        context.consent_audit,
+        policy_digest,
+    );
+    let (knowledge_snapshots, authorization_decisions) = build_knowledge_snapshots(
+        context.input,
+        participant_views,
+        &room_parts.principals,
+        &room_parts.grants,
+    );
+    let counterfactual = build_counterfactual_contract(
+        context.input,
+        context.timeline_id,
+        context.fork_cut_seq,
+        events,
+        factual_events,
+        policy_digest,
+        room_parts.exogenous_digest,
+    );
+    let (conformance_report, subject_artifact_digest) =
+        build_conformance_report(context.mode, events, context.plugin_versions, policy_digest);
+    let atomicity = build_atomicity(
+        context.input,
+        events,
+        context.failure_probes,
+        counterfactual.generation,
+        subject_artifact_digest,
+    );
     Wave8ProofContractV1 {
-        scenario_room: room,
+        scenario_room: room_parts.room,
         plugin_boundary: wave8_plugin_boundary(),
         knowledge_snapshots,
         authorization_decisions,
         counterfactual,
         atomicity,
-        conformance_report: report,
-        non_interference: wave8_non_interference_matrix(input.digest().unwrap_or([0; 32])),
+        conformance_report,
+        non_interference: wave8_non_interference_matrix(context.input.digest().unwrap_or([0; 32])),
     }
 }
 
@@ -1327,6 +1550,10 @@ fn failure_probe(
     class: &'static str,
     resource_limit: u64,
 ) -> Result<PluginFailureV1, MoatProofError> {
+    let sibling_steps = Arc::new(AtomicU64::new(0));
+    let sibling_plugin = SiblingProbePlugin {
+        id: PluginId::new(),
+    };
     let plugin = FailureProbePlugin {
         id: PluginId::new(),
     };
@@ -1337,6 +1564,13 @@ fn failure_probe(
     })
     .with_resource_limit(resource_limit);
     experiment.register(
+        &sibling_plugin,
+        None,
+        Some(Box::new(SiblingProbeDriver {
+            steps: Arc::clone(&sibling_steps),
+        })),
+    )?;
+    experiment.register(
         &plugin,
         None,
         Some(Box::new(FailureProbeDriver {
@@ -1345,10 +1579,10 @@ fn failure_probe(
         })),
     )?;
     let mut session = experiment.start()?;
+    let before = session.source_events()?;
     let step_failed = session.step_tick().is_err();
-    let committed = !session.source_events()?.is_empty();
+    let after = session.source_events()?;
     let failure_class = match class {
-        "plugin_crash" => PluginFailureClassV1::PluginCrash,
         "resource_exhaustion" => PluginFailureClassV1::ResourceExhaustion,
         _ => PluginFailureClassV1::PluginCrash,
     };
@@ -1356,7 +1590,12 @@ fn failure_probe(
         plugin: "failure-probe".to_owned(),
         class: failure_class,
         tick: 0,
-        committed: !step_failed || committed,
+        committed: !step_failed || before != after,
+        staged_event_count: 0,
+        committed_event_count: u64::try_from(after.len()).unwrap_or(u64::MAX),
+        state_digest_before: serialized_digest(&before),
+        state_digest_after: serialized_digest(&after),
+        sibling_step_count: sibling_steps.load(std::sync::atomic::Ordering::SeqCst),
     })
 }
 
@@ -1409,6 +1648,48 @@ fn commit_consent_boundary(
 
 struct FailureProbePlugin {
     id: PluginId,
+}
+
+struct SiblingProbePlugin {
+    id: PluginId,
+}
+
+impl Plugin for SiblingProbePlugin {
+    fn id(&self) -> PluginId {
+        self.id
+    }
+
+    fn name(&self) -> &'static str {
+        "successful-sibling"
+    }
+
+    fn capability(&self) -> Capability {
+        Capability {
+            owned_event_types: vec![Kind::new("proof.failure.sibling")],
+            owned_entity_kinds: Vec::new(),
+            has_driver: true,
+            has_reducer: false,
+        }
+    }
+}
+
+struct SiblingProbeDriver {
+    steps: Arc<AtomicU64>,
+}
+
+impl Driver for SiblingProbeDriver {
+    fn name(&self) -> &'static str {
+        "successful-sibling-driver"
+    }
+
+    fn step(
+        &mut self,
+        _timeline: TimelineId,
+        _observations: ObservationView<'_>,
+    ) -> Result<StepOutput, RuntimeError> {
+        self.steps.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(StepOutput::empty())
+    }
 }
 
 impl Plugin for FailureProbePlugin {
@@ -1623,17 +1904,24 @@ impl Driver for ProofAgentDriver {
             .iter()
             .filter(|event| event.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
             .last();
-        let (observed_x, causation_id) = latest
+        let (observed_x, causation_id, observed_tick) = latest
             .and_then(|event| {
                 pos_plugin_world::WorldObservationV1::decode(&event.payload)
                     .ok()
-                    .map(|observation| (f64::from(observation.pos_x), Some(event.id)))
+                    .map(|observation| {
+                        (
+                            f64::from(observation.pos_x),
+                            Some(event.id),
+                            Some(observation.tick),
+                        )
+                    })
             })
-            .unwrap_or((0.0, None));
+            .unwrap_or((0.0, None, None));
         let distance = (observed_x - self.threshold).abs();
         let confidence = (0.5 + distance).min(1.0);
+        let reaction_tick = observed_tick.unwrap_or(self.tick);
         let reaction = AgentReaction {
-            tick: self.tick,
+            tick: reaction_tick,
             action: if observed_x >= self.threshold {
                 "accelerate".to_owned()
             } else {
@@ -1646,7 +1934,7 @@ impl Driver for ProofAgentDriver {
         // `AgentReaction` contains only JSON primitives and `Vec<u8>` is an
         // infallible sink at this host-owned boundary.
         let _result = serde_json::to_writer(&mut payload, &reaction);
-        self.tick = self.tick.saturating_add(1);
+        self.tick = reaction_tick.saturating_add(1);
         let mut draft = EventDraft::new(
             self.entity,
             Kind::new(AGENT_EVENT_TYPE),
@@ -2099,6 +2387,7 @@ mod tests {
             timeline_id: TimelineId::new(),
             fork_cut_seq: None,
             events: &[],
+            factual_events: &[],
             projections: &projections,
             topology: &topology,
             plugin_versions: &versions,
@@ -2111,6 +2400,7 @@ mod tests {
         assert_eq!(serialized_digest(&BrokenSerialize), [0; 32]);
         let custom = AuthoritativeEventV1 {
             seq: 2,
+            tick: 1,
             entity: "custom".to_owned(),
             event_type: "custom.event".to_owned(),
             payload_digest: [7; 32],
@@ -2247,7 +2537,7 @@ mod coverage_entrypoints {
         let failure = test_ok(failure_probe("unknown", 3));
         assert_eq!(failure.class, PluginFailureClassV1::PluginCrash);
         assert_eq!(suffix_audit(&[], &[], 0), (true, false));
-        assert_eq!(suffix_audit(&[], &[].as_slice(), 0), (true, false));
+        assert_eq!(suffix_audit(&[], &[], 0), (true, false));
         assert!(uncertainty_from_events(&[]).is_empty());
         assert_eq!(participant_views(&[]).len(), 2);
         assert_eq!(causal_relation("unknown", "unknown"), "derived");
@@ -2278,6 +2568,7 @@ mod coverage_entrypoints {
             timeline_id: TimelineId::new(),
             fork_cut_seq: None,
             events: &[],
+            factual_events: &[],
             projections: &projections,
             topology: &topology,
             plugin_versions: &plugin_versions,
@@ -2311,6 +2602,11 @@ mod coverage_entrypoints {
             class: PluginFailureClassV1::PluginCrash,
             tick: 0,
             committed: true,
+            staged_event_count: 0,
+            committed_event_count: 0,
+            state_digest_before: [1; 32],
+            state_digest_after: [1; 32],
+            sibling_step_count: 1,
         }];
         assert!(!failed.passes_reaction_gates());
     }

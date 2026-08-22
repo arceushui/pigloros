@@ -39,10 +39,10 @@ pub(crate) async fn post_owntracks(gateway: Gateway, headers: HeaderMap, body: B
     let result = gateway
         .admit_owntracks_ingress(handle, secret, payload)
         .await;
-    owntracks_response(result)
+    owntracks_response(&result)
 }
 
-fn owntracks_response(result: Result<OwnTracksIngressResult, GatewayError>) -> Response {
+fn owntracks_response(result: &Result<OwnTracksIngressResult, GatewayError>) -> Response {
     match result {
         Ok(OwnTracksIngressResult::RateLimited) => {
             let mut response = error(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
@@ -352,11 +352,11 @@ mod tests {
     #[test]
     fn maps_conflict_and_unavailable_ingress_results() {
         assert_eq!(
-            owntracks_response(Ok(OwnTracksIngressResult::Conflict)).status(),
+            owntracks_response(&Ok(OwnTracksIngressResult::Conflict)).status(),
             StatusCode::FORBIDDEN
         );
         assert_eq!(
-            owntracks_response(Ok(OwnTracksIngressResult::Unavailable)).status(),
+            owntracks_response(&Ok(OwnTracksIngressResult::Unavailable)).status(),
             StatusCode::SERVICE_UNAVAILABLE
         );
     }

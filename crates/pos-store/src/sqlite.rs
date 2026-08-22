@@ -3636,7 +3636,7 @@ mod tests {
                 .test_ok();
             assert!(matches!(
                 SqliteStore::geo_cell_consent_in_transaction(&tx, &consent_id, 12),
-                Err(CoreError::Storage(_)) | Err(CoreError::GeographicAdmissionValidationFailed)
+                Err(CoreError::Storage(_) | CoreError::GeographicAdmissionValidationFailed)
             ));
             tx.rollback().test_ok();
         }
@@ -9091,6 +9091,7 @@ mod coverage_entrypoints {
         if value.is_ok() {
             std::panic::resume_unwind(Box::new("expected a fail-closed error"));
         }
+        std::mem::drop(value);
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -9100,6 +9101,7 @@ mod coverage_entrypoints {
                 "coverage fixture values differed: {left:?} != {right:?}"
             )));
         }
+        std::mem::drop((left, right));
     }
 
     #[test]
@@ -9315,7 +9317,7 @@ mod coverage_entrypoints {
             "UPDATE owntracks_enrollment SET state_cbor = zeroblob(1) WHERE singleton = 1",
             [],
         ));
-        let _ = store.owntracks_enrollment_status();
+        std::mem::drop(store.owntracks_enrollment_status());
         ok(store.conn.execute_batch("DROP TABLE owntracks_enrollment"));
         expect_err(store.owntracks_enrollment_status());
 
@@ -9342,7 +9344,9 @@ mod coverage_entrypoints {
         store.conn.commit_hook(Some(|| true));
         expect_err(store.set_geo_cell_admission_fence(timeline.id(), entity, fence));
         store.conn.commit_hook::<fn() -> bool>(None);
-        let _ = store.resolve_admission_consent(request.fence().draft().consent_record_id(), 12);
+        std::mem::drop(
+            store.resolve_admission_consent(request.fence().draft().consent_record_id(), 12),
+        );
     }
 
     #[test]

@@ -962,15 +962,18 @@ mod coverage_entrypoints {
         if result.is_ok() {
             std::panic::resume_unwind(Box::new("expected a fail-closed error"));
         }
+        std::mem::drop(result);
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn expect_equal<T: PartialEq + std::fmt::Debug>(left: T, right: T) {
-        if left != right {
+        let equal = left == right;
+        if !equal {
             std::panic::resume_unwind(Box::new(format!(
                 "coverage fixture values differed: {left:?} != {right:?}"
             )));
         }
+        std::mem::drop((left, right));
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]

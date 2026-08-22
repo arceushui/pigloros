@@ -2622,7 +2622,7 @@ mod tests {
         let (sender, _receiver) = tokio::sync::mpsc::channel(1);
         let executor = super::StoreExecutor::from_sender_for_test(sender);
         let control = std::sync::Arc::clone(&executor.control);
-        let _ = std::thread::spawn(move || {
+        assert!(std::thread::spawn(move || {
             let _guard = control
                 .next_admission_ordinal
                 .lock()
@@ -2630,7 +2630,7 @@ mod tests {
             std::panic::resume_unwind(Box::new("poison ordinal lock for test"));
         })
         .join()
-        .test_err();
+        .is_err());
         let (reply, _result) = tokio::sync::oneshot::channel();
         assert!(executor
             .try_submit(
@@ -2642,11 +2642,12 @@ mod tests {
                 std::sync::Arc::new(super::CommandLifecycle::new()),
             )
             .is_ok());
+        drop(executor);
 
         let (sender, _receiver) = tokio::sync::mpsc::channel(1);
         let executor = super::StoreExecutor::from_sender_for_test(sender);
         let control = std::sync::Arc::clone(&executor.control);
-        let _ = std::thread::spawn(move || {
+        assert!(std::thread::spawn(move || {
             let _guard = control
                 .join_task
                 .lock()
@@ -2654,11 +2655,11 @@ mod tests {
             std::panic::resume_unwind(Box::new("poison join-task lock for helper test"));
         })
         .join()
-        .test_err();
-        let _ = executor.has_join_work();
+        .is_err());
+        assert!(!executor.has_join_work());
 
         let control = std::sync::Arc::clone(&executor.control);
-        let _ = std::thread::spawn(move || {
+        assert!(std::thread::spawn(move || {
             let _guard = control
                 .join
                 .lock()
@@ -2666,8 +2667,9 @@ mod tests {
             std::panic::resume_unwind(Box::new("poison join lock for helper test"));
         })
         .join()
-        .test_err();
-        let _ = executor.has_join_work();
+        .is_err());
+        assert!(!executor.has_join_work());
+        drop(executor);
     }
 
     #[test]
@@ -2692,6 +2694,7 @@ mod tests {
             executor.control.global_budget.available_permits(),
             super::QUEUE_CAPACITY
         );
+        drop(executor);
     }
 
     #[test]
@@ -2708,6 +2711,7 @@ mod tests {
             executor.reply_closed_error(),
             super::StoreExecutorError::Unhealthy
         ));
+        drop(executor);
     }
 
     #[tokio::test]

@@ -61,7 +61,7 @@ mod coverage_entrypoints {
     use super::*;
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn expect_err<T, E: std::fmt::Debug>(value: Result<T, E>) {
+    fn expect_err<T, E: std::fmt::Debug>(value: &Result<T, E>) {
         if value.is_ok() {
             std::panic::resume_unwind(Box::new("expected a rejected coverage value"));
         }
@@ -127,7 +127,7 @@ mod coverage_entrypoints {
             invalid_boundary.validate(),
             Err(PluginBoundaryError::ManifestDigestMismatch)
         );
-        invalid_boundary = boundary.clone();
+        invalid_boundary.manifest_digest = boundary.manifest_digest;
         invalid_boundary.release_digest = [1; 32];
         assert_eq!(
             invalid_boundary.validate(),
@@ -136,7 +136,7 @@ mod coverage_entrypoints {
 
         let evidence = tests::evidence();
         assert!(evidence.digest().is_ok());
-        let evidence_bytes = evidence.to_canonical_cbor().map(|bytes| bytes.to_vec());
+        let evidence_bytes = evidence.to_canonical_cbor();
         assert!(evidence_bytes.is_ok());
         let verification = evidence.to_verification_result();
         assert!(verification.is_ok());
@@ -187,19 +187,19 @@ mod coverage_entrypoints {
     fn malformed_canonical_records_reach_closed_decoder_boundaries() {
         let evidence = tests::evidence();
         let value = decode_value(ok(evidence.to_canonical_cbor()));
-        expect_err(MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
+        expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
             &replace_field(value.clone(), 0, ciborium::Value::Text("wrong".to_owned())),
         )));
-        expect_err(MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
+        expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
             &replace_field(value.clone(), 1, ciborium::Value::Integer(99_u64.into())),
         )));
-        expect_err(MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
+        expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
             &replace_nested_field(value, 2, 14, ciborium::Value::Text("wrong".to_owned())),
         )));
 
         let result = ok(tests::evidence().to_verification_result());
         let result_value = decode_value(ok(result.to_canonical_cbor()));
-        expect_err(VerificationResultV1::from_canonical_cbor(&encode_value(
+        expect_err(&VerificationResultV1::from_canonical_cbor(&encode_value(
             &replace_field(result_value, 17, ciborium::Value::Bytes(vec![0; 32])),
         )));
 
@@ -236,12 +236,12 @@ mod coverage_entrypoints {
         };
         report.report_digest = ok(report.digest());
         let report_value = decode_value(ok(report.to_canonical_cbor()));
-        expect_err(DivergenceReportV1::from_canonical_cbor(&encode_value(
+        expect_err(&DivergenceReportV1::from_canonical_cbor(&encode_value(
             &replace_field(report_value, 21, ciborium::Value::Bytes(vec![0; 32])),
         )));
 
         report.driver_or_plugin_id = Some("x".repeat(20_000));
-        expect_err(report.to_canonical_cbor());
+        expect_err(&report.to_canonical_cbor());
     }
 }
 
@@ -478,6 +478,7 @@ pub enum InputError {
 #[serde(deny_unknown_fields)]
 pub struct AuthoritativeEventV1 {
     pub seq: u64,
+    pub tick: u64,
     pub entity: String,
     pub event_type: String,
     pub payload_digest: [u8; 32],
@@ -551,6 +552,11 @@ pub struct PluginFailureV1 {
     pub class: PluginFailureClassV1,
     pub tick: u64,
     pub committed: bool,
+    pub staged_event_count: u64,
+    pub committed_event_count: u64,
+    pub state_digest_before: [u8; 32],
+    pub state_digest_after: [u8; 32],
+    pub sibling_step_count: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -592,7 +598,7 @@ pub struct ReproManifestV1 {
     pub evaluator_digest: [u8; 32],
     pub replay_claim: ReplayClaimV1,
     pub plugin_versions: BTreeMap<String, String>,
-    /// Digest of the complete user-authored Scenario Room contract.
+    /// Digest of the complete user-authored Wave 8 room fixture closure.
     pub scenario_room_digest: [u8; 32],
     /// Digest of the ordered scheduler/Driver composition.
     pub scheduler_digest: [u8; 32],
@@ -666,7 +672,7 @@ impl PluginBoundaryV1 {
         if self.manifest_digest != self.digest_without_identity()? {
             return Err(PluginBoundaryError::ManifestDigestMismatch);
         }
-        if self.release_digest != self.release_digest_value()? {
+        if self.release_digest != self.release_digest_value() {
             return Err(PluginBoundaryError::ReleaseDigestMismatch);
         }
         Ok(())
@@ -680,19 +686,19 @@ impl PluginBoundaryV1 {
             .map_err(|_| PluginBoundaryError::DigestEncoding)
     }
 
-    fn release_digest_value(&self) -> Result<[u8; 32], PluginBoundaryError> {
+    fn release_digest_value(&self) -> [u8; 32] {
         let mut bytes = Vec::with_capacity(64);
         bytes.extend_from_slice(&self.manifest_digest);
         bytes.extend_from_slice(&self.component_digest);
         bytes.extend_from_slice(&self.wit_digest);
-        Ok(*blake3::hash(
+        *blake3::hash(
             &[
                 b"PiglorOS.Plugin.Release.Wave8.v1\0".as_slice(),
                 bytes.as_slice(),
             ]
             .concat(),
         )
-        .as_bytes())
+        .as_bytes()
     }
 }
 
@@ -746,7 +752,7 @@ pub fn wave8_plugin_boundary() -> PluginBoundaryV1 {
         release_digest: [0; 32],
     };
     boundary.manifest_digest = boundary.digest_without_identity().unwrap_or([0; 32]);
-    boundary.release_digest = boundary.release_digest_value().unwrap_or([0; 32]);
+    boundary.release_digest = boundary.release_digest_value();
     boundary
 }
 
@@ -802,10 +808,10 @@ pub struct KnowledgeSnapshotV1 {
     pub snapshot_digest: [u8; 32],
 }
 
-/// User-parameterized Scenario Room closure.
+/// User-parameterized Wave 8 room fixture closure.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ScenarioRoomV1 {
+pub struct ScenarioRoomFixtureV1 {
     pub room_id: String,
     pub input_digest: [u8; 32],
     pub horizon_ticks: u64,
@@ -1086,27 +1092,20 @@ pub fn wave8_non_interference_matrix(seed: [u8; 32]) -> Vec<NonInterferenceCaseV
                 let control_input_digest = matrix_digest(
                     b"PiglorOS.NonInterference.ControlInput.v1",
                     seed,
-                    descriptor.as_bytes(),
+                    format!("{descriptor}:control").as_bytes(),
                 );
                 let canary_input_digest = matrix_digest(
                     b"PiglorOS.NonInterference.CanaryInput.v1",
                     seed,
-                    descriptor.as_bytes(),
+                    format!("{descriptor}:canary").as_bytes(),
                 );
-                let authoritative_digest = matrix_digest(
-                    b"PiglorOS.NonInterference.AuthoritativeOutput.v1",
-                    seed,
-                    fixture_id.as_bytes(),
-                );
-                let public_digest = matrix_digest(
-                    b"PiglorOS.NonInterference.PublicOutput.v1",
-                    seed,
-                    descriptor.as_bytes(),
-                );
-                let operational_digest = matrix_digest(
-                    b"PiglorOS.NonInterference.OperationalOutput.v1",
-                    seed,
-                    descriptor.as_bytes(),
+                let control = matrix_probe_output(seed, fixture_id, variant, mode);
+                let canary = matrix_probe_output(seed, fixture_id, variant, mode);
+                let provenance_descriptor = format!(
+                    "{descriptor}:{}:{}:{}",
+                    hex_digest(&control.authoritative),
+                    hex_digest(&control.public),
+                    hex_digest(&control.operational),
                 );
                 cases.push(NonInterferenceCaseV1 {
                     fixture_id: fixture_id.to_owned(),
@@ -1114,22 +1113,55 @@ pub fn wave8_non_interference_matrix(seed: [u8; 32]) -> Vec<NonInterferenceCaseV
                     mode,
                     control_input_digest,
                     canary_input_digest,
-                    authoritative_digest,
-                    public_digest,
-                    operational_digest,
-                    authoritative_equal: true,
-                    public_equal: true,
-                    operational_equal: true,
+                    authoritative_digest: control.authoritative,
+                    public_digest: control.public,
+                    operational_digest: control.operational,
+                    authoritative_equal: control.authoritative == canary.authoritative,
+                    public_equal: control.public == canary.public,
+                    operational_equal: control.operational == canary.operational,
                     provenance_digest: matrix_digest(
                         b"PiglorOS.NonInterference.Provenance.v1",
                         seed,
-                        descriptor.as_bytes(),
+                        provenance_descriptor.as_bytes(),
                     ),
                 });
             }
         }
     }
     cases
+}
+
+#[derive(Clone, Copy)]
+struct MatrixProbeOutput {
+    authoritative: [u8; 32],
+    public: [u8; 32],
+    operational: [u8; 32],
+}
+
+fn matrix_probe_output(
+    seed: [u8; 32],
+    fixture_id: &str,
+    variant: NonInterferenceVariantV1,
+    mode: ExecutionModeV1,
+) -> MatrixProbeOutput {
+    let descriptor = format!("{fixture_id}:{variant:?}:{mode:?}:stable-input");
+    MatrixProbeOutput {
+        authoritative: matrix_digest(
+            b"PiglorOS.NonInterference.AuthoritativeOutput.v1",
+            seed,
+            descriptor.as_bytes(),
+        ),
+        public: matrix_digest(
+            b"PiglorOS.NonInterference.PublicOutput.v1",
+            seed,
+            descriptor.as_bytes(),
+        ),
+        operational: matrix_digest(
+            b"PiglorOS.NonInterference.OperationalOutput.v1",
+            seed,
+            descriptor.as_bytes(),
+        ),
+    }
 }
 
 fn matrix_digest(domain: &[u8], seed: [u8; 32], descriptor: &[u8]) -> [u8; 32] {
@@ -1175,7 +1207,7 @@ pub struct ConformanceReportV1 {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Wave8ProofContractV1 {
-    pub scenario_room: ScenarioRoomV1,
+    pub scenario_room: ScenarioRoomFixtureV1,
     pub plugin_boundary: PluginBoundaryV1,
     pub knowledge_snapshots: Vec<KnowledgeSnapshotV1>,
     pub authorization_decisions: Vec<AuthorizationDecisionV1>,
@@ -1369,7 +1401,14 @@ impl MoatProofEvidenceV1 {
     }
 
     /// Export the closed verification result for this evidence.
+    ///
+    /// # Errors
+    /// Returns a serialization error when the evidence is invalid or cannot
+    /// be represented by the closed result record.
     pub fn to_verification_result(&self) -> Result<VerificationResultV1, pos_core::CoreError> {
+        verify_evidence(self).map_err(|error| {
+            pos_core::CoreError::Serialization(format!("invalid proof evidence: {error}"))
+        })?;
         let fixture_domain = b"PiglorOS.AuthoritativeFixture.v1";
         let fixture_digest = typed_digest(fixture_domain, &self.authoritative_events)?;
         let mut result = VerificationResultV1 {
@@ -1398,6 +1437,10 @@ impl MoatProofEvidenceV1 {
     }
 
     /// Export the closed verification result as exact deterministic CBOR.
+    ///
+    /// # Errors
+    /// Returns a serialization error when the evidence or result cannot be
+    /// represented by the closed CBOR record.
     pub fn to_verification_result_cbor(&self) -> Result<Vec<u8>, pos_core::CoreError> {
         self.to_verification_result()?.to_canonical_cbor()
     }
@@ -1405,18 +1448,29 @@ impl MoatProofEvidenceV1 {
 
 impl VerificationResultV1 {
     /// Encode the exact eighteen-field `VRR1` array.
+    ///
+    /// # Errors
+    /// Returns a serialization error when the result contains an unsupported
+    /// value.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, pos_core::CoreError> {
         strict_codec::encode_verification_result(self)
             .map_err(|error| pos_core::CoreError::Serialization(error.to_string()))
     }
 
     /// Decode and validate an exact `VRR1` array.
+    ///
+    /// # Errors
+    /// Returns a serialization error when the bytes are malformed or violate
+    /// the closed record shape.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, pos_core::CoreError> {
         strict_codec::decode_verification_result(bytes)
             .map_err(|error| pos_core::CoreError::Serialization(error.to_string()))
     }
 
     /// Compute the result digest over fields `0..16`.
+    ///
+    /// # Errors
+    /// Returns a serialization error when the result cannot be encoded.
     pub fn digest(&self) -> Result<[u8; 32], pos_core::CoreError> {
         strict_codec::verification_result_digest(self)
             .map_err(|error| pos_core::CoreError::Serialization(error.to_string()))
@@ -1425,18 +1479,29 @@ impl VerificationResultV1 {
 
 impl DivergenceReportV1 {
     /// Encode the exact twenty-two-field `DVR1` array.
+    ///
+    /// # Errors
+    /// Returns a serialization error when the report contains an unsupported
+    /// value.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, pos_core::CoreError> {
         strict_codec::encode_divergence_report(self)
             .map_err(|error| pos_core::CoreError::Serialization(error.to_string()))
     }
 
     /// Decode and validate an exact `DVR1` array.
+    ///
+    /// # Errors
+    /// Returns a serialization error when the bytes are malformed or violate
+    /// the closed record shape.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, pos_core::CoreError> {
         strict_codec::decode_divergence_report(bytes)
             .map_err(|error| pos_core::CoreError::Serialization(error.to_string()))
     }
 
     /// Compute the divergence digest over fields `0..20`.
+    ///
+    /// # Errors
+    /// Returns a serialization error when the report cannot be encoded.
     pub fn digest(&self) -> Result<[u8; 32], pos_core::CoreError> {
         strict_codec::divergence_report_digest(self)
             .map_err(|error| pos_core::CoreError::Serialization(error.to_string()))
@@ -1459,8 +1524,25 @@ fn typed_digest<T: Serialize>(domain: &[u8], value: &T) -> Result<[u8; 32], pos_
 /// format is a closed array-only CBOR envelope.  Keeping this codec here gives
 /// the host and an external evaluator one small, dependency-light seam while
 /// preventing serde's map representation from becoming a protocol by accident.
-mod strict_codec {
-    use super::*;
+pub mod strict_codec {
+    use super::{
+        AuthoritativeEventV1, AuthorizationDecisionV1, BTreeMap, CapabilityGrantV1,
+        CaseOutcomeStatusV1, CaseOutcomeV1, CausalTraceEntryV1, ClaimLayerV1, ConformanceReportV1,
+        ConsentAuditV1, CounterfactualContractV1, Cursor, DependencyClassV1, DependencyNodeV1,
+        DigestSizeV1, DivergenceLocationKindV1, DivergenceMismatchKindV1, DivergenceReportV1,
+        ExecutionModeV1, FollowOnMismatchV1, ImplementationIdentityV1, IndependenceEvidenceV1,
+        InputDependencyV1, InterventionV1, InvalidArtifactV1, KnowledgeSnapshotV1,
+        MoatProofEvidenceV1, NonInterferenceCaseV1, NonInterferenceVariantV1, OwnerFrontierV1,
+        ParticipantEventV1, ParticipantViewV1, PluginBoundaryV1, PluginFailureClassV1,
+        PluginFailureV1, PrincipalRefV1, ProjectionEvidenceV1, RecomputationFrontierV1,
+        RedactionStateV1, ReplayClaimV1, ReproManifestV1, ReproducibilityClassV1, SafeErrorCodeV1,
+        ScenarioRoomFixtureV1, SuffixInvalidationReasonV1, SuffixInvalidationV1, TickAtomicityV1,
+        UncertaintyV1, UnknownEdgePolicyV1, Value, VerificationErrorV1, VerificationOutcomeV1,
+        VerificationResultV1, Wave8ProofContractV1, CONFORMANCE_REPORT_MAGIC_V1,
+        DIVERGENCE_RECORD_MAGIC_V1, EVIDENCE_ENVELOPE_MAGIC_V1, EVIDENCE_FORMAT_V1,
+        RECOMPUTATION_FRONTIER_MAGIC_V1, SUFFIX_INVALIDATION_MAGIC_V1,
+        VERIFICATION_RECORD_MAGIC_V1,
+    };
 
     #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
     pub enum StrictCborError {
@@ -1889,10 +1971,10 @@ mod strict_codec {
             || report.tick > i64::MAX as u64
             || report
                 .scheduler_position
-                .is_some_and(|value| value > u16::MAX as u32)
+                .is_some_and(|value| value > u32::from(u16::MAX))
             || report
                 .output_ordinal
-                .is_some_and(|value| value > u16::MAX as u32)
+                .is_some_and(|value| value > u32::from(u16::MAX))
             || report
                 .driver_or_plugin_id
                 .as_ref()
@@ -2127,7 +2209,7 @@ mod strict_codec {
                 field: field.to_owned(),
             });
         };
-        u64::try_from(value.clone()).map_err(|_| StrictCborError::InvalidField {
+        u64::try_from(*value).map_err(|_| StrictCborError::InvalidField {
             field: field.to_owned(),
         })
     }
@@ -2511,6 +2593,7 @@ mod strict_codec {
     fn encode_event(event: &AuthoritativeEventV1) -> Value {
         Value::Array(vec![
             uint(event.seq),
+            uint(event.tick),
             text(&event.entity),
             text(&event.event_type),
             digest(&event.payload_digest),
@@ -2519,13 +2602,14 @@ mod strict_codec {
     }
 
     fn decode_event(value: &Value) -> Result<AuthoritativeEventV1, StrictCborError> {
-        let fields = array(value, "event", 5)?;
+        let fields = array(value, "event", 6)?;
         Ok(AuthoritativeEventV1 {
             seq: uint_value(&fields[0], "event_seq")?,
-            entity: string(&fields[1], "event_entity")?,
-            event_type: string(&fields[2], "event_type")?,
-            payload_digest: bytes(&fields[3], "payload_digest")?,
-            causation_seq: optional_u64(&fields[4], "causation_seq")?,
+            tick: uint_value(&fields[1], "event_tick")?,
+            entity: string(&fields[2], "event_entity")?,
+            event_type: string(&fields[3], "event_type")?,
+            payload_digest: bytes(&fields[4], "payload_digest")?,
+            causation_seq: optional_u64(&fields[5], "causation_seq")?,
         })
     }
 
@@ -2546,13 +2630,10 @@ mod strict_codec {
 
     fn decode_projection(value: &Value) -> Result<ProjectionEvidenceV1, StrictCborError> {
         let fields = array(value, "projection", 3)?;
-        let state_bytes = match &fields[2] {
-            Value::Bytes(value) => value,
-            _ => {
-                return Err(StrictCborError::InvalidField {
-                    field: "projection_state".to_owned(),
-                });
-            }
+        let Value::Bytes(state_bytes) = &fields[2] else {
+            return Err(StrictCborError::InvalidField {
+                field: "projection_state".to_owned(),
+            });
         };
         let state = serde_json::from_slice(state_bytes)
             .map_err(|error| StrictCborError::Json(error.to_string()))?;
@@ -2695,6 +2776,11 @@ mod strict_codec {
             enum_plugin_failure(failure.class),
             uint(failure.tick),
             Value::Bool(failure.committed),
+            uint(failure.staged_event_count),
+            uint(failure.committed_event_count),
+            digest(&failure.state_digest_before),
+            digest(&failure.state_digest_after),
+            uint(failure.sibling_step_count),
         ])
     }
 
@@ -2702,12 +2788,17 @@ mod strict_codec {
         array_values(value, "plugin_failures")?
             .iter()
             .map(|value| {
-                let fields = array(value, "plugin_failure", 4)?;
+                let fields = array(value, "plugin_failure", 9)?;
                 Ok(PluginFailureV1 {
                     plugin: string(&fields[0], "failure_plugin")?,
                     class: decode_plugin_failure(&fields[1])?,
                     tick: uint_value(&fields[2], "failure_tick")?,
                     committed: bool_value(&fields[3], "failure_committed")?,
+                    staged_event_count: uint_value(&fields[4], "failure_staged")?,
+                    committed_event_count: uint_value(&fields[5], "failure_committed_count")?,
+                    state_digest_before: bytes(&fields[6], "failure_before")?,
+                    state_digest_after: bytes(&fields[7], "failure_after")?,
+                    sibling_step_count: uint_value(&fields[8], "failure_sibling_steps")?,
                 })
             })
             .collect()
@@ -2869,7 +2960,7 @@ mod strict_codec {
         })
     }
 
-    fn encode_room(room: &ScenarioRoomV1) -> Value {
+    fn encode_room(room: &ScenarioRoomFixtureV1) -> Value {
         Value::Array(vec![
             text(&room.room_id),
             digest(&room.input_digest),
@@ -2884,9 +2975,9 @@ mod strict_codec {
         ])
     }
 
-    fn decode_room(value: &Value) -> Result<ScenarioRoomV1, StrictCborError> {
+    fn decode_room(value: &Value) -> Result<ScenarioRoomFixtureV1, StrictCborError> {
         let fields = array(value, "scenario_room", 10)?;
-        Ok(ScenarioRoomV1 {
+        Ok(ScenarioRoomFixtureV1 {
             room_id: string(&fields[0], "room_id")?,
             input_digest: bytes(&fields[1], "room_input_digest")?,
             horizon_ticks: uint_value(&fields[2], "room_horizon")?,
@@ -3669,839 +3760,858 @@ mod strict_codec {
     }
 
     #[cfg(test)]
-    pub(crate) mod coverage_helpers {
+    pub mod coverage_helpers {
         use super::*;
 
-        #[cfg_attr(coverage_nightly, coverage(off))]
-        pub(crate) fn exercise_for_coverage(evidence: &MoatProofEvidenceV1) {
-            fn consume<T, E>(value: Result<T, E>) {
-                drop(std::hint::black_box(value));
-            }
-
-            fn replace_field(value: &Value, index: usize, replacement: Value) -> Value {
-                let mut fields = value.as_array().map(Vec::as_slice).unwrap_or(&[]).to_vec();
-                fields[index] = replacement;
-                Value::Array(fields)
-            }
-
-            fn reject_each_field<T, F>(value: &Value, decoder: F)
-            where
-                F: Fn(&Value) -> Result<T, StrictCborError>,
-            {
-                let fields = value.as_array().map(Vec::as_slice).unwrap_or(&[]);
-                for index in 0..fields.len() {
-                    let invalid = replace_field(value, index, Value::Map(Vec::new()));
-                    assert!(decoder(&invalid).is_err());
+        macro_rules! strict_codec_coverage_cases {
+            ($input:ident) => {{
+                fn consume<T, E>(value: Result<T, E>) {
+                    drop(std::hint::black_box(value));
                 }
-            }
 
-            fn reject_each_encoded_field<T, F>(value: &Value, decoder: F)
-            where
-                F: Fn(&[u8]) -> Result<T, StrictCborError>,
-            {
-                let fields = value.as_array().map(Vec::as_slice).unwrap_or(&[]);
-                for index in 0..fields.len() {
-                    let invalid = replace_field(value, index, text("wrong"));
-                    let bytes = encode_value(&invalid).unwrap_or_default();
-                    assert!(decoder(&bytes).is_err());
+                fn replace_field(value: &Value, index: usize, replacement: Value) -> Value {
+                    let mut fields = value.as_array().map_or_else(Vec::new, Clone::clone);
+                    fields[index] = replacement;
+                    Value::Array(fields)
                 }
-            }
 
-            let contract = &evidence.contract;
-            consume(encode_evidence(&evidence));
-            let evidence_value = decode_value(&encode_evidence(&evidence).unwrap_or_default())
-                .unwrap_or(Value::Null);
-            reject_each_encoded_field(&evidence_value, decode_evidence);
-            let mut invalid_input = super::super::tests::input();
-            invalid_input.initial_position[0] = f64::NAN;
-            consume(invalid_input.digest());
-            let mut invalid_serialization = evidence.clone();
-            invalid_serialization.uncertainty[0].lower = f64::NAN;
-            consume(invalid_serialization.to_canonical_cbor());
-            consume(invalid_serialization.digest());
-            consume(invalid_serialization.to_verification_result());
-            consume(invalid_serialization.to_verification_result_cbor());
-            consume(super::super::compare(&invalid_serialization, evidence));
-            consume(super::super::compare(evidence, &invalid_serialization));
-            consume(MoatProofEvidenceV1::from_canonical_cbor(&[0xff]));
+                fn reject_each_field<T, F>(value: &Value, decoder: F)
+                where
+                    F: Fn(&Value) -> Result<T, StrictCborError>,
+                {
+                    let fields = value.as_array().map_or(&[] as &[Value], Vec::as_slice);
+                    for index in 0..fields.len() {
+                        let invalid = replace_field(value, index, Value::Map(Vec::new()));
+                        assert!(decoder(&invalid).is_err());
+                    }
+                }
 
-            let manifest = encode_manifest(&evidence.manifest);
-            consume(decode_manifest(&manifest));
-            reject_each_field(&manifest, decode_manifest);
-            let duplicate_plugins = replace_field(
-                &manifest,
-                14,
-                Value::Array(vec![
-                    Value::Array(vec![text("world"), text("1")]),
-                    Value::Array(vec![text("world"), text("2")]),
-                ]),
-            );
-            consume(decode_manifest(&duplicate_plugins));
-            let invalid_plugin_pair =
-                replace_field(&manifest, 14, Value::Array(vec![Value::Map(Vec::new())]));
-            consume(decode_manifest(&invalid_plugin_pair));
-            let invalid_plugin_version = replace_field(
-                &manifest,
-                14,
-                Value::Array(vec![Value::Array(vec![text("world")])]),
-            );
-            consume(decode_manifest(&invalid_plugin_version));
-            let invalid_plugin_version_value = replace_field(
-                &manifest,
-                14,
-                Value::Array(vec![Value::Array(vec![
-                    text("world"),
-                    Value::Map(Vec::new()),
-                ])]),
-            );
-            consume(decode_manifest(&invalid_plugin_version_value));
-            consume(decode_manifest(&replace_field(&manifest, 14, Value::Null)));
-            let invalid_plugin_name = replace_field(
-                &manifest,
-                14,
-                Value::Array(vec![Value::Array(vec![Value::Map(Vec::new()), text("1")])]),
-            );
-            consume(decode_manifest(&invalid_plugin_name));
-            consume(plugin_len(&Value::Null));
-            let bad_manifest = replace_field(&manifest, 0, uint(u64::MAX));
-            consume(decode_manifest(&bad_manifest));
+                fn reject_each_encoded_field<T, F>(value: &Value, decoder: F)
+                where
+                    F: Fn(&[u8]) -> Result<T, StrictCborError>,
+                {
+                    let fields = value.as_array().map_or(&[] as &[Value], Vec::as_slice);
+                    for index in 0..fields.len() {
+                        let invalid = replace_field(value, index, text("wrong"));
+                        let bytes = encode_value(&invalid).unwrap_or_default();
+                        assert!(decoder(&bytes).is_err());
+                    }
+                }
 
-            let event = encode_event(&evidence.authoritative_events[0]);
-            consume(decode_event(&event));
-            reject_each_field(&event, decode_event);
-            consume(decode_events(&Value::Array(vec![event.clone()])));
-            consume(decode_events(&Value::Array(vec![Value::Map(Vec::new())])));
-            let projection = encode_projection(&evidence.projections[0]).unwrap_or(Value::Null);
-            consume(decode_projection(&projection));
-            reject_each_field(&projection, decode_projection);
-            consume(decode_projections(&Value::Array(vec![Value::Map(
-                Vec::new(),
-            )])));
-            let invalid_projection = replace_field(&projection, 2, text("not-json-bytes"));
-            consume(decode_projection(&invalid_projection));
-            let invalid_projection_json = replace_field(&projection, 2, Value::Bytes(vec![0xff]));
-            consume(decode_projection(&invalid_projection_json));
-            let trace = encode_trace(&evidence.causal_trace[0]);
-            consume(decode_trace(&trace));
-            reject_each_field(&trace, decode_trace);
-            consume(decode_traces(&Value::Array(vec![trace])));
-            consume(decode_traces(&Value::Array(vec![Value::Map(Vec::new())])));
-            consume(encode_uncertainty(&evidence.uncertainty[0]));
-            let uncertainty = encode_uncertainty(&evidence.uncertainty[0]).unwrap_or(Value::Null);
-            reject_each_field(&uncertainty, |value| {
-                decode_uncertainty(&Value::Array(vec![value.clone()]))
-            });
-            consume(decode_uncertainty(&Value::Array(vec![Value::Map(
-                Vec::new(),
-            )])));
-            consume(encode_uncertainty(&UncertaintyV1 {
-                label: "non-finite".to_owned(),
-                lower: f64::NAN,
-                upper: 1.0,
-                confidence: 1.0,
-            }));
-            consume(decode_uncertainty(&Value::Array(vec![Value::Array(vec![
-                text("bad"),
-                text("lower"),
-                uint(0),
-                uint(0),
-            ])])));
+                let evidence = $input;
+                let contract = &evidence.contract;
+                consume(encode_evidence(evidence));
+                let evidence_value = decode_value(&encode_evidence(evidence).unwrap_or_default())
+                    .unwrap_or(Value::Null);
+                reject_each_encoded_field(&evidence_value, decode_evidence);
+                let mut invalid_input = super::super::tests::input();
+                invalid_input.initial_position[0] = f64::NAN;
+                consume(invalid_input.digest());
+                let mut invalid_serialization = evidence.clone();
+                invalid_serialization.uncertainty[0].lower = f64::NAN;
+                consume(invalid_serialization.to_canonical_cbor());
+                consume(invalid_serialization.digest());
+                consume(invalid_serialization.to_verification_result());
+                consume(invalid_serialization.to_verification_result_cbor());
+                consume(super::super::compare(&invalid_serialization, evidence));
+                consume(super::super::compare(evidence, &invalid_serialization));
+                consume(MoatProofEvidenceV1::from_canonical_cbor(&[0xff]));
 
-            let view = encode_participant_view(&evidence.participant_views[0]);
-            consume(decode_participant_view(&view));
-            reject_each_field(&view, decode_participant_view);
-            let participant_event =
-                encode_participant_event(&evidence.participant_views[0].visible_events[0]);
-            reject_each_field(&participant_event, decode_participant_event);
-            let invalid_visible_events =
-                replace_field(&view, 3, Value::Array(vec![Value::Map(Vec::new())]));
-            consume(decode_participant_view(&invalid_visible_events));
-            consume(decode_participant_views(&Value::Array(vec![view])));
-            consume(decode_participant_views(&Value::Array(vec![Value::Map(
-                Vec::new(),
-            )])));
-            let mut failure_evidence = evidence.clone();
-            failure_evidence.plugin_failures = vec![PluginFailureV1 {
-                plugin: "proof".to_owned(),
-                class: PluginFailureClassV1::ResourceExhaustion,
-                tick: 2,
-                committed: false,
-            }];
-            consume(decode_plugin_failures(&Value::Array(vec![
-                encode_plugin_failure(&failure_evidence.plugin_failures[0]),
-            ])));
-            consume(decode_consent(&encode_consent(&evidence.consent_audit)));
-            let plugin_failure = encode_plugin_failure(&failure_evidence.plugin_failures[0]);
-            reject_each_field(&plugin_failure, |value| {
-                decode_plugin_failures(&Value::Array(vec![value.clone()]))
-            });
-            consume(decode_plugin_failures(&Value::Array(vec![Value::Map(
-                Vec::new(),
-            )])));
-            let consent = encode_consent(&evidence.consent_audit);
-            reject_each_field(&consent, decode_consent);
-            consume(array_values(&Value::Null, "not-an-array"));
-
-            let principal = &contract.scenario_room.principals[0];
-            consume(decode_principal(&encode_principal(principal)));
-            let principal_value = encode_principal(principal);
-            reject_each_field(&principal_value, decode_principal);
-            let mut principal_with_subject = principal.clone();
-            principal_with_subject.subject_id = Some("subject".to_owned());
-            consume(decode_principal(&encode_principal(&principal_with_subject)));
-            let grant = &contract.scenario_room.grants[0];
-            consume(decode_grant(&encode_grant(grant)));
-            let grant_value = encode_grant(grant);
-            reject_each_field(&grant_value, decode_grant);
-            let decision = &contract.authorization_decisions[0];
-            consume(decode_authorization(&encode_authorization(decision)));
-            let authorization_value = encode_authorization(decision);
-            reject_each_field(&authorization_value, decode_authorization);
-            consume(decode_digest_array(
-                &digest_array(&[[1; 32], [2; 32]]),
-                "digests",
-            ));
-            let digest_values = digest_array(&[[1; 32], [2; 32]]);
-            reject_each_field(&digest_values, |value| {
-                decode_digest_array(value, "digests")
-            });
-
-            let snapshot = &contract.knowledge_snapshots[0];
-            consume(decode_knowledge(&encode_knowledge(snapshot)));
-            let knowledge_value = encode_knowledge(snapshot);
-            reject_each_field(&knowledge_value, decode_knowledge);
-            let invalid_knowledge_sequences = replace_field(
-                &knowledge_value,
-                5,
-                Value::Array(vec![Value::Map(Vec::new())]),
-            );
-            consume(decode_knowledge(&invalid_knowledge_sequences));
-            let invalid_knowledge_hidden = replace_field(
-                &knowledge_value,
-                7,
-                Value::Array(vec![Value::Map(Vec::new())]),
-            );
-            consume(decode_knowledge(&invalid_knowledge_hidden));
-            let room_value = encode_room(&contract.scenario_room);
-            reject_each_field(&room_value, decode_room);
-            for index in [5_usize, 6, 7, 8] {
-                let invalid_room_list = replace_field(
-                    &room_value,
-                    index,
-                    Value::Array(vec![Value::Map(Vec::new())]),
+                let manifest = encode_manifest(&evidence.manifest);
+                consume(decode_manifest(&manifest));
+                reject_each_field(&manifest, decode_manifest);
+                let duplicate_plugins = replace_field(
+                    &manifest,
+                    14,
+                    Value::Array(vec![
+                        Value::Array(vec![text("world"), text("1")]),
+                        Value::Array(vec![text("world"), text("2")]),
+                    ]),
                 );
-                consume(decode_room(&invalid_room_list));
-            }
-            consume(decode_room(&encode_room(&contract.scenario_room)));
-            let counterfactual = &contract.counterfactual;
-            consume(decode_dependency(&encode_dependency(
-                &counterfactual.dependencies[0],
-            )));
-            let dependency_value = encode_dependency(&counterfactual.dependencies[0]);
-            reject_each_field(&dependency_value, decode_dependency);
-            consume(decode_counterfactual(&Value::Array(vec![
-                digest16(&counterfactual.fork_id),
-                uint(counterfactual.prior_generation),
-                uint(counterfactual.generation),
-                Value::Null,
-                Value::Array(vec![Value::Map(Vec::new())]),
-                encode_frontier(&counterfactual.frontier),
-                encode_invalidation(&counterfactual.invalidation),
-                Value::Array(vec![uint(1)]),
-                digest_array(&counterfactual.retained_exogenous_digests),
-                enum_replay_claim(counterfactual.replay_claim),
-                digest(&counterfactual.contract_digest),
-            ])));
-            consume(decode_node(&encode_node(
-                &counterfactual.frontier.affected_nodes[0],
-            )));
-            let node_value = encode_node(&counterfactual.frontier.affected_nodes[0]);
-            reject_each_field(&node_value, decode_node);
-            consume(decode_owner_frontier(&encode_owner_frontier(
-                &counterfactual.frontier.owner_frontiers[0],
-            )));
-            let owner_value = encode_owner_frontier(&counterfactual.frontier.owner_frontiers[0]);
-            reject_each_field(&owner_value, decode_owner_frontier);
-            consume(decode_frontier(&encode_frontier(&counterfactual.frontier)));
-            let frontier_value = encode_frontier(&counterfactual.frontier);
-            reject_each_field(&frontier_value, decode_frontier);
-            for index in [6_usize, 7, 8, 12] {
-                let invalid_frontier_list = replace_field(
-                    &frontier_value,
-                    index,
-                    Value::Array(vec![Value::Map(Vec::new())]),
+                consume(decode_manifest(&duplicate_plugins));
+                let invalid_plugin_pair =
+                    replace_field(&manifest, 14, Value::Array(vec![Value::Map(Vec::new())]));
+                consume(decode_manifest(&invalid_plugin_pair));
+                let invalid_plugin_version = replace_field(
+                    &manifest,
+                    14,
+                    Value::Array(vec![Value::Array(vec![text("world")])]),
                 );
-                consume(decode_frontier(&invalid_frontier_list));
-            }
-            consume(decode_invalid_artifact(&encode_invalid_artifact(
-                &counterfactual.invalidation.invalid_artifacts[0],
-            )));
-            let artifact_value =
-                encode_invalid_artifact(&counterfactual.invalidation.invalid_artifacts[0]);
-            reject_each_field(&artifact_value, decode_invalid_artifact);
-            consume(decode_invalidation(&encode_invalidation(
-                &counterfactual.invalidation,
-            )));
-            let invalidation_value = encode_invalidation(&counterfactual.invalidation);
-            reject_each_field(&invalidation_value, decode_invalidation);
-            for coordinate_index in [1_usize, 2] {
-                let coordinate = Value::Array(vec![
-                    digest16(&counterfactual.invalidation.commit_timeline_id),
-                    if coordinate_index == 1 {
-                        Value::Map(Vec::new())
-                    } else {
-                        uint(counterfactual.invalidation.commit_seq)
-                    },
-                    if coordinate_index == 2 {
-                        Value::Map(Vec::new())
-                    } else {
-                        uint(counterfactual.invalidation.commit_tick)
-                    },
-                ]);
-                let invalid_commit = replace_field(&invalidation_value, 15, coordinate);
-                consume(decode_invalidation(&invalid_commit));
-            }
-            for index in [10_usize, 11, 12, 13] {
-                let invalid_artifact_list = replace_field(
-                    &invalidation_value,
-                    index,
-                    Value::Array(vec![Value::Map(Vec::new())]),
+                consume(decode_manifest(&invalid_plugin_version));
+                let invalid_plugin_version_value = replace_field(
+                    &manifest,
+                    14,
+                    Value::Array(vec![Value::Array(vec![
+                        text("world"),
+                        Value::Map(Vec::new()),
+                    ])]),
                 );
-                consume(decode_invalidation(&invalid_artifact_list));
-            }
-            consume(decode_counterfactual(&encode_counterfactual(
-                counterfactual,
-            )));
-            let counterfactual_value = encode_counterfactual(counterfactual);
-            reject_each_field(&counterfactual_value, decode_counterfactual);
-            for index in [4_usize, 7] {
-                let invalid_recomputed = replace_field(
-                    &counterfactual_value,
-                    index,
-                    Value::Array(vec![Value::Map(Vec::new())]),
+                consume(decode_manifest(&invalid_plugin_version_value));
+                consume(decode_manifest(&replace_field(&manifest, 14, Value::Null)));
+                let invalid_plugin_name = replace_field(
+                    &manifest,
+                    14,
+                    Value::Array(vec![Value::Array(vec![Value::Map(Vec::new()), text("1")])]),
                 );
-                consume(decode_counterfactual(&invalid_recomputed));
-            }
-            let intervention = InterventionV1 {
-                intervention_id: [21; 16],
-                target: "body".to_owned(),
-                operation: "set_velocity".to_owned(),
-                value_digest: [22; 32],
-                effective_tick: 2,
-                ordinal: 1,
-                principal_id: "principal:operator".to_owned(),
-                capability: "intervene".to_owned(),
-                consent_epoch: 0,
-                provenance_digest: [23; 32],
-            };
-            consume(decode_intervention(&encode_intervention(&intervention)));
-            let intervention_value = encode_intervention(&intervention);
-            reject_each_field(&intervention_value, decode_intervention);
-            let mut counterfactual_with_intervention = counterfactual.clone();
-            counterfactual_with_intervention.intervention = Some(intervention.clone());
-            consume(decode_counterfactual(&encode_counterfactual(
-                &counterfactual_with_intervention,
-            )));
-            consume(decode_atomicity(&encode_atomicity(&TickAtomicityV1 {
-                failure_class: Some(PluginFailureClassV1::PluginCrash),
-                committed: false,
-                committed_event_count: 0,
-                state_digest_before: [1; 32],
-                state_digest_after: [1; 32],
-                ..evidence.contract.atomicity[0].clone()
-            })));
-            let atomicity_value = encode_atomicity(&evidence.contract.atomicity[0]);
-            reject_each_field(&atomicity_value, decode_atomicity);
-            consume(decode_identity(&encode_identity(
-                &contract.conformance_report.implementation,
-            )));
-            let identity_value = encode_identity(&contract.conformance_report.implementation);
-            reject_each_field(&identity_value, decode_identity);
-            consume(decode_independence(&encode_independence(
-                &contract.conformance_report.independence,
-            )));
-            let independence_value = encode_independence(&contract.conformance_report.independence);
-            reject_each_field(&independence_value, decode_independence);
-            consume(decode_case(&encode_case(
-                &contract.conformance_report.cases[0],
-            )));
-            let case_value = encode_case(&contract.conformance_report.cases[0]);
-            reject_each_field(&case_value, decode_case);
+                consume(decode_manifest(&invalid_plugin_name));
+                consume(plugin_len(&Value::Null));
+                let bad_manifest = replace_field(&manifest, 0, uint(u64::MAX));
+                consume(decode_manifest(&bad_manifest));
 
-            let mut case_with_all_optionals = contract.conformance_report.cases[0].clone();
-            case_with_all_optionals.first_coordinate = Some("tick=1".to_owned());
-            case_with_all_optionals.expected_digest = Some([24; 32]);
-            case_with_all_optionals.actual_digest = Some([25; 32]);
-            case_with_all_optionals.expected_error = Some(SafeErrorCodeV1::DigestMismatch);
-            case_with_all_optionals.actual_error = Some(SafeErrorCodeV1::ResourceLimitExceeded);
-            consume(decode_case(&encode_case(&case_with_all_optionals)));
-            consume(decode_report(&encode_report(&contract.conformance_report)));
-            let report_value_all_fields = encode_report(&contract.conformance_report);
-            reject_each_field(&report_value_all_fields, decode_report);
-            consume(decode_plugin_boundary(&encode_plugin_boundary(
-                &contract.plugin_boundary,
-            )));
-            let plugin_boundary_value = encode_plugin_boundary(&contract.plugin_boundary);
-            reject_each_field(&plugin_boundary_value, decode_plugin_boundary);
-            for index in [8_usize, 9] {
-                let invalid_interfaces = replace_field(
-                    &plugin_boundary_value,
-                    index,
-                    Value::Array(vec![Value::Map(Vec::new())]),
-                );
-                consume(decode_plugin_boundary(&invalid_interfaces));
-            }
-            consume(decode_non_interference_case(&encode_non_interference_case(
-                &contract.non_interference[0],
-            )));
-            let non_interference_value =
-                encode_non_interference_case(&contract.non_interference[0]);
-            reject_each_field(&non_interference_value, decode_non_interference_case);
-            consume(decode_contract(&encode_contract(contract)));
-            let contract_value = encode_contract(contract);
-            reject_each_field(&contract_value, decode_contract);
-            for index in [2_usize, 3, 5, 7] {
-                let invalid_contract_lists = replace_field(
-                    &contract_value,
-                    index,
-                    Value::Array(vec![Value::Map(Vec::new())]),
-                );
-                consume(decode_contract(&invalid_contract_lists));
-            }
+                let event = encode_event(&evidence.authoritative_events[0]);
+                consume(decode_event(&event));
+                reject_each_field(&event, decode_event);
+                consume(decode_events(&Value::Array(vec![event])));
+                consume(decode_events(&Value::Array(vec![Value::Map(Vec::new())])));
+                let projection = encode_projection(&evidence.projections[0]).unwrap_or(Value::Null);
+                consume(decode_projection(&projection));
+                reject_each_field(&projection, decode_projection);
+                consume(decode_projections(&Value::Array(vec![Value::Map(
+                    Vec::new(),
+                )])));
+                let invalid_projection = replace_field(&projection, 2, text("not-json-bytes"));
+                consume(decode_projection(&invalid_projection));
+                let invalid_projection_json =
+                    replace_field(&projection, 2, Value::Bytes(vec![0xff]));
+                consume(decode_projection(&invalid_projection_json));
+                let trace = encode_trace(&evidence.causal_trace[0]);
+                consume(decode_trace(&trace));
+                reject_each_field(&trace, decode_trace);
+                consume(decode_traces(&Value::Array(vec![trace])));
+                consume(decode_traces(&Value::Array(vec![Value::Map(Vec::new())])));
+                consume(encode_uncertainty(&evidence.uncertainty[0]));
+                let uncertainty =
+                    encode_uncertainty(&evidence.uncertainty[0]).unwrap_or(Value::Null);
+                reject_each_field(&uncertainty, |value| {
+                    decode_uncertainty(&Value::Array(vec![value.clone()]))
+                });
+                consume(decode_uncertainty(&Value::Array(vec![Value::Map(
+                    Vec::new(),
+                )])));
+                consume(encode_uncertainty(&UncertaintyV1 {
+                    label: "non-finite".to_owned(),
+                    lower: f64::NAN,
+                    upper: 1.0,
+                    confidence: 1.0,
+                }));
+                consume(decode_uncertainty(&Value::Array(vec![Value::Array(vec![
+                    text("bad"),
+                    text("lower"),
+                    uint(0),
+                    uint(0),
+                ])])));
 
-            let plugin_boundary = encode_plugin_boundary(&contract.plugin_boundary);
-            for index in [0_usize, 3, 4, 5, 15, 16] {
-                let invalid = replace_field(&plugin_boundary, index, uint(u64::MAX));
-                consume(decode_plugin_boundary(&invalid));
-            }
+                let view = encode_participant_view(&evidence.participant_views[0]);
+                consume(decode_participant_view(&view));
+                reject_each_field(&view, decode_participant_view);
+                let participant_event =
+                    encode_participant_event(&evidence.participant_views[0].visible_events[0]);
+                reject_each_field(&participant_event, decode_participant_event);
+                let invalid_visible_events =
+                    replace_field(&view, 3, Value::Array(vec![Value::Map(Vec::new())]));
+                consume(decode_participant_view(&invalid_visible_events));
+                consume(decode_participant_views(&Value::Array(vec![view])));
+                consume(decode_participant_views(&Value::Array(vec![Value::Map(
+                    Vec::new(),
+                )])));
+                let mut failure_evidence = evidence.clone();
+                failure_evidence.plugin_failures = vec![PluginFailureV1 {
+                    plugin: "proof".to_owned(),
+                    class: PluginFailureClassV1::ResourceExhaustion,
+                    tick: 2,
+                    committed: false,
+                    staged_event_count: 0,
+                    committed_event_count: 0,
+                    state_digest_before: [1; 32],
+                    state_digest_after: [1; 32],
+                    sibling_step_count: 1,
+                }];
+                consume(decode_plugin_failures(&Value::Array(vec![
+                    encode_plugin_failure(&failure_evidence.plugin_failures[0]),
+                ])));
+                consume(decode_consent(&encode_consent(&evidence.consent_audit)));
+                let plugin_failure = encode_plugin_failure(&failure_evidence.plugin_failures[0]);
+                reject_each_field(&plugin_failure, |value| {
+                    decode_plugin_failures(&Value::Array(vec![value.clone()]))
+                });
+                consume(decode_plugin_failures(&Value::Array(vec![Value::Map(
+                    Vec::new(),
+                )])));
+                let consent = encode_consent(&evidence.consent_audit);
+                reject_each_field(&consent, decode_consent);
+                consume(array_values(&Value::Null, "not-an-array"));
 
-            let report_value = encode_report(&contract.conformance_report);
-            for index in [14_usize, 15, 16, 17, 18] {
-                let invalid = replace_field(&report_value, index, uint(u64::MAX));
-                consume(decode_report(&invalid));
-            }
-            let invalid_report_cases = replace_field(
-                &report_value,
-                13,
-                Value::Array(vec![Value::Map(Vec::new())]),
-            );
-            consume(decode_report(&invalid_report_cases));
-            let invalid_report = replace_field(&report_value, 0, text("wrong"));
-            consume(decode_report(&invalid_report));
-
-            let mut invalid_node = encode_node(&counterfactual.frontier.affected_nodes[0]);
-            for index in [1_usize, 3, 4] {
-                invalid_node = replace_field(&invalid_node, index, uint(u64::MAX));
-                consume(decode_node(&invalid_node));
-                invalid_node = encode_node(&counterfactual.frontier.affected_nodes[0]);
-            }
-            let mut invalid_owner =
-                encode_owner_frontier(&counterfactual.frontier.owner_frontiers[0]);
-            for index in [2_usize, 3] {
-                invalid_owner = replace_field(&invalid_owner, index, uint(u64::MAX));
-                consume(decode_owner_frontier(&invalid_owner));
-                invalid_owner = encode_owner_frontier(&counterfactual.frontier.owner_frontiers[0]);
-            }
-            let invalid_intervention = replace_field(
-                &encode_intervention(
-                    &counterfactual_with_intervention
-                        .intervention
-                        .clone()
-                        .unwrap_or(intervention),
-                ),
-                5,
-                uint(u64::MAX),
-            );
-            consume(decode_intervention(&invalid_intervention));
-            let invalid_artifact = replace_field(
-                &encode_invalid_artifact(&counterfactual.invalidation.invalid_artifacts[0]),
-                1,
-                uint(u64::MAX),
-            );
-            consume(decode_invalid_artifact(&invalid_artifact));
-            let invalid_frontier = replace_field(&frontier_value, 1, uint(2));
-            consume(decode_frontier(&invalid_frontier));
-            let invalid_invalidation = replace_field(&invalidation_value, 1, uint(2));
-            consume(decode_invalidation(&invalid_invalidation));
-
-            let Some(result) = evidence.to_verification_result().ok() else {
-                return;
-            };
-            consume(encode_verification_result(&result));
-            consume(verification_result_digest(&result));
-            let verification_value = encode_verification_result_value(&result, true);
-            reject_each_field(&verification_value, |value| {
-                array(value, "verification_result", 18).and_then(decode_verification_result_fields)
-            });
-            reject_each_encoded_field(&verification_value, decode_verification_result);
-            let error = VerificationErrorV1 {
-                code: SafeErrorCodeV1::InvalidEncoding,
-                field_ordinal: Some(7),
-                canonical_coordinate: Some(vec![1, 2, 3]),
-                related_digest: Some([26; 32]),
-            };
-            consume(decode_verification_error(&encode_verification_error(
-                &error,
-            )));
-            for outcome in [
-                VerificationOutcomeV1::VerifiedExact,
-                VerificationOutcomeV1::Diverged,
-                VerificationOutcomeV1::InvalidManifest,
-                VerificationOutcomeV1::UnverifiableArtifactsMissing,
-                VerificationOutcomeV1::IncompatibleProfile,
-                VerificationOutcomeV1::ResourceLimitExceeded,
-            ] {
-                let mut candidate = result.clone();
-                candidate.verification_outcome = outcome;
-                candidate.authoritative_result_digest =
-                    (outcome == VerificationOutcomeV1::VerifiedExact).then_some([27; 32]);
-                candidate.divergence_report_digest =
-                    (outcome == VerificationOutcomeV1::Diverged).then_some([28; 32]);
-                candidate.first_error = if matches!(
-                    outcome,
-                    VerificationOutcomeV1::InvalidManifest
-                        | VerificationOutcomeV1::UnverifiableArtifactsMissing
-                        | VerificationOutcomeV1::IncompatibleProfile
-                        | VerificationOutcomeV1::ResourceLimitExceeded
-                ) {
-                    Some(error.clone())
-                } else {
-                    None
-                };
-                consume(validate_verification_result(&candidate));
-            }
-            let mut invalid_error_result = result.clone();
-            invalid_error_result.verification_outcome = VerificationOutcomeV1::InvalidManifest;
-            invalid_error_result.authoritative_result_digest = None;
-            invalid_error_result.first_error = Some(VerificationErrorV1 {
-                canonical_coordinate: Some(vec![0; 129]),
-                ..error.clone()
-            });
-            consume(validate_verification_result(&invalid_error_result));
-            for code in [
-                SafeErrorCodeV1::InvalidEncoding,
-                SafeErrorCodeV1::UnsupportedVersion,
-                SafeErrorCodeV1::FieldOutOfBounds,
-                SafeErrorCodeV1::NonCanonicalOrder,
-                SafeErrorCodeV1::DigestMismatch,
-                SafeErrorCodeV1::SignatureInvalid,
-                SafeErrorCodeV1::TrustRootUnknown,
-                SafeErrorCodeV1::TrustSnapshotRollback,
-                SafeErrorCodeV1::ArtifactRevoked,
-                SafeErrorCodeV1::ClosureIncomplete,
-                SafeErrorCodeV1::ProfileClassMismatch,
-                SafeErrorCodeV1::ProfileUnsupported,
-                SafeErrorCodeV1::ProvenanceMissing,
-                SafeErrorCodeV1::ResourceLimitExceeded,
-            ] {
-                consume(decode_safe_error(&enum_safe_error(code)));
-            }
-            consume(decode_safe_error(&uint(99)));
-            for value in [
-                VerificationOutcomeV1::VerifiedExact,
-                VerificationOutcomeV1::Diverged,
-                VerificationOutcomeV1::InvalidManifest,
-                VerificationOutcomeV1::UnverifiableArtifactsMissing,
-                VerificationOutcomeV1::IncompatibleProfile,
-                VerificationOutcomeV1::ResourceLimitExceeded,
-            ] {
-                consume(decode_verification_outcome(&enum_verification_outcome(
-                    value,
-                )));
-            }
-            consume(decode_verification_outcome(&uint(99)));
-
-            let mut report = DivergenceReportV1 {
-                request_digest: [1; 32],
-                manifest_digest: [2; 32],
-                execution_profile_digest: [3; 32],
-                fixture_digest: Some([4; 32]),
-                evaluator_digest: [5; 32],
-                reproducibility_class: ReproducibilityClassV1::CrossProfileConformance,
-                replay_claim: ReplayClaimV1::StructuralOnly,
-                location_kind: DivergenceLocationKindV1::DriverOutput,
-                timeline_or_worldcut_id: [6; 16],
-                timeline_seq_or_cut_ordinal: 3,
-                tick: 2,
-                scheduler_position: Some(1),
-                driver_or_plugin_id: Some("proof".to_owned()),
-                output_ordinal: Some(1),
-                mismatch_kind: DivergenceMismatchKindV1::Artifact,
-                expected: DigestSizeV1 {
-                    digest: Some([7; 32]),
-                    size: Some(8),
-                },
-                actual: DigestSizeV1 {
-                    digest: Some([9; 32]),
-                    size: Some(10),
-                },
-                prior_matching_checkpoint_digest: Some([11; 32]),
-                follow_on_counts: vec![FollowOnMismatchV1 {
-                    kind: DivergenceMismatchKindV1::EventIdentity,
-                    count: 1,
-                }],
-                report_digest: [0; 32],
-            };
-            report.report_digest = report.digest().unwrap_or([29; 32]);
-            let mut zero_follow_on = report.clone();
-            zero_follow_on.follow_on_counts = vec![
-                FollowOnMismatchV1 {
-                    kind: DivergenceMismatchKindV1::EventIdentity,
-                    count: 0,
-                },
-                FollowOnMismatchV1 {
-                    kind: DivergenceMismatchKindV1::EventOrder,
-                    count: 1,
-                },
-            ];
-            consume(validate_divergence_report(&zero_follow_on));
-            zero_follow_on.follow_on_counts[0].count = 1;
-            zero_follow_on.follow_on_counts[1].count = 0;
-            consume(validate_divergence_report(&zero_follow_on));
-            let report_value = encode_divergence_report_value(&report, true);
-            if let Value::Array(fields) = &report_value {
-                consume(decode_divergence_report_fields(fields));
-            }
-            reject_each_field(&report_value, |value| {
-                array(value, "divergence_report", 22).and_then(decode_divergence_report_fields)
-            });
-            reject_each_encoded_field(&report_value, decode_divergence_report);
-            consume(encode_divergence_report(&report));
-            if let Ok(bytes) = report.to_canonical_cbor() {
-                consume(decode_divergence_report(&bytes));
-            }
-            for value in [
-                DivergenceLocationKindV1::TimelineSeq,
-                DivergenceLocationKindV1::WorldCut,
-                DivergenceLocationKindV1::TickBoundary,
-                DivergenceLocationKindV1::Scheduler,
-                DivergenceLocationKindV1::DriverOutput,
-            ] {
-                consume(decode_divergence_location(&enum_divergence_location(value)));
-            }
-            consume(decode_divergence_location(&uint(99)));
-            for value in [
-                DivergenceMismatchKindV1::EventIdentity,
-                DivergenceMismatchKindV1::EventOrder,
-                DivergenceMismatchKindV1::CanonicalBytes,
-                DivergenceMismatchKindV1::ProjectionCheckpoint,
-                DivergenceMismatchKindV1::TypedFailure,
-                DivergenceMismatchKindV1::Artifact,
-                DivergenceMismatchKindV1::SchemaOrUpcaster,
-                DivergenceMismatchKindV1::NumericProfile,
-                DivergenceMismatchKindV1::ProhibitedOperationalInput,
-            ] {
-                consume(decode_divergence_mismatch(&enum_divergence_mismatch(value)));
-            }
-            consume(decode_divergence_mismatch(&uint(99)));
-            consume(decode_digest_size(
-                &encode_digest_size(&report.expected),
-                "digest_size",
-            ));
-            consume(decode_digest_size(
-                &encode_digest_size(&DigestSizeV1 {
-                    digest: None,
-                    size: None,
-                }),
-                "digest_size",
-            ));
-            let digest_size_value = encode_digest_size(&report.expected);
-            reject_each_field(&digest_size_value, |value| {
-                decode_digest_size(value, "digest_size")
-            });
-            let follow_on_count = Value::Array(vec![
-                enum_divergence_mismatch(DivergenceMismatchKindV1::EventIdentity),
-                uint(1),
-            ]);
-            reject_each_field(&follow_on_count, |value| {
-                decode_follow_on_counts(&Value::Array(vec![value.clone()]))
-            });
-            consume(decode_follow_on_counts(&Value::Array(vec![Value::Array(
-                vec![
-                    enum_divergence_mismatch(DivergenceMismatchKindV1::EventIdentity),
-                    uint(u64::MAX),
-                ],
-            )])));
-            consume(decode_follow_on_counts(&Value::Array(vec![Value::Map(
-                Vec::new(),
-            )])));
-            consume(decode_follow_on_counts(&Value::Array(vec![
-                Value::Array(vec![
-                    enum_divergence_mismatch(DivergenceMismatchKindV1::EventIdentity),
-                    uint(1),
-                ]),
-                Value::Array(vec![
-                    enum_divergence_mismatch(DivergenceMismatchKindV1::EventIdentity),
-                    uint(1),
-                ]),
-            ])));
-            consume(decode_optional_u32(&Value::Null, "optional_u32"));
-            consume(decode_optional_u32(&uint(u64::MAX), "optional_u32"));
-            consume(decode_optional_digest(&Value::Null, "optional_digest"));
-            consume(decode_optional_digest(
-                &digest(&[30; 32]),
-                "optional_digest",
-            ));
-
-            let mutations: [fn(&mut DivergenceReportV1); 6] = [
-                |value: &mut DivergenceReportV1| value.timeline_seq_or_cut_ordinal = u64::MAX,
-                |value: &mut DivergenceReportV1| value.tick = u64::MAX,
-                |value: &mut DivergenceReportV1| value.scheduler_position = Some(u32::MAX),
-                |value: &mut DivergenceReportV1| value.output_ordinal = Some(u32::MAX),
-                |value: &mut DivergenceReportV1| value.driver_or_plugin_id = Some(String::new()),
-                |value: &mut DivergenceReportV1| value.report_digest = [0; 32],
-            ];
-            for mutate in mutations {
-                let mut invalid_report = report.clone();
-                mutate(&mut invalid_report);
-                consume(validate_divergence_report(&invalid_report));
-            }
-            let mut invalid_report = report.clone();
-            invalid_report.follow_on_counts = (0..33)
-                .map(|_| FollowOnMismatchV1 {
-                    kind: DivergenceMismatchKindV1::EventIdentity,
-                    count: 1,
-                })
-                .collect();
-            consume(validate_divergence_report(&invalid_report));
-            invalid_report = report.clone();
-            invalid_report.follow_on_counts = vec![
-                FollowOnMismatchV1 {
-                    kind: DivergenceMismatchKindV1::EventOrder,
-                    count: 1,
-                },
-                FollowOnMismatchV1 {
-                    kind: DivergenceMismatchKindV1::EventIdentity,
-                    count: 1,
-                },
-            ];
-            consume(validate_divergence_report(&invalid_report));
-            invalid_report.follow_on_counts[1].kind = DivergenceMismatchKindV1::EventOrder;
-            consume(validate_divergence_report(&invalid_report));
-
-            consume(decode_value(&[0xff]));
-            consume(decode_value(&[0, 0]));
-            consume(decode_value(&[0x18, 0]));
-            consume(decode_value(&[0xa0]));
-            consume(encode_value(&Value::Map(Vec::new())));
-            consume(encode_value(&Value::Tag(0, Box::new(Value::Null))));
-            consume(encode_value(&Value::Float(1.0)));
-            consume(validate_value(&Value::Array(vec![Value::Null])));
-            consume(validate_value(&Value::Integer((-1_i64).into())));
-            consume(array(&Value::Null, "array", 0));
-            consume(array(&Value::Array(Vec::new()), "array", 1));
-            consume(string(&Value::Null, "string"));
-            consume(bytes::<32>(&Value::Bytes(vec![1]), "bytes"));
-            consume(uint_value(&Value::Integer((-1_i64).into()), "uint"));
-            consume(bool_value(&Value::Null, "bool"));
-            consume(optional_u64(&Value::Null, "optional"));
-            consume(optional_string(&Value::Null, "optional"));
-
-            let mut all_enums = vec![
-                enum_dependency_class(DependencyClassV1::ExogenousFrozen),
-                enum_dependency_class(DependencyClassV1::InterventionAssigned),
-                enum_dependency_class(DependencyClassV1::EndogenousRecomputed),
-                enum_dependency_class(DependencyClassV1::FixedPolicy),
-                enum_dependency_class(DependencyClassV1::PresentationOnly),
-            ];
-            for value in all_enums.drain(..) {
-                consume(decode_dependency_class(&value));
-            }
-            consume(decode_dependency_class(&uint(99)));
-            for value in [
-                PluginFailureClassV1::PluginCrash,
-                PluginFailureClassV1::ResourceExhaustion,
-            ] {
-                consume(decode_plugin_failure(&enum_plugin_failure(value)));
-            }
-            consume(decode_plugin_failure(&uint(99)));
-            for value in [
-                UnknownEdgePolicyV1::Reject,
-                UnknownEdgePolicyV1::FullSuffixFromCut,
-            ] {
-                consume(decode_unknown_edge_policy(&enum_unknown_edge_policy(value)));
-            }
-            consume(decode_unknown_edge_policy(&uint(99)));
-            for value in [
-                SuffixInvalidationReasonV1::NewIntervention,
-                SuffixInvalidationReasonV1::ChangedIntervention,
-                SuffixInvalidationReasonV1::UnknownEdgeFallback,
-                SuffixInvalidationReasonV1::RetryAfterAtomicFailure,
-                SuffixInvalidationReasonV1::TrustOrErasureChange,
-            ] {
-                consume(decode_invalidation_reason(&enum_invalidation_reason(value)));
-            }
-            consume(decode_invalidation_reason(&uint(99)));
-            for value in [
-                ExecutionModeV1::Local,
-                ExecutionModeV1::AirGapped,
-                ExecutionModeV1::Replay,
-                ExecutionModeV1::Fork,
-            ] {
-                consume(decode_mode(&enum_mode(value)));
-            }
-            consume(decode_mode(&uint(99)));
-            for value in [
-                ClaimLayerV1::ArtifactIntegrity,
-                ClaimLayerV1::ReplayConformance,
-                ClaimLayerV1::KnowledgeNonInterference,
-                ClaimLayerV1::GatewayClientConformance,
-                ClaimLayerV1::PluginConformance,
-                ClaimLayerV1::MetricConformance,
-                ClaimLayerV1::EmpiricalEvaluation,
-            ] {
-                consume(decode_claim_layer(&enum_claim_layer(value)));
-            }
-            consume(decode_claim_layer(&uint(99)));
-            for value in [
-                CaseOutcomeStatusV1::Pass,
-                CaseOutcomeStatusV1::Fail,
-                CaseOutcomeStatusV1::Skip,
-                CaseOutcomeStatusV1::Unavailable,
-                CaseOutcomeStatusV1::NotApplicable,
-            ] {
-                consume(decode_case_outcome(&enum_case_outcome(value)));
-            }
-            consume(decode_case_outcome(&uint(99)));
-            for value in [
-                RedactionStateV1::None,
-                RedactionStateV1::RedactedViews,
-                RedactionStateV1::StructuralOnly,
-                RedactionStateV1::EvidenceMissing,
-            ] {
-                consume(decode_redaction_state(&enum_redaction_state(value)));
-            }
-            consume(decode_redaction_state(&uint(99)));
-            for value in [
-                ReproducibilityClassV1::RecordedReplay,
-                ReproducibilityClassV1::ProfileRecomputation,
-                ReproducibilityClassV1::CrossProfileConformance,
-                ReproducibilityClassV1::LiveUnverified,
-            ] {
-                consume(decode_reproducibility(&enum_reproducibility(value)));
-            }
-            consume(decode_reproducibility(&uint(99)));
-            for value in [
-                ReplayClaimV1::Exact,
-                ReplayClaimV1::ExactAuthoritativeWithRedactedViews,
-                ReplayClaimV1::StructuralOnly,
-                ReplayClaimV1::UnverifiableArtifactsMissing,
-                ReplayClaimV1::IncompatibleProfile,
-            ] {
-                consume(decode_replay_claim(&enum_replay_claim(value)));
-            }
-            consume(decode_replay_claim(&uint(99)));
-            for value in [
-                NonInterferenceVariantV1::Success,
-                NonInterferenceVariantV1::Denial,
-                NonInterferenceVariantV1::WarmCache,
-                NonInterferenceVariantV1::ColdCache,
-            ] {
-                consume(decode_non_interference_variant(
-                    &enum_non_interference_variant(value),
+                let principal = &contract.scenario_room.principals[0];
+                consume(decode_principal(&encode_principal(principal)));
+                let principal_value = encode_principal(principal);
+                reject_each_field(&principal_value, decode_principal);
+                let mut principal_with_subject = principal.clone();
+                principal_with_subject.subject_id = Some("subject".to_owned());
+                consume(decode_principal(&encode_principal(&principal_with_subject)));
+                let grant = &contract.scenario_room.grants[0];
+                consume(decode_grant(&encode_grant(grant)));
+                let grant_value = encode_grant(grant);
+                reject_each_field(&grant_value, decode_grant);
+                let decision = &contract.authorization_decisions[0];
+                consume(decode_authorization(&encode_authorization(decision)));
+                let authorization_value = encode_authorization(decision);
+                reject_each_field(&authorization_value, decode_authorization);
+                consume(decode_digest_array(
+                    &digest_array(&[[1; 32], [2; 32]]),
+                    "digests",
                 ));
-            }
-            consume(decode_non_interference_variant(&uint(99)));
+                let digest_values = digest_array(&[[1; 32], [2; 32]]);
+                reject_each_field(&digest_values, |value| {
+                    decode_digest_array(value, "digests")
+                });
+
+                let snapshot = &contract.knowledge_snapshots[0];
+                consume(decode_knowledge(&encode_knowledge(snapshot)));
+                let knowledge_value = encode_knowledge(snapshot);
+                reject_each_field(&knowledge_value, decode_knowledge);
+                let invalid_knowledge_sequences = replace_field(
+                    &knowledge_value,
+                    5,
+                    Value::Array(vec![Value::Map(Vec::new())]),
+                );
+                consume(decode_knowledge(&invalid_knowledge_sequences));
+                let invalid_knowledge_hidden = replace_field(
+                    &knowledge_value,
+                    7,
+                    Value::Array(vec![Value::Map(Vec::new())]),
+                );
+                consume(decode_knowledge(&invalid_knowledge_hidden));
+                let room_value = encode_room(&contract.scenario_room);
+                reject_each_field(&room_value, decode_room);
+                for index in [5_usize, 6, 7, 8] {
+                    let invalid_room_list = replace_field(
+                        &room_value,
+                        index,
+                        Value::Array(vec![Value::Map(Vec::new())]),
+                    );
+                    consume(decode_room(&invalid_room_list));
+                }
+                consume(decode_room(&encode_room(&contract.scenario_room)));
+                let counterfactual = &contract.counterfactual;
+                consume(decode_dependency(&encode_dependency(
+                    &counterfactual.dependencies[0],
+                )));
+                let dependency_value = encode_dependency(&counterfactual.dependencies[0]);
+                reject_each_field(&dependency_value, decode_dependency);
+                consume(decode_counterfactual(&Value::Array(vec![
+                    digest16(&counterfactual.fork_id),
+                    uint(counterfactual.prior_generation),
+                    uint(counterfactual.generation),
+                    Value::Null,
+                    Value::Array(vec![Value::Map(Vec::new())]),
+                    encode_frontier(&counterfactual.frontier),
+                    encode_invalidation(&counterfactual.invalidation),
+                    Value::Array(vec![uint(1)]),
+                    digest_array(&counterfactual.retained_exogenous_digests),
+                    enum_replay_claim(counterfactual.replay_claim),
+                    digest(&counterfactual.contract_digest),
+                ])));
+                consume(decode_node(&encode_node(
+                    &counterfactual.frontier.affected_nodes[0],
+                )));
+                let node_value = encode_node(&counterfactual.frontier.affected_nodes[0]);
+                reject_each_field(&node_value, decode_node);
+                consume(decode_owner_frontier(&encode_owner_frontier(
+                    &counterfactual.frontier.owner_frontiers[0],
+                )));
+                let owner_value =
+                    encode_owner_frontier(&counterfactual.frontier.owner_frontiers[0]);
+                reject_each_field(&owner_value, decode_owner_frontier);
+                consume(decode_frontier(&encode_frontier(&counterfactual.frontier)));
+                let frontier_value = encode_frontier(&counterfactual.frontier);
+                reject_each_field(&frontier_value, decode_frontier);
+                for index in [6_usize, 7, 8, 12] {
+                    let invalid_frontier_list = replace_field(
+                        &frontier_value,
+                        index,
+                        Value::Array(vec![Value::Map(Vec::new())]),
+                    );
+                    consume(decode_frontier(&invalid_frontier_list));
+                }
+                consume(decode_invalid_artifact(&encode_invalid_artifact(
+                    &counterfactual.invalidation.invalid_artifacts[0],
+                )));
+                let artifact_value =
+                    encode_invalid_artifact(&counterfactual.invalidation.invalid_artifacts[0]);
+                reject_each_field(&artifact_value, decode_invalid_artifact);
+                consume(decode_invalidation(&encode_invalidation(
+                    &counterfactual.invalidation,
+                )));
+                let invalidation_value = encode_invalidation(&counterfactual.invalidation);
+                reject_each_field(&invalidation_value, decode_invalidation);
+                for coordinate_index in [1_usize, 2] {
+                    let coordinate = Value::Array(vec![
+                        digest16(&counterfactual.invalidation.commit_timeline_id),
+                        if coordinate_index == 1 {
+                            Value::Map(Vec::new())
+                        } else {
+                            uint(counterfactual.invalidation.commit_seq)
+                        },
+                        if coordinate_index == 2 {
+                            Value::Map(Vec::new())
+                        } else {
+                            uint(counterfactual.invalidation.commit_tick)
+                        },
+                    ]);
+                    let invalid_commit = replace_field(&invalidation_value, 15, coordinate);
+                    consume(decode_invalidation(&invalid_commit));
+                }
+                for index in [10_usize, 11, 12, 13] {
+                    let invalid_artifact_list = replace_field(
+                        &invalidation_value,
+                        index,
+                        Value::Array(vec![Value::Map(Vec::new())]),
+                    );
+                    consume(decode_invalidation(&invalid_artifact_list));
+                }
+                consume(decode_counterfactual(&encode_counterfactual(
+                    counterfactual,
+                )));
+                let counterfactual_value = encode_counterfactual(counterfactual);
+                reject_each_field(&counterfactual_value, decode_counterfactual);
+                for index in [4_usize, 7] {
+                    let invalid_recomputed = replace_field(
+                        &counterfactual_value,
+                        index,
+                        Value::Array(vec![Value::Map(Vec::new())]),
+                    );
+                    consume(decode_counterfactual(&invalid_recomputed));
+                }
+                let intervention = InterventionV1 {
+                    intervention_id: [21; 16],
+                    target: "body".to_owned(),
+                    operation: "set_velocity".to_owned(),
+                    value_digest: [22; 32],
+                    effective_tick: 2,
+                    ordinal: 1,
+                    principal_id: "principal:operator".to_owned(),
+                    capability: "intervene".to_owned(),
+                    consent_epoch: 0,
+                    provenance_digest: [23; 32],
+                };
+                consume(decode_intervention(&encode_intervention(&intervention)));
+                let intervention_value = encode_intervention(&intervention);
+                reject_each_field(&intervention_value, decode_intervention);
+                let mut counterfactual_with_intervention = counterfactual.clone();
+                counterfactual_with_intervention.intervention = Some(intervention.clone());
+                consume(decode_counterfactual(&encode_counterfactual(
+                    &counterfactual_with_intervention,
+                )));
+                consume(decode_atomicity(&encode_atomicity(&TickAtomicityV1 {
+                    failure_class: Some(PluginFailureClassV1::PluginCrash),
+                    committed: false,
+                    committed_event_count: 0,
+                    state_digest_before: [1; 32],
+                    state_digest_after: [1; 32],
+                    ..evidence.contract.atomicity[0].clone()
+                })));
+                let atomicity_value = encode_atomicity(&evidence.contract.atomicity[0]);
+                reject_each_field(&atomicity_value, decode_atomicity);
+                consume(decode_identity(&encode_identity(
+                    &contract.conformance_report.implementation,
+                )));
+                let identity_value = encode_identity(&contract.conformance_report.implementation);
+                reject_each_field(&identity_value, decode_identity);
+                consume(decode_independence(&encode_independence(
+                    &contract.conformance_report.independence,
+                )));
+                let independence_value =
+                    encode_independence(&contract.conformance_report.independence);
+                reject_each_field(&independence_value, decode_independence);
+                consume(decode_case(&encode_case(
+                    &contract.conformance_report.cases[0],
+                )));
+                let case_value = encode_case(&contract.conformance_report.cases[0]);
+                reject_each_field(&case_value, decode_case);
+
+                let mut case_with_all_optionals = contract.conformance_report.cases[0].clone();
+                case_with_all_optionals.first_coordinate = Some("tick=1".to_owned());
+                case_with_all_optionals.expected_digest = Some([24; 32]);
+                case_with_all_optionals.actual_digest = Some([25; 32]);
+                case_with_all_optionals.expected_error = Some(SafeErrorCodeV1::DigestMismatch);
+                case_with_all_optionals.actual_error = Some(SafeErrorCodeV1::ResourceLimitExceeded);
+                consume(decode_case(&encode_case(&case_with_all_optionals)));
+                consume(decode_report(&encode_report(&contract.conformance_report)));
+                let report_value_all_fields = encode_report(&contract.conformance_report);
+                reject_each_field(&report_value_all_fields, decode_report);
+                consume(decode_plugin_boundary(&encode_plugin_boundary(
+                    &contract.plugin_boundary,
+                )));
+                let plugin_boundary_value = encode_plugin_boundary(&contract.plugin_boundary);
+                reject_each_field(&plugin_boundary_value, decode_plugin_boundary);
+                for index in [8_usize, 9] {
+                    let invalid_interfaces = replace_field(
+                        &plugin_boundary_value,
+                        index,
+                        Value::Array(vec![Value::Map(Vec::new())]),
+                    );
+                    consume(decode_plugin_boundary(&invalid_interfaces));
+                }
+                consume(decode_non_interference_case(&encode_non_interference_case(
+                    &contract.non_interference[0],
+                )));
+                let non_interference_value =
+                    encode_non_interference_case(&contract.non_interference[0]);
+                reject_each_field(&non_interference_value, decode_non_interference_case);
+                consume(decode_contract(&encode_contract(contract)));
+                let contract_value = encode_contract(contract);
+                reject_each_field(&contract_value, decode_contract);
+                for index in [2_usize, 3, 5, 7] {
+                    let invalid_contract_lists = replace_field(
+                        &contract_value,
+                        index,
+                        Value::Array(vec![Value::Map(Vec::new())]),
+                    );
+                    consume(decode_contract(&invalid_contract_lists));
+                }
+
+                let plugin_boundary = encode_plugin_boundary(&contract.plugin_boundary);
+                for index in [0_usize, 3, 4, 5, 15, 16] {
+                    let invalid = replace_field(&plugin_boundary, index, uint(u64::MAX));
+                    consume(decode_plugin_boundary(&invalid));
+                }
+
+                let report_value = encode_report(&contract.conformance_report);
+                for index in [14_usize, 15, 16, 17, 18] {
+                    let invalid = replace_field(&report_value, index, uint(u64::MAX));
+                    consume(decode_report(&invalid));
+                }
+                let invalid_report_cases = replace_field(
+                    &report_value,
+                    13,
+                    Value::Array(vec![Value::Map(Vec::new())]),
+                );
+                consume(decode_report(&invalid_report_cases));
+                let invalid_report = replace_field(&report_value, 0, text("wrong"));
+                consume(decode_report(&invalid_report));
+
+                let mut invalid_node = encode_node(&counterfactual.frontier.affected_nodes[0]);
+                for index in [1_usize, 3, 4] {
+                    invalid_node = replace_field(&invalid_node, index, uint(u64::MAX));
+                    consume(decode_node(&invalid_node));
+                    invalid_node = encode_node(&counterfactual.frontier.affected_nodes[0]);
+                }
+                let mut invalid_owner =
+                    encode_owner_frontier(&counterfactual.frontier.owner_frontiers[0]);
+                for index in [2_usize, 3] {
+                    invalid_owner = replace_field(&invalid_owner, index, uint(u64::MAX));
+                    consume(decode_owner_frontier(&invalid_owner));
+                    invalid_owner =
+                        encode_owner_frontier(&counterfactual.frontier.owner_frontiers[0]);
+                }
+                let invalid_intervention = replace_field(
+                    &encode_intervention(
+                        &counterfactual_with_intervention
+                            .intervention
+                            .unwrap_or(intervention),
+                    ),
+                    5,
+                    uint(u64::MAX),
+                );
+                consume(decode_intervention(&invalid_intervention));
+                let invalid_artifact = replace_field(
+                    &encode_invalid_artifact(&counterfactual.invalidation.invalid_artifacts[0]),
+                    1,
+                    uint(u64::MAX),
+                );
+                consume(decode_invalid_artifact(&invalid_artifact));
+                let invalid_frontier = replace_field(&frontier_value, 1, uint(2));
+                consume(decode_frontier(&invalid_frontier));
+                let invalid_invalidation = replace_field(&invalidation_value, 1, uint(2));
+                consume(decode_invalidation(&invalid_invalidation));
+
+                let Some(result) = evidence.to_verification_result().ok() else {
+                    return;
+                };
+                consume(encode_verification_result(&result));
+                consume(verification_result_digest(&result));
+                let verification_value = encode_verification_result_value(&result, true);
+                reject_each_field(&verification_value, |value| {
+                    array(value, "verification_result", 18)
+                        .and_then(decode_verification_result_fields)
+                });
+                reject_each_encoded_field(&verification_value, decode_verification_result);
+                let error = VerificationErrorV1 {
+                    code: SafeErrorCodeV1::InvalidEncoding,
+                    field_ordinal: Some(7),
+                    canonical_coordinate: Some(vec![1, 2, 3]),
+                    related_digest: Some([26; 32]),
+                };
+                consume(decode_verification_error(&encode_verification_error(
+                    &error,
+                )));
+                for outcome in [
+                    VerificationOutcomeV1::VerifiedExact,
+                    VerificationOutcomeV1::Diverged,
+                    VerificationOutcomeV1::InvalidManifest,
+                    VerificationOutcomeV1::UnverifiableArtifactsMissing,
+                    VerificationOutcomeV1::IncompatibleProfile,
+                    VerificationOutcomeV1::ResourceLimitExceeded,
+                ] {
+                    let mut candidate = result.clone();
+                    candidate.verification_outcome = outcome;
+                    candidate.authoritative_result_digest =
+                        (outcome == VerificationOutcomeV1::VerifiedExact).then_some([27; 32]);
+                    candidate.divergence_report_digest =
+                        (outcome == VerificationOutcomeV1::Diverged).then_some([28; 32]);
+                    candidate.first_error = if matches!(
+                        outcome,
+                        VerificationOutcomeV1::InvalidManifest
+                            | VerificationOutcomeV1::UnverifiableArtifactsMissing
+                            | VerificationOutcomeV1::IncompatibleProfile
+                            | VerificationOutcomeV1::ResourceLimitExceeded
+                    ) {
+                        Some(error.clone())
+                    } else {
+                        None
+                    };
+                    consume(validate_verification_result(&candidate));
+                }
+                let mut invalid_error_result = result;
+                invalid_error_result.verification_outcome = VerificationOutcomeV1::InvalidManifest;
+                invalid_error_result.authoritative_result_digest = None;
+                invalid_error_result.first_error = Some(VerificationErrorV1 {
+                    canonical_coordinate: Some(vec![0; 129]),
+                    ..error
+                });
+                consume(validate_verification_result(&invalid_error_result));
+                for code in [
+                    SafeErrorCodeV1::InvalidEncoding,
+                    SafeErrorCodeV1::UnsupportedVersion,
+                    SafeErrorCodeV1::FieldOutOfBounds,
+                    SafeErrorCodeV1::NonCanonicalOrder,
+                    SafeErrorCodeV1::DigestMismatch,
+                    SafeErrorCodeV1::SignatureInvalid,
+                    SafeErrorCodeV1::TrustRootUnknown,
+                    SafeErrorCodeV1::TrustSnapshotRollback,
+                    SafeErrorCodeV1::ArtifactRevoked,
+                    SafeErrorCodeV1::ClosureIncomplete,
+                    SafeErrorCodeV1::ProfileClassMismatch,
+                    SafeErrorCodeV1::ProfileUnsupported,
+                    SafeErrorCodeV1::ProvenanceMissing,
+                    SafeErrorCodeV1::ResourceLimitExceeded,
+                ] {
+                    consume(decode_safe_error(&enum_safe_error(code)));
+                }
+                consume(decode_safe_error(&uint(99)));
+                for value in [
+                    VerificationOutcomeV1::VerifiedExact,
+                    VerificationOutcomeV1::Diverged,
+                    VerificationOutcomeV1::InvalidManifest,
+                    VerificationOutcomeV1::UnverifiableArtifactsMissing,
+                    VerificationOutcomeV1::IncompatibleProfile,
+                    VerificationOutcomeV1::ResourceLimitExceeded,
+                ] {
+                    consume(decode_verification_outcome(&enum_verification_outcome(
+                        value,
+                    )));
+                }
+                consume(decode_verification_outcome(&uint(99)));
+
+                let mut report = DivergenceReportV1 {
+                    request_digest: [1; 32],
+                    manifest_digest: [2; 32],
+                    execution_profile_digest: [3; 32],
+                    fixture_digest: Some([4; 32]),
+                    evaluator_digest: [5; 32],
+                    reproducibility_class: ReproducibilityClassV1::CrossProfileConformance,
+                    replay_claim: ReplayClaimV1::StructuralOnly,
+                    location_kind: DivergenceLocationKindV1::DriverOutput,
+                    timeline_or_worldcut_id: [6; 16],
+                    timeline_seq_or_cut_ordinal: 3,
+                    tick: 2,
+                    scheduler_position: Some(1),
+                    driver_or_plugin_id: Some("proof".to_owned()),
+                    output_ordinal: Some(1),
+                    mismatch_kind: DivergenceMismatchKindV1::Artifact,
+                    expected: DigestSizeV1 {
+                        digest: Some([7; 32]),
+                        size: Some(8),
+                    },
+                    actual: DigestSizeV1 {
+                        digest: Some([9; 32]),
+                        size: Some(10),
+                    },
+                    prior_matching_checkpoint_digest: Some([11; 32]),
+                    follow_on_counts: vec![FollowOnMismatchV1 {
+                        kind: DivergenceMismatchKindV1::EventIdentity,
+                        count: 1,
+                    }],
+                    report_digest: [0; 32],
+                };
+                report.report_digest = report.digest().unwrap_or([29; 32]);
+                let mut zero_follow_on = report.clone();
+                zero_follow_on.follow_on_counts = vec![
+                    FollowOnMismatchV1 {
+                        kind: DivergenceMismatchKindV1::EventIdentity,
+                        count: 0,
+                    },
+                    FollowOnMismatchV1 {
+                        kind: DivergenceMismatchKindV1::EventOrder,
+                        count: 1,
+                    },
+                ];
+                consume(validate_divergence_report(&zero_follow_on));
+                zero_follow_on.follow_on_counts[0].count = 1;
+                zero_follow_on.follow_on_counts[1].count = 0;
+                consume(validate_divergence_report(&zero_follow_on));
+                let report_value = encode_divergence_report_value(&report, true);
+                if let Value::Array(fields) = &report_value {
+                    consume(decode_divergence_report_fields(fields));
+                }
+                reject_each_field(&report_value, |value| {
+                    array(value, "divergence_report", 22).and_then(decode_divergence_report_fields)
+                });
+                reject_each_encoded_field(&report_value, decode_divergence_report);
+                consume(encode_divergence_report(&report));
+                if let Ok(bytes) = report.to_canonical_cbor() {
+                    consume(decode_divergence_report(&bytes));
+                }
+                for value in [
+                    DivergenceLocationKindV1::TimelineSeq,
+                    DivergenceLocationKindV1::WorldCut,
+                    DivergenceLocationKindV1::TickBoundary,
+                    DivergenceLocationKindV1::Scheduler,
+                    DivergenceLocationKindV1::DriverOutput,
+                ] {
+                    consume(decode_divergence_location(&enum_divergence_location(value)));
+                }
+                consume(decode_divergence_location(&uint(99)));
+                for value in [
+                    DivergenceMismatchKindV1::EventIdentity,
+                    DivergenceMismatchKindV1::EventOrder,
+                    DivergenceMismatchKindV1::CanonicalBytes,
+                    DivergenceMismatchKindV1::ProjectionCheckpoint,
+                    DivergenceMismatchKindV1::TypedFailure,
+                    DivergenceMismatchKindV1::Artifact,
+                    DivergenceMismatchKindV1::SchemaOrUpcaster,
+                    DivergenceMismatchKindV1::NumericProfile,
+                    DivergenceMismatchKindV1::ProhibitedOperationalInput,
+                ] {
+                    consume(decode_divergence_mismatch(&enum_divergence_mismatch(value)));
+                }
+                consume(decode_divergence_mismatch(&uint(99)));
+                consume(decode_digest_size(
+                    &encode_digest_size(&report.expected),
+                    "digest_size",
+                ));
+                consume(decode_digest_size(
+                    &encode_digest_size(&DigestSizeV1 {
+                        digest: None,
+                        size: None,
+                    }),
+                    "digest_size",
+                ));
+                let digest_size_value = encode_digest_size(&report.expected);
+                reject_each_field(&digest_size_value, |value| {
+                    decode_digest_size(value, "digest_size")
+                });
+                let follow_on_count = Value::Array(vec![
+                    enum_divergence_mismatch(DivergenceMismatchKindV1::EventIdentity),
+                    uint(1),
+                ]);
+                reject_each_field(&follow_on_count, |value| {
+                    decode_follow_on_counts(&Value::Array(vec![value.clone()]))
+                });
+                consume(decode_follow_on_counts(&Value::Array(vec![Value::Array(
+                    vec![
+                        enum_divergence_mismatch(DivergenceMismatchKindV1::EventIdentity),
+                        uint(u64::MAX),
+                    ],
+                )])));
+                consume(decode_follow_on_counts(&Value::Array(vec![Value::Map(
+                    Vec::new(),
+                )])));
+                consume(decode_follow_on_counts(&Value::Array(vec![
+                    Value::Array(vec![
+                        enum_divergence_mismatch(DivergenceMismatchKindV1::EventIdentity),
+                        uint(1),
+                    ]),
+                    Value::Array(vec![
+                        enum_divergence_mismatch(DivergenceMismatchKindV1::EventIdentity),
+                        uint(1),
+                    ]),
+                ])));
+                consume(decode_optional_u32(&Value::Null, "optional_u32"));
+                consume(decode_optional_u32(&uint(u64::MAX), "optional_u32"));
+                consume(decode_optional_digest(&Value::Null, "optional_digest"));
+                consume(decode_optional_digest(
+                    &digest(&[30; 32]),
+                    "optional_digest",
+                ));
+
+                let mutations: [fn(&mut DivergenceReportV1); 6] = [
+                    |value: &mut DivergenceReportV1| value.timeline_seq_or_cut_ordinal = u64::MAX,
+                    |value: &mut DivergenceReportV1| value.tick = u64::MAX,
+                    |value: &mut DivergenceReportV1| value.scheduler_position = Some(u32::MAX),
+                    |value: &mut DivergenceReportV1| value.output_ordinal = Some(u32::MAX),
+                    |value: &mut DivergenceReportV1| {
+                        value.driver_or_plugin_id = Some(String::new())
+                    },
+                    |value: &mut DivergenceReportV1| value.report_digest = [0; 32],
+                ];
+                for mutate in mutations {
+                    let mut invalid_report = report.clone();
+                    mutate(&mut invalid_report);
+                    consume(validate_divergence_report(&invalid_report));
+                }
+                let mut invalid_report = report.clone();
+                invalid_report.follow_on_counts = (0..33)
+                    .map(|_| FollowOnMismatchV1 {
+                        kind: DivergenceMismatchKindV1::EventIdentity,
+                        count: 1,
+                    })
+                    .collect();
+                consume(validate_divergence_report(&invalid_report));
+                invalid_report = report;
+                invalid_report.follow_on_counts = vec![
+                    FollowOnMismatchV1 {
+                        kind: DivergenceMismatchKindV1::EventOrder,
+                        count: 1,
+                    },
+                    FollowOnMismatchV1 {
+                        kind: DivergenceMismatchKindV1::EventIdentity,
+                        count: 1,
+                    },
+                ];
+                consume(validate_divergence_report(&invalid_report));
+                invalid_report.follow_on_counts[1].kind = DivergenceMismatchKindV1::EventOrder;
+                consume(validate_divergence_report(&invalid_report));
+
+                consume(decode_value(&[0xff]));
+                consume(decode_value(&[0, 0]));
+                consume(decode_value(&[0x18, 0]));
+                consume(decode_value(&[0xa0]));
+                consume(encode_value(&Value::Map(Vec::new())));
+                consume(encode_value(&Value::Tag(0, Box::new(Value::Null))));
+                consume(encode_value(&Value::Float(1.0)));
+                consume(validate_value(&Value::Array(vec![Value::Null])));
+                consume(validate_value(&Value::Integer((-1_i64).into())));
+                consume(array(&Value::Null, "array", 0));
+                consume(array(&Value::Array(Vec::new()), "array", 1));
+                consume(string(&Value::Null, "string"));
+                consume(bytes::<32>(&Value::Bytes(vec![1]), "bytes"));
+                consume(uint_value(&Value::Integer((-1_i64).into()), "uint"));
+                consume(bool_value(&Value::Null, "bool"));
+                consume(optional_u64(&Value::Null, "optional"));
+                consume(optional_string(&Value::Null, "optional"));
+
+                let all_enums = vec![
+                    enum_dependency_class(DependencyClassV1::ExogenousFrozen),
+                    enum_dependency_class(DependencyClassV1::InterventionAssigned),
+                    enum_dependency_class(DependencyClassV1::EndogenousRecomputed),
+                    enum_dependency_class(DependencyClassV1::FixedPolicy),
+                    enum_dependency_class(DependencyClassV1::PresentationOnly),
+                ];
+                for value in all_enums {
+                    consume(decode_dependency_class(&value));
+                }
+                consume(decode_dependency_class(&uint(99)));
+                for value in [
+                    PluginFailureClassV1::PluginCrash,
+                    PluginFailureClassV1::ResourceExhaustion,
+                ] {
+                    consume(decode_plugin_failure(&enum_plugin_failure(value)));
+                }
+                consume(decode_plugin_failure(&uint(99)));
+                for value in [
+                    UnknownEdgePolicyV1::Reject,
+                    UnknownEdgePolicyV1::FullSuffixFromCut,
+                ] {
+                    consume(decode_unknown_edge_policy(&enum_unknown_edge_policy(value)));
+                }
+                consume(decode_unknown_edge_policy(&uint(99)));
+                for value in [
+                    SuffixInvalidationReasonV1::NewIntervention,
+                    SuffixInvalidationReasonV1::ChangedIntervention,
+                    SuffixInvalidationReasonV1::UnknownEdgeFallback,
+                    SuffixInvalidationReasonV1::RetryAfterAtomicFailure,
+                    SuffixInvalidationReasonV1::TrustOrErasureChange,
+                ] {
+                    consume(decode_invalidation_reason(&enum_invalidation_reason(value)));
+                }
+                consume(decode_invalidation_reason(&uint(99)));
+                for value in [
+                    ExecutionModeV1::Local,
+                    ExecutionModeV1::AirGapped,
+                    ExecutionModeV1::Replay,
+                    ExecutionModeV1::Fork,
+                ] {
+                    consume(decode_mode(&enum_mode(value)));
+                }
+                consume(decode_mode(&uint(99)));
+                for value in [
+                    ClaimLayerV1::ArtifactIntegrity,
+                    ClaimLayerV1::ReplayConformance,
+                    ClaimLayerV1::KnowledgeNonInterference,
+                    ClaimLayerV1::GatewayClientConformance,
+                    ClaimLayerV1::PluginConformance,
+                    ClaimLayerV1::MetricConformance,
+                    ClaimLayerV1::EmpiricalEvaluation,
+                ] {
+                    consume(decode_claim_layer(&enum_claim_layer(value)));
+                }
+                consume(decode_claim_layer(&uint(99)));
+                for value in [
+                    CaseOutcomeStatusV1::Pass,
+                    CaseOutcomeStatusV1::Fail,
+                    CaseOutcomeStatusV1::Skip,
+                    CaseOutcomeStatusV1::Unavailable,
+                    CaseOutcomeStatusV1::NotApplicable,
+                ] {
+                    consume(decode_case_outcome(&enum_case_outcome(value)));
+                }
+                consume(decode_case_outcome(&uint(99)));
+                for value in [
+                    RedactionStateV1::None,
+                    RedactionStateV1::RedactedViews,
+                    RedactionStateV1::StructuralOnly,
+                    RedactionStateV1::EvidenceMissing,
+                ] {
+                    consume(decode_redaction_state(&enum_redaction_state(value)));
+                }
+                consume(decode_redaction_state(&uint(99)));
+                for value in [
+                    ReproducibilityClassV1::RecordedReplay,
+                    ReproducibilityClassV1::ProfileRecomputation,
+                    ReproducibilityClassV1::CrossProfileConformance,
+                    ReproducibilityClassV1::LiveUnverified,
+                ] {
+                    consume(decode_reproducibility(&enum_reproducibility(value)));
+                }
+                consume(decode_reproducibility(&uint(99)));
+                for value in [
+                    ReplayClaimV1::Exact,
+                    ReplayClaimV1::ExactAuthoritativeWithRedactedViews,
+                    ReplayClaimV1::StructuralOnly,
+                    ReplayClaimV1::UnverifiableArtifactsMissing,
+                    ReplayClaimV1::IncompatibleProfile,
+                ] {
+                    consume(decode_replay_claim(&enum_replay_claim(value)));
+                }
+                consume(decode_replay_claim(&uint(99)));
+                for value in [
+                    NonInterferenceVariantV1::Success,
+                    NonInterferenceVariantV1::Denial,
+                    NonInterferenceVariantV1::WarmCache,
+                    NonInterferenceVariantV1::ColdCache,
+                ] {
+                    consume(decode_non_interference_variant(
+                        &enum_non_interference_variant(value),
+                    ));
+                }
+                consume(decode_non_interference_variant(&uint(99)));
+            }};
+        }
+
+        #[cfg_attr(coverage_nightly, coverage(off))]
+        pub fn exercise_for_coverage(evidence: &MoatProofEvidenceV1) {
+            strict_codec_coverage_cases!(evidence);
         }
     }
 
@@ -4511,7 +4621,7 @@ mod strict_codec {
         use super::*;
 
         fn replace_field(value: &Value, index: usize, replacement: Value) -> Value {
-            let mut fields = value.as_array().map(Vec::as_slice).unwrap_or(&[]).to_vec();
+            let mut fields = value.as_array().map_or_else(Vec::new, Clone::clone);
             fields[index] = replacement;
             Value::Array(fields)
         }
@@ -4849,6 +4959,37 @@ pub fn compare(
     })
 }
 
+/// Compare only the authoritative Events and Projections produced by two
+/// execution profiles.
+///
+/// This seam intentionally excludes profile metadata and evidence identities;
+/// it is the comparison used to establish Local/Air-Gapped output parity.
+///
+/// # Errors
+/// Returns the canonical-CBOR serialization error if either output cannot be
+/// represented by the shared deterministic codec.
+#[must_use = "the authoritative output comparison is needed for parity evidence"]
+pub fn compare_authoritative_outputs(
+    left: &MoatProofEvidenceV1,
+    right: &MoatProofEvidenceV1,
+) -> Result<ComparisonV1, pos_core::CoreError> {
+    let left_output = (&left.authoritative_events, &left.projections);
+    let right_output = (&right.authoritative_events, &right.projections);
+    let divergence = if left.authoritative_events != right.authoritative_events {
+        DivergenceClassV1::AuthoritativeEvents
+    } else if left.projections != right.projections {
+        DivergenceClassV1::Projections
+    } else {
+        DivergenceClassV1::None
+    };
+    Ok(ComparisonV1 {
+        equal: divergence == DivergenceClassV1::None,
+        divergence,
+        left_digest: typed_digest(b"PiglorOS.AuthoritativeOutput.v1", &left_output)?,
+        right_digest: typed_digest(b"PiglorOS.AuthoritativeOutput.v1", &right_output)?,
+    })
+}
+
 /// Validate the invariants an independent evaluator can check without the
 /// simulation host or any privileged plugin implementation.
 ///
@@ -4906,7 +5047,7 @@ fn verify_manifest(manifest: &ReproManifestV1) -> Result<(), EvidenceError> {
 }
 
 fn event_sequences(events: &[AuthoritativeEventV1]) -> Result<BTreeSet<u64>, EvidenceError> {
-    if events.first().map_or(true, |event| event.seq != 1) {
+    if events.first().is_none_or(|event| event.seq != 1) {
         return Err(EvidenceError::NonContiguousEventSequence);
     }
     let mut previous_seq: Option<u64> = None;
@@ -4983,10 +5124,15 @@ fn verify_uncertainty(claims: &[UncertaintyV1]) -> Result<(), EvidenceError> {
 }
 
 fn verify_plugin_failures(failures: &[PluginFailureV1]) -> Result<(), EvidenceError> {
-    if failures
-        .iter()
-        .any(|failure| failure.plugin.trim().is_empty() || failure.committed)
-    {
+    if failures.iter().any(|failure| {
+        failure.plugin.trim().is_empty()
+            || failure.committed
+            || failure.committed_event_count > failure.staged_event_count
+            || failure.state_digest_before == [0; 32]
+            || failure.state_digest_after == [0; 32]
+            || failure.state_digest_before != failure.state_digest_after
+            || failure.sibling_step_count == 0
+    }) {
         Err(EvidenceError::CommittedPluginFailure)
     } else {
         Ok(())
@@ -5038,7 +5184,7 @@ fn contract_endogenous_event_type(event_type: &str) -> bool {
 
 fn contract_event_node(event: &AuthoritativeEventV1) -> DependencyNodeV1 {
     DependencyNodeV1 {
-        tick: event.seq,
+        tick: event.tick,
         scheduler_position: match event.event_type.as_str() {
             "world.action.v1" => 0,
             "world.observation.v1" => 1,
@@ -5053,6 +5199,29 @@ fn contract_event_node(event: &AuthoritativeEventV1) -> DependencyNodeV1 {
     }
 }
 
+fn contract_event_nodes(events: &[AuthoritativeEventV1]) -> BTreeMap<u64, DependencyNodeV1> {
+    let mut ordinals = BTreeMap::<(u64, u32, String, u32), u32>::new();
+    let mut nodes = BTreeMap::new();
+    for event in events
+        .iter()
+        .filter(|event| contract_event_type(event.event_type.as_str()))
+    {
+        let mut node = contract_event_node(event);
+        let key = (
+            node.tick,
+            node.scheduler_position,
+            node.owner_id.clone(),
+            node.schema_id,
+        );
+        node.output_ordinal = *ordinals
+            .entry(key)
+            .and_modify(|value| *value += 1)
+            .or_default();
+        nodes.insert(event.seq, node);
+    }
+    nodes
+}
+
 fn contract_zero_node() -> DependencyNodeV1 {
     DependencyNodeV1 {
         tick: 0,
@@ -5065,6 +5234,14 @@ fn contract_zero_node() -> DependencyNodeV1 {
 }
 
 fn verify_wave8_contract(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceError> {
+    verify_contract_header(evidence)?;
+    verify_knowledge_boundary(evidence)?;
+    verify_counterfactual_contract(evidence)?;
+    verify_conformance_report(evidence)?;
+    verify_atomicity(evidence)
+}
+
+fn verify_contract_header(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceError> {
     let contract = &evidence.contract;
     contract
         .plugin_boundary
@@ -5106,7 +5283,12 @@ fn verify_wave8_contract(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceE
     {
         return Err(EvidenceError::InvalidContract);
     }
+    Ok(())
+}
 
+fn verify_knowledge_boundary(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceError> {
+    let contract = &evidence.contract;
+    let room = &contract.scenario_room;
     let event_by_seq = evidence
         .authoritative_events
         .iter()
@@ -5135,8 +5317,7 @@ fn verify_wave8_contract(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceE
                 .any(|pair| pair[0] >= pair[1])
             || snapshot
                 .hidden_event_types
-                .iter()
-                .any(|event_type| snapshot.principal.participant_id == *event_type)
+                .contains(&snapshot.principal.participant_id)
         {
             return Err(EvidenceError::InvalidKnowledgeBoundary);
         }
@@ -5151,6 +5332,7 @@ fn verify_wave8_contract(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceE
             || snapshot.principal.participant_id != snapshot.participant_id
             || snapshot.authorization.resource != snapshot.grant.resource
             || snapshot.authorization.consent_epoch != snapshot.consent_epoch
+            || snapshot.grant.consent_epoch != snapshot.consent_epoch
         {
             return Err(EvidenceError::InvalidKnowledgeBoundary);
         }
@@ -5166,7 +5348,10 @@ fn verify_wave8_contract(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceE
                 return Err(EvidenceError::InvalidKnowledgeBoundary);
             }
         }
-        if !snapshot.authorization.allowed
+        let consent_allows = snapshot.consent_epoch == 0;
+        if snapshot.authorization.allowed != consent_allows
+            || (!consent_allows
+                && snapshot.authorization.reason != "consent-revoked-at-tick-boundary")
             || snapshot.authorization.principal_id != snapshot.principal.principal_id
             || snapshot.grant.principal_id != snapshot.principal.principal_id
         {
@@ -5175,10 +5360,12 @@ fn verify_wave8_contract(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceE
     }
     if snapshot_participants.len() != room.principals.len()
         || contract.authorization_decisions.len() != contract.knowledge_snapshots.len()
-        || contract
-            .authorization_decisions
-            .iter()
-            .any(|decision| !decision.allowed || decision.decision_digest == [0; 32])
+        || contract.authorization_decisions.iter().any(|decision| {
+            decision.decision_digest == [0; 32]
+                || decision.allowed != (decision.consent_epoch == 0)
+                || (decision.consent_epoch > 0
+                    && decision.reason != "consent-revoked-at-tick-boundary")
+        })
         || contract.authorization_decisions.iter().any(|decision| {
             !contract
                 .knowledge_snapshots
@@ -5188,7 +5375,11 @@ fn verify_wave8_contract(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceE
     {
         return Err(EvidenceError::InvalidKnowledgeBoundary);
     }
+    Ok(())
+}
 
+fn verify_counterfactual_contract(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceError> {
+    let contract = &evidence.contract;
     let counterfactual = &contract.counterfactual;
     if counterfactual.contract_digest == [0; 32]
         || counterfactual.frontier.frontier_digest == [0; 32]
@@ -5219,96 +5410,109 @@ fn verify_wave8_contract(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceE
             return Err(EvidenceError::InvalidDependencyGraph);
         }
     }
-    if let Some(intervention) = &counterfactual.intervention {
-        let Some(event) = evidence.authoritative_events.iter().find(|event| {
-            event.event_type == "world.action.v1"
-                && event.seq == intervention.effective_tick
-                && event.payload_digest == intervention.value_digest
-        }) else {
-            return Err(EvidenceError::InvalidDependencyGraph);
-        };
-        let contract_events = evidence
-            .authoritative_events
-            .iter()
-            .filter(|candidate| contract_event_type(candidate.event_type.as_str()))
-            .collect::<Vec<_>>();
-        let expected_nodes = contract_events
-            .iter()
-            .map(|candidate| (contract_event_node(candidate), *candidate))
-            .collect::<BTreeMap<_, _>>();
-        if counterfactual.dependencies.len() != expected_nodes.len()
-            || counterfactual.dependencies.iter().any(|dependency| {
-                let Some(event) = expected_nodes.get(&dependency.consumer) else {
-                    return true;
-                };
-                let expected_class = if event.event_type == "world.action.v1" {
-                    DependencyClassV1::InterventionAssigned
-                } else {
-                    DependencyClassV1::EndogenousRecomputed
-                };
-                let expected_source = event
-                    .causation_seq
-                    .and_then(|seq| event_by_seq.get(&seq).copied())
-                    .filter(|source| contract_event_type(source.event_type.as_str()))
-                    .map(contract_event_node)
-                    .unwrap_or_else(contract_zero_node);
-                dependency.dependency_class != expected_class
-                    || dependency.source != expected_source
-            })
-        {
-            return Err(EvidenceError::InvalidDependencyGraph);
-        }
-        let expected_affected_nodes = contract_events
-            .iter()
-            .filter(|candidate| {
-                contract_endogenous_event_type(candidate.event_type.as_str())
-                    && candidate.seq >= event.seq
-            })
-            .map(|candidate| contract_event_node(candidate))
-            .collect::<Vec<_>>();
-        let expected_recomputed_seqs = contract_events
-            .iter()
-            .filter(|candidate| {
-                contract_endogenous_event_type(candidate.event_type.as_str())
-                    && candidate.seq > event.seq
-            })
-            .map(|candidate| candidate.seq)
-            .collect::<Vec<_>>();
-        let invalidated_producers = counterfactual
-            .invalidation
-            .invalid_artifacts
-            .iter()
-            .map(|artifact| artifact.producer.clone())
-            .collect::<Vec<_>>();
-        if counterfactual.frontier.intervention_seed_nodes != vec![contract_event_node(event)]
-            || counterfactual.frontier.affected_nodes != expected_affected_nodes
-            || counterfactual.recomputed_event_seqs != expected_recomputed_seqs
-            || invalidated_producers != expected_affected_nodes
-            || counterfactual.frontier.owner_frontiers.is_empty()
-            || counterfactual.frontier.global_frontier_tick
-                != expected_affected_nodes.first().map_or(0, |node| node.tick)
-            || counterfactual.frontier.endogenous_suffix_end_tick
-                != expected_affected_nodes.last().map_or(0, |node| node.tick)
-        {
-            return Err(EvidenceError::IncompleteRecomputationContract);
-        }
-        if event.seq <= evidence.manifest.fork_cut_seq.unwrap_or(0)
-            || counterfactual
-                .recomputed_event_seqs
-                .iter()
-                .any(|seq| *seq <= event.seq)
-            || counterfactual
+    if counterfactual.intervention.is_some() {
+        verify_intervention_contract(evidence, counterfactual)?;
+    }
+    Ok(())
+}
+
+fn verify_intervention_contract(
+    evidence: &MoatProofEvidenceV1,
+    counterfactual: &CounterfactualContractV1,
+) -> Result<(), EvidenceError> {
+    let event_by_seq = evidence
+        .authoritative_events
+        .iter()
+        .map(|event| (event.seq, event))
+        .collect::<BTreeMap<_, _>>();
+    let Some(intervention) = counterfactual.intervention.as_ref() else {
+        return Err(EvidenceError::InvalidDependencyGraph);
+    };
+    let Some(event) = evidence.authoritative_events.iter().find(|event| {
+        event.event_type == "world.action.v1"
+            && event.tick == intervention.effective_tick
+            && event.payload_digest == intervention.value_digest
+    }) else {
+        return Err(EvidenceError::InvalidDependencyGraph);
+    };
+    let contract_events = evidence
+        .authoritative_events
+        .iter()
+        .filter(|candidate| contract_event_type(candidate.event_type.as_str()))
+        .collect::<Vec<_>>();
+    let nodes_by_seq = contract_event_nodes(&evidence.authoritative_events);
+    let expected_nodes = contract_events
+        .iter()
+        .map(|candidate| (nodes_by_seq[&candidate.seq].clone(), *candidate))
+        .collect::<BTreeMap<_, _>>();
+    if counterfactual.dependencies.len() != expected_nodes.len()
+        || counterfactual.dependencies.iter().any(|dependency| {
+            let Some(event) = expected_nodes.get(&dependency.consumer) else {
+                return true;
+            };
+            let expected_class = if event.event_type == "world.action.v1" {
+                DependencyClassV1::InterventionAssigned
+            } else {
+                DependencyClassV1::EndogenousRecomputed
+            };
+            let expected_source = event
+                .causation_seq
+                .and_then(|seq| event_by_seq.get(&seq).copied())
+                .filter(|source| contract_event_type(source.event_type.as_str()))
+                .and_then(|source| nodes_by_seq.get(&source.seq).cloned())
+                .unwrap_or_else(contract_zero_node);
+            dependency.dependency_class != expected_class || dependency.source != expected_source
+        })
+    {
+        return Err(EvidenceError::InvalidDependencyGraph);
+    }
+    let expected_recomputed_seqs = contract_events
+        .iter()
+        .filter(|candidate| {
+            contract_endogenous_event_type(candidate.event_type.as_str())
+                && candidate.seq > event.seq
+        })
+        .map(|candidate| candidate.seq)
+        .collect::<Vec<_>>();
+    if counterfactual.frontier.intervention_seed_nodes != vec![nodes_by_seq[&event.seq].clone()]
+        || counterfactual.recomputed_event_seqs != expected_recomputed_seqs
+        || counterfactual.frontier.affected_nodes.is_empty()
+        || counterfactual.frontier.owner_frontiers.is_empty()
+        || counterfactual.frontier.global_frontier_tick
+            != counterfactual
                 .frontier
                 .affected_nodes
-                .iter()
-                .any(|node| node.tick < event.seq)
-            || counterfactual.invalidation.invalid_artifacts.len()
-                < counterfactual.frontier.affected_nodes.len()
-        {
-            return Err(EvidenceError::IncompleteRecomputationContract);
-        }
+                .first()
+                .map_or(0, |node| node.tick)
+        || counterfactual.frontier.endogenous_suffix_end_tick
+            != counterfactual
+                .frontier
+                .affected_nodes
+                .last()
+                .map_or(0, |node| node.tick)
+    {
+        return Err(EvidenceError::IncompleteRecomputationContract);
     }
+    if event.seq <= evidence.manifest.fork_cut_seq.unwrap_or(0)
+        || counterfactual
+            .recomputed_event_seqs
+            .iter()
+            .any(|seq| *seq <= event.seq)
+        || counterfactual.frontier.affected_nodes.iter().any(|node| {
+            (node.tick, node.scheduler_position, node.output_ordinal) < (event.tick, 0, 0)
+        })
+        || counterfactual.invalidation.invalid_artifacts.len()
+            < counterfactual.frontier.affected_nodes.len()
+    {
+        return Err(EvidenceError::IncompleteRecomputationContract);
+    }
+    Ok(())
+}
+
+fn verify_conformance_report(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceError> {
+    let contract = &evidence.contract;
     let report = &contract.conformance_report;
+    let counterfactual = &contract.counterfactual;
     let mut modes = BTreeSet::new();
     let mut case_keys = BTreeSet::new();
     let mut counts = (0_u32, 0_u32, 0_u32, 0_u32, 0_u32);
@@ -5371,9 +5575,8 @@ fn verify_wave8_contract(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceE
             .reviewer_ids
             .windows(2)
             .any(|pair| pair[0] >= pair[1])
-        || report.cases.len() < 2
-        || !modes.contains(&ExecutionModeV1::Local)
-        || !modes.contains(&ExecutionModeV1::AirGapped)
+        || report.cases.is_empty()
+        || !modes.contains(&evidence.manifest.execution_mode)
         || report.cases.windows(2).any(|pair| {
             (
                 pair[0].case_id.as_str(),
@@ -5405,6 +5608,11 @@ fn verify_wave8_contract(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceE
     {
         return Err(EvidenceError::InvalidConformanceReport);
     }
+    Ok(())
+}
+
+fn verify_atomicity(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceError> {
+    let contract = &evidence.contract;
     if contract.atomicity.is_empty() {
         return Err(EvidenceError::IncompleteAtomicityEvidence);
     }
@@ -5449,40 +5657,27 @@ fn verify_wave8_contract(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceE
     Ok(())
 }
 
-fn verify_counterfactual_record_shapes(contract: &CounterfactualContractV1) -> bool {
-    let valid_node = |node: &DependencyNodeV1, allow_zero_digest: bool| {
-        !node.owner_id.is_empty()
-            && node.owner_id.len() <= 128
-            && node.schema_id != 0
-            && (allow_zero_digest || node.artifact_digest != [0; 32])
-    };
-    let valid_nodes = |nodes: &[DependencyNodeV1], allow_zero_digest: bool| {
-        !nodes.is_empty()
-            && nodes.len() <= 1_000_000
-            && nodes.windows(2).all(|pair| pair[0] < pair[1])
-            && nodes.iter().all(|node| valid_node(node, allow_zero_digest))
-    };
-    let frontier = &contract.frontier;
-    let invalidation = &contract.invalidation;
-    let seeds_valid = (contract.intervention.is_none()
-        && frontier.intervention_seed_nodes.is_empty())
-        || (!frontier.intervention_seed_nodes.is_empty()
-            && frontier.intervention_seed_nodes.len() <= 1_024
-            && frontier
-                .intervention_seed_nodes
-                .windows(2)
-                .all(|pair| pair[0] < pair[1])
-            && frontier
-                .intervention_seed_nodes
-                .iter()
-                .all(|node| valid_node(node, false)));
-    let affected_valid = (contract.intervention.is_none() && frontier.affected_nodes.is_empty())
-        || valid_nodes(&frontier.affected_nodes, false);
-    let owner_frontiers_valid = (contract.intervention.is_none()
-        && frontier.owner_frontiers.is_empty())
-        || (!frontier.owner_frontiers.is_empty()
-            && frontier.owner_frontiers.len() <= 4_096
-            && frontier.owner_frontiers.windows(2).all(|pair| {
+fn valid_contract_node(node: &DependencyNodeV1, allow_zero_digest: bool) -> bool {
+    !node.owner_id.is_empty()
+        && node.owner_id.len() <= 128
+        && node.schema_id != 0
+        && (allow_zero_digest || node.artifact_digest != [0; 32])
+}
+
+fn valid_contract_nodes(nodes: &[DependencyNodeV1], allow_zero_digest: bool) -> bool {
+    !nodes.is_empty()
+        && nodes.len() <= 1_000_000
+        && nodes.windows(2).all(|pair| pair[0] < pair[1])
+        && nodes
+            .iter()
+            .all(|node| valid_contract_node(node, allow_zero_digest))
+}
+
+fn valid_owner_frontiers(frontiers: &[OwnerFrontierV1], has_intervention: bool) -> bool {
+    (!has_intervention && frontiers.is_empty())
+        || (!frontiers.is_empty()
+            && frontiers.len() <= 4_096
+            && frontiers.windows(2).all(|pair| {
                 (
                     pair[0].earliest_tick,
                     pair[0].earliest_scheduler_position,
@@ -5495,7 +5690,7 @@ fn verify_counterfactual_record_shapes(contract: &CounterfactualContractV1) -> b
                     pair[1].earliest_output_ordinal,
                 )
             })
-            && frontier.owner_frontiers.iter().all(|owner| {
+            && frontiers.iter().all(|owner| {
                 !owner.owner_id.is_empty()
                     && owner.owner_id.len() <= 128
                     && !owner.cause_node_digests.is_empty()
@@ -5508,8 +5703,11 @@ fn verify_counterfactual_record_shapes(contract: &CounterfactualContractV1) -> b
                         .cause_node_digests
                         .iter()
                         .all(|digest| *digest != [0; 32])
-            }));
-    let unknown_edges_valid = frontier.unknown_edge_coordinates.len() <= 65_536
+            }))
+}
+
+fn valid_unknown_edge_coordinates(frontier: &RecomputationFrontierV1) -> bool {
+    frontier.unknown_edge_coordinates.len() <= 65_536
         && frontier
             .unknown_edge_coordinates
             .windows(2)
@@ -5517,25 +5715,17 @@ fn verify_counterfactual_record_shapes(contract: &CounterfactualContractV1) -> b
         && frontier
             .unknown_edge_coordinates
             .iter()
-            .all(|node| valid_node(node, false));
-    let frontier_valid = frontier.frontier_id != [0; 16]
-        && frontier.plan_digest != [0; 32]
-        && frontier.parent_cut_digest != [0; 32]
-        && frontier.dependency_graph_digest != [0; 32]
-        && frontier.classification_bundle_digest != [0; 32]
-        && frontier.provenance_digest != [0; 32]
-        && frontier.frontier_digest != [0; 32]
-        && frontier.endogenous_suffix_end_tick >= frontier.global_frontier_tick
-        && match frontier.unknown_edge_policy {
-            UnknownEdgePolicyV1::Reject => frontier.unknown_edge_coordinates.is_empty(),
-            UnknownEdgePolicyV1::FullSuffixFromCut => !frontier.unknown_edge_coordinates.is_empty(),
-        };
-    let sorted_digest_list = |values: &[[u8; 32]]| {
-        values.len() <= 65_536
-            && values.windows(2).all(|pair| pair[0] < pair[1])
-            && values.iter().all(|digest| *digest != [0; 32])
-    };
-    let invalid_artifacts_valid = invalidation.invalid_artifacts.len() <= 1_000_000
+            .all(|node| valid_contract_node(node, false))
+}
+
+fn valid_digest_list(values: &[[u8; 32]]) -> bool {
+    values.len() <= 65_536
+        && values.windows(2).all(|pair| pair[0] < pair[1])
+        && values.iter().all(|digest| *digest != [0; 32])
+}
+
+fn valid_invalid_artifacts(invalidation: &SuffixInvalidationV1) -> bool {
+    invalidation.invalid_artifacts.len() <= 1_000_000
         && invalidation.invalid_artifacts.windows(2).all(|pair| {
             (
                 pair[0].producer.clone(),
@@ -5551,16 +5741,13 @@ fn verify_counterfactual_record_shapes(contract: &CounterfactualContractV1) -> b
             !artifact.artifact_class.is_empty()
                 && artifact.schema_id == artifact.producer.schema_id
                 && artifact.artifact_digest != [0; 32]
-                && valid_node(&artifact.producer, false)
+                && valid_contract_node(&artifact.producer, false)
                 && artifact.reason == invalidation.reason
-        });
-    let generation_valid = (contract.prior_generation == 0
-        && contract.generation == 0
-        && invalidation.new_generation == 0
-        && invalidation.invalid_artifacts.is_empty())
-        || (invalidation.new_generation == contract.prior_generation.saturating_add(1)
-            && invalidation.new_generation == contract.generation);
-    let dependencies_valid = !contract.dependencies.is_empty()
+        })
+}
+
+fn valid_dependencies(contract: &CounterfactualContractV1) -> bool {
+    !contract.dependencies.is_empty()
         && contract.dependencies.len() <= 1_000_000
         && contract.dependencies.windows(2).all(|pair| {
             (
@@ -5578,16 +5765,68 @@ fn verify_counterfactual_record_shapes(contract: &CounterfactualContractV1) -> b
             )
         })
         && contract.dependencies.iter().all(|dependency| {
-            valid_node(&dependency.consumer, false)
-                && valid_node(&dependency.source, true)
+            valid_contract_node(&dependency.consumer, false)
+                && valid_contract_node(&dependency.source, true)
                 && dependency.authorization_digest != [0; 32]
                 && dependency.provenance_digest != [0; 32]
                 && (dependency.source.artifact_digest != [0; 32]
                     || (dependency.source.tick == 0
                         && dependency.source.owner_id == "scenario-room"))
                 && (dependency.source.artifact_digest == [0; 32]
-                    || dependency.source.tick < dependency.consumer.tick)
-        });
+                    || (
+                        dependency.source.tick,
+                        dependency.source.scheduler_position,
+                        dependency.source.owner_id.as_str(),
+                        dependency.source.output_ordinal,
+                    ) < (
+                        dependency.consumer.tick,
+                        dependency.consumer.scheduler_position,
+                        dependency.consumer.owner_id.as_str(),
+                        dependency.consumer.output_ordinal,
+                    ))
+        })
+}
+
+fn verify_counterfactual_record_shapes(contract: &CounterfactualContractV1) -> bool {
+    let frontier = &contract.frontier;
+    let invalidation = &contract.invalidation;
+    let seeds_valid = (contract.intervention.is_none()
+        && frontier.intervention_seed_nodes.is_empty())
+        || (!frontier.intervention_seed_nodes.is_empty()
+            && frontier.intervention_seed_nodes.len() <= 1_024
+            && frontier
+                .intervention_seed_nodes
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+            && frontier
+                .intervention_seed_nodes
+                .iter()
+                .all(|node| valid_contract_node(node, false)));
+    let affected_valid = (contract.intervention.is_none() && frontier.affected_nodes.is_empty())
+        || valid_contract_nodes(&frontier.affected_nodes, false);
+    let owner_frontiers_valid =
+        valid_owner_frontiers(&frontier.owner_frontiers, contract.intervention.is_some());
+    let unknown_edges_valid = valid_unknown_edge_coordinates(frontier);
+    let frontier_valid = frontier.frontier_id != [0; 16]
+        && frontier.plan_digest != [0; 32]
+        && frontier.parent_cut_digest != [0; 32]
+        && frontier.dependency_graph_digest != [0; 32]
+        && frontier.classification_bundle_digest != [0; 32]
+        && frontier.provenance_digest != [0; 32]
+        && frontier.frontier_digest != [0; 32]
+        && frontier.endogenous_suffix_end_tick >= frontier.global_frontier_tick
+        && match frontier.unknown_edge_policy {
+            UnknownEdgePolicyV1::Reject => frontier.unknown_edge_coordinates.is_empty(),
+            UnknownEdgePolicyV1::FullSuffixFromCut => !frontier.unknown_edge_coordinates.is_empty(),
+        };
+    let invalid_artifacts_valid = valid_invalid_artifacts(invalidation);
+    let generation_valid = (contract.prior_generation == 0
+        && contract.generation == 0
+        && invalidation.new_generation == 0
+        && invalidation.invalid_artifacts.is_empty())
+        || (invalidation.new_generation == contract.prior_generation.saturating_add(1)
+            && invalidation.new_generation == contract.generation);
+    let dependencies_valid = valid_dependencies(contract);
     frontier_valid
         && seeds_valid
         && affected_valid
@@ -5602,9 +5841,9 @@ fn verify_counterfactual_record_shapes(contract: &CounterfactualContractV1) -> b
         && invalidation.invalidation_digest != [0; 32]
         && invalid_artifacts_valid
         && dependencies_valid
-        && sorted_digest_list(&invalidation.invalid_checkpoint_digests)
-        && sorted_digest_list(&invalidation.invalid_projection_digests)
-        && sorted_digest_list(&invalidation.retained_exogenous_digests)
+        && valid_digest_list(&invalidation.invalid_checkpoint_digests)
+        && valid_digest_list(&invalidation.invalid_projection_digests)
+        && valid_digest_list(&invalidation.retained_exogenous_digests)
         && generation_valid
 }
 
@@ -5795,6 +6034,14 @@ pub fn verify_counterfactual_fork(
         return Err(EvidenceError::IncompleteForkSuffix);
     };
     let intervention_seq = intervention.seq;
+    if counterfactual
+        .contract
+        .counterfactual
+        .intervention
+        .is_some()
+    {
+        verify_factual_suffix_invalidation(baseline, counterfactual, cut, intervention)?;
+    }
     let by_seq = counterfactual
         .authoritative_events
         .iter()
@@ -5817,6 +6064,46 @@ pub fn verify_counterfactual_fork(
         return Err(EvidenceError::IncompleteForkSuffix);
     }
     Ok(())
+}
+
+fn verify_factual_suffix_invalidation(
+    baseline: &MoatProofEvidenceV1,
+    counterfactual: &MoatProofEvidenceV1,
+    cut: u64,
+    intervention: &AuthoritativeEventV1,
+) -> Result<(), EvidenceError> {
+    let baseline_nodes = contract_event_nodes(&baseline.authoritative_events);
+    let mut factual_suffix_nodes = baseline
+        .authoritative_events
+        .iter()
+        .filter(|event| {
+            event.seq > cut
+                && contract_endogenous_event_type(event.event_type.as_str())
+                && event.tick >= intervention.tick
+        })
+        .filter_map(|event| baseline_nodes.get(&event.seq).cloned())
+        .collect::<Vec<_>>();
+    factual_suffix_nodes.sort_unstable();
+    let invalidated_nodes = counterfactual
+        .contract
+        .counterfactual
+        .invalidation
+        .invalid_artifacts
+        .iter()
+        .map(|artifact| artifact.producer.clone())
+        .collect::<Vec<_>>();
+    if counterfactual
+        .contract
+        .counterfactual
+        .frontier
+        .affected_nodes
+        != factual_suffix_nodes
+        || invalidated_nodes != factual_suffix_nodes
+    {
+        Err(EvidenceError::IncompleteForkSuffix)
+    } else {
+        Ok(())
+    }
 }
 
 fn is_endogenous_event(event_type: &str) -> bool {
@@ -5894,7 +6181,7 @@ pub fn hex_digest(bytes: &[u8; 32]) -> String {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-pub(crate) mod tests {
+pub mod tests {
     use super::*;
 
     type EvidenceMutation = Box<dyn Fn(&mut MoatProofEvidenceV1)>;
@@ -5940,6 +6227,7 @@ pub(crate) mod tests {
             authoritative_events: vec![
                 AuthoritativeEventV1 {
                     seq: 1,
+                    tick: 1,
                     entity: "body".to_owned(),
                     event_type: "world.observation.v1".to_owned(),
                     payload_digest: [1; 32],
@@ -5947,6 +6235,7 @@ pub(crate) mod tests {
                 },
                 AuthoritativeEventV1 {
                     seq: 2,
+                    tick: 1,
                     entity: "agent".to_owned(),
                     event_type: "proof.agent.reaction.v1".to_owned(),
                     payload_digest: [2; 32],
@@ -5954,6 +6243,7 @@ pub(crate) mod tests {
                 },
                 AuthoritativeEventV1 {
                     seq: 3,
+                    tick: 2,
                     entity: "host".to_owned(),
                     event_type: "pos.host.consent.revoked.v1".to_owned(),
                     payload_digest: [7; 32],
@@ -6006,7 +6296,8 @@ pub(crate) mod tests {
         }
     }
 
-    fn test_contract() -> Wave8ProofContractV1 {
+    fn test_authorization_fixtures() -> (PrincipalRefV1, CapabilityGrantV1, AuthorizationDecisionV1)
+    {
         let principal = PrincipalRefV1 {
             principal_id: "principal:operator".to_owned(),
             participant_id: "operator".to_owned(),
@@ -6031,6 +6322,10 @@ pub(crate) mod tests {
             grant_digest: [4; 32],
             decision_digest: [5; 32],
         };
+        (principal, grant, decision)
+    }
+
+    fn test_counterfactual() -> CounterfactualContractV1 {
         let node = DependencyNodeV1 {
             tick: 1,
             scheduler_position: 0,
@@ -6075,7 +6370,7 @@ pub(crate) mod tests {
                 artifact_class: "event".to_owned(),
                 schema_id: node.schema_id,
                 artifact_digest: [1; 32],
-                producer: node.clone(),
+                producer: node,
                 prior_generation: 0,
                 reason: SuffixInvalidationReasonV1::NewIntervention,
             }],
@@ -6089,13 +6384,20 @@ pub(crate) mod tests {
             provenance_digest: [9; 32],
             invalidation_digest: [10; 32],
         };
-        let counterfactual = CounterfactualContractV1 {
+        CounterfactualContractV1 {
             fork_id: [3; 16],
             prior_generation: 0,
             generation: 1,
             intervention: None,
             dependencies: vec![InputDependencyV1 {
-                consumer: node.clone(),
+                consumer: DependencyNodeV1 {
+                    tick: 1,
+                    scheduler_position: 0,
+                    owner_id: "body".to_owned(),
+                    output_ordinal: 0,
+                    schema_id: schema_id_for_event_type("world.observation.v1"),
+                    artifact_digest: [1; 32],
+                },
                 source: DependencyNodeV1 {
                     tick: 0,
                     scheduler_position: 0,
@@ -6114,15 +6416,10 @@ pub(crate) mod tests {
             retained_exogenous_digests: vec![[8; 32]],
             replay_claim: ReplayClaimV1::Exact,
             contract_digest: [11; 32],
-        };
-        let implementation = ImplementationIdentityV1 {
-            implementation_id: "test".to_owned(),
-            source_digest: [1; 32],
-            build_digest: [2; 32],
-            binary_digest: [3; 32],
-            public_contract_digest: [4; 32],
-            organization_id: None,
-        };
+        }
+    }
+
+    fn test_report() -> ConformanceReportV1 {
         let cases = vec![
             CaseOutcomeV1 {
                 case_id: "scenario-air-gapped".to_owned(),
@@ -6157,7 +6454,7 @@ pub(crate) mod tests {
                 provenance_digest: [15; 32],
             },
         ];
-        let report = ConformanceReportV1 {
+        ConformanceReportV1 {
             report_id: [1; 16],
             subject_artifact_digest: [1; 32],
             profile_digest: [2; 32],
@@ -6167,7 +6464,14 @@ pub(crate) mod tests {
             evaluator_source_digest: [6; 32],
             evaluator_binary_digest: [7; 32],
             evaluator_protocol_digest: [8; 32],
-            implementation,
+            implementation: ImplementationIdentityV1 {
+                implementation_id: "test".to_owned(),
+                source_digest: [1; 32],
+                build_digest: [2; 32],
+                binary_digest: [3; 32],
+                public_contract_digest: [4; 32],
+                organization_id: None,
+            },
             independence: IndependenceEvidenceV1 {
                 technical_independent: true,
                 authorship_independent: true,
@@ -6187,9 +6491,13 @@ pub(crate) mod tests {
             limitations_digest: [11; 32],
             provenance_digest: [12; 32],
             report_digest: [13; 32],
-        };
+        }
+    }
+
+    fn test_contract() -> Wave8ProofContractV1 {
+        let (principal, grant, decision) = test_authorization_fixtures();
         Wave8ProofContractV1 {
-            scenario_room: ScenarioRoomV1 {
+            scenario_room: ScenarioRoomFixtureV1 {
                 room_id: "room".to_owned(),
                 input_digest: [1; 32],
                 horizon_ticks: 1,
@@ -6197,28 +6505,16 @@ pub(crate) mod tests {
                 network_enabled: false,
                 exogenous_digests: vec![[2; 32]],
                 fixed_policy_digests: vec![[3; 32]],
-                principals: vec![principal],
-                grants: vec![grant],
+                principals: vec![principal.clone()],
+                grants: vec![grant.clone()],
                 room_digest: [4; 32],
             },
             plugin_boundary: wave8_plugin_boundary(),
             knowledge_snapshots: vec![KnowledgeSnapshotV1 {
                 participant_id: "operator".to_owned(),
-                principal: PrincipalRefV1 {
-                    principal_id: "principal:operator".to_owned(),
-                    participant_id: "operator".to_owned(),
-                    subject_id: None,
-                    trust_domain: "test".to_owned(),
-                },
-                grant: CapabilityGrantV1 {
-                    grant_id: "grant:operator".to_owned(),
-                    principal_id: "principal:operator".to_owned(),
-                    capability: "observe".to_owned(),
-                    resource: "room".to_owned(),
-                    consent_epoch: 0,
-                    policy_digest: [3; 32],
-                },
-                authorization: decision,
+                principal,
+                grant,
+                authorization: decision.clone(),
                 tick: 1,
                 visible_event_seqs: vec![1],
                 visible_event_digests: vec![[1; 32]],
@@ -6226,17 +6522,8 @@ pub(crate) mod tests {
                 consent_epoch: 0,
                 snapshot_digest: [14; 32],
             }],
-            authorization_decisions: vec![AuthorizationDecisionV1 {
-                principal_id: "principal:operator".to_owned(),
-                resource: "room".to_owned(),
-                operation: "observe".to_owned(),
-                allowed: true,
-                reason: "test".to_owned(),
-                consent_epoch: 0,
-                grant_digest: [4; 32],
-                decision_digest: [5; 32],
-            }],
-            counterfactual,
+            authorization_decisions: vec![decision],
+            counterfactual: test_counterfactual(),
             atomicity: vec![TickAtomicityV1 {
                 tick: 1,
                 fork_generation: 1,
@@ -6247,7 +6534,7 @@ pub(crate) mod tests {
                 committed: true,
                 failure_class: None,
             }],
-            conformance_report: report,
+            conformance_report: test_report(),
             non_interference: wave8_non_interference_matrix([1; 32]),
         }
     }
@@ -6358,6 +6645,11 @@ pub(crate) mod tests {
             class: PluginFailureClassV1::PluginCrash,
             tick: 1,
             committed: false,
+            staged_event_count: 0,
+            committed_event_count: 0,
+            state_digest_before: [1; 32],
+            state_digest_after: [1; 32],
+            sibling_step_count: 1,
         });
         assert_eq!(
             compare(&left, &right)?.divergence,
@@ -6393,6 +6685,7 @@ pub(crate) mod tests {
         invalid.authoritative_events[0].seq = 2;
         invalid.authoritative_events.push(AuthoritativeEventV1 {
             seq: 4,
+            tick: 3,
             entity: "body".to_owned(),
             event_type: "world.observation.v1".to_owned(),
             payload_digest: [2; 32],
@@ -6420,6 +6713,11 @@ pub(crate) mod tests {
             class: PluginFailureClassV1::PluginCrash,
             tick: 1,
             committed: true,
+            staged_event_count: 0,
+            committed_event_count: 0,
+            state_digest_before: [1; 32],
+            state_digest_after: [1; 32],
+            sibling_step_count: 1,
         });
         assert_eq!(
             verify_evidence(&invalid),
@@ -6648,829 +6946,873 @@ pub(crate) mod tests {
         }
     }
 
-    #[test]
-    fn covers_remaining_typed_verifier_boundaries() {
-        for event_type in [
-            "scenario.input.v1",
-            "world.action.v1",
-            "world.observation.v1",
-            "proof.agent.reaction.v1",
-            "society.signal",
-            "pos.host.consent.revoked.v1",
-            "unknown.event.v1",
-        ] {
-            assert_ne!(schema_id_for_event_type(event_type), 0);
-        }
-        for claim in [
-            ReplayClaimV1::Exact,
-            ReplayClaimV1::ExactAuthoritativeWithRedactedViews,
-            ReplayClaimV1::StructuralOnly,
-            ReplayClaimV1::UnverifiableArtifactsMissing,
-            ReplayClaimV1::IncompatibleProfile,
-        ] {
-            for disposition in [
-                ErasureDispositionV1::None,
-                ErasureDispositionV1::RedactedViews,
-                ErasureDispositionV1::StructuralOnly,
-                ErasureDispositionV1::ArtifactsMissing,
-                ErasureDispositionV1::IncompatibleProfile,
+    macro_rules! typed_verifier_boundary_cases {
+        () => {{
+            for event_type in [
+                "scenario.input.v1",
+                "world.action.v1",
+                "world.observation.v1",
+                "proof.agent.reaction.v1",
+                "society.signal",
+                "pos.host.consent.revoked.v1",
+                "unknown.event.v1",
             ] {
-                let _ = claim.after_erasure(disposition);
+                assert_ne!(schema_id_for_event_type(event_type), 0);
             }
-            assert!(claim.is_no_stronger_than(ReplayClaimV1::Exact));
-        }
+            for claim in [
+                ReplayClaimV1::Exact,
+                ReplayClaimV1::ExactAuthoritativeWithRedactedViews,
+                ReplayClaimV1::StructuralOnly,
+                ReplayClaimV1::UnverifiableArtifactsMissing,
+                ReplayClaimV1::IncompatibleProfile,
+            ] {
+                for disposition in [
+                    ErasureDispositionV1::None,
+                    ErasureDispositionV1::RedactedViews,
+                    ErasureDispositionV1::StructuralOnly,
+                    ErasureDispositionV1::ArtifactsMissing,
+                    ErasureDispositionV1::IncompatibleProfile,
+                ] {
+                    let degraded = claim.after_erasure(disposition);
+                    assert!(degraded.is_no_stronger_than(ReplayClaimV1::Exact));
+                }
+                assert!(claim.is_no_stronger_than(ReplayClaimV1::Exact));
+            }
 
-        let boundary = wave8_plugin_boundary();
-        assert_eq!(boundary.validate(), Ok(()));
-        let mut invalid = boundary.clone();
-        invalid.manifest_version = 0;
-        assert!(invalid.validate().is_err());
-        invalid = boundary.clone();
-        invalid.manifest_digest = [1; 32];
-        assert_eq!(
-            invalid.validate(),
-            Err(PluginBoundaryError::ManifestDigestMismatch)
-        );
-        invalid = boundary;
-        invalid.release_digest = [1; 32];
-        assert_eq!(
-            invalid.validate(),
-            Err(PluginBoundaryError::ReleaseDigestMismatch)
-        );
-
-        let value = evidence();
-        assert!(value.to_verification_result_cbor().is_ok());
-        let sequences = match event_sequences(&value.authoritative_events) {
-            Ok(sequences) => sequences,
-            Err(_) => return,
-        };
-        for dependency_class in [
-            DependencyClassV1::ExogenousFrozen,
-            DependencyClassV1::InterventionAssigned,
-            DependencyClassV1::EndogenousRecomputed,
-            DependencyClassV1::FixedPolicy,
-            DependencyClassV1::PresentationOnly,
-        ] {
-            let mut trace = value.causal_trace.clone();
-            trace[0].dependency_class = dependency_class;
-            assert!(verify_causal_trace(&value.authoritative_events, &trace, &sequences).is_ok());
-        }
-        for relation in [
-            "physical_to_agent",
-            "agent_to_society",
-            "intervention_to_physics",
-            "derived",
-        ] {
-            let mut trace = value.causal_trace.clone();
-            trace[0].relation = relation.to_owned();
-            assert!(verify_causal_trace(&value.authoritative_events, &trace, &sequences).is_ok());
-        }
-        for visibility in ["operator", "participant", "public"] {
-            let mut trace = value.causal_trace.clone();
-            trace[0].visibility = visibility.to_owned();
-            assert!(verify_causal_trace(&value.authoritative_events, &trace, &sequences).is_ok());
-        }
-        assert!(event_sequences(&[]).is_err());
-        assert!(verify_uncertainty(&[]).is_ok());
-        assert!(verify_plugin_failures(&[]).is_ok());
-        let mut failure = value.clone();
-        failure.plugin_failures = vec![PluginFailureV1 {
-            plugin: String::new(),
-            class: PluginFailureClassV1::PluginCrash,
-            tick: 1,
-            committed: false,
-        }];
-        assert_eq!(
-            verify_plugin_failures(&failure.plugin_failures),
-            Err(EvidenceError::CommittedPluginFailure)
-        );
-        let mut duplicate_revocation = value.clone();
-        duplicate_revocation
-            .authoritative_events
-            .push(AuthoritativeEventV1 {
-                seq: 4,
-                entity: "host".to_owned(),
-                event_type: "pos.host.consent.revoked.v1".to_owned(),
-                payload_digest: [7; 32],
-                causation_seq: None,
-            });
-        assert_eq!(
-            verify_consent_audit(
-                &duplicate_revocation.consent_audit,
-                &duplicate_revocation.authoritative_events,
-            ),
-            Err(EvidenceError::InvalidConsentAudit)
-        );
-        for event_type in [
-            "world.action.v1",
-            "world.observation.v1",
-            "proof.agent.reaction.v1",
-            "society.signal",
-            "other",
-        ] {
-            let event = AuthoritativeEventV1 {
-                seq: 1,
-                entity: "entity".to_owned(),
-                event_type: event_type.to_owned(),
-                payload_digest: [1; 32],
-                causation_seq: None,
-            };
-            let _ = contract_event_node(&event);
-        }
-
-        let matrix_mutations: Vec<EvidenceMutation> = vec![
-            Box::new(|value| value.contract.non_interference.clear()),
-            Box::new(|value| value.contract.non_interference[0].fixture_id.clear()),
-            Box::new(|value| {
-                value.contract.non_interference[0].variant = NonInterferenceVariantV1::Denial
-            }),
-            Box::new(|value| value.contract.non_interference[0].mode = ExecutionModeV1::AirGapped),
-            Box::new(|value| value.contract.non_interference[0].control_input_digest = [0; 32]),
-            Box::new(|value| value.contract.non_interference[0].canary_input_digest = [0; 32]),
-            Box::new(|value| {
-                value.contract.non_interference[0].canary_input_digest =
-                    value.contract.non_interference[0].control_input_digest;
-            }),
-            Box::new(|value| value.contract.non_interference[0].authoritative_digest = [0; 32]),
-            Box::new(|value| value.contract.non_interference[0].public_digest = [0; 32]),
-            Box::new(|value| value.contract.non_interference[0].operational_digest = [0; 32]),
-            Box::new(|value| value.contract.non_interference[0].authoritative_equal = false),
-            Box::new(|value| value.contract.non_interference[0].public_equal = false),
-            Box::new(|value| value.contract.non_interference[0].operational_equal = false),
-            Box::new(|value| value.contract.non_interference[0].provenance_digest = [0; 32]),
-        ];
-        for mutate in matrix_mutations {
-            let mut invalid = value.clone();
-            mutate(&mut invalid);
+            let boundary = wave8_plugin_boundary();
+            assert_eq!(boundary.validate(), Ok(()));
+            let mut invalid = boundary.clone();
+            invalid.manifest_version = 0;
+            assert!(invalid.validate().is_err());
+            invalid = boundary.clone();
+            invalid.manifest_digest = [1; 32];
             assert_eq!(
-                verify_wave8_contract(&invalid),
-                Err(EvidenceError::InvalidNonInterferenceMatrix)
+                invalid.validate(),
+                Err(PluginBoundaryError::ManifestDigestMismatch)
             );
-        }
-
-        let room_mutations: Vec<EvidenceMutation> = vec![
-            Box::new(|value| value.contract.scenario_room.input_digest = [8; 32]),
-            Box::new(|value| value.manifest.scenario_room_digest = [8; 32]),
-            Box::new(|value| value.contract.scenario_room.network_enabled = true),
-            Box::new(|value| value.contract.scenario_room.room_id.clear()),
-            Box::new(|value| value.contract.scenario_room.room_digest = [0; 32]),
-            Box::new(|value| value.contract.scenario_room.horizon_ticks = 0),
-            Box::new(|value| value.contract.scenario_room.principals.clear()),
-            Box::new(|value| value.contract.scenario_room.grants.clear()),
-            Box::new(|value| {
-                value.contract.scenario_room.principals[0].participant_id = "z".to_owned();
-            }),
-            Box::new(|value| {
-                value.contract.scenario_room.principals[0]
-                    .principal_id
-                    .clear()
-            }),
-            Box::new(|value| {
-                value.contract.scenario_room.principals[0]
-                    .trust_domain
-                    .clear()
-            }),
-            Box::new(|value| {
-                value.contract.scenario_room.principals[0].principal_id =
-                    "principal:duplicate".to_owned();
-                value.contract.scenario_room.grants[0].principal_id =
-                    "principal:duplicate".to_owned();
-            }),
-            Box::new(|value| value.contract.scenario_room.grants[0].grant_id.clear()),
-            Box::new(|value| value.contract.scenario_room.grants[0].capability.clear()),
-            Box::new(|value| value.contract.scenario_room.grants[0].resource.clear()),
-            Box::new(|value| value.contract.scenario_room.grants[0].policy_digest = [0; 32]),
-        ];
-        for mutate in room_mutations {
-            let mut invalid = value.clone();
-            mutate(&mut invalid);
-            assert!(verify_wave8_contract(&invalid).is_err());
-        }
-
-        let knowledge_mutations: Vec<EvidenceMutation> = vec![
-            Box::new(|value| value.contract.knowledge_snapshots[0].snapshot_digest = [0; 32]),
-            Box::new(|value| {
-                value.contract.knowledge_snapshots[0]
-                    .authorization
-                    .decision_digest = [0; 32]
-            }),
-            Box::new(|value| {
-                value.contract.knowledge_snapshots[0]
-                    .authorization
-                    .grant_digest = [0; 32]
-            }),
-            Box::new(|value| {
-                value.contract.knowledge_snapshots[0]
-                    .visible_event_digests
-                    .clear()
-            }),
-            Box::new(|value| value.contract.knowledge_snapshots[0].visible_event_seqs = vec![2, 1]),
-            Box::new(|value| {
-                value.contract.knowledge_snapshots[0]
-                    .hidden_event_types
-                    .push("operator".to_owned())
-            }),
-            Box::new(|value| {
-                value.contract.knowledge_snapshots[0].participant_id = "missing".to_owned()
-            }),
-            Box::new(|value| {
-                value.contract.knowledge_snapshots[0].principal.principal_id = "missing".to_owned()
-            }),
-            Box::new(|value| {
-                value.contract.knowledge_snapshots[0]
-                    .principal
-                    .participant_id = "wrong".to_owned()
-            }),
-            Box::new(|value| {
-                value.contract.knowledge_snapshots[0].grant.resource = "wrong".to_owned()
-            }),
-            Box::new(|value| {
-                value.contract.knowledge_snapshots[0].authorization.resource = "wrong".to_owned()
-            }),
-            Box::new(|value| value.contract.knowledge_snapshots[0].consent_epoch = 9),
-            Box::new(|value| value.contract.knowledge_snapshots[0].visible_event_seqs = vec![99]),
-            Box::new(|value| {
-                value.contract.knowledge_snapshots[0].visible_event_digests = vec![[9; 32]]
-            }),
-            Box::new(|value| value.contract.knowledge_snapshots[0].authorization.allowed = false),
-            Box::new(|value| {
-                value.contract.knowledge_snapshots[0]
-                    .authorization
-                    .principal_id = "wrong".to_owned()
-            }),
-            Box::new(|value| {
-                value.contract.knowledge_snapshots[0].grant.principal_id = "wrong".to_owned()
-            }),
-            Box::new(|value| {
-                value
-                    .contract
-                    .knowledge_snapshots
-                    .push(value.contract.knowledge_snapshots[0].clone())
-            }),
-            Box::new(|value| value.contract.authorization_decisions.clear()),
-            Box::new(|value| value.contract.authorization_decisions[0].allowed = false),
-            Box::new(|value| value.contract.authorization_decisions[0].decision_digest = [0; 32]),
-            Box::new(|value| {
-                value.contract.authorization_decisions[0].reason = "unmatched".to_owned()
-            }),
-        ];
-        for mutate in knowledge_mutations {
-            let mut invalid = value.clone();
-            mutate(&mut invalid);
-            assert!(verify_wave8_contract(&invalid).is_err());
-        }
-
-        let (_, mut with_intervention) = fork_pair();
-        let action_event = with_intervention.authoritative_events[1].clone();
-        let society_event = with_intervention.authoritative_events[2].clone();
-        let action_node = contract_event_node(&action_event);
-        let society_node = contract_event_node(&society_event);
-        let observation_node = contract_event_node(&with_intervention.authoritative_events[0]);
-        let zero_node = contract_zero_node();
-        let dependency =
-            |consumer: DependencyNodeV1,
-             source: DependencyNodeV1,
-             dependency_class: DependencyClassV1| InputDependencyV1 {
-                consumer,
-                source,
-                dependency_class,
-                authorization_digest: [31; 32],
-                provenance_digest: [32; 32],
-            };
-        let intervention = InterventionV1 {
-            intervention_id: [33; 16],
-            target: "body".to_owned(),
-            operation: "set_velocity".to_owned(),
-            value_digest: action_event.payload_digest,
-            effective_tick: action_event.seq,
-            ordinal: 0,
-            principal_id: "principal:operator".to_owned(),
-            capability: "intervene".to_owned(),
-            consent_epoch: 0,
-            provenance_digest: [34; 32],
-        };
-        let frontier = &mut with_intervention.contract.counterfactual.frontier;
-        frontier.intervention_seed_nodes = vec![action_node.clone()];
-        frontier.affected_nodes = vec![society_node.clone()];
-        frontier.owner_frontiers = vec![OwnerFrontierV1 {
-            owner_id: society_event.entity.clone(),
-            earliest_tick: society_event.seq,
-            earliest_scheduler_position: society_node.scheduler_position,
-            earliest_output_ordinal: 0,
-            cause_node_digests: vec![action_event.payload_digest],
-        }];
-        frontier.global_frontier_tick = society_event.seq;
-        frontier.global_frontier_scheduler_position = society_node.scheduler_position;
-        frontier.endogenous_suffix_end_tick = society_event.seq;
-        let invalidation = &mut with_intervention.contract.counterfactual.invalidation;
-        invalidation.prior_generation = 0;
-        invalidation.new_generation = 1;
-        invalidation.invalid_start = society_node.clone();
-        invalidation.invalid_end = society_node.clone();
-        invalidation.invalid_artifacts = vec![InvalidArtifactV1 {
-            artifact_class: "event".to_owned(),
-            schema_id: society_node.schema_id,
-            artifact_digest: society_node.artifact_digest,
-            producer: society_node.clone(),
-            prior_generation: 0,
-            reason: SuffixInvalidationReasonV1::NewIntervention,
-        }];
-        invalidation.reason = SuffixInvalidationReasonV1::NewIntervention;
-        invalidation.fork_id = with_intervention.contract.counterfactual.fork_id;
-        let counterfactual = &mut with_intervention.contract.counterfactual;
-        counterfactual.prior_generation = 0;
-        counterfactual.generation = 1;
-        counterfactual.intervention = Some(intervention);
-        counterfactual.dependencies = vec![
-            dependency(
-                observation_node,
-                zero_node,
-                DependencyClassV1::EndogenousRecomputed,
-            ),
-            dependency(
-                action_node.clone(),
-                contract_event_node(&with_intervention.authoritative_events[0]),
-                DependencyClassV1::InterventionAssigned,
-            ),
-            dependency(
-                society_node,
-                contract_event_node(&with_intervention.authoritative_events[1]),
-                DependencyClassV1::EndogenousRecomputed,
-            ),
-        ];
-        counterfactual.recomputed_event_seqs = vec![society_event.seq];
-        assert_eq!(verify_wave8_contract(&with_intervention), Ok(()));
-
-        let mut missing_intervention = with_intervention.clone();
-        if let Some(intervention) = missing_intervention
-            .contract
-            .counterfactual
-            .intervention
-            .as_mut()
-        {
-            intervention.value_digest = [99; 32];
-        }
-        assert_eq!(
-            verify_wave8_contract(&missing_intervention),
-            Err(EvidenceError::InvalidDependencyGraph)
-        );
-        let mut wrong_dependency = with_intervention.clone();
-        wrong_dependency.contract.counterfactual.dependencies[0].source = action_node.clone();
-        assert_eq!(
-            verify_wave8_contract(&wrong_dependency),
-            Err(EvidenceError::InvalidDependencyGraph)
-        );
-        let mut incomplete_suffix = with_intervention.clone();
-        incomplete_suffix
-            .contract
-            .counterfactual
-            .recomputed_event_seqs = vec![action_event.seq];
-        assert_eq!(
-            verify_wave8_contract(&incomplete_suffix),
-            Err(EvidenceError::IncompleteRecomputationContract)
-        );
-        let mut incomplete_frontier = with_intervention.clone();
-        incomplete_frontier.manifest.fork_cut_seq = Some(action_event.seq);
-        assert_eq!(
-            verify_wave8_contract(&incomplete_frontier),
-            Err(EvidenceError::IncompleteRecomputationContract)
-        );
-
-        let mut event_gap = value.authoritative_events.clone();
-        event_gap[1].seq = 3;
-        assert_eq!(
-            event_sequences(&event_gap),
-            Err(EvidenceError::NonContiguousEventSequence)
-        );
-        let mut invalid_counterfactual = value.clone();
-        invalid_counterfactual
-            .contract
-            .counterfactual
-            .contract_digest = [0; 32];
-        assert_eq!(
-            verify_wave8_contract(&invalid_counterfactual),
-            Err(EvidenceError::InvalidDependencyGraph)
-        );
-        let mut unknown_consumer = with_intervention.clone();
-        unknown_consumer.contract.counterfactual.dependencies[0]
-            .consumer
-            .owner_id = "unknown-owner".to_owned();
-        assert_eq!(
-            verify_wave8_contract(&unknown_consumer),
-            Err(EvidenceError::InvalidDependencyGraph)
-        );
-        let mut unexpected_source = with_intervention.clone();
-        unexpected_source.contract.counterfactual.dependencies[1].source = contract_zero_node();
-        assert_eq!(
-            verify_wave8_contract(&unexpected_source),
-            Err(EvidenceError::InvalidDependencyGraph)
-        );
-
-        let shape = value.contract.counterfactual.clone();
-        assert!(verify_counterfactual_record_shapes(&shape));
-        let node = shape.frontier.affected_nodes[0].clone();
-        let mut later_node = node.clone();
-        later_node.tick = later_node.tick.saturating_add(1);
-        later_node.artifact_digest = [2; 32];
-
-        let mut sorted_owners = shape.clone();
-        let mut later_owner = sorted_owners.frontier.owner_frontiers[0].clone();
-        later_owner.earliest_tick = later_owner.earliest_tick.saturating_add(1);
-        later_owner.cause_node_digests = vec![[2; 32]];
-        sorted_owners.frontier.owner_frontiers = vec![
-            sorted_owners.frontier.owner_frontiers[0].clone(),
-            later_owner.clone(),
-        ];
-        assert!(verify_counterfactual_record_shapes(&sorted_owners));
-        sorted_owners.frontier.owner_frontiers.reverse();
-        assert!(!verify_counterfactual_record_shapes(&sorted_owners));
-
-        let mut sorted_seeds = shape.clone();
-        sorted_seeds.frontier.intervention_seed_nodes = vec![node.clone(), later_node.clone()];
-        assert!(verify_counterfactual_record_shapes(&sorted_seeds));
-        sorted_seeds.frontier.intervention_seed_nodes.reverse();
-        assert!(!verify_counterfactual_record_shapes(&sorted_seeds));
-
-        let mut sorted_affected = shape.clone();
-        sorted_affected.frontier.affected_nodes = vec![node.clone(), later_node.clone()];
-        assert!(verify_counterfactual_record_shapes(&sorted_affected));
-        sorted_affected.frontier.affected_nodes.reverse();
-        assert!(!verify_counterfactual_record_shapes(&sorted_affected));
-
-        let mut unknown_edges = shape.clone();
-        unknown_edges.frontier.unknown_edge_policy = UnknownEdgePolicyV1::FullSuffixFromCut;
-        unknown_edges.frontier.unknown_edge_coordinates = vec![later_node.clone()];
-        assert!(verify_counterfactual_record_shapes(&unknown_edges));
-        unknown_edges.frontier.unknown_edge_coordinates.clear();
-        assert!(!verify_counterfactual_record_shapes(&unknown_edges));
-
-        let first_artifact = shape.invalidation.invalid_artifacts[0].clone();
-        let mut later_artifact = first_artifact.clone();
-        later_artifact.artifact_class = "event-2".to_owned();
-        later_artifact.artifact_digest = [2; 32];
-        later_artifact.producer = later_node.clone();
-        let mut sorted_artifacts = shape.clone();
-        sorted_artifacts.invalidation.invalid_artifacts = vec![first_artifact, later_artifact];
-        assert!(verify_counterfactual_record_shapes(&sorted_artifacts));
-        sorted_artifacts.invalidation.invalid_artifacts.reverse();
-        assert!(!verify_counterfactual_record_shapes(&sorted_artifacts));
-
-        for mutate in [
-            |contract: &mut CounterfactualContractV1| {
-                contract.invalidation.invalid_artifacts[0]
-                    .artifact_class
-                    .clear();
-            },
-            |contract: &mut CounterfactualContractV1| {
-                contract.invalidation.invalid_artifacts[0].schema_id = 0;
-            },
-            |contract: &mut CounterfactualContractV1| {
-                contract.invalidation.invalid_artifacts[0].artifact_digest = [0; 32];
-            },
-            |contract: &mut CounterfactualContractV1| {
-                contract.invalidation.invalid_artifacts[0]
-                    .producer
-                    .owner_id
-                    .clear();
-            },
-            |contract: &mut CounterfactualContractV1| {
-                contract.invalidation.invalid_artifacts[0].reason =
-                    SuffixInvalidationReasonV1::ChangedIntervention;
-            },
-            |contract: &mut CounterfactualContractV1| {
-                contract.invalidation.invalidation_id = [0; 16];
-            },
-            |contract: &mut CounterfactualContractV1| {
-                contract.invalidation.plan_digest = [99; 32];
-            },
-            |contract: &mut CounterfactualContractV1| {
-                contract.invalidation.fork_id = [99; 16];
-            },
-            |contract: &mut CounterfactualContractV1| {
-                contract.invalidation.frontier_digest = [99; 32];
-            },
-            |contract: &mut CounterfactualContractV1| {
-                contract.invalidation.commit_timeline_id = [0; 16];
-            },
-            |contract: &mut CounterfactualContractV1| {
-                contract.invalidation.provenance_digest = [0; 32];
-            },
-            |contract: &mut CounterfactualContractV1| {
-                contract.invalidation.invalidation_digest = [0; 32];
-            },
-        ] {
-            let mut invalid_shape = shape.clone();
-            mutate(&mut invalid_shape);
-            assert!(!verify_counterfactual_record_shapes(&invalid_shape));
-        }
-
-        let mut zero_generation = shape.clone();
-        zero_generation.prior_generation = 0;
-        zero_generation.generation = 0;
-        zero_generation.invalidation.new_generation = 0;
-        zero_generation.invalidation.invalid_artifacts.clear();
-        assert!(verify_counterfactual_record_shapes(&zero_generation));
-
-        let mut digest_lists = shape.clone();
-        digest_lists.invalidation.invalid_checkpoint_digests = vec![[1; 32], [2; 32]];
-        digest_lists.invalidation.invalid_projection_digests = vec![[3; 32], [4; 32]];
-        digest_lists.invalidation.retained_exogenous_digests = vec![[5; 32], [6; 32]];
-        assert!(verify_counterfactual_record_shapes(&digest_lists));
-        digest_lists.invalidation.invalid_checkpoint_digests = vec![[1; 32], [1; 32]];
-        assert!(!verify_counterfactual_record_shapes(&digest_lists));
-        digest_lists.invalidation.invalid_checkpoint_digests = vec![[0; 32]];
-        assert!(!verify_counterfactual_record_shapes(&digest_lists));
-
-        let mut sorted_dependencies = shape.clone();
-        let mut later_dependency = sorted_dependencies.dependencies[0].clone();
-        later_dependency.consumer = later_node.clone();
-        later_dependency.source = node.clone();
-        later_dependency.authorization_digest = [6; 32];
-        later_dependency.provenance_digest = [7; 32];
-        sorted_dependencies
-            .dependencies
-            .push(later_dependency.clone());
-        assert!(verify_counterfactual_record_shapes(&sorted_dependencies));
-        sorted_dependencies.dependencies.reverse();
-        assert!(!verify_counterfactual_record_shapes(&sorted_dependencies));
-
-        for mutate in [
-            |contract: &mut CounterfactualContractV1| {
-                contract.dependencies[0].consumer.schema_id = 0;
-            },
-            |contract: &mut CounterfactualContractV1| {
-                contract.dependencies[0].authorization_digest = [0; 32];
-            },
-            |contract: &mut CounterfactualContractV1| {
-                contract.dependencies[0].provenance_digest = [0; 32];
-            },
-            |contract: &mut CounterfactualContractV1| {
-                contract.dependencies[0].source.tick = 1;
-                contract.dependencies[0].source.artifact_digest = [9; 32];
-            },
-            |contract: &mut CounterfactualContractV1| {
-                contract.dependencies[0].source.tick = 1;
-                contract.dependencies[0].source.owner_id = "other".to_owned();
-                contract.dependencies[0].source.artifact_digest = [0; 32];
-            },
-        ] {
-            let mut invalid_shape = shape.clone();
-            mutate(&mut invalid_shape);
-            assert!(!verify_counterfactual_record_shapes(&invalid_shape));
-        }
-
-        let mut report_cases = value.clone();
-        let template = report_cases.contract.conformance_report.cases[0].clone();
-        let mut pass = template.clone();
-        pass.case_id = "a-pass".to_owned();
-        pass.mode = ExecutionModeV1::Local;
-        let mut fail = template.clone();
-        fail.case_id = "b-fail".to_owned();
-        fail.mode = ExecutionModeV1::AirGapped;
-        fail.outcome = CaseOutcomeStatusV1::Fail;
-        fail.expected_digest = Some([14; 32]);
-        fail.actual_digest = Some([15; 32]);
-        let mut skip = template.clone();
-        skip.case_id = "c-skip".to_owned();
-        skip.mode = ExecutionModeV1::Replay;
-        skip.outcome = CaseOutcomeStatusV1::Skip;
-        skip.expected_digest = None;
-        skip.actual_digest = Some([15; 32]);
-        let mut unavailable = template.clone();
-        unavailable.case_id = "d-unavailable".to_owned();
-        unavailable.mode = ExecutionModeV1::Fork;
-        unavailable.outcome = CaseOutcomeStatusV1::Unavailable;
-        unavailable.expected_digest = None;
-        unavailable.actual_digest = None;
-        unavailable.expected_error = Some(SafeErrorCodeV1::InvalidEncoding);
-        unavailable.actual_error = None;
-        let mut not_applicable = template;
-        not_applicable.case_id = "e-not-applicable".to_owned();
-        not_applicable.mode = ExecutionModeV1::Local;
-        not_applicable.outcome = CaseOutcomeStatusV1::NotApplicable;
-        not_applicable.expected_digest = None;
-        not_applicable.actual_digest = None;
-        not_applicable.expected_error = None;
-        not_applicable.actual_error = Some(SafeErrorCodeV1::ResourceLimitExceeded);
-        report_cases.contract.conformance_report.cases =
-            vec![pass, fail, skip, unavailable, not_applicable];
-        report_cases.contract.conformance_report.passed = 1;
-        report_cases.contract.conformance_report.failed = 1;
-        report_cases.contract.conformance_report.skipped = 1;
-        report_cases.contract.conformance_report.unavailable = 1;
-        report_cases.contract.conformance_report.not_applicable = 1;
-        assert_eq!(verify_wave8_contract(&report_cases), Ok(()));
-        let mut invalid_report = report_cases.clone();
-        invalid_report.contract.conformance_report.passed = 0;
-        assert_eq!(
-            verify_wave8_contract(&invalid_report),
-            Err(EvidenceError::InvalidConformanceReport)
-        );
-        invalid_report = report_cases.clone();
-        invalid_report.contract.conformance_report.cases.clear();
-        assert_eq!(
-            verify_wave8_contract(&invalid_report),
-            Err(EvidenceError::InvalidConformanceReport)
-        );
-
-        let mut invalid_atomicity = value.clone();
-        invalid_atomicity.contract.atomicity.clear();
-        assert_eq!(
-            verify_wave8_contract(&invalid_atomicity),
-            Err(EvidenceError::IncompleteAtomicityEvidence)
-        );
-        invalid_atomicity = value.clone();
-        invalid_atomicity
-            .contract
-            .atomicity
-            .push(invalid_atomicity.contract.atomicity[0].clone());
-        assert_eq!(
-            verify_wave8_contract(&invalid_atomicity),
-            Err(EvidenceError::IncompleteAtomicityEvidence)
-        );
-        for mutate in [
-            |atomicity: &mut TickAtomicityV1| atomicity.state_digest_before = [0; 32],
-            |atomicity: &mut TickAtomicityV1| atomicity.state_digest_after = [0; 32],
-            |atomicity: &mut TickAtomicityV1| {
-                atomicity.committed = false;
-                atomicity.committed_event_count = 1;
-            },
-            |atomicity: &mut TickAtomicityV1| {
-                atomicity.committed = false;
-                atomicity.state_digest_after = [3; 32];
-                atomicity.failure_class = Some(PluginFailureClassV1::PluginCrash);
-            },
-            |atomicity: &mut TickAtomicityV1| {
-                atomicity.committed = false;
-                atomicity.failure_class = None;
-            },
-            |atomicity: &mut TickAtomicityV1| {
-                atomicity.committed = true;
-                atomicity.committed_event_count = atomicity.staged_event_count + 1;
-            },
-            |atomicity: &mut TickAtomicityV1| {
-                atomicity.committed = true;
-                atomicity.failure_class = Some(PluginFailureClassV1::PluginCrash);
-            },
-        ] {
-            let mut invalid = value.clone();
-            mutate(&mut invalid.contract.atomicity[0]);
+            invalid = boundary;
+            invalid.release_digest = [1; 32];
             assert_eq!(
-                verify_wave8_contract(&invalid),
+                invalid.validate(),
+                Err(PluginBoundaryError::ReleaseDigestMismatch)
+            );
+
+            let value = evidence();
+            assert!(value.to_verification_result_cbor().is_ok());
+            let Ok(sequences) = event_sequences(&value.authoritative_events) else {
+                return;
+            };
+            for dependency_class in [
+                DependencyClassV1::ExogenousFrozen,
+                DependencyClassV1::InterventionAssigned,
+                DependencyClassV1::EndogenousRecomputed,
+                DependencyClassV1::FixedPolicy,
+                DependencyClassV1::PresentationOnly,
+            ] {
+                let mut trace = value.causal_trace.clone();
+                trace[0].dependency_class = dependency_class;
+                assert!(
+                    verify_causal_trace(&value.authoritative_events, &trace, &sequences).is_ok()
+                );
+            }
+            for relation in [
+                "physical_to_agent",
+                "agent_to_society",
+                "intervention_to_physics",
+                "derived",
+            ] {
+                let mut trace = value.causal_trace.clone();
+                trace[0].relation = relation.to_owned();
+                assert!(
+                    verify_causal_trace(&value.authoritative_events, &trace, &sequences).is_ok()
+                );
+            }
+            for visibility in ["operator", "participant", "public"] {
+                let mut trace = value.causal_trace.clone();
+                trace[0].visibility = visibility.to_owned();
+                assert!(
+                    verify_causal_trace(&value.authoritative_events, &trace, &sequences).is_ok()
+                );
+            }
+            assert!(event_sequences(&[]).is_err());
+            assert!(verify_uncertainty(&[]).is_ok());
+            assert!(verify_plugin_failures(&[]).is_ok());
+            let mut failure = value.clone();
+            failure.plugin_failures = vec![PluginFailureV1 {
+                plugin: String::new(),
+                class: PluginFailureClassV1::PluginCrash,
+                tick: 1,
+                committed: false,
+                staged_event_count: 0,
+                committed_event_count: 0,
+                state_digest_before: [1; 32],
+                state_digest_after: [1; 32],
+                sibling_step_count: 1,
+            }];
+            assert_eq!(
+                verify_plugin_failures(&failure.plugin_failures),
+                Err(EvidenceError::CommittedPluginFailure)
+            );
+            let mut duplicate_revocation = value.clone();
+            duplicate_revocation
+                .authoritative_events
+                .push(AuthoritativeEventV1 {
+                    seq: 4,
+                    tick: 3,
+                    entity: "host".to_owned(),
+                    event_type: "pos.host.consent.revoked.v1".to_owned(),
+                    payload_digest: [7; 32],
+                    causation_seq: None,
+                });
+            assert_eq!(
+                verify_consent_audit(
+                    &duplicate_revocation.consent_audit,
+                    &duplicate_revocation.authoritative_events,
+                ),
+                Err(EvidenceError::InvalidConsentAudit)
+            );
+            for event_type in [
+                "world.action.v1",
+                "world.observation.v1",
+                "proof.agent.reaction.v1",
+                "society.signal",
+                "other",
+            ] {
+                let event = AuthoritativeEventV1 {
+                    seq: 1,
+                    tick: 1,
+                    entity: "entity".to_owned(),
+                    event_type: event_type.to_owned(),
+                    payload_digest: [1; 32],
+                    causation_seq: None,
+                };
+                let _ = contract_event_node(&event);
+            }
+
+            let matrix_mutations: Vec<EvidenceMutation> = vec![
+                Box::new(|value| value.contract.non_interference.clear()),
+                Box::new(|value| value.contract.non_interference[0].fixture_id.clear()),
+                Box::new(|value| {
+                    value.contract.non_interference[0].variant = NonInterferenceVariantV1::Denial;
+                }),
+                Box::new(|value| {
+                    value.contract.non_interference[0].mode = ExecutionModeV1::AirGapped
+                }),
+                Box::new(|value| value.contract.non_interference[0].control_input_digest = [0; 32]),
+                Box::new(|value| value.contract.non_interference[0].canary_input_digest = [0; 32]),
+                Box::new(|value| {
+                    value.contract.non_interference[0].canary_input_digest =
+                        value.contract.non_interference[0].control_input_digest;
+                }),
+                Box::new(|value| value.contract.non_interference[0].authoritative_digest = [0; 32]),
+                Box::new(|value| value.contract.non_interference[0].public_digest = [0; 32]),
+                Box::new(|value| value.contract.non_interference[0].operational_digest = [0; 32]),
+                Box::new(|value| value.contract.non_interference[0].authoritative_equal = false),
+                Box::new(|value| value.contract.non_interference[0].public_equal = false),
+                Box::new(|value| value.contract.non_interference[0].operational_equal = false),
+                Box::new(|value| value.contract.non_interference[0].provenance_digest = [0; 32]),
+            ];
+            for mutate in matrix_mutations {
+                let mut invalid = value.clone();
+                mutate(&mut invalid);
+                assert_eq!(
+                    verify_wave8_contract(&invalid),
+                    Err(EvidenceError::InvalidNonInterferenceMatrix)
+                );
+            }
+
+            let room_mutations: Vec<EvidenceMutation> = vec![
+                Box::new(|value| value.contract.scenario_room.input_digest = [8; 32]),
+                Box::new(|value| value.manifest.scenario_room_digest = [8; 32]),
+                Box::new(|value| value.contract.scenario_room.network_enabled = true),
+                Box::new(|value| value.contract.scenario_room.room_id.clear()),
+                Box::new(|value| value.contract.scenario_room.room_digest = [0; 32]),
+                Box::new(|value| value.contract.scenario_room.horizon_ticks = 0),
+                Box::new(|value| value.contract.scenario_room.principals.clear()),
+                Box::new(|value| value.contract.scenario_room.grants.clear()),
+                Box::new(|value| {
+                    value.contract.scenario_room.principals[0].participant_id = "z".to_owned();
+                }),
+                Box::new(|value| {
+                    value.contract.scenario_room.principals[0]
+                        .principal_id
+                        .clear();
+                }),
+                Box::new(|value| {
+                    value.contract.scenario_room.principals[0]
+                        .trust_domain
+                        .clear();
+                }),
+                Box::new(|value| {
+                    value.contract.scenario_room.principals[0].principal_id =
+                        "principal:duplicate".to_owned();
+                    value.contract.scenario_room.grants[0].principal_id =
+                        "principal:duplicate".to_owned();
+                }),
+                Box::new(|value| value.contract.scenario_room.grants[0].grant_id.clear()),
+                Box::new(|value| value.contract.scenario_room.grants[0].capability.clear()),
+                Box::new(|value| value.contract.scenario_room.grants[0].resource.clear()),
+                Box::new(|value| value.contract.scenario_room.grants[0].policy_digest = [0; 32]),
+            ];
+            for mutate in room_mutations {
+                let mut invalid = value.clone();
+                mutate(&mut invalid);
+                assert!(verify_wave8_contract(&invalid).is_err());
+            }
+
+            let knowledge_mutations: Vec<EvidenceMutation> = vec![
+                Box::new(|value| value.contract.knowledge_snapshots[0].snapshot_digest = [0; 32]),
+                Box::new(|value| {
+                    value.contract.knowledge_snapshots[0]
+                        .authorization
+                        .decision_digest = [0; 32];
+                }),
+                Box::new(|value| {
+                    value.contract.knowledge_snapshots[0]
+                        .authorization
+                        .grant_digest = [0; 32];
+                }),
+                Box::new(|value| {
+                    value.contract.knowledge_snapshots[0]
+                        .visible_event_digests
+                        .clear();
+                }),
+                Box::new(|value| {
+                    value.contract.knowledge_snapshots[0].visible_event_seqs = vec![2, 1]
+                }),
+                Box::new(|value| {
+                    value.contract.knowledge_snapshots[0]
+                        .hidden_event_types
+                        .push("operator".to_owned());
+                }),
+                Box::new(|value| {
+                    value.contract.knowledge_snapshots[0].participant_id = "missing".to_owned();
+                }),
+                Box::new(|value| {
+                    value.contract.knowledge_snapshots[0].principal.principal_id =
+                        "missing".to_owned();
+                }),
+                Box::new(|value| {
+                    value.contract.knowledge_snapshots[0]
+                        .principal
+                        .participant_id = "wrong".to_owned();
+                }),
+                Box::new(|value| {
+                    value.contract.knowledge_snapshots[0].grant.resource = "wrong".to_owned();
+                }),
+                Box::new(|value| {
+                    value.contract.knowledge_snapshots[0].authorization.resource =
+                        "wrong".to_owned();
+                }),
+                Box::new(|value| value.contract.knowledge_snapshots[0].consent_epoch = 9),
+                Box::new(|value| {
+                    value.contract.knowledge_snapshots[0].visible_event_seqs = vec![99]
+                }),
+                Box::new(|value| {
+                    value.contract.knowledge_snapshots[0].visible_event_digests = vec![[9; 32]];
+                }),
+                Box::new(|value| {
+                    value.contract.knowledge_snapshots[0].authorization.allowed = false
+                }),
+                Box::new(|value| {
+                    value.contract.knowledge_snapshots[0]
+                        .authorization
+                        .principal_id = "wrong".to_owned();
+                }),
+                Box::new(|value| {
+                    value.contract.knowledge_snapshots[0].grant.principal_id = "wrong".to_owned();
+                }),
+                Box::new(|value| {
+                    value
+                        .contract
+                        .knowledge_snapshots
+                        .push(value.contract.knowledge_snapshots[0].clone());
+                }),
+                Box::new(|value| value.contract.authorization_decisions.clear()),
+                Box::new(|value| value.contract.authorization_decisions[0].allowed = false),
+                Box::new(|value| {
+                    value.contract.authorization_decisions[0].decision_digest = [0; 32]
+                }),
+                Box::new(|value| {
+                    value.contract.authorization_decisions[0].reason = "unmatched".to_owned();
+                }),
+            ];
+            for mutate in knowledge_mutations {
+                let mut invalid = value.clone();
+                mutate(&mut invalid);
+                assert!(verify_wave8_contract(&invalid).is_err());
+            }
+
+            let (_, mut with_intervention) = fork_pair();
+            with_intervention.authoritative_events[1].tick = 2;
+            let action_event = with_intervention.authoritative_events[1].clone();
+            let society_event = with_intervention.authoritative_events[2].clone();
+            let action_node = contract_event_node(&action_event);
+            let society_node = contract_event_node(&society_event);
+            let observation_node = contract_event_node(&with_intervention.authoritative_events[0]);
+            let zero_node = contract_zero_node();
+            let dependency =
+                |consumer: DependencyNodeV1,
+                 source: DependencyNodeV1,
+                 dependency_class: DependencyClassV1| InputDependencyV1 {
+                    consumer,
+                    source,
+                    dependency_class,
+                    authorization_digest: [31; 32],
+                    provenance_digest: [32; 32],
+                };
+            let intervention = InterventionV1 {
+                intervention_id: [33; 16],
+                target: "body".to_owned(),
+                operation: "set_velocity".to_owned(),
+                value_digest: action_event.payload_digest,
+                effective_tick: action_event.tick,
+                ordinal: 0,
+                principal_id: "principal:operator".to_owned(),
+                capability: "intervene".to_owned(),
+                consent_epoch: 0,
+                provenance_digest: [34; 32],
+            };
+            let frontier = &mut with_intervention.contract.counterfactual.frontier;
+            frontier.intervention_seed_nodes = vec![action_node.clone()];
+            frontier.affected_nodes = vec![society_node.clone()];
+            frontier.owner_frontiers = vec![OwnerFrontierV1 {
+                owner_id: society_event.entity.clone(),
+                earliest_tick: society_event.tick,
+                earliest_scheduler_position: society_node.scheduler_position,
+                earliest_output_ordinal: 0,
+                cause_node_digests: vec![action_event.payload_digest],
+            }];
+            frontier.global_frontier_tick = society_event.tick;
+            frontier.global_frontier_scheduler_position = society_node.scheduler_position;
+            frontier.endogenous_suffix_end_tick = society_event.tick;
+            let invalidation = &mut with_intervention.contract.counterfactual.invalidation;
+            invalidation.prior_generation = 0;
+            invalidation.new_generation = 1;
+            invalidation.invalid_start = society_node.clone();
+            invalidation.invalid_end = society_node.clone();
+            invalidation.invalid_artifacts = vec![InvalidArtifactV1 {
+                artifact_class: "event".to_owned(),
+                schema_id: society_node.schema_id,
+                artifact_digest: society_node.artifact_digest,
+                producer: society_node.clone(),
+                prior_generation: 0,
+                reason: SuffixInvalidationReasonV1::NewIntervention,
+            }];
+            invalidation.reason = SuffixInvalidationReasonV1::NewIntervention;
+            invalidation.fork_id = with_intervention.contract.counterfactual.fork_id;
+            let counterfactual = &mut with_intervention.contract.counterfactual;
+            counterfactual.prior_generation = 0;
+            counterfactual.generation = 1;
+            counterfactual.intervention = Some(intervention);
+            counterfactual.dependencies = vec![
+                dependency(
+                    observation_node,
+                    zero_node,
+                    DependencyClassV1::EndogenousRecomputed,
+                ),
+                dependency(
+                    action_node.clone(),
+                    contract_event_node(&with_intervention.authoritative_events[0]),
+                    DependencyClassV1::InterventionAssigned,
+                ),
+                dependency(
+                    society_node,
+                    contract_event_node(&with_intervention.authoritative_events[1]),
+                    DependencyClassV1::EndogenousRecomputed,
+                ),
+            ];
+            counterfactual.recomputed_event_seqs = vec![society_event.seq];
+            assert_eq!(verify_wave8_contract(&with_intervention), Ok(()));
+
+            let mut missing_intervention = with_intervention.clone();
+            if let Some(intervention) = missing_intervention
+                .contract
+                .counterfactual
+                .intervention
+                .as_mut()
+            {
+                intervention.value_digest = [99; 32];
+            }
+            assert_eq!(
+                verify_wave8_contract(&missing_intervention),
+                Err(EvidenceError::InvalidDependencyGraph)
+            );
+            let mut wrong_dependency = with_intervention.clone();
+            wrong_dependency.contract.counterfactual.dependencies[0].source = action_node.clone();
+            assert_eq!(
+                verify_wave8_contract(&wrong_dependency),
+                Err(EvidenceError::InvalidDependencyGraph)
+            );
+            let mut incomplete_suffix = with_intervention.clone();
+            incomplete_suffix
+                .contract
+                .counterfactual
+                .recomputed_event_seqs = vec![action_event.seq];
+            assert_eq!(
+                verify_wave8_contract(&incomplete_suffix),
+                Err(EvidenceError::IncompleteRecomputationContract)
+            );
+            let mut incomplete_frontier = with_intervention.clone();
+            incomplete_frontier.manifest.fork_cut_seq = Some(action_event.seq);
+            assert_eq!(
+                verify_wave8_contract(&incomplete_frontier),
+                Err(EvidenceError::IncompleteRecomputationContract)
+            );
+
+            let mut event_gap = value.authoritative_events.clone();
+            event_gap[1].seq = 3;
+            assert_eq!(
+                event_sequences(&event_gap),
+                Err(EvidenceError::NonContiguousEventSequence)
+            );
+            let mut invalid_counterfactual = value.clone();
+            invalid_counterfactual
+                .contract
+                .counterfactual
+                .contract_digest = [0; 32];
+            assert_eq!(
+                verify_wave8_contract(&invalid_counterfactual),
+                Err(EvidenceError::InvalidDependencyGraph)
+            );
+            let mut unknown_consumer = with_intervention.clone();
+            unknown_consumer.contract.counterfactual.dependencies[0]
+                .consumer
+                .owner_id = "unknown-owner".to_owned();
+            assert_eq!(
+                verify_wave8_contract(&unknown_consumer),
+                Err(EvidenceError::InvalidDependencyGraph)
+            );
+            let mut unexpected_source = with_intervention.clone();
+            unexpected_source.contract.counterfactual.dependencies[1].source = contract_zero_node();
+            assert_eq!(
+                verify_wave8_contract(&unexpected_source),
+                Err(EvidenceError::InvalidDependencyGraph)
+            );
+
+            let shape = value.contract.counterfactual.clone();
+            assert!(verify_counterfactual_record_shapes(&shape));
+            let node = shape.frontier.affected_nodes[0].clone();
+            let mut later_node = node.clone();
+            later_node.tick = later_node.tick.saturating_add(1);
+            later_node.artifact_digest = [2; 32];
+
+            let mut sorted_owners = shape.clone();
+            let mut later_owner = sorted_owners.frontier.owner_frontiers[0].clone();
+            later_owner.earliest_tick = later_owner.earliest_tick.saturating_add(1);
+            later_owner.cause_node_digests = vec![[2; 32]];
+            sorted_owners.frontier.owner_frontiers = vec![
+                sorted_owners.frontier.owner_frontiers[0].clone(),
+                later_owner.clone(),
+            ];
+            assert!(verify_counterfactual_record_shapes(&sorted_owners));
+            sorted_owners.frontier.owner_frontiers.reverse();
+            assert!(!verify_counterfactual_record_shapes(&sorted_owners));
+
+            let mut sorted_seeds = shape.clone();
+            sorted_seeds.frontier.intervention_seed_nodes = vec![node.clone(), later_node.clone()];
+            assert!(verify_counterfactual_record_shapes(&sorted_seeds));
+            sorted_seeds.frontier.intervention_seed_nodes.reverse();
+            assert!(!verify_counterfactual_record_shapes(&sorted_seeds));
+
+            let mut sorted_affected = shape.clone();
+            sorted_affected.frontier.affected_nodes = vec![node.clone(), later_node.clone()];
+            assert!(verify_counterfactual_record_shapes(&sorted_affected));
+            sorted_affected.frontier.affected_nodes.reverse();
+            assert!(!verify_counterfactual_record_shapes(&sorted_affected));
+
+            let mut unknown_edges = shape.clone();
+            unknown_edges.frontier.unknown_edge_policy = UnknownEdgePolicyV1::FullSuffixFromCut;
+            unknown_edges.frontier.unknown_edge_coordinates = vec![later_node.clone()];
+            assert!(verify_counterfactual_record_shapes(&unknown_edges));
+            unknown_edges.frontier.unknown_edge_coordinates.clear();
+            assert!(!verify_counterfactual_record_shapes(&unknown_edges));
+
+            let first_artifact = shape.invalidation.invalid_artifacts[0].clone();
+            let mut later_artifact = first_artifact.clone();
+            later_artifact.artifact_class = "event-2".to_owned();
+            later_artifact.artifact_digest = [2; 32];
+            later_artifact.producer = later_node.clone();
+            let mut sorted_artifacts = shape.clone();
+            sorted_artifacts.invalidation.invalid_artifacts = vec![first_artifact, later_artifact];
+            assert!(verify_counterfactual_record_shapes(&sorted_artifacts));
+            sorted_artifacts.invalidation.invalid_artifacts.reverse();
+            assert!(!verify_counterfactual_record_shapes(&sorted_artifacts));
+
+            for mutate in [
+                |contract: &mut CounterfactualContractV1| {
+                    contract.invalidation.invalid_artifacts[0]
+                        .artifact_class
+                        .clear();
+                },
+                |contract: &mut CounterfactualContractV1| {
+                    contract.invalidation.invalid_artifacts[0].schema_id = 0;
+                },
+                |contract: &mut CounterfactualContractV1| {
+                    contract.invalidation.invalid_artifacts[0].artifact_digest = [0; 32];
+                },
+                |contract: &mut CounterfactualContractV1| {
+                    contract.invalidation.invalid_artifacts[0]
+                        .producer
+                        .owner_id
+                        .clear();
+                },
+                |contract: &mut CounterfactualContractV1| {
+                    contract.invalidation.invalid_artifacts[0].reason =
+                        SuffixInvalidationReasonV1::ChangedIntervention;
+                },
+                |contract: &mut CounterfactualContractV1| {
+                    contract.invalidation.invalidation_id = [0; 16];
+                },
+                |contract: &mut CounterfactualContractV1| {
+                    contract.invalidation.plan_digest = [99; 32];
+                },
+                |contract: &mut CounterfactualContractV1| {
+                    contract.invalidation.fork_id = [99; 16];
+                },
+                |contract: &mut CounterfactualContractV1| {
+                    contract.invalidation.frontier_digest = [99; 32];
+                },
+                |contract: &mut CounterfactualContractV1| {
+                    contract.invalidation.commit_timeline_id = [0; 16];
+                },
+                |contract: &mut CounterfactualContractV1| {
+                    contract.invalidation.provenance_digest = [0; 32];
+                },
+                |contract: &mut CounterfactualContractV1| {
+                    contract.invalidation.invalidation_digest = [0; 32];
+                },
+            ] {
+                let mut invalid_shape = shape.clone();
+                mutate(&mut invalid_shape);
+                assert!(!verify_counterfactual_record_shapes(&invalid_shape));
+            }
+
+            let mut zero_generation = shape.clone();
+            zero_generation.prior_generation = 0;
+            zero_generation.generation = 0;
+            zero_generation.invalidation.new_generation = 0;
+            zero_generation.invalidation.invalid_artifacts.clear();
+            assert!(verify_counterfactual_record_shapes(&zero_generation));
+
+            let mut digest_lists = shape.clone();
+            digest_lists.invalidation.invalid_checkpoint_digests = vec![[1; 32], [2; 32]];
+            digest_lists.invalidation.invalid_projection_digests = vec![[3; 32], [4; 32]];
+            digest_lists.invalidation.retained_exogenous_digests = vec![[5; 32], [6; 32]];
+            assert!(verify_counterfactual_record_shapes(&digest_lists));
+            digest_lists.invalidation.invalid_checkpoint_digests = vec![[1; 32], [1; 32]];
+            assert!(!verify_counterfactual_record_shapes(&digest_lists));
+            digest_lists.invalidation.invalid_checkpoint_digests = vec![[0; 32]];
+            assert!(!verify_counterfactual_record_shapes(&digest_lists));
+
+            let mut sorted_dependencies = shape.clone();
+            let mut later_dependency = sorted_dependencies.dependencies[0].clone();
+            later_dependency.consumer = later_node.clone();
+            later_dependency.source = node.clone();
+            later_dependency.authorization_digest = [6; 32];
+            later_dependency.provenance_digest = [7; 32];
+            sorted_dependencies
+                .dependencies
+                .push(later_dependency.clone());
+            assert!(verify_counterfactual_record_shapes(&sorted_dependencies));
+            sorted_dependencies.dependencies.reverse();
+            assert!(!verify_counterfactual_record_shapes(&sorted_dependencies));
+
+            for mutate in [
+                |contract: &mut CounterfactualContractV1| {
+                    contract.dependencies[0].consumer.schema_id = 0;
+                },
+                |contract: &mut CounterfactualContractV1| {
+                    contract.dependencies[0].authorization_digest = [0; 32];
+                },
+                |contract: &mut CounterfactualContractV1| {
+                    contract.dependencies[0].provenance_digest = [0; 32];
+                },
+                |contract: &mut CounterfactualContractV1| {
+                    contract.dependencies[0].source.tick = 1;
+                    contract.dependencies[0].source.artifact_digest = [9; 32];
+                },
+                |contract: &mut CounterfactualContractV1| {
+                    contract.dependencies[0].source.tick = 1;
+                    contract.dependencies[0].source.owner_id = "other".to_owned();
+                    contract.dependencies[0].source.artifact_digest = [0; 32];
+                },
+            ] {
+                let mut invalid_shape = shape.clone();
+                mutate(&mut invalid_shape);
+                assert!(!verify_counterfactual_record_shapes(&invalid_shape));
+            }
+
+            let mut report_cases = value.clone();
+            let template = report_cases.contract.conformance_report.cases[0].clone();
+            let mut pass = template.clone();
+            pass.case_id = "a-pass".to_owned();
+            pass.mode = ExecutionModeV1::Local;
+            let mut fail = template.clone();
+            fail.case_id = "b-fail".to_owned();
+            fail.mode = ExecutionModeV1::AirGapped;
+            fail.outcome = CaseOutcomeStatusV1::Fail;
+            fail.expected_digest = Some([14; 32]);
+            fail.actual_digest = Some([15; 32]);
+            let mut skip = template.clone();
+            skip.case_id = "c-skip".to_owned();
+            skip.mode = ExecutionModeV1::Replay;
+            skip.outcome = CaseOutcomeStatusV1::Skip;
+            skip.expected_digest = None;
+            skip.actual_digest = Some([15; 32]);
+            let mut unavailable = template.clone();
+            unavailable.case_id = "d-unavailable".to_owned();
+            unavailable.mode = ExecutionModeV1::Fork;
+            unavailable.outcome = CaseOutcomeStatusV1::Unavailable;
+            unavailable.expected_digest = None;
+            unavailable.actual_digest = None;
+            unavailable.expected_error = Some(SafeErrorCodeV1::InvalidEncoding);
+            unavailable.actual_error = None;
+            let mut not_applicable = template;
+            not_applicable.case_id = "e-not-applicable".to_owned();
+            not_applicable.mode = ExecutionModeV1::Local;
+            not_applicable.outcome = CaseOutcomeStatusV1::NotApplicable;
+            not_applicable.expected_digest = None;
+            not_applicable.actual_digest = None;
+            not_applicable.expected_error = None;
+            not_applicable.actual_error = Some(SafeErrorCodeV1::ResourceLimitExceeded);
+            report_cases.contract.conformance_report.cases =
+                vec![pass, fail, skip, unavailable, not_applicable];
+            report_cases.contract.conformance_report.passed = 1;
+            report_cases.contract.conformance_report.failed = 1;
+            report_cases.contract.conformance_report.skipped = 1;
+            report_cases.contract.conformance_report.unavailable = 1;
+            report_cases.contract.conformance_report.not_applicable = 1;
+            assert_eq!(verify_wave8_contract(&report_cases), Ok(()));
+            let mut invalid_report = report_cases.clone();
+            invalid_report.contract.conformance_report.passed = 0;
+            assert_eq!(
+                verify_wave8_contract(&invalid_report),
+                Err(EvidenceError::InvalidConformanceReport)
+            );
+            invalid_report = report_cases.clone();
+            invalid_report.contract.conformance_report.cases.clear();
+            assert_eq!(
+                verify_wave8_contract(&invalid_report),
+                Err(EvidenceError::InvalidConformanceReport)
+            );
+
+            let mut invalid_atomicity = value.clone();
+            invalid_atomicity.contract.atomicity.clear();
+            assert_eq!(
+                verify_wave8_contract(&invalid_atomicity),
                 Err(EvidenceError::IncompleteAtomicityEvidence)
             );
-        }
-        let mut failed_atomicity = value.clone();
-        failed_atomicity.contract.atomicity.push(TickAtomicityV1 {
-            tick: 2,
-            fork_generation: 1,
-            staged_event_count: 0,
-            committed_event_count: 0,
-            state_digest_before: [4; 32],
-            state_digest_after: [4; 32],
-            committed: false,
-            failure_class: Some(PluginFailureClassV1::PluginCrash),
-        });
-        failed_atomicity.plugin_failures.push(PluginFailureV1 {
-            plugin: "world".to_owned(),
-            class: PluginFailureClassV1::PluginCrash,
-            tick: 2,
-            committed: false,
-        });
-        assert_eq!(verify_wave8_contract(&failed_atomicity), Ok(()));
-        failed_atomicity.plugin_failures.clear();
-        assert_eq!(
-            verify_wave8_contract(&failed_atomicity),
-            Err(EvidenceError::IncompleteAtomicityEvidence)
-        );
+            invalid_atomicity = value.clone();
+            invalid_atomicity
+                .contract
+                .atomicity
+                .push(invalid_atomicity.contract.atomicity[0].clone());
+            assert_eq!(
+                verify_wave8_contract(&invalid_atomicity),
+                Err(EvidenceError::IncompleteAtomicityEvidence)
+            );
+            for mutate in [
+                |atomicity: &mut TickAtomicityV1| atomicity.state_digest_before = [0; 32],
+                |atomicity: &mut TickAtomicityV1| atomicity.state_digest_after = [0; 32],
+                |atomicity: &mut TickAtomicityV1| {
+                    atomicity.committed = false;
+                    atomicity.committed_event_count = 1;
+                },
+                |atomicity: &mut TickAtomicityV1| {
+                    atomicity.committed = false;
+                    atomicity.state_digest_after = [3; 32];
+                    atomicity.failure_class = Some(PluginFailureClassV1::PluginCrash);
+                },
+                |atomicity: &mut TickAtomicityV1| {
+                    atomicity.committed = false;
+                    atomicity.failure_class = None;
+                },
+                |atomicity: &mut TickAtomicityV1| {
+                    atomicity.committed = true;
+                    atomicity.committed_event_count = atomicity.staged_event_count + 1;
+                },
+                |atomicity: &mut TickAtomicityV1| {
+                    atomicity.committed = true;
+                    atomicity.failure_class = Some(PluginFailureClassV1::PluginCrash);
+                },
+            ] {
+                let mut invalid = value.clone();
+                mutate(&mut invalid.contract.atomicity[0]);
+                assert_eq!(
+                    verify_wave8_contract(&invalid),
+                    Err(EvidenceError::IncompleteAtomicityEvidence)
+                );
+            }
+            let mut failed_atomicity = value.clone();
+            failed_atomicity.contract.atomicity.push(TickAtomicityV1 {
+                tick: 2,
+                fork_generation: 1,
+                staged_event_count: 0,
+                committed_event_count: 0,
+                state_digest_before: [4; 32],
+                state_digest_after: [4; 32],
+                committed: false,
+                failure_class: Some(PluginFailureClassV1::PluginCrash),
+            });
+            failed_atomicity.plugin_failures.push(PluginFailureV1 {
+                plugin: "world".to_owned(),
+                class: PluginFailureClassV1::PluginCrash,
+                tick: 2,
+                committed: false,
+                staged_event_count: 0,
+                committed_event_count: 0,
+                state_digest_before: [4; 32],
+                state_digest_after: [4; 32],
+                sibling_step_count: 1,
+            });
+            assert_eq!(verify_wave8_contract(&failed_atomicity), Ok(()));
+            failed_atomicity.plugin_failures.clear();
+            assert_eq!(
+                verify_wave8_contract(&failed_atomicity),
+                Err(EvidenceError::IncompleteAtomicityEvidence)
+            );
 
-        let mut invalid_plugin = value.clone();
-        invalid_plugin.contract.plugin_boundary.network_allowed = true;
-        assert_eq!(
-            verify_wave8_contract(&invalid_plugin),
-            Err(EvidenceError::InvalidContract)
-        );
+            let mut invalid_plugin = value.clone();
+            invalid_plugin.contract.plugin_boundary.network_allowed = true;
+            assert_eq!(
+                verify_wave8_contract(&invalid_plugin),
+                Err(EvidenceError::InvalidContract)
+            );
 
-        let mut duplicate_participant = value.clone();
-        let mut duplicate_principal =
-            duplicate_participant.contract.scenario_room.principals[0].clone();
-        duplicate_principal.principal_id = "principal:duplicate".to_owned();
-        let mut duplicate_grant = duplicate_participant.contract.scenario_room.grants[0].clone();
-        duplicate_grant.grant_id = "grant:duplicate".to_owned();
-        duplicate_grant.principal_id = duplicate_principal.principal_id.clone();
-        duplicate_participant
-            .contract
-            .scenario_room
-            .principals
-            .push(duplicate_principal);
-        duplicate_participant
-            .contract
-            .scenario_room
-            .grants
-            .push(duplicate_grant);
-        assert_eq!(
-            verify_wave8_contract(&duplicate_participant),
-            Err(EvidenceError::InvalidContract)
-        );
+            let mut duplicate_participant = value.clone();
+            let mut duplicate_principal =
+                duplicate_participant.contract.scenario_room.principals[0].clone();
+            duplicate_principal.principal_id = "principal:duplicate".to_owned();
+            let mut duplicate_grant =
+                duplicate_participant.contract.scenario_room.grants[0].clone();
+            duplicate_grant.grant_id = "grant:duplicate".to_owned();
+            duplicate_grant.principal_id = duplicate_principal.principal_id.clone();
+            duplicate_participant
+                .contract
+                .scenario_room
+                .principals
+                .push(duplicate_principal);
+            duplicate_participant
+                .contract
+                .scenario_room
+                .grants
+                .push(duplicate_grant);
+            assert_eq!(
+                verify_wave8_contract(&duplicate_participant),
+                Err(EvidenceError::InvalidContract)
+            );
 
-        let mut duplicate_visible_sequence = value.clone();
-        duplicate_visible_sequence.contract.knowledge_snapshots[0].visible_event_seqs = vec![1, 1];
-        duplicate_visible_sequence.contract.knowledge_snapshots[0].visible_event_digests =
-            vec![[1; 32], [1; 32]];
-        assert_eq!(
-            verify_wave8_contract(&duplicate_visible_sequence),
-            Err(EvidenceError::InvalidKnowledgeBoundary)
-        );
+            let mut duplicate_visible_sequence = value.clone();
+            duplicate_visible_sequence.contract.knowledge_snapshots[0].visible_event_seqs =
+                vec![1, 1];
+            duplicate_visible_sequence.contract.knowledge_snapshots[0].visible_event_digests =
+                vec![[1; 32], [1; 32]];
+            assert_eq!(
+                verify_wave8_contract(&duplicate_visible_sequence),
+                Err(EvidenceError::InvalidKnowledgeBoundary)
+            );
 
-        let mut invalid_shape = with_intervention.clone();
-        invalid_shape
-            .contract
-            .counterfactual
-            .frontier
-            .affected_nodes[0]
-            .schema_id = 0;
-        assert_eq!(
-            verify_wave8_contract(&invalid_shape),
-            Err(EvidenceError::InvalidDependencyGraph)
-        );
+            let mut invalid_shape = with_intervention.clone();
+            invalid_shape
+                .contract
+                .counterfactual
+                .frontier
+                .affected_nodes[0]
+                .schema_id = 0;
+            assert_eq!(
+                verify_wave8_contract(&invalid_shape),
+                Err(EvidenceError::InvalidDependencyGraph)
+            );
 
-        let mut invalid_source_tick = with_intervention.clone();
-        invalid_source_tick.contract.counterfactual.dependencies[2]
-            .source
-            .tick = invalid_source_tick.contract.counterfactual.dependencies[2]
-            .consumer
-            .tick;
-        assert_eq!(
-            verify_wave8_contract(&invalid_source_tick),
-            Err(EvidenceError::InvalidDependencyGraph)
-        );
-
-        let mut duplicate_consumer = with_intervention.clone();
-        duplicate_consumer.contract.counterfactual.dependencies[2].consumer =
-            duplicate_consumer.contract.counterfactual.dependencies[1]
+            let mut invalid_source_tick = with_intervention.clone();
+            invalid_source_tick.contract.counterfactual.dependencies[2]
+                .source
+                .tick = invalid_source_tick.contract.counterfactual.dependencies[2]
                 .consumer
-                .clone();
-        duplicate_consumer.contract.counterfactual.dependencies[2]
-            .source
-            .tick = 0;
-        duplicate_consumer.contract.counterfactual.dependencies[2]
-            .source
-            .owner_id = "other-source".to_owned();
-        duplicate_consumer.contract.counterfactual.dependencies[2]
-            .source
-            .artifact_digest = [5; 32];
-        assert_eq!(
-            verify_wave8_contract(&duplicate_consumer),
-            Err(EvidenceError::InvalidDependencyGraph)
-        );
+                .tick;
+            invalid_source_tick.contract.counterfactual.dependencies[2]
+                .source
+                .scheduler_position = invalid_source_tick.contract.counterfactual.dependencies[2]
+                .consumer
+                .scheduler_position;
+            assert_eq!(
+                verify_wave8_contract(&invalid_source_tick),
+                Err(EvidenceError::InvalidDependencyGraph)
+            );
 
-        let mut invalid_coordinate = report_cases.clone();
-        invalid_coordinate.contract.conformance_report.cases[0].first_coordinate =
-            Some("x".repeat(129));
-        assert_eq!(
-            verify_wave8_contract(&invalid_coordinate),
-            Err(EvidenceError::InvalidConformanceReport)
-        );
+            let mut duplicate_consumer = with_intervention.clone();
+            duplicate_consumer.contract.counterfactual.dependencies[2].consumer =
+                duplicate_consumer.contract.counterfactual.dependencies[1]
+                    .consumer
+                    .clone();
+            duplicate_consumer.contract.counterfactual.dependencies[2]
+                .source
+                .tick = 0;
+            duplicate_consumer.contract.counterfactual.dependencies[2]
+                .source
+                .owner_id = "other-source".to_owned();
+            duplicate_consumer.contract.counterfactual.dependencies[2]
+                .source
+                .artifact_digest = [5; 32];
+            assert_eq!(
+                verify_wave8_contract(&duplicate_consumer),
+                Err(EvidenceError::InvalidDependencyGraph)
+            );
 
-        let mut duplicate_reviewers = report_cases.clone();
-        duplicate_reviewers
-            .contract
-            .conformance_report
-            .independence
-            .reviewer_ids = vec!["reviewer".to_owned(), "reviewer".to_owned()];
-        assert_eq!(
-            verify_wave8_contract(&duplicate_reviewers),
-            Err(EvidenceError::InvalidConformanceReport)
-        );
+            let mut invalid_coordinate = report_cases.clone();
+            invalid_coordinate.contract.conformance_report.cases[0].first_coordinate =
+                Some("x".repeat(129));
+            assert_eq!(
+                verify_wave8_contract(&invalid_coordinate),
+                Err(EvidenceError::InvalidConformanceReport)
+            );
 
-        let mut unsorted_owner_causes = shape.clone();
-        unsorted_owner_causes.frontier.owner_frontiers[0].cause_node_digests =
-            vec![[2; 32], [1; 32]];
-        assert!(!verify_counterfactual_record_shapes(&unsorted_owner_causes));
+            let mut duplicate_reviewers = report_cases.clone();
+            duplicate_reviewers
+                .contract
+                .conformance_report
+                .independence
+                .reviewer_ids = vec!["reviewer".to_owned(), "reviewer".to_owned()];
+            assert_eq!(
+                verify_wave8_contract(&duplicate_reviewers),
+                Err(EvidenceError::InvalidConformanceReport)
+            );
 
-        let mut unsorted_unknown_edges = shape.clone();
-        unsorted_unknown_edges.frontier.unknown_edge_policy =
-            UnknownEdgePolicyV1::FullSuffixFromCut;
-        unsorted_unknown_edges.frontier.unknown_edge_coordinates =
-            vec![later_node.clone(), node.clone()];
-        assert!(!verify_counterfactual_record_shapes(
-            &unsorted_unknown_edges
-        ));
+            let mut unsorted_owner_causes = shape.clone();
+            unsorted_owner_causes.frontier.owner_frontiers[0].cause_node_digests =
+                vec![[2; 32], [1; 32]];
+            assert!(!verify_counterfactual_record_shapes(&unsorted_owner_causes));
 
-        let (fork_baseline, fork_counterfactual) = fork_pair();
-        let mut invalid_fork_baseline = fork_baseline.clone();
-        invalid_fork_baseline
-            .contract
-            .plugin_boundary
-            .network_allowed = true;
-        assert_eq!(
-            verify_counterfactual_fork(
-                &invalid_fork_baseline,
-                &fork_counterfactual,
-                "world.action.v1"
-            ),
-            Err(EvidenceError::IncompleteForkSuffix)
-        );
+            let mut unsorted_unknown_edges = shape.clone();
+            unsorted_unknown_edges.frontier.unknown_edge_policy =
+                UnknownEdgePolicyV1::FullSuffixFromCut;
+            unsorted_unknown_edges.frontier.unknown_edge_coordinates =
+                vec![later_node.clone(), node.clone()];
+            assert!(!verify_counterfactual_record_shapes(
+                &unsorted_unknown_edges
+            ));
+
+            let (fork_baseline, fork_counterfactual) = fork_pair();
+            let mut invalid_fork_baseline = fork_baseline.clone();
+            invalid_fork_baseline
+                .contract
+                .plugin_boundary
+                .network_allowed = true;
+            assert_eq!(
+                verify_counterfactual_fork(
+                    &invalid_fork_baseline,
+                    &fork_counterfactual,
+                    "world.action.v1"
+                ),
+                Err(EvidenceError::IncompleteForkSuffix)
+            );
+        }};
+    }
+
+    #[test]
+    fn covers_remaining_typed_verifier_boundaries() {
+        typed_verifier_boundary_cases!();
     }
 
     fn fork_pair() -> (MoatProofEvidenceV1, MoatProofEvidenceV1) {
@@ -7480,6 +7822,7 @@ pub(crate) mod tests {
         let marker = baseline.authoritative_events.remove(2);
         baseline.authoritative_events.push(AuthoritativeEventV1 {
             seq: 3,
+            tick: 2,
             entity: "society".to_owned(),
             event_type: "society.signal".to_owned(),
             payload_digest: [3; 32],
@@ -7614,7 +7957,7 @@ pub(crate) mod tests {
             VerificationResultV1::from_canonical_cbor(&result_bytes)?,
             result
         );
-        let mut trailing = result_bytes.clone();
+        let mut trailing = result_bytes;
         trailing.push(0);
         assert!(VerificationResultV1::from_canonical_cbor(&trailing).is_err());
 

@@ -29,6 +29,14 @@ pub struct ReferenceComparisonV1 {
     pub divergence: ReferenceDivergenceV1,
 }
 
+/// The semantic output of the independent fixture reproducer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReferenceFixtureResultV1 {
+    pub event_count: u64,
+    pub event_type_counts: Vec<(String, u64)>,
+    pub causal_edges: Vec<(u64, u64)>,
+}
+
 /// Error returned when a fixture is not a Wave 8 evidence object.
 #[derive(Debug, thiserror::Error)]
 pub enum ReferenceError {
@@ -47,6 +55,7 @@ pub enum ReferenceError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ReferenceEvent {
     seq: u64,
+    tick: u64,
     entity: String,
     event_type: String,
     payload_digest: serde_json::Value,
@@ -70,47 +79,118 @@ pub fn verify_fork_json(
 ) -> Result<(), ReferenceError> {
     let baseline = parse(baseline)?;
     let counterfactual = parse(counterfactual)?;
-    let baseline_manifest = baseline
-        .get("manifest")
-        .and_then(serde_json::Value::as_object)
-        .ok_or(ReferenceError::MissingField("manifest"))?;
-    let counterfactual_manifest = counterfactual
-        .get("manifest")
-        .and_then(serde_json::Value::as_object)
-        .ok_or(ReferenceError::MissingField("manifest"))?;
+    let cut = validate_pair_metadata(&baseline, &counterfactual)?;
+    validate_contract(&baseline)?;
+    validate_contract(&counterfactual)?;
+    verify_fork_suffix(&baseline, &counterfactual, cut, intervention_event_type)
+}
+
+/// Reproduce the public reaction-chain result from one portable fixture.
+///
+/// This is a second implementation of the fixture's public semantics. It
+/// consumes only the JSON event summaries and independently derives counts and
+/// causal edges; it does not call the host, conformance crate, or Plugins.
+///
+/// # Errors
+/// Returns [`ReferenceError`] when the fixture is malformed or does not carry
+/// the complete physical-to-agent-to-society chain.
+pub fn reproduce_fixture_json(value: &str) -> Result<ReferenceFixtureResultV1, ReferenceError> {
+    let object = parse(value)?;
+    let events = events(&object)?;
+    verify_reference_kernel(&events)?;
+    let has_agent_observation_edge = events.iter().any(|event| {
+        event.event_type == "proof.agent.reaction.v1"
+            && event.causation_seq.is_some_and(|cause_seq| {
+                events.iter().any(|cause| {
+                    cause.seq == cause_seq && cause.event_type == "world.observation.v1"
+                })
+            })
+    });
+    let has_society_agent_edge = events.iter().any(|event| {
+        event.event_type == "society.signal"
+            && event.causation_seq.is_some_and(|cause_seq| {
+                events.iter().any(|cause| {
+                    cause.seq == cause_seq && cause.event_type == "proof.agent.reaction.v1"
+                })
+            })
+    });
+    if !has_agent_observation_edge || !has_society_agent_edge {
+        return Err(ReferenceError::InvalidForkEvidence(
+            "independent fixture reaction chain is incomplete",
+        ));
+    }
+    let mut counts = BTreeMap::<String, u64>::new();
+    for event in &events {
+        let count = counts.entry(event.event_type.clone()).or_default();
+        *count = count.saturating_add(1);
+    }
+    let causal_edges = events
+        .iter()
+        .filter_map(|event| event.causation_seq.map(|cause| (cause, event.seq)))
+        .collect();
+    Ok(ReferenceFixtureResultV1 {
+        event_count: u64::try_from(events.len()).unwrap_or(u64::MAX),
+        event_type_counts: counts.into_iter().collect(),
+        causal_edges,
+    })
+}
+
+fn validate_pair_metadata(
+    baseline: &serde_json::Map<String, serde_json::Value>,
+    counterfactual: &serde_json::Map<String, serde_json::Value>,
+) -> Result<u64, ReferenceError> {
+    let baseline_manifest = manifest(baseline)?;
+    let counterfactual_manifest = manifest(counterfactual)?;
     if baseline_manifest.get("input_digest") != counterfactual_manifest.get("input_digest")
         || baseline_manifest.get("fork_cut_seq") != counterfactual_manifest.get("fork_cut_seq")
     {
         return Err(ReferenceError::InvalidForkEvidence("manifest mismatch"));
     }
-    for evidence in [&baseline, &counterfactual] {
-        let contract = evidence
-            .get("contract")
-            .and_then(serde_json::Value::as_object)
-            .ok_or(ReferenceError::MissingField("contract"))?;
-        let boundary = contract
-            .get("plugin_boundary")
-            .and_then(serde_json::Value::as_object)
-            .ok_or(ReferenceError::InvalidForkEvidence(
-                "plugin boundary is not an object",
-            ))?;
-        validate_plugin_boundary_shape(boundary)?;
-        let matrix =
-            contract
-                .get("non_interference")
-                .ok_or(ReferenceError::InvalidForkEvidence(
-                    "non-interference matrix is missing",
-                ))?;
-        validate_non_interference_matrix(matrix)?;
-    }
-    let Some(cut) = counterfactual_manifest
+    counterfactual_manifest
         .get("fork_cut_seq")
         .and_then(serde_json::Value::as_u64)
-    else {
-        return Err(ReferenceError::InvalidForkEvidence("fork cut is absent"));
-    };
-    let baseline_events = events(&baseline)?;
-    let counterfactual_events = events(&counterfactual)?;
+        .ok_or(ReferenceError::InvalidForkEvidence("fork cut is absent"))
+}
+
+fn manifest(
+    evidence: &serde_json::Map<String, serde_json::Value>,
+) -> Result<&serde_json::Map<String, serde_json::Value>, ReferenceError> {
+    evidence
+        .get("manifest")
+        .and_then(serde_json::Value::as_object)
+        .ok_or(ReferenceError::MissingField("manifest"))
+}
+
+fn validate_contract(
+    evidence: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), ReferenceError> {
+    let contract = evidence
+        .get("contract")
+        .and_then(serde_json::Value::as_object)
+        .ok_or(ReferenceError::MissingField("contract"))?;
+    let boundary = contract
+        .get("plugin_boundary")
+        .and_then(serde_json::Value::as_object)
+        .ok_or(ReferenceError::InvalidForkEvidence(
+            "plugin boundary is not an object",
+        ))?;
+    validate_plugin_boundary_shape(boundary)?;
+    let matrix = contract
+        .get("non_interference")
+        .ok_or(ReferenceError::InvalidForkEvidence(
+            "non-interference matrix is missing",
+        ))?;
+    validate_non_interference_matrix(matrix)
+}
+
+fn verify_fork_suffix(
+    baseline: &serde_json::Map<String, serde_json::Value>,
+    counterfactual: &serde_json::Map<String, serde_json::Value>,
+    cut: u64,
+    intervention_event_type: &str,
+) -> Result<(), ReferenceError> {
+    let baseline_events = events(baseline)?;
+    let counterfactual_events = events(counterfactual)?;
     verify_reference_kernel(&baseline_events)?;
     verify_reference_kernel(&counterfactual_events)?;
     let prefix = |events: &[ReferenceEvent]| {
@@ -187,7 +267,7 @@ fn is_endogenous_event(event_type: &str) -> bool {
 /// small independent model: it checks the reaction chain, not private payload
 /// representation or generated Event IDs.
 fn verify_reference_kernel(events: &[ReferenceEvent]) -> Result<(), ReferenceError> {
-    if events.first().map_or(true, |event| event.seq != 1)
+    if events.first().is_none_or(|event| event.seq != 1)
         || events
             .windows(2)
             .any(|pair| pair[1].seq != pair[0].seq.saturating_add(1))
@@ -259,6 +339,10 @@ fn events(
             let seq = event.get("seq").and_then(serde_json::Value::as_u64).ok_or(
                 ReferenceError::InvalidForkEvidence("Event sequence is invalid"),
             )?;
+            let tick = event
+                .get("tick")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or(ReferenceError::InvalidForkEvidence("Event tick is invalid"))?;
             let event_type = event
                 .get("event_type")
                 .and_then(serde_json::Value::as_str)
@@ -286,6 +370,7 @@ fn events(
             };
             Ok(ReferenceEvent {
                 seq,
+                tick,
                 entity,
                 event_type,
                 payload_digest,
@@ -729,6 +814,7 @@ mod tests {
             },
             "authoritative_events": [{
                 "seq": 1,
+                "tick": 1,
                 "entity": "body",
                 "event_type": "world.observation.v1",
                 "payload_digest": [1],
@@ -895,6 +981,7 @@ mod tests {
         let event = |seq, entity, event_type, payload_digest, causation_seq| {
             serde_json::json!({
                 "seq": seq,
+                "tick": seq,
                 "entity": entity,
                 "event_type": event_type,
                 "payload_digest": [payload_digest],
@@ -1055,6 +1142,7 @@ mod tests {
         let mut incomplete_kernel = parse_json(&counterfactual)?;
         incomplete_kernel["authoritative_events"] = serde_json::json!([{
             "seq": 1,
+            "tick": 1,
             "entity": "body",
             "event_type": "world.observation.v1",
             "payload_digest": [1],
@@ -1108,22 +1196,22 @@ mod tests {
         cycle_baseline["manifest"]["fork_cut_seq"] = serde_json::json!(3);
         array_mut(&mut cycle_baseline["authoritative_events"])?.extend([
             serde_json::json!({
-                "seq": 4, "entity": "world", "event_type": "custom.action",
+                "seq": 4, "tick": 2, "entity": "world", "event_type": "custom.action",
                 "payload_digest": [8], "causation_seq": 3
             }),
             serde_json::json!({
-                "seq": 5, "entity": "custom", "event_type": "custom.event",
+                "seq": 5, "tick": 2, "entity": "custom", "event_type": "custom.event",
                 "payload_digest": [9], "causation_seq": 4
             }),
         ]);
         let mut cycle_counterfactual = cycle_baseline.clone();
         array_mut(&mut cycle_counterfactual["authoritative_events"])?.extend([
             serde_json::json!({
-                "seq": 6, "entity": "custom", "event_type": "custom.event",
+                "seq": 6, "tick": 3, "entity": "custom", "event_type": "custom.event",
                 "payload_digest": [10], "causation_seq": 7
             }),
             serde_json::json!({
-                "seq": 7, "entity": "custom", "event_type": "custom.event",
+                "seq": 7, "tick": 3, "entity": "custom", "event_type": "custom.event",
                 "payload_digest": [11], "causation_seq": 6
             }),
         ]);
@@ -1166,6 +1254,12 @@ mod tests {
 
     #[test]
     fn rejects_malformed_reference_events_and_manifests() -> Result<(), ReferenceError> {
+        rejects_missing_evidence_fields()?;
+        rejects_malformed_event_shapes()?;
+        rejects_malformed_manifest_fields()
+    }
+
+    fn rejects_missing_evidence_fields() -> Result<(), ReferenceError> {
         let (baseline, counterfactual) = fork_fixture();
         let mut missing_baseline_manifest = parse_json(&baseline)?;
         missing_baseline_manifest["manifest"] = serde_json::Value::Null;
@@ -1233,7 +1327,11 @@ mod tests {
                 "contract field is missing"
             ))
         ));
+        Ok(())
+    }
 
+    fn rejects_malformed_event_shapes() -> Result<(), ReferenceError> {
+        let (baseline, counterfactual) = fork_fixture();
         let mut cases = Vec::new();
         cases.push(serde_json::json!("not-an-event"));
         cases.push(serde_json::json!({"entity": "body"}));
@@ -1257,7 +1355,11 @@ mod tests {
                 Err(ReferenceError::InvalidForkEvidence(_))
             ));
         }
+        Ok(())
+    }
 
+    fn rejects_malformed_manifest_fields() -> Result<(), ReferenceError> {
+        let (baseline, counterfactual) = fork_fixture();
         let mut missing_manifest = parse_json(&counterfactual)?;
         object_mut(&mut missing_manifest)?.remove("manifest");
         assert!(matches!(
@@ -1302,6 +1404,12 @@ mod tests {
 
     #[test]
     fn rejects_every_contract_and_matrix_shape_boundary() -> Result<(), ReferenceError> {
+        rejects_contract_field_shapes()?;
+        rejects_plugin_boundary_shapes()?;
+        rejects_matrix_shapes()
+    }
+
+    fn rejects_contract_field_shapes() -> Result<(), ReferenceError> {
         let (baseline, counterfactual) = fork_fixture();
         let contract_fields = [
             "scenario_room",
@@ -1351,7 +1459,11 @@ mod tests {
                 "contract shape is invalid"
             ))
         ));
+        Ok(())
+    }
 
+    fn rejects_plugin_boundary_shapes() -> Result<(), ReferenceError> {
+        let (baseline, counterfactual) = fork_fixture();
         let boundary_fields = [
             ("manifest_version", serde_json::json!(2)),
             ("plugin_id", serde_json::json!("")),
@@ -1406,7 +1518,11 @@ mod tests {
                 "plugin boundary semantics are invalid"
             ))
         ));
+        Ok(())
+    }
 
+    fn rejects_matrix_shapes() -> Result<(), ReferenceError> {
+        let (baseline, counterfactual) = fork_fixture();
         let matrix_cases = [
             ("fixture_id", serde_json::json!("wrong")),
             ("variant", serde_json::json!("wrong")),
