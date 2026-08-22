@@ -41,7 +41,7 @@ serde_json = "1"
 ciborium = "0.2"
 
 # IDs
-ulid = { version = "2", features = ["serde"] }
+ulid = { version = "3", features = ["serde"] }
 
 # Zero-copy byte buffers
 bytes = "1"
