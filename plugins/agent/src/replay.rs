@@ -171,10 +171,6 @@ impl AgentDecisionReplayVerifier {
     /// Returns [`ReplayVerificationError`] for mismatched segments, unordered
     /// evidence headers, or invalid/mismatched target decisions and actions.
     ///
-    /// # Panics
-    ///
-    /// This method panics only if the verifier's private constructor invariant
-    /// is violated and its timeline ancestry is empty.
     pub fn verify_recovery(
         &self,
         evidence: &DriverRecoveryEvidence,
@@ -187,10 +183,9 @@ impl AgentDecisionReplayVerifier {
             .iter()
             .map(verification_event)
             .collect::<Vec<_>>();
-        let last_segment = self
-            .timeline_segments
-            .last()
-            .expect("replay verifier always has a non-empty timeline ancestry");
+        let Some(last_segment) = self.timeline_segments.last() else {
+            return Err(ReplayVerificationError::InvalidTimelineAncestry);
+        };
         validate_recovery_sequence(&events, last_segment.through())?;
         let state = self.verify_events(&events, ReplayState::default())?;
         Ok(ReplayCheckpoint {
@@ -258,7 +253,7 @@ impl AgentDecisionReplayVerifier {
         let catalogue_hash = self
             .catalogue
             .hash()
-            .expect("validated action catalogue must hash");
+            .map_err(|_| ReplayVerificationError::DecisionRecordMismatch)?;
         let expected_timeline = self
             .timeline_segments
             .iter()
@@ -273,7 +268,7 @@ impl AgentDecisionReplayVerifier {
             && request.provenance() == &self.provenance;
         let request_hash = request
             .hash()
-            .expect("validated decision request must hash");
+            .map_err(|_| ReplayVerificationError::DecisionRecordMismatch)?;
         if matches_host && record.request_hash() == request_hash {
             Ok(())
         } else {
@@ -291,7 +286,9 @@ impl AgentDecisionReplayVerifier {
         if !self.is_target_action(event) {
             return Err(ReplayVerificationError::MissingOrMismatchedAcceptedAction);
         }
-        let record_hash = record.hash().expect("validated decision record must hash");
+        let record_hash = record
+            .hash()
+            .map_err(|_| ReplayVerificationError::DecisionRecordMismatch)?;
         let expected = AgentActionV1::try_new(
             action_id.to_owned(),
             confidence,
@@ -299,9 +296,9 @@ impl AgentDecisionReplayVerifier {
             record.request().catalogue_hash(),
             record_hash,
         )
-        .expect("validated decision record must produce a valid action")
+        .map_err(|_| ReplayVerificationError::MissingOrMismatchedAcceptedAction)?
         .encode()
-        .expect("validated agent action must encode");
+        .map_err(|_| ReplayVerificationError::MissingOrMismatchedAcceptedAction)?;
         if event.payload != Some(expected.as_slice()) {
             return Err(ReplayVerificationError::MissingOrMismatchedAcceptedAction);
         }
@@ -362,8 +359,10 @@ fn verification_event(event: &RecoveryEvent) -> VerificationEvent<'_> {
 
 fn validate_source_sequence(events: &[Event]) -> Result<Seq, ReplayVerificationError> {
     for (index, event) in events.iter().enumerate() {
-        let expected =
-            u64::try_from(index).expect("an in-memory Event slice length cannot exceed u64") + 1;
+        let expected = u64::try_from(index)
+            .map_err(|_| ReplayVerificationError::DriverTickOverflow)?
+            .checked_add(1)
+            .ok_or(ReplayVerificationError::DriverTickOverflow)?;
         if event.seq.as_u64() != expected {
             return Err(ReplayVerificationError::NonContiguousSourceSequence {
                 expected,

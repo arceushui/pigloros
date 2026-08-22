@@ -88,6 +88,17 @@ pub fn public_key_from_verifying_key(vk: &VerifyingKey) -> PublicKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Debug;
+
+    trait TestResultExt<T, E> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error>>;
+    }
+
+    impl<T, E: Debug> TestResultExt<T, E> for Result<T, E> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error>> {
+            self.map_err(|error| format!("unexpected error: {error:?}").into())
+        }
+    }
 
     fn payload(b: &[u8]) -> CanonicalBytes {
         CanonicalBytes::from_vec(b.to_vec())
@@ -133,11 +144,13 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn public_key_round_trip_via_verifying_key() {
+    fn public_key_round_trip_via_verifying_key() -> Result<(), Box<dyn std::error::Error>> {
         let (_, vk) = generate_keypair();
         let pk = public_key_from_verifying_key(&vk);
-        let vk2 = verifying_key_from_public_key(&pk).unwrap();
+        let vk2 = verifying_key_from_public_key(&pk).test_ok()?;
         assert_eq!(vk.to_bytes(), vk2.to_bytes());
+
+        Ok(())
     }
 
     #[test]
@@ -188,7 +201,7 @@ mod tests {
             id: EventId::new(),
             entity: EntityId::new(),
             event_type: Kind::new("t"),
-            payload: p.clone(),
+            payload: p,
             wall_time: WallTime::from_micros(1),
             seq: Seq::from_u64(1),
             causation_id: None,

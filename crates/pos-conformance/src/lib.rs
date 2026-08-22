@@ -102,20 +102,18 @@ impl MoatProofInputV1 {
         Ok(())
     }
 
-    /// Return a domain-separated digest of the exact input envelope.
+    /// Return a domain-separated digest of the exact canonical input envelope.
     ///
-    /// # Panics
-    /// Panics only if the statically serializable input type cannot be encoded.
-    #[must_use]
-    pub fn digest(&self) -> [u8; 32] {
-        let bytes = serde_json::to_vec(self).expect("input serialization is infallible");
-        *blake3::hash(
-            &[b'P', b'I', b'1', 0]
-                .into_iter()
-                .chain(bytes)
-                .collect::<Vec<_>>(),
-        )
-        .as_bytes()
+    /// # Errors
+    /// Returns the canonical-CBOR serialization error when the input cannot be
+    /// represented by the shared deterministic codec.
+    #[must_use = "the input digest is needed for deterministic identity"]
+    pub fn digest(&self) -> Result<[u8; 32], pos_core::CoreError> {
+        let bytes = pos_crypto::canonical::encode(self)?;
+        let mut input = Vec::with_capacity(4 + bytes.as_slice().len());
+        input.extend_from_slice(&[b'P', b'I', b'1', 0]);
+        input.extend_from_slice(bytes.as_slice());
+        Ok(*blake3::hash(&input).as_bytes())
     }
 }
 
@@ -153,7 +151,7 @@ pub struct AuthoritativeEventV1 {
 }
 
 /// One projection state at the evidence boundary.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectionEvidenceV1 {
     pub reducer: String,
@@ -301,18 +299,16 @@ impl MoatProofEvidenceV1 {
 
     /// Return the canonical digest of this evidence envelope.
     ///
-    /// # Panics
-    /// Panics only if the statically serializable evidence type cannot be encoded.
-    #[must_use]
-    pub fn digest(&self) -> [u8; 32] {
-        let bytes = serde_json::to_vec(self).expect("evidence serialization is infallible");
-        *blake3::hash(
-            &[b'E', b'V', b'1', 0]
-                .into_iter()
-                .chain(bytes)
-                .collect::<Vec<_>>(),
-        )
-        .as_bytes()
+    /// # Errors
+    /// Returns the canonical-CBOR serialization error when the envelope cannot
+    /// be represented by the shared deterministic codec.
+    #[must_use = "the evidence digest is needed for comparison or verification"]
+    pub fn digest(&self) -> Result<[u8; 32], pos_core::CoreError> {
+        let bytes = pos_crypto::canonical::encode(self)?;
+        let mut input = Vec::with_capacity(4 + bytes.as_slice().len());
+        input.extend_from_slice(&[b'E', b'V', b'1', 0]);
+        input.extend_from_slice(bytes.as_slice());
+        Ok(*blake3::hash(&input).as_bytes())
     }
 }
 
@@ -339,8 +335,15 @@ pub struct ComparisonV1 {
 }
 
 /// Compare the authoritative and derived portions of two proof artifacts.
-#[must_use]
-pub fn compare(left: &MoatProofEvidenceV1, right: &MoatProofEvidenceV1) -> ComparisonV1 {
+///
+/// # Errors
+/// Returns the canonical-CBOR serialization error if either artifact cannot be
+/// represented by the shared deterministic codec.
+#[must_use = "the comparison result is needed to classify the artifacts"]
+pub fn compare(
+    left: &MoatProofEvidenceV1,
+    right: &MoatProofEvidenceV1,
+) -> Result<ComparisonV1, pos_core::CoreError> {
     let manifests_match = left.manifest.format_version == right.manifest.format_version
         && left.manifest.input_digest == right.manifest.input_digest
         && left.manifest.fork_cut_seq == right.manifest.fork_cut_seq
@@ -373,12 +376,12 @@ pub fn compare(left: &MoatProofEvidenceV1, right: &MoatProofEvidenceV1) -> Compa
     } else {
         DivergenceClassV1::None
     };
-    ComparisonV1 {
+    Ok(ComparisonV1 {
         equal: divergence == DivergenceClassV1::None,
         divergence,
-        left_digest: left.digest(),
-        right_digest: right.digest(),
-    }
+        left_digest: left.digest()?,
+        right_digest: right.digest()?,
+    })
 }
 
 /// Validate the invariants an independent evaluator can check without the
@@ -580,10 +583,12 @@ fn verify_participant_views(
             {
                 return Err(EvidenceError::InvalidParticipantView);
             }
-            let authoritative = authoritative_events
+            let Some(authoritative) = authoritative_events
                 .iter()
                 .find(|candidate| candidate.seq == event.seq)
-                .expect("visible event sequence is authoritative");
+            else {
+                return Err(EvidenceError::InvalidParticipantView);
+            };
             if authoritative.event_type != event.event_type
                 || authoritative.payload_digest != event.payload_digest
             {
@@ -777,7 +782,7 @@ mod tests {
             format_version: EVIDENCE_FORMAT_V1,
             manifest: ReproManifestV1 {
                 format_version: EVIDENCE_FORMAT_V1,
-                input_digest: input.digest(),
+                input_digest: [1; 32],
                 execution_mode: ExecutionModeV1::Local,
                 fork_cut_seq: Some(2),
                 seed: input.random_seed,
@@ -853,14 +858,14 @@ mod tests {
     }
 
     #[test]
-    fn validates_parameterized_input_and_hashes_it() {
+    fn validates_parameterized_input_and_hashes_it() -> Result<(), pos_core::CoreError> {
         let value = input();
         assert!(value.validate().is_ok());
-        assert_ne!(value.digest(), {
-            let mut changed = value.clone();
-            changed.random_seed += 1;
-            changed.digest()
-        });
+        let digest = value.digest()?;
+        let mut changed = value;
+        changed.random_seed += 1;
+        assert_ne!(digest, changed.digest()?);
+        Ok(())
     }
 
     #[test]
@@ -898,56 +903,58 @@ mod tests {
     }
 
     #[test]
-    fn compares_equal_and_classifies_event_divergence() {
+    fn compares_equal_and_classifies_event_divergence() -> Result<(), pos_core::CoreError> {
         let left = evidence();
         let mut right = left.clone();
-        assert_eq!(compare(&left, &right).divergence, DivergenceClassV1::None);
+        assert_eq!(compare(&left, &right)?.divergence, DivergenceClassV1::None);
         right.authoritative_events[0].payload_digest = [2; 32];
-        let comparison = compare(&left, &right);
+        let comparison = compare(&left, &right)?;
         assert!(!comparison.equal);
         assert_eq!(
             comparison.divergence,
             DivergenceClassV1::AuthoritativeEvents
         );
         assert_ne!(comparison.left_digest, comparison.right_digest);
+        Ok(())
     }
 
     #[test]
-    fn compares_metadata_projection_and_trace_divergence() {
+    fn compares_metadata_projection_and_trace_divergence() -> Result<(), pos_core::CoreError> {
         let left = evidence();
         let mut right = left.clone();
         right.manifest.seed += 1;
         assert_eq!(
-            compare(&left, &right).divergence,
+            compare(&left, &right)?.divergence,
             DivergenceClassV1::Metadata
         );
         right = left.clone();
         right.projections[0].state = serde_json::json!({"x": 2});
         assert_eq!(
-            compare(&left, &right).divergence,
+            compare(&left, &right)?.divergence,
             DivergenceClassV1::Projections
         );
         right = left;
         right.causal_trace[0].effect_seq += 1;
         assert_eq!(
-            compare(&evidence(), &right).divergence,
+            compare(&evidence(), &right)?.divergence,
             DivergenceClassV1::CausalTrace
         );
+        Ok(())
     }
 
     #[test]
-    fn compares_observability_divergence() {
+    fn compares_observability_divergence() -> Result<(), pos_core::CoreError> {
         let left = evidence();
         let mut right = left.clone();
         right.uncertainty[0].confidence = 0.8;
         assert_eq!(
-            compare(&left, &right).divergence,
+            compare(&left, &right)?.divergence,
             DivergenceClassV1::Observability
         );
         right = left.clone();
         right.participant_views[0].hidden_event_types.clear();
         assert_eq!(
-            compare(&left, &right).divergence,
+            compare(&left, &right)?.divergence,
             DivergenceClassV1::Observability
         );
         right = left.clone();
@@ -958,15 +965,16 @@ mod tests {
             committed: false,
         });
         assert_eq!(
-            compare(&left, &right).divergence,
+            compare(&left, &right)?.divergence,
             DivergenceClassV1::Observability
         );
         right = left;
         right.consent_audit.halted_at_tick_boundary = false;
         assert_eq!(
-            compare(&evidence(), &right).divergence,
+            compare(&evidence(), &right)?.divergence,
             DivergenceClassV1::Observability
         );
+        Ok(())
     }
 
     #[test]
@@ -1212,7 +1220,7 @@ mod tests {
 
     #[test]
     fn verifier_rejects_each_consent_boundary() {
-        let cases: Vec<Box<dyn Fn(&mut MoatProofEvidenceV1)>> = vec![
+        let cases: Vec<EvidenceMutation> = vec![
             Box::new(|value| value.consent_audit.subject.clear()),
             Box::new(|value| value.consent_audit.revocation_event_type = "other".to_owned()),
             Box::new(|value| value.consent_audit.effective_after_seq = 0),
@@ -1315,7 +1323,7 @@ mod tests {
             verify_counterfactual_fork(&baseline, &invalid, "world.action.v1"),
             Err(EvidenceError::IncompleteForkSuffix)
         );
-        let mut invalid = counterfactual.clone();
+        let mut invalid = counterfactual;
         invalid.authoritative_events[2].causation_seq = Some(1);
         invalid.causal_trace[1].cause_seq = 1;
         assert_eq!(
@@ -1330,16 +1338,14 @@ mod tests {
     }
 
     #[test]
-    fn serializes_and_formats_digest() {
+    fn serializes_and_formats_digest() -> Result<(), Box<dyn std::error::Error>> {
         let value = evidence();
-        let json = value.to_json().unwrap();
+        let json = value.to_json()?;
         assert!(json.contains("world.observation.v1"));
-        assert_eq!(MoatProofEvidenceV1::from_json(&json).unwrap(), value);
-        let cbor = value.to_canonical_cbor().unwrap();
-        assert_eq!(
-            MoatProofEvidenceV1::from_canonical_cbor(&cbor).unwrap(),
-            value
-        );
-        assert_eq!(hex_digest(&value.digest()).len(), 64);
+        assert_eq!(MoatProofEvidenceV1::from_json(&json)?, value);
+        let cbor = value.to_canonical_cbor()?;
+        assert_eq!(MoatProofEvidenceV1::from_canonical_cbor(&cbor)?, value);
+        assert_eq!(hex_digest(&value.digest()?).len(), 64);
+        Ok(())
     }
 }

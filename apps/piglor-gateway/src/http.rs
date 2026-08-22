@@ -16,7 +16,7 @@ use axum::{
     Json, Router,
 };
 use piglor_ledger::{render_html, LedgerView};
-use pos_core::{clock::Seq, CoreError};
+use pos_core::{clock::Seq, ActionRejected, CoreError};
 use pos_plugin_ledger::NewPrediction;
 use serde_json::json;
 use std::net::SocketAddr;
@@ -31,14 +31,35 @@ pub struct AppState {
 
 #[cfg(test)]
 mod coverage_tests {
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            match self {
+                Ok(value) => value,
+                Err(error) => {
+                    std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
+                }
+            }
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected test value")))
+        }
+    }
+
     use super::*;
     use pos_core::Kind;
     use pos_store::{open_store, StoreConfig};
 
     #[tokio::test]
     async fn bounded_response_rejects_geographic_event() {
-        let gateway = Gateway::new(open_store(StoreConfig::Memory).unwrap());
-        let timeline = gateway.create_timeline("coverage-geo").await.unwrap();
+        let gateway = Gateway::new(open_store(StoreConfig::Memory).test_ok());
+        let timeline = gateway.create_timeline("coverage-geo").await.test_ok();
         let mut event = gateway
             .append_action(
                 &timeline.id().to_string(),
@@ -47,7 +68,7 @@ mod coverage_tests {
                 &serde_json::json!({"value": 1}),
             )
             .await
-            .unwrap();
+            .test_ok();
         event.event_type = Kind::new(pos_core::GEOGRAPHIC_EVENT_TYPE);
         assert!(bounded_events_response(
             EventPage {
@@ -57,6 +78,7 @@ mod coverage_tests {
             MAX_EVENTS_RESPONSE_BYTES,
         )
         .is_err());
+        drop(gateway);
     }
 }
 
@@ -227,7 +249,11 @@ fn bounded_events_response(
         };
         let event_seq = event.seq.as_u64();
         let view = EventView::try_from(&event)?;
-        events.push(serde_json::to_value(view).expect("EventView serialization is infallible"));
+        events.push(serde_json::to_value(view).map_err(|error| {
+            GatewayError::Store(CoreError::Storage(format!(
+                "EventView serialization failed: {error}"
+            )))
+        })?);
         let next_from_seq = source
             .peek()
             .map(|next| Seq::from_u64(next.seq.as_u64()))
@@ -236,7 +262,7 @@ fn bounded_events_response(
             "events": events,
             "next_from_seq": next_from_seq,
         });
-        if serialized_len(&candidate) > maximum_bytes {
+        if serialized_len(&candidate)? > maximum_bytes {
             events.pop();
             if events.is_empty() {
                 return Err(GatewayError::EventResponseTooLarge {
@@ -255,10 +281,14 @@ fn bounded_events_response(
     }))
 }
 
-fn serialized_len(value: &serde_json::Value) -> usize {
+fn serialized_len(value: &serde_json::Value) -> Result<usize, GatewayError> {
     serde_json::to_vec(value)
-        .expect("JSON Value serialization is infallible")
-        .len()
+        .map(|bytes| bytes.len())
+        .map_err(|error| {
+            GatewayError::Store(CoreError::Storage(format!(
+                "JSON response serialization failed: {error}"
+            )))
+        })
 }
 
 async fn post_action(
@@ -331,41 +361,38 @@ async fn post_ledger_prediction(
 impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
         let status = match &self {
-            GatewayError::InvalidId(_)
-            | GatewayError::UnsupportedAction(_)
-            | GatewayError::InvalidPageLimit { .. }
-            | GatewayError::InvalidEventsQuery(_) => StatusCode::BAD_REQUEST,
-            GatewayError::ActionRejected(ar) => match ar {
-                pos_core::ActionRejected::UnknownEventType => StatusCode::BAD_REQUEST,
-                pos_core::ActionRejected::CapabilityNotGranted => StatusCode::FORBIDDEN,
-                pos_core::ActionRejected::InvalidActorEntityId
-                | pos_core::ActionRejected::DomainValidationFailed(_) => {
-                    StatusCode::UNPROCESSABLE_ENTITY
-                }
-                pos_core::ActionRejected::PayloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::InvalidId(_)
+            | Self::UnsupportedAction(_)
+            | Self::InvalidPageLimit { .. }
+            | Self::InvalidEventsQuery(_) => StatusCode::BAD_REQUEST,
+            Self::ActionRejected(ar) => match ar {
+                ActionRejected::UnknownEventType => StatusCode::BAD_REQUEST,
+                ActionRejected::CapabilityNotGranted => StatusCode::FORBIDDEN,
+                ActionRejected::InvalidActorEntityId
+                | ActionRejected::DomainValidationFailed(_) => StatusCode::UNPROCESSABLE_ENTITY,
+                ActionRejected::PayloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             },
-            GatewayError::TimelineLimitReached { .. }
-            | GatewayError::EventLimitReached { .. }
-            | GatewayError::StoreExecutorSaturated => StatusCode::TOO_MANY_REQUESTS,
-            GatewayError::EventPayloadTooLarge { .. }
-            | GatewayError::EventMetadataTooLarge { .. }
-            | GatewayError::ForkDepthTooLarge { .. }
-            | GatewayError::EventResponseTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
-            GatewayError::EventReadTimeExceeded { .. } => StatusCode::GATEWAY_TIMEOUT,
-            GatewayError::CompatibilityReadTruncated { .. } | GatewayError::IngressConflict => {
-                StatusCode::CONFLICT
+            Self::TimelineLimitReached { .. }
+            | Self::EventLimitReached { .. }
+            | Self::StoreExecutorSaturated => StatusCode::TOO_MANY_REQUESTS,
+            Self::EventPayloadTooLarge { .. }
+            | Self::EventMetadataTooLarge { .. }
+            | Self::ForkDepthTooLarge { .. }
+            | Self::EventResponseTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::EventReadTimeExceeded { .. } => StatusCode::GATEWAY_TIMEOUT,
+            Self::CompatibilityReadTruncated { .. } | Self::IngressConflict => StatusCode::CONFLICT,
+            Self::ResourceUnavailable | Self::Store(CoreError::TimelineNotFound(_)) => {
+                StatusCode::NOT_FOUND
             }
-            GatewayError::ResourceUnavailable
-            | GatewayError::Store(CoreError::TimelineNotFound(_)) => StatusCode::NOT_FOUND,
-            GatewayError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            GatewayError::LedgerWriteDisabled => StatusCode::FORBIDDEN,
-            GatewayError::ActionAuthorizationUnavailable => StatusCode::UNAUTHORIZED,
-            GatewayError::StoreExecutorClosed
-            | GatewayError::StoreExecutorDeadlineExceeded
-            | GatewayError::StoreExecutorUnhealthy
-            | GatewayError::LedgerUnavailable
-            | GatewayError::OwnTracksOwnerKeyUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-            GatewayError::Ledger(le) => match le {
+            Self::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::LedgerWriteDisabled => StatusCode::FORBIDDEN,
+            Self::ActionAuthorizationUnavailable => StatusCode::UNAUTHORIZED,
+            Self::StoreExecutorClosed
+            | Self::StoreExecutorDeadlineExceeded
+            | Self::StoreExecutorUnhealthy
+            | Self::LedgerUnavailable
+            | Self::OwnTracksOwnerKeyUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Ledger(le) => match le {
                 pos_plugin_ledger::LedgerError::InvalidPrediction(_) => {
                     StatusCode::UNPROCESSABLE_ENTITY
                 }
@@ -380,6 +407,27 @@ impl IntoResponse for GatewayError {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            match self {
+                Ok(value) => value,
+                Err(error) => {
+                    std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
+                }
+            }
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected test value")))
+        }
+    }
+
     use super::*;
     use crate::{ActionPrincipal, LedgerConfig, LedgerGateway, EVENT_BUS_CAPACITY};
     use axum::{
@@ -396,17 +444,11 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_world_body() -> EntityId {
-        EntityId::from_ulid(
-            ulid::Ulid::from_string("01J38AE3E964B9281A2ADF6FDB")
-                .expect("test World body ID is valid"),
-        )
+        EntityId::from_ulid(ulid::Ulid::from_string("01J38AE3E964B9281A2ADF6FDB").test_ok())
     }
 
     fn test_action_actor() -> EntityId {
-        EntityId::from_ulid(
-            ulid::Ulid::from_string("01J38AE3E965B9281A2ADF6FDB")
-                .expect("test action principal ID is valid"),
-        )
+        EntityId::from_ulid(ulid::Ulid::from_string("01J38AE3E965B9281A2ADF6FDB").test_ok())
     }
 
     fn test_action_principal() -> ActionPrincipal {
@@ -415,7 +457,7 @@ mod tests {
 
     fn test_app() -> Router {
         let gw = Gateway::new_with_world_bodies_and_principal(
-            open_store(StoreConfig::Memory).unwrap(),
+            open_store(StoreConfig::Memory).test_ok(),
             [test_world_body()],
             test_action_principal(),
         );
@@ -427,7 +469,7 @@ mod tests {
     }
 
     fn test_app_with_body_limit(max_body_bytes: usize) -> Router {
-        let gw = Gateway::new(open_store(StoreConfig::Memory).unwrap());
+        let gw = Gateway::new(open_store(StoreConfig::Memory).test_ok());
         build_router(
             AppState {
                 gateway: gw,
@@ -451,7 +493,7 @@ mod tests {
     }
 
     fn spectator_test_app() -> Router {
-        let gw = Gateway::new(open_store(StoreConfig::Memory).unwrap());
+        let gw = Gateway::new(open_store(StoreConfig::Memory).test_ok());
         spectator_router(AppState {
             gateway: gw,
             ledger_view: LedgerView::default(),
@@ -461,30 +503,32 @@ mod tests {
 
     #[tokio::test]
     async fn owntracks_route_is_enabled_only_by_the_explicit_router() {
-        let state = AppState {
-            gateway: Gateway::new_with_owntracks_ingress_for_test(
-                pos_store::memory::MemoryStore::new(),
-                [0; 32],
-            ),
-            ledger_view: LedgerView::default(),
-            ledger_write: LedgerWriteMode::Disabled,
-        };
-        let response = router_for_addr("127.0.0.1:0".parse().unwrap(), state)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/bridges/owntracks")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = router_for_addr(
+            "127.0.0.1:0".parse().test_ok(),
+            AppState {
+                gateway: Gateway::new_with_owntracks_ingress_for_test(
+                    pos_store::memory::MemoryStore::new(),
+                    [0; 32],
+                ),
+                ledger_view: LedgerView::default(),
+                ledger_write: LedgerWriteMode::Disabled,
+            },
+        )
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/bridges/owntracks")
+                .body(Body::empty())
+                .test_ok(),
+        )
+        .await
+        .test_ok();
         assert_eq!(response.status(), StatusCode::OK);
     }
 
     fn test_app_with_ledger_view(ledger_view: LedgerView) -> Router {
         router(AppState {
-            gateway: Gateway::new(open_store(StoreConfig::Memory).unwrap()),
+            gateway: Gateway::new(open_store(StoreConfig::Memory).test_ok()),
             ledger_view,
             ledger_write: LedgerWriteMode::Disabled,
         })
@@ -495,15 +539,15 @@ mod tests {
             "piglor-gw-ledger-lib-{label}-{}",
             std::process::id()
         ));
-        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&source).test_ok();
         if let Some(prediction) = prediction {
             let predictions = source.join("predictions");
-            std::fs::create_dir_all(&predictions).unwrap();
+            std::fs::create_dir_all(&predictions).test_ok();
             std::fs::write(
                 predictions.join("01KYJ6HAFVPNM4VFBKG5BQ4QMT.toml"),
                 prediction,
             )
-            .unwrap();
+            .test_ok();
         }
         source
     }
@@ -515,9 +559,9 @@ mod tests {
             "piglor-gw-ledger-lib-missing-{}",
             std::process::id()
         ));
-        let _ = std::fs::remove_dir_all(&source);
+        drop(std::fs::remove_dir_all(&source));
         let Err(error) = LedgerConfig::new(Some(source), false).load("2026-07-29") else {
-            panic!("a configured missing Ledger source must fail");
+            std::panic::resume_unwind(Box::new("a configured missing Ledger source must fail"));
         };
         assert!(error.to_string().contains("No such file or directory"));
     }
@@ -528,16 +572,16 @@ mod tests {
         let source = ledger_source_dir("ready", None);
         let (_, write_mode) = LedgerConfig::new(Some(source.clone()), true)
             .load("2026-07-29")
-            .unwrap();
-        let _ = std::fs::remove_dir_all(source);
+            .test_ok();
+        drop(std::fs::remove_dir_all(source));
         assert!(matches!(write_mode, LedgerWriteMode::Ready(_)));
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn ledger_config_distinguishes_unset_source_write_mode() {
-        let (view, disabled) = LedgerConfig::new(None, false).load("2026-07-29").unwrap();
-        let (_, unconfigured) = LedgerConfig::new(None, true).load("2026-07-29").unwrap();
+        let (view, disabled) = LedgerConfig::new(None, false).load("2026-07-29").test_ok();
+        let (_, unconfigured) = LedgerConfig::new(None, true).load("2026-07-29").test_ok();
         assert!(view.entries.is_empty());
         assert!(matches!(disabled, LedgerWriteMode::Disabled));
         assert!(matches!(unconfigured, LedgerWriteMode::Unconfigured));
@@ -548,9 +592,9 @@ mod tests {
     fn ledger_config_rejects_invalid_source_data() {
         let source = ledger_source_dir("invalid", Some("not valid = ["));
         let Err(error) = LedgerConfig::new(Some(source.clone()), false).load("2026-07-29") else {
-            panic!("invalid configured Ledger data must fail");
+            std::panic::resume_unwind(Box::new("invalid configured Ledger data must fail"));
         };
-        let _ = std::fs::remove_dir_all(source);
+        drop(std::fs::remove_dir_all(source));
         assert!(error.to_string().contains("TOML"));
     }
 
@@ -564,16 +608,16 @@ mod tests {
         let req = if let Some(b) = body {
             builder
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&b).unwrap()))
-                .unwrap()
+                .body(Body::from(serde_json::to_vec(&b).test_ok()))
+                .test_ok()
         } else {
-            builder.body(Body::empty()).unwrap()
+            builder.body(Body::empty()).test_ok()
         };
-        let response = app.oneshot(req).await.unwrap();
+        let response = app.oneshot(req).await.test_ok();
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
-            .unwrap();
+            .test_ok();
         let json: serde_json::Value =
             serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
         (status, json)
@@ -583,9 +627,9 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn root_redirects_to_ledger_page() {
         let response = test_app()
-            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .oneshot(Request::builder().uri("/").body(Body::empty()).test_ok())
             .await
-            .unwrap();
+            .test_ok();
         assert_eq!(response.status(), StatusCode::FOUND);
         assert_eq!(response.headers()["location"], "/ledger");
     }
@@ -596,9 +640,9 @@ mod tests {
         let app = test_app();
         let response = app
             .clone()
-            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .oneshot(Request::builder().uri("/").body(Body::empty()).test_ok())
             .await
-            .unwrap();
+            .test_ok();
         assert_eq!(response.status(), StatusCode::FOUND);
         assert_eq!(response.headers()[axum::http::header::LOCATION], "/ledger");
         let target = app
@@ -606,10 +650,10 @@ mod tests {
                 Request::builder()
                     .uri("/ledger")
                     .body(Body::empty())
-                    .unwrap(),
+                    .test_ok(),
             )
             .await
-            .unwrap();
+            .test_ok();
         assert_eq!(target.status(), StatusCode::OK);
     }
 
@@ -621,10 +665,10 @@ mod tests {
                 Request::builder()
                     .uri("/ledger")
                     .body(Body::empty())
-                    .unwrap(),
+                    .test_ok(),
             )
             .await
-            .unwrap();
+            .test_ok();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response
@@ -635,7 +679,7 @@ mod tests {
         );
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
-            .unwrap();
+            .test_ok();
         let html = String::from_utf8_lossy(&body);
         assert!(
             html.contains("<!DOCTYPE html>"),
@@ -650,9 +694,9 @@ mod tests {
         for uri in ["/ledger", "/health", "/v1/ledger"] {
             let response = app
                 .clone()
-                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).test_ok())
                 .await
-                .unwrap();
+                .test_ok();
             assert_eq!(response.status(), StatusCode::OK, "{uri} must stay public");
         }
 
@@ -708,14 +752,20 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn health_reports_executor_unready_after_shutdown() {
-        let gateway = Gateway::new(open_store(StoreConfig::Memory).unwrap());
-        gateway.shutdown().await.unwrap();
-        let app = router(AppState {
-            gateway,
-            ledger_view: LedgerView::default(),
-            ledger_write: LedgerWriteMode::Disabled,
-        });
-        let (status, json) = json_request(app, "GET", "/health", None).await;
+        let gateway = Gateway::new(open_store(StoreConfig::Memory).test_ok());
+        gateway.shutdown().await.test_ok();
+        let (status, json) = json_request(
+            router(AppState {
+                gateway: gateway.clone(),
+                ledger_view: LedgerView::default(),
+                ledger_write: LedgerWriteMode::Disabled,
+            }),
+            "GET",
+            "/health",
+            None,
+        )
+        .await;
+        drop(gateway);
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(json["ok"], false);
     }
@@ -731,7 +781,7 @@ mod tests {
         );
         let (ledger_view, _) = LedgerConfig::new(Some(dir.clone()), false)
             .load("2026-07-29")
-            .unwrap();
+            .test_ok();
         let app = test_app_with_ledger_view(ledger_view);
         let response = app
             .clone()
@@ -739,19 +789,19 @@ mod tests {
                 Request::builder()
                     .uri("/ledger")
                     .body(Body::empty())
-                    .unwrap(),
+                    .test_ok(),
             )
             .await
-            .unwrap();
+            .test_ok();
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
-            .unwrap();
+            .test_ok();
         let html = String::from_utf8_lossy(&body);
         assert!(html.contains("GitHub Copilot Dominance"));
 
         let (status, json) = json_request(app, "GET", "/v1/ledger", None).await;
-        let _ = std::fs::remove_dir_all(dir);
+        drop(std::fs::remove_dir_all(dir));
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["domain"], "piglor.com");
         assert_eq!(json["path"], "/ledger");
@@ -766,7 +816,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["domain"], "piglor.com");
         assert_eq!(json["path"], "/ledger");
-        assert!(json["ledger"].as_array().unwrap().is_empty());
+        assert!(json["ledger"].as_array().test_ok().is_empty());
     }
 
     #[tokio::test]
@@ -781,7 +831,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
-        let id = created["id"].as_str().unwrap().to_owned();
+        let id = created["id"].as_str().test_ok().to_owned();
 
         let entity = test_action_actor().to_string();
         let body = test_world_body().to_string();
@@ -806,7 +856,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(listed["events"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["events"].as_array().test_ok().len(), 1);
         assert_eq!(listed["events"][0]["payload"]["action_kind"], "impulse");
         assert!(listed["next_from_seq"].is_null());
     }
@@ -823,7 +873,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
-        let id = created["id"].as_str().unwrap();
+        let id = created["id"].as_str().test_ok();
         let entity = test_action_actor().to_string();
         let body = test_world_body().to_string();
         let request = json!({
@@ -862,7 +912,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
-        assert!(error["error"].as_str().unwrap().contains("conflicts"));
+        assert!(error["error"].as_str().test_ok().contains("conflicts"));
     }
 
     #[tokio::test]
@@ -877,7 +927,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
-        let id = created["id"].as_str().unwrap();
+        let id = created["id"].as_str().test_ok();
         let entity = test_action_actor().to_string();
         let body = test_world_body().to_string();
         for dx in 0..3 {
@@ -903,7 +953,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(first["events"].as_array().unwrap().len(), 2);
+        assert_eq!(first["events"].as_array().test_ok().len(), 2);
         assert_eq!(first["events"][0]["seq"], 1);
         assert_eq!(first["events"][1]["seq"], 2);
         assert_eq!(first["next_from_seq"], 3);
@@ -916,7 +966,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(second["events"].as_array().unwrap().len(), 1);
+        assert_eq!(second["events"].as_array().test_ok().len(), 1);
         assert_eq!(second["events"][0]["seq"], 3);
         assert!(second["next_from_seq"].is_null());
 
@@ -974,8 +1024,8 @@ mod tests {
     }
 
     fn app_with_preloaded_bytes(payloads: Vec<Vec<u8>>) -> (Router, String) {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let timeline = store.create_timeline("shared-writer").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let timeline = store.create_timeline("shared-writer").test_ok();
         let drafts: Vec<EventDraft> = payloads
             .into_iter()
             .map(|payload| {
@@ -986,7 +1036,7 @@ mod tests {
                 )
             })
             .collect();
-        store.append(timeline.id(), &drafts).unwrap();
+        store.append(timeline.id(), &drafts).test_ok();
         let app = router(AppState {
             gateway: Gateway::new(store),
             ledger_view: LedgerView::default(),
@@ -1016,9 +1066,9 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(first["events"].as_array().unwrap().len(), 2);
+        assert_eq!(first["events"].as_array().test_ok().len(), 2);
         assert_eq!(first["next_from_seq"], 3);
-        assert!(serialized_len(&first) <= MAX_EVENTS_RESPONSE_BYTES);
+        assert!(serialized_len(&first).test_ok() <= MAX_EVENTS_RESPONSE_BYTES);
 
         let (status, exhausted) = json_request(
             app,
@@ -1028,9 +1078,9 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(exhausted["events"].as_array().unwrap().len(), 1);
+        assert_eq!(exhausted["events"].as_array().test_ok().len(), 1);
         assert!(exhausted["next_from_seq"].is_null());
-        assert!(serialized_len(&exhausted) <= MAX_EVENTS_RESPONSE_BYTES);
+        assert!(serialized_len(&exhausted).test_ok() <= MAX_EVENTS_RESPONSE_BYTES);
     }
 
     #[tokio::test]
@@ -1049,7 +1099,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn high_expansion_shared_event_under_payload_cap_returns_json_413() {
         let mut payload = Vec::new();
-        ciborium::into_writer(&"\0".repeat(160 * 1024), &mut payload).unwrap();
+        ciborium::into_writer(&"\0".repeat(160 * 1024), &mut payload).test_ok();
         assert!(payload.len() <= crate::MAX_EVENT_PAYLOAD_BYTES);
         let (app, id) = app_with_preloaded_bytes(vec![payload]);
         let (status, body) =
@@ -1072,7 +1122,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
-        let id = created["id"].as_str().unwrap().to_owned();
+        let id = created["id"].as_str().test_ok().to_owned();
         let entity = test_action_actor().to_string();
 
         let (status, _) = json_request(
@@ -1101,7 +1151,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
-        assert!(err["error"].as_str().unwrap().contains("capability"));
+        assert!(err["error"].as_str().test_ok().contains("capability"));
     }
 
     #[tokio::test]
@@ -1170,15 +1220,15 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
-        let id = created["id"].as_str().unwrap();
+        let id = created["id"].as_str().test_ok();
 
         let req = Request::builder()
             .method("POST")
             .uri(format!("/v1/timelines/{id}/actions"))
             .header("content-type", "application/json")
             .body(Body::from("{not json"))
-            .unwrap();
-        let response = app.oneshot(req).await.unwrap();
+            .test_ok();
+        let response = app.oneshot(req).await.test_ok();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -1225,21 +1275,24 @@ mod tests {
             }
         }
 
-        let gw = Gateway {
-            store: crate::executor::StoreExecutor::new(Box::new(FailCreate)),
-            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
-            limits: crate::GatewayLimits::LOCAL_DEFAULT,
-            owntracks_enabled: false,
-            action_registry: crate::gateway_action_registry(),
-            action_principal: None,
-        };
-        let app = router(AppState {
-            gateway: gw,
-            ledger_view: LedgerView::default(),
-            ledger_write: LedgerWriteMode::Disabled,
-        });
-        let (status, _) =
-            json_request(app, "POST", "/v1/timelines", Some(json!({"name": "x"}))).await;
+        let (status, _) = json_request(
+            router(AppState {
+                gateway: Gateway {
+                    store: crate::executor::StoreExecutor::new(Box::new(FailCreate)),
+                    bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
+                    limits: crate::GatewayLimits::LOCAL_DEFAULT,
+                    owntracks_enabled: false,
+                    action_registry: crate::gateway_action_registry(),
+                    action_principal: None,
+                },
+                ledger_view: LedgerView::default(),
+                ledger_write: LedgerWriteMode::Disabled,
+            }),
+            "POST",
+            "/v1/timelines",
+            Some(json!({"name": "x"})),
+        )
+        .await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
@@ -1255,7 +1308,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
-        let id = created["id"].as_str().unwrap().to_owned();
+        let id = created["id"].as_str().test_ok().to_owned();
         let (status, _) = json_request(
             app,
             "POST",
@@ -1281,8 +1334,8 @@ mod tests {
             .body(Body::from(
                 r#"{"name":"this name is way too long for the limit"}"#,
             ))
-            .unwrap();
-        let response = app.oneshot(req).await.unwrap();
+            .test_ok();
+        let response = app.oneshot(req).await.test_ok();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
@@ -1371,7 +1424,7 @@ mod tests {
 
     fn test_app_with_ledger(store: Box<dyn LedgerStore + Send>) -> Router {
         router(AppState {
-            gateway: Gateway::new(open_store(StoreConfig::Memory).unwrap()),
+            gateway: Gateway::new(open_store(StoreConfig::Memory).test_ok()),
             ledger_view: LedgerView::default(),
             ledger_write: LedgerWriteMode::Ready(LedgerGateway::new(store)),
         })
@@ -1395,7 +1448,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn post_ledger_prediction_gate_on_no_ledger_returns_503() {
         let app = router(AppState {
-            gateway: Gateway::new(open_store(StoreConfig::Memory).unwrap()),
+            gateway: Gateway::new(open_store(StoreConfig::Memory).test_ok()),
             ledger_view: LedgerView::default(),
             ledger_write: LedgerWriteMode::Unconfigured,
         });
@@ -1409,7 +1462,7 @@ mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert!(json["error"]
             .as_str()
-            .unwrap()
+            .test_ok()
             .contains("ledger store not available"));
     }
 
@@ -1417,7 +1470,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn post_ledger_prediction_validation_error_returns_422() {
         let dir = std::env::temp_dir().join(format!("piglor-gw-ledger-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        drop(std::fs::create_dir_all(&dir));
         let store: Box<dyn LedgerStore + Send> =
             Box::new(pos_plugin_ledger::TomlLedgerStore::new(dir.clone()));
         let app = test_app_with_ledger(store);
@@ -1425,14 +1478,14 @@ mod tests {
         body["title"] = json!("");
         let (status, _json) = json_request(app, "POST", "/v1/ledger/predictions", Some(body)).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        let _ = std::fs::remove_dir_all(dir);
+        drop(std::fs::remove_dir_all(dir));
     }
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn post_ledger_prediction_success_returns_201() {
         let dir = std::env::temp_dir().join(format!("piglor-gw-ledger-ok-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        drop(std::fs::create_dir_all(&dir));
         let store: Box<dyn LedgerStore + Send> =
             Box::new(pos_plugin_ledger::TomlLedgerStore::new(dir.clone()));
         let app = test_app_with_ledger(store);
@@ -1444,9 +1497,9 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
-        let prediction_id = json["prediction_id"].as_str().unwrap();
+        let prediction_id = json["prediction_id"].as_str().test_ok();
         assert!(!prediction_id.is_empty());
-        let _ = std::fs::remove_dir_all(dir);
+        drop(std::fs::remove_dir_all(dir));
     }
 
     #[tokio::test]
@@ -1500,7 +1553,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn post_ledger_prediction_unknown_fields_ignored() {
         let dir = std::env::temp_dir().join(format!("piglor-gw-ledger-uf-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        drop(std::fs::create_dir_all(&dir));
         let store: Box<dyn LedgerStore + Send> =
             Box::new(pos_plugin_ledger::TomlLedgerStore::new(dir.clone()));
         let app = test_app_with_ledger(store);
@@ -1508,14 +1561,14 @@ mod tests {
         body["unknown_field"] = json!("ignored");
         let (status, _json) = json_request(app, "POST", "/v1/ledger/predictions", Some(body)).await;
         assert_eq!(status, StatusCode::CREATED);
-        let _ = std::fs::remove_dir_all(dir);
+        drop(std::fs::remove_dir_all(dir));
     }
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn post_ledger_prediction_error_response_has_error_field() {
         let dir = std::env::temp_dir().join(format!("piglor-gw-ledger-err-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        drop(std::fs::create_dir_all(&dir));
         let store: Box<dyn LedgerStore + Send> =
             Box::new(pos_plugin_ledger::TomlLedgerStore::new(dir.clone()));
         let app = test_app_with_ledger(store);
@@ -1530,7 +1583,7 @@ mod tests {
             err_resp["error"].as_str().is_some(),
             "domain validation should produce an error field, got: {err_resp:?}"
         );
-        let _ = std::fs::remove_dir_all(dir);
+        drop(std::fs::remove_dir_all(dir));
     }
 
     #[tokio::test]
@@ -1544,7 +1597,7 @@ mod tests {
             Some(json!({"name": "actions-test"})),
         )
         .await;
-        let id = created["id"].as_str().unwrap();
+        let id = created["id"].as_str().test_ok();
         let entity = test_action_actor().to_string();
 
         let (status, err) = json_request(
@@ -1559,7 +1612,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
-        assert!(err["error"].as_str().unwrap().contains("capability"));
+        assert!(err["error"].as_str().test_ok().contains("capability"));
 
         let other_actor = EntityId::new().to_string();
         let (status, err) = json_request(
@@ -1574,7 +1627,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert!(err["error"].as_str().unwrap().contains("actor"));
+        assert!(err["error"].as_str().test_ok().contains("actor"));
     }
 
     #[test]

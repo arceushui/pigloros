@@ -178,13 +178,50 @@ mod tests {
     use pos_core::ids::EntityId;
     use pos_store::{open_store, StoreConfig};
 
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected recorder fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("missing recorder fixture value"))
+            })
+        }
+    }
+
+    trait TestErrorExt<T, E> {
+        fn test_err(self) -> E;
+    }
+
+    impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
+        fn test_err(self) -> E {
+            match self {
+                Ok(value) => std::panic::resume_unwind(Box::new(format!(
+                    "unexpected successful recorder fixture value: {value:?}"
+                ))),
+                Err(error) => error,
+            }
+        }
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn live_recorder_returns_provided_bytes() {
         let entity = EntityId::new();
         let mut rec = Recorder::new_live(entity);
         assert_eq!(rec.mode(), RunMode::Live);
-        let out = rec.record(b"hello".to_vec()).unwrap();
+        let out = rec.record(b"hello".to_vec()).test_ok();
         assert_eq!(out.bytes, b"hello");
     }
 
@@ -194,7 +231,7 @@ mod tests {
         let entity = EntityId::new();
         let rec = Recorder::new_live(entity);
         let output = RecordedOutput::new(b"data".to_vec());
-        let draft = rec.to_draft(&output).unwrap();
+        let draft = rec.to_draft(&output).test_ok();
         assert_eq!(draft.event_type.as_str(), RECORDER_EVENT_TYPE);
         assert_eq!(draft.payload.as_slice(), b"data");
     }
@@ -208,11 +245,11 @@ mod tests {
         assert_eq!(rec.mode(), RunMode::Replay);
         assert_eq!(rec.remaining(), 2);
 
-        let out1 = rec.record(b"ignored".to_vec()).unwrap();
+        let out1 = rec.record(b"ignored".to_vec()).test_ok();
         assert_eq!(out1.bytes, b"first");
         assert_eq!(rec.remaining(), 1);
 
-        let out2 = rec.record(b"also_ignored".to_vec()).unwrap();
+        let out2 = rec.record(b"also_ignored".to_vec()).test_ok();
         assert_eq!(out2.bytes, b"second");
         assert_eq!(rec.remaining(), 0);
     }
@@ -222,8 +259,8 @@ mod tests {
     fn replay_cursor_exhaustion_returns_error() {
         let entity = EntityId::new();
         let mut rec = Recorder::new_replay(entity, vec![b"only".to_vec()]);
-        rec.record(vec![]).unwrap();
-        let err = rec.record(vec![]).unwrap_err();
+        rec.record(vec![]).test_ok();
+        let err = rec.record(vec![]).test_err();
         assert!(matches!(err, RuntimeError::ModeMismatch { .. }));
     }
 
@@ -239,8 +276,8 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn prepare_replay_loads_recorder_events_from_store() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("t").test_ok();
         let entity = EntityId::new();
 
         // Write two recorded output events manually
@@ -261,12 +298,12 @@ mod tests {
                 CanonicalBytes::from_vec(b"r2".to_vec()),
             ),
         ];
-        store.append(tl.id(), &drafts).unwrap();
+        store.append(tl.id(), &drafts).test_ok();
 
-        let mut rec = Recorder::prepare_replay(entity, store.as_ref(), tl.id()).unwrap();
+        let mut rec = Recorder::prepare_replay(entity, store.as_ref(), tl.id()).test_ok();
         assert_eq!(rec.remaining(), 2);
-        assert_eq!(rec.record(vec![]).unwrap().bytes, b"r1");
-        assert_eq!(rec.record(vec![]).unwrap().bytes, b"r2");
+        assert_eq!(rec.record(vec![]).test_ok().bytes, b"r1");
+        assert_eq!(rec.record(vec![]).test_ok().bytes, b"r2");
     }
 
     #[test]
@@ -351,14 +388,14 @@ mod tests {
         let mut live = Recorder::new_live(entity);
         let mut recorded_bytes: Vec<Vec<u8>> = Vec::new();
         for o in &outputs {
-            let result = live.record(o.clone()).unwrap();
+            let result = live.record(o.clone()).test_ok();
             recorded_bytes.push(result.bytes.clone());
         }
 
         // Replay pass: should get identical bytes regardless of what we pass
         let mut replay = Recorder::new_replay(entity, recorded_bytes);
         for expected in &outputs {
-            let result = replay.record(b"ignored".to_vec()).unwrap();
+            let result = replay.record(b"ignored".to_vec()).test_ok();
             assert_eq!(&result.bytes, expected);
         }
     }

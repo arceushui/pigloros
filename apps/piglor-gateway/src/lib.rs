@@ -6,10 +6,10 @@
 //! JSON HTTP envelope; CBOR payloads into [`EventStore`]. No auth in this slice.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-mod executor;
+pub mod executor;
 mod http;
-mod ledger_config;
-mod owntracks_http;
+pub mod ledger_config;
+pub mod owntracks_http;
 
 pub use http::{router, router_for_addr, spectator_router, AppState};
 pub use ledger_config::{LedgerConfig, LedgerGateway, LedgerWriteMode};
@@ -20,7 +20,7 @@ use pos_core::{
     geo_admission::{
         GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore,
     },
-    ids::{EntityId, PluginId, TimelineId},
+    ids::{EntityId, EventId, PluginId, TimelineId},
     store::{
         AppendDedupKey, AppendDedupScope, AppendIdentity, AppendIntent, AppendOrDuplicateOutcome,
         EventReadBounds, EventStore, PurgeOutcome, SeqRange,
@@ -58,6 +58,40 @@ pub struct LedgerEntryView {
 
 #[cfg(test)]
 mod coverage_tests {
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            match self {
+                Ok(value) => value,
+                Err(error) => {
+                    std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
+                }
+            }
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected test value")))
+        }
+    }
+
+    trait TestErrorExt<E> {
+        fn test_err(self) -> E;
+    }
+
+    impl<T, E: std::fmt::Debug> TestErrorExt<E> for Result<T, E> {
+        fn test_err(self) -> E {
+            match self {
+                Ok(_value) => std::panic::resume_unwind(Box::new("expected test error")),
+                Err(error) => error,
+            }
+        }
+    }
+
     use super::{Gateway, OwnTracksOwnerKey};
     use pos_core::{
         geo_admission::{
@@ -72,10 +106,11 @@ mod coverage_tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn production_owntracks_constructor_enables_private_ingress() {
-        let store = pos_store::sqlite::SqliteStore::open_in_memory().unwrap();
+        let store = pos_store::sqlite::SqliteStore::open_in_memory().test_ok();
         let gateway = Gateway::new_with_owntracks_ingress(store, &OwnTracksOwnerKey([7; 32]));
 
         assert!(gateway.owntracks_enabled);
+        drop(gateway);
     }
 
     #[cfg(unix)]
@@ -88,44 +123,44 @@ mod coverage_tests {
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock after Unix epoch")
+                .test_ok()
                 .as_nanos()
         ));
-        std::fs::create_dir(&directory).unwrap();
+        std::fs::create_dir(&directory).test_ok();
         let path = directory.join("owner.key");
-        std::fs::write(&path, [7_u8; 32]).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(&path, [7_u8; 32]).test_ok();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).test_ok();
 
         assert!(OwnTracksOwnerKey::load(&path).is_ok());
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).test_ok();
         assert!(OwnTracksOwnerKey::load(&path).is_err());
         assert!(OwnTracksOwnerKey::load(&directory.join("missing.key")).is_err());
         assert!(OwnTracksOwnerKey::load(&directory).is_err());
 
         let short_path = directory.join("short.key");
-        std::fs::write(&short_path, [8_u8; 31]).unwrap();
-        std::fs::set_permissions(&short_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(&short_path, [8_u8; 31]).test_ok();
+        std::fs::set_permissions(&short_path, std::fs::Permissions::from_mode(0o600)).test_ok();
         assert!(OwnTracksOwnerKey::load(&short_path).is_err());
 
         let target_path = directory.join("target.key");
-        std::fs::write(&target_path, [9_u8; 32]).unwrap();
-        std::fs::set_permissions(&target_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(&target_path, [9_u8; 32]).test_ok();
+        std::fs::set_permissions(&target_path, std::fs::Permissions::from_mode(0o600)).test_ok();
         let symlink_path = directory.join("symlink.key");
-        symlink(&target_path, &symlink_path).unwrap();
+        symlink(&target_path, &symlink_path).test_ok();
         assert!(OwnTracksOwnerKey::load(&symlink_path).is_err());
 
         let symlink_directory = directory.join("symlink-directory");
-        symlink(&directory, &symlink_directory).unwrap();
+        symlink(&directory, &symlink_directory).test_ok();
         assert!(OwnTracksOwnerKey::load(&symlink_directory.join("owner.key")).is_err());
 
         let insecure_directory = directory.join("insecure");
-        std::fs::create_dir(&insecure_directory).unwrap();
+        std::fs::create_dir(&insecure_directory).test_ok();
         std::fs::set_permissions(&insecure_directory, std::fs::Permissions::from_mode(0o777))
-            .unwrap();
+            .test_ok();
         assert!(OwnTracksOwnerKey::load(&insecure_directory.join("owner.key")).is_err());
 
         let non_directory = directory.join("not-a-directory");
-        std::fs::write(&non_directory, [10_u8; 1]).unwrap();
+        std::fs::write(&non_directory, [10_u8; 1]).test_ok();
         assert!(OwnTracksOwnerKey::load(&non_directory.join("owner.key")).is_err());
         assert!(OwnTracksOwnerKey::load(Path::new("/")).is_err());
 
@@ -134,23 +169,23 @@ mod coverage_tests {
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock after Unix epoch")
+                .test_ok()
                 .as_nanos()
         );
-        std::fs::create_dir(&relative_directory).unwrap();
+        std::fs::create_dir(&relative_directory).test_ok();
         let relative_path = Path::new(&relative_directory).join("owner.key");
-        std::fs::write(&relative_path, [11_u8; 32]).unwrap();
-        std::fs::set_permissions(&relative_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(&relative_path, [11_u8; 32]).test_ok();
+        std::fs::set_permissions(&relative_path, std::fs::Permissions::from_mode(0o600)).test_ok();
         assert!(OwnTracksOwnerKey::load(&relative_path).is_ok());
-        std::fs::remove_dir_all(relative_directory).unwrap();
+        std::fs::remove_dir_all(relative_directory).test_ok();
 
-        std::fs::remove_dir_all(directory).unwrap();
+        std::fs::remove_dir_all(directory).test_ok();
     }
 
     #[tokio::test]
     async fn identified_conflict_is_returned() {
-        let gateway = Gateway::new(open_store(StoreConfig::Memory).unwrap());
-        let timeline = gateway.create_timeline("coverage-conflict").await.unwrap();
+        let gateway = Gateway::new(open_store(StoreConfig::Memory).test_ok());
+        let timeline = gateway.create_timeline("coverage-conflict").await.test_ok();
         let timeline_id = timeline.id().to_string();
         let entity_id = EntityId::new().to_string();
         gateway
@@ -162,7 +197,7 @@ mod coverage_tests {
                 "coverage-conflict",
             )
             .await
-            .unwrap();
+            .test_ok();
         let _ = gateway
             .append_identified_action(
                 &timeline_id,
@@ -172,14 +207,15 @@ mod coverage_tests {
                 "coverage-conflict",
             )
             .await
-            .unwrap_err();
+            .test_err();
+        drop(gateway);
     }
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn fork_action_response_notice_lookup_and_read_share_logical_sequence() {
         let mut store = MemoryStore::new();
-        let root = store.create_timeline("logical-root").unwrap();
+        let root = store.create_timeline("logical-root").test_ok();
         let entity = EntityId::new();
         store
             .append(
@@ -197,10 +233,10 @@ mod coverage_tests {
                     ),
                 ],
             )
-            .unwrap();
+            .test_ok();
         let child = store
             .fork(root.id(), Seq::from_u64(2), "logical-child")
-            .unwrap();
+            .test_ok();
         let gateway = Gateway::new(Box::new(store));
         let mut notices = gateway.subscribe();
         let appended = gateway
@@ -211,9 +247,9 @@ mod coverage_tests {
                 &serde_json::json!({"choice": "child"}),
             )
             .await
-            .unwrap();
+            .test_ok();
         assert_eq!(appended.seq, Seq::from_u64(3));
-        assert_eq!(notices.recv().await.unwrap().seq, 3);
+        assert_eq!(notices.recv().await.test_ok().seq, 3);
 
         let identified = gateway
             .append_identified_action(
@@ -224,10 +260,10 @@ mod coverage_tests {
                 "logical-child-action",
             )
             .await
-            .unwrap();
+            .test_ok();
         assert_eq!(identified.event.seq, Seq::from_u64(4));
         assert!(!identified.duplicate);
-        assert_eq!(notices.recv().await.unwrap().seq, 4);
+        assert_eq!(notices.recv().await.test_ok().seq, 4);
         let duplicate = gateway
             .append_identified_action(
                 &child.id().to_string(),
@@ -237,14 +273,14 @@ mod coverage_tests {
                 "logical-child-action",
             )
             .await
-            .unwrap();
+            .test_ok();
         assert_eq!(duplicate.event.seq, Seq::from_u64(4));
         assert!(duplicate.duplicate);
 
         let page = gateway
             .read_events_page(&child.id().to_string(), 0, 10)
             .await
-            .unwrap();
+            .test_ok();
         assert_eq!(
             page.events
                 .iter()
@@ -252,13 +288,14 @@ mod coverage_tests {
                 .collect::<Vec<_>>(),
             vec![1, 2, 3, 4]
         );
+        drop(gateway);
     }
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn privileged_geographic_admission_notifies_only_new_events() {
         let mut store = MemoryStore::default();
-        let timeline = store.create_timeline("geo-gateway").unwrap();
+        let timeline = store.create_timeline("geo-gateway").test_ok();
         let entity = EntityId::new();
         store
             .pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
@@ -267,7 +304,7 @@ mod coverage_tests {
                 GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
                 [42; 32],
             ))
-            .unwrap();
+            .test_ok();
         let gateway = Gateway::new_with_geo_location_admission(store);
         let mut notices = gateway.subscribe();
         let request = || {
@@ -285,18 +322,19 @@ mod coverage_tests {
         assert!(gateway
             .admit_geo_location_from_core(request())
             .await
-            .unwrap()
+            .test_ok()
             .is_accepted());
-        assert_eq!(notices.recv().await.unwrap().event_type, "geo.location");
+        assert_eq!(notices.recv().await.test_ok().event_type, "geo.location");
         assert!(gateway
             .admit_geo_location_from_core(request())
             .await
-            .unwrap()
+            .test_ok()
             .is_duplicate());
         assert!(matches!(
             notices.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Empty)
         ));
+        drop(gateway);
     }
 
     #[tokio::test]
@@ -307,7 +345,7 @@ mod coverage_tests {
         const SECRET: [u8; 32] = [29; 32];
 
         let mut store = MemoryStore::default();
-        let timeline = store.create_timeline("owntracks-rate-limit").unwrap();
+        let timeline = store.create_timeline("owntracks-rate-limit").test_ok();
         let entity = EntityId::new();
         let mut material = Vec::with_capacity(96);
         material.extend_from_slice(b"pigloros/owntracks/verifier/v1\0");
@@ -320,12 +358,12 @@ mod coverage_tests {
                 GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
                 *blake3::keyed_hash(&OWNER_KEY, &material).as_bytes(),
             ))
-            .unwrap();
+            .test_ok();
         let gateway = Gateway::new_with_owntracks_ingress_for_test(store, OWNER_KEY);
         gateway
             .create_timeline("owntracks-generic-event-store")
             .await
-            .unwrap();
+            .test_ok();
         let mut notices = gateway.subscribe();
         let input = || {
             (
@@ -339,15 +377,15 @@ mod coverage_tests {
             assert!(!gateway
                 .admit_owntracks_ingress(input().0, input().1, input().2)
                 .await
-                .unwrap()
+                .test_ok()
                 .is_rate_limited());
         }
         assert!(gateway
             .admit_owntracks_ingress(input().0, input().1, input().2)
             .await
-            .unwrap()
+            .test_ok()
             .is_rate_limited());
-        assert_eq!(notices.recv().await.unwrap().event_type, "geo.location");
+        assert_eq!(notices.recv().await.test_ok().event_type, "geo.location");
         assert!(matches!(
             notices.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Empty)
@@ -356,8 +394,9 @@ mod coverage_tests {
         assert!(!gateway
             .admit_owntracks_ingress(input().0, input().1, input().2)
             .await
-            .unwrap()
+            .test_ok()
             .is_rate_limited());
+        drop(gateway);
     }
 
     #[tokio::test]
@@ -368,12 +407,13 @@ mod coverage_tests {
         let created = gateway
             .create_timeline("privileged-generic-command")
             .await
-            .unwrap();
+            .test_ok();
 
         assert_eq!(
             created.meta.name.as_deref(),
             Some("privileged-generic-command")
         );
+        drop(gateway);
     }
 
     #[tokio::test]
@@ -399,6 +439,7 @@ mod coverage_tests {
                 pos_core::CoreError::GeographicAdmissionUnavailable
             ))
         ));
+        drop(gateway);
     }
 }
 
@@ -517,15 +558,16 @@ fn gateway_action_registry_with_bodies(
     let descriptor = GatewayActionPlugin {
         id: PluginId::new(),
     };
-    registry
-        .register_with_approver(
-            &descriptor,
-            None,
-            None,
-            Some(Box::new(WorldPlugin::new().with_bodies(bodies))),
-            [Kind::new(EVENT_TYPE_ACTION)],
-        )
-        .expect("the gateway action descriptor must register exactly once");
+    let registration = registry.register_with_approver(
+        &descriptor,
+        None,
+        None,
+        Some(Box::new(WorldPlugin::new().with_bodies(bodies))),
+        [Kind::new(EVENT_TYPE_ACTION)],
+    );
+    if registration.is_err() {
+        return Arc::new(PluginRegistry::new());
+    }
     Arc::new(registry)
 }
 
@@ -547,7 +589,7 @@ impl GatewayLimits {
 ///
 /// `next_from_seq` is the inclusive sequence of the first omitted Event, or
 /// `None` only when the requested Timeline is exhausted.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct EventPage {
     pub events: Vec<Event>,
     pub next_from_seq: Option<Seq>,
@@ -771,6 +813,22 @@ impl From<executor::StoreExecutorError> for GatewayError {
     }
 }
 
+fn accepted_event_coordinates(
+    outcome: &GeoLocationAdmissionOutcome,
+) -> Result<(EventId, Seq), GatewayError> {
+    let event_id = outcome.event_id().ok_or_else(|| {
+        GatewayError::Store(CoreError::Storage(
+            "accepted geographic admission is missing its Event ID".to_owned(),
+        ))
+    })?;
+    let seq = outcome.event_seq().ok_or_else(|| {
+        GatewayError::Store(CoreError::Storage(
+            "accepted geographic admission is missing its Event sequence".to_owned(),
+        ))
+    })?;
+    Ok((event_id, seq))
+}
+
 impl Gateway {
     /// Wrap an existing store backend.
     ///
@@ -888,9 +946,6 @@ impl Gateway {
     /// # Errors
     /// Returns a bounded executor or store error when admission cannot run.
     ///
-    /// # Panics
-    /// Panics only if a core outcome violates its invariant that an accepted
-    /// admission includes both an Event ID and sequence.
     pub async fn admit_geo_location_from_core(
         &self,
         request: GeoLocationAdmissionRequestV1,
@@ -899,12 +954,7 @@ impl Gateway {
         let entity = request.entity();
         let outcome = self.store.admit_geo_location(request).await?;
         if outcome.is_accepted() {
-            let event_id = outcome
-                .event_id()
-                .expect("accepted geographic admission always carries an Event ID");
-            let seq = outcome
-                .event_seq()
-                .expect("accepted geographic admission always carries an Event sequence");
+            let (event_id, seq) = accepted_event_coordinates(&outcome)?;
             self.publish_geographic_notice(timeline, event_id, entity, seq);
         }
         Ok(outcome)
@@ -917,8 +967,6 @@ impl Gateway {
     /// # Errors
     /// Returns a bounded executor or store error when ingress cannot run.
     ///
-    /// # Panics
-    /// Panics only if a core outcome violates its accepted-event invariant.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn admit_owntracks_ingress(
         &self,
@@ -940,12 +988,7 @@ impl Gateway {
                 entity,
             } => {
                 if admission.is_accepted() {
-                    let event_id = admission
-                        .event_id()
-                        .expect("accepted geographic admission always carries an Event ID");
-                    let seq = admission
-                        .event_seq()
-                        .expect("accepted geographic admission always carries an Event sequence");
+                    let (event_id, seq) = accepted_event_coordinates(&admission)?;
                     self.publish_geographic_notice(timeline, event_id, entity, seq);
                     Ok(OwnTracksIngressResult::Accepted)
                 } else if admission.is_duplicate() {
@@ -1155,7 +1198,7 @@ impl Gateway {
         }
         let timeline = parse_timeline_id(timeline_id)?;
         let entity = parse_entity_id(entity_id)?;
-        let bytes = json_to_cbor(payload);
+        let bytes = json_to_cbor(payload)?;
         let draft = EventDraft::new(entity, Kind::new(EVENT_TYPE_ACTION), bytes);
         self.append_draft(timeline, draft).await
     }
@@ -1208,7 +1251,7 @@ impl Gateway {
         let proposal = match ProposedAction::try_new(
             Kind::new(event_type),
             entity,
-            json_to_cbor(payload),
+            json_to_cbor(payload)?,
             Kind::new(capability),
         ) {
             Ok(proposal) => proposal,
@@ -1249,7 +1292,7 @@ impl Gateway {
         let proposal = match ProposedAction::try_new(
             Kind::new(event_type),
             entity,
-            json_to_cbor(payload),
+            json_to_cbor(payload)?,
             Kind::new(capability),
         ) {
             Ok(proposal) => proposal,
@@ -1289,7 +1332,7 @@ impl Gateway {
         }
         let timeline = parse_timeline_id(timeline_id)?;
         let entity = parse_entity_id(entity_id)?;
-        let draft = EventDraft::new(entity, Kind::new(EVENT_TYPE_ACTION), json_to_cbor(payload));
+        let draft = EventDraft::new(entity, Kind::new(EVENT_TYPE_ACTION), json_to_cbor(payload)?);
         self.append_identified_draft(timeline, draft, ingress_id)
             .await
     }
@@ -1305,7 +1348,7 @@ impl Gateway {
                 maximum: MAX_EVENT_PAYLOAD_BYTES,
             });
         }
-        if draft_event_response_len(&draft) > MAX_EVENTS_RESPONSE_BYTES {
+        if draft_event_response_len(&draft)? > MAX_EVENTS_RESPONSE_BYTES {
             return Err(GatewayError::EventResponseTooLarge {
                 maximum: MAX_EVENTS_RESPONSE_BYTES,
             });
@@ -1373,7 +1416,7 @@ impl Gateway {
                 maximum: MAX_EVENT_PAYLOAD_BYTES,
             });
         }
-        if draft_event_response_len(&draft) > MAX_EVENTS_RESPONSE_BYTES {
+        if draft_event_response_len(&draft)? > MAX_EVENTS_RESPONSE_BYTES {
             return Err(GatewayError::EventResponseTooLarge {
                 maximum: MAX_EVENTS_RESPONSE_BYTES,
             });
@@ -1422,7 +1465,7 @@ impl Gateway {
             event_type: event.event_type.as_str().to_owned(),
             seq: event.seq.as_u64(),
         };
-        let _ = self.bus.send(notice);
+        drop(self.bus.send(notice));
     }
 
     fn publish_geographic_notice(
@@ -1432,13 +1475,13 @@ impl Gateway {
         entity: EntityId,
         seq: Seq,
     ) {
-        let _ = self.bus.send(EventNotice {
+        drop(self.bus.send(EventNotice {
             timeline_id: timeline.to_string(),
             event_id: event_id.to_string(),
             entity_id: entity.to_string(),
             event_type: pos_core::GEOGRAPHIC_EVENT_TYPE.to_owned(),
             seq: seq.as_u64(),
-        });
+        }));
     }
 
     async fn read_event_by_id(
@@ -1449,9 +1492,11 @@ impl Gateway {
         self.store
             .read_one(timeline, event_id)
             .await?
-            .ok_or(GatewayError::Store(CoreError::Storage(
-                "duplicate identity points to a missing Event".to_owned(),
-            )))
+            .ok_or_else(|| {
+                GatewayError::Store(CoreError::Storage(
+                    "duplicate identity points to a missing Event".to_owned(),
+                ))
+            })
     }
 
     #[cfg(test)]
@@ -1512,7 +1557,7 @@ fn ingress_identity(timeline: TimelineId, entity: EntityId, ingress_id: &str) ->
     )
 }
 
-fn event_seq(event: &Event) -> u64 {
+const fn event_seq(event: &Event) -> u64 {
     event.seq.as_u64()
 }
 
@@ -1528,16 +1573,19 @@ fn parse_entity_id(s: &str) -> Result<EntityId, GatewayError> {
         .map_err(|e| GatewayError::InvalidId(e.to_string()))
 }
 
-fn json_to_cbor(value: &serde_json::Value) -> CanonicalBytes {
+fn json_to_cbor(value: &serde_json::Value) -> Result<CanonicalBytes, GatewayError> {
     let mut buf = Vec::new();
-    // Writing CBOR to Vec<u8> is infallible (same as plugins / pos-crypto).
-    ciborium::into_writer(value, &mut buf).expect("ciborium write to Vec<u8> is infallible");
-    CanonicalBytes::from_vec(buf)
+    ciborium::into_writer(value, &mut buf).map_err(|error| {
+        GatewayError::Store(CoreError::Storage(format!(
+            "JSON-to-CBOR encoding failed: {error}"
+        )))
+    })?;
+    Ok(CanonicalBytes::from_vec(buf))
 }
 
 /// Serialize the exact wire fields derived from a draft, using the longest
 /// possible sequence number and fixed-width ULID placeholders.
-fn draft_event_response_len(draft: &EventDraft) -> usize {
+fn draft_event_response_len(draft: &EventDraft) -> Result<usize, GatewayError> {
     let payload = draft.payload.as_slice();
     let view = EventView {
         id: "0".repeat(26),
@@ -1551,8 +1599,12 @@ fn draft_event_response_len(draft: &EventDraft) -> usize {
         "events": [view],
         "next_from_seq": u64::MAX,
     }))
-    .expect("EventView serialization is infallible")
-    .len()
+    .map(|bytes| bytes.len())
+    .map_err(|error| {
+        GatewayError::Store(CoreError::Storage(format!(
+            "EventView serialization failed: {error}"
+        )))
+    })
 }
 
 /// Request body for `POST /v1/timelines`.
@@ -1670,6 +1722,40 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            match self {
+                Ok(value) => value,
+                Err(error) => {
+                    std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
+                }
+            }
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected test value")))
+        }
+    }
+
+    trait TestErrorExt<E> {
+        fn test_err(self) -> E;
+    }
+
+    impl<T, E: std::fmt::Debug> TestErrorExt<E> for Result<T, E> {
+        fn test_err(self) -> E {
+            match self {
+                Ok(_value) => std::panic::resume_unwind(Box::new("expected test error")),
+                Err(error) => error,
+            }
+        }
+    }
+
     use super::*;
     use pos_core::{
         clock::{Seq, WallTime},
@@ -1690,7 +1776,7 @@ mod tests {
     use tokio::sync::broadcast;
 
     fn memory_gw() -> Gateway {
-        Gateway::new(open_store(StoreConfig::Memory).unwrap())
+        Gateway::new(open_store(StoreConfig::Memory).test_ok())
     }
 
     #[test]
@@ -1698,9 +1784,10 @@ mod tests {
     fn world_body_constructor_without_principal_is_fail_closed() {
         let body = EntityId::new();
         let gateway =
-            Gateway::new_with_world_bodies(open_store(StoreConfig::Memory).unwrap(), [body]);
+            Gateway::new_with_world_bodies(open_store(StoreConfig::Memory).test_ok(), [body]);
         assert!(gateway.action_principal.is_none());
         assert!(!gateway.owntracks_enabled);
+        drop(gateway);
     }
 
     #[tokio::test]
@@ -1744,6 +1831,7 @@ mod tests {
                 .await,
             Err(GatewayError::ActionAuthorizationUnavailable)
         ));
+        drop(gateway);
     }
 
     async fn assert_proposed_action_boundaries(
@@ -1871,11 +1959,11 @@ mod tests {
         let actor = EntityId::new();
         let body = EntityId::new();
         let gateway = Gateway::new_with_world_bodies_and_principal(
-            open_store(StoreConfig::Memory).unwrap(),
+            open_store(StoreConfig::Memory).test_ok(),
             [body],
             ActionPrincipal::new(actor, [Kind::new("world.action.submit")]),
         );
-        let timeline = gateway.create_timeline("action-boundaries").await.unwrap();
+        let timeline = gateway.create_timeline("action-boundaries").await.test_ok();
         let valid_timeline = timeline.id().to_string();
         let proposal = ProposedAction::new(
             Kind::new(EVENT_TYPE_ACTION),
@@ -1885,7 +1973,7 @@ mod tests {
         );
         assert_proposed_action_boundaries(&gateway, &valid_timeline, &proposal).await;
         assert_identified_action_boundaries(&gateway, &valid_timeline, actor).await;
-        gateway.shutdown().await.unwrap();
+        gateway.shutdown().await.test_ok();
 
         let error_gateway = action_error_gateway(actor, body);
         assert!(matches!(
@@ -1907,7 +1995,9 @@ mod tests {
                 .await,
             Err(GatewayError::Store(_))
         ));
-        error_gateway.shutdown().await.unwrap();
+        error_gateway.shutdown().await.test_ok();
+        drop(error_gateway);
+        drop(gateway);
     }
 
     struct TemporarySqliteFile {
@@ -1921,11 +2011,11 @@ mod tests {
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .expect("system clock after Unix epoch")
+                    .test_ok()
                     .as_nanos(),
             ));
             Self {
-                path: path.to_str().unwrap().to_owned(),
+                path: path.to_str().test_ok().to_owned(),
             }
         }
     }
@@ -1933,7 +2023,7 @@ mod tests {
     impl Drop for TemporarySqliteFile {
         fn drop(&mut self) {
             for suffix in ["", "-shm", "-wal"] {
-                let _ = std::fs::remove_file(format!("{}{suffix}", self.path));
+                drop(std::fs::remove_file(format!("{}{suffix}", self.path)));
             }
         }
     }
@@ -2040,7 +2130,7 @@ mod tests {
                     id: EventId::new(),
                     entity: EntityId::new(),
                     event_type: Kind::new(event_type),
-                    payload: payload.clone(),
+                    payload,
                     wall_time: WallTime::from_micros(1),
                     seq: Seq::from_u64(1),
                     causation_id: None,
@@ -2177,8 +2267,8 @@ mod tests {
 
         fn root_timeline_count_bounded(&self, maximum: usize) -> Result<usize, CoreError> {
             if self.block.swap(false, Ordering::SeqCst) {
-                self.started.send(()).unwrap();
-                self.release.recv().unwrap();
+                self.started.send(()).test_ok();
+                self.release.recv().test_ok();
             }
             self.inner.root_timeline_count_bounded(maximum)
         }
@@ -2199,6 +2289,7 @@ mod tests {
             gateway.create_timeline("closed").await,
             Err(GatewayError::StoreExecutorClosed)
         ));
+        drop(gateway);
     }
 
     #[tokio::test]
@@ -2212,12 +2303,13 @@ mod tests {
             gateway.create_timeline("closed-queue").await,
             Err(GatewayError::StoreExecutorClosed)
         ));
+        drop(gateway);
     }
 
     #[tokio::test]
     async fn saturated_gateway_append_is_typed_and_does_not_mutate_or_publish() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let timeline = store.create_timeline("saturation-target").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let timeline = store.create_timeline("saturation-target").test_ok();
         let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
         let (release_tx, release_rx) = mpsc::channel();
         let gateway = Gateway::with_executor_for_test(executor::StoreExecutor::new(Box::new(
@@ -2233,15 +2325,15 @@ mod tests {
             tokio::spawn(async move { blocker_gateway.store.root_count(MAX_TIMELINES).await });
         tokio::time::timeout(Duration::from_secs(1), started_rx.recv())
             .await
-            .expect("store worker must start before the queue is filled")
-            .expect("store worker start signal must be delivered");
+            .test_ok()
+            .test_ok();
 
         let mut queued = Vec::new();
         for _ in 0..executor::QUEUE_CAPACITY {
             let queued_gateway = gateway.clone();
             queued.push(tokio::spawn(async move {
                 queued_gateway
-                    .purge_expired_ingress_identities(std::num::NonZeroUsize::new(1).unwrap())
+                    .purge_expired_ingress_identities(std::num::NonZeroUsize::new(1).test_ok())
                     .await
             }));
             tokio::task::yield_now().await;
@@ -2256,11 +2348,11 @@ mod tests {
                 &serde_json::json!({"choice": "saturated"}),
             )
             .await
-            .unwrap_err();
+            .test_err();
 
         assert!(matches!(error, GatewayError::StoreExecutorSaturated));
-        release_tx.send(()).unwrap();
-        let blocker_result = blocker.await.unwrap();
+        release_tx.send(()).test_ok();
+        let blocker_result = blocker.await.test_ok();
         assert!(blocker_result.is_ok(), "blocker result: {blocker_result:?}");
         for request in queued {
             assert!(request.await.is_ok());
@@ -2273,15 +2365,16 @@ mod tests {
         let page = gateway
             .read_events_page(&timeline.id().to_string(), 0, 1)
             .await
-            .unwrap();
+            .test_ok();
         assert!(page.events.is_empty());
+        drop(gateway);
     }
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn create_timeline_and_append_action_roundtrip() {
         let gw = memory_gw();
-        let tl = gw.create_timeline("demo").await.unwrap();
+        let tl = gw.create_timeline("demo").await.test_ok();
         let entity = EntityId::new().to_string();
         let event = gw
             .append_action(
@@ -2291,15 +2384,16 @@ mod tests {
                 &serde_json::json!({"dx": 1.0, "dy": 0.0}),
             )
             .await
-            .unwrap();
+            .test_ok();
         assert_eq!(event.event_type.as_str(), EVENT_TYPE_ACTION);
         let page = gw
             .read_events_page(&tl.id().to_string(), 0, MAX_EVENTS_PER_POLL)
             .await
-            .unwrap();
+            .test_ok();
         assert_eq!(page.events.len(), 1);
         assert_eq!(page.events[0].id, event.id);
         assert_eq!(page.next_from_seq, None);
+        drop(gw);
     }
 
     #[tokio::test]
@@ -2315,8 +2409,9 @@ mod tests {
             let error = gateway
                 .read_events_page(&TimelineId::new().to_string(), 0, 1)
                 .await
-                .unwrap_err();
+                .test_err();
             assert!(matches!(error, GatewayError::ResourceUnavailable));
+            drop(gateway);
         }
     }
 
@@ -2324,27 +2419,27 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn gateway_enforces_timeline_and_event_bounds() {
         let timeline_limited = Gateway::with_limits(
-            open_store(StoreConfig::Memory).unwrap(),
+            open_store(StoreConfig::Memory).test_ok(),
             GatewayLimits {
                 max_timelines: 1,
                 max_events_per_timeline: 2,
             },
         );
-        timeline_limited.create_timeline("one").await.unwrap();
-        let err = timeline_limited.create_timeline("two").await.unwrap_err();
+        timeline_limited.create_timeline("one").await.test_ok();
+        let err = timeline_limited.create_timeline("two").await.test_err();
         assert!(matches!(
             err,
             GatewayError::TimelineLimitReached { maximum: 1 }
         ));
 
         let event_limited = Gateway::with_limits(
-            open_store(StoreConfig::Memory).unwrap(),
+            open_store(StoreConfig::Memory).test_ok(),
             GatewayLimits {
                 max_timelines: 1,
                 max_events_per_timeline: 1,
             },
         );
-        let timeline = event_limited.create_timeline("events").await.unwrap();
+        let timeline = event_limited.create_timeline("events").await.test_ok();
         let timeline_id = timeline.id().to_string();
         let entity_id = EntityId::new().to_string();
         event_limited
@@ -2355,7 +2450,7 @@ mod tests {
                 &serde_json::json!({}),
             )
             .await
-            .unwrap();
+            .test_ok();
         let err = event_limited
             .append_action(
                 &timeline_id,
@@ -2364,21 +2459,23 @@ mod tests {
                 &serde_json::json!({}),
             )
             .await
-            .unwrap_err();
+            .test_err();
         assert!(matches!(
             err,
             GatewayError::EventLimitReached { maximum: 1 }
         ));
+        drop(event_limited);
+        drop(timeline_limited);
     }
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn root_limit_excludes_forks_and_imported_children() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let root = store.create_timeline("root").unwrap();
-        store.fork(root.id(), Seq::ZERO, "fork").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let root = store.create_timeline("root").test_ok();
+        store.fork(root.id(), Seq::ZERO, "fork").test_ok();
         let imported_child = TimelineMeta::forked_from(root.id(), Seq::ZERO, "imported-child");
-        store.create_timeline_with_meta(imported_child).unwrap();
+        store.create_timeline_with_meta(imported_child).test_ok();
 
         let gateway = Gateway::with_limits(
             store,
@@ -2387,12 +2484,13 @@ mod tests {
                 max_events_per_timeline: 1,
             },
         );
-        gateway.create_timeline("second-root").await.unwrap();
-        let error = gateway.create_timeline("third-root").await.unwrap_err();
+        gateway.create_timeline("second-root").await.test_ok();
+        let error = gateway.create_timeline("third-root").await.test_err();
         assert!(matches!(
             error,
             GatewayError::TimelineLimitReached { maximum: 2 }
         ));
+        drop(gateway);
     }
 
     #[tokio::test]
@@ -2401,21 +2499,22 @@ mod tests {
         let gateway = Gateway::new(Box::new(ScriptedStore {
             mode: ScriptMode::RejectListUse,
         }));
-        gateway.create_timeline("root").await.unwrap();
+        gateway.create_timeline("root").await.test_ok();
+        drop(gateway);
     }
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn child_event_limit_counts_owned_not_inherited_events() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let root = store.create_timeline("root").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let root = store.create_timeline("root").test_ok();
         let root_draft = EventDraft::new(
             EntityId::new(),
             Kind::new(EVENT_TYPE_ACTION),
-            json_to_cbor(&serde_json::json!({})),
+            json_to_cbor(&serde_json::json!({})).test_ok(),
         );
-        store.append(root.id(), &[root_draft]).unwrap();
-        let child = store.fork(root.id(), Seq::from_u64(1), "child").unwrap();
+        store.append(root.id(), &[root_draft]).test_ok();
+        let child = store.fork(root.id(), Seq::from_u64(1), "child").test_ok();
         let gateway = Gateway::with_limits(
             store,
             GatewayLimits {
@@ -2433,7 +2532,7 @@ mod tests {
                 &serde_json::json!({}),
             )
             .await
-            .unwrap();
+            .test_ok();
         let error = gateway
             .append_action(
                 &child_id,
@@ -2442,7 +2541,7 @@ mod tests {
                 &serde_json::json!({}),
             )
             .await
-            .unwrap_err();
+            .test_err();
         assert!(matches!(
             error,
             GatewayError::EventLimitReached { maximum: 1 }
@@ -2450,21 +2549,22 @@ mod tests {
         let page = gateway
             .read_events_page(&child_id, 0, MAX_EVENTS_PER_POLL)
             .await
-            .unwrap();
+            .test_ok();
         assert_eq!(page.events.len(), 2);
+        drop(gateway);
     }
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn identified_retry_wins_over_event_capacity() {
         let gateway = Gateway::with_limits(
-            open_store(StoreConfig::Memory).unwrap(),
+            open_store(StoreConfig::Memory).test_ok(),
             GatewayLimits {
                 max_timelines: 1,
                 max_events_per_timeline: 1,
             },
         );
-        let timeline = gateway.create_timeline("dedup-capacity").await.unwrap();
+        let timeline = gateway.create_timeline("dedup-capacity").await.test_ok();
         let entity = EntityId::new();
         let first = gateway
             .append_identified_action(
@@ -2475,7 +2575,7 @@ mod tests {
                 "device-1:capacity",
             )
             .await
-            .unwrap();
+            .test_ok();
         let retry = gateway
             .append_identified_action(
                 &timeline.id().to_string(),
@@ -2485,7 +2585,7 @@ mod tests {
                 "device-1:capacity",
             )
             .await
-            .unwrap();
+            .test_ok();
         assert!(retry.duplicate);
         assert_eq!(retry.event.id, first.event.id);
         let error = gateway
@@ -2497,18 +2597,19 @@ mod tests {
                 "device-1:new",
             )
             .await
-            .unwrap_err();
+            .test_err();
         assert!(matches!(
             error,
             GatewayError::EventLimitReached { maximum: 1 }
         ));
+        drop(gateway);
     }
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn same_ingress_id_is_scoped_to_entity() {
         let gateway = memory_gw();
-        let timeline = gateway.create_timeline("entity-scope").await.unwrap();
+        let timeline = gateway.create_timeline("entity-scope").await.test_ok();
         let timeline_id = timeline.id().to_string();
         let first = gateway
             .append_identified_action(
@@ -2519,7 +2620,7 @@ mod tests {
                 "device-1:shared",
             )
             .await
-            .unwrap();
+            .test_ok();
         let second_entity = EntityId::new().to_string();
         let second = gateway
             .append_identified_action(
@@ -2530,15 +2631,16 @@ mod tests {
                 "device-1:shared",
             )
             .await
-            .unwrap();
+            .test_ok();
         assert!(!second.duplicate);
         assert_ne!(first.event.id, second.event.id);
+        drop(gateway);
     }
 
     #[tokio::test]
     async fn identified_admission_covers_bounds_and_maintenance() {
         let gateway = memory_gw();
-        let timeline = gateway.create_timeline("identified-bounds").await.unwrap();
+        let timeline = gateway.create_timeline("identified-bounds").await.test_ok();
         let timeline_id = timeline.id().to_string();
         let entity_id = EntityId::new().to_string();
         let payload = serde_json::json!({"data": "x".repeat(MAX_EVENT_PAYLOAD_BYTES)});
@@ -2569,9 +2671,9 @@ mod tests {
         ));
         assert_eq!(
             gateway
-                .purge_expired_ingress_identities(NonZeroUsize::new(1).unwrap())
+                .purge_expired_ingress_identities(NonZeroUsize::new(1).test_ok())
                 .await
-                .unwrap()
+                .test_ok()
                 .removed,
             0
         );
@@ -2587,12 +2689,13 @@ mod tests {
                 .await,
             Err(GatewayError::UnsupportedAction(_))
         ));
+        drop(gateway);
     }
 
     #[tokio::test]
     async fn identified_admission_fails_closed_for_input_and_append_boundaries() {
         let gateway = memory_gw();
-        let timeline = gateway.create_timeline("identified-errors").await.unwrap();
+        let timeline = gateway.create_timeline("identified-errors").await.test_ok();
         let valid_timeline = timeline.id().to_string();
         let valid_entity = EntityId::new().to_string();
         let payload = serde_json::json!({});
@@ -2665,12 +2768,16 @@ mod tests {
                 .await,
             Err(GatewayError::Store(_))
         ));
+        drop(append_error);
+        drop(gateway);
+        drop(get_error);
+        drop(missing_timeline);
     }
 
     #[tokio::test]
     async fn identified_admission_fails_closed_for_purge_and_duplicate_boundaries() {
         let gateway = memory_gw();
-        let timeline = gateway.create_timeline("identified-errors").await.unwrap();
+        let timeline = gateway.create_timeline("identified-errors").await.test_ok();
         let valid_timeline = timeline.id().to_string();
         let valid_entity = EntityId::new().to_string();
         let payload = serde_json::json!({});
@@ -2678,7 +2785,7 @@ mod tests {
             mode: ScriptMode::RejectListUse,
         }));
         assert!(purge_error
-            .purge_expired_ingress_identities(NonZeroUsize::new(1).unwrap())
+            .purge_expired_ingress_identities(NonZeroUsize::new(1).test_ok())
             .await
             .is_err());
         let duplicate_error = Gateway::new(Box::new(ScriptedStore {
@@ -2711,6 +2818,10 @@ mod tests {
                 .await,
             Err(GatewayError::Store(_))
         ));
+        drop(duplicate_error);
+        drop(duplicate_read_error);
+        drop(gateway);
+        drop(purge_error);
     }
 
     #[tokio::test]
@@ -2720,13 +2831,13 @@ mod tests {
             open_store(StoreConfig::Sqlite {
                 path: ":memory:".to_owned(),
             })
-            .unwrap(),
+            .test_ok(),
             GatewayLimits {
                 max_timelines: 1,
                 max_events_per_timeline: 1,
             },
         );
-        let timeline = gateway.create_timeline("sqlite").await.unwrap();
+        let timeline = gateway.create_timeline("sqlite").await.test_ok();
         let timeline_id = timeline.id().to_string();
         let entity_id = EntityId::new().to_string();
         let first = gateway.clone();
@@ -2741,7 +2852,7 @@ mod tests {
         let rejected = if let Err(error) = a {
             error
         } else {
-            b.unwrap_err()
+            b.test_err()
         };
         assert!(matches!(
             rejected,
@@ -2750,8 +2861,11 @@ mod tests {
         let page = gateway
             .read_events_page(&timeline_id, 0, MAX_EVENTS_PER_POLL)
             .await
-            .unwrap();
+            .test_ok();
         assert_eq!(page.events.len(), 1);
+        drop(first);
+        drop(gateway);
+        drop(second);
     }
 
     #[tokio::test]
@@ -2759,23 +2873,23 @@ mod tests {
     async fn sqlite_gateways_enforce_one_atomic_event_ceiling() {
         let database = TemporarySqliteFile::new("atomic-ceiling");
         let path = database.path.clone();
-        let mut seed = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
-        let timeline = seed.create_timeline("sqlite").unwrap();
+        let mut seed = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
+        let timeline = seed.create_timeline("sqlite").test_ok();
         let entity = EntityId::new();
         let prefill = EventDraft::new(
             entity,
             Kind::new(EVENT_TYPE_ACTION),
-            json_to_cbor(&serde_json::json!({"writer": "prefill"})),
+            json_to_cbor(&serde_json::json!({"writer": "prefill"})).test_ok(),
         );
         seed.append(
             timeline.id(),
-            &vec![prefill; usize::try_from(MAX_EVENTS_PER_TIMELINE - 1).unwrap()],
+            &vec![prefill; usize::try_from(MAX_EVENTS_PER_TIMELINE - 1).test_ok()],
         )
-        .unwrap();
+        .test_ok();
         drop(seed);
 
-        let first = Gateway::new(open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap());
-        let second = Gateway::new(open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap());
+        let first = Gateway::new(open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok());
+        let second = Gateway::new(open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok());
         let timeline_id = timeline.id().to_string();
         let entity_id = entity.to_string();
         let payload_a = serde_json::json!({"writer": "a"});
@@ -2805,13 +2919,13 @@ mod tests {
         };
         barrier.wait().await;
         let (a, b) = tokio::join!(first_task, second_task);
-        let a = a.unwrap();
-        let b = b.unwrap();
+        let a = a.test_ok();
+        let b = b.test_ok();
         assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
         let rejected = if let Err(error) = a {
             error
         } else {
-            b.unwrap_err()
+            b.test_err()
         };
         assert!(matches!(
             rejected,
@@ -2819,17 +2933,17 @@ mod tests {
                 maximum: MAX_EVENTS_PER_TIMELINE
             }
         ));
-        let fresh = open_store(StoreConfig::Sqlite { path: path.clone() }).unwrap();
+        let fresh = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
         assert_eq!(
-            fresh.get_timeline(timeline.id()).unwrap().unwrap().head,
+            fresh.get_timeline(timeline.id()).test_ok().test_ok().head,
             Seq::from_u64(MAX_EVENTS_PER_TIMELINE)
         );
         assert_eq!(
             fresh
                 .read_own(timeline.id(), SeqRange::all())
-                .unwrap()
+                .test_ok()
                 .len(),
-            usize::try_from(MAX_EVENTS_PER_TIMELINE).unwrap()
+            usize::try_from(MAX_EVENTS_PER_TIMELINE).test_ok()
         );
     }
 
@@ -2839,63 +2953,64 @@ mod tests {
         let mut store = open_store(StoreConfig::Sqlite {
             path: ":memory:".to_owned(),
         })
-        .unwrap();
-        let root = store.create_timeline("root").unwrap();
+        .test_ok();
+        let root = store.create_timeline("root").test_ok();
         let small = EventDraft::new(
             EntityId::new(),
             Kind::new(EVENT_TYPE_ACTION),
-            json_to_cbor(&serde_json::json!({})),
+            json_to_cbor(&serde_json::json!({})).test_ok(),
         );
         store
             .append(root.id(), std::slice::from_ref(&small))
-            .unwrap();
-        let child = store.fork(root.id(), Seq::from_u64(1), "child").unwrap();
+            .test_ok();
+        let child = store.fork(root.id(), Seq::from_u64(1), "child").test_ok();
         store
             .append(child.id(), std::slice::from_ref(&small))
-            .unwrap();
+            .test_ok();
         let gateway = Gateway::new(store);
 
         let first = gateway
             .read_events_page(&child.id().to_string(), 1, 1)
             .await
-            .unwrap();
+            .test_ok();
         assert_eq!(first.events.len(), 1);
         assert_eq!(first.events[0].seq.as_u64(), 1);
         assert_eq!(first.next_from_seq, Some(Seq::from_u64(2)));
         let beyond_head = gateway
             .read_events_page(&child.id().to_string(), 3, 1)
             .await
-            .unwrap();
+            .test_ok();
         assert!(beyond_head.events.is_empty());
 
         let mut external = open_store(StoreConfig::Sqlite {
             path: ":memory:".to_owned(),
         })
-        .unwrap();
-        let timeline = external.create_timeline("external").unwrap();
+        .test_ok();
+        let timeline = external.create_timeline("external").test_ok();
         let oversized = EventDraft::new(
             EntityId::new(),
             Kind::new("external.event"),
             CanonicalBytes::from_vec(vec![0; MAX_EVENT_PAYLOAD_BYTES + 1]),
         );
-        external.append(timeline.id(), &[oversized]).unwrap();
+        external.append(timeline.id(), &[oversized]).test_ok();
         let error = Gateway::new(external)
             .read_events_page(&timeline.id().to_string(), 0, 1)
             .await
-            .unwrap_err();
+            .test_err();
         assert!(matches!(
             error,
             GatewayError::EventPayloadTooLarge {
                 maximum: MAX_EVENT_PAYLOAD_BYTES
             }
         ));
+        drop(gateway);
     }
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn imported_oversized_event_type_returns_actionable_413_on_bundled_stores() {
-        let mut source = open_store(StoreConfig::Memory).unwrap();
-        let timeline = source.create_timeline("import-source").unwrap();
+        let mut source = open_store(StoreConfig::Memory).test_ok();
+        let timeline = source.create_timeline("import-source").test_ok();
         source
             .append(
                 timeline.id(),
@@ -2905,22 +3020,22 @@ mod tests {
                     CanonicalBytes::from_static(b"x"),
                 )],
             )
-            .unwrap();
-        let export = export_timeline_own(source.as_ref(), timeline.id()).unwrap();
+            .test_ok();
+        let export = export_timeline_own(source.as_ref(), timeline.id()).test_ok();
 
         let destinations = [
-            open_store(StoreConfig::Memory).unwrap(),
+            open_store(StoreConfig::Memory).test_ok(),
             open_store(StoreConfig::Sqlite {
                 path: ":memory:".to_owned(),
             })
-            .unwrap(),
+            .test_ok(),
         ];
         for mut destination in destinations {
-            import_timeline_with_id(destination.as_mut(), export.clone()).unwrap();
+            import_timeline_with_id(destination.as_mut(), export.clone()).test_ok();
             let error = Gateway::new(destination)
                 .read_events_page(&timeline.id().to_string(), 0, 1)
                 .await
-                .unwrap_err();
+                .test_err();
             assert!(matches!(
                 error,
                 GatewayError::EventMetadataTooLarge {
@@ -2934,23 +3049,23 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn imported_deep_fork_returns_actionable_413() {
-        let mut source = open_store(StoreConfig::Memory).unwrap();
-        let root = source.create_timeline("root").unwrap();
+        let mut source = open_store(StoreConfig::Memory).test_ok();
+        let root = source.create_timeline("root").test_ok();
         let mut timelines = vec![root];
         for depth in 1..=MAX_FORK_DEPTH + 1 {
-            let parent = timelines.last().unwrap();
+            let parent = timelines.last().test_ok();
             let child = source
                 .fork(parent.id(), Seq::ZERO, &format!("depth-{depth}"))
-                .unwrap();
+                .test_ok();
             timelines.push(child);
         }
 
-        let mut destination = open_store(StoreConfig::Memory).unwrap();
+        let mut destination = open_store(StoreConfig::Memory).test_ok();
         for timeline in &timelines {
-            let export = export_timeline_own(source.as_ref(), timeline.id()).unwrap();
-            import_timeline_with_id(destination.as_mut(), export).unwrap();
+            let export = export_timeline_own(source.as_ref(), timeline.id()).test_ok();
+            import_timeline_with_id(destination.as_mut(), export).test_ok();
         }
-        let deepest = timelines.last().unwrap();
+        let deepest = timelines.last().test_ok();
         let response = GatewayError::ForkDepthTooLarge {
             maximum: MAX_FORK_DEPTH,
         }
@@ -2958,7 +3073,7 @@ mod tests {
         let error = Gateway::new(destination)
             .read_events_page(&deepest.id().to_string(), 0, 1)
             .await
-            .unwrap_err();
+            .test_err();
 
         assert_eq!(error.to_string(), response);
     }
@@ -2967,7 +3082,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn gateway_rejects_payloads_that_cannot_fit_bounded_responses() {
         let gateway = memory_gw();
-        let timeline = gateway.create_timeline("payload").await.unwrap();
+        let timeline = gateway.create_timeline("payload").await.test_ok();
         let payload = serde_json::json!({"data": "x".repeat(MAX_EVENT_PAYLOAD_BYTES)});
         let error = gateway
             .append_action(
@@ -2977,7 +3092,7 @@ mod tests {
                 &payload,
             )
             .await
-            .unwrap_err();
+            .test_err();
         assert!(matches!(
             error,
             GatewayError::EventPayloadTooLarge {
@@ -2994,7 +3109,7 @@ mod tests {
                 &high_expansion,
             )
             .await
-            .unwrap_err();
+            .test_err();
         assert!(matches!(
             error,
             GatewayError::EventResponseTooLarge {
@@ -3011,20 +3126,21 @@ mod tests {
                 &retrievable,
             )
             .await
-            .unwrap();
+            .test_ok();
         let page = gateway
             .read_events_page(&timeline.id().to_string(), 0, 1)
             .await
-            .unwrap();
+            .test_ok();
         let response = serde_json::json!({
             "events": page
                 .events
                 .iter()
-                .map(|event| EventView::try_from(event).unwrap())
+                .map(|event| EventView::try_from(event).test_ok())
                 .collect::<Vec<_>>(),
             "next_from_seq": page.next_from_seq,
         });
-        assert!(serde_json::to_vec(&response).unwrap().len() <= MAX_EVENTS_RESPONSE_BYTES);
+        assert!(serde_json::to_vec(&response).test_ok().len() <= MAX_EVENTS_RESPONSE_BYTES);
+        drop(gateway);
     }
 
     #[test]
@@ -3035,7 +3151,7 @@ mod tests {
             Kind::new("\0".repeat(MAX_EVENT_TYPE_BYTES)),
             CanonicalBytes::from_vec(vec![0xff; MAX_EVENT_PAYLOAD_BYTES]),
         );
-        assert!(draft_event_response_len(&draft) <= MAX_EVENTS_RESPONSE_BYTES);
+        assert!(draft_event_response_len(&draft).test_ok() <= MAX_EVENTS_RESPONSE_BYTES);
     }
 
     #[tokio::test]
@@ -3045,8 +3161,11 @@ mod tests {
         let mut boundary = None;
         for length in (MAX_EVENTS_RESPONSE_BYTES / 8 - 128)..=(MAX_EVENTS_RESPONSE_BYTES / 8) {
             let payload = serde_json::json!({"data": "\0".repeat(length)});
-            let draft =
-                EventDraft::new(entity, Kind::new(EVENT_TYPE_ACTION), json_to_cbor(&payload));
+            let draft = EventDraft::new(
+                entity,
+                Kind::new(EVENT_TYPE_ACTION),
+                json_to_cbor(&payload).test_ok(),
+            );
             let view = EventView {
                 id: "0".repeat(26),
                 entity: entity.to_string(),
@@ -3059,9 +3178,9 @@ mod tests {
                 "events": [view],
                 "next_from_seq": null,
             }))
-            .unwrap()
+            .test_ok()
             .len();
-            let worst_cursor_len = draft_event_response_len(&draft);
+            let worst_cursor_len = draft_event_response_len(&draft).test_ok();
             if null_cursor_len <= MAX_EVENTS_RESPONSE_BYTES
                 && worst_cursor_len > MAX_EVENTS_RESPONSE_BYTES
             {
@@ -3069,9 +3188,9 @@ mod tests {
                 break;
             }
         }
-        let payload = boundary.expect("cursor width must cross the exact response boundary");
+        let payload = boundary.test_ok();
         let gateway = memory_gw();
-        let timeline = gateway.create_timeline("cursor-boundary").await.unwrap();
+        let timeline = gateway.create_timeline("cursor-boundary").await.test_ok();
         let error = gateway
             .append_action(
                 &timeline.id().to_string(),
@@ -3080,20 +3199,21 @@ mod tests {
                 &payload,
             )
             .await
-            .unwrap_err();
+            .test_err();
         assert!(matches!(
             error,
             GatewayError::EventResponseTooLarge {
                 maximum: MAX_EVENTS_RESPONSE_BYTES
             }
         ));
+        drop(gateway);
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn events_query_remains_deserializable_for_library_callers() {
         let query: EventsQuery =
-            serde_json::from_value(serde_json::json!({"from_seq": 7, "limit": 8})).unwrap();
+            serde_json::from_value(serde_json::json!({"from_seq": 7, "limit": 8})).test_ok();
         assert_eq!(
             query,
             EventsQuery {
@@ -3107,37 +3227,39 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn event_page_rejects_zero_limit() {
         let gw = memory_gw();
-        let timeline = gw.create_timeline("zero").await.unwrap();
+        let timeline = gw.create_timeline("zero").await.test_ok();
         let err = gw
             .read_events_page(&timeline.id().to_string(), 0, 0)
             .await
-            .unwrap_err();
+            .test_err();
         assert!(matches!(
             err,
             GatewayError::InvalidPageLimit {
                 maximum: MAX_EVENTS_PER_POLL
             }
         ));
+        drop(gw);
     }
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn empty_event_page_has_no_cursor() {
         let gw = memory_gw();
-        let timeline = gw.create_timeline("empty").await.unwrap();
+        let timeline = gw.create_timeline("empty").await.test_ok();
         let page = gw
             .read_events_page(&timeline.id().to_string(), 0, 1)
             .await
-            .unwrap();
+            .test_ok();
         assert!(page.events.is_empty());
         assert_eq!(page.next_from_seq, None);
+        drop(gw);
     }
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn event_page_cursor_is_first_omitted_sequence_and_none_at_exhaustion() {
         let gateway = memory_gw();
-        let timeline = gateway.create_timeline("cursor").await.unwrap();
+        let timeline = gateway.create_timeline("cursor").await.test_ok();
         let timeline_id = timeline.id().to_string();
         let entity_id = EntityId::new().to_string();
         for value in 0..2 {
@@ -3149,14 +3271,15 @@ mod tests {
                     &serde_json::json!({ "value": value }),
                 )
                 .await
-                .unwrap();
+                .test_ok();
         }
-        let first = gateway.read_events_page(&timeline_id, 0, 1).await.unwrap();
+        let first = gateway.read_events_page(&timeline_id, 0, 1).await.test_ok();
         assert_eq!(first.events.len(), 1);
         assert_eq!(first.next_from_seq, Some(Seq::from_u64(2)));
-        let exhausted = gateway.read_events_page(&timeline_id, 2, 1).await.unwrap();
+        let exhausted = gateway.read_events_page(&timeline_id, 2, 1).await.test_ok();
         assert_eq!(exhausted.events.len(), 1);
         assert_eq!(exhausted.next_from_seq, None);
+        drop(gateway);
     }
 
     #[tokio::test]
@@ -3164,13 +3287,13 @@ mod tests {
     #[allow(deprecated)]
     async fn public_page_api_and_compatibility_shim_remain_bounded() {
         let gateway = memory_gw();
-        let timeline = gateway.create_timeline("public-api").await.unwrap();
+        let timeline = gateway.create_timeline("public-api").await.test_ok();
         let drafts: Vec<_> = (0..=MAX_EVENTS_PER_POLL)
             .map(|_| {
                 EventDraft::new(
                     EntityId::new(),
                     Kind::new(EVENT_TYPE_ACTION),
-                    json_to_cbor(&serde_json::json!({})),
+                    json_to_cbor(&serde_json::json!({})).test_ok(),
                 )
             })
             .collect();
@@ -3179,18 +3302,18 @@ mod tests {
                 .store
                 .append(timeline.id(), drafts, None)
                 .await
-                .unwrap();
+                .test_ok();
         }
         let page: EventPage = gateway
             .read_events_page(&timeline.id().to_string(), 0, MAX_EVENTS_PER_POLL)
             .await
-            .unwrap();
+            .test_ok();
         assert_eq!(page.events.len(), MAX_EVENTS_PER_POLL);
         assert_eq!(page.next_from_seq, Some(Seq::from_u64(101)));
         let error = gateway
             .read_events_from(&timeline.id().to_string(), 0)
             .await
-            .unwrap_err();
+            .test_err();
         assert!(matches!(
             error,
             GatewayError::CompatibilityReadTruncated {
@@ -3200,30 +3323,31 @@ mod tests {
         let final_event = gateway
             .read_events_from(&timeline.id().to_string(), 101)
             .await
-            .unwrap();
+            .test_ok();
         assert_eq!(final_event.len(), 1);
-        let invalid = gateway.read_events_from("bad", 0).await.unwrap_err();
+        let invalid = gateway.read_events_from("bad", 0).await.test_err();
         assert!(matches!(invalid, GatewayError::InvalidId(_)));
+        drop(gateway);
     }
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn fork_with_more_than_ten_thousand_logical_events_pages_to_exhaustion() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let root = store.create_timeline("root").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let root = store.create_timeline("root").test_ok();
         let drafts: Vec<_> = (0..MAX_EVENTS_PER_TIMELINE)
             .map(|_| {
                 EventDraft::new(
                     EntityId::new(),
                     Kind::new(EVENT_TYPE_ACTION),
-                    json_to_cbor(&serde_json::json!({})),
+                    json_to_cbor(&serde_json::json!({})).test_ok(),
                 )
             })
             .collect();
-        store.append(root.id(), &drafts).unwrap();
+        store.append(root.id(), &drafts).test_ok();
         let child = store
             .fork(root.id(), Seq::from_u64(10_000), "child")
-            .unwrap();
+            .test_ok();
         let gateway = Gateway::new(store);
         gateway
             .append_action(
@@ -3233,7 +3357,7 @@ mod tests {
                 &serde_json::json!({}),
             )
             .await
-            .unwrap();
+            .test_ok();
 
         let mut from_seq = 0;
         let mut count = 0;
@@ -3241,7 +3365,7 @@ mod tests {
             let page = gateway
                 .read_events_page(&child.id().to_string(), from_seq, MAX_EVENTS_PER_POLL)
                 .await
-                .unwrap();
+                .test_ok();
             count += page.events.len();
             match page.next_from_seq {
                 Some(next) => from_seq = next.as_u64(),
@@ -3249,13 +3373,14 @@ mod tests {
             }
         }
         assert_eq!(count, 10_001);
+        drop(gateway);
     }
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn append_action_rejects_other_types() {
         let gw = memory_gw();
-        let tl = gw.create_timeline("demo").await.unwrap();
+        let tl = gw.create_timeline("demo").await.test_ok();
         let err = gw
             .append_action(
                 &tl.id().to_string(),
@@ -3264,8 +3389,9 @@ mod tests {
                 &serde_json::json!({}),
             )
             .await
-            .unwrap_err();
+            .test_err();
         assert!(matches!(err, GatewayError::UnsupportedAction(_)));
+        drop(gw);
     }
 
     #[tokio::test]
@@ -3273,7 +3399,7 @@ mod tests {
     async fn append_signal_and_bus_notice() {
         let gw = memory_gw();
         let mut rx = gw.subscribe();
-        let tl = gw.create_timeline("society").await.unwrap();
+        let tl = gw.create_timeline("society").await.test_ok();
         let signal = SocietySignal {
             dimension: SocietyDimension::Trust,
             value: 0.8,
@@ -3283,17 +3409,18 @@ mod tests {
         let event = gw
             .append_signal(&tl.id().to_string(), &EntityId::new().to_string(), &signal)
             .await
-            .unwrap();
-        let notice = rx.try_recv().unwrap();
+            .test_ok();
+        let notice = rx.try_recv().test_ok();
         assert_eq!(notice.event_id, event.id.to_string());
         assert_eq!(notice.event_type, EVENT_TYPE_SIGNAL);
+        drop(gw);
     }
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn invalid_ids_error() {
         let gw = memory_gw();
-        let err = gw.read_events_page("not-a-ulid", 0, 1).await.unwrap_err();
+        let err = gw.read_events_page("not-a-ulid", 0, 1).await.test_err();
         assert!(matches!(err, GatewayError::InvalidId(_)));
         let err = gw
             .append_action(
@@ -3303,9 +3430,9 @@ mod tests {
                 &serde_json::json!({}),
             )
             .await
-            .unwrap_err();
+            .test_err();
         assert!(matches!(err, GatewayError::InvalidId(_)));
-        let tl = gw.create_timeline("ids").await.unwrap();
+        let tl = gw.create_timeline("ids").await.test_ok();
         let err = gw
             .append_action(
                 &tl.id().to_string(),
@@ -3314,7 +3441,7 @@ mod tests {
                 &serde_json::json!({}),
             )
             .await
-            .unwrap_err();
+            .test_err();
         assert!(matches!(err, GatewayError::InvalidId(_)));
         let err = gw
             .append_signal(
@@ -3328,7 +3455,7 @@ mod tests {
                 },
             )
             .await
-            .unwrap_err();
+            .test_err();
         assert!(matches!(err, GatewayError::InvalidId(_)));
         let err = gw
             .append_signal(
@@ -3342,8 +3469,9 @@ mod tests {
                 },
             )
             .await
-            .unwrap_err();
+            .test_err();
         assert!(matches!(err, GatewayError::InvalidId(_)));
+        drop(gw);
     }
 
     #[tokio::test]
@@ -3378,6 +3506,8 @@ mod tests {
             fail_list.create_timeline("x").await,
             Err(GatewayError::Store(_))
         ));
+        drop(fail_create);
+        drop(fail_list);
     }
 
     #[tokio::test]
@@ -3393,7 +3523,7 @@ mod tests {
             action_registry: gateway_action_registry(),
             action_principal: None,
         };
-        let tl = empty_append.create_timeline("e").await.unwrap();
+        let tl = empty_append.create_timeline("e").await.test_ok();
         let err = empty_append
             .append_action(
                 &tl.id().to_string(),
@@ -3402,7 +3532,7 @@ mod tests {
                 &serde_json::json!({}),
             )
             .await
-            .unwrap_err();
+            .test_err();
         assert!(matches!(err, GatewayError::Store(_)));
 
         let fail_get_timeline = Gateway {
@@ -3423,7 +3553,7 @@ mod tests {
                 &serde_json::json!({}),
             )
             .await
-            .unwrap_err();
+            .test_err();
         assert!(matches!(err, GatewayError::Store(_)));
 
         let fail_append = Gateway {
@@ -3436,7 +3566,7 @@ mod tests {
             action_registry: gateway_action_registry(),
             action_principal: None,
         };
-        let tl = fail_append.create_timeline("a").await.unwrap();
+        let tl = fail_append.create_timeline("a").await.test_ok();
         let err = fail_append
             .append_action(
                 &tl.id().to_string(),
@@ -3445,7 +3575,7 @@ mod tests {
                 &serde_json::json!({}),
             )
             .await
-            .unwrap_err();
+            .test_err();
         assert!(matches!(err, GatewayError::Store(_)));
 
         let fail_read = Gateway {
@@ -3461,8 +3591,12 @@ mod tests {
         let err = fail_read
             .read_events_page(&TimelineId::new().to_string(), 0, 1)
             .await
-            .unwrap_err();
+            .test_err();
         assert!(matches!(err, GatewayError::Store(_)));
+        drop(empty_append);
+        drop(fail_append);
+        drop(fail_get_timeline);
+        drop(fail_read);
     }
 
     #[tokio::test]
@@ -3513,8 +3647,9 @@ mod tests {
             let error = gateway
                 .read_events_page(&TimelineId::new().to_string(), 0, 1)
                 .await
-                .unwrap_err();
+                .test_err();
             assert_eq!(error.to_string(), expected.to_string());
+            drop(gateway);
         }
     }
 
@@ -3522,7 +3657,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn event_view_and_hex() {
         let gw = memory_gw();
-        let tl = gw.create_timeline("x").await.unwrap();
+        let tl = gw.create_timeline("x").await.test_ok();
         let event = gw
             .append_action(
                 &tl.id().to_string(),
@@ -3531,8 +3666,8 @@ mod tests {
                 &serde_json::json!({"k": "v"}),
             )
             .await
-            .unwrap();
-        let view = EventView::try_from(&event).unwrap();
+            .test_ok();
+        let view = EventView::try_from(&event).test_ok();
         assert_eq!(view.event_type, EVENT_TYPE_ACTION);
         assert!(!view.payload_hex.is_empty());
         assert_eq!(view.payload, Some(serde_json::json!({"k": "v"})));
@@ -3540,15 +3675,16 @@ mod tests {
 
         let mut geographic = event;
         geographic.event_type = Kind::new(pos_core::GEOGRAPHIC_EVENT_TYPE);
-        let error = EventView::try_from(&geographic).unwrap_err();
+        let error = EventView::try_from(&geographic).test_err();
         assert!(error.to_string().contains("not found"));
+        drop(gw);
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn decode_cbor_json_roundtrip() {
         let value = serde_json::json!({"n": 1});
-        let bytes = json_to_cbor(&value);
+        let bytes = json_to_cbor(&value).test_ok();
         assert_eq!(decode_cbor_json(bytes.as_slice()), Some(value));
         assert!(decode_cbor_json(&[0xff]).is_none());
     }
@@ -3573,20 +3709,21 @@ mod tests {
     async fn subscribe_lag_signals_resync() {
         use tokio::sync::broadcast::error::TryRecvError;
 
-        let gw = Gateway::with_bus_capacity(open_store(StoreConfig::Memory).unwrap(), 2);
+        let gw = Gateway::with_bus_capacity(open_store(StoreConfig::Memory).test_ok(), 2);
         let mut rx = gw.subscribe();
-        let tl = gw.create_timeline("lag").await.unwrap();
+        let tl = gw.create_timeline("lag").await.test_ok();
         let entity = EntityId::new().to_string();
         let id = tl.id().to_string();
         for _ in 0..3 {
             gw.append_action(&id, &entity, EVENT_TYPE_ACTION, &serde_json::json!({}))
                 .await
-                .unwrap();
+                .test_ok();
         }
         assert!(matches!(
             rx.try_recv(),
             Ok(_) | Err(TryRecvError::Lagged(_))
         ));
+        drop(gw);
     }
 
     #[test]
@@ -3647,11 +3784,11 @@ mod tests {
         let actor = EntityId::new();
         let body = EntityId::new();
         let gw = Gateway::new_with_world_bodies_and_principal(
-            open_store(StoreConfig::Memory).unwrap(),
+            open_store(StoreConfig::Memory).test_ok(),
             [body],
             ActionPrincipal::new(actor, [Kind::new("world.action.submit")]),
         );
-        let tl = gw.create_timeline("actions").await.unwrap();
+        let tl = gw.create_timeline("actions").await.test_ok();
         let action = pos_plugin_world::WorldAction {
             actor_entity_id: actor,
             body_entity_id: body,
@@ -3662,7 +3799,7 @@ mod tests {
             tick: 1,
         };
         let mut payload = Vec::new();
-        ciborium::into_writer(&action, &mut payload).unwrap();
+        ciborium::into_writer(&action, &mut payload).test_ok();
 
         // Valid proposal
         let valid = ProposedAction::new(
@@ -3674,7 +3811,7 @@ mod tests {
         let event = gw
             .submit_proposed_action(&tl.id().to_string(), valid)
             .await
-            .unwrap();
+            .test_ok();
         assert_eq!(event.entity, actor);
         assert_eq!(event.event_type.as_str(), EVENT_TYPE_ACTION);
 
@@ -3688,7 +3825,7 @@ mod tests {
         let err = gw
             .submit_proposed_action(&tl.id().to_string(), bad_cap)
             .await
-            .unwrap_err();
+            .test_err();
         assert!(err.to_string().contains("capability not granted"));
 
         // Approver rejection
@@ -3701,7 +3838,8 @@ mod tests {
         let err = gw
             .submit_proposed_action(&tl.id().to_string(), invalid)
             .await
-            .unwrap_err();
+            .test_err();
         assert!(err.to_string().contains("malformed world.action payload"));
+        drop(gw);
     }
 }

@@ -153,7 +153,6 @@ pub fn is_valid_osf_link(link: &str) -> bool {
 
 /// Field validation shared by [`NewPrediction`] and [`LedgerPrediction`]
 /// (the OSF link is *not* checked here — read-side exclusion handles it).
-#[allow(clippy::redundant_pub_crate)]
 pub(crate) fn validate_fields(
     title: &str,
     statement: &str,
@@ -201,7 +200,6 @@ pub(crate) fn validate_fields(
 }
 
 /// Validate the payload-specific fields of a [`LedgerPrediction`].
-#[allow(clippy::redundant_pub_crate)]
 pub(crate) fn validate_prediction(prediction: &LedgerPrediction) -> Result<(), LedgerError> {
     if ulid::Ulid::from_string(&prediction.prediction_id).is_err() {
         return Err(LedgerError::InvalidPrediction(format!(
@@ -321,19 +319,20 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn new_prediction_validate_rejects_blank_strings() {
+    fn new_prediction_validate_rejects_blank_strings() -> Result<(), Box<dyn std::error::Error>> {
         let mut new = sample_new();
         new.title = "  ".to_owned();
-        crate::payload::expect_invalid(new.validate(), "title");
+        crate::payload::expect_invalid(new.validate(), "title")?;
         new.title = "t".to_owned();
         new.statement = String::new();
-        crate::payload::expect_invalid(new.validate(), "statement");
+        crate::payload::expect_invalid(new.validate(), "statement")?;
         new.statement = "s".to_owned();
         new.predicted_outcome = " ".to_owned();
-        crate::payload::expect_invalid(new.validate(), "predicted_outcome");
+        crate::payload::expect_invalid(new.validate(), "predicted_outcome")?;
         new.predicted_outcome = "o".to_owned();
         new.osf_link = " ".to_owned();
-        crate::payload::expect_invalid(new.validate(), "osf_link");
+        crate::payload::expect_invalid(new.validate(), "osf_link")?;
+        Ok(())
     }
 
     #[test]
@@ -352,7 +351,8 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn new_prediction_validate_rejects_non_resource_osf_navigation() {
+    fn new_prediction_validate_rejects_non_resource_osf_navigation(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut new = sample_new();
         for unsafe_link in [
             "http://osf.io/example",
@@ -374,44 +374,48 @@ mod tests {
             "https://osf.io/abc.12",
         ] {
             new.osf_link = unsafe_link.to_owned();
-            crate::payload::expect_invalid(new.validate(), "osf_link");
+            crate::payload::expect_invalid(new.validate(), "osf_link")?;
         }
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn new_prediction_validate_rejects_bad_confidence() {
+    fn new_prediction_validate_rejects_bad_confidence() -> Result<(), Box<dyn std::error::Error>> {
         let mut new = sample_new();
         new.confidence = f64::NAN;
-        crate::payload::expect_invalid(new.validate(), "confidence");
+        crate::payload::expect_invalid(new.validate(), "confidence")?;
         new.confidence = -0.1;
-        crate::payload::expect_invalid(new.validate(), "confidence");
+        crate::payload::expect_invalid(new.validate(), "confidence")?;
         new.confidence = 1.1;
-        crate::payload::expect_invalid(new.validate(), "confidence");
+        crate::payload::expect_invalid(new.validate(), "confidence")?;
         new.confidence = 0.0;
         assert!(new.validate().is_ok());
         new.confidence = 1.0;
         assert!(new.validate().is_ok());
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn new_prediction_validate_rejects_bad_dates() {
+    fn new_prediction_validate_rejects_bad_dates() -> Result<(), Box<dyn std::error::Error>> {
         let mut new = sample_new();
         new.made_at = "2026-07-25".to_owned();
-        crate::payload::expect_invalid(new.validate(), "made_at");
+        crate::payload::expect_invalid(new.validate(), "made_at")?;
         new.made_at = "2026-07-25T12:00:00Z".to_owned();
         new.resolve_by = "2026-08-01T00:00:00Z".to_owned();
-        crate::payload::expect_invalid(new.validate(), "resolve_by");
+        crate::payload::expect_invalid(new.validate(), "resolve_by")?;
         new.resolve_by = "2026-07-24".to_owned();
-        crate::payload::expect_invalid(new.validate(), "on or before");
+        crate::payload::expect_invalid(new.validate(), "on or before")?;
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn validate_prediction_rejects_bad_ulid() {
+    fn validate_prediction_rejects_bad_ulid() -> Result<(), Box<dyn std::error::Error>> {
         let prediction = sample_new().into_prediction("not-a-ulid".to_owned());
-        crate::payload::expect_invalid(validate_prediction(&prediction), "ULID");
+        crate::payload::expect_invalid(validate_prediction(&prediction), "ULID")?;
+        Ok(())
     }
 
     #[test]

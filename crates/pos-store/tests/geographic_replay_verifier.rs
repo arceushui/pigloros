@@ -7,6 +7,41 @@ use pos_core::{
 };
 use pos_store::sqlite::SqliteStore;
 
+trait TestValueExt<T> {
+    fn test_ok(self) -> T;
+}
+
+impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+    fn test_ok(self) -> T {
+        self.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "unexpected replay fixture error: {error:?}"
+            )))
+        })
+    }
+}
+
+impl<T> TestValueExt<T> for Option<T> {
+    fn test_ok(self) -> T {
+        self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing replay fixture value")))
+    }
+}
+
+trait TestErrorExt<T, E> {
+    fn test_err(self) -> E;
+}
+
+impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
+    fn test_err(self) -> E {
+        match self {
+            Ok(value) => std::panic::resume_unwind(Box::new(format!(
+                "unexpected successful replay fixture value: {value:?}"
+            ))),
+            Err(error) => error,
+        }
+    }
+}
+
 fn request(
     timeline: pos_core::TimelineId,
     entity: EntityId,
@@ -23,7 +58,7 @@ fn request(
     ))
 }
 
-fn fence() -> GeoLocationAdmissionFenceV1 {
+const fn fence() -> GeoLocationAdmissionFenceV1 {
     GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9))
 }
 
@@ -35,7 +70,7 @@ fn pair(store: &mut SqliteStore, timeline: pos_core::TimelineId, entity: EntityI
             fence(),
             [42; 32],
         ))
-        .unwrap();
+        .test_ok();
 }
 
 fn assert_replay_verifier_rejects_durable_corruption(
@@ -52,12 +87,12 @@ fn assert_replay_verifier_rejects_durable_corruption(
                 "UPDATE events SET payload_hash = ?1 WHERE timeline_id = ?2 AND event_id = ?3",
                 rusqlite::params![vec![0_u8], timeline_id, event_id],
             )
-            .unwrap(),
+            .test_ok(),
         1
     );
     assert!(store
         .verify_v1_event_snapshot_link(evidence)
-        .unwrap_err()
+        .test_err()
         .to_string()
         .contains("geographic admission validation failed"));
     assert_eq!(
@@ -66,7 +101,7 @@ fn assert_replay_verifier_rejects_durable_corruption(
                 "UPDATE events SET payload_hash = ?1 WHERE timeline_id = ?2 AND event_id = ?3",
                 rusqlite::params![event_hash.as_bytes().as_slice(), timeline_id, event_id],
             )
-            .unwrap(),
+            .test_ok(),
         1
     );
     inspection
@@ -74,42 +109,42 @@ fn assert_replay_verifier_rejects_durable_corruption(
             "UPDATE geographic_admission_links SET snapshot_cbor = ?1 WHERE timeline_id = ?2 AND event_id = ?3",
             rusqlite::params![vec![0_u8], timeline_id, event_id],
         )
-        .unwrap();
+        .test_ok();
     inspection
         .execute(
             "UPDATE geographic_admission_snapshots SET snapshot_cbor = ?1 WHERE event_id = ?2",
             rusqlite::params![vec![0_u8], event_id],
         )
-        .unwrap();
+        .test_ok();
     assert!(store
         .verify_v1_event_snapshot_link(evidence)
-        .unwrap_err()
+        .test_err()
         .to_string()
         .contains("geographic admission validation failed"));
-    inspection.execute_batch("DROP TABLE events").unwrap();
+    inspection.execute_batch("DROP TABLE events").test_ok();
     assert!(store
         .verify_v1_event_snapshot_link(evidence)
-        .unwrap_err()
+        .test_err()
         .to_string()
         .contains("no such table"));
 }
 
 #[test]
 fn sqlite_replay_verifier_accepts_only_the_exact_durable_snapshot_link() {
-    let database = tempfile::NamedTempFile::new().unwrap();
-    let path = database.path().to_str().unwrap();
-    let mut store = SqliteStore::open(path).unwrap();
-    let timeline = store.create_timeline("replay-verifier").unwrap();
+    let database = tempfile::NamedTempFile::new().test_ok();
+    let path = database.path().to_str().test_ok();
+    let mut store = SqliteStore::open(path).test_ok();
+    let timeline = store.create_timeline("replay-verifier").test_ok();
     let entity = EntityId::new();
     pair(&mut store, timeline.id(), entity);
     let accepted = store
         .admit_geo_location(request(timeline.id(), entity, ([4; 32], [5; 32])))
-        .unwrap();
-    let event_id = accepted.event_id().unwrap();
-    let event_seq = accepted.event_seq().unwrap();
+        .test_ok();
+    let event_id = accepted.event_id().test_ok();
+    let event_seq = accepted.event_seq().test_ok();
     let timeline_id = timeline.id().to_string();
     let event_id_text = event_id.to_string();
-    let inspection = rusqlite::Connection::open(path).unwrap();
+    let inspection = rusqlite::Connection::open(path).test_ok();
     let (event_hash, snapshot_cbor): (Vec<u8>, Vec<u8>) = inspection
         .query_row(
             "SELECT event.payload_hash, snapshot.snapshot_cbor
@@ -121,8 +156,8 @@ fn sqlite_replay_verifier_accepts_only_the_exact_durable_snapshot_link() {
             [&timeline_id, &event_id_text],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .unwrap();
-    let event_hash = pos_core::Hash::from_bytes(event_hash.try_into().unwrap());
+        .test_ok();
+    let event_hash = pos_core::Hash::from_bytes(event_hash.try_into().test_ok());
     let snapshot_hash = pos_crypto::chain::hash_payload(&CanonicalBytes::from_vec(snapshot_cbor));
     let evidence = |event_seq, event_payload_hash, expected_snapshot_hash| {
         GeoLocationReplayEvidenceV1::new(
@@ -134,13 +169,13 @@ fn sqlite_replay_verifier_accepts_only_the_exact_durable_snapshot_link() {
         )
     };
 
-    store.revoke_owntracks_enrollment().unwrap();
+    store.revoke_owntracks_enrollment().test_ok();
     assert!(store
         .verify_v1_event_snapshot_link(evidence(event_seq, event_hash, snapshot_hash))
         .is_ok());
     assert!(store
         .verify_v1_event_snapshot_link(evidence(event_seq.next(), event_hash, snapshot_hash))
-        .unwrap_err()
+        .test_err()
         .to_string()
         .contains("geographic admission validation failed"));
     assert!(store
@@ -149,7 +184,7 @@ fn sqlite_replay_verifier_accepts_only_the_exact_durable_snapshot_link() {
             pos_core::Hash::from_bytes([0; 32]),
             snapshot_hash,
         ))
-        .unwrap_err()
+        .test_err()
         .to_string()
         .contains("geographic admission validation failed"));
     assert!(store
@@ -158,7 +193,7 @@ fn sqlite_replay_verifier_accepts_only_the_exact_durable_snapshot_link() {
             event_hash,
             pos_core::Hash::from_bytes([0; 32]),
         ))
-        .unwrap_err()
+        .test_err()
         .to_string()
         .contains("geographic admission validation failed"));
     assert_eq!(
@@ -167,12 +202,12 @@ fn sqlite_replay_verifier_accepts_only_the_exact_durable_snapshot_link() {
                 "UPDATE events SET entity_id = ?1 WHERE timeline_id = ?2 AND event_id = ?3",
                 rusqlite::params![EntityId::new().to_string(), &timeline_id, &event_id_text],
             )
-            .unwrap(),
+            .test_ok(),
         1
     );
     assert!(store
         .verify_v1_event_snapshot_link(evidence(event_seq, event_hash, snapshot_hash))
-        .unwrap_err()
+        .test_err()
         .to_string()
         .contains("geographic admission validation failed"));
 

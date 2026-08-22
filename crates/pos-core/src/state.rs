@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn state_is_a_fold() {
+    fn state_is_a_fold() -> Result<(), Box<dyn std::error::Error>> {
         let reducer = CountReducer;
         let entity = EntityId::new();
         let mut registry = StateRegistry::new();
@@ -128,11 +128,12 @@ mod tests {
             registry.apply(&reducer, &make_event(entity));
         }
 
-        let state = registry.get(&entity).unwrap();
+        let state = registry.get(&entity).ok_or("entity state missing")?;
         assert_eq!(
             state.get("count").and_then(serde_json::Value::as_u64),
             Some(5)
         );
+        Ok(())
     }
 
     #[test]
@@ -161,28 +162,30 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn state_json_round_trip() {
+    fn state_json_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let mut s = State::new();
         s.set("name", serde_json::Value::String("alice".into()));
         s.set("score", serde_json::Value::Number(42.into()));
-        let back: State = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        let back: State = serde_json::from_str(&serde_json::to_string(&s)?)?;
         assert_eq!(s, back);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn state_cbor_round_trip() {
+    fn state_cbor_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let mut s = State::new();
         s.set("x", serde_json::json!(true));
         let mut buf = Vec::new();
-        ciborium::into_writer(&s, &mut buf).unwrap();
-        let back: State = ciborium::from_reader(buf.as_slice()).unwrap();
+        ciborium::into_writer(&s, &mut buf)?;
+        let back: State = ciborium::from_reader(buf.as_slice())?;
         assert_eq!(s, back);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn state_registry_tracks_multiple_entities() {
+    fn state_registry_tracks_multiple_entities() -> Result<(), Box<dyn std::error::Error>> {
         let reducer = CountReducer;
         let a = EntityId::new();
         let b = EntityId::new();
@@ -195,7 +198,7 @@ mod tests {
         assert_eq!(
             registry
                 .get(&a)
-                .unwrap()
+                .ok_or("first entity state missing")?
                 .get("count")
                 .and_then(serde_json::Value::as_u64),
             Some(2)
@@ -203,11 +206,12 @@ mod tests {
         assert_eq!(
             registry
                 .get(&b)
-                .unwrap()
+                .ok_or("second entity state missing")?
                 .get("count")
                 .and_then(serde_json::Value::as_u64),
             Some(1)
         );
+        Ok(())
     }
 
     #[test]

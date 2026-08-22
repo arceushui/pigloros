@@ -490,6 +490,28 @@ mod tests {
     };
     use pos_store::{open_store, StoreConfig};
 
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected driver fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("missing driver fixture value"))
+            })
+        }
+    }
+
     struct TickDriver {
         entity: EntityId,
         ticks: u32,
@@ -531,11 +553,11 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_produces_drafts() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("t").test_ok();
         let entity = EntityId::new();
         let mut driver = TickDriver { entity, ticks: 0 };
-        let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
+        let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
         assert_eq!(out.drafts.len(), 1);
         assert_eq!(out.drafts[0].event_type.as_str(), "tick.event");
     }
@@ -543,13 +565,13 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_tick_increments() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("t").test_ok();
         let entity = EntityId::new();
         let mut driver = TickDriver { entity, ticks: 0 };
-        driver.step(tl.id(), ObservationView::empty()).unwrap();
-        driver.step(tl.id(), ObservationView::empty()).unwrap();
-        let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
+        driver.step(tl.id(), ObservationView::empty()).test_ok();
+        driver.step(tl.id(), ObservationView::empty()).test_ok();
+        let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
         // tick 3 — payload contains 3u32 as le bytes
         assert_eq!(out.drafts[0].payload.as_slice(), &3u32.to_le_bytes());
     }
@@ -557,10 +579,10 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn idle_driver_returns_empty() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("t").test_ok();
         let mut driver = IdleDriver;
-        let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
+        let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
         assert!(out.drafts.is_empty());
     }
 

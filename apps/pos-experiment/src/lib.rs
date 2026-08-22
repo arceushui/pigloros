@@ -36,7 +36,7 @@ pub enum StopCondition {
 }
 
 impl StopCondition {
-    fn reached(&self, ticks: u64, total_events: u64) -> bool {
+    const fn reached(&self, ticks: u64, total_events: u64) -> bool {
         match self {
             Self::MaxTicks(max) => ticks >= *max,
             Self::MaxEvents(max) => total_events >= *max,
@@ -829,13 +829,13 @@ impl Experiment {
 }
 
 impl ExperimentSession {
-    fn reached_stop_condition(&self) -> bool {
+    const fn reached_stop_condition(&self) -> bool {
         self.config.stop.reached(self.ticks, self.total_events)
     }
 
     /// Return the active Timeline handle.
     #[must_use]
-    pub fn timeline(&self) -> &Timeline {
+    pub const fn timeline(&self) -> &Timeline {
         &self.timeline
     }
 
@@ -1511,6 +1511,35 @@ impl BacktestRunner {
 
 #[cfg(test)]
 mod tests {
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected test value")))
+        }
+    }
+
+    trait TestErrorExt<E> {
+        fn test_err(self) -> E;
+    }
+
+    impl<T, E> TestErrorExt<E> for Result<T, E> {
+        fn test_err(self) -> E {
+            self.err()
+                .unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected test error")))
+        }
+    }
+
     use super::*;
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
@@ -1630,7 +1659,7 @@ mod tests {
         for spec in plugins {
             registry
                 .register(&CompositionPlugin(*spec), None, None)
-                .unwrap();
+                .test_ok();
         }
         registry
     }
@@ -1668,7 +1697,7 @@ mod tests {
                 Some(Box::new(AcceptingApprover)),
                 [Kind::new("approver.event")],
             )
-            .expect("approver registration succeeds");
+            .test_ok();
         let proposal = ProposedAction::new(
             Kind::new("approver.event"),
             EntityId::new(),
@@ -1676,25 +1705,22 @@ mod tests {
             Kind::new("approver.submit"),
         );
         assert_eq!(
-            AcceptingApprover.approve(&proposal).unwrap().event_type,
+            AcceptingApprover.approve(&proposal).test_ok().event_type,
             Kind::new("approver.event")
         );
     }
 
     fn assert_incompatible_fork(mut session: ExperimentSession) {
-        let error = session
-            .fork("incompatible-child")
-            .err()
-            .expect("an incompatible fork registry must be rejected");
+        let error = session.fork("incompatible-child").err().test_ok();
         assert_eq!(
             error.to_string(),
             "the fresh PluginRegistry is incompatible with the parent plugin composition"
         );
         assert_eq!(
             lock_store(&session.store)
-                .unwrap()
+                .test_ok()
                 .list_timelines()
-                .unwrap()
+                .test_ok()
                 .len(),
             1
         );
@@ -1737,12 +1763,11 @@ mod tests {
             _: pos_core::ids::TimelineId,
             observations: ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().test_ok();
             state.steps += 1;
             state.staged = true;
-            state
-                .anchors
-                .push(observations.anchor().expect("host must supply anchor"));
+            state.anchors.push(observations.anchor().test_ok());
+            drop(state);
             if self.fail_step {
                 return Err(RuntimeError::UnknownEventType(
                     "injected partial Driver failure".to_owned(),
@@ -1768,7 +1793,7 @@ mod tests {
         }
 
         fn commit_step(&mut self) {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().test_ok();
             assert!(state.staged);
             state.staged = false;
             state.commits += 1;
@@ -1776,7 +1801,7 @@ mod tests {
         }
 
         fn abort_step(&mut self) {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().test_ok();
             if state.staged {
                 state.staged = false;
                 state.aborts += 1;
@@ -1801,7 +1826,7 @@ mod tests {
             timeline: pos_core::ids::TimelineId,
             drafts: &[EventDraft],
         ) -> Result<Vec<Event>, CoreError> {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().test_ok();
             let commits = state.commits;
             state.append_calls.push((drafts.len(), commits));
             drop(state);
@@ -1844,11 +1869,11 @@ mod tests {
             &self,
             id: pos_core::ids::TimelineId,
         ) -> Result<pos_core::clock::Seq, CoreError> {
-            let state = self.state.lock().unwrap();
+            let state = self.state.lock().test_ok();
             if state.steps > 0 {
                 let commits = state.commits;
                 drop(state);
-                self.state.lock().unwrap().capture_commits.push(commits);
+                self.state.lock().test_ok().capture_commits.push(commits);
                 if self.fail_post_step_capture {
                     return Err(CoreError::Storage(
                         "injected post-step capture failure".to_owned(),
@@ -1876,13 +1901,13 @@ mod tests {
             timeline,
             pos_core::clock::Seq::ZERO,
         ));
-        assert_eq!(driver.step(timeline, view).unwrap().drafts.len(), 1);
+        assert_eq!(driver.step(timeline, view).test_ok().drafts.len(), 1);
         driver.commit_step();
         let view = ObservationView::anchored_empty(pos_runtime::SnapshotAnchor::new(
             timeline,
             pos_core::clock::Seq::ZERO,
         ));
-        assert_eq!(driver.step(timeline, view).unwrap().drafts.len(), 1);
+        assert_eq!(driver.step(timeline, view).test_ok().drafts.len(), 1);
         driver.abort_step();
 
         let store_state = Arc::new(Mutex::new(HostTransactionState::default()));
@@ -1892,23 +1917,23 @@ mod tests {
             fail_append: false,
             fail_post_step_capture: false,
         };
-        let created = store.create_timeline("capture-aware-seam").unwrap();
+        let created = store.create_timeline("capture-aware-seam").test_ok();
         let draft = EventDraft::new(
             entity,
             Kind::new("capture.event"),
             CanonicalBytes::from_static(b"capture"),
         );
-        assert_eq!(store.append(created.id(), &[draft]).unwrap().len(), 1);
+        assert_eq!(store.append(created.id(), &[draft]).test_ok().len(), 1);
         assert!(!store
             .read(created.id(), pos_store::SeqRange::all())
-            .unwrap()
+            .test_ok()
             .is_empty());
         let _fork = store
             .fork(created.id(), pos_core::clock::Seq::ZERO, "capture-fork")
-            .unwrap();
-        assert!(!store.list_timelines().unwrap().is_empty());
-        assert!(store.get_timeline(created.id()).unwrap().is_some());
-        assert_eq!(store.logical_head(created.id()).unwrap().as_u64(), 1);
+            .test_ok();
+        assert!(!store.list_timelines().test_ok().is_empty());
+        assert!(store.get_timeline(created.id()).test_ok().is_some());
+        assert_eq!(store.logical_head(created.id()).test_ok().as_u64(), 1);
     }
 
     impl FixedDriver {
@@ -2110,8 +2135,8 @@ mod tests {
                     steps: Arc::clone(&steps),
                 })),
             )
-            .unwrap();
-        (experiment.start().unwrap(), steps, entity)
+            .test_ok();
+        (experiment.start().test_ok(), steps, entity)
     }
 
     fn cadence_session_state(
@@ -2120,8 +2145,8 @@ mod tests {
         expected_steps: usize,
     ) -> (u64, u64, u64) {
         assert_eq!(
-            projection_count(session, entity).unwrap(),
-            u64::try_from(expected_steps).unwrap()
+            projection_count(session, entity).test_ok(),
+            u64::try_from(expected_steps).test_ok()
         );
         (
             session.timeline.head.as_u64(),
@@ -2164,7 +2189,7 @@ mod tests {
                 .and_then(|state| state.get("n"))
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
-            self.seen_counts.lock().unwrap().push(count);
+            self.seen_counts.lock().test_ok().push(count);
             Ok(StepOutput::empty())
         }
     }
@@ -2197,7 +2222,7 @@ mod tests {
                 .and_then(|state| state.get("n"))
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
-            self.seen_counts.lock().unwrap().push(count);
+            self.seen_counts.lock().test_ok().push(count);
             if self.injected {
                 return Ok(StepOutput::empty());
             }
@@ -2234,7 +2259,7 @@ mod tests {
         }
 
         fn apply(&self, _: &mut State, _: &Event) {
-            let store = self.store.lock().unwrap().clone();
+            let store = self.store.lock().test_ok().clone();
             let is_unlocked = store.is_some_and(|store| store.try_lock().is_ok());
             self.saw_unlocked_store
                 .store(is_unlocked, std::sync::atomic::Ordering::SeqCst);
@@ -2255,9 +2280,10 @@ mod tests {
             stop: StopCondition::MaxTicks(5),
             store_config: StoreConfig::Memory,
         });
-        exp.register(&plugin, None, Some(Box::new(driver))).unwrap();
+        exp.register(&plugin, None, Some(Box::new(driver)))
+            .test_ok();
 
-        let result = exp.run().unwrap();
+        let result = exp.run().test_ok();
         assert_eq!(result.ticks, 5);
         assert_eq!(result.total_events, 5);
     }
@@ -2275,9 +2301,10 @@ mod tests {
             stop: StopCondition::MaxEvents(6),
             store_config: StoreConfig::Memory,
         });
-        exp.register(&plugin, None, Some(Box::new(driver))).unwrap();
+        exp.register(&plugin, None, Some(Box::new(driver)))
+            .test_ok();
 
-        let result = exp.run().unwrap();
+        let result = exp.run().test_ok();
         assert_eq!(result.total_events, 6);
         assert_eq!(result.ticks, 3);
     }
@@ -2307,10 +2334,10 @@ mod tests {
             store_config: StoreConfig::Memory,
         });
         exp.register(&plugin, None, Some(Box::new(IdleDriver)))
-            .unwrap();
+            .test_ok();
 
         // Should terminate quickly, not loop forever
-        let result = exp.run().unwrap();
+        let result = exp.run().test_ok();
         assert_eq!(result.ticks, 1);
         assert_eq!(result.total_events, 0);
     }
@@ -2340,7 +2367,7 @@ mod tests {
                     steps: Arc::clone(&fast_steps),
                 })),
             )
-            .unwrap();
+            .test_ok();
         experiment
             .register(
                 &slow,
@@ -2353,25 +2380,25 @@ mod tests {
                     steps: Arc::clone(&slow_steps),
                 })),
             )
-            .unwrap();
-        let mut session = experiment.start().unwrap();
+            .test_ok();
+        let mut session = experiment.start().test_ok();
 
         assert_eq!(
-            session.step_cadenced(0).unwrap(),
+            session.step_cadenced(0).test_ok(),
             TickOutcome::Advanced {
                 folded_events: 2,
                 emitted_events: 2,
             }
         );
         assert_eq!(
-            session.step_cadenced(100_000_000).unwrap(),
+            session.step_cadenced(100_000_000).test_ok(),
             TickOutcome::Advanced {
                 folded_events: 1,
                 emitted_events: 1,
             }
         );
         assert_eq!(
-            session.step_cadenced(200_000_000).unwrap(),
+            session.step_cadenced(200_000_000).test_ok(),
             TickOutcome::Advanced {
                 folded_events: 2,
                 emitted_events: 2,
@@ -2380,9 +2407,9 @@ mod tests {
         assert_eq!(fast_steps.load(std::sync::atomic::Ordering::SeqCst), 3);
         assert_eq!(slow_steps.load(std::sync::atomic::Ordering::SeqCst), 2);
         let events = lock_store(&session.store)
-            .unwrap()
+            .test_ok()
             .read(session.timeline.id(), pos_store::SeqRange::all())
-            .unwrap();
+            .test_ok();
         assert_eq!(
             events
                 .iter()
@@ -2402,8 +2429,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn step_cadenced_rejects_time_regression_before_mutation_and_remains_usable() {
         let (mut cadenced, cadenced_steps, entity) = new_cadence_session("cadence-validation");
-        cadenced.step_cadenced(0).unwrap();
-        cadenced.step_cadenced(100_000_000).unwrap();
+        cadenced.step_cadenced(0).test_ok();
+        cadenced.step_cadenced(100_000_000).test_ok();
         let before_steps = cadenced_steps.load(std::sync::atomic::Ordering::SeqCst);
         let before = cadence_session_state(&cadenced, entity, before_steps);
         assert!(matches!(
@@ -2421,11 +2448,11 @@ mod tests {
             cadence_session_state(&cadenced, entity, before_steps),
             before
         );
-        cadenced.step_cadenced(200_000_000).unwrap();
+        cadenced.step_cadenced(200_000_000).test_ok();
         let equal_steps = cadenced_steps.load(std::sync::atomic::Ordering::SeqCst);
         let ticks_before_equal = cadenced.ticks;
         assert_eq!(
-            cadenced.step_cadenced(200_000_000).unwrap(),
+            cadenced.step_cadenced(200_000_000).test_ok(),
             TickOutcome::Quiescent
         );
         assert_eq!(cadenced.ticks, ticks_before_equal + 1);
@@ -2434,7 +2461,7 @@ mod tests {
             equal_steps
         );
         assert!(matches!(
-            cadenced.step_cadenced(300_000_000).unwrap(),
+            cadenced.step_cadenced(300_000_000).test_ok(),
             TickOutcome::Advanced {
                 folded_events: 1,
                 emitted_events: 1,
@@ -2450,7 +2477,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn step_cadenced_and_all_driver_modes_reject_mixing_before_mutation() {
         let (mut all_first, all_steps, all_entity) = new_cadence_session("all-first");
-        all_first.step_tick().unwrap();
+        all_first.step_tick().test_ok();
         let all_before_steps = all_steps.load(std::sync::atomic::Ordering::SeqCst);
         let all_before = cadence_session_state(&all_first, all_entity, all_before_steps);
         assert!(matches!(
@@ -2470,7 +2497,7 @@ mod tests {
         );
 
         let (mut cadence_first, later_steps, later_entity) = new_cadence_session("cadence-first");
-        cadence_first.step_cadenced(0).unwrap();
+        cadence_first.step_cadenced(0).test_ok();
         let later_before_steps = later_steps.load(std::sync::atomic::Ordering::SeqCst);
         let later_before = cadence_session_state(&cadence_first, later_entity, later_before_steps);
         assert!(matches!(
@@ -2493,8 +2520,8 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn step_cadenced_fork_and_resume_choose_fresh_modes() {
-        let database = tempfile::NamedTempFile::new().unwrap();
-        let path = database.path().to_str().unwrap().to_owned();
+        let database = tempfile::NamedTempFile::new().test_ok();
+        let path = database.path().to_str().test_ok().to_owned();
         let plugin = CompositionPluginSpec {
             id: PluginId::new(),
             name: "mode",
@@ -2509,15 +2536,15 @@ mod tests {
         .with_fork_registry_factory(move || Ok(composition_registry(&[plugin])));
         experiment
             .register(&CompositionPlugin(plugin), None, None)
-            .unwrap();
-        let mut parent = experiment.start().unwrap();
+            .test_ok();
+        let mut parent = experiment.start().test_ok();
         let parent_id = parent.timeline().id();
         assert_eq!(
-            parent.step_cadenced(100_000_000).unwrap(),
+            parent.step_cadenced(100_000_000).test_ok(),
             TickOutcome::Quiescent
         );
-        let mut child = parent.fork("mode-child").unwrap();
-        assert_eq!(child.step_cadenced(0).unwrap(), TickOutcome::Quiescent);
+        let mut child = parent.fork("mode-child").test_ok();
+        assert_eq!(child.step_cadenced(0).test_ok(), TickOutcome::Quiescent);
         assert!(matches!(
             parent.step_cadenced(99_999_999),
             Err(ExperimentError::CadenceTimeRegressed {
@@ -2539,9 +2566,9 @@ mod tests {
         });
         recovery
             .register(&CompositionPlugin(plugin), None, None)
-            .unwrap();
-        let mut resumed = recovery.resume(parent_id).unwrap();
-        assert_eq!(resumed.step_cadenced(0).unwrap(), TickOutcome::Quiescent);
+            .test_ok();
+        let mut resumed = recovery.resume(parent_id).test_ok();
+        assert_eq!(resumed.step_cadenced(0).test_ok(), TickOutcome::Quiescent);
     }
 
     #[test]
@@ -2553,9 +2580,9 @@ mod tests {
             store_config: StoreConfig::Memory,
         })
         .start()
-        .unwrap();
+        .test_ok();
         {
-            let mut store = lock_store(&session.store).unwrap();
+            let mut store = lock_store(&session.store).test_ok();
             let inner =
                 std::mem::replace(&mut *store, Box::new(pos_store::memory::MemoryStore::new()));
             *store = Box::new(FailFirstLogicalHeadStore {
@@ -2570,7 +2597,7 @@ mod tests {
                 if message == "injected first-boundary head failure"
         ));
         assert_eq!(session.ticks, 0);
-        assert_eq!(session.step_tick().unwrap(), TickOutcome::Quiescent);
+        assert_eq!(session.step_tick().test_ok(), TickOutcome::Quiescent);
         assert_eq!(session.ticks, 1);
         assert!(matches!(
             session.step_cadenced(0),
@@ -2601,11 +2628,11 @@ mod tests {
                     Arc::clone(&seen_counts),
                 ))),
             )
-            .unwrap();
-        let mut session = experiment.start().unwrap();
+            .test_ok();
+        let mut session = experiment.start().test_ok();
         let timeline = session.timeline().id();
         lock_store(&session.store)
-            .unwrap()
+            .test_ok()
             .append(
                 timeline,
                 &[EventDraft::new(
@@ -2614,18 +2641,18 @@ mod tests {
                     CanonicalBytes::from_vec(b"first".to_vec()),
                 )],
             )
-            .unwrap();
+            .test_ok();
 
         assert_eq!(
-            session.step_tick().unwrap(),
+            session.step_tick().test_ok(),
             TickOutcome::Advanced {
                 folded_events: 1,
                 emitted_events: 0,
             }
         );
-        assert_eq!(session.step_tick().unwrap(), TickOutcome::Quiescent);
+        assert_eq!(session.step_tick().test_ok(), TickOutcome::Quiescent);
         lock_store(&session.store)
-            .unwrap()
+            .test_ok()
             .append(
                 timeline,
                 &[EventDraft::new(
@@ -2634,15 +2661,15 @@ mod tests {
                     CanonicalBytes::from_vec(b"second".to_vec()),
                 )],
             )
-            .unwrap();
+            .test_ok();
         assert!(matches!(
-            session.step_tick().unwrap(),
+            session.step_tick().test_ok(),
             TickOutcome::Advanced {
                 folded_events: 1,
                 emitted_events: 0
             }
         ));
-        assert_eq!(*seen_counts.lock().unwrap(), vec![1, 1, 2]);
+        assert_eq!(*seen_counts.lock().test_ok(), vec![1, 1, 2]);
         assert_eq!(session.total_events, 2);
         assert_eq!(session.ticks, 3);
     }
@@ -2650,8 +2677,8 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn action_appended_during_step_waits_for_the_post_step_logical_fold() {
-        let database = tempfile::NamedTempFile::new().unwrap();
-        let path = database.path().to_str().unwrap().to_owned();
+        let database = tempfile::NamedTempFile::new().test_ok();
+        let path = database.path().to_str().test_ok().to_owned();
         let entity = EntityId::new();
         let seen_counts = Arc::new(Mutex::new(Vec::new()));
         let plugin = make_plugin_with_reducer("interleaving", &["world.action", "agent.decision"]);
@@ -2672,21 +2699,21 @@ mod tests {
                     injected: false,
                 })),
             )
-            .unwrap();
-        let mut session = experiment.start().unwrap();
+            .test_ok();
+        let mut session = experiment.start().test_ok();
         assert_eq!(
-            session.step_tick().unwrap(),
+            session.step_tick().test_ok(),
             TickOutcome::Advanced {
                 folded_events: 2,
                 emitted_events: 1,
             }
         );
-        assert_eq!(session.step_tick().unwrap(), TickOutcome::Quiescent);
-        assert_eq!(*seen_counts.lock().unwrap(), vec![0, 2]);
+        assert_eq!(session.step_tick().test_ok(), TickOutcome::Quiescent);
+        assert_eq!(*seen_counts.lock().test_ok(), vec![0, 2]);
 
         let timeline = session.timeline().id();
-        let store = lock_store(&session.store).unwrap();
-        let events = store.read(timeline, pos_store::SeqRange::all()).unwrap();
+        let store = lock_store(&session.store).test_ok();
+        let events = store.read(timeline, pos_store::SeqRange::all()).test_ok();
         assert_eq!(
             events
                 .iter()
@@ -2696,7 +2723,8 @@ mod tests {
         );
         let mut replayed = pos_state::ProjectionRegistry::new();
         replayed.register("interleaving", Box::new(CountReducer));
-        pos_time::replay(store.as_ref(), timeline, &mut replayed).unwrap();
+        pos_time::replay(store.as_ref(), timeline, &mut replayed).test_ok();
+        drop(store);
         assert_eq!(
             replayed.state_for(&entity).and_then(|state| state.get("n")),
             session
@@ -2733,8 +2761,8 @@ mod tests {
             }
         }
 
-        let database = tempfile::NamedTempFile::new().unwrap();
-        let path = database.path().to_str().unwrap().to_owned();
+        let database = tempfile::NamedTempFile::new().test_ok();
+        let path = database.path().to_str().test_ok().to_owned();
         let entity = EntityId::new();
         let plugin = make_plugin_with_reducer("faulting", &["world.action"]);
         let mut experiment = Experiment::new(ExperimentConfig {
@@ -2748,11 +2776,11 @@ mod tests {
                 Some(Box::new(CountReducer)),
                 Some(Box::new(UnknownDraftDriver { entity })),
             )
-            .unwrap();
-        let mut session = experiment.start().unwrap();
+            .test_ok();
+        let mut session = experiment.start().test_ok();
         let timeline = session.timeline().id();
         lock_store(&session.store)
-            .unwrap()
+            .test_ok()
             .append(
                 timeline,
                 &[EventDraft::new(
@@ -2761,7 +2789,7 @@ mod tests {
                     CanonicalBytes::from_vec(b"persisted".to_vec()),
                 )],
             )
-            .unwrap();
+            .test_ok();
         assert!(matches!(
             session.step_tick(),
             Err(ExperimentError::Runtime(RuntimeError::UnknownEventType(_)))
@@ -2796,24 +2824,24 @@ mod tests {
                     Arc::clone(&seen_counts),
                 ))),
             )
-            .unwrap();
-        let mut resumed = recovery.resume(timeline).unwrap();
+            .test_ok();
+        let mut resumed = recovery.resume(timeline).test_ok();
         assert_eq!(resumed.total_events, 1);
-        assert_eq!(projection_count(&resumed, entity).unwrap(), 1);
-        assert_eq!(resumed.step_tick().unwrap(), TickOutcome::Quiescent);
-        assert_eq!(*seen_counts.lock().unwrap(), vec![1]);
-        assert_eq!(projection_count(&resumed, entity).unwrap(), 1);
+        assert_eq!(projection_count(&resumed, entity).test_ok(), 1);
+        assert_eq!(resumed.step_tick().test_ok(), TickOutcome::Quiescent);
+        assert_eq!(*seen_counts.lock().test_ok(), vec![1]);
+        assert_eq!(projection_count(&resumed, entity).test_ok(), 1);
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn empty_durable_timeline_resumes_and_stops_after_one_quiescent_tick() {
-        let database = tempfile::NamedTempFile::new().unwrap();
-        let path = database.path().to_str().unwrap().to_owned();
-        let config = StoreConfig::Sqlite { path: path.clone() };
+        let database = tempfile::NamedTempFile::new().test_ok();
+        let path = database.path().to_str().test_ok().to_owned();
+        let config = StoreConfig::Sqlite { path };
         let timeline = {
-            let mut store = open_store(config.clone()).unwrap();
-            store.create_timeline("empty-resume").unwrap().id()
+            let mut store = open_store(config.clone()).test_ok();
+            store.create_timeline("empty-resume").test_ok().id()
         };
         let mut session = Experiment::new(ExperimentConfig {
             name: "resumed-empty".to_owned(),
@@ -2821,34 +2849,34 @@ mod tests {
             store_config: config,
         })
         .resume(timeline)
-        .unwrap();
+        .test_ok();
 
-        assert_eq!(session.step_tick().unwrap(), TickOutcome::Quiescent);
-        assert_eq!(session.step_tick().unwrap(), TickOutcome::Stopped);
+        assert_eq!(session.step_tick().test_ok(), TickOutcome::Quiescent);
+        assert_eq!(session.step_tick().test_ok(), TickOutcome::Stopped);
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn durable_resume_propagates_open_and_missing_timeline_failures() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().test_ok();
         let directory_config = ExperimentConfig {
             name: "resume-open-failure".to_owned(),
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Sqlite {
-                path: directory.path().to_str().unwrap().to_owned(),
+                path: directory.path().to_str().test_ok().to_owned(),
             },
         };
         assert!(Experiment::new(directory_config)
             .resume(pos_core::ids::TimelineId::new())
             .is_err());
 
-        let missing_database = tempfile::NamedTempFile::new().unwrap();
-        let missing_path = missing_database.path().to_str().unwrap().to_owned();
+        let missing_database = tempfile::NamedTempFile::new().test_ok();
+        let missing_path = missing_database.path().to_str().test_ok().to_owned();
         drop(
             open_store(StoreConfig::Sqlite {
                 path: missing_path.clone(),
             })
-            .unwrap(),
+            .test_ok(),
         );
         assert!(Experiment::new(ExperimentConfig {
             name: "resume-missing".to_owned(),
@@ -2862,22 +2890,22 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn durable_resume_propagates_metadata_and_event_read_failures() {
-        let metadata_database = tempfile::NamedTempFile::new().unwrap();
-        let metadata_path = metadata_database.path().to_str().unwrap().to_owned();
+        let metadata_database = tempfile::NamedTempFile::new().test_ok();
+        let metadata_path = metadata_database.path().to_str().test_ok().to_owned();
         let metadata_timeline = {
             let mut store = open_store(StoreConfig::Sqlite {
                 path: metadata_path.clone(),
             })
-            .unwrap();
-            store.create_timeline("resume-metadata").unwrap().id()
+            .test_ok();
+            store.create_timeline("resume-metadata").test_ok().id()
         };
         rusqlite::Connection::open(&metadata_path)
-            .unwrap()
+            .test_ok()
             .execute(
                 "UPDATE timelines SET name = X'FF' WHERE id = ?1",
                 rusqlite::params![metadata_timeline.to_string()],
             )
-            .unwrap();
+            .test_ok();
         assert!(Experiment::new(ExperimentConfig {
             name: "resume-metadata".to_owned(),
             stop: StopCondition::MaxTicks(1),
@@ -2888,14 +2916,14 @@ mod tests {
         .resume(metadata_timeline)
         .is_err());
 
-        let read_database = tempfile::NamedTempFile::new().unwrap();
-        let read_path = read_database.path().to_str().unwrap().to_owned();
+        let read_database = tempfile::NamedTempFile::new().test_ok();
+        let read_path = read_database.path().to_str().test_ok().to_owned();
         let read_timeline = {
             let mut store = open_store(StoreConfig::Sqlite {
                 path: read_path.clone(),
             })
-            .unwrap();
-            let timeline = store.create_timeline("resume-read").unwrap();
+            .test_ok();
+            let timeline = store.create_timeline("resume-read").test_ok();
             store
                 .append(
                     timeline.id(),
@@ -2905,13 +2933,13 @@ mod tests {
                         CanonicalBytes::from_vec(Vec::new()),
                     )],
                 )
-                .unwrap();
+                .test_ok();
             timeline.id()
         };
         rusqlite::Connection::open(&read_path)
-            .unwrap()
+            .test_ok()
             .execute("DROP TABLE events", [])
-            .unwrap();
+            .test_ok();
         assert!(Experiment::new(ExperimentConfig {
             name: "resume-read".to_owned(),
             stop: StopCondition::MaxTicks(1),
@@ -2924,11 +2952,11 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn durable_resume_propagates_malformed_ancestry_failure() {
-        let head_database = tempfile::NamedTempFile::new().unwrap();
-        let head_path = head_database.path().to_str().unwrap().to_owned();
+        let head_database = tempfile::NamedTempFile::new().test_ok();
+        let head_path = head_database.path().to_str().test_ok().to_owned();
         let malformed_head_timeline = {
-            let mut store = pos_store::sqlite::SqliteStore::open(&head_path).unwrap();
-            let root = store.create_timeline("resume-head-root").unwrap();
+            let mut store = pos_store::sqlite::SqliteStore::open(&head_path).test_ok();
+            let root = store.create_timeline("resume-head-root").test_ok();
             store
                 .append(
                     root.id(),
@@ -2938,14 +2966,14 @@ mod tests {
                         CanonicalBytes::from_vec(Vec::new()),
                     )],
                 )
-                .unwrap();
+                .test_ok();
             let child = store
                 .fork(
                     root.id(),
                     pos_core::clock::Seq::from_u64(1),
                     "resume-head-child",
                 )
-                .unwrap();
+                .test_ok();
             store
                 .append(
                     child.id(),
@@ -2955,19 +2983,19 @@ mod tests {
                         CanonicalBytes::from_vec(Vec::new()),
                     )],
                 )
-                .unwrap();
+                .test_ok();
             store
                 .fork(
                     child.id(),
                     pos_core::clock::Seq::from_u64(2),
                     "resume-head-grandchild",
                 )
-                .unwrap()
+                .test_ok()
                 .id()
         };
         let missing_parent = pos_core::ids::TimelineId::new();
         rusqlite::Connection::open(&head_path)
-            .unwrap()
+            .test_ok()
             .execute(
                 "UPDATE timelines SET parent_id = ?2 WHERE id = ?1",
                 rusqlite::params![
@@ -2975,7 +3003,7 @@ mod tests {
                     missing_parent.to_string()
                 ],
             )
-            .unwrap();
+            .test_ok();
         assert!(Experiment::new(ExperimentConfig {
             name: "resume-head".to_owned(),
             stop: StopCondition::MaxTicks(1),
@@ -3111,7 +3139,7 @@ mod tests {
                 fault,
                 head_calls: std::cell::Cell::new(0),
             };
-            let timeline = store.create_timeline("capture-fault").unwrap();
+            let timeline = store.create_timeline("capture-fault").test_ok();
             store
                 .append(
                     timeline.id(),
@@ -3121,7 +3149,7 @@ mod tests {
                         CanonicalBytes::from_vec(Vec::new()),
                     )],
                 )
-                .unwrap();
+                .test_ok();
 
             assert!(
                 capture_pending_range(&store, timeline.id(), pos_core::clock::Seq::ZERO,).is_err()
@@ -3139,7 +3167,7 @@ mod tests {
         };
         let first_timeline = first_capture_store
             .create_timeline("first-capture")
-            .unwrap();
+            .test_ok();
         assert!(advance_tick(
             &mut first_capture_store,
             first_timeline.id(),
@@ -3157,7 +3185,7 @@ mod tests {
         };
         let second_timeline = second_capture_store
             .create_timeline("second-capture")
-            .unwrap();
+            .test_ok();
         assert!(advance_tick(
             &mut second_capture_store,
             second_timeline.id(),
@@ -3169,7 +3197,7 @@ mod tests {
         .is_err());
 
         let mut driver_store = pos_store::memory::MemoryStore::new();
-        let driver_timeline = driver_store.create_timeline("driver-failure").unwrap();
+        let driver_timeline = driver_store.create_timeline("driver-failure").test_ok();
         let mut registry = PluginRegistry::new();
         registry
             .register(
@@ -3177,7 +3205,7 @@ mod tests {
                 None,
                 Some(Box::new(CaptureFailDriver)),
             )
-            .unwrap();
+            .test_ok();
         assert!(append_driver_drafts(
             &mut driver_store,
             driver_timeline.id(),
@@ -3191,7 +3219,7 @@ mod tests {
             fault: CaptureFault::LogicalHead,
             head_calls: std::cell::Cell::new(0),
         };
-        branch_store.create_timeline("branch-head").unwrap();
+        branch_store.create_timeline("branch-head").test_ok();
         assert!(Experiment::new(ExperimentConfig {
             name: "branch-head".to_owned(),
             stop: StopCondition::MaxTicks(1),
@@ -3246,7 +3274,7 @@ mod tests {
                     fail_step: false,
                 })),
             )
-            .unwrap();
+            .test_ok();
         if case == TransactionCase::PartialDriverFailure {
             registry
                 .register(
@@ -3259,7 +3287,7 @@ mod tests {
                         fail_step: true,
                     })),
                 )
-                .unwrap();
+                .test_ok();
         }
         registry
     }
@@ -3274,7 +3302,7 @@ mod tests {
                     CanonicalBytes::from_static(b"before"),
                 )],
             )
-            .unwrap();
+            .test_ok();
     }
 
     fn capture_aware_store(
@@ -3308,7 +3336,7 @@ mod tests {
         let (timeline, result) = match path {
             TransactionHostPath::AdvanceTick => {
                 let mut base: Box<dyn EventStore> = Box::new(pos_store::memory::MemoryStore::new());
-                let timeline = base.create_timeline("transaction-advance").unwrap().id();
+                let timeline = base.create_timeline("transaction-advance").test_ok().id();
                 seed_external_event(base.as_mut(), timeline);
                 let mut store = capture_aware_store(base, case, &state);
                 let mut registry = registry;
@@ -3330,10 +3358,10 @@ mod tests {
                     fork_registry_factory: None,
                 }
                 .start()
-                .unwrap();
+                .test_ok();
                 let timeline = session.timeline().id();
                 {
-                    let mut store = session.store.lock().unwrap();
+                    let mut store = session.store.lock().test_ok();
                     seed_external_event(store.as_mut(), timeline);
                     let base = std::mem::replace(
                         &mut *store,
@@ -3359,7 +3387,7 @@ mod tests {
             state,
             failing_state,
         } = run_host_transaction_case(path, case);
-        let state = state.lock().unwrap();
+        let state = state.lock().test_ok();
         match case {
             TransactionCase::NonEmpty
             | TransactionCase::AppendFailure
@@ -3410,7 +3438,7 @@ mod tests {
         }
         drop(state);
 
-        let failing_state = failing_state.lock().unwrap();
+        let failing_state = failing_state.lock().test_ok();
         if case == TransactionCase::PartialDriverFailure {
             assert_eq!(failing_state.steps, 1, "{path:?} {case:?}");
             assert_eq!(failing_state.commits, 0, "{path:?} {case:?}");
@@ -3426,6 +3454,7 @@ mod tests {
                 "{path:?} {case:?}"
             );
         }
+        drop(failing_state);
     }
 
     #[test]
@@ -3451,7 +3480,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn captured_ranges_fail_before_fold_when_length_order_or_cursor_is_invalid() {
         let mut store = pos_store::memory::MemoryStore::new();
-        let timeline = store.create_timeline("range-validation").unwrap();
+        let timeline = store.create_timeline("range-validation").test_ok();
         let mut event = store
             .append(
                 timeline.id(),
@@ -3461,9 +3490,9 @@ mod tests {
                     CanonicalBytes::from_vec(Vec::new()),
                 )],
             )
-            .unwrap()
+            .test_ok()
             .pop()
-            .unwrap();
+            .test_ok();
         assert!(validate_captured_range(
             pos_core::clock::Seq::ZERO,
             pos_core::clock::Seq::from_u64(2),
@@ -3516,9 +3545,9 @@ mod tests {
             store_config: StoreConfig::Memory,
         });
         exp.register(&plugin, None, Some(Box::new(BadDriver { entity })))
-            .unwrap();
+            .test_ok();
 
-        let err = exp.run().unwrap_err();
+        let err = exp.run().test_err();
         assert!(matches!(err, ExperimentError::Runtime(_)));
     }
 
@@ -3539,9 +3568,9 @@ mod tests {
             Some(Box::new(CountReducer)),
             Some(Box::new(driver)),
         )
-        .unwrap();
+        .test_ok();
 
-        let result = exp.run().unwrap();
+        let result = exp.run().test_ok();
         assert_eq!(result.ticks, 3);
         assert_eq!(result.total_events, 3);
     }
@@ -3573,7 +3602,7 @@ mod tests {
                     Some(Box::new(CountReducer)),
                     Some(Box::new(driver)),
                 )
-                .unwrap();
+                .test_ok();
             Ok(registry)
         });
         experiment
@@ -3582,13 +3611,13 @@ mod tests {
                 Some(Box::new(CountReducer)),
                 Some(Box::new(driver)),
             )
-            .unwrap();
+            .test_ok();
 
-        let mut session = experiment.start().unwrap();
-        assert!(session.step().unwrap());
+        let mut session = experiment.start().test_ok();
+        assert!(session.step().test_ok());
         assert_eq!(session.timeline().head, pos_core::clock::Seq::from_u64(1));
         lock_store(&session.store)
-            .unwrap()
+            .test_ok()
             .append(
                 session.timeline().id(),
                 &[EventDraft::new(
@@ -3597,9 +3626,9 @@ mod tests {
                     CanonicalBytes::from_vec(b"pending".to_vec()),
                 )],
             )
-            .unwrap();
+            .test_ok();
 
-        let mut fork = session.fork("session-fork").unwrap();
+        let mut fork = session.fork("session-fork").test_ok();
         assert_eq!(
             fork.timeline().meta.fork_point,
             Some((session.timeline().id(), session.timeline().head))
@@ -3612,24 +3641,24 @@ mod tests {
             .and_then(serde_json::Value::as_u64);
         assert_eq!(inherited_count, Some(1));
 
-        assert!(fork.step().unwrap());
-        assert!(session.step().unwrap());
+        assert!(fork.step().test_ok());
+        assert!(session.step().test_ok());
         assert_ne!(fork.timeline().id(), session.timeline().id());
         assert_eq!(session.timeline().head, pos_core::clock::Seq::from_u64(3));
 
-        let fork_result = fork.run_to_completion().unwrap();
+        let fork_result = fork.run_to_completion().test_ok();
         assert_eq!(fork_result.ticks, 2);
         assert_eq!(fork_result.total_events, 2);
 
-        let result = session.run_to_completion().unwrap();
+        let result = session.run_to_completion().test_ok();
         assert_eq!(result.ticks, 2);
         assert_eq!(result.total_events, 3);
     }
 
     #[test]
     fn consent_revocation_is_durable_across_resume() {
-        let database = tempfile::NamedTempFile::new().unwrap();
-        let path = database.path().to_str().unwrap().to_owned();
+        let database = tempfile::NamedTempFile::new().test_ok();
+        let path = database.path().to_str().test_ok().to_owned();
         let entity = EntityId::new();
         let plugin = make_plugin("consent-ticker", &["consent.event"]);
         let plugin_id = plugin.id;
@@ -3646,10 +3675,10 @@ mod tests {
                 None,
                 Some(Box::new(FixedDriver::new(entity, "consent.event", 1))),
             )
-            .unwrap();
-        let mut session = experiment.start().unwrap();
+            .test_ok();
+        let mut session = experiment.start().test_ok();
         assert!(matches!(
-            session.step_tick().unwrap(),
+            session.step_tick().test_ok(),
             TickOutcome::Advanced {
                 emitted_events: 1,
                 ..
@@ -3666,13 +3695,13 @@ mod tests {
             Err(ExperimentError::ConsentRevoked)
         ));
         assert!(matches!(
-            session.step_tick().unwrap(),
+            session.step_tick().test_ok(),
             TickOutcome::Advanced {
                 emitted_events: 1,
                 ..
             }
         ));
-        assert_eq!(session.step_tick().unwrap(), TickOutcome::Stopped);
+        assert_eq!(session.step_tick().test_ok(), TickOutcome::Stopped);
         drop(session);
 
         let resumed_plugin = TestPlugin {
@@ -3692,9 +3721,9 @@ mod tests {
                 None,
                 Some(Box::new(FixedDriver::new(entity, "consent.event", 1))),
             )
-            .unwrap();
-        let mut resumed = recovery.resume(timeline_id).unwrap();
-        assert_eq!(resumed.step_tick().unwrap(), TickOutcome::Stopped);
+            .test_ok();
+        let mut resumed = recovery.resume(timeline_id).test_ok();
+        assert_eq!(resumed.step_tick().test_ok(), TickOutcome::Stopped);
         assert!(matches!(
             resumed.append_events(&[EventDraft::new(
                 entity,
@@ -3705,7 +3734,7 @@ mod tests {
         ));
         assert!(resumed
             .source_events()
-            .unwrap()
+            .test_ok()
             .iter()
             .any(|event| event.event_type.as_str()
                 == pos_runtime::HOST_CONSENT_REVOCATION_EVENT_TYPE));
@@ -3732,8 +3761,8 @@ mod tests {
         .with_fork_registry_factory(move || Ok(composition_registry(&[child])));
         experiment
             .register(&CompositionPlugin(parent), None, None)
-            .unwrap();
-        assert_incompatible_fork(experiment.start().unwrap());
+            .test_ok();
+        assert_incompatible_fork(experiment.start().test_ok());
     }
 
     #[test]
@@ -3757,8 +3786,8 @@ mod tests {
         .with_fork_registry_factory(move || Ok(composition_registry(&[child])));
         experiment
             .register(&CompositionPlugin(parent), None, None)
-            .unwrap();
-        assert_incompatible_fork(experiment.start().unwrap());
+            .test_ok();
+        assert_incompatible_fork(experiment.start().test_ok());
     }
 
     #[test]
@@ -3784,11 +3813,11 @@ mod tests {
         .with_fork_registry_factory(move || Ok(composition_registry(&[second, first])));
         experiment
             .register(&CompositionPlugin(first), None, None)
-            .unwrap();
+            .test_ok();
         experiment
             .register(&CompositionPlugin(second), None, None)
-            .unwrap();
-        assert_incompatible_fork(experiment.start().unwrap());
+            .test_ok();
+        assert_incompatible_fork(experiment.start().test_ok());
     }
 
     #[test]
@@ -3812,8 +3841,8 @@ mod tests {
         .with_fork_registry_factory(move || Ok(composition_registry(&[child])));
         experiment
             .register(&CompositionPlugin(parent), None, None)
-            .unwrap();
-        assert_incompatible_fork(experiment.start().unwrap());
+            .test_ok();
+        assert_incompatible_fork(experiment.start().test_ok());
     }
 
     #[test]
@@ -3835,17 +3864,17 @@ mod tests {
             store_config: StoreConfig::Memory,
         })
         .with_fork_registry_factory(move || {
-            let store = factory_store.lock().unwrap().clone();
+            let store = factory_store.lock().test_ok().clone();
             let is_unlocked = store.is_some_and(|store| store.try_lock().is_ok());
             factory_saw_unlocked_store.store(is_unlocked, std::sync::atomic::Ordering::SeqCst);
             Ok(composition_registry(&[plugin]))
         });
         experiment
             .register(&CompositionPlugin(plugin), None, None)
-            .unwrap();
-        let mut session = experiment.start().unwrap();
-        *store.lock().unwrap() = Some(Arc::clone(&session.store));
-        let child = session.fork("compatible-child").unwrap();
+            .test_ok();
+        let mut session = experiment.start().test_ok();
+        *store.lock().test_ok() = Some(Arc::clone(&session.store));
+        let child = session.fork("compatible-child").test_ok();
         assert!(saw_unlocked_store.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(
             child.timeline().meta.fork_point,
@@ -3874,11 +3903,11 @@ mod tests {
                 })),
                 Some(Box::new(FixedDriver::new(entity, "lock.inspection", 1))),
             )
-            .unwrap();
+            .test_ok();
 
-        let mut session = experiment.start().unwrap();
-        *store.lock().unwrap() = Some(Arc::clone(&session.store));
-        assert!(session.step().unwrap());
+        let mut session = experiment.start().test_ok();
+        *store.lock().test_ok() = Some(Arc::clone(&session.store));
+        assert!(session.step().test_ok());
         assert!(saw_unlocked_store.load(std::sync::atomic::Ordering::SeqCst));
     }
 
@@ -3891,7 +3920,7 @@ mod tests {
             store_config: StoreConfig::Memory,
         })
         .start()
-        .unwrap();
+        .test_ok();
 
         assert!(matches!(
             session.fork("child"),
@@ -3913,7 +3942,7 @@ mod tests {
             })
         })
         .start()
-        .unwrap();
+        .test_ok();
 
         assert!(matches!(
             session.fork("child"),
@@ -3931,15 +3960,17 @@ mod tests {
         })
         .with_fork_registry_factory(|| Ok(PluginRegistry::new()))
         .start()
-        .unwrap();
+        .test_ok();
         let store = Arc::clone(&session.store);
-        let _ = std::thread::spawn(move || {
-            let _guard = store.lock().unwrap();
-            panic!("poison the shared store for this test");
-        })
-        .join();
+        drop(
+            std::thread::spawn(move || {
+                let _guard = store.lock().test_ok();
+                std::panic::resume_unwind(Box::new("poison the shared store for this test"));
+            })
+            .join(),
+        );
 
-        let error = session.step().unwrap_err();
+        let error = session.step().test_err();
         assert_eq!(
             error.to_string(),
             "the shared experiment EventStore lock is poisoned"
@@ -3974,8 +4005,9 @@ mod tests {
             stop: StopCondition::MaxTicks(2),
             store_config: StoreConfig::Memory,
         });
-        exp.register(&plugin, None, Some(Box::new(driver))).unwrap();
-        let result = exp.run().unwrap();
+        exp.register(&plugin, None, Some(Box::new(driver)))
+            .test_ok();
+        let result = exp.run().test_ok();
         assert_eq!(result.ticks, 2);
 
         // Re-open the same in-memory store is not possible after run() consumes it,
@@ -3990,13 +4022,13 @@ mod tests {
         let mut exp2_mut = exp2;
         exp2_mut
             .register(&plugin2, None, Some(Box::new(driver2)))
-            .unwrap();
+            .test_ok();
 
         // Consume the experiment and get a store back via run, then re-use the
         // branch logic through a manual store path.
-        let mut store2 = pos_store::open_store(StoreConfig::Memory).unwrap();
-        store2.create_timeline("branch-seed").unwrap();
-        let forked = exp2_mut.branch("branch-seed", store2.as_mut()).unwrap();
+        let mut store2 = pos_store::open_store(StoreConfig::Memory).test_ok();
+        store2.create_timeline("branch-seed").test_ok();
+        let forked = exp2_mut.branch("branch-seed", store2.as_mut()).test_ok();
         assert!(!forked.id().to_string().is_empty());
     }
 
@@ -4008,7 +4040,7 @@ mod tests {
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Memory,
         });
-        let mut store = pos_store::open_store(StoreConfig::Memory).unwrap();
+        let mut store = pos_store::open_store(StoreConfig::Memory).test_ok();
         let err = exp.branch("nonexistent", store.as_mut());
         assert!(err.is_err());
     }
@@ -4031,12 +4063,12 @@ mod tests {
                 Ok(StepOutput::empty())
             }
         }
-        let mut store = pos_store::open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("idle2-test").unwrap();
+        let mut store = pos_store::open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("idle2-test").test_ok();
         let mut d = IdleDriver2;
         assert_eq!(d.name(), "idle2");
         // Also call step to cover those lines
-        let out = d.step(tl.id(), ObservationView::empty()).unwrap();
+        let out = d.step(tl.id(), ObservationView::empty()).test_ok();
         assert!(out.drafts.is_empty());
     }
 
@@ -4063,13 +4095,13 @@ mod tests {
                 Ok(StepOutput::new(vec![draft]))
             }
         }
-        let mut store = pos_store::open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("bad2-test").unwrap();
+        let mut store = pos_store::open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("bad2-test").test_ok();
         let entity = EntityId::new();
         let mut d = BadDriver2 { entity };
         assert_eq!(d.name(), "bad2");
         // Also call step to cover those lines
-        let out = d.step(tl.id(), ObservationView::empty()).unwrap();
+        let out = d.step(tl.id(), ObservationView::empty()).test_ok();
         assert_eq!(out.drafts.len(), 1);
     }
 
@@ -4087,8 +4119,9 @@ mod tests {
             stop: StopCondition::MaxTicks(5),
             store_config: StoreConfig::Memory,
         });
-        exp.register(&plugin, None, Some(Box::new(driver))).unwrap();
-        let result = exp.run().unwrap();
+        exp.register(&plugin, None, Some(Box::new(driver)))
+            .test_ok();
+        let result = exp.run().test_ok();
         // One emitting boundary plus one resumable quiescent boundary.
         assert_eq!(result.ticks, 2);
     }
@@ -4105,9 +4138,10 @@ mod tests {
             stop: StopCondition::MaxTicks(2),
             store_config: StoreConfig::Memory,
         });
-        exp.register(&plugin, None, Some(Box::new(driver))).unwrap();
+        exp.register(&plugin, None, Some(Box::new(driver)))
+            .test_ok();
 
-        let result = exp.run().unwrap();
+        let result = exp.run().test_ok();
         // The manifest should have the same timeline_id as the result
         assert_eq!(result.manifest.timeline_id, result.timeline_id);
     }
@@ -4124,9 +4158,10 @@ mod tests {
             stop: StopCondition::MaxTicks(3),
             store_config: StoreConfig::Memory,
         });
-        exp.register(&plugin, None, Some(Box::new(driver))).unwrap();
+        exp.register(&plugin, None, Some(Box::new(driver)))
+            .test_ok();
 
-        let result = exp.run().unwrap();
+        let result = exp.run().test_ok();
         // head_hash should not be zero since events were committed
         assert_ne!(result.manifest.head_hash, pos_core::crypto::Hash::zero());
     }
@@ -4140,7 +4175,7 @@ mod tests {
             store_config: StoreConfig::Memory,
         });
         // No plugins registered → no events → head_hash stays zero
-        let result = exp.run().unwrap();
+        let result = exp.run().test_ok();
         assert_eq!(result.manifest.head_hash, pos_core::crypto::Hash::zero());
         assert_eq!(result.total_events, 0);
     }
@@ -4162,9 +4197,9 @@ mod tests {
             Some(Box::new(CountReducer)),
             Some(Box::new(driver)),
         )
-        .unwrap();
+        .test_ok();
 
-        let result = exp.run().unwrap();
+        let result = exp.run().test_ok();
         // state_for returns from the first reducer ("proj-plugin")
         let n = result
             .projections
@@ -4185,24 +4220,25 @@ mod tests {
         // Use SQLite for persistence so branch() can reopen the store
         let tmp =
             std::env::temp_dir().join(format!("pos-test-{}.db", pos_core::ids::EntityId::new()));
-        let path = tmp.to_str().unwrap().to_owned();
+        let path = tmp.to_str().test_ok().to_owned();
 
         let mut exp = Experiment::new(ExperimentConfig {
             name: "branch-result-test".to_owned(),
             stop: StopCondition::MaxTicks(2),
             store_config: StoreConfig::Sqlite { path },
         });
-        exp.register(&plugin, None, Some(Box::new(driver))).unwrap();
-        let result = exp.run().unwrap();
+        exp.register(&plugin, None, Some(Box::new(driver)))
+            .test_ok();
+        let result = exp.run().test_ok();
         assert_eq!(result.ticks, 2);
 
         // Branch from the result without needing the original store
-        let forked = result.branch("fork-from-result").unwrap();
+        let forked = result.branch("fork-from-result").test_ok();
         assert!(!forked.id().to_string().is_empty());
         assert_ne!(forked.id(), result.timeline_id);
 
         // Clean up
-        let _ = std::fs::remove_file(&tmp);
+        drop(std::fs::remove_file(&tmp));
     }
 
     #[test]
@@ -4221,12 +4257,12 @@ mod tests {
                         1,
                     ))),
                 )
-                .unwrap();
+                .test_ok();
             registry
         }
 
-        let database = tempfile::NamedTempFile::new().unwrap();
-        let path = database.path().to_str().unwrap().to_owned();
+        let database = tempfile::NamedTempFile::new().test_ok();
+        let path = database.path().to_str().test_ok().to_owned();
         let result = BacktestRunner::new(
             BacktestConfig {
                 experiment_name: "nested-result-branch".to_owned(),
@@ -4237,9 +4273,9 @@ mod tests {
             registry,
         )
         .run()
-        .unwrap();
+        .test_ok();
 
-        let branch = result.eval_result.branch("nested-result-child").unwrap();
+        let branch = result.eval_result.branch("nested-result-child").test_ok();
         assert_eq!(
             branch.meta.fork_point,
             Some((
@@ -4247,8 +4283,8 @@ mod tests {
                 pos_core::clock::Seq::from_u64(3)
             ))
         );
-        let store = pos_store::sqlite::SqliteStore::open(&path).unwrap();
-        assert_eq!(store.logical_head(branch.id()).unwrap().as_u64(), 3);
+        let store = pos_store::sqlite::SqliteStore::open(&path).test_ok();
+        assert_eq!(store.logical_head(branch.id()).test_ok().as_u64(), 3);
     }
 
     #[test]
@@ -4284,8 +4320,9 @@ mod tests {
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Memory,
         });
-        exp.register(&plugin, None, Some(Box::new(driver))).unwrap();
-        let result = exp.run().unwrap();
+        exp.register(&plugin, None, Some(Box::new(driver)))
+            .test_ok();
+        let result = exp.run().test_ok();
 
         // store_config should be set to Memory
         assert!(matches!(result.store_config, Some(StoreConfig::Memory)));
@@ -4300,9 +4337,9 @@ mod tests {
         });
         let session = experiment
             .start_with_store(Box::new(pos_store::memory::MemoryStore::new()))
-            .unwrap();
-        assert!(session.source_events().unwrap().is_empty());
-        let result = session.run_to_completion().unwrap();
+            .test_ok();
+        assert!(session.source_events().test_ok().is_empty());
+        let result = session.run_to_completion().test_ok();
         assert!(result.store_config.is_none());
         assert!(matches!(
             result.branch("host-store-child"),
@@ -4322,8 +4359,9 @@ mod tests {
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Memory,
         });
-        exp.register(&plugin, None, Some(Box::new(driver))).unwrap();
-        let result = exp.run().unwrap();
+        exp.register(&plugin, None, Some(Box::new(driver)))
+            .test_ok();
+        let result = exp.run().test_ok();
 
         // Manifest should have plugin_versions populated
         assert!(!result.manifest.plugin_versions.is_empty());
@@ -4349,8 +4387,9 @@ mod tests {
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Memory,
         });
-        exp.register(&plugin, None, Some(Box::new(driver))).unwrap();
-        let result = exp.run().unwrap();
+        exp.register(&plugin, None, Some(Box::new(driver)))
+            .test_ok();
+        let result = exp.run().test_ok();
 
         // Manifest should have adapter_records populated
         assert!(!result.manifest.adapter_records.is_empty());
@@ -4365,21 +4404,22 @@ mod tests {
         let entity = EntityId::new();
         let plugin = make_plugin("chain-plugin", &["chain.event"]);
         let driver = FixedDriver::new(entity, "chain.event", 2);
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().test_ok();
         let path = directory.path().join("chain-head.db");
 
         let mut exp = Experiment::new(ExperimentConfig {
             name: "chain-hash-test".to_owned(),
             stop: StopCondition::MaxTicks(2),
             store_config: StoreConfig::Sqlite {
-                path: path.to_str().unwrap().to_owned(),
+                path: path.to_str().test_ok().to_owned(),
             },
         });
-        exp.register(&plugin, None, Some(Box::new(driver))).unwrap();
-        let result = exp.run().unwrap();
+        exp.register(&plugin, None, Some(Box::new(driver)))
+            .test_ok();
+        let result = exp.run().test_ok();
 
-        let store = open_store(result.store_config.clone().unwrap()).unwrap();
-        let events = store.read(result.timeline_id, SeqRange::all()).unwrap();
+        let store = open_store(result.store_config.clone().test_ok()).test_ok();
+        let events = store.read(result.timeline_id, SeqRange::all()).test_ok();
         assert!(!events.is_empty());
         let mut hasher = blake3::Hasher::new();
         for e in &events {
@@ -4393,6 +4433,24 @@ mod tests {
 
 #[cfg(test)]
 mod integration_tests {
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected test value")))
+        }
+    }
+
     use super::*;
     use pos_core::ids::EntityId;
     use pos_plugin_rule_agent::{RuleAgentDriver, RuleAgentPlugin, RuleAgentReducer};
@@ -4421,7 +4479,7 @@ mod integration_tests {
             Some(Box::new(agent_reducer)),
             Some(Box::new(agent_driver)),
         )
-        .unwrap();
+        .test_ok();
 
         // Register synthetic-obs plugin
         let obs_plugin = SyntheticObsPlugin::new();
@@ -4432,9 +4490,9 @@ mod integration_tests {
             Some(Box::new(obs_reducer)),
             Some(Box::new(obs_driver)),
         )
-        .unwrap();
+        .test_ok();
 
-        let result = exp.run().unwrap();
+        let result = exp.run().test_ok();
 
         // 5 ticks × 2 plugins = 10 events minimum
         assert!(
@@ -4467,6 +4525,24 @@ mod integration_tests {
 
 #[cfg(test)]
 mod backtest_tests {
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected test value")))
+        }
+    }
+
     use super::*;
 
     struct BtPlugin {
@@ -4520,9 +4596,10 @@ mod backtest_tests {
         let mut driver = BtDriver { entity };
         assert_eq!(driver.name(), "bt-driver"); // force coverage of fn name()
         let tl_id = pos_core::ids::TimelineId::new();
-        let _ = driver.step(tl_id, pos_runtime::ObservationView::empty());
+        drop(driver.step(tl_id, pos_runtime::ObservationView::empty()));
         let mut reg = pos_runtime::PluginRegistry::new();
-        reg.register(&plugin, None, Some(Box::new(driver))).unwrap();
+        reg.register(&plugin, None, Some(Box::new(driver)))
+            .test_ok();
         reg
     }
 
@@ -4537,7 +4614,7 @@ mod backtest_tests {
         };
 
         let runner = BacktestRunner::new(config, make_registry);
-        let result = runner.run().unwrap();
+        let result = runner.run().test_ok();
 
         assert_eq!(result.train_result.ticks, 3);
         assert_eq!(result.eval_result.ticks, 2);
@@ -4565,7 +4642,7 @@ mod backtest_tests {
             make_registry,
         )
         .run()
-        .unwrap();
+        .test_ok();
         assert_eq!(result.train_events, 1);
         assert_eq!(result.eval_events, 1);
     }
@@ -4581,7 +4658,7 @@ mod backtest_tests {
         };
 
         let runner = BacktestRunner::new(config, make_registry);
-        let result = runner.run().unwrap();
+        let result = runner.run().test_ok();
         assert_eq!(result.train_events, 2);
         assert_eq!(result.eval_events, 0);
         // eval_avg_events_per_tick should be 0 when eval_ticks is 0
@@ -4606,11 +4683,11 @@ mod backtest_tests {
             let mut registry = pos_runtime::PluginRegistry::new();
             registry
                 .register(&plugin, None, Some(Box::new(GoodBtDriver)))
-                .unwrap();
+                .test_ok();
             registry
         });
 
-        let result = runner.run().unwrap();
+        let result = runner.run().test_ok();
         assert_eq!(result.train_result.ticks, 1);
         assert_eq!(result.eval_result.ticks, 1);
         assert_eq!(result.train_events, 0);
@@ -4652,10 +4729,10 @@ mod backtest_tests {
                 id: pos_core::ids::PluginId::new(),
             };
             let mut reg = pos_runtime::PluginRegistry::new();
-            reg.register(&plugin, None, None).unwrap();
+            reg.register(&plugin, None, None).test_ok();
             reg
         });
-        let result = runner.run().unwrap();
+        let result = runner.run().test_ok();
         assert_eq!(result.train_events, 0);
         assert_eq!(result.eval_events, 0);
         assert!(result.persistence_lift.abs() < f64::EPSILON);
@@ -4678,7 +4755,7 @@ mod backtest_tests {
         };
 
         let runner = BacktestRunner::new(config, make_registry);
-        let result = runner.run().unwrap();
+        let result = runner.run().test_ok();
 
         assert_eq!(result.train_events, 4);
         assert_eq!(result.eval_events, 2);
@@ -4771,11 +4848,11 @@ mod backtest_tests {
         assert_eq!(BadEvalDriver { entity }.name(), "bad-eval-driver");
 
         // Also cover GoodBtDriver::step by calling it directly.
-        let mut store = pos_store::open_store(pos_store::StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("good-step-test").unwrap();
+        let mut store = pos_store::open_store(pos_store::StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("good-step-test").test_ok();
         let out = GoodBtDriver
             .step(tl.id(), pos_runtime::ObservationView::empty())
-            .unwrap();
+            .test_ok();
         assert!(out.drafts.is_empty());
     }
 
@@ -4797,7 +4874,7 @@ mod backtest_tests {
             };
             let mut reg = pos_runtime::PluginRegistry::new();
             reg.register(&plugin, None, Some(Box::new(BadBtDriver { entity })))
-                .unwrap();
+                .test_ok();
             reg
         });
         let err = runner.run();
@@ -4834,10 +4911,10 @@ mod backtest_tests {
             let mut reg = pos_runtime::PluginRegistry::new();
             if n == 0 {
                 reg.register(&plugin, None, Some(Box::new(GoodBtDriver)))
-                    .unwrap();
+                    .test_ok();
             } else {
                 reg.register(&plugin, None, Some(Box::new(BadEvalDriver { entity })))
-                    .unwrap();
+                    .test_ok();
             }
             reg
         });
@@ -4849,6 +4926,24 @@ mod backtest_tests {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod fault_injection_tests {
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected test value")))
+        }
+    }
+
     use super::*;
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
@@ -4860,31 +4955,43 @@ mod fault_injection_tests {
     use rusqlite::Connection;
     use std::cell::Cell;
 
+    fn running_as_root() -> bool {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Uid:\t"))
+                    .and_then(|uids| uids.split_whitespace().next())
+                    .and_then(|uid| uid.parse::<u32>().ok())
+            })
+            == Some(0)
+    }
+
     fn drop_table(path: &str, table: &str) {
-        let conn = Connection::open(path).expect("open sqlite for corruption");
-        conn.execute(&format!("DROP TABLE {table}"), [])
-            .expect("drop table");
+        let conn = Connection::open(path).test_ok();
+        conn.execute(&format!("DROP TABLE {table}"), []).test_ok();
     }
 
     #[cfg(unix)]
     fn set_readonly(path: &std::path::Path) {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o444)).test_ok();
     }
 
     #[cfg(unix)]
     fn set_writable(path: &std::path::Path) {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).test_ok();
     }
 
     #[cfg(unix)]
     fn readonly_db(path: &std::path::Path) {
         let mut store = open_store(StoreConfig::Sqlite {
-            path: path.to_str().unwrap().to_owned(),
+            path: path.to_str().test_ok().to_owned(),
         })
-        .unwrap();
-        store.create_timeline("seed").unwrap();
+        .test_ok();
+        store.create_timeline("seed").test_ok();
         drop(store);
         set_readonly(path);
     }
@@ -4961,25 +5068,22 @@ mod fault_injection_tests {
         use pos_runtime::Driver as _;
         let entity = EntityId::new();
         let event_type = Kind::new("fault.tick");
-        let mut emit = EmitDriver {
-            entity,
-            event_type: event_type.clone(),
-        };
+        let mut emit = EmitDriver { entity, event_type };
         assert_eq!(emit.name(), "emit");
         let mut bad = BadEmitDriver { entity };
         assert_eq!(bad.name(), "bad-emit");
         let mut fail = FailStepDriver;
         assert_eq!(fail.name(), "fail-step");
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("driver-methods").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("driver-methods").test_ok();
         assert!(!emit
             .step(tl.id(), ObservationView::empty())
-            .unwrap()
+            .test_ok()
             .drafts
             .is_empty());
         assert!(!bad
             .step(tl.id(), ObservationView::empty())
-            .unwrap()
+            .test_ok()
             .drafts
             .is_empty());
         assert!(fail.step(tl.id(), ObservationView::empty()).is_err());
@@ -5016,14 +5120,14 @@ mod fault_injection_tests {
             None,
             Some(Box::new(EmitDriver { entity, event_type })),
         )
-        .unwrap();
+        .test_ok();
         reg
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_result_branch_open_store_fails_on_directory_path() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().test_ok();
         let result = RunResult {
             timeline_id: pos_core::ids::TimelineId::new(),
             ticks: 0,
@@ -5035,7 +5139,7 @@ mod fault_injection_tests {
             ),
             projections: pos_state::ProjectionRegistry::new(),
             store_config: Some(StoreConfig::Sqlite {
-                path: dir.path().to_str().unwrap().to_owned(),
+                path: dir.path().to_str().test_ok().to_owned(),
             }),
         };
         assert!(result.branch("fork").is_err());
@@ -5044,7 +5148,7 @@ mod fault_injection_tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_result_branch_list_timelines_fails_on_corrupt_row() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().test_ok();
         let path = dir.path().join("branch.db");
         let entity = EntityId::new();
         let plugin = FaultPlugin {
@@ -5055,7 +5159,7 @@ mod fault_injection_tests {
             name: "branch-fault".to_owned(),
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Sqlite {
-                path: path.to_str().unwrap().to_owned(),
+                path: path.to_str().test_ok().to_owned(),
             },
         });
         exp.register(
@@ -5066,11 +5170,11 @@ mod fault_injection_tests {
                 event_type: Kind::new("branch.tick"),
             })),
         )
-        .unwrap();
-        let result = exp.run().unwrap();
-        let conn = Connection::open(&path).unwrap();
+        .test_ok();
+        let result = exp.run().test_ok();
+        let conn = Connection::open(&path).test_ok();
         conn.execute("UPDATE timelines SET name = X'0102'", [])
-            .unwrap();
+            .test_ok();
         assert!(result.branch("child").is_err());
     }
 
@@ -5088,10 +5192,10 @@ mod fault_injection_tests {
         });
         experiment
             .register(&plugin, None, Some(Box::new(FailStepDriver)))
-            .unwrap();
+            .test_ok();
 
         assert!(matches!(
-            experiment.start().unwrap().step(),
+            experiment.start().test_ok().step(),
             Err(ExperimentError::Runtime(_))
         ));
     }
@@ -5099,7 +5203,7 @@ mod fault_injection_tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn live_session_propagates_append_error() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().test_ok();
         let path = dir.path().join("session-append.db");
         let plugin = FaultPlugin {
             id: PluginId::new(),
@@ -5109,7 +5213,7 @@ mod fault_injection_tests {
             name: "session-append-fault".to_owned(),
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Sqlite {
-                path: path.to_str().unwrap().to_owned(),
+                path: path.to_str().test_ok().to_owned(),
             },
         });
         experiment
@@ -5121,10 +5225,10 @@ mod fault_injection_tests {
                     event_type: Kind::new("session.append"),
                 })),
             )
-            .unwrap();
-        let mut session = experiment.start().unwrap();
+            .test_ok();
+        let mut session = experiment.start().test_ok();
         Connection::open(&path)
-            .unwrap()
+            .test_ok()
             .execute_batch(
                 "CREATE TRIGGER fail_session_append
                  BEFORE INSERT ON events
@@ -5132,7 +5236,7 @@ mod fault_injection_tests {
                    SELECT RAISE(FAIL, 'injected append failure');
                  END;",
             )
-            .unwrap();
+            .test_ok();
 
         assert!(matches!(session.step(), Err(ExperimentError::Store(_))));
         assert!(matches!(
@@ -5144,7 +5248,7 @@ mod fault_injection_tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn live_session_faults_when_post_append_capture_fails() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().test_ok();
         let path = dir.path().join("session-post-capture.db");
         let event_type = Kind::new("session.post-capture");
         let plugin = FaultPlugin {
@@ -5155,7 +5259,7 @@ mod fault_injection_tests {
             name: "session-post-capture-fault".to_owned(),
             stop: StopCondition::MaxTicks(2),
             store_config: StoreConfig::Sqlite {
-                path: path.to_str().unwrap().to_owned(),
+                path: path.to_str().test_ok().to_owned(),
             },
         });
         experiment
@@ -5167,10 +5271,10 @@ mod fault_injection_tests {
                     event_type,
                 })),
             )
-            .unwrap();
-        let mut session = experiment.start().unwrap();
+            .test_ok();
+        let mut session = experiment.start().test_ok();
         Connection::open(&path)
-            .unwrap()
+            .test_ok()
             .execute_batch(
                 "CREATE TRIGGER corrupt_after_session_append
                  AFTER INSERT ON events
@@ -5178,7 +5282,7 @@ mod fault_injection_tests {
                    UPDATE timelines SET fork_seq = 0 WHERE id = NEW.timeline_id;
                  END;",
             )
-            .unwrap();
+            .test_ok();
 
         assert!(matches!(
             session.step_tick(),
@@ -5193,7 +5297,7 @@ mod fault_injection_tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn live_session_propagates_final_read_error() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().test_ok();
         let path = dir.path().join("session-read.db");
         let plugin = FaultPlugin {
             id: PluginId::new(),
@@ -5203,7 +5307,7 @@ mod fault_injection_tests {
             name: "session-read-fault".to_owned(),
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Sqlite {
-                path: path.to_str().unwrap().to_owned(),
+                path: path.to_str().test_ok().to_owned(),
             },
         });
         experiment
@@ -5215,10 +5319,10 @@ mod fault_injection_tests {
                     event_type: Kind::new("session.read"),
                 })),
             )
-            .unwrap();
-        let mut session = experiment.start().unwrap();
-        assert!(session.step().unwrap());
-        drop_table(path.to_str().unwrap(), "events");
+            .test_ok();
+        let mut session = experiment.start().test_ok();
+        assert!(session.step().test_ok());
+        drop_table(path.to_str().test_ok(), "events");
 
         assert!(matches!(
             session.run_to_completion(),
@@ -5229,40 +5333,40 @@ mod fault_injection_tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn live_session_fork_hydration_error_does_not_create_a_child_timeline() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().test_ok();
         let path = dir.path().join("session-fork-read.db");
         let mut session = Experiment::new(ExperimentConfig {
             name: "session-fork-read-fault".to_owned(),
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Sqlite {
-                path: path.to_str().unwrap().to_owned(),
+                path: path.to_str().test_ok().to_owned(),
             },
         })
         .with_fork_registry_factory(|| Ok(PluginRegistry::new()))
         .start()
-        .unwrap();
-        drop_table(path.to_str().unwrap(), "events");
+        .test_ok();
+        drop_table(path.to_str().test_ok(), "events");
 
         assert!(matches!(
             session.fork("child"),
             Err(ExperimentError::Store(_))
         ));
-        let connection = rusqlite::Connection::open(&path).unwrap();
+        let connection = rusqlite::Connection::open(&path).test_ok();
         let timeline_count: i64 = connection
             .query_row("SELECT COUNT(*) FROM timelines", [], |row| row.get(0))
-            .unwrap();
+            .test_ok();
         assert_eq!(timeline_count, 1);
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn experiment_run_open_store_fails_on_directory_path() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().test_ok();
         let exp = Experiment::new(ExperimentConfig {
             name: "open-fault".to_owned(),
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Sqlite {
-                path: dir.path().to_str().unwrap().to_owned(),
+                path: dir.path().to_str().test_ok().to_owned(),
             },
         });
         assert!(exp.run().is_err());
@@ -5271,7 +5375,10 @@ mod fault_injection_tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn experiment_run_create_timeline_fails_on_readonly_database() {
-        let dir = tempfile::tempdir().unwrap();
+        if running_as_root() {
+            return;
+        }
+        let dir = tempfile::tempdir().test_ok();
         let path = dir.path().join("create.db");
         readonly_db(&path);
         let entity = EntityId::new();
@@ -5283,7 +5390,7 @@ mod fault_injection_tests {
             name: "create-fault".to_owned(),
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Sqlite {
-                path: path.to_str().unwrap().to_owned(),
+                path: path.to_str().test_ok().to_owned(),
             },
         });
         exp.register(
@@ -5294,7 +5401,7 @@ mod fault_injection_tests {
                 event_type: Kind::new("create.tick"),
             })),
         )
-        .unwrap();
+        .test_ok();
         let result = exp.run();
         set_writable(&path);
         assert!(result.is_err());
@@ -5303,7 +5410,10 @@ mod fault_injection_tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_result_branch_fork_fails_on_readonly_database() {
-        let dir = tempfile::tempdir().unwrap();
+        if running_as_root() {
+            return;
+        }
+        let dir = tempfile::tempdir().test_ok();
         let path = dir.path().join("branch-fork.db");
         let entity = EntityId::new();
         let plugin = FaultPlugin {
@@ -5314,7 +5424,7 @@ mod fault_injection_tests {
             name: "branch-fault".to_owned(),
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Sqlite {
-                path: path.to_str().unwrap().to_owned(),
+                path: path.to_str().test_ok().to_owned(),
             },
         });
         exp.register(
@@ -5325,8 +5435,8 @@ mod fault_injection_tests {
                 event_type: Kind::new("branch.tick"),
             })),
         )
-        .unwrap();
-        let result = exp.run().unwrap();
+        .test_ok();
+        let result = exp.run().test_ok();
         set_readonly(&path);
         let err = result.branch("child");
         set_writable(&path);
@@ -5336,7 +5446,7 @@ mod fault_injection_tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn experiment_branch_list_timelines_fails_on_corrupt_row() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().test_ok();
         let path = dir.path().join("exp-branch-list.db");
         let entity = EntityId::new();
         let plugin = FaultPlugin {
@@ -5347,7 +5457,7 @@ mod fault_injection_tests {
             name: "exp-branch-list".to_owned(),
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Sqlite {
-                path: path.to_str().unwrap().to_owned(),
+                path: path.to_str().test_ok().to_owned(),
             },
         });
         exp.register(
@@ -5358,29 +5468,32 @@ mod fault_injection_tests {
                 event_type: Kind::new("exp-branch.tick"),
             })),
         )
-        .unwrap();
-        let _ = exp.run().unwrap();
-        let conn = Connection::open(&path).unwrap();
+        .test_ok();
+        let _ = exp.run().test_ok();
+        let conn = Connection::open(&path).test_ok();
         conn.execute("UPDATE timelines SET name = X'0102'", [])
-            .unwrap();
+            .test_ok();
         let exp2 = Experiment::new(ExperimentConfig {
             name: "exp-branch-list".to_owned(),
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Sqlite {
-                path: path.to_str().unwrap().to_owned(),
+                path: path.to_str().test_ok().to_owned(),
             },
         });
         let mut store = open_store(StoreConfig::Sqlite {
-            path: path.to_str().unwrap().to_owned(),
+            path: path.to_str().test_ok().to_owned(),
         })
-        .unwrap();
+        .test_ok();
         assert!(exp2.branch("child", store.as_mut()).is_err());
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn experiment_branch_fork_fails_on_readonly_database() {
-        let dir = tempfile::tempdir().unwrap();
+        if running_as_root() {
+            return;
+        }
+        let dir = tempfile::tempdir().test_ok();
         let path = dir.path().join("exp-branch.db");
         let entity = EntityId::new();
         let plugin = FaultPlugin {
@@ -5391,7 +5504,7 @@ mod fault_injection_tests {
             name: "exp-branch-fault".to_owned(),
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Sqlite {
-                path: path.to_str().unwrap().to_owned(),
+                path: path.to_str().test_ok().to_owned(),
             },
         });
         exp.register(
@@ -5402,20 +5515,20 @@ mod fault_injection_tests {
                 event_type: Kind::new("exp-branch.tick"),
             })),
         )
-        .unwrap();
-        let _ = exp.run().unwrap();
+        .test_ok();
+        let _ = exp.run().test_ok();
         set_readonly(&path);
         let exp2 = Experiment::new(ExperimentConfig {
             name: "exp-branch-fault".to_owned(),
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Sqlite {
-                path: path.to_str().unwrap().to_owned(),
+                path: path.to_str().test_ok().to_owned(),
             },
         });
         let mut store = open_store(StoreConfig::Sqlite {
-            path: path.to_str().unwrap().to_owned(),
+            path: path.to_str().test_ok().to_owned(),
         })
-        .unwrap();
+        .test_ok();
         let err = exp2.branch("child", store.as_mut());
         set_writable(&path);
         assert!(err.is_err());
@@ -5424,13 +5537,13 @@ mod fault_injection_tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn backtest_runner_open_store_fails_on_directory_path() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().test_ok();
         let config = BacktestConfig {
             experiment_name: "bt-open-fault".to_owned(),
             train_ticks: 1,
             eval_ticks: 1,
             store_config: StoreConfig::Sqlite {
-                path: dir.path().to_str().unwrap().to_owned(),
+                path: dir.path().to_str().test_ok().to_owned(),
             },
         };
         let runner = BacktestRunner::new(config, registry_with_emit_driver);
@@ -5440,7 +5553,10 @@ mod fault_injection_tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn backtest_runner_create_timeline_fails_on_readonly_database() {
-        let dir = tempfile::tempdir().unwrap();
+        if running_as_root() {
+            return;
+        }
+        let dir = tempfile::tempdir().test_ok();
         let path = dir.path().join("bt-create.db");
         readonly_db(&path);
         let config = BacktestConfig {
@@ -5448,7 +5564,7 @@ mod fault_injection_tests {
             train_ticks: 1,
             eval_ticks: 0,
             store_config: StoreConfig::Sqlite {
-                path: path.to_str().unwrap().to_owned(),
+                path: path.to_str().test_ok().to_owned(),
             },
         };
         let runner = BacktestRunner::new(config, registry_with_emit_driver);
@@ -5460,9 +5576,9 @@ mod fault_injection_tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn backtest_runner_ignores_unrelated_corrupt_timeline_metadata() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().test_ok();
         let path = dir.path().join("bt-list.db");
-        let path_str = path.to_str().unwrap().to_owned();
+        let path_str = path.to_str().test_ok().to_owned();
         let config = BacktestConfig {
             experiment_name: "bt-list-fault".to_owned(),
             train_ticks: 1,
@@ -5472,13 +5588,13 @@ mod fault_injection_tests {
             },
         };
         let runner = BacktestRunner::new(config, registry_with_emit_driver);
-        let _ = runner.run().unwrap();
-        let conn = Connection::open(&path).unwrap();
+        let _ = runner.run().test_ok();
+        let conn = Connection::open(&path).test_ok();
         conn.execute(
             "UPDATE timelines SET name = X'0102' WHERE name LIKE '%-train'",
             [],
         )
-        .unwrap();
+        .test_ok();
         let config2 = BacktestConfig {
             experiment_name: "bt-list-fault-2".to_owned(),
             train_ticks: 1,

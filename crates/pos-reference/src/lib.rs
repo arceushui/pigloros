@@ -415,6 +415,28 @@ fn field_value<'a>(
 mod tests {
     use super::*;
 
+    fn parse_json(value: &str) -> Result<serde_json::Value, ReferenceError> {
+        Ok(serde_json::from_str(value)?)
+    }
+
+    fn object_mut(
+        value: &mut serde_json::Value,
+    ) -> Result<&mut serde_json::Map<String, serde_json::Value>, ReferenceError> {
+        value
+            .as_object_mut()
+            .ok_or(ReferenceError::InvalidForkEvidence(
+                "test object is missing",
+            ))
+    }
+
+    fn array_mut(
+        value: &mut serde_json::Value,
+    ) -> Result<&mut Vec<serde_json::Value>, ReferenceError> {
+        value
+            .as_array_mut()
+            .ok_or(ReferenceError::InvalidForkEvidence("test array is missing"))
+    }
+
     fn fixture() -> String {
         serde_json::json!({
             "format_version": 1,
@@ -453,10 +475,10 @@ mod tests {
     }
 
     #[test]
-    fn classifies_equal_and_each_divergence() {
+    fn classifies_equal_and_each_divergence() -> Result<(), ReferenceError> {
         let left = fixture();
         assert_eq!(
-            compare_json(&left, &left).unwrap().divergence,
+            compare_json(&left, &left)?.divergence,
             ReferenceDivergenceV1::Equal
         );
         for (field, expected) in [
@@ -469,21 +491,22 @@ mod tests {
             ("causal_trace", ReferenceDivergenceV1::CausalTrace),
             ("uncertainty", ReferenceDivergenceV1::Observability),
         ] {
-            let mut value: serde_json::Value = serde_json::from_str(&left).unwrap();
+            let mut value = parse_json(&left)?;
             if field == "seed" {
                 value["manifest"][field] = serde_json::json!(2);
             } else {
                 value[field] = serde_json::json!([{"changed": true}]);
             }
             assert_eq!(
-                compare_json(&left, &value.to_string()).unwrap().divergence,
+                compare_json(&left, &value.to_string())?.divergence,
                 expected
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn rejects_invalid_or_incomplete_json() {
+    fn rejects_invalid_or_incomplete_json() -> Result<(), ReferenceError> {
         assert!(matches!(
             compare_json("[]", "{}"),
             Err(ReferenceError::RootNotObject)
@@ -496,12 +519,13 @@ mod tests {
             compare_json("not-json", &fixture()),
             Err(ReferenceError::Json(_))
         ));
-        let mut value: serde_json::Value = serde_json::from_str(&fixture()).unwrap();
+        let mut value = parse_json(&fixture())?;
         value["unknown"] = serde_json::json!(true);
         assert!(matches!(
             compare_json(&value.to_string(), &fixture()),
             Err(ReferenceError::UnexpectedField(field)) if field == "unknown"
         ));
+        Ok(())
     }
 
     fn fork_fixture() -> (String, String) {
@@ -570,20 +594,19 @@ mod tests {
     }
 
     #[test]
-    fn independently_verifies_fork_and_rejects_each_boundary() {
+    fn independently_verifies_fork_and_rejects_each_boundary() -> Result<(), ReferenceError> {
         let (baseline, counterfactual) = fork_fixture();
         assert!(verify_fork_json(&baseline, &counterfactual, "world.action.v1").is_ok());
 
-        let mut value: serde_json::Value = serde_json::from_str(&counterfactual).unwrap();
+        let mut value = parse_json(&counterfactual)?;
         value["manifest"]["input_digest"] = serde_json::json!([9]);
         assert!(matches!(
             verify_fork_json(&baseline, &value.to_string(), "world.action.v1"),
             Err(ReferenceError::InvalidForkEvidence("manifest mismatch"))
         ));
 
-        let mut no_cut_baseline: serde_json::Value = serde_json::from_str(&baseline).unwrap();
-        let mut no_cut_counterfactual: serde_json::Value =
-            serde_json::from_str(&counterfactual).unwrap();
+        let mut no_cut_baseline = parse_json(&baseline)?;
+        let mut no_cut_counterfactual = parse_json(&counterfactual)?;
         no_cut_baseline["manifest"]["fork_cut_seq"] = serde_json::Value::Null;
         no_cut_counterfactual["manifest"]["fork_cut_seq"] = serde_json::Value::Null;
         assert!(matches!(
@@ -595,14 +618,14 @@ mod tests {
             Err(ReferenceError::InvalidForkEvidence("fork cut is absent"))
         ));
 
-        let mut prefix: serde_json::Value = serde_json::from_str(&counterfactual).unwrap();
+        let mut prefix = parse_json(&counterfactual)?;
         prefix["authoritative_events"][0]["payload_digest"] = serde_json::json!([9]);
         assert!(matches!(
             verify_fork_json(&baseline, &prefix.to_string(), "world.action.v1"),
             Err(ReferenceError::InvalidForkEvidence("prefix mismatch"))
         ));
 
-        let mut no_suffix: serde_json::Value = serde_json::from_str(&baseline).unwrap();
+        let mut no_suffix = parse_json(&baseline)?;
         no_suffix["manifest"]["fork_cut_seq"] = serde_json::json!(5);
         assert!(matches!(
             verify_fork_json(
@@ -613,7 +636,7 @@ mod tests {
             Err(ReferenceError::InvalidForkEvidence("suffix is empty"))
         ));
 
-        let mut no_intervention: serde_json::Value = serde_json::from_str(&counterfactual).unwrap();
+        let mut no_intervention = parse_json(&counterfactual)?;
         no_intervention["authoritative_events"][1]["event_type"] =
             serde_json::json!("world.observation.v1");
         assert!(matches!(
@@ -623,7 +646,7 @@ mod tests {
             ))
         ));
 
-        let mut incomplete_tail: serde_json::Value = serde_json::from_str(&counterfactual).unwrap();
+        let mut incomplete_tail = parse_json(&counterfactual)?;
         incomplete_tail["authoritative_events"][2]["causation_seq"] = serde_json::json!(1);
         assert!(matches!(
             verify_fork_json(&baseline, &incomplete_tail.to_string(), "world.action.v1"),
@@ -631,13 +654,13 @@ mod tests {
                 "causal tail is incomplete"
             ))
         ));
+        Ok(())
     }
 
     #[test]
-    fn independently_rejects_kernel_boundaries() {
+    fn independently_rejects_kernel_boundaries() -> Result<(), ReferenceError> {
         let (baseline, counterfactual) = fork_fixture();
-        let mut incomplete_kernel: serde_json::Value =
-            serde_json::from_str(&counterfactual).unwrap();
+        let mut incomplete_kernel = parse_json(&counterfactual)?;
         incomplete_kernel["authoritative_events"] = serde_json::json!([{
             "seq": 1,
             "entity": "body",
@@ -652,7 +675,7 @@ mod tests {
             ))
         ));
 
-        let mut missing_source: serde_json::Value = serde_json::from_str(&counterfactual).unwrap();
+        let mut missing_source = parse_json(&counterfactual)?;
         missing_source["authoritative_events"][3]["causation_seq"] = serde_json::json!(99);
         assert!(matches!(
             verify_fork_json(&baseline, &missing_source.to_string(), "world.action.v1"),
@@ -661,8 +684,7 @@ mod tests {
             ))
         ));
 
-        let mut invalid_relation: serde_json::Value =
-            serde_json::from_str(&counterfactual).unwrap();
+        let mut invalid_relation = parse_json(&counterfactual)?;
         invalid_relation["authoritative_events"][3]["causation_seq"] = serde_json::json!(5);
         assert!(matches!(
             verify_fork_json(&baseline, &invalid_relation.to_string(), "world.action.v1"),
@@ -670,40 +692,35 @@ mod tests {
                 "independent causal relation is invalid"
             ))
         ));
+        Ok(())
     }
 
     #[test]
-    fn independently_rejects_cyclic_and_copied_suffixes() {
+    fn independently_rejects_cyclic_and_copied_suffixes() -> Result<(), ReferenceError> {
         let (baseline, counterfactual) = fork_fixture();
-        let mut cycle_baseline: serde_json::Value = serde_json::from_str(&baseline).unwrap();
+        let mut cycle_baseline = parse_json(&baseline)?;
         cycle_baseline["manifest"]["fork_cut_seq"] = serde_json::json!(3);
-        cycle_baseline["authoritative_events"]
-            .as_array_mut()
-            .unwrap()
-            .extend([
-                serde_json::json!({
-                    "seq": 4, "entity": "world", "event_type": "custom.action",
-                    "payload_digest": [8], "causation_seq": 3
-                }),
-                serde_json::json!({
-                    "seq": 5, "entity": "custom", "event_type": "custom.event",
-                    "payload_digest": [9], "causation_seq": 4
-                }),
-            ]);
+        array_mut(&mut cycle_baseline["authoritative_events"])?.extend([
+            serde_json::json!({
+                "seq": 4, "entity": "world", "event_type": "custom.action",
+                "payload_digest": [8], "causation_seq": 3
+            }),
+            serde_json::json!({
+                "seq": 5, "entity": "custom", "event_type": "custom.event",
+                "payload_digest": [9], "causation_seq": 4
+            }),
+        ]);
         let mut cycle_counterfactual = cycle_baseline.clone();
-        cycle_counterfactual["authoritative_events"]
-            .as_array_mut()
-            .unwrap()
-            .extend([
-                serde_json::json!({
-                    "seq": 6, "entity": "custom", "event_type": "custom.event",
-                    "payload_digest": [10], "causation_seq": 7
-                }),
-                serde_json::json!({
-                    "seq": 7, "entity": "custom", "event_type": "custom.event",
-                    "payload_digest": [11], "causation_seq": 6
-                }),
-            ]);
+        array_mut(&mut cycle_counterfactual["authoritative_events"])?.extend([
+            serde_json::json!({
+                "seq": 6, "entity": "custom", "event_type": "custom.event",
+                "payload_digest": [10], "causation_seq": 7
+            }),
+            serde_json::json!({
+                "seq": 7, "entity": "custom", "event_type": "custom.event",
+                "payload_digest": [11], "causation_seq": 6
+            }),
+        ]);
         cycle_counterfactual["authoritative_events"][4]["causation_seq"] = serde_json::json!(7);
         cycle_counterfactual["authoritative_events"][5]["causation_seq"] = serde_json::json!(6);
         assert!(matches!(
@@ -717,7 +734,7 @@ mod tests {
             ))
         ));
 
-        let mut copied_suffix: serde_json::Value = serde_json::from_str(&baseline).unwrap();
+        let mut copied_suffix = parse_json(&baseline)?;
         copied_suffix["manifest"]["fork_cut_seq"] = serde_json::json!(1);
         assert!(matches!(
             verify_fork_json(
@@ -728,8 +745,7 @@ mod tests {
             Err(ReferenceError::InvalidForkEvidence("suffix was copied"))
         ));
 
-        let mut short_counterfactual: serde_json::Value =
-            serde_json::from_str(&counterfactual).unwrap();
+        let mut short_counterfactual = parse_json(&counterfactual)?;
         short_counterfactual["manifest"]["fork_cut_seq"] = serde_json::json!(4);
         assert!(matches!(
             verify_fork_json(
@@ -739,10 +755,11 @@ mod tests {
             ),
             Err(ReferenceError::InvalidForkEvidence("manifest mismatch"))
         ));
+        Ok(())
     }
 
     #[test]
-    fn rejects_malformed_reference_events_and_manifests() {
+    fn rejects_malformed_reference_events_and_manifests() -> Result<(), ReferenceError> {
         let (baseline, counterfactual) = fork_fixture();
         let mut cases = Vec::new();
         cases.push(serde_json::json!("not-an-event"));
@@ -760,7 +777,7 @@ mod tests {
             "payload_digest": [1]
         }));
         for event in cases {
-            let mut value: serde_json::Value = serde_json::from_str(&counterfactual).unwrap();
+            let mut value = parse_json(&counterfactual)?;
             value["authoritative_events"] = serde_json::json!([event]);
             assert!(matches!(
                 verify_fork_json(&baseline, &value.to_string(), "world.action.v1"),
@@ -768,35 +785,27 @@ mod tests {
             ));
         }
 
-        let mut missing_manifest: serde_json::Value =
-            serde_json::from_str(&counterfactual).unwrap();
-        missing_manifest.as_object_mut().unwrap().remove("manifest");
+        let mut missing_manifest = parse_json(&counterfactual)?;
+        object_mut(&mut missing_manifest)?.remove("manifest");
         assert!(matches!(
             verify_fork_json(&baseline, &missing_manifest.to_string(), "world.action.v1"),
             Err(ReferenceError::MissingField("manifest"))
         ));
-        let mut bad_manifest: serde_json::Value = serde_json::from_str(&counterfactual).unwrap();
+        let mut bad_manifest = parse_json(&counterfactual)?;
         bad_manifest["manifest"] = serde_json::json!(true);
         assert!(matches!(
             verify_fork_json(&baseline, &bad_manifest.to_string(), "world.action.v1"),
             Err(ReferenceError::MissingField("manifest"))
         ));
-        let mut missing_events: serde_json::Value = serde_json::from_str(&counterfactual).unwrap();
-        missing_events
-            .as_object_mut()
-            .unwrap()
-            .remove("authoritative_events");
+        let mut missing_events = parse_json(&counterfactual)?;
+        object_mut(&mut missing_events)?.remove("authoritative_events");
         assert!(matches!(
             verify_fork_json(&baseline, &missing_events.to_string(), "world.action.v1"),
             Err(ReferenceError::MissingField("authoritative_events"))
         ));
 
-        let mut missing_manifest_field: serde_json::Value =
-            serde_json::from_str(&counterfactual).unwrap();
-        missing_manifest_field["manifest"]
-            .as_object_mut()
-            .unwrap()
-            .remove("evaluator_digest");
+        let mut missing_manifest_field = parse_json(&counterfactual)?;
+        object_mut(&mut missing_manifest_field["manifest"])?.remove("evaluator_digest");
         assert!(matches!(
             verify_fork_json(
                 &baseline,
@@ -805,8 +814,7 @@ mod tests {
             ),
             Err(ReferenceError::MissingField("evaluator_digest"))
         ));
-        let mut unknown_manifest_field: serde_json::Value =
-            serde_json::from_str(&counterfactual).unwrap();
+        let mut unknown_manifest_field = parse_json(&counterfactual)?;
         unknown_manifest_field["manifest"]["unknown"] = serde_json::json!(true);
         assert!(matches!(
             verify_fork_json(
@@ -816,5 +824,6 @@ mod tests {
             ),
             Err(ReferenceError::UnexpectedField(field)) if field == "unknown"
         ));
+        Ok(())
     }
 }

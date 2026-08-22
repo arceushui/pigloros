@@ -951,6 +951,43 @@ mod tests {
         time::Duration,
     };
 
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected registry fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("missing registry fixture value"))
+            })
+        }
+    }
+
+    trait TestErrorExt<T, E> {
+        fn test_err(self) -> E;
+    }
+
+    impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
+        fn test_err(self) -> E {
+            match self {
+                Ok(value) => std::panic::resume_unwind(Box::new(format!(
+                    "unexpected successful registry fixture value: {value:?}"
+                ))),
+                Err(error) => error,
+            }
+        }
+    }
+
     // ── Test helpers ──────────────────────────────────────────────────────────
 
     struct TestPlugin {
@@ -1032,7 +1069,7 @@ mod tests {
             _: pos_core::ids::TimelineId,
             _: ObservationView<'_>,
         ) -> Result<crate::driver::StepOutput, RuntimeError> {
-            panic!("test driver panic");
+            std::panic::resume_unwind(Box::new("test driver panic"));
         }
     }
 
@@ -1051,7 +1088,7 @@ mod tests {
         }
 
         fn abort_step(&mut self) {
-            panic!("test abort panic");
+            std::panic::resume_unwind(Box::new("test abort panic"));
         }
     }
 
@@ -1087,14 +1124,11 @@ mod tests {
                     name: self.name.to_owned(),
                 });
             }
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().test_ok();
             state.steps += 1;
             state.staged = true;
-            state.anchors.push(
-                observations
-                    .anchor()
-                    .expect("anchored step supplies anchor"),
-            );
+            state.anchors.push(observations.anchor().test_ok());
+            drop(state);
             Ok(StepOutput::empty())
         }
 
@@ -1107,14 +1141,14 @@ mod tests {
         }
 
         fn commit_step(&mut self) {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().test_ok();
             assert!(state.staged);
             state.staged = false;
             state.commits += 1;
         }
 
         fn abort_step(&mut self) {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().test_ok();
             if state.staged {
                 state.staged = false;
                 state.aborts += 1;
@@ -1125,7 +1159,7 @@ mod tests {
             &mut self,
             _evidence: &DriverRecoveryEvidence,
         ) -> Result<(), RuntimeError> {
-            self.state.lock().unwrap().restores += 1;
+            self.state.lock().test_ok().restores += 1;
             Ok(())
         }
     }
@@ -1138,11 +1172,11 @@ mod tests {
         let plugin = plugin_with_caps("panicking", &["probe.event"], true, false);
         registry
             .register(&plugin, None, Some(Box::new(PanickingDriver)))
-            .unwrap();
+            .test_ok();
 
         let error = registry
             .step_all_anchored(TimelineId::new(), Seq::ZERO)
-            .unwrap_err();
+            .test_err();
         assert!(matches!(error, RuntimeError::DriverPanicked { .. }));
         registry.abort_step();
     }
@@ -1153,10 +1187,10 @@ mod tests {
         let plugin = plugin_with_caps("abort-panicking", &[], true, false);
         registry
             .register(&plugin, None, Some(Box::new(AbortPanickingDriver)))
-            .unwrap();
+            .test_ok();
         registry
             .step_all_anchored(TimelineId::new(), Seq::ZERO)
-            .unwrap();
+            .test_ok();
         registry.abort_step();
         assert!(registry
             .step_all_anchored(TimelineId::new(), Seq::ZERO)
@@ -1194,7 +1228,7 @@ mod tests {
             }
 
             fn abort_step(&mut self) {
-                *self.aborted.lock().unwrap() = true;
+                *self.aborted.lock().test_ok() = true;
             }
         }
 
@@ -1205,9 +1239,9 @@ mod tests {
         }));
         let error = registry
             .step_all_anchored(TimelineId::new(), Seq::ZERO)
-            .unwrap_err();
+            .test_err();
         assert!(matches!(error, RuntimeError::ResourceExhausted { .. }));
-        assert!(*aborted.lock().unwrap());
+        assert!(*aborted.lock().test_ok());
     }
 
     #[test]
@@ -1227,14 +1261,14 @@ mod tests {
             registry.step_all(timeline),
             Err(RuntimeError::MissingSnapshotAnchor { .. })
         ));
-        assert_eq!(state.lock().unwrap().steps, 0);
+        assert_eq!(state.lock().test_ok().steps, 0);
 
         assert!(registry
             .step_all_anchored(timeline, Seq::from_u64(7))
-            .unwrap()
+            .test_ok()
             .is_empty());
         {
-            let observed = state.lock().unwrap();
+            let observed = state.lock().test_ok();
             assert_eq!(observed.steps, 1);
             assert_eq!(observed.commits, 0);
             assert!(observed.staged);
@@ -1242,6 +1276,7 @@ mod tests {
                 observed.anchors,
                 [SnapshotAnchor::new(timeline, Seq::from_u64(7))]
             );
+            drop(observed);
         }
         assert!(matches!(
             registry.step_all_anchored(timeline, Seq::from_u64(7)),
@@ -1255,18 +1290,18 @@ mod tests {
             registry.tick_cadenced(timeline, 0),
             Err(RuntimeError::PendingDriverStep)
         ));
-        assert_eq!(state.lock().unwrap().steps, 1);
+        assert_eq!(state.lock().test_ok().steps, 1);
 
         registry.commit_step();
-        assert_eq!(state.lock().unwrap().commits, 1);
-        assert!(!state.lock().unwrap().staged);
+        assert_eq!(state.lock().test_ok().commits, 1);
+        assert!(!state.lock().test_ok().staged);
 
         registry
             .step_all_anchored(timeline, Seq::from_u64(7))
-            .unwrap();
+            .test_ok();
         registry.abort_step();
-        assert_eq!(state.lock().unwrap().aborts, 1);
-        assert!(!state.lock().unwrap().staged);
+        assert_eq!(state.lock().test_ok().aborts, 1);
+        assert!(!state.lock().test_ok().staged);
     }
 
     #[test]
@@ -1284,12 +1319,10 @@ mod tests {
 
         registry
             .restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[])
-            .unwrap();
-        assert_eq!(state.lock().unwrap().restores, 1);
+            .test_ok();
+        assert_eq!(state.lock().test_ok().restores, 1);
 
-        registry
-            .step_all_anchored(timeline, Seq::ZERO)
-            .expect("step stages");
+        registry.step_all_anchored(timeline, Seq::ZERO).test_ok();
         assert!(matches!(
             registry.restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[]),
             Err(RuntimeError::PendingDriverStep)
@@ -1330,24 +1363,24 @@ mod tests {
                 _: &DriverRecoveryEvidence,
             ) -> Result<(), RuntimeError> {
                 if self.rejects {
-                    self.state.lock().unwrap().staged = true;
+                    self.state.lock().test_ok().staged = true;
                     return Err(RuntimeError::NoDriver {
                         name: "rejected recovery".to_owned(),
                     });
                 }
-                self.state.lock().unwrap().staged = true;
+                self.state.lock().test_ok().staged = true;
                 Ok(())
             }
 
             fn commit_restore_from_history(&mut self) {
-                let mut state = self.state.lock().unwrap();
+                let mut state = self.state.lock().test_ok();
                 assert!(state.staged);
                 state.staged = false;
                 state.commits += 1;
             }
 
             fn abort_restore_from_history(&mut self) {
-                let mut state = self.state.lock().unwrap();
+                let mut state = self.state.lock().test_ok();
                 if state.staged {
                     state.staged = false;
                     state.aborts += 1;
@@ -1373,14 +1406,16 @@ mod tests {
                 &[],
             )
             .is_err());
-        let first = first.lock().unwrap();
+        let first = first.lock().test_ok();
         assert!(!first.staged);
         assert_eq!(first.commits, 0);
         assert_eq!(first.aborts, 1);
-        let second = second.lock().unwrap();
+        drop(first);
+        let second = second.lock().test_ok();
         assert!(!second.staged);
         assert_eq!(second.commits, 0);
         assert_eq!(second.aborts, 1);
+        drop(second);
     }
 
     #[test]
@@ -1404,11 +1439,12 @@ mod tests {
         }));
 
         assert!(registry.step_all_anchored(timeline, Seq::ZERO).is_err());
-        let first = first.lock().unwrap();
+        let first = first.lock().test_ok();
         assert_eq!(first.steps, 1);
         assert_eq!(first.aborts, 1);
         assert!(!first.staged);
-        assert_eq!(failed.lock().unwrap().steps, 0);
+        drop(first);
+        assert_eq!(failed.lock().test_ok().steps, 0);
     }
 
     #[test]
@@ -1426,32 +1462,32 @@ mod tests {
 
         registry
             .tick_cadenced_anchored(timeline, 0, Seq::ZERO)
-            .unwrap();
+            .test_ok();
         registry.abort_step();
         registry
             .tick_cadenced_anchored(timeline, 0, Seq::ZERO)
-            .unwrap();
+            .test_ok();
         registry.commit_step();
-        assert_eq!(state.lock().unwrap().steps, 2);
+        assert_eq!(state.lock().test_ok().steps, 2);
 
         assert!(matches!(
             registry.tick_cadenced(timeline, 50),
             Err(RuntimeError::MissingSnapshotAnchor { .. })
         ));
-        assert_eq!(state.lock().unwrap().steps, 2);
+        assert_eq!(state.lock().test_ok().steps, 2);
 
         assert!(registry
             .tick_cadenced_anchored(timeline, 50, Seq::ZERO)
-            .unwrap()
+            .test_ok()
             .is_empty());
         registry.commit_step();
-        assert_eq!(state.lock().unwrap().steps, 2);
+        assert_eq!(state.lock().test_ok().steps, 2);
 
         registry
             .tick_cadenced_anchored(timeline, 100, Seq::ZERO)
-            .unwrap();
+            .test_ok();
         registry.commit_step();
-        assert_eq!(state.lock().unwrap().steps, 3);
+        assert_eq!(state.lock().test_ok().steps, 3);
     }
 
     #[test]
@@ -1459,7 +1495,7 @@ mod tests {
     fn register_plugin_wires_schemas() {
         let mut reg = PluginRegistry::new();
         let p = simple_plugin("world", &["world.observation", "world.action"]);
-        reg.register(&p, None, None).unwrap();
+        reg.register(&p, None, None).test_ok();
         assert!(reg.schemas.contains("world.observation"));
         assert!(reg.schemas.contains("world.action"));
         assert!(!reg.schemas.contains("agent.decision"));
@@ -1471,13 +1507,11 @@ mod tests {
         let plugin = simple_plugin("malicious-geo", &[pos_core::GEOGRAPHIC_EVENT_TYPE]);
         let error = PluginRegistry::new()
             .register(&plugin, None, None)
-            .unwrap_err();
+            .test_err();
         assert!(error.to_string().contains(pos_core::GEOGRAPHIC_EVENT_TYPE));
 
         let cell = simple_plugin("future-geo", &[pos_core::GEOGRAPHIC_CELL_EVENT_TYPE]);
-        let error = PluginRegistry::new()
-            .register(&cell, None, None)
-            .unwrap_err();
+        let error = PluginRegistry::new().register(&cell, None, None).test_err();
         assert!(error
             .to_string()
             .contains(pos_core::GEOGRAPHIC_CELL_EVENT_TYPE));
@@ -1489,7 +1523,7 @@ mod tests {
         let mut reg = PluginRegistry::new();
         let p = plugin_with_caps("counter", &["counter.tick"], false, true);
         reg.register(&p, Some(Box::new(CountReducer)), None)
-            .unwrap();
+            .test_ok();
         // Apply an event and verify the reducer ran
         let event = Event {
             id: EventId::new(),
@@ -1505,7 +1539,7 @@ mod tests {
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
         reg.projections.apply_event(&event);
-        let state = reg.projections.state_for(&event.entity).unwrap();
+        let state = reg.projections.state_for(&event.entity).test_ok();
         assert_eq!(state.get("n").and_then(serde_json::Value::as_u64), Some(1));
         let mut protected = event;
         protected.event_type = Kind::new(pos_core::GEOGRAPHIC_EVENT_TYPE);
@@ -1534,8 +1568,8 @@ mod tests {
             name: "dup",
             cap: Capability::default(),
         };
-        reg.register(&p1, None, None).unwrap();
-        let err = reg.register(&p2, None, None).unwrap_err();
+        reg.register(&p1, None, None).test_ok();
+        let err = reg.register(&p2, None, None).test_err();
         assert!(matches!(err, RuntimeError::DuplicatePlugin { .. }));
     }
 
@@ -1545,7 +1579,7 @@ mod tests {
         let mut reg = PluginRegistry::new();
         assert!(reg.is_empty());
         let p = simple_plugin("p", &[]);
-        reg.register(&p, None, None).unwrap();
+        reg.register(&p, None, None).test_ok();
         assert_eq!(reg.len(), 1);
         assert_eq!(reg.driver_count(), 0);
         assert!(reg.contains(&p.id));
@@ -1555,12 +1589,12 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn tick_cadenced_skips_driverless_plugins() {
-        let mut store = pos_store::open_store(pos_store::StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("t").unwrap();
+        let mut store = pos_store::open_store(pos_store::StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("t").test_ok();
         let mut reg = PluginRegistry::new();
         let p = simple_plugin("p", &[]);
-        reg.register(&p, None, None).unwrap();
-        let drafts = reg.tick_cadenced(tl.id(), 0).unwrap();
+        reg.register(&p, None, None).test_ok();
+        let drafts = reg.tick_cadenced(tl.id(), 0).test_ok();
         assert!(drafts.is_empty());
     }
 
@@ -1570,8 +1604,8 @@ mod tests {
         let mut reg = PluginRegistry::new();
         let p1 = simple_plugin("alpha", &[]);
         let p2 = simple_plugin("beta", &[]);
-        reg.register(&p1, None, None).unwrap();
-        reg.register(&p2, None, None).unwrap();
+        reg.register(&p1, None, None).test_ok();
+        reg.register(&p2, None, None).test_ok();
         let names: Vec<&str> = reg.plugin_names().collect();
         assert!(names.contains(&"alpha"));
         assert!(names.contains(&"beta"));
@@ -1609,8 +1643,8 @@ mod tests {
             }
         }
 
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("t").test_ok();
 
         let entity = EntityId::new();
         let p = plugin_with_caps("driven", &["driver.tick"], true, false);
@@ -1618,10 +1652,10 @@ mod tests {
         assert_eq!(driver.name(), "simple"); // force coverage of name()
 
         let mut reg = PluginRegistry::new();
-        reg.register(&p, None, Some(Box::new(driver))).unwrap();
+        reg.register(&p, None, Some(Box::new(driver))).test_ok();
         assert_eq!(reg.driver_count(), 1);
 
-        let drafts = reg.step_all(tl.id()).unwrap();
+        let drafts = reg.step_all(tl.id()).test_ok();
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].event_type.as_str(), "driver.tick");
     }
@@ -1630,12 +1664,12 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn step_all_no_drivers_returns_empty() {
         use pos_store::{open_store, StoreConfig};
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("t").test_ok();
         let p = simple_plugin("nodrive", &[]);
         let mut reg = PluginRegistry::new();
-        reg.register(&p, None, None).unwrap();
-        let drafts = reg.step_all(tl.id()).unwrap();
+        reg.register(&p, None, None).test_ok();
+        let drafts = reg.step_all(tl.id()).test_ok();
         assert!(drafts.is_empty());
     }
 
@@ -1660,15 +1694,15 @@ mod tests {
             }
         }
 
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let timeline = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let timeline = store.create_timeline("t").test_ok();
         let mut reg = PluginRegistry::new();
         reg.register_driver(Box::new(FailingDriver));
 
-        let error = reg.step_all(timeline.id()).unwrap_err();
+        let error = reg.step_all(timeline.id()).test_err();
         assert!(error.to_string().contains("failing"));
 
-        let error = reg.tick_cadenced(timeline.id(), 0).unwrap_err();
+        let error = reg.tick_cadenced(timeline.id(), 0).test_err();
         assert!(error.to_string().contains("failing"));
     }
 
@@ -1694,8 +1728,8 @@ mod tests {
             }
         }
 
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let timeline = store.create_timeline("driver-geo").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let timeline = store.create_timeline("driver-geo").test_ok();
         let mut registry = PluginRegistry::new();
         registry.register_driver(Box::new(GeographicDriver));
         assert!(matches!(
@@ -1751,8 +1785,8 @@ mod tests {
             }
         }
 
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let timeline = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let timeline = store.create_timeline("t").test_ok();
         let observed_entity = EntityId::new();
         let event = Event {
             id: EventId::new(),
@@ -1776,11 +1810,11 @@ mod tests {
             entity: EntityId::new(),
         }));
 
-        let drafts = reg.tick_cadenced(timeline.id(), 0).unwrap();
+        let drafts = reg.tick_cadenced(timeline.id(), 0).test_ok();
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].event_type.as_str(), "driver.observed");
 
-        let drafts = reg.step_all(timeline.id()).unwrap();
+        let drafts = reg.step_all(timeline.id()).test_ok();
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].event_type.as_str(), "driver.observed");
     }
@@ -1813,17 +1847,18 @@ mod tests {
             }
         }
 
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let timeline = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let timeline = store.create_timeline("t").test_ok();
         let key = ProjectionKey::new(EntityId::new());
         let driver = DuplicateKeyDriver {
             keys: vec![key.clone(), key],
         };
         let plugin = plugin_with_caps("dup-key-plugin", &[], true, false);
         let mut reg = PluginRegistry::new();
-        reg.register(&plugin, None, Some(Box::new(driver))).unwrap();
+        reg.register(&plugin, None, Some(Box::new(driver)))
+            .test_ok();
 
-        let drafts = reg.tick_cadenced(timeline.id(), 0).unwrap();
+        let drafts = reg.tick_cadenced(timeline.id(), 0).test_ok();
         assert!(drafts.is_empty());
     }
 
@@ -1918,8 +1953,8 @@ mod tests {
         }));
 
         let timeline = TimelineId::new();
-        registry.tick_cadenced(timeline, u128::MAX - 1).unwrap();
-        let error = registry.tick_cadenced(timeline, u128::MAX).unwrap_err();
+        registry.tick_cadenced(timeline, u128::MAX - 1).test_ok();
+        let error = registry.tick_cadenced(timeline, u128::MAX).test_err();
 
         assert!(matches!(
             error,
@@ -1975,8 +2010,8 @@ mod tests {
         }
 
         let timeline = TimelineId::new();
-        assert_eq!(registry.tick_cadenced(timeline, 0).unwrap().len(), 3);
-        let drafts = registry.tick_cadenced(timeline, 1).unwrap();
+        assert_eq!(registry.tick_cadenced(timeline, 0).test_ok().len(), 3);
+        let drafts = registry.tick_cadenced(timeline, 1).test_ok();
         assert_eq!(
             drafts
                 .iter()
@@ -2011,23 +2046,23 @@ mod tests {
             }
         }
 
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let timeline = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let timeline = store.create_timeline("t").test_ok();
         let plugin = plugin_with_caps("interval-plugin", &[], true, false);
         let mut reg = PluginRegistry::new();
         reg.register(&plugin, None, Some(Box::new(IntervalDriver)))
-            .unwrap();
+            .test_ok();
 
-        let first = reg.tick_cadenced(timeline.id(), 0).unwrap();
+        let first = reg.tick_cadenced(timeline.id(), 0).test_ok();
         assert_eq!(first.len(), 1);
 
-        let too_early = reg.tick_cadenced(timeline.id(), 50_000_000).unwrap();
+        let too_early = reg.tick_cadenced(timeline.id(), 50_000_000).test_ok();
         assert!(
             too_early.is_empty(),
             "interval gate should suppress a second tick"
         );
 
-        let ready = reg.tick_cadenced(timeline.id(), 100_000_000).unwrap();
+        let ready = reg.tick_cadenced(timeline.id(), 100_000_000).test_ok();
         assert_eq!(
             ready.len(),
             1,
@@ -2061,13 +2096,13 @@ mod tests {
                 _: TimelineId,
                 observations: ObservationView<'_>,
             ) -> Result<StepOutput, RuntimeError> {
-                self.observed.lock().unwrap().push(observations.len());
+                self.observed.lock().test_ok().push(observations.len());
                 Ok(StepOutput::empty())
             }
         }
 
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let timeline = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let timeline = store.create_timeline("t").test_ok();
         let shared_key = ProjectionKey::new(EntityId::new());
         let observed = Arc::new(Mutex::new(Vec::new()));
         let mut reg = PluginRegistry::new();
@@ -2081,10 +2116,10 @@ mod tests {
             observed: observed.clone(),
         }));
 
-        let drafts = reg.step_all(timeline.id()).unwrap();
+        let drafts = reg.step_all(timeline.id()).test_ok();
         assert_eq!(drafts.len(), 0);
 
-        assert_eq!(observed.lock().unwrap().as_slice(), [1, 1]);
+        assert_eq!(observed.lock().test_ok().as_slice(), [1, 1]);
     }
 
     #[test]
@@ -2099,7 +2134,7 @@ mod tests {
     fn schema_validation_after_registration() {
         let mut reg = PluginRegistry::new();
         let p = simple_plugin("agent", &["agent.decision"]);
-        reg.register(&p, None, None).unwrap();
+        reg.register(&p, None, None).test_ok();
         let valid = EventDraft::new(
             EntityId::new(),
             Kind::new("agent.decision"),
@@ -2110,7 +2145,7 @@ mod tests {
             Kind::new("unknown.type"),
             CanonicalBytes::from_vec(vec![]),
         );
-        reg.schemas.validate(&valid).unwrap();
+        reg.schemas.validate(&valid).test_ok();
         assert!(reg.schemas.validate(&invalid).is_err());
     }
 
@@ -2119,24 +2154,28 @@ mod tests {
     fn register_rejects_capability_mismatch() {
         let mut reg = PluginRegistry::new();
         let p = plugin_with_caps("mismatch", &["x.y"], true, false);
-        let err = reg.register(&p, None, None).unwrap_err();
+        let err = reg.register(&p, None, None).test_err();
         assert!(matches!(err, RuntimeError::CapabilityMismatch { .. }));
 
         let p2 = plugin_with_caps("mismatch2", &["x.y"], false, false);
         let err = reg
             .register(&p2, Some(Box::new(CountReducer)), None)
-            .unwrap_err();
+            .test_err();
         assert!(matches!(err, RuntimeError::CapabilityMismatch { .. }));
 
         let p3 = plugin_with_caps("mismatch3", &["x.y"], false, true);
-        let err = reg.register(&p3, None, None).unwrap_err();
+        let err = reg.register(&p3, None, None).test_err();
         assert!(matches!(err, RuntimeError::CapabilityMismatch { .. }));
 
         let p4 = plugin_with_caps("mismatch4", &["x.y"], false, false);
         let mut noop = NoopDriver;
         assert_eq!(crate::driver::Driver::name(&noop), "noop");
-        let _ = crate::driver::Driver::step(&mut noop, TimelineId::new(), ObservationView::empty());
-        let err = reg.register(&p4, None, Some(Box::new(noop))).unwrap_err();
+        drop(crate::driver::Driver::step(
+            &mut noop,
+            TimelineId::new(),
+            ObservationView::empty(),
+        ));
+        let err = reg.register(&p4, None, Some(Box::new(noop))).test_err();
         assert!(matches!(err, RuntimeError::CapabilityMismatch { .. }));
     }
 
@@ -2164,8 +2203,8 @@ mod tests {
             },
         };
         let mut registry = PluginRegistry::new();
-        registry.register(&first, None, None).unwrap();
-        registry.register(&second, None, None).unwrap();
+        registry.register(&first, None, None).test_ok();
+        registry.register(&second, None, None).test_ok();
         let composition = registry.composition();
         assert_eq!(
             composition
@@ -2194,10 +2233,10 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn cover_validate_recovery_evidence_empty_segments_and_zero_bound_paths() {
         // Empty ancestry → InvalidRecoveryEvidence (first else branch)
-        let _ = validate_recovery_evidence(&[], &[]);
+        drop(validate_recovery_evidence(&[], &[]));
         // Empty events with through=ZERO → early Ok() return
         let zero_segment = TimelineHistorySegment::new(TimelineId::new(), Seq::ZERO);
-        let _ = validate_recovery_evidence(&[zero_segment], &[]);
+        drop(validate_recovery_evidence(&[zero_segment], &[]));
     }
 
     struct MockActionApprover;
@@ -2229,7 +2268,7 @@ mod tests {
             Some(Box::new(MockActionApprover)),
             [Kind::new("action.type")],
         )
-        .unwrap();
+        .test_ok();
 
         assert!(reg.approver_for(&Kind::new("action.type")).is_some());
         assert!(reg.approver_for(&Kind::new("other.type")).is_none());
@@ -2244,13 +2283,13 @@ mod tests {
                 Some(Box::new(MockActionApprover)),
                 [Kind::new("action.type")],
             )
-            .unwrap_err();
+            .test_err();
         assert!(matches!(duplicate, RuntimeError::CapabilityMismatch { .. }));
 
         let no_approver = plugin_with_caps("missing_approver", &["missing.type"], false, false);
         let missing = reg
             .register_with_approver(&no_approver, None, None, None, [Kind::new("missing.type")])
-            .unwrap_err();
+            .test_err();
         assert!(matches!(missing, RuntimeError::CapabilityMismatch { .. }));
 
         let foreign_type = plugin_with_caps("foreign_type", &["owned.type"], false, false);
@@ -2262,7 +2301,7 @@ mod tests {
                 Some(Box::new(MockActionApprover)),
                 [Kind::new("not-owned.type")],
             )
-            .unwrap_err();
+            .test_err();
         assert!(matches!(foreign, RuntimeError::CapabilityMismatch { .. }));
 
         let actor = EntityId::new();
@@ -2272,7 +2311,7 @@ mod tests {
             CanonicalBytes::from_vec(b"ok_payload".to_vec()),
             Kind::new("action.type.submit"),
         );
-        let draft = reg.submit_action(&valid).expect("should succeed");
+        let draft = reg.submit_action(&valid).test_ok();
         assert_eq!(draft.entity, actor);
         assert_eq!(draft.event_type.as_str(), "action.type");
 

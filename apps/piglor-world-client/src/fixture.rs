@@ -26,7 +26,7 @@ pub enum ClientError {
 ///
 /// # Panics
 ///
-/// Panics only if the in-memory CBOR writer fails.
+/// Panics only if the statically defined fixture cannot be encoded into CBOR.
 #[must_use]
 pub fn fixture_bytes() -> Vec<u8> {
     let events = [
@@ -47,7 +47,7 @@ pub fn fixture_bytes() -> Vec<u8> {
         parent_fork_hash: None,
     };
     let mut bytes = Vec::new();
-    ciborium::into_writer(&export, &mut bytes).expect("CBOR write to Vec is infallible");
+    assert!(ciborium::into_writer(&export, &mut bytes).is_ok());
     bytes
 }
 
@@ -89,7 +89,7 @@ fn signal_payload(value: f64) -> Vec<u8> {
         object: None,
     };
     let mut payload = Vec::new();
-    ciborium::into_writer(&signal, &mut payload).expect("CBOR write to Vec is infallible");
+    assert!(ciborium::into_writer(&signal, &mut payload).is_ok());
     payload
 }
 
@@ -163,7 +163,18 @@ mod tests {
     };
     use pos_plugin_society::{decode_signal, SocietyDimension, EVENT_TYPE_SIGNAL};
     use serde::Serialize;
+    use std::fmt::Debug;
     use ulid::Ulid;
+
+    trait TestResultExt<T, E> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error>>;
+    }
+
+    impl<T, E: Debug> TestResultExt<T, E> for Result<T, E> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error>> {
+            self.map_err(|error| format!("unexpected error: {error:?}").into())
+        }
+    }
 
     #[derive(Serialize)]
     struct RawSignal<'a> {
@@ -173,14 +184,14 @@ mod tests {
         object: Option<&'a str>,
     }
 
-    fn encode(export: &TimelineExport) -> Vec<u8> {
+    fn encode(export: &TimelineExport) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let mut bytes = Vec::new();
-        ciborium::into_writer(export, &mut bytes).unwrap();
-        bytes
+        ciborium::into_writer(export, &mut bytes)?;
+        Ok(bytes)
     }
 
-    fn decoded_fixture() -> TimelineExport {
-        decode_fixture(&fixture_bytes()).unwrap()
+    fn decoded_fixture() -> Result<TimelineExport, Box<dyn std::error::Error>> {
+        Ok(decode_fixture(&fixture_bytes())?)
     }
 
     #[test]
@@ -189,8 +200,8 @@ mod tests {
     }
 
     #[test]
-    fn fixture_preserves_complete_event_fields() {
-        let export = decoded_fixture();
+    fn fixture_preserves_complete_event_fields() -> Result<(), Box<dyn std::error::Error>> {
+        let export = decoded_fixture()?;
         assert_eq!(export.events.len(), 2);
         assert_eq!(
             export.events[0].entity,
@@ -213,18 +224,20 @@ mod tests {
                 event.payload_hash,
                 Hash::from_bytes(*blake3::hash(event.payload.as_slice()).as_bytes())
             );
-            let signal = decode_signal(event.payload.as_slice()).unwrap();
+            let signal = decode_signal(event.payload.as_slice()).test_ok()?;
             assert_eq!(signal.dimension, SocietyDimension::Trust);
             assert!((signal.value - [0.5, 1.0][index]).abs() <= f64::EPSILON);
             assert_eq!(signal.subject, None);
             assert_eq!(signal.object, None);
         }
+
+        Ok(())
     }
 
     #[test]
-    fn fixture_round_trips_with_identity() {
-        let export = decoded_fixture();
-        let round_trip = decode_fixture(&encode(&export)).unwrap();
+    fn fixture_round_trips_with_identity() -> Result<(), Box<dyn std::error::Error>> {
+        let export = decoded_fixture()?;
+        let round_trip = decode_fixture(&encode(&export)?).test_ok()?;
         assert_eq!(round_trip.timeline, export.timeline);
         assert_eq!(round_trip.events, export.events);
         assert_eq!(round_trip.parent_fork_hash, export.parent_fork_hash);
@@ -233,6 +246,8 @@ mod tests {
             TimelineId::from_ulid(Ulid::from(1u128))
         );
         assert_eq!(export.timeline.head, Seq::from_u64(2));
+
+        Ok(())
     }
 
     #[test]
@@ -241,149 +256,189 @@ mod tests {
     }
 
     #[test]
-    fn wrong_timeline_identity_is_rejected() {
-        let mut export = decoded_fixture();
+    fn wrong_timeline_identity_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut export = decoded_fixture()?;
         export.timeline.meta.id = TimelineId::from_ulid(Ulid::from(99u128));
-        assert!(decode_fixture(&encode(&export)).is_err());
+        assert!(decode_fixture(&encode(&export)?).is_err());
+
+        Ok(())
     }
 
     #[test]
-    fn wrong_root_mode_is_rejected() {
-        let mut export = decoded_fixture();
+    fn wrong_root_mode_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut export = decoded_fixture()?;
         export.timeline.meta.mode = TimelineMode::Historical;
-        assert!(decode_fixture(&encode(&export)).is_err());
+        assert!(decode_fixture(&encode(&export)?).is_err());
+
+        Ok(())
     }
 
     #[test]
-    fn wrong_timeline_head_is_rejected() {
-        let mut export = decoded_fixture();
+    fn wrong_timeline_head_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut export = decoded_fixture()?;
         export.timeline.head = Seq::from_u64(1);
-        assert!(decode_fixture(&encode(&export)).is_err());
+        assert!(decode_fixture(&encode(&export)?).is_err());
+
+        Ok(())
     }
 
     #[test]
-    fn wrong_event_count_is_rejected() {
-        let mut export = decoded_fixture();
+    fn wrong_event_count_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut export = decoded_fixture()?;
         export.events.pop();
-        assert!(decode_fixture(&encode(&export)).is_err());
+        assert!(decode_fixture(&encode(&export)?).is_err());
+
+        Ok(())
     }
 
     #[test]
-    fn fork_metadata_on_root_is_rejected() {
-        let mut export = decoded_fixture();
+    fn fork_metadata_on_root_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut export = decoded_fixture()?;
         export.timeline.meta.fork_point = Some((export.timeline.meta.id, Seq::from_u64(1)));
-        assert!(decode_fixture(&encode(&export)).is_err());
+        assert!(decode_fixture(&encode(&export)?).is_err());
+
+        Ok(())
     }
 
     #[test]
-    fn parent_fork_hash_on_root_is_rejected() {
-        let mut export = decoded_fixture();
+    fn parent_fork_hash_on_root_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut export = decoded_fixture()?;
         export.parent_fork_hash = Some(Hash::from_bytes([1u8; 32]));
-        assert!(decode_fixture(&encode(&export)).is_err());
+        assert!(decode_fixture(&encode(&export)?).is_err());
+
+        Ok(())
     }
 
     #[test]
-    fn wrong_event_id_is_rejected() {
-        let mut export = decoded_fixture();
+    fn wrong_event_id_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut export = decoded_fixture()?;
         export.events[0].id = EventId::from_ulid(Ulid::from(99u128));
-        assert!(decode_fixture(&encode(&export)).is_err());
+        assert!(decode_fixture(&encode(&export)?).is_err());
+
+        Ok(())
     }
 
     #[test]
-    fn wrong_event_entity_is_rejected() {
-        let mut export = decoded_fixture();
+    fn wrong_event_entity_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut export = decoded_fixture()?;
         export.events[0].entity = EntityId::from_ulid(Ulid::from(99u128));
-        assert!(decode_fixture(&encode(&export)).is_err());
+        assert!(decode_fixture(&encode(&export)?).is_err());
+
+        Ok(())
     }
 
     #[test]
-    fn wrong_event_wall_time_is_rejected() {
-        let mut export = decoded_fixture();
+    fn wrong_event_wall_time_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut export = decoded_fixture()?;
         export.events[0].wall_time = WallTime::from_micros(99);
-        assert!(decode_fixture(&encode(&export)).is_err());
+        assert!(decode_fixture(&encode(&export)?).is_err());
+
+        Ok(())
     }
 
     #[test]
-    fn non_none_causation_id_is_rejected() {
-        let mut export = decoded_fixture();
+    fn non_none_causation_id_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut export = decoded_fixture()?;
         export.events[0].causation_id = Some(EventId::from_ulid(Ulid::from(4u128)));
-        assert!(decode_fixture(&encode(&export)).is_err());
+        assert!(decode_fixture(&encode(&export)?).is_err());
+
+        Ok(())
     }
 
     #[test]
-    fn non_none_correlation_id_is_rejected() {
-        let mut export = decoded_fixture();
+    fn non_none_correlation_id_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut export = decoded_fixture()?;
         export.events[0].correlation_id = Some(CorrelationId::from_ulid(Ulid::from(4u128)));
-        assert!(decode_fixture(&encode(&export)).is_err());
+        assert!(decode_fixture(&encode(&export)?).is_err());
+
+        Ok(())
     }
 
     #[test]
-    fn non_none_signature_is_rejected() {
-        let mut export = decoded_fixture();
+    fn non_none_signature_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut export = decoded_fixture()?;
         export.events[0].signature = Some(Signature::from_bytes([7u8; 64]));
-        assert!(decode_fixture(&encode(&export)).is_err());
+        assert!(decode_fixture(&encode(&export)?).is_err());
+
+        Ok(())
     }
 
     #[test]
-    fn non_v1_schema_version_is_rejected() {
+    fn non_v1_schema_version_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
         let mut bytes = Vec::new();
-        ciborium::into_writer(&2u8, &mut bytes).unwrap();
+        ciborium::into_writer(&2u8, &mut bytes).test_ok()?;
         assert!(ciborium::from_reader::<SchemaVersion, _>(bytes.as_slice()).is_err());
+
+        Ok(())
     }
 
     #[test]
-    fn wrong_payload_hash_is_rejected() {
-        let mut export = decoded_fixture();
+    fn wrong_payload_hash_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut export = decoded_fixture()?;
         export.events[0].payload_hash = Hash::from_bytes([99u8; 32]);
-        assert!(decode_fixture(&encode(&export)).is_err());
+        assert!(decode_fixture(&encode(&export)?).is_err());
+
+        Ok(())
     }
 
     #[test]
-    fn malformed_signal_payload_is_rejected() {
-        let mut export = decoded_fixture();
+    fn malformed_signal_payload_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut export = decoded_fixture()?;
         export.events[0].payload = CanonicalBytes::from_vec(vec![0xff, 0x00]);
         export.events[0].payload_hash = payload_hash(export.events[0].payload.as_slice());
-        assert!(decode_fixture(&encode(&export)).is_err());
+        assert!(decode_fixture(&encode(&export)?).is_err());
+
+        Ok(())
     }
 
     #[test]
-    fn invalid_signal_dimension_is_rejected() {
-        let mut export = decoded_fixture();
-        export.events[0].payload = signal_payload_for_test("opinion", 0.5, None, None);
+    fn invalid_signal_dimension_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut export = decoded_fixture()?;
+        export.events[0].payload = signal_payload_for_test("opinion", 0.5, None, None)?;
         export.events[0].payload_hash = payload_hash(export.events[0].payload.as_slice());
-        assert!(decode_fixture(&encode(&export)).is_err());
+        assert!(decode_fixture(&encode(&export)?).is_err());
+
+        Ok(())
     }
 
     #[test]
-    fn invalid_signal_value_is_rejected() {
-        let mut export = decoded_fixture();
-        export.events[0].payload = signal_payload_for_test("trust", 2.0, None, None);
+    fn invalid_signal_value_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut export = decoded_fixture()?;
+        export.events[0].payload = signal_payload_for_test("trust", 2.0, None, None)?;
         export.events[0].payload_hash = payload_hash(export.events[0].payload.as_slice());
-        assert!(decode_fixture(&encode(&export)).is_err());
+        assert!(decode_fixture(&encode(&export)?).is_err());
+
+        Ok(())
     }
 
     #[test]
-    fn non_finite_signal_value_is_rejected() {
-        let mut export = decoded_fixture();
-        export.events[0].payload = signal_payload_for_test("trust", f64::NAN, None, None);
+    fn non_finite_signal_value_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut export = decoded_fixture()?;
+        export.events[0].payload = signal_payload_for_test("trust", f64::NAN, None, None)?;
         export.events[0].payload_hash = payload_hash(export.events[0].payload.as_slice());
-        assert!(decode_fixture(&encode(&export)).is_err());
+        assert!(decode_fixture(&encode(&export)?).is_err());
+
+        Ok(())
     }
 
     #[test]
-    fn invalid_signal_subject_is_rejected() {
-        let mut export = decoded_fixture();
-        export.events[0].payload = signal_payload_for_test("trust", 0.5, Some("subject"), None);
+    fn invalid_signal_subject_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut export = decoded_fixture()?;
+        export.events[0].payload = signal_payload_for_test("trust", 0.5, Some("subject"), None)?;
         export.events[0].payload_hash = payload_hash(export.events[0].payload.as_slice());
-        assert!(decode_fixture(&encode(&export)).is_err());
+        assert!(decode_fixture(&encode(&export)?).is_err());
+
+        Ok(())
     }
 
     #[test]
-    fn invalid_signal_object_is_rejected() {
-        let mut export = decoded_fixture();
-        export.events[0].payload = signal_payload_for_test("trust", 0.5, None, Some("object"));
+    fn invalid_signal_object_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut export = decoded_fixture()?;
+        export.events[0].payload = signal_payload_for_test("trust", 0.5, None, Some("object"))?;
         export.events[0].payload_hash = payload_hash(export.events[0].payload.as_slice());
-        assert!(decode_fixture(&encode(&export)).is_err());
+        assert!(decode_fixture(&encode(&export)?).is_err());
+
+        Ok(())
     }
 
     fn signal_payload_for_test(
@@ -391,7 +446,7 @@ mod tests {
         value: f64,
         subject: Option<&str>,
         object: Option<&str>,
-    ) -> CanonicalBytes {
+    ) -> Result<CanonicalBytes, Box<dyn std::error::Error>> {
         let signal = RawSignal {
             dimension,
             value,
@@ -399,21 +454,25 @@ mod tests {
             object,
         };
         let mut payload = Vec::new();
-        ciborium::into_writer(&signal, &mut payload).unwrap();
-        CanonicalBytes::from_vec(payload)
+        ciborium::into_writer(&signal, &mut payload)?;
+        Ok(CanonicalBytes::from_vec(payload))
     }
 
     #[test]
-    fn wrong_event_type_is_rejected() {
-        let mut export = decoded_fixture();
+    fn wrong_event_type_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut export = decoded_fixture()?;
         export.events[0].event_type = Kind::new("world.action");
-        assert!(decode_fixture(&encode(&export)).is_err());
+        assert!(decode_fixture(&encode(&export)?).is_err());
+
+        Ok(())
     }
 
     #[test]
-    fn non_contiguous_sequences_are_rejected() {
-        let mut export = decoded_fixture();
+    fn non_contiguous_sequences_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut export = decoded_fixture()?;
         export.events[1].seq = Seq::from_u64(3);
-        assert!(decode_fixture(&encode(&export)).is_err());
+        assert!(decode_fixture(&encode(&export)?).is_err());
+
+        Ok(())
     }
 }

@@ -299,16 +299,53 @@ pub fn import_timeline_with_verified_signatures(
 mod tests {
     use super::*;
 
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected store facade fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("missing store facade fixture value"))
+            })
+        }
+    }
+
+    trait TestErrorExt<T, E> {
+        fn test_err(self) -> E;
+    }
+
+    impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
+        fn test_err(self) -> E {
+            match self {
+                Ok(value) => std::panic::resume_unwind(Box::new(format!(
+                    "unexpected successful store facade fixture value: {value:?}"
+                ))),
+                Err(error) => error,
+            }
+        }
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_head_helpers_cover_accept_reject_and_overflow() {
-        assert_eq!(bounded_owned_head(2, 1, 3).unwrap(), Some(3));
-        assert_eq!(bounded_owned_head(2, 2, 3).unwrap(), None);
+        assert_eq!(bounded_owned_head(2, 1, 3).test_ok(), Some(3));
+        assert_eq!(bounded_owned_head(2, 2, 3).test_ok(), None);
         assert!(matches!(
             bounded_owned_head(u64::MAX, 1, u64::MAX),
             Err(CoreError::Storage(_))
         ));
-        assert_eq!(checked_logical_head(2, 3).unwrap(), 5);
+        assert_eq!(checked_logical_head(2, 3).test_ok(), 5);
         assert!(matches!(
             checked_logical_head(u64::MAX, 1),
             Err(CoreError::Storage(_))
@@ -318,24 +355,20 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[test]
     fn owntracks_factory_exposes_only_the_narrow_enrollment_capability() {
-        let directory = tempfile::tempdir().expect("create temporary store directory");
+        let directory = tempfile::tempdir().test_ok();
         let path = directory.path().join("owntracks.db");
-        let store = open_owntracks_enrollment_store(path.to_str().expect("UTF-8 path"))
-            .expect("open narrow OwnTracks enrollment store");
+        let store = open_owntracks_enrollment_store(path.to_str().test_ok()).test_ok();
         assert_eq!(
-            store
-                .owntracks_enrollment_status()
-                .expect("read bounded enrollment status")
-                .status(),
+            store.owntracks_enrollment_status().test_ok().status(),
             pos_core::OwnTracksEnrollmentStatusV1::Absent
         );
     }
 
     /// Helper: run a minimal contract against any backend via the port.
     fn contract(store: &mut dyn EventStore) {
-        let tl = store.create_timeline("contract-test").unwrap();
-        assert_eq!(store.list_timelines().unwrap().len(), 1);
-        let events = store.read(tl.id(), SeqRange::all()).unwrap();
+        let tl = store.create_timeline("contract-test").test_ok();
+        assert_eq!(store.list_timelines().test_ok().len(), 1);
+        let events = store.read(tl.id(), SeqRange::all()).test_ok();
         assert!(events.is_empty());
     }
 
@@ -360,12 +393,12 @@ mod tests {
                 WallTime::from_micros(40),
                 draft.clone(),
             )
-            .unwrap();
+            .test_ok();
         let _ = appended_event_id(first);
         assert_eq!(
             store
                 .remove_append_identities(AppendDedupScope::from_keyed_hash([4; 32]))
-                .unwrap(),
+                .test_ok(),
             1
         );
         let after_withdrawal = store
@@ -375,7 +408,7 @@ mod tests {
                 WallTime::from_micros(40),
                 draft.clone(),
             )
-            .unwrap();
+            .test_ok();
         let _ = appended_event_id(after_withdrawal);
     }
 
@@ -384,7 +417,7 @@ mod tests {
         match outcome {
             AppendOrDuplicateOutcome::Appended(event) => event.id,
             AppendOrDuplicateOutcome::Duplicate { .. } | AppendOrDuplicateOutcome::Conflict => {
-                panic!("identified append must append an Event")
+                std::panic::resume_unwind(Box::new("identified append must append an Event"))
             }
         }
     }
@@ -403,7 +436,7 @@ mod tests {
                 WallTime::from_micros(21),
                 draft.clone(),
             )
-            .unwrap();
+            .test_ok();
         assert_eq!(duplicate, AppendOrDuplicateOutcome::Duplicate { event_id });
         let mut retry_without_wall_time = draft.clone();
         retry_without_wall_time.wall_time = None;
@@ -415,7 +448,7 @@ mod tests {
                     WallTime::from_micros(21),
                     retry_without_wall_time,
                 )
-                .unwrap(),
+                .test_ok(),
             AppendOrDuplicateOutcome::Duplicate { event_id }
         );
         // Generated Event metadata is not part of canonical retry intent. A
@@ -431,7 +464,7 @@ mod tests {
                     WallTime::from_micros(21),
                     wall_time_variant,
                 )
-                .unwrap(),
+                .test_ok(),
             AppendOrDuplicateOutcome::Duplicate { event_id }
         );
     }
@@ -441,10 +474,10 @@ mod tests {
         timeline: TimelineId,
         draft: &EventDraft,
     ) {
-        store.delete_timeline(timeline).unwrap();
+        store.delete_timeline(timeline).test_ok();
         let replacement = store
             .create_timeline("append-or-duplicate-replacement")
-            .unwrap();
+            .test_ok();
         let first_retry = store
             .append_or_duplicate(
                 replacement.id(),
@@ -452,7 +485,7 @@ mod tests {
                 WallTime::from_micros(50),
                 draft.clone(),
             )
-            .unwrap();
+            .test_ok();
         let _ = appended_event_id(first_retry);
         let second_retry = store
             .append_or_duplicate(
@@ -461,13 +494,13 @@ mod tests {
                 WallTime::from_micros(50),
                 draft.clone(),
             )
-            .unwrap();
+            .test_ok();
         let _ = appended_event_id(second_retry);
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_or_duplicate_contract(store: &mut dyn EventStore) {
-        let timeline = store.create_timeline("append-or-duplicate").unwrap();
+        let timeline = store.create_timeline("append-or-duplicate").test_ok();
         let mut draft = EventDraft::new(
             EntityId::new(),
             Kind::new("test.append"),
@@ -483,9 +516,9 @@ mod tests {
                 WallTime::from_micros(20),
                 draft.clone(),
             )
-            .unwrap();
+            .test_ok();
         let event_id = appended_event_id(first);
-        let admitted_events = store.read(timeline.id(), SeqRange::all()).unwrap();
+        let admitted_events = store.read(timeline.id(), SeqRange::all()).test_ok();
         assert_eq!(admitted_events[0].causation_id, draft.causation_id);
         assert_eq!(admitted_events[0].correlation_id, draft.correlation_id);
         assert_wall_time_contract(store, timeline.id(), &draft, event_id);
@@ -501,16 +534,19 @@ mod tests {
                 WallTime::from_micros(21),
                 conflict_draft,
             )
-            .unwrap();
+            .test_ok();
         assert_eq!(conflict, AppendOrDuplicateOutcome::Conflict);
-        assert_eq!(store.read(timeline.id(), SeqRange::all()).unwrap().len(), 1);
+        assert_eq!(
+            store.read(timeline.id(), SeqRange::all()).test_ok().len(),
+            1
+        );
 
         assert_eq!(
             store
                 .purge_expired_append_identities(WallTime::from_micros(
                     20 + APPEND_IDENTITY_RETENTION_MICROS - 1,
                 ))
-                .unwrap(),
+                .test_ok(),
             0
         );
         assert_eq!(
@@ -518,7 +554,7 @@ mod tests {
                 .purge_expired_append_identities(WallTime::from_micros(
                     20 + APPEND_IDENTITY_RETENTION_MICROS,
                 ))
-                .unwrap(),
+                .test_ok(),
             1
         );
         match store
@@ -528,14 +564,17 @@ mod tests {
                 WallTime::from_micros(40),
                 draft.clone(),
             )
-            .unwrap()
+            .test_ok()
         {
             AppendOrDuplicateOutcome::Appended(_) => {}
             AppendOrDuplicateOutcome::Duplicate { .. } | AppendOrDuplicateOutcome::Conflict => {
-                panic!("expired identity must append a new Event")
+                std::panic::resume_unwind(Box::new("expired identity must append a new Event"))
             }
         }
-        assert_eq!(store.read(timeline.id(), SeqRange::all()).unwrap().len(), 2);
+        assert_eq!(
+            store.read(timeline.id(), SeqRange::all()).test_ok().len(),
+            2
+        );
 
         assert_timeline_scoped_and_delayed_expiry(store, timeline.id(), &draft);
 
@@ -549,7 +588,7 @@ mod tests {
         timeline: pos_core::TimelineId,
         draft: &EventDraft,
     ) {
-        let other_timeline = store.create_timeline("append-or-duplicate-other").unwrap();
+        let other_timeline = store.create_timeline("append-or-duplicate-other").test_ok();
         // A target Timeline is part of the admission boundary: reusing an
         // opaque key against another Timeline must not disclose the retained
         // Event or return its EventId.
@@ -561,7 +600,7 @@ mod tests {
                     WallTime::from_micros(21),
                     draft.clone(),
                 )
-                .unwrap(),
+                .test_ok(),
             AppendOrDuplicateOutcome::Conflict
         );
         assert!(matches!(
@@ -589,7 +628,7 @@ mod tests {
                 WallTime::from_micros(100),
                 delayed_draft.clone(),
             )
-            .unwrap();
+            .test_ok();
         let _ = appended_event_id(delayed_first);
         assert!(matches!(
             store.append_or_duplicate(
@@ -605,19 +644,19 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn factory_memory() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
         contract(&mut *store);
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_or_duplicate_contract_memory() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
         append_or_duplicate_contract(&mut *store);
     }
 
     fn bounded_identity_contract(store: &mut dyn EventStore) {
-        let timeline = store.create_timeline("bounded-identity").unwrap();
+        let timeline = store.create_timeline("bounded-identity").test_ok();
         let entity = EntityId::new();
         let draft = EventDraft::new(
             entity,
@@ -628,36 +667,36 @@ mod tests {
         let intent = AppendIntent::new(&draft);
         let first = store
             .append_intent_or_duplicate_bounded(timeline.id(), identity, intent.clone(), 1)
-            .unwrap()
-            .unwrap();
+            .test_ok()
+            .test_ok();
         let event_id = appended_event_id(first);
         assert_eq!(
             store
                 .append_intent_or_duplicate_bounded(timeline.id(), identity, intent.clone(), 1)
-                .unwrap(),
+                .test_ok(),
             Some(AppendOrDuplicateOutcome::Duplicate { event_id })
         );
         assert_eq!(
             store
                 .read_event_by_id(timeline.id(), event_id)
-                .unwrap()
-                .unwrap()
+                .test_ok()
+                .test_ok()
                 .id,
             event_id
         );
         assert!(store
             .read_event_by_id(timeline.id(), EventId::new())
-            .unwrap()
+            .test_ok()
             .is_none());
         assert!(store
             .append_intent_or_duplicate_bounded(timeline.id(), append_identity(23, 24), intent, 1,)
-            .unwrap()
+            .test_ok()
             .is_none());
     }
 
     #[test]
     fn bounded_identity_contract_memory() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
         bounded_identity_contract(&mut *store);
     }
 
@@ -665,7 +704,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn factory_sqlite_in_memory() {
-        let mut store = open_store(StoreConfig::SqliteInMemory).unwrap();
+        let mut store = open_store(StoreConfig::SqliteInMemory).test_ok();
         contract(&mut *store);
     }
 
@@ -673,13 +712,13 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_or_duplicate_contract_sqlite() {
-        let mut store = open_store(StoreConfig::SqliteInMemory).unwrap();
+        let mut store = open_store(StoreConfig::SqliteInMemory).test_ok();
         append_or_duplicate_contract(&mut *store);
     }
 
     #[test]
     fn bounded_identity_contract_sqlite() {
-        let mut store = open_store(StoreConfig::SqliteInMemory).unwrap();
+        let mut store = open_store(StoreConfig::SqliteInMemory).test_ok();
         bounded_identity_contract(&mut *store);
     }
 
@@ -687,9 +726,9 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn factory_sqlite_file() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_str().unwrap().to_owned();
-        let mut store = open_store(StoreConfig::Sqlite { path }).unwrap();
+        let tmp = tempfile::NamedTempFile::new().test_ok();
+        let path = tmp.path().to_str().test_ok().to_owned();
+        let mut store = open_store(StoreConfig::Sqlite { path }).test_ok();
         contract(&mut *store);
     }
 
@@ -697,9 +736,9 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn open_store_sqlite_rejects_directory_path() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().test_ok();
         let result = open_store(StoreConfig::Sqlite {
-            path: dir.path().to_str().unwrap().to_owned(),
+            path: dir.path().to_str().test_ok().to_owned(),
         });
         assert!(matches!(result, Err(CoreError::Storage(_))));
     }
@@ -707,8 +746,8 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn export_import_roundtrip_memory() {
-        let mut src = open_store(StoreConfig::Memory).unwrap();
-        let tl = src.create_timeline("source").unwrap();
+        let mut src = open_store(StoreConfig::Memory).test_ok();
+        let tl = src.create_timeline("source").test_ok();
         let entity = EntityId::new();
         let drafts = vec![
             EventDraft::new(
@@ -722,16 +761,16 @@ mod tests {
                 CanonicalBytes::from_vec(b"world".to_vec()),
             ),
         ];
-        src.append(tl.id(), &drafts).unwrap();
+        src.append(tl.id(), &drafts).test_ok();
 
         // Export from source
-        let export = pos_core::store::export_timeline(src.as_ref(), tl.id()).unwrap();
+        let export = pos_core::store::export_timeline(src.as_ref(), tl.id()).test_ok();
         assert_eq!(export.events.len(), 2);
 
         // Import into a fresh store — different backend, same data
-        let mut dst = open_store(StoreConfig::Memory).unwrap();
-        let imported = pos_core::store::import_timeline(dst.as_mut(), export).unwrap();
-        let events = dst.read(imported.id(), SeqRange::all()).unwrap();
+        let mut dst = open_store(StoreConfig::Memory).test_ok();
+        let imported = pos_core::store::import_timeline(dst.as_mut(), export).test_ok();
+        let events = dst.read(imported.id(), SeqRange::all()).test_ok();
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].payload.as_slice(), b"hello");
         assert_eq!(events[1].payload.as_slice(), b"world");
@@ -741,8 +780,8 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn export_memory_import_sqlite() {
-        let mut src = open_store(StoreConfig::Memory).unwrap();
-        let tl = src.create_timeline("mem-src").unwrap();
+        let mut src = open_store(StoreConfig::Memory).test_ok();
+        let tl = src.create_timeline("mem-src").test_ok();
         let entity = EntityId::new();
         src.append(
             tl.id(),
@@ -752,13 +791,13 @@ mod tests {
                 CanonicalBytes::from_vec(b"data".to_vec()),
             )],
         )
-        .unwrap();
+        .test_ok();
 
-        let export = pos_core::store::export_timeline(src.as_ref(), tl.id()).unwrap();
+        let export = pos_core::store::export_timeline(src.as_ref(), tl.id()).test_ok();
 
-        let mut dst = open_store(StoreConfig::SqliteInMemory).unwrap();
-        let imported = pos_core::store::import_timeline(dst.as_mut(), export).unwrap();
-        let events = dst.read(imported.id(), SeqRange::all()).unwrap();
+        let mut dst = open_store(StoreConfig::SqliteInMemory).test_ok();
+        let imported = pos_core::store::import_timeline(dst.as_mut(), export).test_ok();
+        let events = dst.read(imported.id(), SeqRange::all()).test_ok();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].payload.as_slice(), b"data");
     }
@@ -795,18 +834,18 @@ mod tests {
         };
         let export = TimelineExport {
             timeline: Timeline::new(TimelineMeta::root("signed")),
-            events: vec![event.clone()],
+            events: vec![event],
             parent_fork_hash: None,
         };
 
-        let mut ok_store = open_store(StoreConfig::Memory).unwrap();
-        import_timeline_with_verified_signatures(ok_store.as_mut(), export.clone(), &pk).unwrap();
+        let mut ok_store = open_store(StoreConfig::Memory).test_ok();
+        import_timeline_with_verified_signatures(ok_store.as_mut(), export.clone(), &pk).test_ok();
 
         let (_, reject_vk) = generate_keypair();
         let reject_key = public_key_from_verifying_key(&reject_vk);
-        let mut bad_store = open_store(StoreConfig::Memory).unwrap();
+        let mut bad_store = open_store(StoreConfig::Memory).test_ok();
         let err = import_timeline_with_verified_signatures(bad_store.as_mut(), export, &reject_key)
-            .unwrap_err();
+            .test_err();
         assert!(matches!(err, CoreError::SignatureVerificationFailed));
     }
 
@@ -824,12 +863,11 @@ mod tests {
             events: vec![],
             parent_fork_hash: None,
         };
-        let mut store = open_store(StoreConfig::Memory).unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
         let mut bytes = [0u8; 32];
         bytes[31] = 0xff;
         let bad = PublicKey::from_bytes(bytes);
-        let err =
-            import_timeline_with_verified_signatures(store.as_mut(), export, &bad).unwrap_err();
+        let err = import_timeline_with_verified_signatures(store.as_mut(), export, &bad).test_err();
         assert!(matches!(err, CoreError::SignatureVerificationFailed));
     }
 
@@ -865,9 +903,8 @@ mod tests {
             }],
             parent_fork_hash: None,
         };
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let err =
-            import_timeline_with_verified_signatures(store.as_mut(), export, &pk).unwrap_err();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let err = import_timeline_with_verified_signatures(store.as_mut(), export, &pk).test_err();
         assert!(matches!(err, CoreError::SignatureVerificationFailed));
     }
 
@@ -889,7 +926,7 @@ mod tests {
         let admission = WallTime::from_micros(APPEND_IDENTITY_RETENTION_MICROS + 42);
         let mut store =
             memory::MemoryStore::with_clock(Box::new(pos_core::FixedAdmissionClock(admission)));
-        let timeline = store.create_timeline("clock").unwrap();
+        let timeline = store.create_timeline("clock").test_ok();
         let draft = EventDraft::new(
             EntityId::new(),
             Kind::new("clock.test"),
@@ -903,17 +940,17 @@ mod tests {
                 WallTime::from_micros(0),
                 draft.clone(),
             )
-            .unwrap();
+            .test_ok();
         let event_id = appended_event_id(first);
         let replaced = store
             .append_intent_or_duplicate(timeline.id(), append_identity(9, 9), intent.clone())
-            .unwrap();
+            .test_ok();
         let _ = appended_event_id(replaced);
         let second = store
             .append_intent_or_duplicate(timeline.id(), append_identity(8, 8), intent.clone())
-            .unwrap();
+            .test_ok();
         let second_event_id = appended_event_id(second);
-        let second_event = store.read(timeline.id(), SeqRange::all()).unwrap()[1].clone();
+        let second_event = store.read(timeline.id(), SeqRange::all()).test_ok()[1].clone();
         assert_eq!(second_event.wall_time, admission);
         store
             .append_or_duplicate(
@@ -922,7 +959,7 @@ mod tests {
                 WallTime::from_micros(0),
                 draft,
             )
-            .unwrap();
+            .test_ok();
         store
             .append_or_duplicate(
                 timeline.id(),
@@ -934,24 +971,24 @@ mod tests {
                     CanonicalBytes::from_vec(b"second".to_vec()),
                 ),
             )
-            .unwrap();
+            .test_ok();
         assert_eq!(
             store
                 .append_intent_or_duplicate(timeline.id(), append_identity(8, 8), intent)
-                .unwrap(),
+                .test_ok(),
             AppendOrDuplicateOutcome::Duplicate {
                 event_id: second_event_id
             }
         );
         let outcome = store
-            .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).unwrap())
-            .unwrap();
+            .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).test_ok())
+            .test_ok();
         assert_eq!(outcome.removed, 1);
         assert!(outcome.more_may_remain);
         assert_eq!(
             store
-                .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).unwrap())
-                .unwrap(),
+                .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).test_ok())
+                .test_ok(),
             PurgeOutcome {
                 removed: 1,
                 more_may_remain: false

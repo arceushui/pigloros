@@ -89,6 +89,41 @@ pub fn compare(
 
 #[cfg(test)]
 mod tests {
+
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected compare fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing fixture value")))
+        }
+    }
+
+    trait TestErrorExt<T, E> {
+        fn test_err(self) -> E;
+    }
+
+    impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
+        fn test_err(self) -> E {
+            match self {
+                Ok(value) => std::panic::resume_unwind(Box::new(format!(
+                    "unexpected successful compare fixture value: {value:?}"
+                ))),
+                Err(error) => error,
+            }
+        }
+    }
     use super::*;
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
@@ -147,18 +182,18 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn compare_identical_timelines_no_diff() {
         // Fork a timeline, append nothing to either fork. Diff should be empty.
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let parent = store.create_timeline("parent").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let parent = store.create_timeline("parent").test_ok();
         let entity = EntityId::new();
 
         // Append some shared events to the parent.
         let drafts: Vec<EventDraft> = (0..3).map(|_| draft(entity)).collect();
-        let committed = store.append(parent.id(), &drafts).unwrap();
-        let fork_seq = committed.last().unwrap().seq;
+        let committed = store.append(parent.id(), &drafts).test_ok();
+        let fork_seq = committed.last().test_ok().seq;
 
         // Fork twice at the same point.
-        let fork_a = store.fork(parent.id(), fork_seq, "a").unwrap();
-        let fork_b = store.fork(parent.id(), fork_seq, "b").unwrap();
+        let fork_a = store.fork(parent.id(), fork_seq, "a").test_ok();
+        let fork_b = store.fork(parent.id(), fork_seq, "b").test_ok();
 
         // No additional events on either fork.
         let diff = compare(
@@ -169,7 +204,7 @@ mod tests {
             &mut make_registry(),
             &mut make_registry(),
         )
-        .unwrap();
+        .test_ok();
 
         assert!(diff.only_in_a.is_empty());
         assert!(diff.only_in_b.is_empty());
@@ -180,25 +215,25 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn compare_diverged_timelines_detects_differences() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let parent = store.create_timeline("parent").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let parent = store.create_timeline("parent").test_ok();
         let shared_entity = EntityId::new();
 
         // Append 2 shared events.
         let shared_drafts: Vec<EventDraft> = (0..2).map(|_| draft(shared_entity)).collect();
-        let committed = store.append(parent.id(), &shared_drafts).unwrap();
-        let fork_seq = committed.last().unwrap().seq;
+        let committed = store.append(parent.id(), &shared_drafts).test_ok();
+        let fork_seq = committed.last().test_ok().seq;
 
         // Fork into A and B.
-        let fork_a = store.fork(parent.id(), fork_seq, "branch-a").unwrap();
-        let fork_b = store.fork(parent.id(), fork_seq, "branch-b").unwrap();
+        let fork_a = store.fork(parent.id(), fork_seq, "branch-a").test_ok();
+        let fork_b = store.fork(parent.id(), fork_seq, "branch-b").test_ok();
 
         // Append different counts to each fork for the same entity.
         let drafts_a: Vec<EventDraft> = (0..2).map(|_| draft(shared_entity)).collect();
         let drafts_b: Vec<EventDraft> = (0..3).map(|_| draft(shared_entity)).collect();
 
-        store.append(fork_a.id(), &drafts_a).unwrap();
-        store.append(fork_b.id(), &drafts_b).unwrap();
+        store.append(fork_a.id(), &drafts_a).test_ok();
+        store.append(fork_b.id(), &drafts_b).test_ok();
 
         let diff = compare(
             store.as_ref(),
@@ -208,7 +243,7 @@ mod tests {
             &mut make_registry(),
             &mut make_registry(),
         )
-        .unwrap();
+        .test_ok();
 
         // Each side should have its own post-fork events.
         assert_eq!(diff.only_in_a.len(), 2);
@@ -224,20 +259,20 @@ mod tests {
         // Two registries must not share state even when both see events for the
         // same entity. This exercises the isolation guarantee that motivated the
         // fix from a single shared reducers slice.
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let parent = store.create_timeline("parent").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let parent = store.create_timeline("parent").test_ok();
         let entity = EntityId::new();
 
         let shared: Vec<EventDraft> = (0..2).map(|_| draft(entity)).collect();
-        let committed = store.append(parent.id(), &shared).unwrap();
-        let fork_seq = committed.last().unwrap().seq;
+        let committed = store.append(parent.id(), &shared).test_ok();
+        let fork_seq = committed.last().test_ok().seq;
 
-        let fork_a = store.fork(parent.id(), fork_seq, "iso-a").unwrap();
-        let fork_b = store.fork(parent.id(), fork_seq, "iso-b").unwrap();
+        let fork_a = store.fork(parent.id(), fork_seq, "iso-a").test_ok();
+        let fork_b = store.fork(parent.id(), fork_seq, "iso-b").test_ok();
 
         // Only A gets new events; B stays at the fork point.
         let new_a: Vec<EventDraft> = (0..3).map(|_| draft(entity)).collect();
-        store.append(fork_a.id(), &new_a).unwrap();
+        store.append(fork_a.id(), &new_a).test_ok();
 
         let mut reg_a = make_registry();
         let mut reg_b = make_registry();
@@ -250,7 +285,7 @@ mod tests {
             &mut reg_a,
             &mut reg_b,
         )
-        .unwrap();
+        .test_ok();
 
         // B has no post-fork events.
         assert_eq!(diff.only_in_b.len(), 0);
@@ -269,7 +304,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn compare_unknown_timeline_returns_store_error() {
-        let store = open_store(StoreConfig::Memory).unwrap();
+        let store = open_store(StoreConfig::Memory).test_ok();
         let mut reg_a = make_registry();
         let mut reg_b = make_registry();
         let err = compare(
@@ -280,7 +315,7 @@ mod tests {
             &mut reg_a,
             &mut reg_b,
         )
-        .unwrap_err();
+        .test_err();
         assert!(matches!(err, CoreError::TimelineNotFound(_)));
     }
 
@@ -288,8 +323,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn compare_second_timeline_missing_returns_error() {
         // Covers the `events_b` read error path (first timeline exists).
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let a = store.create_timeline("a").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let a = store.create_timeline("a").test_ok();
         let mut reg_a = make_registry();
         let mut reg_b = make_registry();
         let err = compare(
@@ -300,7 +335,7 @@ mod tests {
             &mut reg_a,
             &mut reg_b,
         )
-        .unwrap_err();
+        .test_err();
         assert!(matches!(err, CoreError::TimelineNotFound(_)));
     }
 }

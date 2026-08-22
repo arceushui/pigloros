@@ -3,7 +3,6 @@
 //! The gateway never holds a synchronous store lock on an async executor
 //! worker.  Commands are linearised by one bounded FIFO and executed by one
 //! dedicated OS thread.
-
 use pos_core::{
     event::{Event, EventDraft},
     geo_admission::{
@@ -52,7 +51,7 @@ macro_rules! submit {
     }};
 }
 
-pub(super) enum Command {
+enum Command {
     #[allow(dead_code)]
     AdmitOwnTracksIngress {
         basic_handle: [u8; 32],
@@ -121,7 +120,7 @@ enum CommandClass {
 }
 
 impl Command {
-    fn class(&self) -> CommandClass {
+    const fn class(&self) -> CommandClass {
         match self {
             Self::RootCount { .. }
             | Self::Read { .. }
@@ -180,14 +179,18 @@ impl SchedulerObserver {
     }
 
     fn install_gate(&self, gate: std::sync::mpsc::Receiver<()>) {
-        let mut current = self.gate.lock().expect("scheduler gate lock is healthy");
+        let mut current = self
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *current = Some(gate);
     }
 
     fn record(&self, record: SchedulerTrace) {
-        self.trace
-            .try_send(record)
-            .expect("scheduler trace receiver accepts every expected record");
+        assert!(
+            self.trace.try_send(record).is_ok(),
+            "scheduler trace receiver accepts every expected record"
+        );
     }
 
     fn admitted(&self, ordinal: u64, class: CommandClass) {
@@ -202,11 +205,13 @@ impl SchedulerObserver {
         let gate = self
             .gate
             .lock()
-            .expect("scheduler gate lock is healthy")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         if let Some(gate) = gate {
-            gate.recv()
-                .expect("scheduler controller releases the worker");
+            assert!(
+                gate.recv().is_ok(),
+                "scheduler controller releases the worker"
+            );
         }
     }
 
@@ -289,7 +294,7 @@ impl OwnTracksRateLimiter {
                 .as_secs()
                 .min(u64::from(OWNTRACKS_RATE_BURST)),
         )
-        .expect("OwnTracks rate refill is bounded by the burst");
+        .unwrap_or(OWNTRACKS_RATE_BURST);
         if replenished != 0 {
             bucket.tokens = bucket
                 .tokens
@@ -347,7 +352,7 @@ struct CommandLifecycle {
 }
 
 impl CommandLifecycle {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             phase: AtomicU8::new(CommandPhase::Queued as u8),
         }
@@ -369,7 +374,7 @@ impl CommandLifecycle {
             return false;
         }
         if Instant::now() >= deadline {
-            let _ = self.phase.compare_exchange(
+            let _transition = self.phase.compare_exchange(
                 CommandPhase::Started as u8,
                 CommandPhase::Expired as u8,
                 Ordering::AcqRel,
@@ -624,6 +629,7 @@ impl StoreExecutor {
                 }
                 LifecycleState::Unhealthy { .. } => return Err(StoreExecutorError::Unhealthy),
             }
+            drop(state);
 
             let global_permit = self
                 .control
@@ -645,6 +651,11 @@ impl StoreExecutor {
                 Ok(ordinal) => *ordinal,
                 Err(poisoned) => *poisoned.into_inner(),
             };
+            let next_admission_ordinal = admission_ordinal.checked_add(1).ok_or_else(|| {
+                StoreExecutorError::Store(CoreError::Storage(
+                    "StoreExecutor admission ordinal overflow".to_owned(),
+                ))
+            })?;
             let send_result = self.control.tx.try_send(CommandEnvelope {
                 deadline,
                 lifecycle,
@@ -660,9 +671,8 @@ impl StoreExecutor {
                         Ok(ordinal) => ordinal,
                         Err(poisoned) => poisoned.into_inner(),
                     };
-                    *ordinal = ordinal
-                        .checked_add(1)
-                        .expect("StoreExecutor admission ordinal overflow");
+                    *ordinal = next_admission_ordinal;
+                    drop(ordinal);
                     Ok((class, admission_ordinal))
                 }
                 Err(mpsc::error::TrySendError::Full(_)) => Err(StoreExecutorError::Saturated),
@@ -689,7 +699,7 @@ impl StoreExecutor {
                 Ok(state) => state,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            match *state {
+            let notify_worker = match *state {
                 LifecycleState::Open => {
                     *state = LifecycleState::Draining;
                     true
@@ -702,7 +712,9 @@ impl StoreExecutor {
                     }
                     false
                 }
-            }
+            };
+            drop(state);
+            notify_worker
         };
         if notify_worker {
             self.control.shutdown.notify_one();
@@ -791,7 +803,8 @@ impl StoreExecutor {
     async fn wait_for_join(&self, deadline: Instant) -> Result<JoinOutcome, ()> {
         let mut completion = self.control.join_completion.subscribe();
         loop {
-            if let Some(outcome) = *completion.borrow() {
+            let outcome = *completion.borrow();
+            if let Some(outcome) = outcome {
                 return Ok(outcome);
             }
             if tokio::time::timeout_at(
@@ -809,24 +822,28 @@ impl StoreExecutor {
     #[cfg(test)]
     async fn panic_for_test(&self) -> Result<(), StoreExecutorError> {
         let result = submit!(self, |reply| Command::Panic { reply });
-        let _ = tokio::time::timeout(Duration::from_secs(1), async {
-            while self.is_ready() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await;
+        drop(
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while self.is_ready() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await,
+        );
         result
     }
 
     #[cfg(test)]
     async fn panic_read_for_test(&self) -> Result<(), StoreExecutorError> {
         let result = submit!(self, |reply| Command::PanicRead { reply });
-        let _ = tokio::time::timeout(Duration::from_secs(1), async {
-            while self.is_ready() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await;
+        drop(
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while self.is_ready() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await,
+        );
         result
     }
 
@@ -928,16 +945,16 @@ async fn await_command_result<T>(
     lifecycle: Arc<CommandLifecycle>,
     deadline: Instant,
 ) -> Result<T, StoreExecutorError> {
-    let result =
-        match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), &mut reply).await {
-            Ok(result) => result,
-            Err(_) => {
-                if lifecycle.expire_if_queued() {
-                    return Err(StoreExecutorError::DeadlineExceeded);
-                }
-                reply.await
-            }
-        };
+    let timeout_result =
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), &mut reply).await;
+    let result = if let Ok(result) = timeout_result {
+        result
+    } else {
+        if lifecycle.expire_if_queued() {
+            return Err(StoreExecutorError::DeadlineExceeded);
+        }
+        reply.await
+    };
     match result {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(error)) => Err(error),
@@ -962,10 +979,18 @@ fn worker_loop(
     #[cfg(test)] observer: Option<Arc<SchedulerObserver>>,
 ) {
     let worker_result = catch_unwind(AssertUnwindSafe(|| {
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("store executor runtime initialization failed");
+        else {
+            set_lifecycle_state(
+                lifecycle_state.as_ref(),
+                LifecycleState::Unhealthy {
+                    retryable_shutdown: false,
+                },
+            );
+            return;
+        };
         runtime.block_on(worker_loop_async(
             Arc::clone(lifecycle_state),
             shutdown,
@@ -1017,8 +1042,8 @@ async fn worker_loop_async(
     loop {
         if pending.is_empty() && !disconnected {
             if draining {
-                let received = receiver.try_recv();
-                match received {
+                let drain_result = receiver.try_recv();
+                match drain_result {
                     Ok(envelope) => pending.push_back(envelope),
                     Err(
                         mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected,
@@ -1027,7 +1052,7 @@ async fn worker_loop_async(
                     }
                 }
             } else {
-                let received = tokio::select! {
+                let next_received = tokio::select! {
                     biased;
                     envelope = receiver.recv() => envelope,
                     () = shutdown.notified() => {
@@ -1035,12 +1060,11 @@ async fn worker_loop_async(
                         continue;
                     }
                 };
-                match received {
-                    Some(envelope) => pending.push_back(envelope),
-                    None => {
-                        disconnected = true;
-                        continue;
-                    }
+                if let Some(envelope) = next_received {
+                    pending.push_back(envelope);
+                } else {
+                    disconnected = true;
+                    continue;
                 }
             }
         }
@@ -1054,9 +1078,9 @@ async fn worker_loop_async(
             let Some(index) = select_pending_index(&pending, reads_since_write) else {
                 continue;
             };
-            let envelope = pending
-                .remove(index)
-                .expect("selected pending envelope remains present");
+            let Some(envelope) = pending.remove(index) else {
+                continue;
+            };
             let class = envelope.class;
             #[cfg(test)]
             if let Some(observer) = &observer {
@@ -1092,6 +1116,8 @@ async fn worker_loop_async(
             break;
         }
     }
+    drop(pending);
+    drop(state);
 }
 
 fn drain_available(
@@ -1138,42 +1164,42 @@ fn select_pending_index(
 fn expire_command(command: Command) {
     match command {
         Command::AdmitOwnTracksIngress { reply, .. } => {
-            let _ = reply.send(Err(StoreExecutorError::DeadlineExceeded));
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
         Command::AdmitGeoLocation { reply, .. } => {
-            let _ = reply.send(Err(StoreExecutorError::DeadlineExceeded));
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
         Command::Purge { reply, .. } => {
-            let _ = reply.send(Err(StoreExecutorError::DeadlineExceeded));
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
         Command::RootCount { reply, .. } => {
-            let _ = reply.send(Err(StoreExecutorError::DeadlineExceeded));
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
         Command::Create { reply, .. } => {
-            let _ = reply.send(Err(StoreExecutorError::DeadlineExceeded));
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
         Command::Read { reply, .. } => {
-            let _ = reply.send(Err(StoreExecutorError::DeadlineExceeded));
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
         Command::ReadOne { reply, .. } => {
-            let _ = reply.send(Err(StoreExecutorError::DeadlineExceeded));
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
         Command::Append { reply, .. } => {
-            let _ = reply.send(Err(StoreExecutorError::DeadlineExceeded));
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
         Command::AppendIdentified { reply, .. } => {
-            let _ = reply.send(Err(StoreExecutorError::DeadlineExceeded));
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
         Command::GetTimeline { reply, .. } => {
-            let _ = reply.send(Err(StoreExecutorError::DeadlineExceeded));
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
         #[cfg(test)]
         Command::Panic { reply } => {
-            let _ = reply.send(Err(StoreExecutorError::DeadlineExceeded));
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
         #[cfg(test)]
         Command::PanicRead { reply } => {
-            let _ = reply.send(Err(StoreExecutorError::DeadlineExceeded));
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
     }
 }
@@ -1182,7 +1208,7 @@ fn send_store_result<T>(
     reply: oneshot::Sender<Result<T, StoreExecutorError>>,
     result: Result<T, CoreError>,
 ) {
-    let _ = reply.send(result.map_err(StoreExecutorError::Store));
+    drop(reply.send(result.map_err(StoreExecutorError::Store)));
 }
 
 fn execute_owntracks_ingress(
@@ -1312,13 +1338,13 @@ fn execute(state: &mut ExecutorState, command: Command) {
         }
         #[cfg(test)]
         Command::Panic { reply } => {
-            let _ = reply.send(Err(StoreExecutorError::Unhealthy));
-            panic!("test store executor worker panic");
+            drop(reply.send(Err(StoreExecutorError::Unhealthy)));
+            std::panic::resume_unwind(Box::new("test store executor worker panic"));
         }
         #[cfg(test)]
         Command::PanicRead { reply } => {
-            let _ = reply.send(Err(StoreExecutorError::Unhealthy));
-            panic!("test store executor read worker panic");
+            drop(reply.send(Err(StoreExecutorError::Unhealthy)));
+            std::panic::resume_unwind(Box::new("test store executor read worker panic"));
         }
     }
 }
@@ -1460,6 +1486,43 @@ fn execute_get_timeline_command(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    trait TestResultExt<T, E> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error + Send + Sync>>;
+        fn test_err(self) -> Result<E, Box<dyn std::error::Error + Send + Sync>>;
+        fn test_value(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestResultExt<T, E> for Result<T, E> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
+            self.map_err(|error| format!("unexpected error: {error:?}").into())
+        }
+
+        fn test_err(self) -> Result<E, Box<dyn std::error::Error + Send + Sync>> {
+            self.err().ok_or_else(|| "expected an error".into())
+        }
+
+        fn test_value(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
+            })
+        }
+    }
+
+    trait TestOptionExt<T> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error + Send + Sync>>;
+        fn test_value(self) -> T;
+    }
+
+    impl<T> TestOptionExt<T> for Option<T> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
+            self.ok_or_else(|| "expected a value".into())
+        }
+
+        fn test_value(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected a value")))
+        }
+    }
+
     use super::{
         execute_append_command, execute_owntracks_ingress, Command, ExecutorState, ExecutorStore,
         OwnTracksRateLimiter,
@@ -1489,7 +1552,9 @@ mod tests {
 
     impl EventStore for RecordingBoundedStore {
         fn create_timeline(&mut self, _name: &str) -> Result<Timeline, CoreError> {
-            panic!("create_timeline must not be called")
+            Err(CoreError::Storage(
+                "create_timeline must not be called".to_owned(),
+            ))
         }
 
         fn append(
@@ -1497,7 +1562,9 @@ mod tests {
             _timeline: TimelineId,
             _drafts: &[EventDraft],
         ) -> Result<Vec<Event>, CoreError> {
-            panic!("ordinary append must not be called when a ceiling is supplied")
+            Err(CoreError::Storage(
+                "ordinary append must not be called when a ceiling is supplied".to_owned(),
+            ))
         }
 
         fn append_bounded(
@@ -1508,13 +1575,13 @@ mod tests {
         ) -> Result<Option<Vec<Event>>, CoreError> {
             self.calls
                 .lock()
-                .expect("bounded-call trace lock is healthy")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push((timeline, drafts.len(), maximum));
             Ok(self.outcome.take())
         }
 
         fn read(&self, _timeline: TimelineId, _range: SeqRange) -> Result<Vec<Event>, CoreError> {
-            panic!("read must not be called")
+            Err(CoreError::Storage("read must not be called".to_owned()))
         }
 
         fn fork(
@@ -1523,21 +1590,26 @@ mod tests {
             _at_seq: pos_core::Seq,
             _name: &str,
         ) -> Result<Timeline, CoreError> {
-            panic!("fork must not be called")
+            Err(CoreError::Storage("fork must not be called".to_owned()))
         }
 
         fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
-            panic!("list_timelines must not be called")
+            Err(CoreError::Storage(
+                "list_timelines must not be called".to_owned(),
+            ))
         }
 
         fn get_timeline(&self, _timeline: TimelineId) -> Result<Option<Timeline>, CoreError> {
-            panic!("get_timeline must not be called by atomic bounded append")
+            Err(CoreError::Storage(
+                "get_timeline must not be called by atomic bounded append".to_owned(),
+            ))
         }
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn execute_append_command_uses_only_atomic_bounded_append_for_a_ceiling() {
+    fn execute_append_command_uses_only_atomic_bounded_append_for_a_ceiling(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let timeline = TimelineId::new();
         let drafts = [
             EventDraft::new(
@@ -1564,11 +1636,8 @@ mod tests {
         };
         let (reply, result) = tokio::sync::oneshot::channel();
         execute_append_command(&mut state, timeline, &drafts, Some(17), reply);
-        assert!(result.blocking_recv().unwrap().unwrap().is_empty());
-        assert_eq!(
-            *calls.lock().expect("bounded-call trace lock is healthy"),
-            vec![(timeline, 2, 17)]
-        );
+        assert!(result.blocking_recv().test_ok()?.test_ok()?.is_empty());
+        assert_eq!(*calls.lock().test_ok()?, vec![(timeline, 2, 17)]);
 
         let rejected_calls = Arc::new(Mutex::new(Vec::new()));
         let mut rejected_state = ExecutorState {
@@ -1584,16 +1653,13 @@ mod tests {
         let (reply, result) = tokio::sync::oneshot::channel();
         execute_append_command(&mut rejected_state, timeline, &drafts[..1], Some(23), reply);
         assert!(matches!(
-            result.blocking_recv().unwrap(),
+            result.blocking_recv().test_ok()?,
             Err(super::StoreExecutorError::Store(CoreError::Storage(message)))
                 if message == "event limit reached"
         ));
-        assert_eq!(
-            *rejected_calls
-                .lock()
-                .expect("bounded-call trace lock is healthy"),
-            vec![(timeline, 1, 23)]
-        );
+        assert_eq!(*rejected_calls.lock().test_ok()?, vec![(timeline, 1, 23)]);
+
+        Ok(())
     }
 
     struct BlockingRootCountStore {
@@ -1633,8 +1699,11 @@ mod tests {
         }
 
         fn root_timeline_count_bounded(&self, maximum: usize) -> Result<usize, CoreError> {
-            self.entered.send(()).expect("root-count observer is alive");
-            self.release.recv().expect("root-count release is alive");
+            assert!(
+                self.entered.send(()).is_ok(),
+                "root-count observer is alive"
+            );
+            assert!(self.release.recv().is_ok(), "root-count release is alive");
             self.inner.root_timeline_count_bounded(maximum)
         }
 
@@ -1672,8 +1741,8 @@ mod tests {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                 == 0
             {
-                self.entered.send(()).expect("create observer is alive");
-                self.release.recv().expect("create release is alive");
+                assert!(self.entered.send(()).is_ok(), "create observer is alive");
+                assert!(self.release.recv().is_ok(), "create release is alive");
             }
             self.inner.create_timeline(name)
         }
@@ -1724,11 +1793,11 @@ mod tests {
         fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
             self.operations
                 .lock()
-                .expect("operation trace lock is healthy")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push("create");
             self.created_names
                 .lock()
-                .expect("created-name trace lock is healthy")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(name.to_owned());
             self.inner.create_timeline(name)
         }
@@ -1744,7 +1813,7 @@ mod tests {
         fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
             self.operations
                 .lock()
-                .expect("operation trace lock is healthy")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push("read");
             self.inner.read(timeline, range)
         }
@@ -1765,17 +1834,20 @@ mod tests {
         fn root_timeline_count_bounded(&self, maximum: usize) -> Result<usize, CoreError> {
             self.operations
                 .lock()
-                .expect("operation trace lock is healthy")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push("root_count");
-            self.entered.send(()).expect("root-count observer is alive");
-            self.release.recv().expect("root-count release is alive");
+            assert!(
+                self.entered.send(()).is_ok(),
+                "root-count observer is alive"
+            );
+            assert!(self.release.recv().is_ok(), "root-count release is alive");
             self.inner.root_timeline_count_bounded(maximum)
         }
 
         fn get_timeline(&self, timeline: TimelineId) -> Result<Option<Timeline>, CoreError> {
             self.operations
                 .lock()
-                .expect("operation trace lock is healthy")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push("read");
             self.inner.get_timeline(timeline)
         }
@@ -1783,13 +1855,19 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_closes_executor_and_readiness_after_join() {
+        let result = shutdown_closes_executor_and_readiness_after_join_impl().await;
+        assert!(
+            result.is_ok(),
+            "shutdown_closes_executor_and_readiness_after_join failed: {result:?}"
+        );
+    }
+
+    async fn shutdown_closes_executor_and_readiness_after_join_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let executor = super::StoreExecutor::new(Box::new(MemoryStore::new()));
 
         assert!(executor.is_ready());
-        executor
-            .shutdown()
-            .await
-            .expect("executor shuts down cleanly");
+        executor.shutdown().await.test_ok()?;
         assert!(!executor.is_ready());
         assert!(matches!(
             executor.create("after-shutdown".to_owned()).await,
@@ -1799,10 +1877,22 @@ mod tests {
             executor.shutdown().await,
             Err(super::StoreExecutorError::Closed)
         ));
+        drop(executor);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn expired_queued_command_is_not_executed() {
+        let result = expired_queued_command_is_not_executed_impl().await;
+        assert!(
+            result.is_ok(),
+            "expired_queued_command_is_not_executed failed: {result:?}"
+        );
+    }
+
+    async fn expired_queued_command_is_not_executed_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let executor = super::StoreExecutor::new(Box::new(MemoryStore::new()));
         let (reply, result) = tokio::sync::oneshot::channel();
         executor
@@ -1813,21 +1903,33 @@ mod tests {
                 },
                 Instant::now()
                     .checked_sub(std::time::Duration::from_secs(1))
-                    .expect("instant supports the test interval"),
+                    .test_ok()?,
                 std::sync::Arc::new(super::CommandLifecycle::new()),
             )
-            .expect("expired command is accepted into the queue");
+            .test_ok()?;
 
         assert!(matches!(
-            result.await.expect("expired command reply"),
+            result.await.test_ok()?,
             Err(super::StoreExecutorError::DeadlineExceeded)
         ));
         assert!(executor.create("fresh".to_owned()).await.is_ok());
-        executor.shutdown().await.expect("executor shuts down");
+        executor.shutdown().await.test_ok()?;
+        drop(executor);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn queued_command_deadline_returns_before_worker_release() {
+        let result = queued_command_deadline_returns_before_worker_release_impl().await;
+        assert!(
+            result.is_ok(),
+            "queued_command_deadline_returns_before_worker_release failed: {result:?}"
+        );
+    }
+
+    async fn queued_command_deadline_returns_before_worker_release_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
         let executor = super::StoreExecutor::spawn_with_deadlines_for_test(
@@ -1844,12 +1946,10 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            entered_receiver
-                .recv()
-                .expect("root-count command entered the worker");
+            assert!(entered_receiver.recv().is_ok());
         })
         .await
-        .expect("root-count entry observer joined");
+        .test_ok()?;
 
         let started = std::time::Instant::now();
         let result = executor
@@ -1865,13 +1965,25 @@ mod tests {
         ));
         assert!(started.elapsed() < std::time::Duration::from_millis(250));
 
-        release_sender.send(()).expect("worker release is alive");
-        assert!(blocker.await.expect("blocked command joined").is_ok());
-        executor.shutdown().await.expect("executor shuts down");
+        release_sender.send(()).test_ok()?;
+        assert!(blocker.await.test_ok()?.is_ok());
+        executor.shutdown().await.test_ok()?;
+        drop(executor);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn expired_queued_write_never_commits() {
+        let result = expired_queued_write_never_commits_impl().await;
+        assert!(
+            result.is_ok(),
+            "expired_queued_write_never_commits failed: {result:?}"
+        );
+    }
+
+    async fn expired_queued_write_never_commits_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
         let create_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1890,20 +2002,18 @@ mod tests {
             tokio::spawn(async move { executor.create("first".to_owned()).await })
         };
         tokio::task::spawn_blocking(move || {
-            entered_receiver
-                .recv()
-                .expect("create command entered the worker");
+            assert!(entered_receiver.recv().is_ok());
         })
         .await
-        .expect("create entry observer joined");
+        .test_ok()?;
 
         assert!(matches!(
             executor.create("expired".to_owned()).await,
             Err(super::StoreExecutorError::DeadlineExceeded)
         ));
-        release_sender.send(()).expect("worker release is alive");
-        assert!(first.await.expect("first create joined").is_ok());
-        executor.shutdown().await.expect("executor shuts down");
+        release_sender.send(()).test_ok()?;
+        assert!(first.await.test_ok()?.is_ok());
+        executor.shutdown().await.test_ok()?;
         assert_eq!(create_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(
             executor.control.global_budget.available_permits(),
@@ -1913,10 +2023,22 @@ mod tests {
             executor.control.read_budget.available_permits(),
             super::READ_CAPACITY
         );
+        drop(executor);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn started_write_returns_its_commit_outcome_after_deadline() {
+        let result = started_write_returns_its_commit_outcome_after_deadline_impl().await;
+        assert!(
+            result.is_ok(),
+            "started_write_returns_its_commit_outcome_after_deadline failed: {result:?}"
+        );
+    }
+
+    async fn started_write_returns_its_commit_outcome_after_deadline_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
         let create_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1935,18 +2057,20 @@ mod tests {
             tokio::spawn(async move { executor.create("started".to_owned()).await })
         };
         tokio::task::spawn_blocking(move || {
-            entered_receiver
-                .recv()
-                .expect("create command entered the worker");
+            assert!(entered_receiver.recv().is_ok());
         })
         .await
-        .expect("create entry observer joined");
+        .test_ok()?;
         tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-        release_sender.send(()).expect("worker release is alive");
+        release_sender.send(()).test_ok()?;
 
-        assert!(first.await.expect("started create joined").is_ok());
+        assert!(first.await.test_ok()?.is_ok());
         assert_eq!(create_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-        executor.shutdown().await.expect("executor shuts down");
+        executor.shutdown().await.test_ok()?;
+
+        drop(executor);
+
+        Ok(())
     }
 
     fn assert_expired<T>(
@@ -1955,7 +2079,7 @@ mod tests {
     ) {
         super::expire_command(command);
         assert!(matches!(
-            receiver.blocking_recv().expect("expired command reply"),
+            receiver.blocking_recv().test_value(),
             Err(super::StoreExecutorError::DeadlineExceeded)
         ));
     }
@@ -1987,11 +2111,11 @@ mod tests {
     }
 
     #[test]
-    fn expired_store_commands_reply() {
+    fn expired_store_commands_reply() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(
             Command::Purge {
-                limit: NonZeroUsize::new(1).expect("one is non-zero"),
+                limit: NonZeroUsize::new(1).test_ok()?,
                 reply,
             },
             receiver,
@@ -2075,10 +2199,21 @@ mod tests {
 
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(Command::PanicRead { reply }, receiver);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn shutdown_timeout_retains_join_for_retry() {
+        let result = shutdown_timeout_retains_join_for_retry_impl().await;
+        assert!(
+            result.is_ok(),
+            "shutdown_timeout_retains_join_for_retry failed: {result:?}"
+        );
+    }
+
+    async fn shutdown_timeout_retains_join_for_retry_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
         let store = BlockingRootCountStore {
@@ -2096,28 +2231,36 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            entered_receiver
-                .recv()
-                .expect("root-count command entered the worker");
+            assert!(entered_receiver.recv().is_ok());
         })
         .await
-        .expect("root-count entry observer joined");
+        .test_ok()?;
 
         assert!(matches!(
             executor.shutdown().await,
             Err(super::StoreExecutorError::DeadlineExceeded)
         ));
-        release_sender.send(()).expect("worker release is alive");
-        assert!(count.await.expect("root-count task joined").is_ok());
-        executor
-            .shutdown()
-            .await
-            .expect("retained join can be retried");
+        release_sender.send(()).test_ok()?;
+        assert!(count.await.test_ok()?.is_ok());
+        executor.shutdown().await.test_ok()?;
         assert!(!executor.is_ready());
+
+        drop(executor);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn cancelled_shutdown_does_not_lose_worker_join_ownership() {
+        let result = cancelled_shutdown_does_not_lose_worker_join_ownership_impl().await;
+        assert!(
+            result.is_ok(),
+            "cancelled_shutdown_does_not_lose_worker_join_ownership failed: {result:?}"
+        );
+    }
+
+    async fn cancelled_shutdown_does_not_lose_worker_join_ownership_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
         let store = BlockingRootCountStore {
@@ -2135,12 +2278,10 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            entered_receiver
-                .recv()
-                .expect("root-count command entered the worker");
+            assert!(entered_receiver.recv().is_ok());
         })
         .await
-        .expect("root-count entry observer joined");
+        .test_ok()?;
 
         let shutdown = tokio::spawn({
             let executor = executor.clone();
@@ -2148,16 +2289,26 @@ mod tests {
         });
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         shutdown.abort();
-        release_sender.send(()).expect("worker release is alive");
-        assert!(count.await.expect("root-count task joined").is_ok());
-        executor
-            .shutdown()
-            .await
-            .expect("cancelled shutdown can be retried");
+        release_sender.send(()).test_ok()?;
+        assert!(count.await.test_ok()?.is_ok());
+        executor.shutdown().await.test_ok()?;
+
+        drop(executor);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn shutdown_drains_accepted_channel_and_pending_commands() {
+        let result = shutdown_drains_accepted_channel_and_pending_commands_impl().await;
+        assert!(
+            result.is_ok(),
+            "shutdown_drains_accepted_channel_and_pending_commands failed: {result:?}"
+        );
+    }
+
+    async fn shutdown_drains_accepted_channel_and_pending_commands_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
         let executor = super::StoreExecutor::spawn_with_deadlines_for_test(
@@ -2174,12 +2325,10 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            entered_receiver
-                .recv()
-                .expect("first command entered the worker");
+            assert!(entered_receiver.recv().is_ok());
         })
         .await
-        .expect("first-command observer joined");
+        .test_ok()?;
 
         let deadline = Instant::now() + std::time::Duration::from_secs(1);
         let read_result = submit_get_timeline(&executor, deadline);
@@ -2193,7 +2342,7 @@ mod tests {
                 deadline,
                 std::sync::Arc::new(super::CommandLifecycle::new()),
             )
-            .expect("accepted write is queued for shutdown drain");
+            .test_ok()?;
 
         let shutdown = {
             let executor = executor.clone();
@@ -2215,18 +2364,29 @@ mod tests {
             Err(super::StoreExecutorError::Closed)
         ));
 
-        release_sender
-            .send(())
-            .expect("first command release is alive");
-        assert!(first.await.expect("first command joined").is_ok());
-        assert!(read_result.await.expect("queued read reply").is_ok());
-        assert!(create_result.await.expect("queued write reply").is_ok());
-        assert!(shutdown.await.expect("shutdown task joined").is_ok());
+        release_sender.send(()).test_ok()?;
+        assert!(first.await.test_ok()?.is_ok());
+        assert!(read_result.await.test_ok()?.is_ok());
+        assert!(create_result.await.test_ok()?.is_ok());
+        assert!(shutdown.await.test_ok()?.is_ok());
         assert!(!executor.is_ready());
+
+        drop(executor);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn in_flight_command_returns_its_commit_outcome_after_deadline() {
+        let result = in_flight_command_returns_its_commit_outcome_after_deadline_impl().await;
+        assert!(
+            result.is_ok(),
+            "in_flight_command_returns_its_commit_outcome_after_deadline failed: {result:?}"
+        );
+    }
+
+    async fn in_flight_command_returns_its_commit_outcome_after_deadline_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
         let store = BlockingRootCountStore {
@@ -2244,21 +2404,32 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            entered_receiver
-                .recv()
-                .expect("root-count command entered the worker");
+            assert!(entered_receiver.recv().is_ok());
         })
         .await
-        .expect("root-count entry observer joined");
+        .test_ok()?;
         tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-        release_sender.send(()).expect("worker release is alive");
+        release_sender.send(()).test_ok()?;
 
-        assert!(count.await.expect("root-count task joined").is_ok());
-        executor.shutdown().await.expect("executor shuts down");
+        assert!(count.await.test_ok()?.is_ok());
+        executor.shutdown().await.test_ok()?;
+
+        drop(executor);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn worker_panic_is_reported_as_unhealthy() {
+        let result = worker_panic_is_reported_as_unhealthy_impl().await;
+        assert!(
+            result.is_ok(),
+            "worker_panic_is_reported_as_unhealthy failed: {result:?}"
+        );
+    }
+
+    async fn worker_panic_is_reported_as_unhealthy_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let executor = super::StoreExecutor::new(Box::new(MemoryStore::new()));
 
         let panic_result = executor.panic_for_test().await;
@@ -2283,16 +2454,24 @@ mod tests {
             executor.control.read_budget.available_permits(),
             super::READ_CAPACITY
         );
-        assert!(executor
-            .control
-            .join
-            .lock()
-            .expect("join lock is healthy")
-            .is_none());
+        assert!(executor.control.join.lock().test_ok()?.is_none());
+
+        drop(executor);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn read_worker_panic_releases_read_admission_permit() {
+        let result = read_worker_panic_releases_read_admission_permit_impl().await;
+        assert!(
+            result.is_ok(),
+            "read_worker_panic_releases_read_admission_permit failed: {result:?}"
+        );
+    }
+
+    async fn read_worker_panic_releases_read_admission_permit_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let executor = super::StoreExecutor::new(Box::new(MemoryStore::new()));
 
         let panic_result = executor.panic_read_for_test().await;
@@ -2312,10 +2491,23 @@ mod tests {
             executor.control.read_budget.available_permits(),
             super::READ_CAPACITY
         );
+
+        drop(executor);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn executor_reports_unhealthy_and_closed_submission_paths() {
+        let result = executor_reports_unhealthy_and_closed_submission_paths_impl().await;
+        assert!(
+            result.is_ok(),
+            "executor_reports_unhealthy_and_closed_submission_paths failed: {result:?}"
+        );
+    }
+
+    async fn executor_reports_unhealthy_and_closed_submission_paths_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (sender, receiver) = tokio::sync::mpsc::channel(1);
         let executor = super::StoreExecutor::from_sender_for_test(sender);
         drop(receiver);
@@ -2325,12 +2517,9 @@ mod tests {
         ));
 
         let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        drop(executor);
         let executor = super::StoreExecutor::from_sender_for_test(sender);
-        *executor
-            .control
-            .state
-            .lock()
-            .expect("state lock is healthy") = super::LifecycleState::Unhealthy {
+        *executor.control.state.lock().test_ok()? = super::LifecycleState::Unhealthy {
             retryable_shutdown: false,
         };
         assert!(matches!(
@@ -2341,19 +2530,34 @@ mod tests {
             executor.shutdown().await,
             Err(super::StoreExecutorError::Unhealthy)
         ));
+
+        drop(executor);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn executor_recovers_poisoned_control_locks() {
+        let result = executor_recovers_poisoned_control_locks_impl().await;
+        assert!(
+            result.is_ok(),
+            "executor_recovers_poisoned_control_locks failed: {result:?}"
+        );
+    }
+
+    async fn executor_recovers_poisoned_control_locks_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (sender, _receiver) = tokio::sync::mpsc::channel(1);
         let executor = super::StoreExecutor::from_sender_for_test(sender);
         let state = std::sync::Arc::clone(&executor.control.state);
         std::thread::spawn(move || {
-            let _guard = state.lock().expect("state lock is initially healthy");
-            panic!("poison state lock for recovery test");
+            let _guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::panic::resume_unwind(Box::new("poison state lock for recovery test"));
         })
         .join()
-        .expect_err("poisoning thread must panic");
+        .test_err()?;
 
         assert!(executor.is_ready());
         let (reply, _result) = tokio::sync::oneshot::channel();
@@ -2373,85 +2577,98 @@ mod tests {
         ));
 
         let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        drop(executor);
         let executor = super::StoreExecutor::from_sender_for_test(sender);
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = executor
                 .control
                 .join_task
                 .lock()
-                .expect("join-task lock is initially healthy");
-            panic!("poison join-task lock for recovery test");
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::panic::resume_unwind(Box::new("poison join-task lock for recovery test"));
         }))
-        .expect_err("poisoning closure must panic");
+        .test_err()?;
         assert!(matches!(
             executor.shutdown().await,
             Err(super::StoreExecutorError::Closed)
         ));
 
         let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        drop(executor);
         let executor = super::StoreExecutor::from_sender_for_test(sender);
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = executor
                 .control
                 .join
                 .lock()
-                .expect("join lock is initially healthy");
-            panic!("poison join lock for recovery test");
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::panic::resume_unwind(Box::new("poison join lock for recovery test"));
         }))
-        .expect_err("poisoning closure must panic");
+        .test_err()?;
         assert!(matches!(
             executor.shutdown().await,
             Err(super::StoreExecutorError::Closed)
         ));
+
+        drop(executor);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn executor_reaps_successful_and_panicked_join_handles() {
+        let result = executor_reaps_successful_and_panicked_join_handles_impl().await;
+        assert!(
+            result.is_ok(),
+            "executor_reaps_successful_and_panicked_join_handles failed: {result:?}"
+        );
+    }
+
+    async fn executor_reaps_successful_and_panicked_join_handles_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (sender, _receiver) = tokio::sync::mpsc::channel(1);
         let executor = super::StoreExecutor::from_sender_for_test(sender);
-        *executor
-            .control
-            .state
-            .lock()
-            .expect("state lock is healthy") = super::LifecycleState::Unhealthy {
+        *executor.control.state.lock().test_ok()? = super::LifecycleState::Unhealthy {
             retryable_shutdown: false,
         };
-        *executor.control.join.lock().expect("join lock is healthy") =
-            Some(std::thread::spawn(|| {}));
+        *executor.control.join.lock().test_ok()? = Some(std::thread::spawn(|| {}));
         assert!(matches!(
             executor.shutdown().await,
             Err(super::StoreExecutorError::Unhealthy)
         ));
 
         let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        drop(executor);
         let executor = super::StoreExecutor::from_sender_for_test(sender);
-        *executor
-            .control
-            .state
-            .lock()
-            .expect("state lock is healthy") = super::LifecycleState::Unhealthy {
+        *executor.control.state.lock().test_ok()? = super::LifecycleState::Unhealthy {
             retryable_shutdown: false,
         };
-        *executor.control.join.lock().expect("join lock is healthy") =
-            Some(std::thread::spawn(|| {
-                panic!("panic join for recovery test");
-            }));
+        *executor.control.join.lock().test_ok()? = Some(std::thread::spawn(|| {
+            std::panic::resume_unwind(Box::new("panic join for recovery test"));
+        }));
         assert!(matches!(
             executor.shutdown().await,
             Err(super::StoreExecutorError::Unhealthy)
         ));
+
+        drop(executor);
+
+        Ok(())
     }
 
     #[test]
-    fn worker_and_state_helpers_recover_poisoned_mutexes() {
+    fn worker_and_state_helpers_recover_poisoned_mutexes(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let state = std::sync::Arc::new(std::sync::Mutex::new(super::LifecycleState::Open));
         let poisoned = std::sync::Arc::clone(&state);
         std::thread::spawn(move || {
-            let _guard = poisoned.lock().expect("state lock is initially healthy");
-            panic!("poison lifecycle lock for helper test");
+            let _guard = poisoned
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::panic::resume_unwind(Box::new("poison lifecycle lock for helper test"));
         })
         .join()
-        .expect_err("poisoning thread must panic");
+        .test_err()?;
         super::set_lifecycle_state(state.as_ref(), super::LifecycleState::Closed);
         assert_eq!(
             *state
@@ -2465,11 +2682,11 @@ mod tests {
         std::thread::spawn(move || {
             let _guard = poisoned
                 .lock()
-                .expect("lifecycle lock is initially healthy");
-            panic!("poison worker lifecycle lock for helper test");
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::panic::resume_unwind(Box::new("poison worker lifecycle lock for helper test"));
         })
         .join()
-        .expect_err("poisoning thread must panic");
+        .test_err()?;
         let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
         drop(sender);
         super::worker_loop(
@@ -2486,10 +2703,21 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             super::LifecycleState::Closed
         );
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn disconnected_receiver_drains_pending_commands_through_scheduler() {
+        let result = disconnected_receiver_drains_pending_commands_through_scheduler_impl().await;
+        assert!(
+            result.is_ok(),
+            "disconnected_receiver_drains_pending_commands_through_scheduler failed: {result:?}"
+        );
+    }
+
+    async fn disconnected_receiver_drains_pending_commands_through_scheduler_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
         let (observer, records) = super::SchedulerObserver::new(8);
         let (gate_sender, gate_receiver) = std::sync::mpsc::channel();
@@ -2498,13 +2726,13 @@ mod tests {
         let (write_reply, write_result) = tokio::sync::oneshot::channel();
         let read_permit = std::sync::Arc::new(super::Semaphore::new(1))
             .try_acquire_owned()
-            .expect("read test permit is available");
+            .test_ok()?;
         let read_global = std::sync::Arc::new(super::Semaphore::new(1))
             .try_acquire_owned()
-            .expect("read global test permit is available");
+            .test_ok()?;
         let write_global = std::sync::Arc::new(super::Semaphore::new(1))
             .try_acquire_owned()
-            .expect("write global test permit is available");
+            .test_ok()?;
         let read_lifecycle = std::sync::Arc::new(super::CommandLifecycle::new());
         let write_lifecycle = std::sync::Arc::new(super::CommandLifecycle::new());
         let deadline = Instant::now() + std::time::Duration::from_secs(1);
@@ -2522,7 +2750,7 @@ mod tests {
                 },
             })
             .await
-            .expect("read envelope is accepted");
+            .test_ok()?;
         sender
             .send(super::CommandEnvelope {
                 deadline,
@@ -2537,7 +2765,7 @@ mod tests {
                 },
             })
             .await
-            .expect("write envelope is accepted");
+            .test_ok()?;
         drop(sender);
 
         let lifecycle = std::sync::Arc::new(std::sync::Mutex::new(super::LifecycleState::Open));
@@ -2554,22 +2782,17 @@ mod tests {
         });
 
         assert!(matches!(
-            records.recv().expect("terminal drain trace is alive"),
+            records.recv().test_ok()?,
             super::SchedulerTrace::DrainCompleted {
                 pending: 2,
                 disconnected: true,
             }
         ));
-        gate_sender
-            .send(())
-            .expect("disconnected scheduler gate is alive");
-        assert!(read_result.await.expect("read terminal reply").is_ok());
-        assert!(write_result.await.expect("write terminal reply").is_ok());
-        worker.await.expect("disconnected worker joined");
-        assert_eq!(
-            *lifecycle.lock().expect("worker lifecycle lock is healthy"),
-            super::LifecycleState::Closed
-        );
+        gate_sender.send(()).test_ok()?;
+        assert!(read_result.await.test_ok()?.is_ok());
+        assert!(write_result.await.test_ok()?.is_ok());
+        worker.await.test_ok()?;
+        assert_eq!(*lifecycle.lock().test_ok()?, super::LifecycleState::Closed);
         let selected = records
             .try_iter()
             .filter_map(|record| match record {
@@ -2579,10 +2802,22 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(selected, vec![0, 1]);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn expired_pending_read_releases_admission_permits_after_worker_sweep() {
+        let result =
+            expired_pending_read_releases_admission_permits_after_worker_sweep_impl().await;
+        assert!(
+            result.is_ok(),
+            "expired_pending_read_releases_admission_permits_after_worker_sweep failed: {result:?}"
+        );
+    }
+
+    async fn expired_pending_read_releases_admission_permits_after_worker_sweep_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
         let executor = super::StoreExecutor::spawn_with_deadlines_for_test(
@@ -2599,12 +2834,10 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            entered_receiver
-                .recv()
-                .expect("root-count command entered the worker");
+            assert!(entered_receiver.recv().is_ok());
         })
         .await
-        .expect("root-count entry observer joined");
+        .test_ok()?;
 
         let (reply, result) = tokio::sync::oneshot::channel();
         executor
@@ -2615,10 +2848,10 @@ mod tests {
                 },
                 Instant::now()
                     .checked_sub(std::time::Duration::from_secs(1))
-                    .expect("instant supports the test interval"),
+                    .test_ok()?,
                 std::sync::Arc::new(super::CommandLifecycle::new()),
             )
-            .expect("expired read is accepted while the worker is blocked");
+            .test_ok()?;
         assert_eq!(
             executor.control.global_budget.available_permits(),
             super::QUEUE_CAPACITY - 2
@@ -2628,13 +2861,13 @@ mod tests {
             super::READ_CAPACITY - 2
         );
 
-        release_sender.send(()).expect("worker release is alive");
-        assert!(blocker.await.expect("blocked command joined").is_ok());
+        release_sender.send(()).test_ok()?;
+        assert!(blocker.await.test_ok()?.is_ok());
         assert!(matches!(
-            result.await.expect("expired read reply"),
+            result.await.test_ok()?,
             Err(super::StoreExecutorError::DeadlineExceeded)
         ));
-        executor.shutdown().await.expect("executor shuts down");
+        executor.shutdown().await.test_ok()?;
         assert_eq!(
             executor.control.global_budget.available_permits(),
             super::QUEUE_CAPACITY
@@ -2643,10 +2876,23 @@ mod tests {
             executor.control.read_budget.available_permits(),
             super::READ_CAPACITY
         );
+
+        drop(executor);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn worker_unwind_releases_executing_and_pending_read_write_permits() {
+        let result = worker_unwind_releases_executing_and_pending_read_write_permits_impl().await;
+        assert!(
+            result.is_ok(),
+            "worker_unwind_releases_executing_and_pending_read_write_permits failed: {result:?}"
+        );
+    }
+
+    async fn worker_unwind_releases_executing_and_pending_read_write_permits_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(3);
         let global_budget = std::sync::Arc::new(super::Semaphore::new(3));
         let read_budget = std::sync::Arc::new(super::Semaphore::new(2));
@@ -2658,20 +2904,12 @@ mod tests {
                 lifecycle: std::sync::Arc::new(super::CommandLifecycle::new()),
                 class: super::CommandClass::Read,
                 admission_ordinal: 0,
-                global_permit: global_budget
-                    .clone()
-                    .try_acquire_owned()
-                    .expect("panic global permit is available"),
-                read_permit: Some(
-                    read_budget
-                        .clone()
-                        .try_acquire_owned()
-                        .expect("panic read permit is available"),
-                ),
+                global_permit: global_budget.clone().try_acquire_owned().test_ok()?,
+                read_permit: Some(read_budget.clone().try_acquire_owned().test_ok()?),
                 command: Command::PanicRead { reply: panic_reply },
             })
             .await
-            .expect("panic envelope is accepted");
+            .test_ok()?;
         let (pending_read_reply, _pending_read_result) = tokio::sync::oneshot::channel();
         sender
             .send(super::CommandEnvelope {
@@ -2679,23 +2917,15 @@ mod tests {
                 lifecycle: std::sync::Arc::new(super::CommandLifecycle::new()),
                 class: super::CommandClass::Read,
                 admission_ordinal: 1,
-                global_permit: global_budget
-                    .clone()
-                    .try_acquire_owned()
-                    .expect("pending read global permit is available"),
-                read_permit: Some(
-                    read_budget
-                        .clone()
-                        .try_acquire_owned()
-                        .expect("pending read permit is available"),
-                ),
+                global_permit: global_budget.clone().try_acquire_owned().test_ok()?,
+                read_permit: Some(read_budget.clone().try_acquire_owned().test_ok()?),
                 command: Command::GetTimeline {
                     timeline: TimelineId::new(),
                     reply: pending_read_reply,
                 },
             })
             .await
-            .expect("pending read envelope is accepted");
+            .test_ok()?;
         let (pending_write_reply, _pending_write_result) = tokio::sync::oneshot::channel();
         sender
             .send(super::CommandEnvelope {
@@ -2703,10 +2933,7 @@ mod tests {
                 lifecycle: std::sync::Arc::new(super::CommandLifecycle::new()),
                 class: super::CommandClass::Write,
                 admission_ordinal: 2,
-                global_permit: global_budget
-                    .clone()
-                    .try_acquire_owned()
-                    .expect("pending write permit is available"),
+                global_permit: global_budget.clone().try_acquire_owned().test_ok()?,
                 read_permit: None,
                 command: Command::Create {
                     name: "pending-unwind".to_owned(),
@@ -2714,7 +2941,7 @@ mod tests {
                 },
             })
             .await
-            .expect("pending write envelope is accepted");
+            .test_ok()?;
         drop(sender);
 
         let lifecycle = std::sync::Arc::new(std::sync::Mutex::new(super::LifecycleState::Open));
@@ -2730,21 +2957,32 @@ mod tests {
             );
         });
 
-        worker.await.expect("unwinding worker joined");
+        worker.await.test_ok()?;
         assert!(matches!(
-            panic_result.await.expect("panic terminal reply"),
+            panic_result.await.test_ok()?,
             Err(super::StoreExecutorError::Unhealthy)
         ));
         assert!(matches!(
-            *lifecycle.lock().expect("worker lifecycle lock is healthy"),
+            *lifecycle.lock().test_ok()?,
             super::LifecycleState::Unhealthy { .. }
         ));
         assert_eq!(global_budget.available_permits(), 3);
         assert_eq!(read_budget.available_permits(), 2);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn worker_unwind_releases_envelope_arriving_in_channel() {
+        let result = worker_unwind_releases_envelope_arriving_in_channel_impl().await;
+        assert!(
+            result.is_ok(),
+            "worker_unwind_releases_envelope_arriving_in_channel failed: {result:?}"
+        );
+    }
+
+    async fn worker_unwind_releases_envelope_arriving_in_channel_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
         let global_budget = std::sync::Arc::new(super::Semaphore::new(2));
         let read_budget = std::sync::Arc::new(super::Semaphore::new(1));
@@ -2759,20 +2997,12 @@ mod tests {
                 lifecycle: std::sync::Arc::new(super::CommandLifecycle::new()),
                 class: super::CommandClass::Read,
                 admission_ordinal: 0,
-                global_permit: global_budget
-                    .clone()
-                    .try_acquire_owned()
-                    .expect("panic global permit is available"),
-                read_permit: Some(
-                    read_budget
-                        .clone()
-                        .try_acquire_owned()
-                        .expect("panic read permit is available"),
-                ),
+                global_permit: global_budget.clone().try_acquire_owned().test_ok()?,
+                read_permit: Some(read_budget.clone().try_acquire_owned().test_ok()?),
                 command: Command::PanicRead { reply: panic_reply },
             })
             .await
-            .expect("panic envelope is accepted");
+            .test_ok()?;
         let lifecycle = std::sync::Arc::new(std::sync::Mutex::new(super::LifecycleState::Open));
         let worker_lifecycle = std::sync::Arc::clone(&lifecycle);
         let worker = tokio::task::spawn_blocking(move || {
@@ -2786,7 +3016,7 @@ mod tests {
             );
         });
         assert!(matches!(
-            records.recv().expect("drain trace is alive"),
+            records.recv().test_ok()?,
             super::SchedulerTrace::DrainCompleted {
                 pending: 1,
                 disconnected: false,
@@ -2800,10 +3030,7 @@ mod tests {
                 lifecycle: std::sync::Arc::new(super::CommandLifecycle::new()),
                 class: super::CommandClass::Write,
                 admission_ordinal: 1,
-                global_permit: global_budget
-                    .clone()
-                    .try_acquire_owned()
-                    .expect("channel write permit is available"),
+                global_permit: global_budget.clone().try_acquire_owned().test_ok()?,
                 read_permit: None,
                 command: Command::Create {
                     name: "channel-unwind".to_owned(),
@@ -2811,26 +3038,35 @@ mod tests {
                 },
             })
             .await
-            .expect("channel envelope is accepted");
+            .test_ok()?;
         drop(sender);
-        gate_sender
-            .send(())
-            .expect("scheduler gate releases the panic");
-        worker.await.expect("channel-unwind worker joined");
+        gate_sender.send(()).test_ok()?;
+        worker.await.test_ok()?;
         assert!(matches!(
-            panic_result.await.expect("panic terminal reply"),
+            panic_result.await.test_ok()?,
             Err(super::StoreExecutorError::Unhealthy)
         ));
         assert!(matches!(
-            *lifecycle.lock().expect("worker lifecycle lock is healthy"),
+            *lifecycle.lock().test_ok()?,
             super::LifecycleState::Unhealthy { .. }
         ));
         assert_eq!(global_budget.available_permits(), 2);
         assert_eq!(read_budget.available_permits(), 1);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn read_admission_preserves_reserved_write_capacity_with_live_worker() {
+        let result = read_admission_preserves_reserved_write_capacity_with_live_worker_impl().await;
+        assert!(
+            result.is_ok(),
+            "read_admission_preserves_reserved_write_capacity_with_live_worker failed: {result:?}"
+        );
+    }
+
+    async fn read_admission_preserves_reserved_write_capacity_with_live_worker_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
         let store = BlockingRootCountStore {
@@ -2848,12 +3084,10 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            entered_receiver
-                .recv()
-                .expect("root-count command entered the worker");
+            assert!(entered_receiver.recv().is_ok());
         })
         .await
-        .expect("root-count entry observer joined");
+        .test_ok()?;
 
         let deadline = Instant::now() + std::time::Duration::from_secs(1);
 
@@ -2868,7 +3102,7 @@ mod tests {
                     deadline,
                     std::sync::Arc::new(super::CommandLifecycle::new()),
                 )
-                .expect("reads may consume only the read-class capacity");
+                .test_ok()?;
         }
 
         let (reply, _result) = tokio::sync::oneshot::channel();
@@ -2894,12 +3128,16 @@ mod tests {
                 deadline,
                 std::sync::Arc::new(super::CommandLifecycle::new()),
             )
-            .expect("writes may consume the reserved slots");
+            .test_ok()?;
 
-        release_sender.send(()).expect("worker release is alive");
-        assert!(count.await.expect("root-count task joined").is_ok());
-        assert!(result.await.expect("reserved write reply").is_ok());
-        executor.shutdown().await.expect("executor shuts down");
+        release_sender.send(()).test_ok()?;
+        assert!(count.await.test_ok()?.is_ok());
+        assert!(result.await.test_ok()?.is_ok());
+        executor.shutdown().await.test_ok()?;
+
+        drop(executor);
+
+        Ok(())
     }
 
     fn submit_get_timeline(
@@ -2916,7 +3154,7 @@ mod tests {
                 deadline,
                 std::sync::Arc::new(super::CommandLifecycle::new()),
             )
-            .expect("read is admitted");
+            .test_value();
         result
     }
 
@@ -2934,12 +3172,12 @@ mod tests {
     ) -> Vec<u64> {
         let mut selected = Vec::new();
         loop {
-            match records.recv().expect("scheduler trace is alive") {
+            match records.recv().test_value() {
                 super::SchedulerTrace::DrainCompleted {
                     pending,
                     disconnected: _,
                 } if pending == expected_pending => {
-                    gate_sender.send(()).expect("scheduler gate is alive");
+                    gate_sender.send(()).test_value();
                     return selected;
                 }
                 super::SchedulerTrace::Selected { ordinal, .. } => selected.push(ordinal),
@@ -2965,7 +3203,7 @@ mod tests {
         expected_ordinal: u64,
     ) {
         loop {
-            match records.recv().expect("scheduler trace is alive") {
+            match records.recv().test_value() {
                 super::SchedulerTrace::Selected { ordinal, .. } if ordinal == expected_ordinal => {
                     return
                 }
@@ -2978,6 +3216,15 @@ mod tests {
 
     #[tokio::test]
     async fn reads_without_pending_writes_retain_fifo_after_the_burst() {
+        let result = reads_without_pending_writes_retain_fifo_after_the_burst_impl().await;
+        assert!(
+            result.is_ok(),
+            "reads_without_pending_writes_retain_fifo_after_the_burst failed: {result:?}"
+        );
+    }
+
+    async fn reads_without_pending_writes_retain_fifo_after_the_burst_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
         let (observer, records) = super::SchedulerObserver::new(64);
@@ -2999,25 +3246,21 @@ mod tests {
                 Instant::now() + std::time::Duration::from_secs(1),
                 std::sync::Arc::new(super::CommandLifecycle::new()),
             )
-            .expect("initial read is admitted");
+            .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            entered_receiver
-                .recv()
-                .expect("initial read entered the worker");
+            assert!(entered_receiver.recv().is_ok());
         })
         .await
-        .expect("initial read observer joined");
+        .test_ok()?;
 
         let deadline = Instant::now() + std::time::Duration::from_secs(1);
         let reads = (0..10)
             .map(|_| submit_get_timeline(&executor, deadline))
             .collect::<Vec<_>>();
-        release_sender
-            .send(())
-            .expect("initial read release is alive");
-        assert!(root_result.await.expect("initial read reply").is_ok());
+        release_sender.send(()).test_ok()?;
+        assert!(root_result.await.test_ok()?.is_ok());
         for result in reads {
-            assert!(result.await.expect("read reply").is_ok());
+            assert!(result.await.test_ok()?.is_ok());
         }
         let selected = records
             .try_iter()
@@ -3028,11 +3271,24 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(selected, (0..=10).collect::<Vec<_>>());
-        executor.shutdown().await.expect("executor shuts down");
+        executor.shutdown().await.test_ok()?;
+
+        drop(executor);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn queued_write_is_selected_immediately_without_pending_reads() {
+        let result = queued_write_is_selected_immediately_without_pending_reads_impl().await;
+        assert!(
+            result.is_ok(),
+            "queued_write_is_selected_immediately_without_pending_reads failed: {result:?}"
+        );
+    }
+
+    async fn queued_write_is_selected_immediately_without_pending_reads_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
         let (observer, records) = super::SchedulerObserver::new(16);
@@ -3054,14 +3310,12 @@ mod tests {
                 Instant::now() + std::time::Duration::from_secs(1),
                 std::sync::Arc::new(super::CommandLifecycle::new()),
             )
-            .expect("initial read is admitted");
+            .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            entered_receiver
-                .recv()
-                .expect("initial read entered the worker");
+            assert!(entered_receiver.recv().is_ok());
         })
         .await
-        .expect("initial read observer joined");
+        .test_ok()?;
 
         let (write_reply, write_result) = tokio::sync::oneshot::channel();
         executor
@@ -3073,10 +3327,10 @@ mod tests {
                 Instant::now() + std::time::Duration::from_secs(1),
                 std::sync::Arc::new(super::CommandLifecycle::new()),
             )
-            .expect("write is admitted");
-        release_sender.send(()).expect("worker release is alive");
-        assert!(root_result.await.expect("initial read reply").is_ok());
-        assert!(write_result.await.expect("write reply").is_ok());
+            .test_ok()?;
+        release_sender.send(()).test_ok()?;
+        assert!(root_result.await.test_ok()?.is_ok());
+        assert!(write_result.await.test_ok()?.is_ok());
         let selected = records
             .try_iter()
             .filter_map(|record| match record {
@@ -3096,11 +3350,24 @@ mod tests {
                 (1, super::CommandClass::Write, 1)
             ]
         );
-        executor.shutdown().await.expect("executor shuts down");
+        executor.shutdown().await.test_ok()?;
+
+        drop(executor);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn expired_burst_entries_do_not_change_fairness_priority() {
+        let result = expired_burst_entries_do_not_change_fairness_priority_impl().await;
+        assert!(
+            result.is_ok(),
+            "expired_burst_entries_do_not_change_fairness_priority failed: {result:?}"
+        );
+    }
+
+    async fn expired_burst_entries_do_not_change_fairness_priority_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
         let (observer, records) = super::SchedulerObserver::new(64);
@@ -3122,14 +3389,12 @@ mod tests {
                 Instant::now() + std::time::Duration::from_secs(1),
                 std::sync::Arc::new(super::CommandLifecycle::new()),
             )
-            .expect("initial read is admitted");
+            .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            entered_receiver
-                .recv()
-                .expect("initial read entered the worker");
+            assert!(entered_receiver.recv().is_ok());
         })
         .await
-        .expect("initial read observer joined");
+        .test_ok()?;
 
         let deadline = Instant::now() + std::time::Duration::from_secs(1);
         let live_reads = (0..6)
@@ -3145,10 +3410,10 @@ mod tests {
                     },
                     Instant::now()
                         .checked_sub(std::time::Duration::from_secs(1))
-                        .expect("instant supports the test interval"),
+                        .test_ok()?,
                     std::sync::Arc::new(super::CommandLifecycle::new()),
                 )
-                .expect("expired read is admitted");
+                .test_ok()?;
             result
         };
         let live_read = submit_get_timeline(&executor, deadline);
@@ -3162,10 +3427,10 @@ mod tests {
                     },
                     Instant::now()
                         .checked_sub(std::time::Duration::from_secs(1))
-                        .expect("instant supports the test interval"),
+                        .test_ok()?,
                     std::sync::Arc::new(super::CommandLifecycle::new()),
                 )
-                .expect("expired write is admitted");
+                .test_ok()?;
             result
         };
         let (write_reply, write_result) = tokio::sync::oneshot::channel();
@@ -3178,30 +3443,41 @@ mod tests {
                 deadline,
                 std::sync::Arc::new(super::CommandLifecycle::new()),
             )
-            .expect("live write is admitted");
+            .test_ok()?;
         let trailing_read = submit_get_timeline(&executor, deadline);
         let (gate_sender, gate_receiver) = std::sync::mpsc::channel();
         observer.install_gate(gate_receiver);
-        release_sender
-            .send(())
-            .expect("initial read release is alive");
+        release_sender.send(()).test_ok()?;
         let mut selected = release_scheduler_gate_at_pending(&records, &gate_sender, 11);
-        assert!(root_result.await.expect("initial read reply").is_ok());
+        assert!(root_result.await.test_ok()?.is_ok());
         for result in live_reads {
-            assert!(result.await.expect("read reply").is_ok());
+            assert!(result.await.test_ok()?.is_ok());
         }
-        assert!(expired_read.await.expect("expired read reply").is_err());
-        assert!(live_read.await.expect("live read reply").is_ok());
-        assert!(expired_write.await.expect("expired write reply").is_err());
-        assert!(write_result.await.expect("live write reply").is_ok());
-        assert!(trailing_read.await.expect("trailing read reply").is_ok());
+        assert!(expired_read.await.test_ok()?.is_err());
+        assert!(live_read.await.test_ok()?.is_ok());
+        assert!(expired_write.await.test_ok()?.is_err());
+        assert!(write_result.await.test_ok()?.is_ok());
+        assert!(trailing_read.await.test_ok()?.is_ok());
         selected.extend(collect_selected(&records));
         assert_eq!(selected, (0..=11).collect::<Vec<_>>());
-        executor.shutdown().await.expect("executor shuts down");
+        executor.shutdown().await.test_ok()?;
+
+        drop(executor);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn pending_write_is_selected_after_eight_consecutive_reads() {
+        let result = pending_write_is_selected_after_eight_consecutive_reads_impl().await;
+        assert!(
+            result.is_ok(),
+            "pending_write_is_selected_after_eight_consecutive_reads failed: {result:?}"
+        );
+    }
+
+    async fn pending_write_is_selected_after_eight_consecutive_reads_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
         let operations = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -3228,14 +3504,12 @@ mod tests {
                 Instant::now() + std::time::Duration::from_secs(1),
                 std::sync::Arc::new(super::CommandLifecycle::new()),
             )
-            .expect("initial read is admitted");
+            .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            entered_receiver
-                .recv()
-                .expect("initial read entered the worker");
+            assert!(entered_receiver.recv().is_ok());
         })
         .await
-        .expect("initial read observer joined");
+        .test_ok()?;
 
         let deadline = Instant::now() + std::time::Duration::from_secs(1);
         let read_results = (0..8)
@@ -3252,24 +3526,19 @@ mod tests {
                 deadline,
                 std::sync::Arc::new(super::CommandLifecycle::new()),
             )
-            .expect("write is admitted behind the reads");
+            .test_ok()?;
 
         let (gate_sender, gate_receiver) = std::sync::mpsc::channel();
         observer.install_gate(gate_receiver);
-        release_sender
-            .send(())
-            .expect("initial read release is alive");
+        release_sender.send(()).test_ok()?;
         let mut selected = release_scheduler_gate(&records, &gate_sender);
-        assert!(root_result.await.expect("initial read reply").is_ok());
-        assert!(create_result.await.expect("write reply").is_ok());
+        assert!(root_result.await.test_ok()?.is_ok());
+        assert!(create_result.await.test_ok()?.is_ok());
         for result in read_results {
-            assert!(result.await.expect("read reply").is_ok());
+            assert!(result.await.test_ok()?.is_ok());
         }
 
-        let operations = operations
-            .lock()
-            .expect("operation trace lock is healthy")
-            .clone();
+        let operations = operations.lock().test_ok()?.clone();
         assert_eq!(
             &operations[..10],
             &[
@@ -3287,11 +3556,22 @@ mod tests {
         );
         selected.extend(collect_selected(&records));
         assert_eq!(&selected[..10], &[0, 1, 2, 3, 4, 5, 6, 7, 9, 8]);
-        executor.shutdown().await.expect("executor shuts down");
+        executor.shutdown().await.test_ok()?;
+
+        drop(executor);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn write_admitted_after_eighth_read_probe_is_selected_at_next_boundary() {
+        let result =
+            write_admitted_after_eighth_read_probe_is_selected_at_next_boundary_impl().await;
+        assert!(result.is_ok(), "write_admitted_after_eighth_read_probe_is_selected_at_next_boundary failed: {result:?}");
+    }
+
+    async fn write_admitted_after_eighth_read_probe_is_selected_at_next_boundary_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
         let operations = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -3318,14 +3598,12 @@ mod tests {
                 Instant::now() + std::time::Duration::from_secs(1),
                 std::sync::Arc::new(super::CommandLifecycle::new()),
             )
-            .expect("initial read is admitted");
+            .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            entered_receiver
-                .recv()
-                .expect("initial read entered the worker");
+            assert!(entered_receiver.recv().is_ok());
         })
         .await
-        .expect("initial read observer joined");
+        .test_ok()?;
 
         let deadline = Instant::now() + std::time::Duration::from_secs(1);
         let read_results = (0..8)
@@ -3333,13 +3611,15 @@ mod tests {
             .collect::<Vec<_>>();
         let (first_gate_sender, first_gate_receiver) = std::sync::mpsc::channel();
         observer.install_gate(first_gate_receiver);
-        release_sender
-            .send(())
-            .expect("initial read release is alive");
-        let _ = release_scheduler_gate_at_pending(&records, &first_gate_sender, 8);
-        assert!(root_result.await.expect("initial read reply").is_ok());
+        release_sender.send(()).test_ok()?;
+        drop(release_scheduler_gate_at_pending(
+            &records,
+            &first_gate_sender,
+            8,
+        ));
+        assert!(root_result.await.test_ok()?.is_ok());
         for result in read_results {
-            assert!(result.await.expect("read reply").is_ok());
+            assert!(result.await.test_ok()?.is_ok());
         }
         wait_for_selected(&records, 8);
 
@@ -3355,10 +3635,10 @@ mod tests {
                 deadline,
                 std::sync::Arc::new(super::CommandLifecycle::new()),
             )
-            .expect("post-probe write is admitted");
+            .test_ok()?;
         let selected_before_write =
             release_scheduler_gate_at_pending(&records, &second_gate_sender, 1);
-        assert!(write_result.await.expect("post-probe write reply").is_ok());
+        assert!(write_result.await.test_ok()?.is_ok());
 
         let write_burst_counters = records
             .try_iter()
@@ -3376,7 +3656,7 @@ mod tests {
         assert!(!selected_before_write.contains(&write_ordinal));
         assert_eq!(write_burst_counters, vec![8]);
         assert_eq!(
-            &operations.lock().expect("operation trace lock is healthy")[..10],
+            &operations.lock().test_ok()?[..10],
             &[
                 "root_count",
                 "read",
@@ -3390,11 +3670,24 @@ mod tests {
                 "create",
             ]
         );
-        executor.shutdown().await.expect("executor shuts down");
+        executor.shutdown().await.test_ok()?;
+
+        drop(executor);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn interleaved_writes_retain_successful_admission_order() {
+        let result = interleaved_writes_retain_successful_admission_order_impl().await;
+        assert!(
+            result.is_ok(),
+            "interleaved_writes_retain_successful_admission_order failed: {result:?}"
+        );
+    }
+
+    async fn interleaved_writes_retain_successful_admission_order_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
         let operations = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -3421,14 +3714,12 @@ mod tests {
                 Instant::now() + std::time::Duration::from_secs(1),
                 std::sync::Arc::new(super::CommandLifecycle::new()),
             )
-            .expect("initial read is admitted");
+            .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            entered_receiver
-                .recv()
-                .expect("initial read entered the worker");
+            assert!(entered_receiver.recv().is_ok());
         })
         .await
-        .expect("initial read observer joined");
+        .test_ok()?;
 
         let deadline = Instant::now() + std::time::Duration::from_secs(1);
         let (first_reply, first_result) = tokio::sync::oneshot::channel();
@@ -3441,7 +3732,7 @@ mod tests {
                 deadline,
                 std::sync::Arc::new(super::CommandLifecycle::new()),
             )
-            .expect("first write is admitted");
+            .test_ok()?;
         let read_result = submit_get_timeline(&executor, deadline);
         let (second_reply, second_result) = tokio::sync::oneshot::channel();
         executor
@@ -3453,22 +3744,22 @@ mod tests {
                 deadline,
                 std::sync::Arc::new(super::CommandLifecycle::new()),
             )
-            .expect("second write is admitted");
+            .test_ok()?;
 
-        release_sender
-            .send(())
-            .expect("initial read release is alive");
-        assert!(root_result.await.expect("initial read reply").is_ok());
-        assert!(first_result.await.expect("first write reply").is_ok());
-        assert!(read_result.await.expect("read reply").is_ok());
-        assert!(second_result.await.expect("second write reply").is_ok());
+        release_sender.send(()).test_ok()?;
+        assert!(root_result.await.test_ok()?.is_ok());
+        assert!(first_result.await.test_ok()?.is_ok());
+        assert!(read_result.await.test_ok()?.is_ok());
+        assert!(second_result.await.test_ok()?.is_ok());
         assert_eq!(
-            *created_names
-                .lock()
-                .expect("created-name trace lock is healthy"),
+            *created_names.lock().test_ok()?,
             vec!["write-1".to_owned(), "write-2".to_owned()]
         );
-        executor.shutdown().await.expect("executor shuts down");
+        executor.shutdown().await.test_ok()?;
+
+        drop(executor);
+
+        Ok(())
     }
 
     fn spawn_append_producer(
@@ -3495,20 +3786,9 @@ mod tests {
                     Instant::now() + std::time::Duration::from_secs(1),
                     std::sync::Arc::new(super::CommandLifecycle::new()),
                 )
-                .expect("append producer is admitted");
-            let events = result
-                .blocking_recv()
-                .expect("append producer receives a reply")
-                .expect("append producer succeeds");
-            (
-                ordinal,
-                events
-                    .into_iter()
-                    .next()
-                    .expect("append returns an event")
-                    .seq
-                    .as_u64(),
-            )
+                .test_value();
+            let events = result.blocking_recv().test_value().test_value();
+            (ordinal, events.into_iter().next().test_value().seq.as_u64())
         })
     }
 
@@ -3540,14 +3820,14 @@ mod tests {
                     Instant::now() + std::time::Duration::from_secs(1),
                     std::sync::Arc::new(super::CommandLifecycle::new()),
                 )
-                .expect("identified producer is admitted");
+                .test_value();
             let outcome = result
                 .blocking_recv()
-                .expect("identified producer receives a reply")
-                .expect("identified producer succeeds")
-                .expect("identified append is inserted");
+                .test_value()
+                .test_value()
+                .test_value();
             let pos_core::store::AppendOrDuplicateOutcome::Appended(event) = outcome else {
-                panic!("identified producer must append a new event");
+                std::panic::resume_unwind(Box::new("identified producer must append a new event"));
             };
             (ordinal, event.seq.as_u64())
         })
@@ -3555,36 +3835,42 @@ mod tests {
 
     #[tokio::test]
     async fn coordinated_same_timeline_appends_follow_admission_order() {
+        let result = coordinated_same_timeline_appends_follow_admission_order_impl().await;
+        assert!(
+            result.is_ok(),
+            "coordinated_same_timeline_appends_follow_admission_order failed: {result:?}"
+        );
+    }
+
+    async fn coordinated_same_timeline_appends_follow_admission_order_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
         let (observer, records) = super::SchedulerObserver::new(64);
-        let executor = super::StoreExecutor::spawn_with_observer_for_test(
+        let executor = std::sync::Arc::new(super::StoreExecutor::spawn_with_observer_for_test(
             super::ExecutorStore::Generic(Box::new(BlockingRootCountStore {
                 inner: MemoryStore::new(),
                 entered: entered_sender,
                 release: release_receiver,
             })),
             observer,
-        );
+        ));
         let timeline = executor
             .create("concurrent-appends".to_owned())
             .await
-            .expect("shared timeline is created");
+            .test_ok()?;
         let timeline_id = timeline.id();
         let blocker = {
             let executor = executor.clone();
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            entered_receiver
-                .recv()
-                .expect("root-count command entered the worker");
+            assert!(entered_receiver.recv().is_ok());
         })
         .await
-        .expect("root-count entry observer joined");
-        let _ = records.try_iter().collect::<Vec<_>>();
+        .test_ok()?;
+        drop(records.try_iter().collect::<Vec<_>>());
 
-        let executor = std::sync::Arc::new(executor);
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
         let append_thread = spawn_append_producer(
             std::sync::Arc::clone(&executor),
@@ -3598,13 +3884,11 @@ mod tests {
         );
 
         barrier.wait();
-        release_sender.send(()).expect("worker release is alive");
-        assert!(blocker.await.expect("blocked command joined").is_ok());
+        release_sender.send(()).test_ok()?;
+        assert!(blocker.await.test_ok()?.is_ok());
         let mut admitted = [
-            append_thread.join().expect("append producer joined"),
-            identified_thread
-                .join()
-                .expect("identified producer joined"),
+            append_thread.join().test_ok()?,
+            identified_thread.join().test_ok()?,
         ];
         admitted.sort_unstable();
         assert_eq!(
@@ -3631,11 +3915,24 @@ mod tests {
                 .map(|(ordinal, _)| *ordinal)
                 .collect::<Vec<_>>()
         );
-        executor.shutdown().await.expect("executor shuts down");
+        executor.shutdown().await.test_ok()?;
+
+        drop(executor);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn failed_send_releases_admission_permits() {
+        let result = failed_send_releases_admission_permits_impl().await;
+        assert!(
+            result.is_ok(),
+            "failed_send_releases_admission_permits failed: {result:?}"
+        );
+    }
+
+    async fn failed_send_releases_admission_permits_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
         let executor = super::StoreExecutor::from_sender_for_test(sender);
         let deadline = Instant::now() + std::time::Duration::from_secs(1);
@@ -3650,7 +3947,7 @@ mod tests {
                 deadline,
                 std::sync::Arc::new(super::CommandLifecycle::new()),
             )
-            .expect("first read is admitted");
+            .test_ok()?;
         assert_eq!(first_ordinal, 0);
         assert_eq!(
             executor.control.global_budget.available_permits(),
@@ -3682,7 +3979,7 @@ mod tests {
             super::READ_CAPACITY - 1
         );
 
-        drop(receiver.recv().await.expect("accepted envelope is present"));
+        drop(receiver.recv().await.test_ok()?);
         let (third_reply, _third_result) = tokio::sync::oneshot::channel();
         let third_ordinal = executor
             .try_submit_with_admission_for_test(
@@ -3693,14 +3990,9 @@ mod tests {
                 deadline,
                 std::sync::Arc::new(super::CommandLifecycle::new()),
             )
-            .expect("read after the full send is admitted");
+            .test_ok()?;
         assert_eq!(third_ordinal, 1);
-        drop(
-            receiver
-                .recv()
-                .await
-                .expect("replacement envelope is present"),
-        );
+        drop(receiver.recv().await.test_ok()?);
         assert_eq!(
             executor.control.global_budget.available_permits(),
             super::QUEUE_CAPACITY
@@ -3709,10 +4001,23 @@ mod tests {
             executor.control.read_budget.available_permits(),
             super::READ_CAPACITY
         );
+
+        drop(executor);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn failed_read_acquisition_releases_global_permit() {
+        let result = failed_read_acquisition_releases_global_permit_impl();
+        assert!(
+            result.is_ok(),
+            "failed_read_acquisition_releases_global_permit failed: {result:?}"
+        );
+    }
+
+    fn failed_read_acquisition_releases_global_permit_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(super::QUEUE_CAPACITY);
         let executor = super::StoreExecutor::from_sender_for_test(sender);
         let deadline = Instant::now() + std::time::Duration::from_secs(1);
@@ -3728,7 +4033,7 @@ mod tests {
                     deadline,
                     std::sync::Arc::new(super::CommandLifecycle::new()),
                 )
-                .expect("read-class permit is available");
+                .test_ok()?;
         }
         assert_eq!(executor.control.global_budget.available_permits(), 8);
         assert_eq!(executor.control.read_budget.available_permits(), 0);
@@ -3759,10 +4064,23 @@ mod tests {
             executor.control.read_budget.available_permits(),
             super::READ_CAPACITY
         );
+
+        drop(executor);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn global_admission_exhaustion_releases_without_consuming_ordinal() {
+        let result = global_admission_exhaustion_releases_without_consuming_ordinal_impl().await;
+        assert!(
+            result.is_ok(),
+            "global_admission_exhaustion_releases_without_consuming_ordinal failed: {result:?}"
+        );
+    }
+
+    async fn global_admission_exhaustion_releases_without_consuming_ordinal_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(super::QUEUE_CAPACITY);
         let executor = super::StoreExecutor::from_sender_for_test(sender);
         let deadline = Instant::now() + std::time::Duration::from_secs(1);
@@ -3777,8 +4095,8 @@ mod tests {
                     deadline,
                     std::sync::Arc::new(super::CommandLifecycle::new()),
                 )
-                .expect("global permit is available");
-            assert_eq!(ordinal, u64::try_from(expected).expect("test ordinal fits"));
+                .test_ok()?;
+            assert_eq!(ordinal, u64::try_from(expected).test_ok()?);
         }
         let (reply, _result) = tokio::sync::oneshot::channel();
         assert!(matches!(
@@ -3806,22 +4124,30 @@ mod tests {
                 deadline,
                 std::sync::Arc::new(super::CommandLifecycle::new()),
             )
-            .expect("global permit is restored");
+            .test_ok()?;
         assert_eq!(ordinal, super::QUEUE_CAPACITY as u64);
-        drop(
-            receiver
-                .recv()
-                .await
-                .expect("replacement envelope is present"),
-        );
+        drop(receiver.recv().await.test_ok()?);
         assert_eq!(
             executor.control.global_budget.available_permits(),
             super::QUEUE_CAPACITY
         );
+
+        drop(executor);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn closed_send_releases_admission_permits() {
+        let result = closed_send_releases_admission_permits_impl();
+        assert!(
+            result.is_ok(),
+            "closed_send_releases_admission_permits failed: {result:?}"
+        );
+    }
+
+    fn closed_send_releases_admission_permits_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (sender, receiver) = tokio::sync::mpsc::channel(1);
         drop(receiver);
         let executor = super::StoreExecutor::from_sender_for_test(sender);
@@ -3847,17 +4173,26 @@ mod tests {
             super::READ_CAPACITY
         );
         assert_eq!(
-            *executor
-                .control
-                .next_admission_ordinal
-                .lock()
-                .expect("admission ordinal lock is healthy"),
+            *executor.control.next_admission_ordinal.lock().test_ok()?,
             0
         );
+
+        drop(executor);
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn normal_completion_releases_admission_permits() {
+        let result = normal_completion_releases_admission_permits_impl().await;
+        assert!(
+            result.is_ok(),
+            "normal_completion_releases_admission_permits failed: {result:?}"
+        );
+    }
+
+    async fn normal_completion_releases_admission_permits_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let executor = super::StoreExecutor::new(Box::new(MemoryStore::new()));
         assert!(executor.create("completed".to_owned()).await.is_ok());
         assert!(executor.timeline(TimelineId::new()).await.is_ok());
@@ -3869,7 +4204,7 @@ mod tests {
             }
         })
         .await
-        .expect("normal command completion releases admission permits");
+        .test_ok()?;
         assert_eq!(
             executor.control.global_budget.available_permits(),
             super::QUEUE_CAPACITY
@@ -3878,11 +4213,16 @@ mod tests {
             executor.control.read_budget.available_permits(),
             super::READ_CAPACITY
         );
-        executor.shutdown().await.expect("executor shuts down");
+        executor.shutdown().await.test_ok()?;
+
+        drop(executor);
+
+        Ok(())
     }
 
     #[test]
-    fn owntracks_ingress_fails_closed_for_a_generic_store() {
+    fn owntracks_ingress_fails_closed_for_a_generic_store(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut state = ExecutorState {
             store: ExecutorStore::Generic(Box::new(MemoryStore::new())),
             owntracks_owner_key: None,
@@ -3896,12 +4236,15 @@ mod tests {
             [2; 32],
             CanonicalBytes::from_static(b"payload"),
         )
-        .unwrap_err();
+        .test_err()?;
         assert!(matches!(error, CoreError::GeographicAdmissionUnavailable));
+
+        Ok(())
     }
 
     #[test]
-    fn owntracks_ingress_requires_an_owner_key() {
+    fn owntracks_ingress_requires_an_owner_key(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut state = ExecutorState {
             store: ExecutorStore::OwnTracks(Box::new(MemoryStore::new())),
             owntracks_owner_key: None,
@@ -3915,12 +4258,23 @@ mod tests {
             [2; 32],
             CanonicalBytes::from_static(b"payload"),
         )
-        .unwrap_err();
+        .test_err()?;
         assert!(matches!(error, CoreError::GeographicAdmissionUnavailable));
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn owntracks_executor_dispatches_geo_admission_commands() {
+        let result = owntracks_executor_dispatches_geo_admission_commands_impl().await;
+        assert!(
+            result.is_ok(),
+            "owntracks_executor_dispatches_geo_admission_commands failed: {result:?}"
+        );
+    }
+
+    async fn owntracks_executor_dispatches_geo_admission_commands_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let executor =
             super::StoreExecutor::new_with_owntracks_ingress(MemoryStore::new(), [0; 32]);
         let request = GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
@@ -3932,12 +4286,17 @@ mod tests {
             (0, false, 0),
             ([0; 32], [0; 32]),
         ));
-        let _ = executor.admit_geo_location(request).await;
-        executor.shutdown().await.expect("executor shuts down");
+        drop(executor.admit_geo_location(request).await);
+        executor.shutdown().await.test_ok()?;
+
+        drop(executor);
+
+        Ok(())
     }
 
     #[test]
-    fn owntracks_rate_state_expires_without_reaching_the_cardinality_limit() {
+    fn owntracks_rate_state_expires_without_reaching_the_cardinality_limit(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let key = OwnTracksIngressRateKeyV1::from_owner_keyed_bytes([1; 32]);
         let mut limiter = OwnTracksRateLimiter {
             buckets: HashMap::from([(
@@ -3946,17 +4305,20 @@ mod tests {
                     tokens: 0,
                     last_refill: Instant::now()
                         .checked_sub(super::OWNTRACKS_RATE_STATE_TTL)
-                        .expect("current instant is after the rate-state TTL"),
+                        .test_ok()?,
                 },
             )]),
         };
         assert!(limiter.allow(OwnTracksIngressRateKeyV1::from_owner_keyed_bytes([2; 32],)));
         assert_eq!(limiter.buckets.len(), 1);
         assert!(!limiter.buckets.contains_key(&key));
+
+        Ok(())
     }
 
     #[test]
-    fn owntracks_rate_state_evicts_the_oldest_key_at_capacity() {
+    fn owntracks_rate_state_evicts_the_oldest_key_at_capacity(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let now = Instant::now();
         let oldest = OwnTracksIngressRateKeyV1::from_owner_keyed_bytes([1; 32]);
         let newest = OwnTracksIngressRateKeyV1::from_owner_keyed_bytes([2; 32]);
@@ -3965,7 +4327,7 @@ mod tests {
         for byte in 0..super::OWNTRACKS_RATE_KEYS_MAXIMUM {
             buckets.insert(
                 OwnTracksIngressRateKeyV1::from_owner_keyed_bytes(
-                    [u8::try_from(byte).expect("test byte is bounded"); 32],
+                    [u8::try_from(byte).test_ok()?; 32],
                 ),
                 super::OwnTracksTokenBucket {
                     tokens: 1,
@@ -3979,7 +4341,7 @@ mod tests {
                 tokens: 1,
                 last_refill: now
                     .checked_sub(std::time::Duration::from_secs(1))
-                    .expect("current instant is after the test interval"),
+                    .test_ok()?,
             },
         );
         buckets.insert(
@@ -3996,5 +4358,7 @@ mod tests {
         assert!(!limiter.buckets.contains_key(&oldest));
         assert!(limiter.buckets.contains_key(&replacement));
         assert!(limiter.buckets.contains_key(&newest));
+
+        Ok(())
     }
 }

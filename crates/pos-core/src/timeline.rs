@@ -90,66 +90,70 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn forked_timeline_records_parent_and_seq() {
+    fn forked_timeline_records_parent_and_seq() -> Result<(), Box<dyn std::error::Error>> {
         let parent = TimelineId::new();
         let at_seq = Seq::from_u64(42);
         let meta = TimelineMeta::forked_from(parent, at_seq, "branch-a");
         assert!(!meta.is_root());
-        let (fp_parent, fp_seq) = meta.fork_point.unwrap();
+        let (fp_parent, fp_seq) = meta.fork_point.ok_or("fork point missing")?;
         assert_eq!(fp_parent, parent);
         assert_eq!(fp_seq, at_seq);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn timeline_meta_json_round_trip() {
+    fn timeline_meta_json_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let meta = TimelineMeta::root("main");
-        let back: TimelineMeta =
-            serde_json::from_str(&serde_json::to_string(&meta).unwrap()).unwrap();
+        let back: TimelineMeta = serde_json::from_str(&serde_json::to_string(&meta)?)?;
         assert_eq!(meta, back);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn timeline_meta_cbor_round_trip() {
+    fn timeline_meta_cbor_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let parent = TimelineId::new();
         let meta = TimelineMeta::forked_from(parent, Seq::from_u64(7), "fork");
         let mut buf = Vec::new();
-        ciborium::into_writer(&meta, &mut buf).unwrap();
-        let back: TimelineMeta = ciborium::from_reader(buf.as_slice()).unwrap();
+        ciborium::into_writer(&meta, &mut buf)?;
+        let back: TimelineMeta = ciborium::from_reader(buf.as_slice())?;
         assert_eq!(meta, back);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn timeline_json_round_trip() {
+    fn timeline_json_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let t = Timeline::new(TimelineMeta::root("test"));
-        let back: Timeline = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        let back: Timeline = serde_json::from_str(&serde_json::to_string(&t)?)?;
         assert_eq!(t, back);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn timeline_cbor_round_trip() {
+    fn timeline_cbor_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let t = Timeline::new(TimelineMeta::root("cbor-test"));
         let mut buf = Vec::new();
-        ciborium::into_writer(&t, &mut buf).unwrap();
-        let back: Timeline = ciborium::from_reader(buf.as_slice()).unwrap();
+        ciborium::into_writer(&t, &mut buf)?;
+        let back: Timeline = ciborium::from_reader(buf.as_slice())?;
         assert_eq!(t, back);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn timeline_mode_serde() {
+    fn timeline_mode_serde() -> Result<(), Box<dyn std::error::Error>> {
         for mode in [
             TimelineMode::Historical,
             TimelineMode::Live,
             TimelineMode::Future,
         ] {
-            let back: TimelineMode =
-                serde_json::from_str(&serde_json::to_string(&mode).unwrap()).unwrap();
+            let back: TimelineMode = serde_json::from_str(&serde_json::to_string(&mode)?)?;
             assert_eq!(mode, back);
         }
+        Ok(())
     }
 
     #[test]

@@ -154,34 +154,38 @@ mod tests {
         append_identity_expires_at, checked_append_identity_expires_at,
         APPEND_IDENTITY_RETENTION_MICROS,
     };
+    use proptest::{prop_assert, prop_assert_eq};
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn wall_time_round_trip_json() {
+    fn wall_time_round_trip_json() -> Result<(), Box<dyn std::error::Error>> {
         let t = WallTime::from_micros(1_700_000_000_000_000);
-        let s = serde_json::to_string(&t).unwrap();
-        let back: WallTime = serde_json::from_str(&s).unwrap();
+        let s = serde_json::to_string(&t)?;
+        let back: WallTime = serde_json::from_str(&s)?;
         assert_eq!(t, back);
+        Ok(())
     }
 
     #[test]
-    fn admission_clocks_return_configured_times() {
+    fn admission_clocks_return_configured_times() -> Result<(), Box<dyn std::error::Error>> {
         let expected = WallTime::from_micros(9);
         let mut fixed = FixedAdmissionClock(expected);
-        assert_eq!(fixed.now().unwrap(), expected);
+        assert_eq!(fixed.now()?, expected);
         let mut system = SystemAdmissionClock;
-        assert!(system.now().unwrap().as_micros() > 0);
+        assert!(system.now()?.as_micros() > 0);
+        Ok(())
     }
 
     #[test]
-    fn append_identity_expiry_helpers_cover_saturation_and_overflow() {
+    fn append_identity_expiry_helpers_cover_saturation_and_overflow(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let admitted_at = WallTime::from_micros(42);
         assert_eq!(
             append_identity_expires_at(admitted_at),
             WallTime::from_micros(42 + APPEND_IDENTITY_RETENTION_MICROS)
         );
         assert_eq!(
-            checked_append_identity_expires_at(admitted_at).unwrap(),
+            checked_append_identity_expires_at(admitted_at)?,
             append_identity_expires_at(admitted_at)
         );
         assert_eq!(
@@ -189,16 +193,18 @@ mod tests {
             WallTime::from_micros(u64::MAX)
         );
         assert!(checked_append_identity_expires_at(WallTime::from_micros(u64::MAX)).is_err());
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn wall_time_round_trip_cbor() {
+    fn wall_time_round_trip_cbor() -> Result<(), Box<dyn std::error::Error>> {
         let t = WallTime::from_micros(42);
         let mut buf = Vec::new();
-        ciborium::into_writer(&t, &mut buf).unwrap();
-        let back: WallTime = ciborium::from_reader(buf.as_slice()).unwrap();
+        ciborium::into_writer(&t, &mut buf)?;
+        let back: WallTime = ciborium::from_reader(buf.as_slice())?;
         assert_eq!(t, back);
+        Ok(())
     }
 
     #[test]
@@ -234,20 +240,22 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn seq_round_trip_json() {
+    fn seq_round_trip_json() -> Result<(), Box<dyn std::error::Error>> {
         let s = Seq::from_u64(999);
-        let back: Seq = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        let back: Seq = serde_json::from_str(&serde_json::to_string(&s)?)?;
         assert_eq!(s, back);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn seq_round_trip_cbor() {
+    fn seq_round_trip_cbor() -> Result<(), Box<dyn std::error::Error>> {
         let s = Seq::from_u64(999);
         let mut buf = Vec::new();
-        ciborium::into_writer(&s, &mut buf).unwrap();
-        let back: Seq = ciborium::from_reader(buf.as_slice()).unwrap();
+        ciborium::into_writer(&s, &mut buf)?;
+        let back: Seq = ciborium::from_reader(buf.as_slice())?;
         assert_eq!(s, back);
+        Ok(())
     }
 
     #[test]
@@ -258,18 +266,30 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn sim_time_add_duration() {
+    fn sim_time_add_duration() -> Result<(), Box<dyn std::error::Error>> {
         let t = SimTime::from_nanos(1000);
         let d = SimDuration::from_nanos(500);
-        assert_eq!(t.checked_add(d).unwrap().as_nanos(), 1500);
+        assert_eq!(
+            t.checked_add(d)
+                .ok_or("duration addition overflow")?
+                .as_nanos(),
+            1500
+        );
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn sim_time_sub_duration() {
+    fn sim_time_sub_duration() -> Result<(), Box<dyn std::error::Error>> {
         let a = SimTime::from_nanos(1000);
         let b = SimTime::from_nanos(400);
-        assert_eq!(a.checked_sub(b).unwrap().as_nanos(), 600);
+        assert_eq!(
+            a.checked_sub(b)
+                .ok_or("duration subtraction overflow")?
+                .as_nanos(),
+            600
+        );
+        Ok(())
     }
 
     #[test]
@@ -286,20 +306,22 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn sim_time_round_trip_json() {
+    fn sim_time_round_trip_json() -> Result<(), Box<dyn std::error::Error>> {
         let t = SimTime::from_nanos(-42);
-        let back: SimTime = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        let back: SimTime = serde_json::from_str(&serde_json::to_string(&t)?)?;
         assert_eq!(t, back);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn sim_time_round_trip_cbor() {
+    fn sim_time_round_trip_cbor() -> Result<(), Box<dyn std::error::Error>> {
         let t = SimTime::from_nanos(999_999);
         let mut buf = Vec::new();
-        ciborium::into_writer(&t, &mut buf).unwrap();
-        let back: SimTime = ciborium::from_reader(buf.as_slice()).unwrap();
+        ciborium::into_writer(&t, &mut buf)?;
+        let back: SimTime = ciborium::from_reader(buf.as_slice())?;
         assert_eq!(t, back);
+        Ok(())
     }
 
     proptest::proptest! {
@@ -319,9 +341,19 @@ mod tests {
         fn seq_ord_stable_after_serde(a: u64, b: u64) {
             let sa = Seq::from_u64(a);
             let sb = Seq::from_u64(b);
-            let sa2: Seq = serde_json::from_str(&serde_json::to_string(&sa).unwrap()).unwrap();
-            let sb2: Seq = serde_json::from_str(&serde_json::to_string(&sb).unwrap()).unwrap();
-            assert_eq!(sa.cmp(&sb), sa2.cmp(&sb2));
+            let sa_json = serde_json::to_string(&sa);
+            prop_assert!(sa_json.is_ok(), "Seq JSON serialization failed");
+            let sb_json = serde_json::to_string(&sb);
+            prop_assert!(sb_json.is_ok(), "Seq JSON serialization failed");
+            if let (Ok(sa_json), Ok(sb_json)) = (sa_json, sb_json) {
+                let sa2 = serde_json::from_str::<Seq>(&sa_json);
+                let sb2 = serde_json::from_str::<Seq>(&sb_json);
+                prop_assert!(sa2.is_ok(), "Seq JSON deserialization failed");
+                prop_assert!(sb2.is_ok(), "Seq JSON deserialization failed");
+                if let (Ok(sa2), Ok(sb2)) = (sa2, sb2) {
+                    prop_assert_eq!(sa.cmp(&sb), sa2.cmp(&sb2));
+                }
+            }
         }
 
         #[test]

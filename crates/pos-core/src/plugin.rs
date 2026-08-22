@@ -156,20 +156,21 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn plugin_capability_json_round_trip() {
+    fn plugin_capability_json_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let cap = Capability {
             owned_event_types: vec![Kind::new("world.observation"), Kind::new("agent.decision")],
             owned_entity_kinds: vec!["agent".to_owned()],
             has_driver: true,
             has_reducer: false,
         };
-        let back: Capability = serde_json::from_str(&serde_json::to_string(&cap).unwrap()).unwrap();
+        let back: Capability = serde_json::from_str(&serde_json::to_string(&cap)?)?;
         assert_eq!(cap, back);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn plugin_capability_cbor_round_trip() {
+    fn plugin_capability_cbor_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let cap = Capability {
             owned_event_types: vec![Kind::new("sensor.reading")],
             owned_entity_kinds: vec![],
@@ -177,9 +178,10 @@ mod tests {
             has_reducer: true,
         };
         let mut buf = Vec::new();
-        ciborium::into_writer(&cap, &mut buf).unwrap();
-        let back: Capability = ciborium::from_reader(buf.as_slice()).unwrap();
+        ciborium::into_writer(&cap, &mut buf)?;
+        let back: Capability = ciborium::from_reader(buf.as_slice())?;
         assert_eq!(cap, back);
+        Ok(())
     }
 
     #[test]
@@ -252,7 +254,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn proposed_action_serde_round_trip() {
+    fn proposed_action_serde_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let entity = EntityId::new();
         let payload = CanonicalBytes::from_vec(vec![1, 2, 3]);
         let proposal = ProposedAction::new(
@@ -261,14 +263,15 @@ mod tests {
             payload,
             Kind::new("test.action.submit"),
         );
-        let serialized = serde_json::to_string(&proposal).unwrap();
-        let deserialized: ProposedAction = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&proposal)?;
+        let deserialized: ProposedAction = serde_json::from_str(&serialized)?;
         assert_eq!(proposal, deserialized);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn action_rejected_display_and_error() {
+    fn action_rejected_display_and_error() -> Result<(), Box<dyn std::error::Error>> {
         let errors = vec![
             (ActionRejected::UnknownEventType, "unknown event type"),
             (
@@ -294,9 +297,10 @@ mod tests {
 
         for (err, expected_msg) in errors {
             assert_eq!(err.to_string(), expected_msg);
-            let json = serde_json::to_string(&err).unwrap();
-            let back: ActionRejected = serde_json::from_str(&json).unwrap();
+            let json = serde_json::to_string(&err)?;
+            let back: ActionRejected = serde_json::from_str(&json)?;
             assert_eq!(err, back);
         }
+        Ok(())
     }
 }

@@ -146,7 +146,7 @@ fn build_store(db: &Path, today: &str, pubkey: Option<String>) -> Result<ExportM
     let ledger_store = pos_plugin_ledger::EventLedgerStore::new(
         store,
         timeline.id(),
-        crate::cli::well_known_entity(),
+        crate::well_known_entity(),
         sk,
         Box::new(pos_crypto::chain::Blake3Hasher),
     );
@@ -175,12 +175,13 @@ mod tests {
     use super::*;
     use crate::cli::run;
     use crate::hex::{hex_decode, nib};
+    use crate::test_helpers::{running_as_root, TestOptionExt, TestResultExt};
     use tempfile::TempDir;
 
-    fn populated_toml_dir() -> TempDir {
-        let tmp = TempDir::new().unwrap();
+    fn populated_toml_dir() -> Result<TempDir, Box<dyn std::error::Error>> {
+        let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&dir).test_ok()?;
         run(&[
             "piglor-ledger".into(),
             "predict".into(),
@@ -201,7 +202,7 @@ mod tests {
             "--osf".into(),
             "https://osf.io/example".into(),
         ])
-        .unwrap();
+        .test_ok()?;
         let id = crate::test_helpers::first_prediction_id(&dir);
         run(&[
             "piglor-ledger".into(),
@@ -215,87 +216,95 @@ mod tests {
             "--resolved-at".into(),
             "2026-07-30T09:00:00Z".into(),
         ])
-        .unwrap();
+        .test_ok()?;
         // Return the TempDir parent so both `tmp` (with `ledger/`) survives.
         // The dir is tmp/ledger; we'll point build at it.
         // We need to keep the TempDir alive — return it.
-        tmp
+        Ok(tmp)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn build_toml_produces_manifest_with_file_hashes_matching_b3sum() {
-        let tmp = populated_toml_dir();
+    fn build_toml_produces_manifest_with_file_hashes_matching_b3sum(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = populated_toml_dir()?;
         let dir = tmp.path().join("ledger");
-        let manifest = build(&Source::Toml(dir.clone()), "2026-07-25", None).unwrap();
-        let json = serde_json::to_string_pretty(&manifest).unwrap();
+        let manifest = build(&Source::Toml(dir.clone()), "2026-07-25", None).test_ok()?;
+        let json = serde_json::to_string_pretty(&manifest).test_ok()?;
         assert!(json.contains("\"tier\": \"toml\""), "{json}");
         assert!(json.contains("\"today\": \"2026-07-25\""), "{json}");
         assert!(json.contains("\"n_resolved\": 1"), "{json}");
         assert!(json.contains("\"n_pending\": 0"), "{json}");
         // Parse as a generic JSON value to inspect file hashes without branching
         // on the enum variant (avoids unreachable match arms).
-        let val: serde_json::Value = serde_json::from_str(&json).unwrap();
-        let files = val["files"].as_array().unwrap();
+        let val: serde_json::Value = serde_json::from_str(&json).test_ok()?;
+        let files = val["files"].as_array().test_ok()?;
         assert_eq!(
             files.len(),
             2,
             "expected 2 files (1 prediction + 1 resolution)"
         );
         for fh in files {
-            let path = fh["path"].as_str().unwrap();
-            let hash = fh["hash"].as_str().unwrap();
+            let path = fh["path"].as_str().test_ok()?;
+            let hash = fh["hash"].as_str().test_ok()?;
             let abs = dir.join(path);
-            let bytes = std::fs::read(&abs).unwrap();
+            let bytes = std::fs::read(&abs).test_ok()?;
             let expected = blake3::hash(&bytes).to_hex().to_string();
             assert_eq!(hash, expected, "hash mismatch for {path}");
             assert_eq!(hash.len(), 64);
         }
         assert!(files[0]["path"]
             .as_str()
-            .unwrap()
+            .test_ok()?
             .starts_with("predictions/"));
         assert!(files[1]["path"]
             .as_str()
-            .unwrap()
+            .test_ok()?
             .starts_with("resolutions/"));
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn build_toml_empty_dir_yields_empty_manifest() {
-        let tmp = TempDir::new().unwrap();
+    fn build_toml_empty_dir_yields_empty_manifest() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
-        std::fs::create_dir_all(&dir).unwrap();
-        let manifest = build(&Source::Toml(dir), "2026-07-25", None).unwrap();
-        let json = serde_json::to_string_pretty(&manifest).unwrap();
+        std::fs::create_dir_all(&dir).test_ok()?;
+        let manifest = build(&Source::Toml(dir), "2026-07-25", None).test_ok()?;
+        let json = serde_json::to_string_pretty(&manifest).test_ok()?;
         assert!(json.contains("\"tier\": \"toml\""), "{json}");
         assert!(json.contains("\"n_pending\": 0"), "{json}");
         assert!(json.contains("\"n_resolved\": 0"), "{json}");
         assert!(json.contains("\"files\": []"), "{json}");
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn build_store_without_ledger_timeline_errors() {
-        let tmp = TempDir::new().unwrap();
+    fn build_store_without_ledger_timeline_errors() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("novelty.db");
         // Open and create a non-ledger timeline so the find fails.
         let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
             path: db.to_string_lossy().into_owned(),
         })
-        .unwrap();
-        store.create_timeline("other").unwrap();
+        .test_ok()?;
+        store.create_timeline("other").test_ok()?;
         drop(store);
-        let err = build_store(&db, "2026-07-25", None).unwrap_err();
+        let err = build_store(&db, "2026-07-25", None).test_err()?;
         assert!(err.to_string().contains("ledger"));
+
+        Ok(())
     }
 
     #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn build_store_with_signed_events_includes_signature_hex() {
-        let tmp = TempDir::new().unwrap();
+    fn build_store_with_signed_events_includes_signature_hex(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
         // keygen + predict + resolve via the CLI
         let key_path = tmp.path().join("sk");
@@ -303,10 +312,10 @@ mod tests {
             "piglor-ledger".into(),
             "keygen".into(),
             "--out".into(),
-            key_path.to_str().unwrap().to_owned(),
+            key_path.to_str().test_ok()?.to_owned(),
         ])
-        .unwrap();
-        let key_text = std::fs::read_to_string(&key_path).unwrap();
+        .test_ok()?;
+        let key_text = std::fs::read_to_string(&key_path).test_ok()?;
         let _pk = crate::test_helpers::derive_pubkey_hex(&key_text);
 
         run(&[
@@ -315,7 +324,7 @@ mod tests {
             "--source".into(),
             format!("store:{}", db.display()),
             "--key".into(),
-            key_path.to_str().unwrap().to_owned(),
+            key_path.to_str().test_ok()?.to_owned(),
             "--title".into(),
             "T".into(),
             "--statement".into(),
@@ -331,11 +340,11 @@ mod tests {
             "--osf".into(),
             "https://osf.io/example".into(),
         ])
-        .unwrap();
+        .test_ok()?;
         // Need a pubkey to verify; re-derive from the secret key for the manifest.
         let pubkey = crate::test_helpers::derive_pubkey_hex(&key_text);
-        let manifest = build_store(&db, "2026-07-25", Some(pubkey.clone())).unwrap();
-        let json = serde_json::to_string_pretty(&manifest).unwrap();
+        let manifest = build_store(&db, "2026-07-25", Some(pubkey.clone())).test_ok()?;
+        let json = serde_json::to_string_pretty(&manifest).test_ok()?;
         assert!(json.contains("\"tier\": \"store\""), "{json}");
         assert!(
             json.contains(&format!("\"pubkey\": \"{pubkey}\"")),
@@ -344,45 +353,54 @@ mod tests {
         assert!(json.contains("\"n_pending\": 1"), "{json}");
         // Parse as a generic JSON value to inspect events without branching on the
         // enum variant (avoids unreachable match arms).
-        let val: serde_json::Value = serde_json::from_str(&json).unwrap();
-        let events = val["events"].as_array().unwrap();
+        let val: serde_json::Value = serde_json::from_str(&json).test_ok()?;
+        let events = val["events"].as_array().test_ok()?;
         assert!(!events.is_empty(), "expected at least one event");
         assert!(
             events.iter().all(|e| e["signature_hex"].is_string()),
             "all events should be signed"
         );
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn collect_toml_hashes_skips_unreadable_subdirs() {
+    fn collect_toml_hashes_skips_unreadable_subdirs() -> Result<(), Box<dyn std::error::Error>> {
         // With the simplified collect_toml_hashes (any read_dir error → skip),
         // an empty ledger dir produces an empty file list.
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
-        std::fs::create_dir_all(&dir).unwrap();
-        let manifest = build(&Source::Toml(dir), "2026-07-25", None).unwrap();
+        std::fs::create_dir_all(&dir).test_ok()?;
+        let manifest = build(&Source::Toml(dir), "2026-07-25", None).test_ok()?;
         // Check via JSON to avoid unreachable pattern-match branches.
-        let json = serde_json::to_string_pretty(&manifest).unwrap();
+        let json = serde_json::to_string_pretty(&manifest).test_ok()?;
         assert!(json.contains("\"tier\": \"toml\""), "{json}");
         assert!(json.contains("\"files\": []"), "{json}");
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn collect_toml_hashes_skips_unreadable_file() {
+    fn collect_toml_hashes_skips_unreadable_file() -> Result<(), Box<dyn std::error::Error>> {
         // Exercises the `continue` on L113 in collect_toml_hashes when the
         // file is listed by read_dir but unreadable (permissions removed).
         use std::os::unix::fs::PermissionsExt;
-        let tmp = TempDir::new().unwrap();
+        if running_as_root() {
+            return Ok(());
+        }
+        let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
-        std::fs::create_dir_all(dir.join("predictions")).unwrap();
+        std::fs::create_dir_all(dir.join("predictions")).test_ok()?;
         let pred_file = dir.join("predictions").join("test.toml");
-        std::fs::write(&pred_file, "key = \"value\"\n").unwrap();
-        std::fs::set_permissions(&pred_file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::write(&pred_file, "key = \"value\"\n").test_ok()?;
+        std::fs::set_permissions(&pred_file, std::fs::Permissions::from_mode(0o000)).test_ok()?;
         let hashes = collect_toml_hashes(&dir);
-        std::fs::set_permissions(&pred_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&pred_file, std::fs::Permissions::from_mode(0o644)).test_ok()?;
         assert!(hashes.is_empty(), "expected no hashes for unreadable file");
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -401,15 +419,17 @@ mod tests {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn nib_covers_uppercase() {
+    fn nib_covers_uppercase() -> Result<(), Box<dyn std::error::Error>> {
         // Exercises the 'A'..='F' arm of nib.
-        assert_eq!(nib('A').unwrap(), 10);
-        assert_eq!(nib('F').unwrap(), 15);
+        assert_eq!(nib('A').test_ok()?, 10);
+        assert_eq!(nib('F').test_ok()?, 15);
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn manifest_serialises_as_pretty_tagged_json() {
+    fn manifest_serialises_as_pretty_tagged_json() -> Result<(), Box<dyn std::error::Error>> {
         let manifest = ExportManifest::Toml {
             today: "2026-07-25".into(),
             view: LedgerView {
@@ -422,39 +442,41 @@ mod tests {
             },
             files: Vec::new(),
         };
-        let s = serde_json::to_string_pretty(&manifest).unwrap();
+        let s = serde_json::to_string_pretty(&manifest).test_ok()?;
         assert!(s.contains("\"tier\": \"toml\""));
         assert!(s.contains("\"today\": \"2026-07-25\""));
         assert!(s.contains("\"n_resolved\": 0"));
         assert!(s.contains("\"entries\": []"));
         // Round-trips losslessly.
-        let back: ExportManifest = serde_json::from_str(&s).unwrap();
+        let back: ExportManifest = serde_json::from_str(&s).test_ok()?;
         assert_eq!(back, manifest);
+
+        Ok(())
     }
 
     #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn build_source_store_dispatches_to_build_store() {
+    fn build_source_store_dispatches_to_build_store() -> Result<(), Box<dyn std::error::Error>> {
         // Exercises the `Source::Store(db) => build_store(...)` arm (line 79)
         // of the public `build()` function.
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
         let key_path = tmp.path().join("sk");
         run(&[
             "piglor-ledger".into(),
             "keygen".into(),
             "--out".into(),
-            key_path.to_str().unwrap().to_owned(),
+            key_path.to_str().test_ok()?.to_owned(),
         ])
-        .unwrap();
+        .test_ok()?;
         run(&[
             "piglor-ledger".into(),
             "predict".into(),
             "--source".into(),
             format!("store:{}", db.display()),
             "--key".into(),
-            key_path.to_str().unwrap().to_owned(),
+            key_path.to_str().test_ok()?.to_owned(),
             "--title".into(),
             "T".into(),
             "--statement".into(),
@@ -470,38 +492,44 @@ mod tests {
             "--osf".into(),
             "https://osf.io/x".into(),
         ])
-        .unwrap();
+        .test_ok()?;
         // Derive pubkey for the manifest.
-        let sk_text = std::fs::read_to_string(&key_path).unwrap();
+        let sk_text = std::fs::read_to_string(&key_path).test_ok()?;
         let pubkey = crate::test_helpers::derive_pubkey_hex(&sk_text);
-        let manifest = build(&Source::Store(db), "2026-07-25", Some(pubkey)).unwrap();
-        let json = serde_json::to_string_pretty(&manifest).unwrap();
+        let manifest = build(&Source::Store(db), "2026-07-25", Some(pubkey)).test_ok()?;
+        let json = serde_json::to_string_pretty(&manifest).test_ok()?;
         assert!(json.contains("\"tier\": \"store\""), "{json}");
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn build_store_with_invalid_sqlite_path_errors() {
+    fn build_store_with_invalid_sqlite_path_errors() -> Result<(), Box<dyn std::error::Error>> {
         // Covers L133: `format!("open sqlite: {e}")` in build_store when the
         // sqlite path is invalid (parent directory doesn't exist).
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().test_ok()?;
         let bad_db = tmp.path().join("no_such_dir").join("ledger.db");
-        let err = build_store(&bad_db, "2026-07-25", None).unwrap_err();
+        let err = build_store(&bad_db, "2026-07-25", None).test_err()?;
         // The error could be "store error" (wrapped CoreError) or "io error" depending on SQLite behavior.
         assert!(!err.to_string().is_empty(), "{err}");
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn build_store_with_corrupted_db_errors() {
+    fn build_store_with_corrupted_db_errors() -> Result<(), Box<dyn std::error::Error>> {
         // Covers L136: `format!("list timelines: {e}")` in build_store when
         // the DB file is not a valid SQLite database.
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().test_ok()?;
         let bad_db = tmp.path().join("corrupt.db");
-        std::fs::write(&bad_db, b"this is not a sqlite file at all\n").unwrap();
+        std::fs::write(&bad_db, b"this is not a sqlite file at all\n").test_ok()?;
         let err = build_store(&bad_db, "2026-07-25", None);
         // Either open fails (L133) or list_timelines fails (L136).
         assert!(err.is_err(), "expected error for corrupted DB");
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -520,25 +548,30 @@ mod tests {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn build_toml_with_invalid_today_errors() {
+    fn build_toml_with_invalid_today_errors() -> Result<(), Box<dyn std::error::Error>> {
         // Covers L86: `?` on store.load(today) in build_toml when today is invalid.
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&dir).test_ok()?;
         // Invalid date format triggers LedgerError::InvalidToday → CliError::Ledger.
-        let err = build(&Source::Toml(dir), "not-a-date", None).unwrap_err();
+        let err = build(&Source::Toml(dir), "not-a-date", None).test_err()?;
         assert!(err.to_string().contains("invalid today"), "{err}");
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn build_toml_unreadable_prediction_returns_error() {
+    fn build_toml_unreadable_prediction_returns_error() -> Result<(), Box<dyn std::error::Error>> {
         // When a prediction file is unreadable, store.load fails with an
         // io error — demonstrating the error propagates through build_toml.
         use std::os::unix::fs::PermissionsExt;
-        let tmp = TempDir::new().unwrap();
+        if running_as_root() {
+            return Ok(());
+        }
+        let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
-        std::fs::create_dir_all(dir.join("predictions")).unwrap();
+        std::fs::create_dir_all(dir.join("predictions")).test_ok()?;
         let pred_file = dir
             .join("predictions")
             .join("01J3B0Y5ZK2J6MGK8D7QW3N0P9.toml");
@@ -546,36 +579,38 @@ mod tests {
             &pred_file,
             "prediction_id = \"01J3B0Y5ZK2J6MGK8D7QW3N0P9\"\ntitle = \"T\"\nstatement = \"S\"\npredicted_outcome = \"O\"\nconfidence = 0.7\nmade_at = \"2026-07-25T12:00:00Z\"\nresolve_by = \"2026-08-01\"\nosf_link = \"https://osf.io/x\"\n",
         )
-        .unwrap();
-        std::fs::set_permissions(&pred_file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        .test_ok()?;
+        std::fs::set_permissions(&pred_file, std::fs::Permissions::from_mode(0o000)).test_ok()?;
         let err = build(&Source::Toml(dir), "2026-07-25", None);
-        std::fs::set_permissions(&pred_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&pred_file, std::fs::Permissions::from_mode(0o644)).test_ok()?;
         // store.load fails because the prediction file is unreadable.
         assert!(err.is_err(), "expected error for unreadable file");
+
+        Ok(())
     }
 
     #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn build_store_with_invalid_today_errors() {
+    fn build_store_with_invalid_today_errors() -> Result<(), Box<dyn std::error::Error>> {
         // Covers L152: `?` on ledger_store.load(today) in build_store.
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
         let key_path = tmp.path().join("sk");
         run(&[
             "piglor-ledger".into(),
             "keygen".into(),
             "--out".into(),
-            key_path.to_str().unwrap().to_owned(),
+            key_path.to_str().test_ok()?.to_owned(),
         ])
-        .unwrap();
+        .test_ok()?;
         run(&[
             "piglor-ledger".into(),
             "predict".into(),
             "--source".into(),
             format!("store:{}", db.display()),
             "--key".into(),
-            key_path.to_str().unwrap().to_owned(),
+            key_path.to_str().test_ok()?.to_owned(),
             "--title".into(),
             "T".into(),
             "--statement".into(),
@@ -591,48 +626,52 @@ mod tests {
             "--osf".into(),
             "https://osf.io/x".into(),
         ])
-        .unwrap();
-        let err = build_store(&db, "bad-date", None).unwrap_err();
+        .test_ok()?;
+        let err = build_store(&db, "bad-date", None).test_err()?;
         assert!(err.to_string().contains("invalid today"), "{err}");
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn build_store_list_timelines_fails_on_corrupt_db() {
+    fn build_store_list_timelines_fails_on_corrupt_db() -> Result<(), Box<dyn std::error::Error>> {
         // Covers L136: `?` on list_timelines in build_store when timeline
         // id is corrupt (same SQLite injection technique as pos-cli).
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("corrupt.db");
         {
             let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
                 path: db.to_string_lossy().into_owned(),
             })
-            .unwrap();
-            store.create_timeline("ledger").unwrap();
+            .test_ok()?;
+            store.create_timeline("ledger").test_ok()?;
         }
         {
-            let conn = rusqlite::Connection::open(&db).expect("open for corruption");
+            let conn = rusqlite::Connection::open(&db).test_ok()?;
             conn.execute("UPDATE timelines SET id = X'0102'", [])
-                .expect("corrupt timeline id");
+                .test_ok()?;
         }
-        let err = build_store(&db, "2026-07-25", None).unwrap_err();
+        let err = build_store(&db, "2026-07-25", None).test_err()?;
         assert!(!err.to_string().is_empty(), "{err}");
+
+        Ok(())
     }
 
     #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn build_store_read_fails_on_corrupt_events() {
+    fn build_store_read_fails_on_corrupt_events() -> Result<(), Box<dyn std::error::Error>> {
         // Covers L141: `?` on store.read when an Event identifier is corrupt.
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().test_ok()?;
         let key_path = tmp.path().join("sk");
         run(&[
             "piglor-ledger".into(),
             "keygen".into(),
             "--out".into(),
-            key_path.to_str().unwrap().to_owned(),
+            key_path.to_str().test_ok()?.to_owned(),
         ])
-        .unwrap();
+        .test_ok()?;
         let db = tmp.path().join("corrupt_events.db");
         // Add a real event so the timeline and events table have data.
         run(&[
@@ -641,7 +680,7 @@ mod tests {
             "--source".into(),
             format!("store:{}", db.display()),
             "--key".into(),
-            key_path.to_str().unwrap().to_owned(),
+            key_path.to_str().test_ok()?.to_owned(),
             "--title".into(),
             "T".into(),
             "--statement".into(),
@@ -657,14 +696,16 @@ mod tests {
             "--osf".into(),
             "https://osf.io/x".into(),
         ])
-        .unwrap();
+        .test_ok()?;
         // Corrupt an Event identifier so store.read() fails after open succeeds.
         {
-            let conn = rusqlite::Connection::open(&db).expect("open for corruption");
+            let conn = rusqlite::Connection::open(&db).test_ok()?;
             conn.execute("UPDATE events SET event_id = 'not-a-ulid'", [])
-                .expect("corrupt Event identifier");
+                .test_ok()?;
         }
-        let err = build_store(&db, "2026-07-25", None).unwrap_err();
+        let err = build_store(&db, "2026-07-25", None).test_err()?;
         assert!(!err.to_string().is_empty(), "{err}");
+
+        Ok(())
     }
 }

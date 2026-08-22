@@ -20,7 +20,7 @@ impl ProjectionDigest {
         clippy::cast_possible_truncation,
         reason = "The bounded projection crosses the renderer's f64-to-f32 boundary."
     )]
-    pub fn landmark_x(self) -> f32 {
+    pub const fn landmark_x(self) -> f32 {
         f64::from_bits(self.landmark_x_bits) as f32
     }
 
@@ -103,11 +103,27 @@ mod tests {
     use crate::ClientError;
     use pos_core::state::State;
     use serde_json::json;
+    use std::fmt::Debug;
+
+    trait TestResultExt<T, E> {
+        fn test_err(self) -> Result<E, Box<dyn std::error::Error>>;
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error>>;
+    }
+
+    impl<T, E: Debug> TestResultExt<T, E> for Result<T, E> {
+        fn test_err(self) -> Result<E, Box<dyn std::error::Error>> {
+            self.err().ok_or_else(|| "expected an error".into())
+        }
+
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error>> {
+            self.map_err(|error| format!("unexpected error: {error:?}").into())
+        }
+    }
 
     #[test]
-    fn projects_fixture_to_stable_digest() {
-        let export = decode_fixture(&fixture_bytes()).unwrap();
-        let digest = project_fixture(&export).unwrap();
+    fn projects_fixture_to_stable_digest() -> Result<(), Box<dyn std::error::Error>> {
+        let export = decode_fixture(&fixture_bytes()).test_ok()?;
+        let digest = project_fixture(&export).test_ok()?;
 
         assert_eq!(digest.signals, 2);
         assert_eq!(digest.trust_mean_bits, 0.75f64.to_bits());
@@ -127,85 +143,106 @@ mod tests {
         }
         .landmark_x()
         .is_nan());
+
+        Ok(())
     }
 
     #[test]
-    fn projects_events_in_sequence_order() {
-        let mut export = decode_fixture(&fixture_bytes()).unwrap();
+    fn projects_events_in_sequence_order() -> Result<(), Box<dyn std::error::Error>> {
+        let mut export = decode_fixture(&fixture_bytes()).test_ok()?;
         export.events.reverse();
 
         let events = sorted_events(&export.events);
         assert_eq!(events[0].seq.as_u64(), 1);
         assert_eq!(events[1].seq.as_u64(), 2);
 
-        let digest = project_fixture(&export).unwrap();
+        let digest = project_fixture(&export).test_ok()?;
         assert_eq!(digest.trust_mean_bits, 0.75f64.to_bits());
         assert_eq!(digest.landmark_x_bits, 1.0f64.to_bits());
+
+        Ok(())
     }
 
     #[test]
-    fn rejects_missing_fixed_entity_state() {
-        let mut export = decode_fixture(&fixture_bytes()).unwrap();
+    fn rejects_missing_fixed_entity_state() -> Result<(), Box<dyn std::error::Error>> {
+        let mut export = decode_fixture(&fixture_bytes()).test_ok()?;
         export.events.clear();
 
-        let error = project_fixture(&export).unwrap_err();
+        let error = project_fixture(&export).test_err()?;
 
-        assert_invalid(error, "missing fixed entity state");
+        assert_invalid(error, "missing fixed entity state")?;
+
+        Ok(())
     }
 
     #[test]
-    fn rejects_missing_signals() {
-        let error = digest_from_state(&State::new()).unwrap_err();
+    fn rejects_missing_signals() -> Result<(), Box<dyn std::error::Error>> {
+        let error = digest_from_state(&State::new()).test_err()?;
 
-        assert_invalid(error, "missing society signal count");
+        assert_invalid(error, "missing society signal count")?;
+
+        Ok(())
     }
 
     #[test]
-    fn rejects_missing_trust_mean() {
+    fn rejects_missing_trust_mean() -> Result<(), Box<dyn std::error::Error>> {
         let mut state = State::new();
         state.set("signals", json!(2));
 
-        let error = digest_from_state(&state).unwrap_err();
+        let error = digest_from_state(&state).test_err()?;
 
-        assert_invalid(error, "missing trust mean");
+        assert_invalid(error, "missing trust mean")?;
+
+        Ok(())
     }
 
     #[test]
-    fn rejects_non_numeric_signals() {
+    fn rejects_non_numeric_signals() -> Result<(), Box<dyn std::error::Error>> {
         let mut state = State::new();
         state.set("signals", json!("two"));
         state.set("mean.trust", json!(0.75));
 
-        let error = digest_from_state(&state).unwrap_err();
+        let error = digest_from_state(&state).test_err()?;
 
-        assert_invalid(error, "missing society signal count");
+        assert_invalid(error, "missing society signal count")?;
+
+        Ok(())
     }
 
     #[test]
-    fn rejects_non_finite_and_out_of_range_projection_values() {
+    fn rejects_non_finite_and_out_of_range_projection_values(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         for trust_mean in [f64::NAN, -0.1, 1.1] {
-            let error = digest_from_values(2, trust_mean, 1.0).unwrap_err();
-            assert_invalid(error, "trust mean is outside [0, 1]");
+            let error = digest_from_values(2, trust_mean, 1.0).test_err()?;
+            assert_invalid(error, "trust mean is outside [0, 1]")?;
         }
 
-        let error = digest_from_values(2, 0.75, f64::NAN).unwrap_err();
-        assert_invalid(error, "landmark is not finite");
+        let error = digest_from_values(2, 0.75, f64::NAN).test_err()?;
+        assert_invalid(error, "landmark is not finite")?;
+
+        Ok(())
     }
 
     #[test]
-    #[should_panic(expected = "expected ClientError::Invalid")]
     fn invalid_assertion_rejects_decode_errors() {
-        assert_invalid(
+        assert!(assert_invalid(
             ClientError::Decode("decode failed".to_owned()),
             "decode failed",
-        );
+        )
+        .is_err());
     }
 
-    fn assert_invalid(error: ClientError, expected: &str) {
+    fn assert_invalid(
+        error: ClientError,
+        expected: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         match error {
-            ClientError::Invalid(message) => assert_eq!(message, expected),
+            ClientError::Invalid(message) => {
+                assert_eq!(message, expected);
+                Ok(())
+            }
             ClientError::Decode(message) => {
-                panic!("expected ClientError::Invalid, got Decode({message})")
+                Err(format!("expected ClientError::Invalid, got Decode({message})").into())
             }
         }
     }

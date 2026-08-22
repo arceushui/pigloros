@@ -4,7 +4,29 @@ use pos_core::{
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 
-fn request(
+trait TestValueExt<T> {
+    fn test_ok(self) -> T;
+}
+
+impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+    fn test_ok(self) -> T {
+        self.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "unexpected enrollment fixture error: {error:?}"
+            )))
+        })
+    }
+}
+
+impl<T> TestValueExt<T> for Option<T> {
+    fn test_ok(self) -> T {
+        self.unwrap_or_else(|| {
+            std::panic::resume_unwind(Box::new("missing enrollment fixture value"))
+        })
+    }
+}
+
+const fn request(
     timeline: pos_core::TimelineId,
     entity: EntityId,
     epoch: u64,
@@ -23,26 +45,26 @@ where
     S: EventStore + OwnTracksEnrollmentStore,
 {
     assert_eq!(
-        store.owntracks_enrollment_status().unwrap().status(),
+        store.owntracks_enrollment_status().test_ok().status(),
         OwnTracksEnrollmentStatusV1::Absent
     );
     assert_eq!(
         store
             .owntracks_enrollment_status()
-            .unwrap()
+            .test_ok()
             .policy_version(),
         None
     );
 
-    let timeline = store.create_timeline("owntracks-enrollment").unwrap();
+    let timeline = store.create_timeline("owntracks-enrollment").test_ok();
     let entity = EntityId::new();
     assert_eq!(
         store
             .pair_owntracks_enrollment(request(timeline.id(), entity, 3, [3; 32]))
-            .unwrap(),
+            .test_ok(),
         OwnTracksEnrollmentStatusV1::Active
     );
-    let active = store.owntracks_enrollment_status().unwrap();
+    let active = store.owntracks_enrollment_status().test_ok();
     assert_eq!(active.status(), OwnTracksEnrollmentStatusV1::Active);
     assert_eq!(active.policy_version(), Some(1));
 
@@ -50,20 +72,22 @@ where
         .pair_owntracks_enrollment(request(timeline.id(), entity, 4, [4; 32]))
         .is_err());
     assert_eq!(
-        store.owntracks_enrollment_status().unwrap().status(),
+        store.owntracks_enrollment_status().test_ok().status(),
         OwnTracksEnrollmentStatusV1::Active
     );
 
     assert_eq!(
-        store.rotate_owntracks_enrollment_verifier([5; 32]).unwrap(),
+        store
+            .rotate_owntracks_enrollment_verifier([5; 32])
+            .test_ok(),
         OwnTracksEnrollmentStatusV1::Active
     );
     assert_eq!(
-        store.revoke_owntracks_enrollment().unwrap(),
+        store.revoke_owntracks_enrollment().test_ok(),
         OwnTracksEnrollmentStatusV1::Revoked
     );
     assert_eq!(
-        store.owntracks_enrollment_status().unwrap().status(),
+        store.owntracks_enrollment_status().test_ok().status(),
         OwnTracksEnrollmentStatusV1::Revoked
     );
     assert!(store.rotate_owntracks_enrollment_verifier([6; 32]).is_err());
@@ -71,7 +95,7 @@ where
     assert_eq!(
         store
             .pair_owntracks_enrollment(request(timeline.id(), entity, 5, [7; 32]))
-            .unwrap(),
+            .test_ok(),
         OwnTracksEnrollmentStatusV1::Active
     );
 }
@@ -83,20 +107,20 @@ fn memory_enrollment_contract() {
 
 #[test]
 fn sqlite_enrollment_contract() {
-    assert_enrollment_contract(&mut SqliteStore::open_in_memory().unwrap());
+    assert_enrollment_contract(&mut SqliteStore::open_in_memory().test_ok());
 }
 
 fn assert_deleting_enrolled_timeline_revokes<S>(store: &mut S)
 where
     S: EventStore + OwnTracksEnrollmentStore,
 {
-    let timeline = store.create_timeline("delete-enrolled").unwrap();
+    let timeline = store.create_timeline("delete-enrolled").test_ok();
     store
         .pair_owntracks_enrollment(request(timeline.id(), EntityId::new(), 3, [8; 32]))
-        .unwrap();
-    store.delete_timeline(timeline.id()).unwrap();
+        .test_ok();
+    store.delete_timeline(timeline.id()).test_ok();
     assert_eq!(
-        store.owntracks_enrollment_status().unwrap().status(),
+        store.owntracks_enrollment_status().test_ok().status(),
         OwnTracksEnrollmentStatusV1::Revoked
     );
 }
@@ -108,5 +132,5 @@ fn deleting_memory_enrolled_timeline_revokes_enrollment() {
 
 #[test]
 fn deleting_sqlite_enrolled_timeline_revokes_enrollment() {
-    assert_deleting_enrolled_timeline_revokes(&mut SqliteStore::open_in_memory().unwrap());
+    assert_deleting_enrolled_timeline_revokes(&mut SqliteStore::open_in_memory().test_ok());
 }

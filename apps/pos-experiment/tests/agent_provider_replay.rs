@@ -1,3 +1,21 @@
+trait TestValueExt<T> {
+    fn test_ok(self) -> T;
+}
+
+impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+    fn test_ok(self) -> T {
+        self.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
+        })
+    }
+}
+
+impl<T> TestValueExt<T> for Option<T> {
+    fn test_ok(self) -> T {
+        self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected test value")))
+    }
+}
+
 use pos_core::{
     clock::Seq,
     event::{CanonicalBytes, Event, EventDraft, Kind},
@@ -44,7 +62,7 @@ struct TickRecordingProvider {
 
 impl AgentDecisionProvider for TickRecordingProvider {
     fn decide(&mut self, request: &AgentDecisionRequestV1) -> ProviderAttempt {
-        self.ticks.lock().unwrap().push(request.driver_tick());
+        self.ticks.lock().test_ok().push(request.driver_tick());
         ProviderAttempt::Response(self.response.clone())
     }
 }
@@ -63,7 +81,7 @@ impl HostFixture {
         let agent = EntityId::new();
         let plugin = PluginId::new();
         let catalogue =
-            ActionCatalogueV1::try_new(vec!["move".to_owned(), "wait".to_owned()]).unwrap();
+            ActionCatalogueV1::try_new(vec!["move".to_owned(), "wait".to_owned()]).test_ok();
         let provenance = AgentProviderProvenanceV1::try_new(
             plugin,
             PLUGIN_VERSION.to_owned(),
@@ -72,7 +90,7 @@ impl HostFixture {
             PROVIDER_VERSION.to_owned(),
             PROVIDER_HASH,
         )
-        .unwrap();
+        .test_ok();
         let catalogue_hash = blake3::derive_key(
             "pigloros.agent.catalogue.v1",
             &catalogue_bytes(&["move", "wait"]),
@@ -133,7 +151,7 @@ impl HostFixture {
                 Some(Box::new(AgentReducer)),
                 Some(Box::new(driver)),
             )
-            .unwrap();
+            .test_ok();
         (experiment, calls, committed_tick)
     }
 
@@ -166,7 +184,7 @@ impl HostFixture {
             self.provenance.clone(),
             self.catalogue.clone(),
         )
-        .unwrap()
+        .test_ok()
     }
 
     fn forkable_experiment(
@@ -212,7 +230,7 @@ impl HostFixture {
                 Some(Box::new(AgentReducer)),
                 Some(Box::new(parent_driver)),
             )
-            .unwrap();
+            .test_ok();
         experiment
     }
 }
@@ -422,21 +440,15 @@ impl SharedMemoryAdapter {
     }
 
     fn source_events(&self, timeline: TimelineId) -> Vec<Event> {
-        self.store()
-            .read(timeline, SeqRange::all())
-            .expect("fixture source read should succeed")
+        self.store().read(timeline, SeqRange::all()).test_ok()
     }
 
     fn store(&self) -> MutexGuard<'_, MemoryStore> {
-        self.store
-            .lock()
-            .expect("fixture store lock should be healthy")
+        self.store.lock().test_ok()
     }
 
     fn control(&self) -> MutexGuard<'_, AdapterControl> {
-        self.control
-            .lock()
-            .expect("fixture control lock should be healthy")
+        self.control.lock().test_ok()
     }
 }
 
@@ -555,7 +567,7 @@ fn assert_supplied_store_has_no_recovery_recipe(
     adapter.drop_first_on_next_read();
     assert!(session.source_events().is_err());
 
-    let result = session.run_to_completion().unwrap();
+    let result = session.run_to_completion().test_ok();
     assert!(result.store_config.is_none());
     assert!(matches!(
         result.branch("must-not-reopen"),
@@ -576,7 +588,7 @@ fn boundary_experiment(name: &str, driver: BoundaryDriver) -> Experiment {
             Some(Box::new(AgentReducer)),
             Some(Box::new(driver)),
         )
-        .unwrap();
+        .test_ok();
     experiment
 }
 
@@ -592,7 +604,7 @@ fn backtest_runner_completes_both_empty_phases() {
         PluginRegistry::new,
     )
     .run()
-    .unwrap();
+    .test_ok();
     assert_eq!(result.train_events, 0);
     assert_eq!(result.eval_events, 0);
     assert!(matches!(
@@ -610,7 +622,7 @@ fn backtest_runner_reads_train_history_before_non_empty_eval() {
     let host = HostFixture::new();
     let plugin = Arc::new(AgentPlugin::new());
     let accepted = accepted_response_bytes(0, CONFIDENCE);
-    let runner_host = host.clone();
+    let runner_host = host;
     let runner_plugin = Arc::clone(&plugin);
     let result = BacktestRunner::new(
         BacktestConfig {
@@ -634,12 +646,12 @@ fn backtest_runner_reads_train_history_before_non_empty_eval() {
                     Some(Box::new(AgentReducer)),
                     Some(Box::new(driver)),
                 )
-                .unwrap();
+                .test_ok();
             registry
         },
     )
     .run()
-    .unwrap();
+    .test_ok();
     assert!(result.train_events > 0);
     assert!(result.eval_events > 0);
     assert_eq!(result.train_result.ticks, 1);
@@ -649,7 +661,7 @@ fn backtest_runner_reads_train_history_before_non_empty_eval() {
 #[test]
 fn backtest_eval_restores_driver_tick_before_first_provider_decision() {
     let host = HostFixture::new();
-    let accepted = BoundedProviderBytes::try_from(accepted_response_bytes(0, CONFIDENCE)).unwrap();
+    let accepted = BoundedProviderBytes::try_from(accepted_response_bytes(0, CONFIDENCE)).test_ok();
     let train_ticks = Arc::new(Mutex::new(Vec::new()));
     let eval_ticks = Arc::new(Mutex::new(Vec::new()));
     let factory_calls = Arc::new(AtomicU64::new(0));
@@ -664,7 +676,6 @@ fn backtest_eval_restores_driver_tick_before_first_provider_decision() {
             let train_ticks = Arc::clone(&train_ticks);
             let eval_ticks = Arc::clone(&eval_ticks);
             let factory_calls = Arc::clone(&factory_calls);
-            let host = host.clone();
             move || {
                 let phase = factory_calls.fetch_add(1, Ordering::SeqCst);
                 let ticks = if phase == 0 {
@@ -688,17 +699,17 @@ fn backtest_eval_restores_driver_tick_before_first_provider_decision() {
                         Some(Box::new(AgentReducer)),
                         Some(Box::new(driver)),
                     )
-                    .unwrap();
+                    .test_ok();
                 registry
             }
         },
     )
     .run()
-    .unwrap();
+    .test_ok();
 
     assert_eq!(factory_calls.load(Ordering::SeqCst), 2);
-    assert_eq!(*train_ticks.lock().unwrap(), vec![0]);
-    assert_eq!(*eval_ticks.lock().unwrap(), vec![1]);
+    assert_eq!(*train_ticks.lock().test_ok(), vec![0]);
+    assert_eq!(*eval_ticks.lock().test_ok(), vec![1]);
     assert_eq!(result.train_result.ticks, 1);
     assert_eq!(result.eval_result.ticks, 1);
     assert_eq!(result.train_events, 2);
@@ -709,14 +720,14 @@ fn backtest_eval_restores_driver_tick_before_first_provider_decision() {
 fn boundary_driver_paths_cover_quiescence_runtime_and_schema_failures() {
     let result = boundary_experiment("boundary-empty", BoundaryDriver::Empty)
         .run()
-        .unwrap();
+        .test_ok();
     assert_eq!(result.total_events, 0);
 
     for (name, driver) in [
         ("boundary-runtime", BoundaryDriver::Fails),
         ("boundary-schema", BoundaryDriver::EmitsUnknown),
     ] {
-        let mut session = boundary_experiment(name, driver).start().unwrap();
+        let mut session = boundary_experiment(name, driver).start().test_ok();
         assert!(session.step_tick().is_err());
         assert!(matches!(
             session.step_tick(),
@@ -735,7 +746,7 @@ fn post_append_capture_failure_faults_the_session() {
     );
     let adapter = SharedMemoryAdapter::new();
     adapter.fail_after_first_logical_head();
-    let mut session = experiment.start_with_store(Box::new(adapter)).unwrap();
+    let mut session = experiment.start_with_store(Box::new(adapter)).test_ok();
     assert!(matches!(
         session.step_tick(),
         Err(ExperimentError::Store(_))
@@ -758,9 +769,9 @@ fn resume_rejects_mismatched_ancestry_metadata() {
     );
     let mut parent = experiment
         .start_with_store(Box::new(adapter.clone()))
-        .unwrap();
-    parent.step_tick().unwrap();
-    let child = parent.fork("child").unwrap();
+        .test_ok();
+    parent.step_tick().test_ok();
+    let child = parent.fork("child").test_ok();
     adapter.return_wrong_timeline_on_second_get();
     let fresh = host.experiment("agent-provider-ancestry-resume", vec![]).0;
     assert!(fresh
@@ -781,8 +792,8 @@ fn resume_rejects_cyclic_ancestry_metadata() {
         .0;
     let mut original = experiment
         .start_with_store(Box::new(adapter.clone()))
-        .unwrap();
-    original.step_tick().unwrap();
+        .test_ok();
+    original.step_tick().test_ok();
     let timeline = original.timeline().id();
     adapter.return_cycle_on_second_get();
     let fresh = host.experiment("agent-provider-cyclic-resume", vec![]).0;
@@ -806,11 +817,11 @@ fn live_boundaries_are_atomic_byte_stable_and_provider_free_on_replay() {
     let adapter = SharedMemoryAdapter::new();
     let mut session = experiment
         .start_with_store(Box::new(adapter.clone()))
-        .unwrap();
+        .test_ok();
     let timeline = session.timeline().id();
 
     assert_eq!(
-        session.step_tick().unwrap(),
+        session.step_tick().test_ok(),
         TickOutcome::Advanced {
             folded_events: 2,
             emitted_events: 2,
@@ -818,7 +829,7 @@ fn live_boundaries_are_atomic_byte_stable_and_provider_free_on_replay() {
     );
     assert_eq!(committed_tick.load(), 1);
     assert_eq!(
-        session.step_tick().unwrap(),
+        session.step_tick().test_ok(),
         TickOutcome::Advanced {
             folded_events: 1,
             emitted_events: 1,
@@ -828,7 +839,7 @@ fn live_boundaries_are_atomic_byte_stable_and_provider_free_on_replay() {
     assert_eq!(calls.get(), 2);
     assert_eq!(adapter.append_batch_sizes(), [2, 1]);
 
-    let events = session.source_events().unwrap();
+    let events = session.source_events().test_ok();
     assert_eq!(
         events
             .iter()
@@ -876,9 +887,9 @@ fn live_boundaries_are_atomic_byte_stable_and_provider_free_on_replay() {
 
     let state = session
         .projections()
-        .unwrap()
+        .test_ok()
         .state_for_reducer("agent", &host.agent)
-        .unwrap();
+        .test_ok();
     assert_eq!(
         state
             .get("action_count")
@@ -891,7 +902,7 @@ fn live_boundaries_are_atomic_byte_stable_and_provider_free_on_replay() {
     );
 
     let before_replay_calls = calls.get();
-    let checkpoint = host.verifier(timeline).verify(&events, None).unwrap();
+    let checkpoint = host.verifier(timeline).verify(&events, None).test_ok();
     assert_eq!(checkpoint.last_verified(), Seq::from_u64(3));
     assert_eq!(calls.get(), before_replay_calls);
 
@@ -910,7 +921,7 @@ fn append_fault_commits_neither_pair_nor_tick_and_fresh_session_recovers() {
     );
     let mut failed_session = experiment
         .start_with_store(Box::new(adapter.clone()))
-        .unwrap();
+        .test_ok();
     let timeline = failed_session.timeline().id();
 
     assert!(matches!(
@@ -920,7 +931,7 @@ fn append_fault_commits_neither_pair_nor_tick_and_fresh_session_recovers() {
     assert_eq!(failed_calls.get(), 1);
     assert_eq!(failed_tick.load(), 0);
     assert!(adapter.source_events(timeline).is_empty());
-    assert!(failed_session.source_events().unwrap().is_empty());
+    assert!(failed_session.source_events().test_ok().is_empty());
     assert_eq!(adapter.append_batch_sizes(), [2]);
 
     let (recovery, recovery_calls, recovery_tick) = host.experiment(
@@ -929,9 +940,9 @@ fn append_fault_commits_neither_pair_nor_tick_and_fresh_session_recovers() {
     );
     let mut recovered = recovery
         .resume_with_store(timeline, Box::new(adapter.clone()))
-        .unwrap();
+        .test_ok();
     assert_eq!(
-        recovered.step_tick().unwrap(),
+        recovered.step_tick().test_ok(),
         TickOutcome::Advanced {
             folded_events: 2,
             emitted_events: 2,
@@ -939,7 +950,7 @@ fn append_fault_commits_neither_pair_nor_tick_and_fresh_session_recovers() {
     );
     assert_eq!(recovery_tick.load(), 1);
 
-    let events = recovered.source_events().unwrap();
+    let events = recovered.source_events().test_ok();
     let expected_record = host.expected_record(
         timeline,
         0,
@@ -969,9 +980,9 @@ fn append_fault_commits_neither_pair_nor_tick_and_fresh_session_recovers() {
     assert_eq!(recovery_calls.get(), 1);
     let recovered_state = recovered
         .projections()
-        .unwrap()
+        .test_ok()
         .state_for_reducer("agent", &host.agent)
-        .unwrap();
+        .test_ok();
     assert_eq!(
         recovered_state
             .get("action_count")
@@ -980,7 +991,7 @@ fn append_fault_commits_neither_pair_nor_tick_and_fresh_session_recovers() {
     );
 
     let total_live_calls = failed_calls.get() + recovery_calls.get();
-    let checkpoint = host.verifier(timeline).verify(&events, None).unwrap();
+    let checkpoint = host.verifier(timeline).verify(&events, None).test_ok();
     assert_eq!(checkpoint.last_verified(), Seq::from_u64(2));
     assert_eq!(failed_calls.get() + recovery_calls.get(), total_live_calls);
 }
@@ -997,26 +1008,26 @@ fn committed_history_restores_driver_tick_for_resume_and_fork() {
     );
     let mut original = experiment
         .start_with_store(Box::new(adapter.clone()))
-        .unwrap();
+        .test_ok();
     let timeline = original.timeline().id();
-    original.step_tick().unwrap();
+    original.step_tick().test_ok();
 
     let (resume, _, resumed_tick) = host.experiment(
         "agent-provider-resumed-tick",
         vec![response_attempt(&no_action)],
     );
     let mut resumed = resume
-        .resume_with_store(timeline, Box::new(adapter.clone()))
-        .unwrap();
+        .resume_with_store(timeline, Box::new(adapter))
+        .test_ok();
     assert_eq!(resumed_tick.load(), 1);
-    resumed.step_tick().unwrap();
+    resumed.step_tick().test_ok();
     assert_eq!(resumed_tick.load(), 2);
-    let resumed_events = resumed.source_events().unwrap();
+    let resumed_events = resumed.source_events().test_ok();
     assert_eq!(resumed_events.len(), 3);
     assert_eq!(
         host.verifier(timeline)
             .verify(&resumed_events, None)
-            .unwrap()
+            .test_ok()
             .last_verified(),
         Seq::from_u64(3)
     );
@@ -1027,13 +1038,13 @@ fn committed_history_restores_driver_tick_for_resume_and_fork() {
         vec![response_attempt(&accepted)],
         vec![response_attempt(&no_action)],
     );
-    let mut parent = forkable.start_with_store(Box::new(fork_adapter)).unwrap();
-    parent.step_tick().unwrap();
+    let mut parent = forkable.start_with_store(Box::new(fork_adapter)).test_ok();
+    parent.step_tick().test_ok();
     let parent_timeline = parent.timeline().id();
-    let mut child = parent.fork("agent-provider-child").unwrap();
+    let mut child = parent.fork("agent-provider-child").test_ok();
     let child_timeline = child.timeline().id();
-    child.step_tick().unwrap();
-    let child_events = child.source_events().unwrap();
+    child.step_tick().test_ok();
+    let child_events = child.source_events().test_ok();
     let verifier = AgentDecisionReplayVerifier::try_new_with_timeline_ancestry(
         vec![
             TimelineHistorySegment::new(parent_timeline, Seq::from_u64(2)),
@@ -1041,13 +1052,13 @@ fn committed_history_restores_driver_tick_for_resume_and_fork() {
         ],
         host.agent,
         host.provenance.clone(),
-        host.catalogue.clone(),
+        host.catalogue,
     )
-    .unwrap();
+    .test_ok();
     assert_eq!(
         verifier
             .verify(&child_events, None)
-            .unwrap()
+            .test_ok()
             .last_verified(),
         Seq::from_u64(3)
     );
@@ -1066,8 +1077,8 @@ fn fork_recovery_fails_closed_when_prefix_or_ancestry_read_is_untrustworthy() {
     );
     let mut prefix_parent = prefix_experiment
         .start_with_store(Box::new(prefix_adapter.clone()))
-        .unwrap();
-    prefix_parent.step_tick().unwrap();
+        .test_ok();
+    prefix_parent.step_tick().test_ok();
     prefix_adapter.fail_next_read();
     assert!(matches!(
         prefix_parent.fork("prefix-read-failure"),
@@ -1082,8 +1093,8 @@ fn fork_recovery_fails_closed_when_prefix_or_ancestry_read_is_untrustworthy() {
     );
     let mut ancestry_parent = ancestry_experiment
         .start_with_store(Box::new(ancestry_adapter.clone()))
-        .unwrap();
-    ancestry_parent.step_tick().unwrap();
+        .test_ok();
+    ancestry_parent.step_tick().test_ok();
     ancestry_adapter.return_wrong_timeline_on_second_get();
     assert!(matches!(
         ancestry_parent.fork("ancestry-read-failure"),
@@ -1098,8 +1109,8 @@ fn fork_recovery_fails_closed_when_prefix_or_ancestry_read_is_untrustworthy() {
     );
     let mut cycle_parent = cycle_experiment
         .start_with_store(Box::new(cycle_adapter.clone()))
-        .unwrap();
-    cycle_parent.step_tick().unwrap();
+        .test_ok();
+    cycle_parent.step_tick().test_ok();
     cycle_adapter.return_cycle_on_second_get();
     assert!(matches!(
         cycle_parent.fork("cyclic-ancestry"),
@@ -1118,8 +1129,8 @@ fn supplied_store_read_failure_prevents_driver_restore() {
     );
     let mut original = experiment
         .start_with_store(Box::new(adapter.clone()))
-        .unwrap();
-    original.step_tick().unwrap();
+        .test_ok();
+    original.step_tick().test_ok();
     let timeline = original.timeline().id();
     drop(original);
 
@@ -1147,7 +1158,7 @@ fn source_events_validates_empty_metadata_and_completed_head() {
     let (experiment, _, _) = host.experiment("agent-provider-source-validation", vec![]);
     let mut session = experiment
         .start_with_store(Box::new(adapter.clone()))
-        .unwrap();
+        .test_ok();
 
     adapter.fail_next_get_timeline();
     assert!(session.source_events().is_err());
@@ -1155,23 +1166,23 @@ fn source_events_validates_empty_metadata_and_completed_head() {
     adapter.return_wrong_timeline_on_next_get();
     assert!(session.source_events().is_err());
 
-    session.step_tick().unwrap();
-    assert_eq!(session.source_events().unwrap().len(), 1);
+    session.step_tick().test_ok();
+    assert_eq!(session.source_events().test_ok().len(), 1);
     adapter.report_zero_head_on_next_read();
     assert!(session.source_events().is_err());
 
     let (experiment, _, _) = host.experiment("agent-provider-capture-regression", vec![]);
     let mut session = experiment
         .start_with_store(Box::new(adapter.clone()))
-        .unwrap();
-    session.step_tick().unwrap();
+        .test_ok();
+    session.step_tick().test_ok();
     adapter.report_zero_head_on_next_read();
     assert!(session.step_tick().is_err());
 
     let (experiment, _, _) = host.experiment("agent-provider-capture-gap", vec![]);
     let mut session = experiment
         .start_with_store(Box::new(adapter.clone()))
-        .unwrap();
+        .test_ok();
     let timeline = session.timeline().id();
     adapter
         .store()
@@ -1183,7 +1194,7 @@ fn source_events_validates_empty_metadata_and_completed_head() {
                 pos_core::event::CanonicalBytes::from_static(b"pending"),
             )],
         )
-        .unwrap();
+        .test_ok();
     adapter.drop_first_on_next_read();
     assert!(session.step_tick().is_err());
 }
@@ -1195,7 +1206,7 @@ fn resume_rejects_mismatched_initial_timeline_metadata() {
     let (experiment, _, _) = host.experiment("agent-provider-resume-metadata", vec![]);
     let session = experiment
         .start_with_store(Box::new(adapter.clone()))
-        .unwrap();
+        .test_ok();
     let timeline = session.timeline().id();
     drop(session);
 
@@ -1216,8 +1227,8 @@ fn resume_fails_closed_when_the_durable_prefix_or_metadata_is_untrustworthy() {
     );
     let mut session = experiment
         .start_with_store(Box::new(adapter.clone()))
-        .unwrap();
-    session.step_tick().unwrap();
+        .test_ok();
+    session.step_tick().test_ok();
     let timeline = session.timeline().id();
     drop(session);
 
@@ -1237,7 +1248,7 @@ fn resume_fails_closed_when_the_durable_prefix_or_metadata_is_untrustworthy() {
 #[test]
 fn durable_recipe_reopens_branches_and_resumes_the_child_history() {
     let host = HostFixture::new();
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().test_ok();
     let path = directory.path().join("agent-provider-recovery.sqlite");
     let store_config = StoreConfig::Sqlite {
         path: path.to_string_lossy().into_owned(),
@@ -1247,24 +1258,24 @@ fn durable_recipe_reopens_branches_and_resumes_the_child_history() {
         vec![ProviderAttempt::NoResponse, ProviderAttempt::NoResponse],
         store_config.clone(),
     );
-    let mut result = experiment.start().unwrap().run_to_completion().unwrap();
+    let mut result = experiment.start().test_ok().run_to_completion().test_ok();
     assert!(matches!(
         result.store_config,
         Some(StoreConfig::Sqlite { .. })
     ));
 
-    let child = result.branch("agent-provider-durable-child").unwrap();
+    let child = result.branch("agent-provider-durable-child").test_ok();
     let (resume, calls, restored_tick) = host.experiment_with_store(
         "agent-provider-durable-child-resume",
         vec![ProviderAttempt::NoResponse],
         store_config,
     );
-    let mut resumed = resume.resume(child.id()).unwrap();
+    let mut resumed = resume.resume(child.id()).test_ok();
     assert_eq!(calls.get(), 0, "resume must not call the provider");
     assert_eq!(restored_tick.load(), 2);
-    assert_eq!(resumed.source_events().unwrap().len(), 2);
+    assert_eq!(resumed.source_events().test_ok().len(), 2);
     assert!(matches!(
-        resumed.step_tick().unwrap(),
+        resumed.step_tick().test_ok(),
         TickOutcome::Advanced { .. }
     ));
     assert_eq!(calls.get(), 1);
@@ -1277,7 +1288,7 @@ fn durable_recipe_reopens_branches_and_resumes_the_child_history() {
 fn completed_run_wraps_the_host_reproduction_recipe() {
     let host = HostFixture::new();
     let (experiment, _, _) = host.experiment("agent-provider-reproduction-manifest", vec![]);
-    let result = experiment.start().unwrap().run_to_completion().unwrap();
+    let result = experiment.start().test_ok().run_to_completion().test_ok();
     let timeline_id = result.timeline_id;
     let manifest = result.into_reproduction_manifest(ReproductionRecipe::new(
         "pigloros.agent-provider",
@@ -1306,7 +1317,7 @@ fn configured_resume_rejects_an_absent_timeline() {
 }
 
 fn response_attempt(response: &[u8]) -> ProviderAttempt {
-    ProviderAttempt::Response(BoundedProviderBytes::try_from(response.to_vec()).unwrap())
+    ProviderAttempt::Response(BoundedProviderBytes::try_from(response.to_vec()).test_ok())
 }
 
 fn accepted_response_bytes(action_index: u8, confidence: u32) -> Vec<u8> {
@@ -1436,16 +1447,16 @@ struct IndependentCbor(Vec<u8>);
 
 impl IndependentCbor {
     fn array(&mut self, len: usize) {
-        self.major(4, u64::try_from(len).unwrap());
+        self.major(4, u64::try_from(len).test_ok());
     }
 
     fn bytes(&mut self, value: &[u8]) {
-        self.major(2, u64::try_from(value.len()).unwrap());
+        self.major(2, u64::try_from(value.len()).test_ok());
         self.0.extend_from_slice(value);
     }
 
     fn text(&mut self, value: &str) {
-        self.major(3, u64::try_from(value.len()).unwrap());
+        self.major(3, u64::try_from(value.len()).test_ok());
         self.0.extend_from_slice(value.as_bytes());
     }
 
@@ -1456,20 +1467,20 @@ impl IndependentCbor {
     fn major(&mut self, major: u8, value: u64) {
         let prefix = major << 5;
         match value {
-            0..=23 => self.0.push(prefix | u8::try_from(value).unwrap()),
+            0..=23 => self.0.push(prefix | u8::try_from(value).test_ok()),
             24..=0xff => {
                 self.0.push(prefix | 0x18);
-                self.0.push(u8::try_from(value).unwrap());
+                self.0.push(u8::try_from(value).test_ok());
             }
             0x100..=0xffff => {
                 self.0.push(prefix | 0x19);
                 self.0
-                    .extend_from_slice(&u16::try_from(value).unwrap().to_be_bytes());
+                    .extend_from_slice(&u16::try_from(value).test_ok().to_be_bytes());
             }
             0x1_0000..=0xffff_ffff => {
                 self.0.push(prefix | 0x1a);
                 self.0
-                    .extend_from_slice(&u32::try_from(value).unwrap().to_be_bytes());
+                    .extend_from_slice(&u32::try_from(value).test_ok().to_be_bytes());
             }
             _ => {
                 self.0.push(prefix | 0x1b);

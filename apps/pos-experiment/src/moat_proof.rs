@@ -129,7 +129,7 @@ impl MoatProofRun {
         let mode = self.mode;
         let failure_probes = failure_probes(input.resource_limit)?;
         let consent_audit = consent_probe()?;
-        let topology = ProofTopology::new(input.clone());
+        let topology = ProofTopology::new(input.clone())?;
         let plugin_versions = plugin_versions(&topology)?;
         let factory_topology = topology.clone();
         let registry_factory = move || build_registry(&factory_topology);
@@ -167,7 +167,7 @@ impl MoatProofRun {
             plugin_versions: &plugin_versions,
             failure_probes: &failure_probes,
             consent_audit: &consent_audit,
-        });
+        })?;
         let counterfactual = evidence(&EvidenceContext {
             input: &input,
             mode,
@@ -178,7 +178,7 @@ impl MoatProofRun {
             plugin_versions: &plugin_versions,
             failure_probes: &failure_probes,
             consent_audit: &consent_audit,
-        });
+        })?;
         verify_evidence(&baseline)?;
         verify_evidence(&counterfactual)?;
         verify_counterfactual_fork(&baseline, &counterfactual, EVENT_TYPE_ACTION_V1)?;
@@ -191,7 +191,7 @@ impl MoatProofRun {
             &counterfactual_json,
             EVENT_TYPE_ACTION_V1,
         )?;
-        let divergence = compare(&baseline, &counterfactual);
+        let divergence = compare(&baseline, &counterfactual)?;
         compare_with_reference(&baseline, &counterfactual, &divergence)?;
         let physical_reaction = projection_changed(&baseline, &counterfactual, "world");
         let agent_reaction = projection_changed(&baseline, &counterfactual, "proof-agent");
@@ -230,11 +230,11 @@ pub fn run_local_and_air_gapped(
 ) -> Result<(MoatProofReport, MoatProofReport, ComparisonV1), MoatProofError> {
     let local = MoatProofRun::new(input.clone(), ExecutionModeV1::Local)?.run()?;
     let air_gapped = MoatProofRun::new(input, ExecutionModeV1::AirGapped)?.run()?;
-    let comparison = compare(&local.baseline, &air_gapped.baseline);
+    let comparison = compare(&local.baseline, &air_gapped.baseline)?;
     if !comparison.equal {
         return Err(MoatProofError::ExecutionModesDiverged(comparison));
     }
-    let counterfactual_comparison = compare(&local.counterfactual, &air_gapped.counterfactual);
+    let counterfactual_comparison = compare(&local.counterfactual, &air_gapped.counterfactual)?;
     if !counterfactual_comparison.equal {
         return Err(MoatProofError::ExecutionModesDiverged(
             counterfactual_comparison,
@@ -253,6 +253,8 @@ pub enum MoatProofError {
     Runtime(#[from] RuntimeError),
     #[error("world action encoding failed: {0}")]
     WorldCodec(#[from] pos_plugin_world::WorldCodecError),
+    #[error("world action parameter encoding failed: {0}")]
+    ActionParams(String),
     #[error("fork cut has no committed events")]
     MissingForkCut,
     #[error("proof evidence failed independent verification: {0}")]
@@ -300,10 +302,10 @@ fn fixed_id(value: u128) -> EntityId {
     EntityId::from_ulid(ulid::Ulid::from(value))
 }
 
-fn room_entity(input: &MoatProofInputV1, slot: u8) -> EntityId {
+fn room_entity(input_digest: &[u8; 32], slot: u8) -> EntityId {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"pigloros.wave8.fixture.entity.v1");
-    hasher.update(&input.digest());
+    hasher.update(input_digest);
     hasher.update(&[slot]);
     let digest = hasher.finalize();
     let mut bytes = [0; 16];
@@ -324,10 +326,10 @@ fn intervention(
     actor: EntityId,
     input: &MoatProofInputV1,
     tick: u64,
-) -> Result<pos_core::ProposedAction, pos_plugin_world::WorldCodecError> {
+) -> Result<pos_core::ProposedAction, MoatProofError> {
     let mut params = Vec::new();
     ciborium::into_writer(&input.fork_velocity.to_vec(), &mut params)
-        .expect("CBOR writing to Vec is infallible");
+        .map_err(|error| MoatProofError::ActionParams(error.to_string()))?;
     let action = WorldActionV1 {
         actor_entity_id: actor,
         body_entity_id: body,
@@ -348,6 +350,7 @@ fn intervention(
 #[derive(Clone)]
 struct ProofTopology {
     input: MoatProofInputV1,
+    input_digest: [u8; 32],
     body: EntityId,
     agent: EntityId,
     society: EntityId,
@@ -358,13 +361,15 @@ struct ProofTopology {
 }
 
 impl ProofTopology {
-    fn new(input: MoatProofInputV1) -> Self {
-        let body = room_entity(&input, 1);
-        let agent = room_entity(&input, 2);
-        let society = room_entity(&input, 3);
-        let config_entity = room_entity(&input, 4);
-        Self {
+    fn new(input: MoatProofInputV1) -> Result<Self, pos_core::CoreError> {
+        let input_digest = input.digest()?;
+        let body = room_entity(&input_digest, 1);
+        let agent = room_entity(&input_digest, 2);
+        let society = room_entity(&input_digest, 3);
+        let config_entity = room_entity(&input_digest, 4);
+        Ok(Self {
             input,
+            input_digest,
             body,
             agent,
             society,
@@ -372,7 +377,7 @@ impl ProofTopology {
             world_plugin: WorldPlugin::new().with_bodies([body]),
             agent_plugin: ProofAgentPlugin::new(),
             society_plugin: ProofSocietyPlugin::new(),
-        }
+        })
     }
 }
 
@@ -481,7 +486,7 @@ struct EvidenceContext<'a> {
     consent_audit: &'a ConsentAuditV1,
 }
 
-fn evidence(context: &EvidenceContext<'_>) -> MoatProofEvidenceV1 {
+fn evidence(context: &EvidenceContext<'_>) -> Result<MoatProofEvidenceV1, MoatProofError> {
     let input = context.input;
     let mode = context.mode;
     let fork_cut_seq = context.fork_cut_seq;
@@ -515,7 +520,7 @@ fn evidence(context: &EvidenceContext<'_>) -> MoatProofEvidenceV1 {
             projection_evidence.push(ProjectionEvidenceV1 {
                 reducer: name.to_owned(),
                 entity: entity.to_string(),
-                state: serde_json::to_value(state).expect("State is serializable"),
+                state: serde_json::to_value(state)?,
             });
         }
     }
@@ -541,11 +546,11 @@ fn evidence(context: &EvidenceContext<'_>) -> MoatProofEvidenceV1 {
         .collect();
     let uncertainty = uncertainty_from_events(events);
     let participant_views = participant_views(events);
-    MoatProofEvidenceV1 {
+    Ok(MoatProofEvidenceV1 {
         format_version: EVIDENCE_FORMAT_V1,
         manifest: ReproManifestV1 {
             format_version: EVIDENCE_FORMAT_V1,
-            input_digest: input.digest(),
+            input_digest: topology.input_digest,
             execution_mode: mode,
             fork_cut_seq,
             seed: input.random_seed,
@@ -570,7 +575,7 @@ fn evidence(context: &EvidenceContext<'_>) -> MoatProofEvidenceV1 {
         participant_views,
         plugin_failures: failure_probes.to_vec(),
         consent_audit: consent_audit.clone(),
-    }
+    })
 }
 
 const SOCIETY_NAME: &str = "society";
@@ -663,7 +668,7 @@ fn artifact_closure_digest(topology: &ProofTopology) -> [u8; 32] {
         bytes.extend_from_slice(version.as_bytes());
         bytes.push(0);
     }
-    bytes.extend_from_slice(&topology.input.digest());
+    bytes.extend_from_slice(&topology.input_digest);
     bytes.extend_from_slice(blake3::hash(WORLD_BACKEND_CONTENT).as_bytes());
     bytes.extend_from_slice(blake3::hash(EXECUTION_PROFILE_CONTENT).as_bytes());
     bytes.extend_from_slice(blake3::hash(TRUST_POLICY_CONTENT).as_bytes());
@@ -1017,7 +1022,7 @@ struct ProofAgentDriver {
 }
 
 impl ProofAgentDriver {
-    fn new(entity: EntityId, threshold: f64) -> Self {
+    const fn new(entity: EntityId, threshold: f64) -> Self {
         Self {
             entity,
             threshold,
@@ -1117,7 +1122,11 @@ impl Driver for ProofAgentDriver {
             confidence,
             observed_x,
         };
-        let payload = serde_json::to_vec(&reaction).expect("AgentReaction is serializable");
+        let payload =
+            serde_json::to_vec(&reaction).map_err(|error| RuntimeError::InvalidPayload {
+                event_type: AGENT_EVENT_TYPE.to_owned(),
+                reason: error.to_string(),
+            })?;
         self.tick = self.tick.saturating_add(1);
         let mut draft = EventDraft::new(
             self.entity,
@@ -1162,7 +1171,7 @@ struct ProofSocietyDriver {
 }
 
 impl ProofSocietyDriver {
-    fn new(entity: EntityId) -> Self {
+    const fn new(entity: EntityId) -> Self {
         Self {
             entity,
             staged: false,
@@ -1229,6 +1238,24 @@ impl Driver for ProofSocietyDriver {
 
 #[cfg(test)]
 mod tests {
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected test value")))
+        }
+    }
+
     use super::*;
     use pos_core::{
         clock::{Seq, WallTime},
@@ -1254,9 +1281,9 @@ mod tests {
     #[test]
     fn proof_run_exhibits_the_three_reactions_and_fork_divergence() {
         let report = MoatProofRun::new(input(), ExecutionModeV1::Local)
-            .unwrap()
+            .test_ok()
             .run()
-            .unwrap();
+            .test_ok();
         assert!(report.passes_reaction_gates());
         assert_eq!(report.prefix_identical_through_fork, GateStatus::Passed);
         assert_eq!(report.suffix_recomputed, GateStatus::Passed);
@@ -1270,7 +1297,7 @@ mod tests {
 
     #[test]
     fn local_and_air_gapped_have_equivalent_baseline_evidence() {
-        let (local, air_gapped, comparison) = run_local_and_air_gapped(input()).unwrap();
+        let (local, air_gapped, comparison) = run_local_and_air_gapped(input()).test_ok();
         assert!(comparison.equal);
         assert!(local.passes_reaction_gates());
         assert!(air_gapped.passes_reaction_gates());
@@ -1279,9 +1306,9 @@ mod tests {
     #[test]
     fn independent_reference_agrees_for_every_divergence_class() {
         let report = MoatProofRun::new(input(), ExecutionModeV1::Local)
-            .unwrap()
+            .test_ok()
             .run()
-            .unwrap();
+            .test_ok();
         let baseline = report.baseline;
         let mut variants = Vec::new();
 
@@ -1303,11 +1330,11 @@ mod tests {
         variants.push(observability);
 
         for variant in &variants {
-            let expected = compare(&baseline, variant);
-            compare_with_reference(&baseline, variant, &expected).unwrap();
+            let expected = compare(&baseline, variant).test_ok();
+            compare_with_reference(&baseline, variant, &expected).test_ok();
         }
 
-        let mut wrong = compare(&baseline, &variants[2]);
+        let mut wrong = compare(&baseline, &variants[2]).test_ok();
         wrong.divergence = DivergenceClassV1::None;
         assert!(matches!(
             compare_with_reference(&baseline, &variants[2], &wrong),
@@ -1330,11 +1357,11 @@ mod tests {
 
     #[test]
     fn scenario_room_entities_are_deterministic_and_input_derived() {
-        let first = ProofTopology::new(input());
-        let same = ProofTopology::new(input());
+        let first = ProofTopology::new(input()).test_ok();
+        let same = ProofTopology::new(input()).test_ok();
         let mut changed_input = input();
         changed_input.scenario_id = "different-room".to_owned();
-        let changed = ProofTopology::new(changed_input);
+        let changed = ProofTopology::new(changed_input).test_ok();
         assert_eq!(first.body, same.body);
         assert_eq!(first.agent, same.agent);
         assert_ne!(first.body, changed.body);
@@ -1346,14 +1373,14 @@ mod tests {
         let mut agent = ProofAgentDriver::new(fixed_id(2), 0.5);
         agent
             .step(TimelineId::new(), ObservationView::empty())
-            .unwrap();
+            .test_ok();
         agent.abort_step();
         agent.abort_restore_from_history();
 
         let mut society = ProofSocietyDriver::new(fixed_id(3));
         society
             .step(TimelineId::new(), ObservationView::empty())
-            .unwrap();
+            .test_ok();
         society.abort_step();
 
         let bad_event = Event {
@@ -1377,7 +1404,7 @@ mod tests {
 
     #[test]
     fn fork_rejects_malformed_agent_recovery_payload() {
-        let topology = ProofTopology::new(input());
+        let topology = ProofTopology::new(input()).test_ok();
         let factory_topology = topology.clone();
         let registry_factory = move || build_registry(&factory_topology);
         let mut experiment = Experiment::new(ExperimentConfig {
@@ -1386,15 +1413,15 @@ mod tests {
             store_config: pos_store::StoreConfig::Memory,
         })
         .with_fork_registry_factory(registry_factory);
-        register_plugins(&mut experiment, &topology).unwrap();
-        let mut session = experiment.start().unwrap();
+        register_plugins(&mut experiment, &topology).test_ok();
+        let mut session = experiment.start().test_ok();
         session
             .append_events(&[EventDraft::new(
                 topology.agent,
                 Kind::new(AGENT_EVENT_TYPE),
                 CanonicalBytes::from_static(b"malformed"),
             )])
-            .unwrap();
+            .test_ok();
         assert!(session.fork("malformed").is_err());
     }
 }

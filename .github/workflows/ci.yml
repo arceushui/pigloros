@@ -48,6 +48,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           toolchain: 1.97.1
@@ -83,6 +85,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           toolchain: 1.97.1
@@ -90,6 +94,8 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: clippy
+      - name: Reject new lint suppressions
+        run: bash scripts/check-no-new-lint-suppressions.sh origin/main
       - name: cargo clippy (workspace lint policy, pedantic, deny warnings)
         run: >
           cargo clippy --workspace --all-features --all-targets --locked --
@@ -168,6 +174,7 @@ jobs:
           tool: cargo-geiger
       - name: cargo geiger (assert no unsafe in own crates)
         run: |
+          set -o pipefail
           cargo geiger --all-features --locked --workspace 2>&1 | tee /tmp/geiger.log
           ! grep -E "^(crates|apps|plugins)/" /tmp/geiger.log | grep -v "0 unsafe"
 

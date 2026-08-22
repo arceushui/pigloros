@@ -1024,6 +1024,32 @@ mod tests {
         ids::{EntityId, EventId, TimelineId},
         timeline::{Timeline, TimelineMeta},
     };
+    use std::fmt::Debug;
+
+    trait TestResultExt<T, E> {
+        fn test_err(self) -> Result<E, Box<dyn std::error::Error>>;
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error>>;
+    }
+
+    impl<T, E: Debug> TestResultExt<T, E> for Result<T, E> {
+        fn test_err(self) -> Result<E, Box<dyn std::error::Error>> {
+            self.err().ok_or_else(|| "expected an error".into())
+        }
+
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error>> {
+            self.map_err(|error| format!("unexpected error: {error:?}").into())
+        }
+    }
+
+    trait TestOptionExt<T> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error>>;
+    }
+
+    impl<T> TestOptionExt<T> for Option<T> {
+        fn test_ok(self) -> Result<T, Box<dyn std::error::Error>> {
+            self.ok_or_else(|| "expected a value".into())
+        }
+    }
 
     // The EventStore trait lives here; implementations are in pos-store.
     // These tests verify the trait contract is sound (not that it compiles with an impl).
@@ -1192,7 +1218,7 @@ mod tests {
     }
 
     #[test]
-    fn append_or_duplicate_defaults_fail_closed() {
+    fn append_or_duplicate_defaults_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
         let mut store = TrivialStore::new();
         let identity = AppendIdentity::new(
             AppendDedupKey::from_keyed_hash([1; 32]),
@@ -1210,15 +1236,15 @@ mod tests {
                 WallTime::from_micros(3),
                 draft.clone(),
             )
-            .unwrap_err();
+            .test_err()?;
         assert!(append_error.to_string().contains("append-or-duplicate"));
         let cleanup_error = store
             .purge_expired_append_identities(WallTime::from_micros(3))
-            .unwrap_err();
+            .test_err()?;
         assert!(cleanup_error.to_string().contains("cleanup"));
         let intent_error = store
             .append_intent_or_duplicate(TimelineId::new(), identity, AppendIntent::new(&draft))
-            .unwrap_err();
+            .test_err()?;
         assert!(intent_error.to_string().contains("store-owned"));
         let bounded_intent_error = store
             .append_intent_or_duplicate_bounded(
@@ -1227,25 +1253,28 @@ mod tests {
                 AppendIntent::new(&draft),
                 1,
             )
-            .unwrap_err();
+            .test_err()?;
         assert!(bounded_intent_error.to_string().contains("store-owned"));
         assert!(store
             .read_event_by_id(TimelineId::new(), EventId::new())
-            .unwrap()
+            .test_ok()?
             .is_none());
         let bounded_error = store
-            .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).unwrap())
-            .unwrap_err();
+            .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).test_ok()?)
+            .test_err()?;
         assert!(bounded_error.to_string().contains("bounded"));
         let withdrawal_error = store
             .remove_append_identities(AppendDedupScope::from_keyed_hash([2; 32]))
-            .unwrap_err();
+            .test_err()?;
         assert!(withdrawal_error.to_string().contains("withdrawal"));
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn import_timeline_with_id_requires_preserving_backend() {
+    fn import_timeline_with_id_requires_preserving_backend(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Default trait stubs reject identity-preserving import (Wave 6 / #87).
         let entity = EntityId::new();
         let dummy_event = Event {
@@ -1270,7 +1299,7 @@ mod tests {
         };
 
         let mut store = TrivialStore::new();
-        let err = import_timeline_with_id(&mut store, export).unwrap_err();
+        let err = import_timeline_with_id(&mut store, export).test_err()?;
         assert!(
             matches!(
                 err,
@@ -1280,6 +1309,8 @@ mod tests {
             ),
             "expected Wave 6 import rejected by stub defaults, got {err:?}"
         );
+
+        Ok(())
     }
 
     #[test]
@@ -1298,7 +1329,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn event_store_defaults_fail_closed() {
+    fn event_store_defaults_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
         let mut store = TrivialStore::new();
         let id = TimelineId::new();
         let result = store.append_bounded(
@@ -1311,62 +1342,71 @@ mod tests {
             1,
         );
         assert!(result
-            .unwrap_err()
+            .test_err()?
             .to_string()
             .contains("atomic bounded append"));
-        let err = store.logical_head(id).unwrap_err();
+        let err = store.logical_head(id).test_err()?;
         assert!(matches!(err, CoreError::Storage(_)));
         assert!(store.read_own(id, SeqRange::all()).is_ok());
         let err = store
             .create_timeline_with_meta(TimelineMeta::root("x"))
-            .unwrap_err();
+            .test_err()?;
         assert!(matches!(err, CoreError::Storage(_)));
-        let err = store.append_committed(id, &[]).unwrap_err();
+        let err = store.append_committed(id, &[]).test_err()?;
         assert!(matches!(err, CoreError::Storage(_)));
-        let err = store.delete_timeline(id).unwrap_err();
+        let err = store.delete_timeline(id).test_err()?;
         assert!(matches!(err, CoreError::Storage(_)));
-        let err = store.chain_hash_at(id, Seq::ZERO).unwrap_err();
+        let err = store.chain_hash_at(id, Seq::ZERO).test_err()?;
         assert!(matches!(err, CoreError::Storage(_)));
         let err = store
             .import_committed(TimelineMeta::root("y"), &[])
-            .unwrap_err();
+            .test_err()?;
         assert!(matches!(err, CoreError::Storage(_)));
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn import_committed_with_rollback_surfaces_create_meta_err() {
+    fn import_committed_with_rollback_surfaces_create_meta_err(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Hit the `?` error path on create_timeline_with_meta inside the helper.
         let mut store = TrivialStore::new();
         let err =
-            import_committed_with_rollback(&mut store, TimelineMeta::root("x"), &[]).unwrap_err();
+            import_committed_with_rollback(&mut store, TimelineMeta::root("x"), &[]).test_err()?;
         assert!(
             matches!(err, CoreError::Storage(ref m) if m.contains("create_timeline_with_meta")),
             "got {err:?}"
         );
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn create_timeline_with_meta_stub_rejects() {
+    fn create_timeline_with_meta_stub_rejects() -> Result<(), Box<dyn std::error::Error>> {
         let mut store = TrivialStore::new();
         let err = store
             .create_timeline_with_meta(TimelineMeta::root("x"))
-            .unwrap_err();
+            .test_err()?;
         assert!(matches!(err, CoreError::Storage(_)));
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn append_committed_stub_rejects() {
+    fn append_committed_stub_rejects() -> Result<(), Box<dyn std::error::Error>> {
         let mut store = TrivialStore::new();
-        let err = store.append_committed(TimelineId::new(), &[]).unwrap_err();
+        let err = store.append_committed(TimelineId::new(), &[]).test_err()?;
         assert!(matches!(err, CoreError::Storage(_)));
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn import_timeline_with_events_uses_append() {
+    fn import_timeline_with_events_uses_append() -> Result<(), Box<dyn std::error::Error>> {
         let entity = EntityId::new();
         let dummy_event = Event {
             id: EventId::new(),
@@ -1387,13 +1427,15 @@ mod tests {
             parent_fork_hash: None,
         };
         let mut store = TrivialStore::new();
-        let imported = import_timeline(&mut store, export).unwrap();
-        let _ = imported.id();
+        let imported = import_timeline(&mut store, export).test_ok()?;
+        assert!(!imported.id().to_string().is_empty());
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn import_timeline_with_id_append_committed_err() {
+    fn import_timeline_with_id_append_committed_err() -> Result<(), Box<dyn std::error::Error>> {
         struct AppendFailStore {
             created: Option<TimelineId>,
             deleted: bool,
@@ -1467,17 +1509,20 @@ mod tests {
             created: None,
             deleted: false,
         };
-        let err = import_timeline_with_id(&mut store, export).unwrap_err();
+        let err = import_timeline_with_id(&mut store, export).test_err()?;
         assert!(matches!(err, CoreError::Storage(_)));
         assert!(
             store.deleted,
             "failed append must roll back via delete_timeline"
         );
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn import_timeline_with_id_surfaces_rollback_delete_failure() {
+    fn import_timeline_with_id_surfaces_rollback_delete_failure(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         struct AppendAndDeleteFailStore {
             created: Option<TimelineId>,
         }
@@ -1543,19 +1588,21 @@ mod tests {
             parent_fork_hash: None,
         };
         let err = import_timeline_with_id(&mut AppendAndDeleteFailStore { created: None }, export)
-            .unwrap_err();
+            .test_err()?;
         match err {
             CoreError::Storage(msg) => {
                 assert!(msg.contains("import failed"));
                 assert!(msg.contains("rollback delete also failed"));
             }
-            other => panic!("unexpected {other:?}"),
+            other => return Err(format!("unexpected {other:?}").into()),
         }
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn import_timeline_with_id_success() {
+    fn import_timeline_with_id_success() -> Result<(), Box<dyn std::error::Error>> {
         struct HappyStore {
             timeline: Option<Timeline>,
         }
@@ -1614,13 +1661,17 @@ mod tests {
             events: vec![],
             parent_fork_hash: None,
         };
-        let imported = import_timeline_with_id(&mut HappyStore { timeline: None }, export).unwrap();
+        let imported =
+            import_timeline_with_id(&mut HappyStore { timeline: None }, export).test_ok()?;
         assert_eq!(imported.id(), expected);
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn import_timeline_with_id_rejects_wrong_returned_id() {
+    fn import_timeline_with_id_rejects_wrong_returned_id() -> Result<(), Box<dyn std::error::Error>>
+    {
         struct LieStore;
         impl EventStore for LieStore {
             fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
@@ -1669,16 +1720,19 @@ mod tests {
             events: vec![],
             parent_fork_hash: None,
         };
-        let err = import_timeline_with_id(&mut LieStore, export).unwrap_err();
+        let err = import_timeline_with_id(&mut LieStore, export).test_err()?;
         assert!(
             matches!(err, CoreError::Storage(ref msg) if msg.contains("honour")),
             "{err:?}"
         );
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn import_timeline_with_id_fork_requires_preserving_create() {
+    fn import_timeline_with_id_fork_requires_preserving_create(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // TrivialStore rejects create_timeline_with_meta — fork import needs a real backend.
         let parent = TimelineId::new();
         let meta = TimelineMeta::forked_from(parent, Seq::from_u64(1), "child");
@@ -1688,13 +1742,16 @@ mod tests {
             parent_fork_hash: None,
         };
         let mut store = TrivialStore::new();
-        let err = import_timeline_with_id(&mut store, export).unwrap_err();
+        let err = import_timeline_with_id(&mut store, export).test_err()?;
         assert!(matches!(err, CoreError::Storage(_)), "{err:?}");
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn validate_committed_batch_rejects_gaps_and_dup_ids() {
+    fn validate_committed_batch_rejects_gaps_and_dup_ids() -> Result<(), Box<dyn std::error::Error>>
+    {
         struct TestHasher {
             should_match: bool,
         }
@@ -1739,7 +1796,7 @@ mod tests {
         };
         let id = crate::ids::EventId::new();
         let err = validate_committed_batch(Seq::ZERO, &[mk(2, id)], &mut |_| false, &match_hasher)
-            .unwrap_err();
+            .test_err()?;
         assert!(matches!(err, CoreError::Storage(ref m) if m.contains("contiguous")));
 
         let err = validate_committed_batch(
@@ -1748,7 +1805,7 @@ mod tests {
             &mut |_| false,
             &match_hasher,
         )
-        .unwrap_err();
+        .test_err()?;
         assert!(matches!(err, CoreError::Storage(ref m) if m.contains("duplicate")));
 
         let err = validate_committed_batch(
@@ -1757,7 +1814,7 @@ mod tests {
             &mut |_| true,
             &match_hasher,
         )
-        .unwrap_err();
+        .test_err()?;
         assert!(matches!(err, CoreError::Storage(ref m) if m.contains("duplicate")));
 
         let err = validate_committed_batch(
@@ -1766,7 +1823,7 @@ mod tests {
             &mut |_| false,
             &mismatch_hasher,
         )
-        .unwrap_err();
+        .test_err()?;
         assert!(matches!(err, CoreError::Storage(ref m) if m.contains("payload_hash")));
 
         let err = validate_committed_batch(
@@ -1775,10 +1832,11 @@ mod tests {
             &mut |_| false,
             &match_hasher,
         )
-        .unwrap_err();
+        .test_err()?;
         assert!(matches!(err, CoreError::Storage(ref m) if m.contains(">= 1")));
 
-        let ok = validate_committed_batch(Seq::ZERO, &[], &mut |_| false, &match_hasher).unwrap();
+        let ok =
+            validate_committed_batch(Seq::ZERO, &[], &mut |_| false, &match_hasher).test_ok()?;
         assert!(ok.is_empty());
 
         // Success path with contiguous events (covers Ok(ordered)).
@@ -1790,16 +1848,18 @@ mod tests {
             &mut |_| false,
             &match_hasher,
         )
-        .unwrap();
+        .test_ok()?;
         assert_eq!(accepted.len(), 2);
         assert_eq!(accepted[0].id, e1.id);
         assert_eq!(accepted[1].id, e2.id);
+
+        Ok(())
     }
 
     // Counted under llvm-cov: exercises `chain_hash_at` Err through the `?` on raw export.
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn export_timeline_raw_chain_hash_err_arm_counted() {
+    fn export_timeline_raw_chain_hash_err_arm_counted() -> Result<(), Box<dyn std::error::Error>> {
         struct HashFail {
             id: TimelineId,
         }
@@ -1853,16 +1913,18 @@ mod tests {
         }
 
         let id = TimelineId::new();
-        let err = export_timeline_raw(&HashFail { id }, id).unwrap_err();
+        let err = export_timeline_raw(&HashFail { id }, id).test_err()?;
         assert!(
             err.to_string().contains("hash boom"),
             "expected hash boom error, got {err:?}"
         );
+
+        Ok(())
     }
 
     // Prefer export_timeline_own in new code; own/cow wrap raw (legacy name).
     #[test]
-    fn export_timeline_own_matches_raw_alias() {
+    fn export_timeline_own_matches_raw_alias() -> Result<(), Box<dyn std::error::Error>> {
         struct RootStore {
             id: TimelineId,
         }
@@ -1916,17 +1978,20 @@ mod tests {
 
         let id = TimelineId::new();
         let store = RootStore { id };
-        let own = export_timeline_own(&store, id).unwrap();
-        let cow = export_timeline_cow(&store, id).unwrap();
-        let raw = export_timeline_raw(&store, id).unwrap();
+        let own = export_timeline_own(&store, id).test_ok()?;
+        let cow = export_timeline_cow(&store, id).test_ok()?;
+        let raw = export_timeline_raw(&store, id).test_ok()?;
         assert_eq!(own.timeline.id(), raw.timeline.id());
         assert_eq!(cow.timeline.id(), raw.timeline.id());
         assert!(own.parent_fork_hash.is_none());
+
+        Ok(())
     }
 
     // Counted under llvm-cov: root raw export takes the None fork_point arm.
     #[test]
-    fn export_timeline_raw_root_clears_parent_fork_hash_arm() {
+    fn export_timeline_raw_root_clears_parent_fork_hash_arm(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         struct RootStore {
             id: TimelineId,
         }
@@ -1979,14 +2044,17 @@ mod tests {
         }
 
         let id = TimelineId::new();
-        let raw = export_timeline_raw(&RootStore { id }, id).unwrap();
+        let raw = export_timeline_raw(&RootStore { id }, id).test_ok()?;
         assert!(raw.timeline.meta.fork_point.is_none());
         assert!(raw.parent_fork_hash.is_none());
+
+        Ok(())
     }
 
     // Counted under llvm-cov: matching parent_fork_hash takes the equality arm.
     #[test]
-    fn import_timeline_with_id_accepts_matching_parent_fork_hash() {
+    fn import_timeline_with_id_accepts_matching_parent_fork_hash(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         struct MatchStore {
             created: Option<Timeline>,
         }
@@ -2042,13 +2110,17 @@ mod tests {
             events: vec![],
             parent_fork_hash: Some(Hash::zero()),
         };
-        let imported = import_timeline_with_id(&mut MatchStore { created: None }, export).unwrap();
+        let imported =
+            import_timeline_with_id(&mut MatchStore { created: None }, export).test_ok()?;
         assert!(imported.meta.fork_point.is_some());
+
+        Ok(())
     }
 
     // Counted under llvm-cov: `chain_hash_at` Err through import_timeline_with_id's `?`.
     #[test]
-    fn import_timeline_with_id_chain_hash_err_arm_counted() {
+    fn import_timeline_with_id_chain_hash_err_arm_counted() -> Result<(), Box<dyn std::error::Error>>
+    {
         struct HashFailStore;
         impl EventStore for HashFailStore {
             fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
@@ -2100,16 +2172,18 @@ mod tests {
             events: vec![],
             parent_fork_hash: Some(Hash::zero()),
         };
-        let err = import_timeline_with_id(&mut HashFailStore, export).unwrap_err();
+        let err = import_timeline_with_id(&mut HashFailStore, export).test_err()?;
         assert!(matches!(
             err,
             CoreError::Storage(ref m) if m.contains("import hash boom")
         ));
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn export_timeline_flattens_empty_fork_meta() {
+    fn export_timeline_flattens_empty_fork_meta() -> Result<(), Box<dyn std::error::Error>> {
         struct ForkStore {
             id: TimelineId,
         }
@@ -2164,18 +2238,20 @@ mod tests {
         }
 
         let id = TimelineId::new();
-        let export = export_timeline(&ForkStore { id }, id).unwrap();
+        let export = export_timeline(&ForkStore { id }, id).test_ok()?;
         assert!(export.timeline.meta.fork_point.is_none());
         assert!(export.events.is_empty());
 
-        let raw = export_timeline_raw(&ForkStore { id }, id).unwrap();
+        let raw = export_timeline_raw(&ForkStore { id }, id).test_ok()?;
         assert!(raw.timeline.meta.fork_point.is_some());
         assert!(raw.parent_fork_hash.is_some());
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn export_timeline_raw_propagates_chain_hash_err() {
+    fn export_timeline_raw_propagates_chain_hash_err() -> Result<(), Box<dyn std::error::Error>> {
         struct HashFailStore {
             id: TimelineId,
         }
@@ -2229,13 +2305,15 @@ mod tests {
         }
 
         let id = TimelineId::new();
-        let err = export_timeline_raw(&HashFailStore { id }, id).unwrap_err();
+        let err = export_timeline_raw(&HashFailStore { id }, id).test_err()?;
         assert!(matches!(err, CoreError::Storage(ref m) if m.contains("hash failed")));
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn export_timeline_raw_propagates_read_own_err() {
+    fn export_timeline_raw_propagates_read_own_err() -> Result<(), Box<dyn std::error::Error>> {
         struct ReadOwnFail {
             id: TimelineId,
         }
@@ -2289,13 +2367,16 @@ mod tests {
         }
 
         let id = TimelineId::new();
-        let err = export_timeline_raw(&ReadOwnFail { id }, id).unwrap_err();
+        let err = export_timeline_raw(&ReadOwnFail { id }, id).test_err()?;
         assert!(matches!(err, CoreError::Storage(ref m) if m.contains("read_own")));
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn import_timeline_with_id_requires_parent_fork_hash() {
+    fn import_timeline_with_id_requires_parent_fork_hash() -> Result<(), Box<dyn std::error::Error>>
+    {
         let mut meta = TimelineMeta::forked_from(TimelineId::new(), Seq::from_u64(1), "child");
         meta.id = TimelineId::new();
         let export = TimelineExport {
@@ -2303,16 +2384,19 @@ mod tests {
             events: vec![],
             parent_fork_hash: None,
         };
-        let err = import_timeline_with_id(&mut TrivialStore::new(), export).unwrap_err();
+        let err = import_timeline_with_id(&mut TrivialStore::new(), export).test_err()?;
         assert!(matches!(
             err,
             CoreError::Storage(ref m) if m.contains("parent_fork_hash")
         ));
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn import_timeline_with_id_rejects_parent_fork_hash_mismatch() {
+    fn import_timeline_with_id_rejects_parent_fork_hash_mismatch(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         struct HashOkStore;
         impl EventStore for HashOkStore {
             fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
@@ -2367,16 +2451,18 @@ mod tests {
             events: vec![],
             parent_fork_hash: Some(Hash::from_bytes(expected)),
         };
-        let err = import_timeline_with_id(&mut HashOkStore, export).unwrap_err();
+        let err = import_timeline_with_id(&mut HashOkStore, export).test_err()?;
         assert!(matches!(
             err,
             CoreError::Storage(ref m) if m.contains("chain hash mismatch")
         ));
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn export_timeline_sets_head_from_stitched_events() {
+    fn export_timeline_sets_head_from_stitched_events() -> Result<(), Box<dyn std::error::Error>> {
         struct ForkWithEvents {
             id: TimelineId,
             event: Event,
@@ -2446,19 +2532,21 @@ mod tests {
             payload_hash: Hash::zero(),
         };
         let original_id = event.id;
-        let export = export_timeline(&ForkWithEvents { id, event }, id).unwrap();
+        let export = export_timeline(&ForkWithEvents { id, event }, id).test_ok()?;
         assert!(export.timeline.meta.fork_point.is_none());
         assert_eq!(export.events.len(), 1);
         assert_eq!(export.timeline.head, Seq::from_u64(3));
         // Fork flatten remints EventIds so parent history cannot collide on import.
         assert_ne!(export.events[0].id, original_id);
         assert!(export.events[0].signature.is_none());
+
+        Ok(())
     }
 
     // Intentionally NOT coverage(off): keeps materialize_fork_export_as_root arms counted
     // under llvm-cov when other flatten tests are coverage(off).
     #[test]
-    fn export_timeline_flatten_causation_arms_counted() {
+    fn export_timeline_flatten_causation_arms_counted() -> Result<(), Box<dyn std::error::Error>> {
         struct S {
             id: TimelineId,
             events: Vec<Event>,
@@ -2541,15 +2629,18 @@ mod tests {
             },
             id,
         )
-        .unwrap();
+        .test_ok()?;
         assert_eq!(export.events[1].causation_id, Some(export.events[0].id));
         assert!(export.events[2].causation_id.is_none());
         assert!(export.events.iter().all(|e| e.signature.is_none()));
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn export_timeline_remaps_causation_within_fork_flatten() {
+    fn export_timeline_remaps_causation_within_fork_flatten(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         struct ForkWithCausation {
             id: TimelineId,
             events: Vec<Event>,
@@ -2630,15 +2721,17 @@ mod tests {
             },
             id,
         )
-        .unwrap();
+        .test_ok()?;
         assert_ne!(export.events[0].id, first_id);
         assert_eq!(export.events[1].causation_id, Some(export.events[0].id));
         assert!(export.events[2].causation_id.is_none());
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn import_timeline_with_id_get_timeline_err() {
+    fn import_timeline_with_id_get_timeline_err() -> Result<(), Box<dyn std::error::Error>> {
         struct GetFailStore;
         impl EventStore for GetFailStore {
             fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
@@ -2687,13 +2780,15 @@ mod tests {
             events: vec![],
             parent_fork_hash: None,
         };
-        let err = import_timeline_with_id(&mut GetFailStore, export).unwrap_err();
+        let err = import_timeline_with_id(&mut GetFailStore, export).test_err()?;
         assert!(matches!(err, CoreError::Storage(_)));
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn import_timeline_with_id_missing_after_create() {
+    fn import_timeline_with_id_missing_after_create() -> Result<(), Box<dyn std::error::Error>> {
         struct VanishStore;
         impl EventStore for VanishStore {
             fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
@@ -2742,30 +2837,36 @@ mod tests {
             events: vec![],
             parent_fork_hash: None,
         };
-        let err = import_timeline_with_id(&mut VanishStore, export).unwrap_err();
+        let err = import_timeline_with_id(&mut VanishStore, export).test_err()?;
         assert!(matches!(err, CoreError::TimelineNotFound(_)));
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn delete_timeline_stub_rejects() {
+    fn delete_timeline_stub_rejects() -> Result<(), Box<dyn std::error::Error>> {
         let mut store = TrivialStore::new();
-        let err = store.delete_timeline(TimelineId::new()).unwrap_err();
+        let err = store.delete_timeline(TimelineId::new()).test_err()?;
         assert!(matches!(err, CoreError::Storage(_)));
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn trivial_store_read_returns_empty() {
+    fn trivial_store_read_returns_empty() -> Result<(), Box<dyn std::error::Error>> {
         let store = TrivialStore::new();
         let id = crate::ids::TimelineId::new();
-        let result = store.read(id, SeqRange::all()).unwrap();
+        let result = store.read(id, SeqRange::all()).test_ok()?;
         assert!(result.is_empty());
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn bounded_capability_defaults_fail_closed() {
+    fn bounded_capability_defaults_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
         let store = TrivialStore::new();
         let bounds = EventReadBounds::new(1, 2, 3, 4);
         assert_eq!(bounds.max_payload_bytes(), 1);
@@ -2774,26 +2875,32 @@ mod tests {
         assert_eq!(bounds.max_events(), 4);
         let read_error = store
             .read_bounded(TimelineId::new(), SeqRange::all(), bounds)
-            .unwrap_err();
+            .test_err()?;
         assert!(read_error.to_string().contains("bounded event reads"));
-        let count_error = store.root_timeline_count_bounded(1).unwrap_err();
+        let count_error = store.root_timeline_count_bounded(1).test_err()?;
         assert!(count_error.to_string().contains("bounded root Timeline"));
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn trivial_store_fork_returns_timeline() {
+    fn trivial_store_fork_returns_timeline() -> Result<(), Box<dyn std::error::Error>> {
         let mut store = TrivialStore::new();
         let id = crate::ids::TimelineId::new();
-        let tl = store.fork(id, Seq::ZERO, "fork").unwrap();
-        let _ = tl.id();
+        let tl = store.fork(id, Seq::ZERO, "fork").test_ok()?;
+        assert!(!tl.id().to_string().is_empty());
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn trivial_store_list_timelines_returns_empty() {
+    fn trivial_store_list_timelines_returns_empty() -> Result<(), Box<dyn std::error::Error>> {
         let store = TrivialStore::new();
-        assert!(store.list_timelines().unwrap().is_empty());
+        assert!(store.list_timelines().test_ok()?.is_empty());
+
+        Ok(())
     }
 
     #[test]
@@ -2810,10 +2917,12 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn trivial_store_get_timeline_returns_none() {
+    fn trivial_store_get_timeline_returns_none() -> Result<(), Box<dyn std::error::Error>> {
         let store = TrivialStore::new();
         let id = crate::ids::TimelineId::new();
-        assert!(store.get_timeline(id).unwrap().is_none());
+        assert!(store.get_timeline(id).test_ok()?.is_none());
+
+        Ok(())
     }
 
     #[test]
@@ -2842,47 +2951,56 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn export_timeline_get_timeline_err_propagates() {
+    fn export_timeline_get_timeline_err_propagates() -> Result<(), Box<dyn std::error::Error>> {
         let store = FlakyStore::new(FlakyMode::GetTimelineErr);
         let id = TimelineId::new();
-        let err = export_timeline(&store, id).unwrap_err();
+        let err = export_timeline(&store, id).test_err()?;
         assert!(matches!(err, CoreError::Storage(_)));
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn export_timeline_missing_timeline_returns_not_found() {
+    fn export_timeline_missing_timeline_returns_not_found() -> Result<(), Box<dyn std::error::Error>>
+    {
         let store = FlakyStore::new(FlakyMode::GetTimelineMissing);
         let id = TimelineId::new();
-        let err = export_timeline(&store, id).unwrap_err();
+        let err = export_timeline(&store, id).test_err()?;
         assert!(matches!(err, CoreError::TimelineNotFound(_)));
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn export_timeline_read_err_propagates() {
+    fn export_timeline_read_err_propagates() -> Result<(), Box<dyn std::error::Error>> {
         let store = FlakyStore::new(FlakyMode::ReadErr);
         let id = TimelineId::new();
-        let err = export_timeline(&store, id).unwrap_err();
+        let err = export_timeline(&store, id).test_err()?;
         assert!(matches!(err, CoreError::Storage(_)));
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn import_timeline_create_timeline_err_propagates() {
+    fn import_timeline_create_timeline_err_propagates() -> Result<(), Box<dyn std::error::Error>> {
         let mut store = FlakyStore::new(FlakyMode::CreateTimelineErr);
         let export = TimelineExport {
             timeline: FlakyStore::healthy_timeline(),
             events: vec![],
             parent_fork_hash: None,
         };
-        let err = import_timeline(&mut store, export).unwrap_err();
+        let err = import_timeline(&mut store, export).test_err()?;
         assert!(matches!(err, CoreError::Storage(_)));
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn import_timeline_append_err_propagates() {
+    fn import_timeline_append_err_propagates() -> Result<(), Box<dyn std::error::Error>> {
         let entity = EntityId::new();
         let dummy_event = Event {
             id: EventId::new(),
@@ -2903,22 +3021,26 @@ mod tests {
             parent_fork_hash: None,
         };
         let mut store = FlakyStore::new(FlakyMode::AppendErr);
-        let err = import_timeline(&mut store, export).unwrap_err();
+        let err = import_timeline(&mut store, export).test_err()?;
         assert!(matches!(err, CoreError::Storage(_)));
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn flaky_store_healthy_export_succeeds() {
+    fn flaky_store_healthy_export_succeeds() -> Result<(), Box<dyn std::error::Error>> {
         let store = FlakyStore::new(FlakyMode::Healthy);
         let id = TimelineId::new();
-        let export = export_timeline(&store, id).unwrap();
+        let export = export_timeline(&store, id).test_ok()?;
         assert!(export.events.is_empty());
+
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn flaky_store_healthy_import_with_events_succeeds() {
+    fn flaky_store_healthy_import_with_events_succeeds() -> Result<(), Box<dyn std::error::Error>> {
         let entity = EntityId::new();
         let dummy_event = Event {
             id: EventId::new(),
@@ -2939,7 +3061,9 @@ mod tests {
             parent_fork_hash: None,
         };
         let mut store = FlakyStore::new(FlakyMode::Healthy);
-        let imported = import_timeline(&mut store, export).unwrap();
-        let _ = imported.id();
+        let imported = import_timeline(&mut store, export).test_ok()?;
+        assert!(!imported.id().to_string().is_empty());
+
+        Ok(())
     }
 }

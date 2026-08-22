@@ -1,5 +1,8 @@
 fn main() -> std::process::ExitCode {
-    eprintln!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+    drop(std::io::Write::write_all(
+        &mut std::io::stderr().lock(),
+        format!("{} {}\n", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")).as_bytes(),
+    ));
     std::process::ExitCode::SUCCESS
 }
 

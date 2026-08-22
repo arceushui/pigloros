@@ -212,10 +212,9 @@ fn merge_append_merged(
 }
 
 fn merge_result_timeline(store: &dyn EventStore, id: TimelineId) -> Result<Timeline, CoreError> {
-    match store.get_timeline(id)? {
-        Some(timeline) => Ok(timeline),
-        None => Err(CoreError::TimelineNotFound(id)),
-    }
+    store
+        .get_timeline(id)?
+        .ok_or(CoreError::TimelineNotFound(id))
 }
 
 /// Check if two divergent timelines can be merged without conflicts.
@@ -241,6 +240,41 @@ pub fn can_merge_conflict_free(
 
 #[cfg(test)]
 mod tests {
+
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected merge fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing fixture value")))
+        }
+    }
+
+    trait TestErrorExt<T, E> {
+        fn test_err(self) -> E;
+    }
+
+    impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
+        fn test_err(self) -> E {
+            match self {
+                Ok(value) => std::panic::resume_unwind(Box::new(format!(
+                    "unexpected successful merge fixture value: {value:?}"
+                ))),
+                Err(error) => error,
+            }
+        }
+    }
     use super::*;
     use pos_core::{
         clock::WallTime,
@@ -386,8 +420,8 @@ mod tests {
             fork_seq: pos_core::clock::Seq::from_u64(42),
             strategy: MergeStrategy::DisjointCrdt,
         };
-        let json = serde_json::to_string(&spec).unwrap();
-        let back: MergeSpec = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&spec).test_ok();
+        let back: MergeSpec = serde_json::from_str(&json).test_ok();
         assert_eq!(spec.fork_seq, back.fork_seq);
         assert_eq!(spec.base, back.base);
         assert_eq!(spec.fork_a, back.fork_a);
@@ -398,8 +432,8 @@ mod tests {
             MergeStrategy::PreferA,
             MergeStrategy::PreferB,
         ] {
-            let j = serde_json::to_string(&strategy).unwrap();
-            let _back: MergeStrategy = serde_json::from_str(&j).unwrap();
+            let j = serde_json::to_string(&strategy).test_ok();
+            let _back: MergeStrategy = serde_json::from_str(&j).test_ok();
         }
     }
 
@@ -407,15 +441,15 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn merge_strategy_parse() {
         assert_eq!(
-            MergeStrategy::parse("disjoint").unwrap(),
+            MergeStrategy::parse("disjoint").test_ok(),
             MergeStrategy::DisjointCrdt
         );
         assert_eq!(
-            MergeStrategy::parse("prefer-a").unwrap(),
+            MergeStrategy::parse("prefer-a").test_ok(),
             MergeStrategy::PreferA
         );
         assert_eq!(
-            MergeStrategy::parse("prefer-b").unwrap(),
+            MergeStrategy::parse("prefer-b").test_ok(),
             MergeStrategy::PreferB
         );
         assert!(MergeStrategy::parse("nope").is_err());
@@ -426,24 +460,24 @@ mod tests {
     fn merge_disjoint_entities_succeeds() {
         let mut store = setup_store();
 
-        let base = store.create_timeline("base").unwrap();
+        let base = store.create_timeline("base").test_ok();
         let entity_base = EntityId::new();
         store
             .append(base.id(), &[make_draft(entity_base, "base.event", b"base")])
-            .unwrap();
+            .test_ok();
 
-        let fork_a = store.fork(base.id(), Seq::from_u64(1), "fork_a").unwrap();
-        let fork_b = store.fork(base.id(), Seq::from_u64(1), "fork_b").unwrap();
+        let fork_a = store.fork(base.id(), Seq::from_u64(1), "fork_a").test_ok();
+        let fork_b = store.fork(base.id(), Seq::from_u64(1), "fork_b").test_ok();
 
         let entity_a = EntityId::new();
         let entity_b = EntityId::new();
 
         store
             .append(fork_a.id(), &[make_draft(entity_a, "a.event", b"a1")])
-            .unwrap();
+            .test_ok();
         store
             .append(fork_b.id(), &[make_draft(entity_b, "b.event", b"b1")])
-            .unwrap();
+            .test_ok();
 
         let merged = merge(
             &mut store,
@@ -452,9 +486,9 @@ mod tests {
             Seq::from_u64(1),
             "merged",
         )
-        .unwrap();
+        .test_ok();
 
-        let events = store.read(merged.id(), SeqRange::all()).unwrap();
+        let events = store.read(merged.id(), SeqRange::all()).test_ok();
         assert_eq!(events.len(), 3);
 
         let entities: HashSet<EntityId> = events.iter().map(|e| e.entity).collect();
@@ -468,16 +502,16 @@ mod tests {
     fn merged_timeline_contains_events_from_both_arms() {
         let mut store = setup_store();
 
-        let base = store.create_timeline("base").unwrap();
+        let base = store.create_timeline("base").test_ok();
         store
             .append(
                 base.id(),
                 &[make_draft(EntityId::new(), "base.event", b"base")],
             )
-            .unwrap();
+            .test_ok();
 
-        let fork_a = store.fork(base.id(), Seq::from_u64(1), "fork_a").unwrap();
-        let fork_b = store.fork(base.id(), Seq::from_u64(1), "fork_b").unwrap();
+        let fork_a = store.fork(base.id(), Seq::from_u64(1), "fork_a").test_ok();
+        let fork_b = store.fork(base.id(), Seq::from_u64(1), "fork_b").test_ok();
 
         let entity_a1 = EntityId::new();
         let entity_a2 = EntityId::new();
@@ -491,10 +525,10 @@ mod tests {
                     make_draft(entity_a2, "a.event2", b"a2"),
                 ],
             )
-            .unwrap();
+            .test_ok();
         store
             .append(fork_b.id(), &[make_draft(entity_from_b, "b.event", b"b1")])
-            .unwrap();
+            .test_ok();
 
         let merged = merge(
             &mut store,
@@ -503,9 +537,9 @@ mod tests {
             Seq::from_u64(1),
             "merged",
         )
-        .unwrap();
+        .test_ok();
 
-        let events = store.read(merged.id(), SeqRange::all()).unwrap();
+        let events = store.read(merged.id(), SeqRange::all()).test_ok();
         let post_fork_events: Vec<_> = events.iter().filter(|e| e.seq > Seq::from_u64(1)).collect();
 
         assert_eq!(post_fork_events.len(), 3);
@@ -516,24 +550,24 @@ mod tests {
     fn merge_overlapping_entities_returns_error() {
         let mut store = setup_store();
 
-        let base = store.create_timeline("base").unwrap();
+        let base = store.create_timeline("base").test_ok();
         let shared_entity = EntityId::new();
         store
             .append(
                 base.id(),
                 &[make_draft(shared_entity, "base.event", b"base")],
             )
-            .unwrap();
+            .test_ok();
 
-        let fork_a = store.fork(base.id(), Seq::from_u64(1), "fork_a").unwrap();
-        let fork_b = store.fork(base.id(), Seq::from_u64(1), "fork_b").unwrap();
+        let fork_a = store.fork(base.id(), Seq::from_u64(1), "fork_a").test_ok();
+        let fork_b = store.fork(base.id(), Seq::from_u64(1), "fork_b").test_ok();
 
         store
             .append(fork_a.id(), &[make_draft(shared_entity, "a.event", b"a")])
-            .unwrap();
+            .test_ok();
         store
             .append(fork_b.id(), &[make_draft(shared_entity, "b.event", b"b")])
-            .unwrap();
+            .test_ok();
 
         let result = merge(
             &mut store,
@@ -543,7 +577,7 @@ mod tests {
             "merged",
         );
 
-        let err = result.unwrap_err();
+        let err = result.test_err();
         let msg = err.to_string();
         assert!(msg.contains("merge conflict"), "msg={msg}");
         assert!(msg.contains("overlapping entity"), "msg={msg}");
@@ -554,21 +588,21 @@ mod tests {
     fn merge_prefer_a_keeps_a_on_overlap() {
         let mut store = setup_store();
 
-        let base = store.create_timeline("base").unwrap();
+        let base = store.create_timeline("base").test_ok();
         let shared = EntityId::new();
         store
             .append(base.id(), &[make_draft(shared, "base.event", b"base")])
-            .unwrap();
+            .test_ok();
 
-        let fork_a = store.fork(base.id(), Seq::from_u64(1), "fork_a").unwrap();
-        let fork_b = store.fork(base.id(), Seq::from_u64(1), "fork_b").unwrap();
+        let fork_a = store.fork(base.id(), Seq::from_u64(1), "fork_a").test_ok();
+        let fork_b = store.fork(base.id(), Seq::from_u64(1), "fork_b").test_ok();
 
         store
             .append(fork_a.id(), &[make_draft(shared, "a.event", b"a")])
-            .unwrap();
+            .test_ok();
         store
             .append(fork_b.id(), &[make_draft(shared, "b.event", b"b")])
-            .unwrap();
+            .test_ok();
 
         let merged = merge_with_strategy(
             &mut store,
@@ -578,9 +612,9 @@ mod tests {
             "merged-a",
             MergeStrategy::PreferA,
         )
-        .unwrap();
+        .test_ok();
 
-        let events = store.read(merged.id(), SeqRange::all()).unwrap();
+        let events = store.read(merged.id(), SeqRange::all()).test_ok();
         let post: Vec<_> = events.iter().filter(|e| e.seq > Seq::from_u64(1)).collect();
         assert_eq!(post.len(), 1);
         assert_eq!(post[0].event_type.as_str(), "a.event");
@@ -591,21 +625,21 @@ mod tests {
     fn merge_prefer_b_keeps_b_on_overlap() {
         let mut store = setup_store();
 
-        let base = store.create_timeline("base").unwrap();
+        let base = store.create_timeline("base").test_ok();
         let shared = EntityId::new();
         store
             .append(base.id(), &[make_draft(shared, "base.event", b"base")])
-            .unwrap();
+            .test_ok();
 
-        let fork_a = store.fork(base.id(), Seq::from_u64(1), "fork_a").unwrap();
-        let fork_b = store.fork(base.id(), Seq::from_u64(1), "fork_b").unwrap();
+        let fork_a = store.fork(base.id(), Seq::from_u64(1), "fork_a").test_ok();
+        let fork_b = store.fork(base.id(), Seq::from_u64(1), "fork_b").test_ok();
 
         store
             .append(fork_a.id(), &[make_draft(shared, "a.event", b"a")])
-            .unwrap();
+            .test_ok();
         store
             .append(fork_b.id(), &[make_draft(shared, "b.event", b"b")])
-            .unwrap();
+            .test_ok();
 
         let merged = merge_with_strategy(
             &mut store,
@@ -615,9 +649,9 @@ mod tests {
             "merged-b",
             MergeStrategy::PreferB,
         )
-        .unwrap();
+        .test_ok();
 
-        let events = store.read(merged.id(), SeqRange::all()).unwrap();
+        let events = store.read(merged.id(), SeqRange::all()).test_ok();
         let post: Vec<_> = events.iter().filter(|e| e.seq > Seq::from_u64(1)).collect();
         assert_eq!(post.len(), 1);
         assert_eq!(post[0].event_type.as_str(), "b.event");
@@ -628,26 +662,26 @@ mod tests {
     fn can_merge_conflict_free_returns_true_for_disjoint() {
         let mut store = setup_store();
 
-        let base = store.create_timeline("base").unwrap();
+        let base = store.create_timeline("base").test_ok();
         store
             .append(
                 base.id(),
                 &[make_draft(EntityId::new(), "base.event", b"base")],
             )
-            .unwrap();
+            .test_ok();
 
-        let fork_a = store.fork(base.id(), Seq::from_u64(1), "fork_a").unwrap();
-        let fork_b = store.fork(base.id(), Seq::from_u64(1), "fork_b").unwrap();
+        let fork_a = store.fork(base.id(), Seq::from_u64(1), "fork_a").test_ok();
+        let fork_b = store.fork(base.id(), Seq::from_u64(1), "fork_b").test_ok();
 
         store
             .append(fork_a.id(), &[make_draft(EntityId::new(), "a.event", b"a")])
-            .unwrap();
+            .test_ok();
         store
             .append(fork_b.id(), &[make_draft(EntityId::new(), "b.event", b"b")])
-            .unwrap();
+            .test_ok();
 
         let can_merge =
-            can_merge_conflict_free(&store, fork_a.id(), fork_b.id(), Seq::from_u64(1)).unwrap();
+            can_merge_conflict_free(&store, fork_a.id(), fork_b.id(), Seq::from_u64(1)).test_ok();
         assert!(can_merge);
     }
 
@@ -656,27 +690,27 @@ mod tests {
     fn can_merge_conflict_free_returns_false_for_overlapping() {
         let mut store = setup_store();
 
-        let base = store.create_timeline("base").unwrap();
+        let base = store.create_timeline("base").test_ok();
         let shared_entity = EntityId::new();
         store
             .append(
                 base.id(),
                 &[make_draft(shared_entity, "base.event", b"base")],
             )
-            .unwrap();
+            .test_ok();
 
-        let fork_a = store.fork(base.id(), Seq::from_u64(1), "fork_a").unwrap();
-        let fork_b = store.fork(base.id(), Seq::from_u64(1), "fork_b").unwrap();
+        let fork_a = store.fork(base.id(), Seq::from_u64(1), "fork_a").test_ok();
+        let fork_b = store.fork(base.id(), Seq::from_u64(1), "fork_b").test_ok();
 
         store
             .append(fork_a.id(), &[make_draft(shared_entity, "a.event", b"a")])
-            .unwrap();
+            .test_ok();
         store
             .append(fork_b.id(), &[make_draft(shared_entity, "b.event", b"b")])
-            .unwrap();
+            .test_ok();
 
         let can_merge =
-            can_merge_conflict_free(&store, fork_a.id(), fork_b.id(), Seq::from_u64(1)).unwrap();
+            can_merge_conflict_free(&store, fork_a.id(), fork_b.id(), Seq::from_u64(1)).test_ok();
         assert!(!can_merge);
     }
 
@@ -685,16 +719,16 @@ mod tests {
     fn empty_arms_merge_cleanly() {
         let mut store = setup_store();
 
-        let base = store.create_timeline("base").unwrap();
+        let base = store.create_timeline("base").test_ok();
         store
             .append(
                 base.id(),
                 &[make_draft(EntityId::new(), "base.event", b"base")],
             )
-            .unwrap();
+            .test_ok();
 
-        let fork_a = store.fork(base.id(), Seq::from_u64(1), "fork_a").unwrap();
-        let fork_b = store.fork(base.id(), Seq::from_u64(1), "fork_b").unwrap();
+        let fork_a = store.fork(base.id(), Seq::from_u64(1), "fork_a").test_ok();
+        let fork_b = store.fork(base.id(), Seq::from_u64(1), "fork_b").test_ok();
 
         let merged = merge(
             &mut store,
@@ -703,9 +737,9 @@ mod tests {
             Seq::from_u64(1),
             "merged",
         )
-        .unwrap();
+        .test_ok();
 
-        let events = store.read(merged.id(), SeqRange::all()).unwrap();
+        let events = store.read(merged.id(), SeqRange::all()).test_ok();
         assert_eq!(events.len(), 1);
     }
 
@@ -714,9 +748,9 @@ mod tests {
     fn merge_sorts_events_by_wall_time() {
         let mut store = setup_store();
 
-        let base = store.create_timeline("base").unwrap();
-        let fork_a = store.fork(base.id(), Seq::ZERO, "fork_a").unwrap();
-        let fork_b = store.fork(base.id(), Seq::ZERO, "fork_b").unwrap();
+        let base = store.create_timeline("base").test_ok();
+        let fork_a = store.fork(base.id(), Seq::ZERO, "fork_a").test_ok();
+        let fork_b = store.fork(base.id(), Seq::ZERO, "fork_b").test_ok();
 
         let entity_a = EntityId::new();
         let entity_b = EntityId::new();
@@ -727,12 +761,12 @@ mod tests {
         let mut draft_b = make_draft(entity_b, "b.event", b"b");
         draft_b.wall_time = Some(WallTime::from_micros(1000));
 
-        store.append(fork_a.id(), &[draft_a]).unwrap();
-        store.append(fork_b.id(), &[draft_b]).unwrap();
+        store.append(fork_a.id(), &[draft_a]).test_ok();
+        store.append(fork_b.id(), &[draft_b]).test_ok();
 
-        let merged = merge(&mut store, fork_a.id(), fork_b.id(), Seq::ZERO, "merged").unwrap();
+        let merged = merge(&mut store, fork_a.id(), fork_b.id(), Seq::ZERO, "merged").test_ok();
 
-        let events = store.read(merged.id(), SeqRange::all()).unwrap();
+        let events = store.read(merged.id(), SeqRange::all()).test_ok();
 
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].entity, entity_b);
@@ -744,9 +778,9 @@ mod tests {
     fn merge_conflict_single_overlap() {
         let mut store = setup_store();
 
-        let base = store.create_timeline("base").unwrap();
-        let fork_a = store.fork(base.id(), Seq::ZERO, "fork_a").unwrap();
-        let fork_b = store.fork(base.id(), Seq::ZERO, "fork_b").unwrap();
+        let base = store.create_timeline("base").test_ok();
+        let fork_a = store.fork(base.id(), Seq::ZERO, "fork_a").test_ok();
+        let fork_b = store.fork(base.id(), Seq::ZERO, "fork_b").test_ok();
 
         let shared = EntityId::new();
         let unique_a = EntityId::new();
@@ -760,7 +794,7 @@ mod tests {
                     make_draft(unique_a, "a.unique", b"a"),
                 ],
             )
-            .unwrap();
+            .test_ok();
         store
             .append(
                 fork_b.id(),
@@ -769,7 +803,7 @@ mod tests {
                     make_draft(unique_b, "b.unique", b"b"),
                 ],
             )
-            .unwrap();
+            .test_ok();
 
         let result = merge(&mut store, fork_a.id(), fork_b.id(), Seq::ZERO, "merged");
 
@@ -781,20 +815,20 @@ mod tests {
     fn can_merge_with_empty_arm_a() {
         let mut store = setup_store();
 
-        let base = store.create_timeline("base").unwrap();
-        let fork_a = store.fork(base.id(), Seq::ZERO, "fork_a").unwrap();
-        let fork_b = store.fork(base.id(), Seq::ZERO, "fork_b").unwrap();
+        let base = store.create_timeline("base").test_ok();
+        let fork_a = store.fork(base.id(), Seq::ZERO, "fork_a").test_ok();
+        let fork_b = store.fork(base.id(), Seq::ZERO, "fork_b").test_ok();
 
         store
             .append(fork_b.id(), &[make_draft(EntityId::new(), "b.event", b"b")])
-            .unwrap();
+            .test_ok();
 
         let can_merge =
-            can_merge_conflict_free(&store, fork_a.id(), fork_b.id(), Seq::ZERO).unwrap();
+            can_merge_conflict_free(&store, fork_a.id(), fork_b.id(), Seq::ZERO).test_ok();
         assert!(can_merge);
 
-        let merged = merge(&mut store, fork_a.id(), fork_b.id(), Seq::ZERO, "merged").unwrap();
-        let events = store.read(merged.id(), SeqRange::all()).unwrap();
+        let merged = merge(&mut store, fork_a.id(), fork_b.id(), Seq::ZERO, "merged").test_ok();
+        let events = store.read(merged.id(), SeqRange::all()).test_ok();
         assert_eq!(events.len(), 1);
     }
 
@@ -803,20 +837,20 @@ mod tests {
     fn can_merge_with_empty_arm_b() {
         let mut store = setup_store();
 
-        let base = store.create_timeline("base").unwrap();
-        let fork_a = store.fork(base.id(), Seq::ZERO, "fork_a").unwrap();
-        let fork_b = store.fork(base.id(), Seq::ZERO, "fork_b").unwrap();
+        let base = store.create_timeline("base").test_ok();
+        let fork_a = store.fork(base.id(), Seq::ZERO, "fork_a").test_ok();
+        let fork_b = store.fork(base.id(), Seq::ZERO, "fork_b").test_ok();
 
         store
             .append(fork_a.id(), &[make_draft(EntityId::new(), "a.event", b"a")])
-            .unwrap();
+            .test_ok();
 
         let can_merge =
-            can_merge_conflict_free(&store, fork_a.id(), fork_b.id(), Seq::ZERO).unwrap();
+            can_merge_conflict_free(&store, fork_a.id(), fork_b.id(), Seq::ZERO).test_ok();
         assert!(can_merge);
 
-        let merged = merge(&mut store, fork_a.id(), fork_b.id(), Seq::ZERO, "merged").unwrap();
-        let events = store.read(merged.id(), SeqRange::all()).unwrap();
+        let merged = merge(&mut store, fork_a.id(), fork_b.id(), Seq::ZERO, "merged").test_ok();
+        let events = store.read(merged.id(), SeqRange::all()).test_ok();
         assert_eq!(events.len(), 1);
     }
 
@@ -855,22 +889,22 @@ mod tests {
     fn merge_root_timelines_without_fork() {
         let mut store = setup_store();
 
-        let root_a = store.create_timeline("root_a").unwrap();
-        let root_b = store.create_timeline("root_b").unwrap();
+        let root_a = store.create_timeline("root_a").test_ok();
+        let root_b = store.create_timeline("root_b").test_ok();
 
         let entity_a = EntityId::new();
         let entity_b = EntityId::new();
 
         store
             .append(root_a.id(), &[make_draft(entity_a, "a.event", b"a")])
-            .unwrap();
+            .test_ok();
         store
             .append(root_b.id(), &[make_draft(entity_b, "b.event", b"b")])
-            .unwrap();
+            .test_ok();
 
-        let merged = merge(&mut store, root_a.id(), root_b.id(), Seq::ZERO, "merged").unwrap();
+        let merged = merge(&mut store, root_a.id(), root_b.id(), Seq::ZERO, "merged").test_ok();
 
-        let events = store.read(merged.id(), SeqRange::all()).unwrap();
+        let events = store.read(merged.id(), SeqRange::all()).test_ok();
         assert_eq!(events.len(), 2);
         let entities: HashSet<EntityId> = events.iter().map(|e| e.entity).collect();
         assert!(entities.contains(&entity_a));
@@ -881,11 +915,11 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn merge_read_err_on_second_timeline_propagates() {
         let mut store = FailStore::new();
-        let base = store.create_timeline("base").unwrap();
-        let fork_a = store.fork(base.id(), Seq::ZERO, "a").unwrap();
-        let fork_b = store.fork(base.id(), Seq::ZERO, "b").unwrap();
+        let base = store.create_timeline("base").test_ok();
+        let fork_a = store.fork(base.id(), Seq::ZERO, "a").test_ok();
+        let fork_b = store.fork(base.id(), Seq::ZERO, "b").test_ok();
         store.set_fail_on(FailOp::ReadOnSecondCall);
-        let err = merge(&mut store, fork_a.id(), fork_b.id(), Seq::ZERO, "merged").unwrap_err();
+        let err = merge(&mut store, fork_a.id(), fork_b.id(), Seq::ZERO, "merged").test_err();
         assert!(matches!(err, CoreError::Storage(_)));
     }
 
@@ -893,11 +927,11 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn can_merge_read_err_on_second_timeline_propagates() {
         let mut store = FailStore::new();
-        let base = store.create_timeline("base").unwrap();
-        let fork_a = store.fork(base.id(), Seq::ZERO, "a").unwrap();
-        let fork_b = store.fork(base.id(), Seq::ZERO, "b").unwrap();
+        let base = store.create_timeline("base").test_ok();
+        let fork_a = store.fork(base.id(), Seq::ZERO, "a").test_ok();
+        let fork_b = store.fork(base.id(), Seq::ZERO, "b").test_ok();
         store.set_fail_on(FailOp::ReadOnSecondCall);
-        let err = can_merge_conflict_free(&store, fork_a.id(), fork_b.id(), Seq::ZERO).unwrap_err();
+        let err = can_merge_conflict_free(&store, fork_a.id(), fork_b.id(), Seq::ZERO).test_err();
         assert!(matches!(err, CoreError::Storage(_)));
     }
 
@@ -905,11 +939,11 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn merge_read_err_propagates() {
         let mut store = FailStore::new();
-        let base = store.create_timeline("base").unwrap();
-        let fork_a = store.fork(base.id(), Seq::ZERO, "a").unwrap();
-        let fork_b = store.fork(base.id(), Seq::ZERO, "b").unwrap();
+        let base = store.create_timeline("base").test_ok();
+        let fork_a = store.fork(base.id(), Seq::ZERO, "a").test_ok();
+        let fork_b = store.fork(base.id(), Seq::ZERO, "b").test_ok();
         store.set_fail_on(FailOp::Read);
-        let err = merge(&mut store, fork_a.id(), fork_b.id(), Seq::ZERO, "merged").unwrap_err();
+        let err = merge(&mut store, fork_a.id(), fork_b.id(), Seq::ZERO, "merged").test_err();
         assert!(matches!(err, CoreError::Storage(_)));
     }
 
@@ -917,19 +951,19 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn merge_get_timeline_err_propagates() {
         let mut store = FailStore::new();
-        let base = store.create_timeline("base").unwrap();
+        let base = store.create_timeline("base").test_ok();
         let entity = EntityId::new();
         store
             .append(base.id(), &[make_draft(entity, "base.event", b"base")])
-            .unwrap();
-        let fork_a = store.fork(base.id(), Seq::from_u64(1), "a").unwrap();
-        let fork_b = store.fork(base.id(), Seq::from_u64(1), "b").unwrap();
+            .test_ok();
+        let fork_a = store.fork(base.id(), Seq::from_u64(1), "a").test_ok();
+        let fork_b = store.fork(base.id(), Seq::from_u64(1), "b").test_ok();
         store
             .append(fork_a.id(), &[make_draft(EntityId::new(), "a.event", b"a")])
-            .unwrap();
+            .test_ok();
         store
             .append(fork_b.id(), &[make_draft(EntityId::new(), "b.event", b"b")])
-            .unwrap();
+            .test_ok();
         store.set_fail_on(FailOp::GetTimeline);
         let err = merge(
             &mut store,
@@ -938,7 +972,7 @@ mod tests {
             Seq::from_u64(1),
             "merged",
         )
-        .unwrap_err();
+        .test_err();
         assert!(matches!(err, CoreError::Storage(_)));
     }
 
@@ -946,19 +980,19 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn merge_get_timeline_none_returns_not_found() {
         let mut store = FailStore::new();
-        let base = store.create_timeline("base").unwrap();
+        let base = store.create_timeline("base").test_ok();
         let entity = EntityId::new();
         store
             .append(base.id(), &[make_draft(entity, "base.event", b"base")])
-            .unwrap();
-        let fork_a = store.fork(base.id(), Seq::from_u64(1), "a").unwrap();
-        let fork_b = store.fork(base.id(), Seq::from_u64(1), "b").unwrap();
+            .test_ok();
+        let fork_a = store.fork(base.id(), Seq::from_u64(1), "a").test_ok();
+        let fork_b = store.fork(base.id(), Seq::from_u64(1), "b").test_ok();
         store
             .append(fork_a.id(), &[make_draft(EntityId::new(), "a.event", b"a")])
-            .unwrap();
+            .test_ok();
         store
             .append(fork_b.id(), &[make_draft(EntityId::new(), "b.event", b"b")])
-            .unwrap();
+            .test_ok();
         store.set_fail_on(FailOp::GetTimelineNone);
         let err = merge(
             &mut store,
@@ -967,7 +1001,7 @@ mod tests {
             Seq::from_u64(1),
             "merged",
         )
-        .unwrap_err();
+        .test_err();
         assert!(matches!(err, CoreError::TimelineNotFound(_)));
     }
 
@@ -975,19 +1009,19 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn merge_fork_err_propagates() {
         let mut store = FailStore::new();
-        let base = store.create_timeline("base").unwrap();
+        let base = store.create_timeline("base").test_ok();
         let entity = EntityId::new();
         store
             .append(base.id(), &[make_draft(entity, "base.event", b"base")])
-            .unwrap();
-        let fork_a = store.fork(base.id(), Seq::from_u64(1), "a").unwrap();
-        let fork_b = store.fork(base.id(), Seq::from_u64(1), "b").unwrap();
+            .test_ok();
+        let fork_a = store.fork(base.id(), Seq::from_u64(1), "a").test_ok();
+        let fork_b = store.fork(base.id(), Seq::from_u64(1), "b").test_ok();
         store
             .append(fork_a.id(), &[make_draft(EntityId::new(), "a.event", b"a")])
-            .unwrap();
+            .test_ok();
         store
             .append(fork_b.id(), &[make_draft(EntityId::new(), "b.event", b"b")])
-            .unwrap();
+            .test_ok();
         store.set_fail_on(FailOp::Fork);
         let err = merge(
             &mut store,
@@ -996,7 +1030,7 @@ mod tests {
             Seq::from_u64(1),
             "merged",
         )
-        .unwrap_err();
+        .test_err();
         assert!(matches!(err, CoreError::Storage(_)));
     }
 
@@ -1004,19 +1038,19 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn merge_append_err_propagates() {
         let mut store = FailStore::new();
-        let base = store.create_timeline("base").unwrap();
+        let base = store.create_timeline("base").test_ok();
         let entity = EntityId::new();
         store
             .append(base.id(), &[make_draft(entity, "base.event", b"base")])
-            .unwrap();
-        let fork_a = store.fork(base.id(), Seq::from_u64(1), "a").unwrap();
-        let fork_b = store.fork(base.id(), Seq::from_u64(1), "b").unwrap();
+            .test_ok();
+        let fork_a = store.fork(base.id(), Seq::from_u64(1), "a").test_ok();
+        let fork_b = store.fork(base.id(), Seq::from_u64(1), "b").test_ok();
         store
             .append(fork_a.id(), &[make_draft(EntityId::new(), "a.event", b"a")])
-            .unwrap();
+            .test_ok();
         store
             .append(fork_b.id(), &[make_draft(EntityId::new(), "b.event", b"b")])
-            .unwrap();
+            .test_ok();
         store.set_fail_on(FailOp::Append);
         let err = merge(
             &mut store,
@@ -1025,7 +1059,7 @@ mod tests {
             Seq::from_u64(1),
             "merged",
         )
-        .unwrap_err();
+        .test_err();
         assert!(matches!(err, CoreError::Storage(_)));
     }
 
@@ -1033,15 +1067,15 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn merge_result_timeline_missing_after_fork() {
         let mut store = FailStore::new();
-        let base = store.create_timeline("base").unwrap();
-        let fork_a = store.fork(base.id(), Seq::ZERO, "a").unwrap();
-        let fork_b = store.fork(base.id(), Seq::ZERO, "b").unwrap();
+        let base = store.create_timeline("base").test_ok();
+        let fork_a = store.fork(base.id(), Seq::ZERO, "a").test_ok();
+        let fork_b = store.fork(base.id(), Seq::ZERO, "b").test_ok();
         store
             .append(fork_a.id(), &[make_draft(EntityId::new(), "a.event", b"a")])
-            .unwrap();
+            .test_ok();
         store
             .append(fork_b.id(), &[make_draft(EntityId::new(), "b.event", b"b")])
-            .unwrap();
+            .test_ok();
         store.set_fail_on(FailOp::GetTimelineNoneOnSecondCall);
         let err = merge_with_strategy(
             &mut store,
@@ -1051,7 +1085,7 @@ mod tests {
             "merged",
             MergeStrategy::DisjointCrdt,
         )
-        .unwrap_err();
+        .test_err();
         assert!(matches!(err, CoreError::TimelineNotFound(_)));
     }
 
@@ -1059,17 +1093,17 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn merge_final_get_timeline_err_propagates() {
         let mut store = FailStore::new();
-        let base = store.create_timeline("base").unwrap();
-        let fork_a = store.fork(base.id(), Seq::ZERO, "a").unwrap();
-        let fork_b = store.fork(base.id(), Seq::ZERO, "b").unwrap();
+        let base = store.create_timeline("base").test_ok();
+        let fork_a = store.fork(base.id(), Seq::ZERO, "a").test_ok();
+        let fork_b = store.fork(base.id(), Seq::ZERO, "b").test_ok();
         store
             .append(fork_a.id(), &[make_draft(EntityId::new(), "a.event", b"a")])
-            .unwrap();
+            .test_ok();
         store
             .append(fork_b.id(), &[make_draft(EntityId::new(), "b.event", b"b")])
-            .unwrap();
+            .test_ok();
         store.set_fail_on(FailOp::GetTimelineErrOnSecondCall);
-        let err = merge(&mut store, fork_a.id(), fork_b.id(), Seq::ZERO, "merged").unwrap_err();
+        let err = merge(&mut store, fork_a.id(), fork_b.id(), Seq::ZERO, "merged").test_err();
         assert!(matches!(err, CoreError::Storage(_)));
     }
 }

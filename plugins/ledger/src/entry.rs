@@ -172,14 +172,18 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn brier_score_math() {
+    fn brier_score_math() -> Result<(), Box<dyn std::error::Error>> {
         let entry = resolved_entry();
-        let score = entry.brier_score().unwrap();
+        let score = entry.brier_score().ok_or("resolved score missing")?;
         assert!((score - 0.04).abs() < f64::EPSILON); // (0.8 - 1)^2
 
-        let mut missed = entry.clone();
-        missed.resolution.as_mut().unwrap().outcome = false;
-        let score = missed.brier_score().unwrap();
+        let mut missed = entry;
+        missed
+            .resolution
+            .as_mut()
+            .ok_or("resolution missing")?
+            .outcome = false;
+        let score = missed.brier_score().ok_or("missed score missing")?;
         assert!((score - 0.64).abs() < f64::EPSILON); // (0.8 - 0)^2
 
         let pending = LedgerEntry {
@@ -188,6 +192,7 @@ mod tests {
             status: Status::Pending,
         };
         assert_eq!(pending.brier_score(), None);
+        Ok(())
     }
 
     #[test]
@@ -220,18 +225,19 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn view_serde_roundtrip() {
+    fn view_serde_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         let view = LedgerEntryView::from(&resolved_entry());
-        let back: LedgerEntryView =
-            serde_json::from_str(&serde_json::to_string(&view).unwrap()).unwrap();
+        let encoded = serde_json::to_string(&view)?;
+        let back: LedgerEntryView = serde_json::from_str(&encoded)?;
         assert_eq!(back, view);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn ledger_view_from_ledger() {
+    fn ledger_view_from_ledger() -> Result<(), Box<dyn std::error::Error>> {
         let pair = (sample_prediction("01J3B0Y5ZK2J6MGK8D7QW3N0P4"), None);
-        let ledger = crate::Ledger::from_pairs(vec![pair], "2026-07-25").unwrap();
+        let ledger = crate::Ledger::from_pairs(vec![pair], "2026-07-25")?;
         let view = LedgerView::from(&ledger);
         assert_eq!(view.entries.len(), 1);
         assert_eq!(view.n_pending, 1);
@@ -243,5 +249,6 @@ mod tests {
         assert_eq!(entry.id, "01J3B0Y5ZK2J6MGK8D7QW3N0P4");
         assert_eq!(entry.status, "pending");
         assert_eq!(entry.scenario.as_deref(), Some("places"));
+        Ok(())
     }
 }

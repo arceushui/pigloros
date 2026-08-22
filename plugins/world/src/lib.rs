@@ -1480,6 +1480,42 @@ impl Reducer for WorldReducer {
 
 #[cfg(test)]
 mod tests {
+
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected world fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing fixture value")))
+        }
+    }
+
+    trait TestErrorExt<T, E> {
+        fn test_err(self) -> E;
+    }
+
+    impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
+        fn test_err(self) -> E {
+            match self {
+                Ok(value) => std::panic::resume_unwind(Box::new(format!(
+                    "unexpected successful world fixture value: {value:?}"
+                ))),
+                Err(error) => error,
+            }
+        }
+    }
+
     use super::*;
     use pos_core::{
         clock::{Seq, WallTime},
@@ -1504,7 +1540,7 @@ mod tests {
             y: 2.0,
         };
         let mut buf = Vec::new();
-        ciborium::into_writer(&payload, &mut buf).unwrap();
+        ciborium::into_writer(&payload, &mut buf).test_ok();
 
         Event {
             id: EventId::new(),
@@ -1620,7 +1656,7 @@ mod tests {
         replacement: ciborium::Value,
     ) -> CanonicalBytes {
         let mut cursor = std::io::Cursor::new(bytes.as_slice());
-        let mut value: ciborium::Value = ciborium::from_reader(&mut cursor).unwrap();
+        let mut value: ciborium::Value = ciborium::from_reader(&mut cursor).test_ok();
         if let ciborium::Value::Array(ref mut items) = value {
             items[index] = replacement;
         }
@@ -1655,7 +1691,7 @@ mod tests {
 
         let error = driver
             .step(TimelineId::new(), ObservationView::empty())
-            .expect_err("invalid config must fail closed");
+            .test_err();
         assert!(error.to_string().contains("world.config.v1"));
         assert!(error.to_string().contains("non-finite float value"));
     }
@@ -1679,7 +1715,7 @@ mod tests {
 
         let error = driver
             .step(TimelineId::new(), ObservationView::empty())
-            .expect_err("non-finite observation must fail closed");
+            .test_err();
         assert!(error.to_string().contains("world.observation.v1"));
         assert!(error.to_string().contains("non-finite float value"));
     }
@@ -1688,8 +1724,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_action_v1_round_trip() {
         let a = sample_action();
-        let bytes = a.encode().unwrap();
-        let decoded = WorldActionV1::decode(&bytes).unwrap();
+        let bytes = a.encode().test_ok();
+        let decoded = WorldActionV1::decode(&bytes).test_ok();
         assert_eq!(decoded.actor_entity_id, a.actor_entity_id);
         assert_eq!(decoded.body_entity_id, a.body_entity_id);
         assert_eq!(decoded.action_kind, a.action_kind);
@@ -1704,8 +1740,8 @@ mod tests {
     fn world_action_v1_target_velocity_allowed() {
         let mut a = sample_action();
         a.action_kind = ActionKindV1::TargetVelocity;
-        let bytes = a.encode().unwrap();
-        let decoded = WorldActionV1::decode(&bytes).unwrap();
+        let bytes = a.encode().test_ok();
+        let decoded = WorldActionV1::decode(&bytes).test_ok();
         assert_eq!(decoded.action_kind, ActionKindV1::TargetVelocity);
     }
 
@@ -1725,7 +1761,7 @@ mod tests {
             ciborium::Value::Integer(0.into()),
         ]);
         let mut buf = Vec::new();
-        ciborium::into_writer(&arr, &mut buf).unwrap();
+        ciborium::into_writer(&arr, &mut buf).test_ok();
         assert!(matches!(
             WorldActionV1::decode(&CanonicalBytes::from_vec(buf)),
             Err(WorldCodecError::UnknownActionKind)
@@ -1758,7 +1794,7 @@ mod tests {
             ciborium::Value::Integer(0.into()),
         ]);
         let mut buf = Vec::new();
-        ciborium::into_writer(&arr, &mut buf).unwrap();
+        ciborium::into_writer(&arr, &mut buf).test_ok();
         assert!(matches!(
             WorldActionV1::decode(&CanonicalBytes::from_vec(buf)),
             Err(WorldCodecError::InvalidActionScope)
@@ -1803,7 +1839,7 @@ mod tests {
             ciborium::Value::Integer(0.into()),
         ]);
         let mut buf = Vec::new();
-        ciborium::into_writer(&arr, &mut buf).unwrap();
+        ciborium::into_writer(&arr, &mut buf).test_ok();
         assert!(matches!(
             WorldActionV1::decode(&CanonicalBytes::from_vec(buf)),
             Err(WorldCodecError::WrongFieldType)
@@ -1814,7 +1850,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_action_v1_rejects_wrong_numeric_and_params_types() {
         let action = sample_action();
-        let encoded = action.encode().unwrap();
+        let encoded = action.encode().test_ok();
         for (index, replacement) in [
             (5, ciborium::Value::Integer(1.into())),
             (6, ciborium::Value::Text("not-a-number".to_owned())),
@@ -1847,7 +1883,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_action_v1_wrong_magic_rejected() {
         let a = sample_action();
-        let mut bytes = a.encode().unwrap().as_slice().to_vec();
+        let mut bytes = a.encode().test_ok().as_slice().to_vec();
         // byte[2] is always 'W' in the magic (array-header, bytes-header, 'W', ...).
         bytes[2] = b'X';
         assert!(matches!(
@@ -1860,7 +1896,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_action_v1_trailing_bytes_rejected() {
         let a = sample_action();
-        let mut bytes = a.encode().unwrap().as_slice().to_vec();
+        let mut bytes = a.encode().test_ok().as_slice().to_vec();
         bytes.push(0x00);
         assert!(matches!(
             WorldActionV1::decode(&CanonicalBytes::from_vec(bytes)),
@@ -1873,8 +1909,8 @@ mod tests {
     fn world_action_v1_empty_params_allowed() {
         let mut a = sample_action();
         a.params_cbor = vec![0xf6]; // CBOR null
-        let bytes = a.encode().unwrap();
-        let decoded = WorldActionV1::decode(&bytes).unwrap();
+        let bytes = a.encode().test_ok();
+        let decoded = WorldActionV1::decode(&bytes).test_ok();
         assert_eq!(decoded.params_cbor, vec![0xf6]);
     }
 
@@ -1886,8 +1922,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_observation_v1_round_trip() {
         let o = sample_observation();
-        let bytes = o.encode().unwrap();
-        let d = WorldObservationV1::decode(&bytes).unwrap();
+        let bytes = o.encode().test_ok();
+        let d = WorldObservationV1::decode(&bytes).test_ok();
         assert_eq!(d.body_entity_id, o.body_entity_id);
         assert_eq!(d.tick, o.tick);
         assert_eq!(d.step_index, o.step_index);
@@ -1928,7 +1964,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_observation_v1_non_finite_float_rejected_on_decode() {
         let o = sample_observation();
-        let bytes = rewrite_array_field(&o.encode().unwrap(), 5, ciborium::Value::Float(f64::NAN));
+        let bytes = rewrite_array_field(&o.encode().test_ok(), 5, ciborium::Value::Float(f64::NAN));
         assert!(matches!(
             WorldObservationV1::decode(&bytes),
             Err(WorldCodecError::NonFiniteFloat)
@@ -1950,7 +1986,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_observation_v1_wrong_magic_rejected() {
         let o = sample_observation();
-        let mut bytes = o.encode().unwrap().as_slice().to_vec();
+        let mut bytes = o.encode().test_ok().as_slice().to_vec();
         // byte[2] is always 'W' in the magic (array-header, bytes-header, 'W', ...).
         bytes[2] = b'X';
         assert!(matches!(
@@ -1963,7 +1999,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_observation_v1_trailing_bytes_rejected() {
         let o = sample_observation();
-        let mut bytes = o.encode().unwrap().as_slice().to_vec();
+        let mut bytes = o.encode().test_ok().as_slice().to_vec();
         bytes.push(0x00);
         assert!(matches!(
             WorldObservationV1::decode(&CanonicalBytes::from_vec(bytes)),
@@ -1979,7 +2015,7 @@ mod tests {
             ciborium::Value::Integer(1.into()),
         ]);
         let mut buf = Vec::new();
-        ciborium::into_writer(&truncated, &mut buf).unwrap();
+        ciborium::into_writer(&truncated, &mut buf).test_ok();
         assert!(matches!(
             WorldObservationV1::decode(&CanonicalBytes::from_vec(buf)),
             Err(WorldCodecError::WrongArrayLength)
@@ -1994,8 +2030,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_config_v1_round_trip() {
         let c = sample_config();
-        let bytes = c.encode().unwrap();
-        let decoded = WorldConfigV1::decode(&bytes).unwrap();
+        let bytes = c.encode().test_ok();
+        let decoded = WorldConfigV1::decode(&bytes).test_ok();
         assert_eq!(decoded.backend_id, c.backend_id);
         assert_eq!(decoded.backend_version, c.backend_version);
         assert_eq!(decoded.backend_content_hash, c.backend_content_hash);
@@ -2013,7 +2049,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_config_v1_wrong_magic_rejected() {
         let c = sample_config();
-        let mut bytes = c.encode().unwrap().as_slice().to_vec();
+        let mut bytes = c.encode().test_ok().as_slice().to_vec();
         // byte[2] is always 'W' in the magic (array-header, bytes-header, 'W', ...).
         bytes[2] = b'X';
         assert!(matches!(
@@ -2026,7 +2062,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_config_v1_trailing_bytes_rejected() {
         let c = sample_config();
-        let mut bytes = c.encode().unwrap().as_slice().to_vec();
+        let mut bytes = c.encode().test_ok().as_slice().to_vec();
         bytes.push(0xFF);
         assert!(matches!(
             WorldConfigV1::decode(&CanonicalBytes::from_vec(bytes)),
@@ -2059,14 +2095,14 @@ mod tests {
         // Build a WCF1 array with coord_convention = 1
         let mut c = sample_config();
         c.coord_convention = 0; // encode valid first
-        let bytes = c.encode().unwrap().as_slice().to_vec();
+        let bytes = c.encode().test_ok().as_slice().to_vec();
         let mut cursor = std::io::Cursor::new(bytes.as_slice());
-        let mut val: ciborium::Value = ciborium::from_reader(&mut cursor).unwrap();
+        let mut val: ciborium::Value = ciborium::from_reader(&mut cursor).test_ok();
         if let ciborium::Value::Array(ref mut items) = val {
             items[3] = ciborium::Value::Integer(1.into()); // flip coord_convention
         }
         let mut buf = Vec::new();
-        ciborium::into_writer(&val, &mut buf).unwrap();
+        ciborium::into_writer(&val, &mut buf).test_ok();
         assert!(matches!(
             WorldConfigV1::decode(&CanonicalBytes::from_vec(buf)),
             Err(WorldCodecError::InvalidCoordConvention)
@@ -2088,14 +2124,14 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_config_v1_sensor_resolution_below_minimum_rejected_on_decode() {
         let c = sample_config();
-        let bytes = c.encode().unwrap().as_slice().to_vec();
+        let bytes = c.encode().test_ok().as_slice().to_vec();
         let mut cursor = std::io::Cursor::new(bytes.as_slice());
-        let mut val: ciborium::Value = ciborium::from_reader(&mut cursor).unwrap();
+        let mut val: ciborium::Value = ciborium::from_reader(&mut cursor).test_ok();
         if let ciborium::Value::Array(ref mut items) = val {
             items[12] = ciborium::Value::Integer(50.into()); // below 100mm floor
         }
         let mut buf = Vec::new();
-        ciborium::into_writer(&val, &mut buf).unwrap();
+        ciborium::into_writer(&val, &mut buf).test_ok();
         assert!(matches!(
             WorldConfigV1::decode(&CanonicalBytes::from_vec(buf)),
             Err(WorldCodecError::SensorResolutionBelowMinimum)
@@ -2106,14 +2142,14 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_config_v1_wrong_field_type_for_backend_id_rejected() {
         let c = sample_config();
-        let bytes = c.encode().unwrap().as_slice().to_vec();
+        let bytes = c.encode().test_ok().as_slice().to_vec();
         let mut cursor = std::io::Cursor::new(bytes.as_slice());
-        let mut val: ciborium::Value = ciborium::from_reader(&mut cursor).unwrap();
+        let mut val: ciborium::Value = ciborium::from_reader(&mut cursor).test_ok();
         if let ciborium::Value::Array(ref mut items) = val {
             items[7] = ciborium::Value::Integer(42.into()); // backend_id should be tstr
         }
         let mut buf = Vec::new();
-        ciborium::into_writer(&val, &mut buf).unwrap();
+        ciborium::into_writer(&val, &mut buf).test_ok();
         assert!(matches!(
             WorldConfigV1::decode(&CanonicalBytes::from_vec(buf)),
             Err(WorldCodecError::WrongFieldType)
@@ -2124,7 +2160,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_config_v1_rejects_wrong_hash_and_resolution_types() {
         let config = sample_config();
-        let encoded = config.encode().unwrap();
+        let encoded = config.encode().test_ok();
         assert!(matches!(
             WorldConfigV1::decode(&rewrite_array_field(
                 &encoded,
@@ -2157,14 +2193,14 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_observation_v1_wrong_field_type_for_float_rejected() {
         let o = sample_observation();
-        let bytes = o.encode().unwrap().as_slice().to_vec();
+        let bytes = o.encode().test_ok().as_slice().to_vec();
         let mut cursor = std::io::Cursor::new(bytes.as_slice());
-        let mut val: ciborium::Value = ciborium::from_reader(&mut cursor).unwrap();
+        let mut val: ciborium::Value = ciborium::from_reader(&mut cursor).test_ok();
         if let ciborium::Value::Array(ref mut items) = val {
             items[5] = ciborium::Value::Text("not_a_float".to_owned()); // pos_x should be float
         }
         let mut buf = Vec::new();
-        ciborium::into_writer(&val, &mut buf).unwrap();
+        ciborium::into_writer(&val, &mut buf).test_ok();
         assert!(matches!(
             WorldObservationV1::decode(&CanonicalBytes::from_vec(buf)),
             Err(WorldCodecError::WrongFieldType)
@@ -2175,14 +2211,14 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_observation_v1_payload_too_large_for_sensor_rejected() {
         let o = sample_observation();
-        let bytes = o.encode().unwrap().as_slice().to_vec();
+        let bytes = o.encode().test_ok().as_slice().to_vec();
         let mut cursor = std::io::Cursor::new(bytes.as_slice());
-        let mut val: ciborium::Value = ciborium::from_reader(&mut cursor).unwrap();
+        let mut val: ciborium::Value = ciborium::from_reader(&mut cursor).test_ok();
         if let ciborium::Value::Array(ref mut items) = val {
             items[19] = ciborium::Value::Bytes(vec![0u8; MAX_SENSOR_VALUE_BYTES + 1]);
         }
         let mut buf = Vec::new();
-        ciborium::into_writer(&val, &mut buf).unwrap();
+        ciborium::into_writer(&val, &mut buf).test_ok();
         assert!(matches!(
             WorldObservationV1::decode(&CanonicalBytes::from_vec(buf)),
             Err(WorldCodecError::PayloadTooLarge { .. })
@@ -2204,16 +2240,16 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_driver_emits_config_on_first_step() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("test").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("test").test_ok();
         let backend = Box::new(SimpleKinematicBackend::new());
         let mut driver = WorldDriver::new(vec![], backend, sample_config());
-        let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
+        let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
         // First step: config draft only (no bodies)
         assert_eq!(out.drafts.len(), 1);
         assert_eq!(out.drafts[0].event_type.as_str(), EVENT_TYPE_CONFIG_V1);
         // Second step: no config, no bodies
-        let out2 = driver.step(tl.id(), ObservationView::empty()).unwrap();
+        let out2 = driver.step(tl.id(), ObservationView::empty()).test_ok();
         assert_eq!(out2.drafts.len(), 0);
     }
 
@@ -2231,7 +2267,7 @@ mod tests {
         let config_entity = EntityId::new();
         let timeline = TimelineId::new();
         let mut params = Vec::new();
-        ciborium::into_writer(&vec![1.0_f32, 0.0_f32], &mut params).unwrap();
+        ciborium::into_writer(&vec![1.0_f32, 0.0_f32], &mut params).test_ok();
         let action = WorldActionV1 {
             actor_entity_id: body,
             body_entity_id: body,
@@ -2266,14 +2302,14 @@ mod tests {
                 1,
                 config_entity,
                 EVENT_TYPE_CONFIG_V1,
-                sample_config().encode().unwrap(),
+                sample_config().encode().test_ok(),
             ),
-            make_versioned_event(2, body, EVENT_TYPE_ACTION_V1, action.encode().unwrap()),
+            make_versioned_event(2, body, EVENT_TYPE_ACTION_V1, action.encode().test_ok()),
             make_versioned_event(
                 3,
                 body,
                 EVENT_TYPE_OBSERVATION_V1,
-                observation.encode().unwrap(),
+                observation.encode().test_ok(),
             ),
             make_versioned_event(
                 4,
@@ -2303,20 +2339,20 @@ mod tests {
                     .with_config_entity(config_entity),
                 )),
             )
-            .unwrap();
+            .test_ok();
         registry
             .restore_driver_state(
                 &[TimelineHistorySegment::new(timeline, Seq::from_u64(4))],
                 &events,
             )
-            .unwrap();
+            .test_ok();
         registry
             .step_all_anchored_with_events(timeline, Seq::from_u64(4), &events)
-            .unwrap();
+            .test_ok();
         registry.abort_step();
         registry
             .step_all_anchored_with_events(timeline, Seq::from_u64(4), &events)
-            .unwrap();
+            .test_ok();
         let mut reduced = WorldReducer.initial();
         WorldReducer.apply(&mut reduced, &events[2]);
         assert_eq!(reduced.get("last_x"), Some(&serde_json::json!(1.0)));
@@ -2345,7 +2381,7 @@ mod tests {
                     sample_config(),
                 ))),
             )
-            .unwrap();
+            .test_ok();
 
         for event_type in [EVENT_TYPE_ACTION_V1, EVENT_TYPE_OBSERVATION_V1] {
             let malformed = make_versioned_event(
@@ -2366,15 +2402,12 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_driver_default_emits_its_default_config() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("default-driver").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("default-driver").test_ok();
         let mut driver = WorldDriver::default();
 
-        let output = driver
-            .step(tl.id(), ObservationView::empty())
-            .expect("default configuration is valid");
-        let config = WorldConfigV1::decode(&output.drafts[0].payload)
-            .expect("default config draft uses the public codec");
+        let output = driver.step(tl.id(), ObservationView::empty()).test_ok();
+        let config = WorldConfigV1::decode(&output.drafts[0].payload).test_ok();
 
         assert_eq!(config.backend_id, "simple-kinematic");
         assert_eq!(config.backend_version, "1.0.0");
@@ -2411,12 +2444,12 @@ mod tests {
 
     fn flip_version(bytes: &[u8]) -> Vec<u8> {
         let mut cursor = std::io::Cursor::new(bytes);
-        let mut val: ciborium::Value = ciborium::from_reader(&mut cursor).unwrap();
+        let mut val: ciborium::Value = ciborium::from_reader(&mut cursor).test_ok();
         if let ciborium::Value::Array(ref mut items) = val {
             items[1] = ciborium::Value::Integer(99_i64.into());
         }
         let mut buf = Vec::new();
-        ciborium::into_writer(&val, &mut buf).unwrap();
+        ciborium::into_writer(&val, &mut buf).test_ok();
         buf
     }
 
@@ -2424,7 +2457,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_observation_v1_wrong_version_rejected() {
         let o = sample_observation();
-        let flipped = flip_version(o.encode().unwrap().as_slice());
+        let flipped = flip_version(o.encode().test_ok().as_slice());
         assert!(matches!(
             WorldObservationV1::decode(&CanonicalBytes::from_vec(flipped)),
             Err(WorldCodecError::WrongVersion)
@@ -2435,7 +2468,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_action_v1_wrong_version_rejected() {
         let a = sample_action();
-        let flipped = flip_version(a.encode().unwrap().as_slice());
+        let flipped = flip_version(a.encode().test_ok().as_slice());
         assert!(matches!(
             WorldActionV1::decode(&CanonicalBytes::from_vec(flipped)),
             Err(WorldCodecError::WrongVersion)
@@ -2446,7 +2479,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_config_v1_wrong_version_rejected() {
         let c = sample_config();
-        let flipped = flip_version(c.encode().unwrap().as_slice());
+        let flipped = flip_version(c.encode().test_ok().as_slice());
         assert!(matches!(
             WorldConfigV1::decode(&CanonicalBytes::from_vec(flipped)),
             Err(WorldCodecError::WrongVersion)
@@ -2577,29 +2610,25 @@ mod tests {
             [21; 16],
             [22; 16],
             1,
-            pos_core::Wgs84PositionV1::new(35.0, -120.0, 100.0).expect("fixture origin is valid"),
+            pos_core::Wgs84PositionV1::new(35.0, -120.0, 100.0).test_ok(),
             [23; 32],
             10_000.0,
         )
-        .expect("fixture origin is valid");
-        let transform = pos_core::WorldTransformV1::new(&capability, origin)
-            .expect("fixture transform is valid");
+        .test_ok();
+        let transform = pos_core::WorldTransformV1::new(&capability, origin).test_ok();
         let position = transform
             .forward(
                 &capability,
-                pos_core::Wgs84PositionV1::new(35.001, -119.999, 120.0)
-                    .expect("fixture position is valid"),
+                pos_core::Wgs84PositionV1::new(35.001, -119.999, 120.0).test_ok(),
             )
-            .expect("fixture position is in range");
+            .test_ok();
         let body = WorldCoordinateBody::new(EntityId::new(), position, 1.5, -2.0, 0.25);
         assert!((body.position().east_metres() - position.east_metres()).abs() < f64::EPSILON);
         assert!((body.position().north_metres() - position.north_metres()).abs() < f64::EPSILON);
         assert!((body.position().up_metres() - position.up_metres()).abs() < f64::EPSILON);
 
         let backend = SimpleKinematicBackend::new();
-        let observations = backend
-            .step_coordinates(&[body])
-            .expect("named coordinate step is finite");
+        let observations = backend.step_coordinates(&[body]).test_ok();
 
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].entity_id(), body.entity_id());
@@ -2626,20 +2655,18 @@ mod tests {
             [24; 16],
             [25; 16],
             1,
-            pos_core::Wgs84PositionV1::new(35.0, -120.0, 100.0).expect("fixture is valid"),
+            pos_core::Wgs84PositionV1::new(35.0, -120.0, 100.0).test_ok(),
             [26; 32],
             10_000.0,
         )
-        .expect("fixture origin is valid");
-        let transform = pos_core::WorldTransformV1::new(&capability, origin)
-            .expect("fixture transform is valid");
+        .test_ok();
+        let transform = pos_core::WorldTransformV1::new(&capability, origin).test_ok();
         let position = transform
             .forward(
                 &capability,
-                pos_core::Wgs84PositionV1::new(35.001, -119.999, 120.0)
-                    .expect("fixture position is valid"),
+                pos_core::Wgs84PositionV1::new(35.001, -119.999, 120.0).test_ok(),
             )
-            .expect("fixture position is in range");
+            .test_ok();
         let body = WorldCoordinateBody::new(EntityId::new(), position, f64::INFINITY, 0.0, 0.0);
         let backend = SimpleKinematicBackend::new();
 
@@ -2660,8 +2687,8 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_step_produces_correct_event_type() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("test").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("test").test_ok();
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
@@ -2674,12 +2701,12 @@ mod tests {
         let mut driver = WorldDriver::new(vec![body], backend, sample_config());
 
         // First step: config (index 0) + observation (index 1).
-        let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
+        let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
         assert_eq!(out.drafts.len(), 2);
         assert_eq!(out.drafts[0].event_type.as_str(), EVENT_TYPE_CONFIG_V1);
         assert_eq!(out.drafts[1].event_type.as_str(), EVENT_TYPE_OBSERVATION_V1);
         // Second step: observation only.
-        let out2 = driver.step(tl.id(), ObservationView::empty()).unwrap();
+        let out2 = driver.step(tl.id(), ObservationView::empty()).test_ok();
         assert_eq!(out2.drafts.len(), 1);
         assert_eq!(
             out2.drafts[0].event_type.as_str(),
@@ -2690,8 +2717,8 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_step_produces_decodable_v1_payload() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("test").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("test").test_ok();
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
@@ -2704,9 +2731,9 @@ mod tests {
         let mut driver = WorldDriver::new(vec![body], backend, sample_config());
 
         // First step: drafts[0]=config, drafts[1]=observation.
-        let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
+        let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
         assert_eq!(out.drafts.len(), 2);
-        let obs = WorldObservationV1::decode(&out.drafts[1].payload).unwrap();
+        let obs = WorldObservationV1::decode(&out.drafts[1].payload).test_ok();
         // Positions are quantized to sensor_min_resolution_mm (100mm = 0.1m).
         let expected_x = (7.0_f32 / 0.1).round() * 0.1;
         let expected_y = (13.0_f32 / 0.1).round() * 0.1;
@@ -2718,8 +2745,8 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_updates_body_positions() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("test").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("test").test_ok();
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
@@ -2731,11 +2758,11 @@ mod tests {
         let backend = Box::new(SimpleKinematicBackend::new());
         let mut driver = WorldDriver::new(vec![body], backend, sample_config());
 
-        driver.step(tl.id(), ObservationView::empty()).unwrap();
+        driver.step(tl.id(), ObservationView::empty()).test_ok();
         assert!((driver.entities[0].x - 1.0).abs() < f64::EPSILON);
         assert!((driver.entities[0].y - 1.0).abs() < f64::EPSILON);
 
-        driver.step(tl.id(), ObservationView::empty()).unwrap();
+        driver.step(tl.id(), ObservationView::empty()).test_ok();
         assert!((driver.entities[0].x - 2.0).abs() < f64::EPSILON);
         assert!((driver.entities[0].y - 2.0).abs() < f64::EPSILON);
     }
@@ -2788,8 +2815,8 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_ignores_observations_for_unknown_entities() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("test").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("test").test_ok();
         let known = EntityId::new();
         let body = Body {
             entity_id: known,
@@ -2803,7 +2830,7 @@ mod tests {
         assert_eq!(UnknownEntityBackend.name(), "unknown-entity");
         // First step: config + observation for the unknown entity (backend returns unknown id,
         // so body state is unchanged, but an observation draft is still emitted for it).
-        let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
+        let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
         assert_eq!(out.drafts.len(), 2); // config + one observation from unknown backend
         assert!((driver.entities[0].x - 1.0).abs() < f64::EPSILON);
         assert!((driver.entities[0].y - 2.0).abs() < f64::EPSILON);
@@ -2812,8 +2839,8 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_updates_known_and_skips_unknown_in_same_step() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("test").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("test").test_ok();
         let known = EntityId::new();
         let unknown = EntityId::new();
         let body = Body {
@@ -2829,7 +2856,7 @@ mod tests {
             sample_config(),
         );
         assert_eq!(MixedEntityBackend { extra: unknown }.name(), "mixed-entity");
-        driver.step(tl.id(), ObservationView::empty()).unwrap();
+        driver.step(tl.id(), ObservationView::empty()).test_ok();
         assert!((driver.entities[0].x - 1.0).abs() < f64::EPSILON);
         assert!((driver.entities[0].y - 2.0).abs() < f64::EPSILON);
     }
@@ -2943,17 +2970,17 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_empty_bodies_produces_no_events() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("test").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("test").test_ok();
         let backend = Box::new(SimpleKinematicBackend::new());
         let mut driver = WorldDriver::new(vec![], backend, sample_config());
 
         // First step: config event only (no bodies → no observations).
-        let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
+        let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
         assert_eq!(out.drafts.len(), 1);
         assert_eq!(out.drafts[0].event_type.as_str(), EVENT_TYPE_CONFIG_V1);
         // Second step: no config, no bodies → no events.
-        let out2 = driver.step(tl.id(), ObservationView::empty()).unwrap();
+        let out2 = driver.step(tl.id(), ObservationView::empty()).test_ok();
         assert_eq!(out2.drafts.len(), 0);
     }
 
@@ -2998,8 +3025,8 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_tick_increments() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("test").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("test").test_ok();
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
@@ -3012,9 +3039,9 @@ mod tests {
         let mut driver = WorldDriver::new(vec![body], backend, sample_config());
 
         assert_eq!(driver.tick, 0);
-        driver.step(tl.id(), ObservationView::empty()).unwrap();
+        driver.step(tl.id(), ObservationView::empty()).test_ok();
         assert_eq!(driver.tick, 1);
-        driver.step(tl.id(), ObservationView::empty()).unwrap();
+        driver.step(tl.id(), ObservationView::empty()).test_ok();
         assert_eq!(driver.tick, 2);
     }
 
@@ -3042,31 +3069,31 @@ mod tests {
             let expected_pos_y = (-0.5_f32 / 0.1).round() * 0.1;
 
             // First independent run.
-            let mut store1 = open_store(StoreConfig::Memory).unwrap();
-            let tl1 = store1.create_timeline("fixture-1").unwrap();
+            let mut store1 = open_store(StoreConfig::Memory).test_ok();
+            let tl1 = store1.create_timeline("fixture-1").test_ok();
             let mut driver1 = WorldDriver::new(
                 vec![body.clone()],
                 Box::new(SimpleKinematicBackend::new()),
                 sample_config(),
             );
-            let out1 = driver1.step(tl1.id(), ObservationView::empty()).unwrap();
+            let out1 = driver1.step(tl1.id(), ObservationView::empty()).test_ok();
             // drafts[0]=config, drafts[1]=observation
             assert_eq!(out1.drafts.len(), 2);
-            let obs1 = WorldObservationV1::decode(&out1.drafts[1].payload).unwrap();
+            let obs1 = WorldObservationV1::decode(&out1.drafts[1].payload).test_ok();
             assert!((obs1.pos_x - expected_pos_x).abs() < 0.001);
             assert!((obs1.pos_y - expected_pos_y).abs() < 0.001);
 
             // Second independent run — same input must produce same output (determinism).
-            let mut store2 = open_store(StoreConfig::Memory).unwrap();
-            let tl2 = store2.create_timeline("fixture-2").unwrap();
+            let mut store2 = open_store(StoreConfig::Memory).test_ok();
+            let tl2 = store2.create_timeline("fixture-2").test_ok();
             let mut driver2 = WorldDriver::new(
                 vec![body],
                 Box::new(SimpleKinematicBackend::new()),
                 sample_config(),
             );
-            let out2 = driver2.step(tl2.id(), ObservationView::empty()).unwrap();
+            let out2 = driver2.step(tl2.id(), ObservationView::empty()).test_ok();
             assert_eq!(out2.drafts.len(), 2);
-            let obs2 = WorldObservationV1::decode(&out2.drafts[1].payload).unwrap();
+            let obs2 = WorldObservationV1::decode(&out2.drafts[1].payload).test_ok();
             assert!((obs2.pos_x - expected_pos_x).abs() < 0.001);
             assert!((obs2.pos_y - expected_pos_y).abs() < 0.001);
             // Byte-identical payloads prove determinism.
@@ -3079,8 +3106,8 @@ mod tests {
         #[test]
         #[cfg_attr(coverage_nightly, coverage(off))]
         fn worlddriver_observation_encodes_sensor_proximity() {
-            let mut store = open_store(StoreConfig::Memory).unwrap();
-            let tl = store.create_timeline("sensor-kind-test").unwrap();
+            let mut store = open_store(StoreConfig::Memory).test_ok();
+            let tl = store.create_timeline("sensor-kind-test").test_ok();
             let entity = EntityId::new();
             let body = Body {
                 entity_id: entity,
@@ -3094,10 +3121,10 @@ mod tests {
                 Box::new(SimpleKinematicBackend::new()),
                 sample_config(),
             );
-            let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
+            let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
             // drafts[0]=config, drafts[1]=observation
             assert_eq!(out.drafts.len(), 2);
-            let obs = WorldObservationV1::decode(&out.drafts[1].payload).unwrap();
+            let obs = WorldObservationV1::decode(&out.drafts[1].payload).test_ok();
             assert_eq!(obs.sensor_kind, SensorKindV1::Proximity.as_u8());
         }
     }
@@ -3111,7 +3138,7 @@ mod tests {
             id: EventId::new(),
             entity,
             event_type: Kind::new(EVENT_TYPE_ACTION_V1),
-            payload: action.encode().unwrap(),
+            payload: action.encode().test_ok(),
             wall_time: WallTime::from_micros(0),
             seq: Seq::ZERO,
             causation_id: None,
@@ -3124,8 +3151,8 @@ mod tests {
 
     fn encode_vel_params(vx: f32, vy: f32) -> Vec<u8> {
         cbor_encode(&ciborium::Value::Array(vec![
-            cbor_f32(vx).unwrap(),
-            cbor_f32(vy).unwrap(),
+            cbor_f32(vx).test_ok(),
+            cbor_f32(vy).test_ok(),
         ]))
     }
 
@@ -3151,8 +3178,8 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_applies_impulse_action_to_body() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("test").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("test").test_ok();
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
@@ -3183,13 +3210,13 @@ mod tests {
         ];
         let out = driver
             .step(tl.id(), ObservationView::from_events(&events))
-            .unwrap();
+            .test_ok();
         let obs_draft = out
             .drafts
             .iter()
             .find(|d| d.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
-            .unwrap();
-        let obs = WorldObservationV1::decode(&obs_draft.payload).unwrap();
+            .test_ok();
+        let obs = WorldObservationV1::decode(&obs_draft.payload).test_ok();
         // 100 mm quantization; 1.5 m and 2.0 m are exact multiples of 0.1 m.
         assert!((obs.pos_x - 1.5_f32).abs() < 0.15);
         assert!((obs.pos_y - 2.0_f32).abs() < 0.15);
@@ -3200,13 +3227,13 @@ mod tests {
         driver.commit_step();
         let out = driver
             .step(tl.id(), ObservationView::from_events(&events))
-            .unwrap();
+            .test_ok();
         let obs_draft = out
             .drafts
             .iter()
             .find(|d| d.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
-            .unwrap();
-        let obs = WorldObservationV1::decode(&obs_draft.payload).unwrap();
+            .test_ok();
+        let obs = WorldObservationV1::decode(&obs_draft.payload).test_ok();
         assert!((obs.pos_x - 3.0_f32).abs() < 0.15);
         assert!((obs.pos_y - 4.0_f32).abs() < 0.15);
     }
@@ -3214,8 +3241,8 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_applies_target_velocity_action() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("test").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("test").test_ok();
         let entity = EntityId::new();
         // High initial velocity; TargetVelocity must override it entirely.
         let body = Body {
@@ -3244,13 +3271,13 @@ mod tests {
         let events = vec![make_action_event_from(entity, &action)];
         let out = driver
             .step(tl.id(), ObservationView::from_events(&events))
-            .unwrap();
+            .test_ok();
         let obs_draft = out
             .drafts
             .iter()
             .find(|d| d.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
-            .unwrap();
-        let obs = WorldObservationV1::decode(&obs_draft.payload).unwrap();
+            .test_ok();
+        let obs = WorldObservationV1::decode(&obs_draft.payload).test_ok();
         assert!((obs.pos_x - 2.0_f32).abs() < 0.15);
         assert!((obs.pos_y - 0.5_f32).abs() < 0.15);
     }
@@ -3258,8 +3285,8 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_rejects_malformed_action_payload() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("test").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("test").test_ok();
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
@@ -3290,13 +3317,13 @@ mod tests {
         let events = vec![bad_event];
         let error = driver
             .step(tl.id(), ObservationView::from_events(&events))
-            .expect_err("malformed committed action must abort the step");
+            .test_err();
         match error {
             RuntimeError::InvalidPayload { event_type, reason } => {
                 assert_eq!(event_type, EVENT_TYPE_ACTION_V1);
                 assert_eq!(reason, "CBOR decode error");
             }
-            other => panic!("unexpected error: {other:?}"),
+            other => std::panic::resume_unwind(Box::new(format!("unexpected error: {other:?}"))),
         }
         driver.abort_step();
     }
@@ -3318,7 +3345,7 @@ mod tests {
     /// Serialise `action` to CBOR and wrap it in a [`ProposedAction`].
     fn cbor_proposal(action: &WorldAction, actor: EntityId) -> ProposedAction {
         let mut buf = Vec::new();
-        ciborium::into_writer(action, &mut buf).unwrap();
+        ciborium::into_writer(action, &mut buf).test_ok();
         ProposedAction::new(
             Kind::new(EVENT_TYPE_ACTION),
             actor,
@@ -3352,9 +3379,7 @@ mod tests {
 
         // 1. Valid CBOR proposal
         let proposal = cbor_proposal(&action, actor);
-        let draft = plugin
-            .approve(&proposal)
-            .expect("CBOR proposal should be approved");
+        let draft = plugin.approve(&proposal).test_ok();
         assert_eq!(draft.entity, actor);
         assert_eq!(draft.event_type.as_str(), EVENT_TYPE_ACTION);
 
@@ -3362,7 +3387,7 @@ mod tests {
         let wrong_type = ProposedAction::new(
             Kind::new("wrong.event"),
             actor,
-            proposal.payload.clone(),
+            proposal.payload,
             Kind::new("world.action.submit"),
         );
         assert_eq!(
@@ -3428,7 +3453,7 @@ mod tests {
         let wrong_actor = ProposedAction::new(
             Kind::new(EVENT_TYPE_ACTION),
             other_actor,
-            proposal.payload.clone(),
+            proposal.payload,
             Kind::new("world.action.submit"),
         );
         assert_eq!(

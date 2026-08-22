@@ -28,7 +28,7 @@ pub fn replay(
 
 /// Replay events up to and **including** `at_seq` on `timeline`.
 ///
-/// Reads [`SeqRange::bounded`]`(Seq::ZERO, at_seq)` and folds through `registry`.
+/// Reads [`SeqRange::bounded`](`Seq::ZERO`, `at_seq`) and folds through `registry`.
 ///
 /// # Errors
 /// Propagates [`CoreError`] from the underlying store.
@@ -45,6 +45,41 @@ pub fn replay_at(
 
 #[cfg(test)]
 mod tests {
+
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected replay fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing fixture value")))
+        }
+    }
+
+    trait TestErrorExt<T, E> {
+        fn test_err(self) -> E;
+    }
+
+    impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
+        fn test_err(self) -> E {
+            match self {
+                Ok(value) => std::panic::resume_unwind(Box::new(format!(
+                    "unexpected successful replay fixture value: {value:?}"
+                ))),
+                Err(error) => error,
+            }
+        }
+    }
     use super::*;
     use pos_core::{
         clock::WallTime,
@@ -156,12 +191,12 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn replay_empty_timeline_is_noop() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("empty").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("empty").test_ok();
         let mut reg = ProjectionRegistry::new();
         reg.register("count", Box::new(CountReducer));
 
-        replay(store.as_ref(), tl.id(), &mut reg).unwrap();
+        replay(store.as_ref(), tl.id(), &mut reg).test_ok();
 
         // No entities seen — state_for returns None (count is zero).
         let entity = EntityId::new();
@@ -171,16 +206,16 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn replay_full_timeline_folds_all_events() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("full").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("full").test_ok();
         let entity = EntityId::new();
 
         let drafts: Vec<EventDraft> = (0..5).map(|_| draft(entity)).collect();
-        store.append(tl.id(), &drafts).unwrap();
+        store.append(tl.id(), &drafts).test_ok();
 
         let mut reg = ProjectionRegistry::new();
         reg.register("count", Box::new(CountReducer));
-        replay(store.as_ref(), tl.id(), &mut reg).unwrap();
+        replay(store.as_ref(), tl.id(), &mut reg).test_ok();
 
         assert_eq!(count_for(&reg, &entity), 5);
     }
@@ -188,19 +223,19 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn replay_at_seq_stops_at_boundary() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("partial").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("partial").test_ok();
         let entity = EntityId::new();
 
         // Append 6 events; we only want to replay the first 3.
         let drafts: Vec<EventDraft> = (0..6).map(|_| draft(entity)).collect();
-        let committed = store.append(tl.id(), &drafts).unwrap();
+        let committed = store.append(tl.id(), &drafts).test_ok();
         // seq of the 3rd event (0-indexed = 2, but seqs are 1-based in MemoryStore)
         let third_seq = committed[2].seq;
 
         let mut reg = ProjectionRegistry::new();
         reg.register("count", Box::new(CountReducer));
-        replay_at(store.as_ref(), tl.id(), third_seq, &mut reg).unwrap();
+        replay_at(store.as_ref(), tl.id(), third_seq, &mut reg).test_ok();
 
         assert_eq!(count_for(&reg, &entity), 3);
     }
@@ -211,7 +246,7 @@ mod tests {
         let store = ReadFailStore;
         let mut reg = ProjectionRegistry::new();
         reg.register("count", Box::new(CountReducer));
-        let err = replay(&store, TimelineId::new(), &mut reg).unwrap_err();
+        let err = replay(&store, TimelineId::new(), &mut reg).test_err();
         assert!(matches!(err, CoreError::Storage(_)));
     }
 
@@ -221,7 +256,7 @@ mod tests {
         let store = ReadFailStore;
         let mut reg = ProjectionRegistry::new();
         reg.register("count", Box::new(CountReducer));
-        let err = replay_at(&store, TimelineId::new(), Seq::from_u64(1), &mut reg).unwrap_err();
+        let err = replay_at(&store, TimelineId::new(), Seq::from_u64(1), &mut reg).test_err();
         assert!(matches!(err, CoreError::Storage(_)));
     }
 
@@ -229,8 +264,8 @@ mod tests {
         #[test]
         #[cfg_attr(coverage_nightly, coverage(off))]
         fn replay_is_deterministic(event_count in 0usize..20) {
-            let mut store = open_store(StoreConfig::Memory).unwrap();
-            let tl = store.create_timeline("det").unwrap();
+            let mut store = open_store(StoreConfig::Memory).test_ok();
+            let tl = store.create_timeline("det").test_ok();
             let entity = EntityId::new();
 
             // Pre-populate with events built directly so we don't need mut store later.
@@ -255,11 +290,11 @@ mod tests {
             // Also exercise the store-based replay path.
             let drafts: Vec<EventDraft> = (0..event_count).map(|_| draft(entity)).collect();
             if !drafts.is_empty() {
-                store.append(tl.id(), &drafts).unwrap();
+                store.append(tl.id(), &drafts).test_ok();
             }
             let mut reg3 = ProjectionRegistry::new();
             reg3.register("count", Box::new(CountReducer));
-            replay(store.as_ref(), tl.id(), &mut reg3).unwrap();
+            replay(store.as_ref(), tl.id(), &mut reg3).test_ok();
             prop_assert_eq!(count_for(&reg3, &entity), event_count as u64);
         }
     }

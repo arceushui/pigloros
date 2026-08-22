@@ -38,6 +38,12 @@ fn fmt_brier(p: f64) -> String {
     format!("{p:.3}")
 }
 
+fn append_format(result: std::fmt::Result, output: &mut String) {
+    if result.is_err() {
+        output.push_str("[formatting error]");
+    }
+}
+
 /// Render the HTML page for a [`LedgerView`].
 ///
 /// `pubkey_hex` is printed in the footer when `Some`; `None` produces a
@@ -50,10 +56,9 @@ pub fn render_html(view: &LedgerView, pubkey_hex: Option<&str>) -> String {
     s.push_str("<head>\n");
     s.push_str("<meta charset=\"utf-8\">\n");
     s.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
-    let _ = writeln!(
-        s,
-        "<meta http-equiv=\"Content-Security-Policy\" content=\"{CONTENT_SECURITY_POLICY}\">"
-    );
+    s.push_str("<meta http-equiv=\"Content-Security-Policy\" content=\"");
+    s.push_str(CONTENT_SECURITY_POLICY);
+    s.push_str("\">\n");
     s.push_str("<title>Prediction Ledger</title>\n");
     s.push_str("<style>\n");
     s.push_str("body{font:16px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;max-width:48rem;margin:2rem auto;padding:0 1rem;color:#222;}\n");
@@ -78,22 +83,28 @@ pub fn render_html(view: &LedgerView, pubkey_hex: Option<&str>) -> String {
     // Headline (ADR-017 Decision 7): counts always; mean Brier only when
     // n_resolved >= 1, otherwise the explicit "no Brier Score yet" copy.
     s.push_str("<p class=\"headline\">");
-    let _ = write!(
-        s,
-        "{} pending / {} resolved",
-        view.n_pending + view.n_overdue,
-        view.n_resolved
+    append_format(
+        write!(
+            s,
+            "{} pending / {} resolved",
+            view.n_pending + view.n_overdue,
+            view.n_resolved
+        ),
+        &mut s,
     );
     if view.n_overdue > 0 {
-        let _ = write!(s, " ({} overdue)", view.n_overdue);
+        append_format(write!(s, " ({} overdue)", view.n_overdue), &mut s);
     }
     match view.mean_brier {
         Some(b) => {
-            let _ = write!(
-                s,
-                " — mean Brier Score: {} (n={})",
-                fmt_brier(b),
-                view.n_resolved
+            append_format(
+                write!(
+                    s,
+                    " — mean Brier Score: {} (n={})",
+                    fmt_brier(b),
+                    view.n_resolved
+                ),
+                &mut s,
             );
         }
         None => s.push_str(" — no Brier Score yet"),
@@ -112,7 +123,10 @@ pub fn render_html(view: &LedgerView, pubkey_hex: Option<&str>) -> String {
     s.push_str("<p>Verify each entry matches its OSF registration</p>\n");
     match pubkey_hex {
         Some(pk) => {
-            let _ = writeln!(s, "<p>Public key: <code>{}</code></p>", esc(pk));
+            append_format(
+                writeln!(s, "<p>Public key: <code>{}</code></p>", esc(pk)),
+                &mut s,
+            );
         }
         None => s.push_str("<p>Demo tier (TOML): entries are unsigned; verify with <code>b3sum</code> on the TOML files.</p>\n"),
     }
@@ -210,6 +224,7 @@ pub fn render_redirect() -> String {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::test_helpers::TestResultExt;
     use pos_plugin_ledger::{LedgerEntryView, LedgerStore, TomlLedgerStore};
     use std::path::Path;
 
@@ -384,9 +399,10 @@ mod tests {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn repository_seed_predictions_remain_included_and_renderable() {
+    fn repository_seed_predictions_remain_included_and_renderable(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let seed = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../seed");
-        let ledger = TomlLedgerStore::new(seed).load("2026-07-29").unwrap();
+        let ledger = TomlLedgerStore::new(seed).load("2026-07-29").test_ok()?;
 
         assert_eq!(ledger.entries().len(), 3);
         assert!(ledger.warnings().is_empty());
@@ -397,6 +413,8 @@ mod tests {
                 .count(),
             3
         );
+
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]

@@ -10,12 +10,28 @@
 //! logic lives here so downstream crates (#111 gateway, #113 close-out)
 //! can depend on the library directly.
 
+macro_rules! output_stdout {
+    ($($arg:tt)*) => {{
+        let mut output = std::io::stdout().lock();
+        drop(std::io::Write::write_fmt(&mut output, format_args!($($arg)*)));
+        drop(std::io::Write::write_all(&mut output, b"\n"));
+    }};
+}
+
+macro_rules! output_stderr {
+    ($($arg:tt)*) => {{
+        let mut output = std::io::stderr().lock();
+        drop(std::io::Write::write_fmt(&mut output, format_args!($($arg)*)));
+        drop(std::io::Write::write_all(&mut output, b"\n"));
+    }};
+}
+
 pub(crate) mod cli;
 pub(crate) mod export;
 pub mod hex;
 pub(crate) mod html;
 pub(crate) mod json;
-pub(crate) mod key_output;
+pub mod key_output;
 pub(crate) mod verify;
 
 /// Test support utilities shared across crate boundaries.
@@ -27,6 +43,15 @@ pub use html::{render_html, render_redirect, CONTENT_SECURITY_POLICY};
 pub use json::render_json;
 pub use pos_plugin_ledger::LedgerView;
 pub use verify::run as verify_source;
+
+/// Return the committed author identity used for ledger Events.
+#[must_use]
+pub(crate) fn well_known_entity() -> pos_core::ids::EntityId {
+    const LEDGER_ENTITY_ULID: &str = "01J3B0Y5ZK2J6MGK8D7QW3N0A0";
+    pos_core::ids::EntityId::from_ulid(
+        ulid::Ulid::from_string(LEDGER_ENTITY_ULID).unwrap_or_else(|_| ulid::Ulid::nil()),
+    )
+}
 
 /// Encode bytes as lowercase hex.
 pub(crate) fn hex_encode(bytes: &[u8]) -> String {

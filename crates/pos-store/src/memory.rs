@@ -1852,7 +1852,11 @@ impl MemoryStore {
             } => {
                 self.timelines
                     .get_mut(&timeline)
-                    .expect("test corruption targets an existing Timeline")
+                    .unwrap_or_else(|| {
+                        std::panic::resume_unwind(Box::new(
+                            "test corruption targets an existing Timeline",
+                        ))
+                    })
                     .timeline
                     .meta
                     .fork_point = Some((parent, fork_seq));
@@ -1887,6 +1891,43 @@ mod tests {
         store::{SeqRange, TimelineExport},
         OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore,
     };
+
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected memory-store fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("missing memory-store fixture value"))
+            })
+        }
+    }
+
+    trait TestErrorExt<T, E> {
+        fn test_err(self) -> E;
+    }
+
+    impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
+        fn test_err(self) -> E {
+            match self {
+                Ok(value) => std::panic::resume_unwind(Box::new(format!(
+                    "unexpected successful memory-store fixture value: {value:?}"
+                ))),
+                Err(error) => error,
+            }
+        }
+    }
 
     fn make_draft(entity: EntityId, payload: &[u8]) -> EventDraft {
         EventDraft::new(
@@ -1931,7 +1972,7 @@ mod tests {
             admission_policy_version,
             admission_epoch,
         )
-        .unwrap()
+        .test_ok()
     }
 
     fn pair_geographic_enrollment(
@@ -1944,7 +1985,7 @@ mod tests {
             .pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
                 timeline, entity, fence, [42; 32],
             ))
-            .unwrap();
+            .test_ok();
     }
 
     struct ErrorClock;
@@ -1960,7 +2001,7 @@ mod tests {
         let draft = make_draft(EntityId::new(), b"payload");
         let intent = AppendIntent::new(&draft);
         let mut clock_error = MemoryStore::with_clock(Box::new(ErrorClock));
-        let timeline = clock_error.create_timeline("clock-error").unwrap();
+        let timeline = clock_error.create_timeline("clock-error").test_ok();
         assert!(clock_error
             .append_intent_or_duplicate(timeline.id(), append_identity(1, 1), intent.clone())
             .is_err());
@@ -1976,13 +2017,13 @@ mod tests {
             )
             .is_err());
         assert!(clock_error
-            .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).unwrap())
+            .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).test_ok())
             .is_err());
 
         let mut overflow = MemoryStore::with_clock(Box::new(pos_core::FixedAdmissionClock(
             WallTime::from_micros(u64::MAX),
         )));
-        let timeline = overflow.create_timeline("overflow").unwrap();
+        let timeline = overflow.create_timeline("overflow").test_ok();
         assert!(overflow
             .append_intent_or_duplicate(timeline.id(), append_identity(2, 2), intent)
             .is_err());
@@ -1994,7 +2035,7 @@ mod tests {
     fn geographic_admission_clock_and_expiry_failures_leave_no_evidence() {
         let entity = EntityId::new();
         let mut clock_error = MemoryStore::with_clock(Box::new(ErrorClock));
-        let timeline = clock_error.create_timeline("geo-clock-error").unwrap();
+        let timeline = clock_error.create_timeline("geo-clock-error").test_ok();
         let request = GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
             timeline.id(),
             entity,
@@ -2020,7 +2061,7 @@ mod tests {
         let mut overflow = MemoryStore::with_clock(Box::new(pos_core::FixedAdmissionClock(
             WallTime::from_micros(u64::MAX),
         )));
-        let timeline = overflow.create_timeline("geo-expiry-overflow").unwrap();
+        let timeline = overflow.create_timeline("geo-expiry-overflow").test_ok();
         let request = GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
             timeline.id(),
             entity,
@@ -2049,16 +2090,16 @@ mod tests {
         let mut store = MemoryStore::new();
         let timeline = store
             .create_timeline("geo-cell-private-corruption")
-            .unwrap();
+            .test_ok();
         let entity = EntityId::new();
         let cell = ValidatedGeoCellV1::from_adr031_bytes(&CanonicalBytes::from_static(
             b"\xa4eindexo8928308280fffff\x66systemeh3-v4\x6aresolution\x09kcell_format\x01",
         ))
-        .unwrap();
+        .test_ok();
         let draft = geo_cell_draft(
             timeline.id(),
             entity,
-            AdmissionSnapshotId::from_canonical("01ARZ3NDEKTSV4RRFFQ69G5FAZ").unwrap(),
+            AdmissionSnapshotId::from_canonical("01ARZ3NDEKTSV4RRFFQ69G5FAZ").test_ok(),
             12,
             "private-corruption",
             vec![entity],
@@ -2073,13 +2114,13 @@ mod tests {
             GeoCellAdmissionFenceV1::new(draft, [7; 32], 11, false),
             pos_core::GeographicAdmissionFingerprintV1::from_ingress([8; 32]),
         ))
-        .unwrap();
+        .test_ok();
         store
             .set_geo_cell_admission_consent_record(geo_cell_consent_record(
                 request.fence().draft().consent_record_id().clone(),
                 request.fence().draft().consent_revision(),
             ))
-            .unwrap();
+            .test_ok();
         assert!(store
             .set_geo_cell_admission_consent_record(
                 AdmissionConsentRecordV1::from_persistence_parts(
@@ -2100,19 +2141,12 @@ mod tests {
             .is_err());
         store
             .set_geo_cell_admission_fence(timeline.id(), entity, request.fence().clone())
-            .unwrap();
-        let accepted = store.admit(request.clone()).unwrap();
-        let event_id = accepted.event_id().expect("accepted geo.cell event id");
-        let event_seq = accepted
-            .event_seq()
-            .expect("accepted geo.cell event sequence");
-        let snapshot_id = accepted
-            .snapshot_id()
-            .expect("accepted geo.cell snapshot id")
-            .clone();
-        let snapshot_hash = accepted
-            .snapshot_hash()
-            .expect("accepted geo.cell snapshot hash");
+            .test_ok();
+        let accepted = store.admit(request.clone()).test_ok();
+        let event_id = accepted.event_id().test_ok();
+        let event_seq = accepted.event_seq().test_ok();
+        let snapshot_id = accepted.snapshot_id().test_ok().clone();
+        let snapshot_hash = accepted.snapshot_hash().test_ok();
         let fingerprint = request.fingerprint();
         let valid = store.geographic_cell_dedup[&fingerprint].clone();
         assert!(store.verified_geo_cell_duplicate(&valid).is_some());
@@ -2124,7 +2158,7 @@ mod tests {
         let consent = store
             .geographic_cell_consent_records
             .remove(&consent_key)
-            .unwrap();
+            .test_ok();
         assert!(store.admit(request.clone()).is_err());
         assert!(store.verified_geo_cell_duplicate(&valid).is_none());
         store
@@ -2144,8 +2178,8 @@ mod tests {
             .geographic_cell_consent_records
             .insert(consent_key.clone(), consent);
 
-        let dedup_record = store.geographic_cell_dedup.remove(&fingerprint).unwrap();
-        let timeline_state = store.timelines.remove(&timeline.id()).unwrap();
+        let dedup_record = store.geographic_cell_dedup.remove(&fingerprint).test_ok();
+        let timeline_state = store.timelines.remove(&timeline.id()).test_ok();
         assert!(store.admit(request.clone()).is_err());
         store.timelines.insert(timeline.id(), timeline_state);
         store
@@ -2155,7 +2189,7 @@ mod tests {
         let draft = geo_cell_draft(
             timeline.id(),
             entity,
-            AdmissionSnapshotId::from_canonical("01ARZ3NDEKTSV4RRFFQ69G5FB0").unwrap(),
+            AdmissionSnapshotId::from_canonical("01ARZ3NDEKTSV4RRFFQ69G5FB0").test_ok(),
             request.fence().draft().consent_revision(),
             "different-intent",
             request.fence().draft().entitled_principals().to_vec(),
@@ -2175,17 +2209,17 @@ mod tests {
             ),
             pos_core::GeographicAdmissionFingerprintV1::from_ingress([8; 32]),
         ))
-        .unwrap();
+        .test_ok();
         store
             .set_geo_cell_admission_consent_record(geo_cell_consent_record(
                 conflict.fence().draft().consent_record_id().clone(),
                 conflict.fence().draft().consent_revision(),
             ))
-            .unwrap();
+            .test_ok();
         store
             .set_geo_cell_admission_fence(timeline.id(), entity, conflict.fence().clone())
-            .unwrap();
-        assert!(store.admit(conflict).unwrap().is_conflict());
+            .test_ok();
+        assert!(store.admit(conflict).test_ok().is_conflict());
         store
             .geographic_cell_dedup
             .insert(fingerprint, valid.clone());
@@ -2194,12 +2228,12 @@ mod tests {
                 request.fence().draft().consent_record_id().clone(),
                 request.fence().draft().consent_revision(),
             ))
-            .unwrap();
+            .test_ok();
         store
             .set_geo_cell_admission_fence(timeline.id(), entity, request.fence().clone())
-            .unwrap();
+            .test_ok();
 
-        let timeline_state = store.timelines.remove(&timeline.id()).unwrap();
+        let timeline_state = store.timelines.remove(&timeline.id()).test_ok();
         assert!(store.verified_geo_cell_duplicate(&valid).is_none());
         store
             .timelines
@@ -2229,33 +2263,33 @@ mod tests {
         bad.snapshot_hash = AdmissionSnapshotHash::from_bytes([0xff; 32]);
         assert!(store.verified_geo_cell_duplicate(&bad).is_none());
 
-        let original_event = store.timelines.get(&timeline.id()).unwrap().events[0].clone();
+        let original_event = store.timelines.get(&timeline.id()).test_ok().events[0].clone();
         let mut corrupt_event = original_event.clone();
         corrupt_event.payload_hash = Hash::zero();
-        store.timelines.get_mut(&timeline.id()).unwrap().events[0] = corrupt_event;
+        store.timelines.get_mut(&timeline.id()).test_ok().events[0] = corrupt_event;
         assert!(store.verified_geo_cell_duplicate(&valid).is_none());
-        assert!(store.admit(request.clone()).unwrap().is_outcome_unknown());
-        store.timelines.get_mut(&timeline.id()).unwrap().events[0] = original_event.clone();
+        assert!(store.admit(request.clone()).test_ok().is_outcome_unknown());
+        store.timelines.get_mut(&timeline.id()).test_ok().events[0] = original_event.clone();
         let mut corrupt_event = original_event.clone();
         corrupt_event.payload = CanonicalBytes::from_static(b"not-a-geo-cell");
         corrupt_event.payload_hash = store.hasher.hash_payload(&corrupt_event.payload);
-        store.timelines.get_mut(&timeline.id()).unwrap().events[0] = corrupt_event;
+        store.timelines.get_mut(&timeline.id()).test_ok().events[0] = corrupt_event;
         assert!(store.verified_geo_cell_duplicate(&valid).is_none());
-        store.timelines.get_mut(&timeline.id()).unwrap().events[0] = original_event.clone();
+        store.timelines.get_mut(&timeline.id()).test_ok().events[0] = original_event.clone();
         let replacement_id = AdmissionSnapshotId::new();
         let replacement_hash = AdmissionSnapshotHash::from_bytes([31; 32]);
         let replacement_payload = request.payload(replacement_id, replacement_hash).encode();
         let mut corrupt_event = original_event.clone();
         corrupt_event.payload = replacement_payload.clone();
         corrupt_event.payload_hash = store.hasher.hash_payload(&replacement_payload);
-        store.timelines.get_mut(&timeline.id()).unwrap().events[0] = corrupt_event;
+        store.timelines.get_mut(&timeline.id()).test_ok().events[0] = corrupt_event;
         assert!(store.verified_geo_cell_duplicate(&valid).is_none());
-        store.timelines.get_mut(&timeline.id()).unwrap().events[0] = original_event.clone();
+        store.timelines.get_mut(&timeline.id()).test_ok().events[0] = original_event.clone();
 
         let snapshot = store
             .geographic_cell_snapshots
             .remove(&snapshot_id)
-            .unwrap();
+            .test_ok();
         assert!(store.verified_geo_cell_duplicate(&valid).is_none());
         store
             .geographic_cell_snapshots
@@ -2268,7 +2302,7 @@ mod tests {
         );
         store
             .geographic_cell_snapshots
-            .insert(snapshot_id.clone(), bad_snapshot.clone());
+            .insert(snapshot_id.clone(), bad_snapshot);
         assert!(store.verified_geo_cell_duplicate(&valid).is_none());
         let bad_snapshot = AdmissionEntitlementSnapshotV1::new(
             snapshot_id.clone(),
@@ -2287,7 +2321,7 @@ mod tests {
         let link = store
             .geographic_cell_links
             .remove(&(timeline.id(), event_id))
-            .unwrap();
+            .test_ok();
         assert!(store.verified_geo_cell_duplicate(&valid).is_none());
         store
             .geographic_cell_links
@@ -2331,7 +2365,7 @@ mod tests {
         let consent = store
             .geographic_cell_consent_records
             .remove(&consent_key)
-            .unwrap();
+            .test_ok();
         assert!(store.verify_geo_cell_event(evidence.clone()).is_err());
         store
             .geographic_cell_consent_records
@@ -2392,17 +2426,17 @@ mod tests {
         let original_link = store
             .geographic_cell_links
             .get(&(timeline.id(), event_id))
-            .unwrap()
+            .test_ok()
             .clone();
         let mut bad_event = original_event.clone();
         bad_event.event_type = Kind::new("other.event");
-        store.timelines.get_mut(&timeline.id()).unwrap().events[0] = bad_event;
+        store.timelines.get_mut(&timeline.id()).test_ok().events[0] = bad_event;
         assert!(store.verify_geo_cell_event(evidence.clone()).is_err());
-        store.timelines.get_mut(&timeline.id()).unwrap().events[0] = original_event.clone();
+        store.timelines.get_mut(&timeline.id()).test_ok().events[0] = original_event.clone();
         let mut bad_event = original_event.clone();
         bad_event.payload = CanonicalBytes::from_static(b"not-a-geo-cell");
         bad_event.payload_hash = store.hasher.hash_payload(&bad_event.payload);
-        store.timelines.get_mut(&timeline.id()).unwrap().events[0] = bad_event;
+        store.timelines.get_mut(&timeline.id()).test_ok().events[0] = bad_event;
         assert!(store
             .verify_geo_cell_event(GeographicReplayEvidenceV1::new(
                 timeline.id(),
@@ -2413,11 +2447,11 @@ mod tests {
                 snapshot_hash,
             ))
             .is_err());
-        store.timelines.get_mut(&timeline.id()).unwrap().events[0] = original_event;
+        store.timelines.get_mut(&timeline.id()).test_ok().events[0] = original_event;
         let original_snapshot = store
             .geographic_cell_snapshots
             .get(&snapshot_id)
-            .unwrap()
+            .test_ok()
             .clone();
         store.geographic_cell_snapshots.insert(
             snapshot_id.clone(),
@@ -2430,7 +2464,7 @@ mod tests {
         let removed_link = store
             .geographic_cell_links
             .remove(&(timeline.id(), event_id))
-            .unwrap();
+            .test_ok();
         assert!(store.verify_geo_cell_event(evidence.clone()).is_err());
         store
             .geographic_cell_links
@@ -2462,12 +2496,12 @@ mod tests {
             .geographic_cell_links
             .values()
             .next()
-            .expect("geo.cell link exists")
+            .test_ok()
             .clone();
         store
             .geographic_cell_links
             .insert((TimelineId::new(), event_id), retained_link);
-        delete_visible_timeline(&mut store, timeline.id()).unwrap();
+        delete_visible_timeline(&mut store, timeline.id()).test_ok();
     }
 
     #[test]
@@ -2475,12 +2509,12 @@ mod tests {
         let mut store = MemoryStore::new();
         let timeline = store
             .create_timeline("geo-cell-expiry-purge-atomicity")
-            .unwrap();
+            .test_ok();
         let entity = EntityId::new();
         let draft = geo_cell_draft(
             timeline.id(),
             entity,
-            AdmissionSnapshotId::from_canonical("01ARZ3NDEKTSV4RRFFQ69G5FAZ").unwrap(),
+            AdmissionSnapshotId::from_canonical("01ARZ3NDEKTSV4RRFFQ69G5FAZ").test_ok(),
             12,
             "expiry-purge",
             vec![entity],
@@ -2493,29 +2527,29 @@ mod tests {
             ValidatedGeoCellV1::from_adr031_bytes(&CanonicalBytes::from_static(
                 b"\xa4eindexo8928308280fffff\x66systemeh3-v4\x6aresolution\x09kcell_format\x01",
             ))
-            .unwrap(),
+            .test_ok(),
             pos_core::SourceTimeBucket::new(123),
             GeoCellAdmissionFenceV1::new(draft, [7; 32], 11, false),
             pos_core::GeographicAdmissionFingerprintV1::from_ingress([8; 32]),
         ))
-        .unwrap();
+        .test_ok();
         store
             .set_geo_cell_admission_consent_record(geo_cell_consent_record(
                 request.fence().draft().consent_record_id().clone(),
                 request.fence().draft().consent_revision(),
             ))
-            .unwrap();
+            .test_ok();
         store
             .set_geo_cell_admission_fence(timeline.id(), entity, request.fence().clone())
-            .unwrap();
-        assert!(store.admit(request.clone()).unwrap().is_accepted());
+            .test_ok();
+        assert!(store.admit(request.clone()).test_ok().is_accepted());
         let fingerprint = request.fingerprint();
         store
             .geographic_cell_dedup
             .get_mut(&fingerprint)
-            .unwrap()
+            .test_ok()
             .expires_at = WallTime::from_micros(0);
-        store.timelines.remove(&timeline.id()).unwrap();
+        store.timelines.remove(&timeline.id()).test_ok();
 
         assert!(store.admit(request).is_err());
         assert!(store.geographic_cell_dedup.contains_key(&fingerprint));
@@ -2561,27 +2595,30 @@ mod tests {
         assert!(store.geographic_admission_links.is_empty());
     }
 
-    #[test]
-    fn geographic_admission_keeps_private_sidecars_in_lockstep_with_timeline_lifecycle() {
-        let mut store = MemoryStore::default();
-        let timeline = store.create_timeline("protected").unwrap();
-        let entity = EntityId::new();
-        let missing_fence_entity = EntityId::new();
+    fn assert_missing_geo_fence_is_rejected(store: &mut MemoryStore, timeline: TimelineId) {
         let missing_fence_request =
             GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
-                timeline.id(),
-                missing_fence_entity,
+                timeline,
+                EntityId::new(),
                 CanonicalBytes::from_static(b"missing-fence"),
                 7,
                 ([1; 32], 8, [2; 32]),
                 (1, false, 9),
                 ([4; 32], [5; 32]),
             ));
-        let error = store.admit_geo_location(missing_fence_request).unwrap_err();
+        let error = store.admit_geo_location(missing_fence_request).test_err();
         assert_eq!(
             std::mem::discriminant(&error),
             std::mem::discriminant(&CoreError::GeographicAdmissionValidationFailed)
         );
+    }
+
+    #[test]
+    fn geographic_admission_keeps_private_sidecars_in_lockstep_with_timeline_lifecycle() {
+        let mut store = MemoryStore::default();
+        let timeline = store.create_timeline("protected").test_ok();
+        let entity = EntityId::new();
+        assert_missing_geo_fence_is_rejected(&mut store, timeline.id());
         pair_geographic_enrollment(
             &mut store,
             timeline.id(),
@@ -2598,26 +2635,32 @@ mod tests {
             ([4; 32], [5; 32]),
         ));
 
-        let accepted = store.admit_geo_location(request.clone()).unwrap();
-        let event_id = accepted.event_id().unwrap();
+        let event_id = store
+            .admit_geo_location(request.clone())
+            .test_ok()
+            .event_id()
+            .test_ok();
         let event = &store.state(timeline.id()).events[0];
-        let snapshot = store.geographic_admission_snapshots.get(&event_id).unwrap();
+        let snapshot = store
+            .geographic_admission_snapshots
+            .get(&event_id)
+            .test_ok();
         let link = store
             .geographic_admission_links
             .get(&(timeline.id(), event_id))
-            .unwrap();
+            .test_ok();
         assert!(link
             .validate_for(snapshot, timeline.id(), event_id, event.seq)
             .is_ok());
         assert_eq!(store.geographic_admission_dedup.len(), 1);
 
-        assert!(store.admit_geo_location(request).unwrap().is_duplicate());
+        assert!(store.admit_geo_location(request).test_ok().is_duplicate());
         assert_eq!(store.geographic_admission_snapshots.len(), 1);
         assert_eq!(store.geographic_admission_links.len(), 1);
 
-        let retained_timeline = store.create_timeline("retained").unwrap();
-        let retained_entity = EntityId::new();
-        store.revoke_owntracks_enrollment().unwrap();
+        let (retained_timeline, retained_entity) =
+            (store.create_timeline("retained").test_ok(), EntityId::new());
+        store.revoke_owntracks_enrollment().test_ok();
         pair_geographic_enrollment(
             &mut store,
             retained_timeline.id(),
@@ -2636,13 +2679,13 @@ mod tests {
             ));
         let retained_event_id = store
             .admit_geo_location(retained_request)
-            .unwrap()
+            .test_ok()
             .event_id()
-            .unwrap();
+            .test_ok();
         let deleted_event_link = store
             .geographic_admission_links
             .get(&(timeline.id(), event_id))
-            .unwrap()
+            .test_ok()
             .clone();
         store
             .geographic_admission_links
@@ -2650,13 +2693,13 @@ mod tests {
         let retained_event_link = store
             .geographic_admission_links
             .get(&(retained_timeline.id(), retained_event_id))
-            .unwrap()
+            .test_ok()
             .clone();
         store
             .geographic_admission_links
             .insert((timeline.id(), retained_event_id), retained_event_link);
 
-        delete_visible_timeline(&mut store, timeline.id()).unwrap();
+        delete_visible_timeline(&mut store, timeline.id()).test_ok();
         assert_eq!(
             store.owntracks_enrollment.status(),
             OwnTracksEnrollmentStatusV1::Active
@@ -2697,7 +2740,7 @@ mod tests {
 
     fn replay_fixture() -> ReplayFixture {
         let mut store = MemoryStore::default();
-        let timeline = store.create_timeline("replay-verifier").unwrap();
+        let timeline = store.create_timeline("replay-verifier").test_ok();
         let entity = EntityId::new();
         pair_geographic_enrollment(
             &mut store,
@@ -2717,15 +2760,15 @@ mod tests {
                     ([4; 32], [5; 32]),
                 ),
             ))
-            .unwrap();
-        let event_id = accepted.event_id().unwrap();
-        let event_seq = accepted.event_seq().unwrap();
+            .test_ok();
+        let event_id = accepted.event_id().test_ok();
+        let event_seq = accepted.event_seq().test_ok();
         let event_hash = store.state(timeline.id()).events[0].payload_hash;
         let snapshot_hash = store.hasher.hash_payload(
             store
                 .geographic_admission_links
                 .get(&(timeline.id(), event_id))
-                .unwrap()
+                .test_ok()
                 .snapshot_cbor(),
         );
         ReplayFixture {
@@ -2741,7 +2784,7 @@ mod tests {
 
     fn assert_replay_validation(result: Result<(), CoreError>) {
         assert!(result
-            .unwrap_err()
+            .test_err()
             .to_string()
             .contains("geographic admission validation failed"));
     }
@@ -2756,7 +2799,7 @@ mod tests {
                 fixture.evidence(fixture.event_hash, fixture.snapshot_hash,)
             )
             .is_ok());
-        fixture.store.revoke_owntracks_enrollment().unwrap();
+        fixture.store.revoke_owntracks_enrollment().test_ok();
         fixture.store.clock = Box::new(ErrorClock);
         assert!(fixture
             .store
@@ -2788,7 +2831,7 @@ mod tests {
             .store
             .geographic_admission_links
             .get(&(fixture.timeline, fixture.event_id))
-            .unwrap()
+            .test_ok()
             .clone();
         let altered_request =
             GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
@@ -2835,7 +2878,7 @@ mod tests {
             .store
             .geographic_admission_snapshots
             .remove(&fixture.event_id)
-            .unwrap();
+            .test_ok();
         assert_replay_validation(fixture.store.verify_v1_event_snapshot_link(
             fixture.evidence(fixture.event_hash, fixture.snapshot_hash),
         ));
@@ -2859,7 +2902,7 @@ mod tests {
             .store
             .geographic_admission_snapshots
             .insert(fixture.event_id, mismatched_snapshot)
-            .unwrap();
+            .test_ok();
         assert_replay_validation(fixture.store.verify_v1_event_snapshot_link(
             fixture.evidence(fixture.event_hash, fixture.snapshot_hash),
         ));
@@ -2871,7 +2914,7 @@ mod tests {
             .store
             .geographic_admission_links
             .remove(&(fixture.timeline, fixture.event_id))
-            .unwrap();
+            .test_ok();
         assert_replay_validation(fixture.store.verify_v1_event_snapshot_link(
             fixture.evidence(fixture.event_hash, fixture.snapshot_hash),
         ));
@@ -2879,7 +2922,7 @@ mod tests {
             .store
             .geographic_admission_links
             .insert((fixture.timeline, fixture.event_id), link);
-        fixture.store.state_mut(fixture.timeline).unwrap().events[0].event_type =
+        fixture.store.state_mut(fixture.timeline).test_ok().events[0].event_type =
             Kind::new("test.event");
         assert_replay_validation(fixture.store.verify_v1_event_snapshot_link(
             GeoLocationReplayEvidenceV1::new(
@@ -2903,8 +2946,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn create_and_get_timeline() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("main").unwrap();
-        let got = store.get_timeline(tl.id()).unwrap();
+        let tl = store.create_timeline("main").test_ok();
+        let got = store.get_timeline(tl.id()).test_ok();
         assert_eq!(got.as_ref().map(Timeline::id), Some(tl.id()));
     }
 
@@ -2912,17 +2955,17 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_and_read_events() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("main").unwrap();
+        let tl = store.create_timeline("main").test_ok();
         let entity = EntityId::new();
         let drafts = vec![
             make_draft(entity, b"first"),
             make_draft(entity, b"second"),
             make_draft(entity, b"third"),
         ];
-        let committed = store.append(tl.id(), &drafts).unwrap();
+        let committed = store.append(tl.id(), &drafts).test_ok();
         assert_eq!(committed.len(), 3);
 
-        let events = store.read(tl.id(), SeqRange::all()).unwrap();
+        let events = store.read(tl.id(), SeqRange::all()).test_ok();
         assert_eq!(events.len(), 3);
         assert_eq!(events[0].payload.as_slice(), b"first");
         assert_eq!(events[1].payload.as_slice(), b"second");
@@ -2933,21 +2976,21 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_read_rejects_inherited_event_type_before_clone() {
         let mut store = MemoryStore::new();
-        let root = store.create_timeline("root").unwrap();
+        let root = store.create_timeline("root").test_ok();
         let oversized = EventDraft::new(
             EntityId::new(),
             Kind::new("x".repeat(5)),
             CanonicalBytes::from_static(b"x"),
         );
-        store.append(root.id(), &[oversized]).unwrap();
-        let child = store.fork(root.id(), Seq::from_u64(1), "child").unwrap();
+        store.append(root.id(), &[oversized]).test_ok();
+        let child = store.fork(root.id(), Seq::from_u64(1), "child").test_ok();
         let payload_error = store
             .read_bounded(
                 child.id(),
                 SeqRange::all(),
                 EventReadBounds::new(0, 5, usize::MAX, usize::MAX),
             )
-            .unwrap_err();
+            .test_err();
         assert!(matches!(
             payload_error,
             CoreError::PayloadTooLarge { size: 1 }
@@ -2958,7 +3001,7 @@ mod tests {
                 SeqRange::all(),
                 EventReadBounds::new(1, 4, usize::MAX, usize::MAX),
             )
-            .unwrap_err();
+            .test_err();
 
         assert!(matches!(
             error,
@@ -2973,7 +3016,7 @@ mod tests {
                 SeqRange::all(),
                 EventReadBounds::new(1, 5, usize::MAX, usize::MAX),
             )
-            .unwrap();
+            .test_ok();
         assert_eq!(events.len(), 1);
     }
 
@@ -2981,7 +3024,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_read_rejects_aggregate_event_bytes_before_clone() {
         let mut store = MemoryStore::new();
-        let timeline = store.create_timeline("aggregate-bytes").unwrap();
+        let timeline = store.create_timeline("aggregate-bytes").test_ok();
         let entity = EntityId::new();
         store
             .append(
@@ -2991,7 +3034,7 @@ mod tests {
                     EventDraft::new(entity, Kind::new("x"), CanonicalBytes::from_static(b"5678")),
                 ],
             )
-            .unwrap();
+            .test_ok();
 
         let error = store
             .read_bounded(
@@ -2999,7 +3042,7 @@ mod tests {
                 SeqRange::all(),
                 EventReadBounds::new_with_total_bytes(4, 1, usize::MAX, 2, 9),
             )
-            .unwrap_err();
+            .test_err();
         assert!(matches!(error, CoreError::ReadBytesTooLarge { size: 10 }));
 
         let events = store
@@ -3008,7 +3051,7 @@ mod tests {
                 SeqRange::all(),
                 EventReadBounds::new_with_total_bytes(4, 1, usize::MAX, 2, 10),
             )
-            .unwrap();
+            .test_ok();
         assert_eq!(events.len(), 2);
 
         let time_error = store
@@ -3017,7 +3060,7 @@ mod tests {
                 SeqRange::all(),
                 EventReadBounds::new_with_total_bytes_and_elapsed(4, 1, usize::MAX, 2, 10, 0),
             )
-            .unwrap_err();
+            .test_err();
         assert!(matches!(time_error, CoreError::ReadTimeTooLarge { .. }));
 
         BOUNDED_CLONE_DELAY_MILLIS.with(|delay| delay.set(20));
@@ -3027,7 +3070,7 @@ mod tests {
                 SeqRange::all(),
                 EventReadBounds::new_with_total_bytes_and_elapsed(4, 1, usize::MAX, 2, 10, 1_000),
             )
-            .unwrap_err();
+            .test_err();
         BOUNDED_CLONE_DELAY_MILLIS.with(|delay| delay.set(0));
         assert!(matches!(time_error, CoreError::ReadTimeTooLarge { .. }));
 
@@ -3038,13 +3081,13 @@ mod tests {
                 SeqRange::all(),
                 EventReadBounds::new_with_total_bytes_and_elapsed(4, 1, usize::MAX, 2, 10, 1_000),
             )
-            .unwrap_err();
+            .test_err();
         BOUNDED_PLAN_DELAY_MILLIS.with(|delay| delay.set(0));
         assert!(matches!(time_error, CoreError::ReadTimeTooLarge { .. }));
 
         let child = store
             .fork(timeline.id(), Seq::from_u64(2), "bounded-time-child")
-            .unwrap();
+            .test_ok();
         BOUNDED_CHAIN_DELAY_MILLIS.with(|delay| delay.set(20));
         let time_error = store
             .read_bounded(
@@ -3052,7 +3095,7 @@ mod tests {
                 SeqRange::all(),
                 EventReadBounds::new_with_total_bytes_and_elapsed(4, 1, usize::MAX, 2, 10, 1_000),
             )
-            .unwrap_err();
+            .test_err();
         BOUNDED_CHAIN_DELAY_MILLIS.with(|delay| delay.set(0));
         assert!(matches!(time_error, CoreError::ReadTimeTooLarge { .. }));
 
@@ -3063,7 +3106,7 @@ mod tests {
                 SeqRange::all(),
                 EventReadBounds::new_with_total_bytes_and_elapsed(4, 1, usize::MAX, 2, 10, 1_000),
             )
-            .unwrap_err();
+            .test_err();
         BOUNDED_EVENT_DELAY_MILLIS.with(|delay| delay.set(0));
         assert!(matches!(time_error, CoreError::ReadTimeTooLarge { .. }));
 
@@ -3074,7 +3117,7 @@ mod tests {
                 SeqRange::all(),
                 EventReadBounds::new_with_total_bytes_and_elapsed(4, 1, usize::MAX, 2, 10, 1_000),
             )
-            .unwrap_err();
+            .test_err();
         BOUNDED_MATERIALIZE_START_DELAY_MILLIS.with(|delay| delay.set(0));
         assert!(matches!(time_error, CoreError::ReadTimeTooLarge { .. }));
 
@@ -3085,7 +3128,7 @@ mod tests {
                 SeqRange::all(),
                 EventReadBounds::new_with_total_bytes_and_elapsed(4, 1, usize::MAX, 2, 10, 1_000),
             )
-            .unwrap_err();
+            .test_err();
         BOUNDED_MATERIALIZE_FINAL_DELAY_MILLIS.with(|delay| delay.set(0));
         assert!(matches!(time_error, CoreError::ReadTimeTooLarge { .. }));
     }
@@ -3094,24 +3137,24 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_read_enforces_exact_fork_depth_before_chain_growth() {
         let mut store = MemoryStore::new();
-        let root = store.create_timeline("root").unwrap();
+        let root = store.create_timeline("root").test_ok();
         let mut timelines = vec![root];
         for depth in 1..=65 {
-            let parent = timelines.last().unwrap();
+            let parent = timelines.last().test_ok();
             let child = store
                 .fork(parent.id(), Seq::ZERO, &format!("depth-{depth}"))
-                .unwrap();
+                .test_ok();
             timelines.push(child);
         }
         let bounds = EventReadBounds::new(1, 1, 64, usize::MAX);
 
         assert!(store
             .read_bounded(timelines[64].id(), SeqRange::all(), bounds)
-            .unwrap()
+            .test_ok()
             .is_empty());
         let error = store
             .read_bounded(timelines[65].id(), SeqRange::all(), bounds)
-            .unwrap_err();
+            .test_err();
         assert!(matches!(error, CoreError::ForkDepthTooLarge { depth: 65 }));
     }
 
@@ -3119,25 +3162,25 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_read_seeks_late_across_forks_and_fetches_only_the_page() {
         let mut store = MemoryStore::new();
-        let root = store.create_timeline("root").unwrap();
+        let root = store.create_timeline("root").test_ok();
         let entity = EntityId::new();
         let drafts: Vec<_> = (0..4_096).map(|_| make_draft(entity, b"x")).collect();
-        store.append(root.id(), &drafts).unwrap();
+        store.append(root.id(), &drafts).test_ok();
         let child = store
             .fork(root.id(), Seq::from_u64(4_096), "child")
-            .unwrap();
+            .test_ok();
         store
             .append(
                 child.id(),
                 &[make_draft(entity, b"y"), make_draft(entity, b"z")],
             )
-            .unwrap();
+            .test_ok();
         let bounds = EventReadBounds::new(1, usize::MAX, 1, 4);
 
         BOUNDED_EVENTS_EXAMINED.with(|count| count.set(0));
         let page = store
             .read_bounded(child.id(), SeqRange::from_seq(Seq::from_u64(4_095)), bounds)
-            .unwrap();
+            .test_ok();
         assert_eq!(
             page.iter()
                 .map(|event| event.seq.as_u64())
@@ -3149,7 +3192,7 @@ mod tests {
         BOUNDED_EVENTS_EXAMINED.with(|count| count.set(0));
         let exhausted = store
             .read_bounded(child.id(), SeqRange::from_seq(Seq::from_u64(4_098)), bounds)
-            .unwrap();
+            .test_ok();
         assert_eq!(exhausted.len(), 1);
         assert_eq!(exhausted[0].seq.as_u64(), 4_098);
         BOUNDED_EVENTS_EXAMINED.with(|count| assert_eq!(count.get(), 1));
@@ -3159,18 +3202,18 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_read_fails_closed_when_memory_sequence_metadata_is_corrupt() {
         let mut store = MemoryStore::new();
-        let timeline = store.create_timeline("corrupt").unwrap();
+        let timeline = store.create_timeline("corrupt").test_ok();
         let entity = EntityId::new();
         store
             .append(
                 timeline.id(),
                 &[make_draft(entity, b"a"), make_draft(entity, b"b")],
             )
-            .unwrap();
+            .test_ok();
         store
             .timelines
             .get_mut(&timeline.id())
-            .unwrap()
+            .test_ok()
             .events
             .remove(0);
 
@@ -3180,11 +3223,11 @@ mod tests {
                 SeqRange::from_seq(Seq::from_u64(2)),
                 EventReadBounds::new(1, usize::MAX, 0, 1),
             )
-            .unwrap_err();
+            .test_err();
         assert!(error.to_string().contains("contiguous Event sequence"));
 
         let mut interior_store = MemoryStore::new();
-        let timeline = interior_store.create_timeline("interior").unwrap();
+        let timeline = interior_store.create_timeline("interior").test_ok();
         interior_store
             .append(
                 timeline.id(),
@@ -3194,11 +3237,11 @@ mod tests {
                     make_draft(entity, b"c"),
                 ],
             )
-            .unwrap();
+            .test_ok();
         interior_store
             .timelines
             .get_mut(&timeline.id())
-            .unwrap()
+            .test_ok()
             .events[1]
             .seq = Seq::from_u64(99);
         let error = interior_store
@@ -3207,16 +3250,16 @@ mod tests {
                 SeqRange::from_seq(Seq::from_u64(2)),
                 EventReadBounds::new(1, usize::MAX, 0, 1),
             )
-            .unwrap_err();
+            .test_err();
         assert!(error.to_string().contains("contiguous Event sequence"));
 
         let mut fork_store = MemoryStore::new();
-        let root = fork_store.create_timeline("root").unwrap();
-        let child = fork_store.fork(root.id(), Seq::ZERO, "child").unwrap();
+        let root = fork_store.create_timeline("root").test_ok();
+        let child = fork_store.fork(root.id(), Seq::ZERO, "child").test_ok();
         fork_store
             .timelines
             .get_mut(&child.id())
-            .unwrap()
+            .test_ok()
             .timeline
             .meta
             .fork_point = Some((root.id(), Seq::from_u64(1)));
@@ -3226,7 +3269,7 @@ mod tests {
                 SeqRange::all(),
                 EventReadBounds::new(1, usize::MAX, 1, 1),
             )
-            .unwrap_err();
+            .test_err();
         assert!(error.to_string().contains("Fork point exceeds"));
     }
 
@@ -3234,29 +3277,29 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_root_count_ignores_many_children_and_caps_at_maximum_plus_one() {
         let mut store = MemoryStore::new();
-        let first = store.create_timeline("first").unwrap();
+        let first = store.create_timeline("first").test_ok();
         for index in 0..256 {
             store
                 .fork(first.id(), Seq::ZERO, &format!("child-{index}"))
-                .unwrap();
+                .test_ok();
         }
-        store.create_timeline("second").unwrap();
+        store.create_timeline("second").test_ok();
 
-        assert_eq!(store.root_timeline_count_bounded(0).unwrap(), 1);
-        assert_eq!(store.root_timeline_count_bounded(1).unwrap(), 2);
-        assert_eq!(store.root_timeline_count_bounded(10).unwrap(), 2);
-        assert_eq!(store.root_timeline_count_bounded(usize::MAX).unwrap(), 2);
+        assert_eq!(store.root_timeline_count_bounded(0).test_ok(), 1);
+        assert_eq!(store.root_timeline_count_bounded(1).test_ok(), 2);
+        assert_eq!(store.root_timeline_count_bounded(10).test_ok(), 2);
+        assert_eq!(store.root_timeline_count_bounded(usize::MAX).test_ok(), 2);
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn payload_is_opaque_and_unchanged() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("main").unwrap();
+        let tl = store.create_timeline("main").test_ok();
         let entity = EntityId::new();
         let raw = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xFF, 0x00];
-        store.append(tl.id(), &[make_draft(entity, &raw)]).unwrap();
-        let events = store.read(tl.id(), SeqRange::all()).unwrap();
+        store.append(tl.id(), &[make_draft(entity, &raw)]).test_ok();
+        let events = store.read(tl.id(), SeqRange::all()).test_ok();
         assert_eq!(events[0].payload.as_slice(), &raw[..]);
     }
 
@@ -3264,10 +3307,10 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn seq_is_monotonically_increasing() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("main").unwrap();
+        let tl = store.create_timeline("main").test_ok();
         let entity = EntityId::new();
         let drafts: Vec<EventDraft> = (0..10).map(|i| make_draft(entity, &[i])).collect();
-        let committed = store.append(tl.id(), &drafts).unwrap();
+        let committed = store.append(tl.id(), &drafts).test_ok();
         for (i, e) in committed.iter().enumerate() {
             assert_eq!(e.seq.as_u64(), (i + 1) as u64);
         }
@@ -3277,17 +3320,17 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn read_range_filters_correctly() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("main").unwrap();
+        let tl = store.create_timeline("main").test_ok();
         let entity = EntityId::new();
         let drafts: Vec<EventDraft> = (0..5u8).map(|i| make_draft(entity, &[i])).collect();
-        store.append(tl.id(), &drafts).unwrap();
+        store.append(tl.id(), &drafts).test_ok();
 
         let events = store
             .read(
                 tl.id(),
                 SeqRange::bounded(Seq::from_u64(2), Seq::from_u64(4)),
             )
-            .unwrap();
+            .test_ok();
         assert_eq!(events.len(), 3);
         assert_eq!(events[0].payload.as_slice(), &[1u8]);
         assert_eq!(events[2].payload.as_slice(), &[3u8]);
@@ -3297,7 +3340,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn fork_is_copy_on_write_child_events_do_not_affect_parent() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("main").unwrap();
+        let tl = store.create_timeline("main").test_ok();
         let entity = EntityId::new();
 
         // Append 3 events to parent
@@ -3306,22 +3349,22 @@ mod tests {
             make_draft(entity, b"p2"),
             make_draft(entity, b"p3"),
         ];
-        store.append(tl.id(), &parent_drafts).unwrap();
+        store.append(tl.id(), &parent_drafts).test_ok();
 
         // Fork at seq 2
-        let child = store.fork(tl.id(), Seq::from_u64(2), "child").unwrap();
+        let child = store.fork(tl.id(), Seq::from_u64(2), "child").test_ok();
 
         // Append to child
         store
             .append(child.id(), &[make_draft(entity, b"c1")])
-            .unwrap();
+            .test_ok();
 
         // Parent still has only 3 events
-        let parent_events = store.read(tl.id(), SeqRange::all()).unwrap();
+        let parent_events = store.read(tl.id(), SeqRange::all()).test_ok();
         assert_eq!(parent_events.len(), 3);
 
         // Child sees parent[0..2] + its own events = 3 total
-        let child_events = store.read(child.id(), SeqRange::all()).unwrap();
+        let child_events = store.read(child.id(), SeqRange::all()).test_ok();
         assert_eq!(child_events.len(), 3);
         assert_eq!(child_events[0].payload.as_slice(), b"p1");
         assert_eq!(child_events[1].payload.as_slice(), b"p2");
@@ -3332,7 +3375,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn nested_forks_expose_one_logical_sequence() {
         let mut store = MemoryStore::new();
-        let root = store.create_timeline("root").unwrap();
+        let root = store.create_timeline("root").test_ok();
         let entity = EntityId::new();
         store
             .append(
@@ -3343,34 +3386,34 @@ mod tests {
                     make_draft(entity, b"r3"),
                 ],
             )
-            .unwrap();
-        let child = store.fork(root.id(), Seq::from_u64(2), "child").unwrap();
+            .test_ok();
+        let child = store.fork(root.id(), Seq::from_u64(2), "child").test_ok();
         let child_event = store
             .append(child.id(), &[make_draft(entity, b"c1")])
-            .unwrap()
+            .test_ok()
             .pop()
-            .unwrap();
+            .test_ok();
         assert_eq!(child.head, Seq::ZERO);
         assert_eq!(child_event.seq, Seq::from_u64(3));
-        assert_eq!(store.logical_head(child.id()).unwrap(), Seq::from_u64(3));
+        assert_eq!(store.logical_head(child.id()).test_ok(), Seq::from_u64(3));
 
         let grandchild = store
             .fork(child.id(), Seq::from_u64(3), "grandchild")
-            .unwrap();
+            .test_ok();
         let grandchild_event = store
             .append(grandchild.id(), &[make_draft(entity, b"g1")])
-            .unwrap()
+            .test_ok()
             .pop()
-            .unwrap();
+            .test_ok();
         assert_eq!(grandchild_event.seq, Seq::from_u64(4));
         assert_eq!(
-            store.logical_head(grandchild.id()).unwrap(),
+            store.logical_head(grandchild.id()).test_ok(),
             Seq::from_u64(4)
         );
         assert_eq!(
             store
                 .read(grandchild.id(), SeqRange::all())
-                .unwrap()
+                .test_ok()
                 .iter()
                 .map(|event| (event.seq, event.payload.as_slice()))
                 .collect::<Vec<_>>(),
@@ -3384,8 +3427,8 @@ mod tests {
         assert_eq!(
             store
                 .read_event_by_id(grandchild.id(), grandchild_event.id)
-                .unwrap()
-                .unwrap()
+                .test_ok()
+                .test_ok()
                 .seq,
             Seq::from_u64(4)
         );
@@ -3395,13 +3438,13 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn logical_sequence_integrity_failures_are_fail_closed() {
         let mut store = MemoryStore::new();
-        let root = store.create_timeline("integrity-root").unwrap();
+        let root = store.create_timeline("integrity-root").test_ok();
         let entity = EntityId::new();
         let event = store
             .append(root.id(), &[make_draft(entity, b"root")])
-            .unwrap()
+            .test_ok()
             .pop()
-            .unwrap();
+            .test_ok();
         assert!(matches!(
             MemoryStore::logical_event(u64::MAX, event),
             Err(CoreError::Storage(_))
@@ -3411,7 +3454,7 @@ mod tests {
             Err(CoreError::ForkBeyondHead { .. })
         ));
 
-        let child = store.fork(root.id(), Seq::from_u64(1), "child").unwrap();
+        let child = store.fork(root.id(), Seq::from_u64(1), "child").test_ok();
         let missing_prefix = ForkChain {
             timelines: vec![root.id(), child.id()],
             fork_seqs: Vec::new(),
@@ -3421,7 +3464,7 @@ mod tests {
             Err(CoreError::Storage(_))
         ));
 
-        store.timelines.get_mut(&child.id()).unwrap().timeline.head = Seq::from_u64(1);
+        store.timelines.get_mut(&child.id()).test_ok().timeline.head = Seq::from_u64(1);
         let preceding = ForkChain {
             timelines: vec![root.id(), child.id(), TimelineId::new()],
             fork_seqs: vec![Seq::from_u64(1), Seq::ZERO],
@@ -3439,8 +3482,8 @@ mod tests {
             Err(CoreError::Storage(_))
         ));
 
-        store.timelines.get_mut(&root.id()).unwrap().timeline.head = Seq::from_u64(u64::MAX);
-        let child_state = store.timelines.get_mut(&child.id()).unwrap();
+        store.timelines.get_mut(&root.id()).test_ok().timeline.head = Seq::from_u64(u64::MAX);
+        let child_state = store.timelines.get_mut(&child.id()).test_ok();
         child_state.timeline.meta.fork_point = Some((root.id(), Seq::from_u64(u64::MAX)));
         child_state.timeline.head = Seq::from_u64(1);
         assert!(matches!(
@@ -3453,14 +3496,14 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_segment_integrity_failures_are_fail_closed() {
         let mut store = MemoryStore::new();
-        let root = store.create_timeline("bounded-root").unwrap();
-        let child = store.fork(root.id(), Seq::ZERO, "bounded-child").unwrap();
+        let root = store.create_timeline("bounded-root").test_ok();
+        let child = store.fork(root.id(), Seq::ZERO, "bounded-child").test_ok();
         let chain = vec![root.id(), child.id()];
 
         store
             .timelines
             .get_mut(&child.id())
-            .unwrap()
+            .test_ok()
             .timeline
             .meta
             .fork_point = Some((root.id(), Seq::ZERO));
@@ -3472,7 +3515,7 @@ mod tests {
         store
             .timelines
             .get_mut(&child.id())
-            .unwrap()
+            .test_ok()
             .timeline
             .meta
             .fork_point = Some((root.id(), Seq::from_u64(1)));
@@ -3498,21 +3541,21 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn parent_events_after_fork_point_invisible_to_child() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("main").unwrap();
+        let tl = store.create_timeline("main").test_ok();
         let entity = EntityId::new();
 
         store
             .append(tl.id(), &[make_draft(entity, b"before")])
-            .unwrap();
-        let child = store.fork(tl.id(), Seq::from_u64(1), "branch").unwrap();
+            .test_ok();
+        let child = store.fork(tl.id(), Seq::from_u64(1), "branch").test_ok();
 
         // Append to parent AFTER fork
         store
             .append(tl.id(), &[make_draft(entity, b"after-fork")])
-            .unwrap();
+            .test_ok();
 
         // Child should NOT see "after-fork"
-        let child_events = store.read(child.id(), SeqRange::all()).unwrap();
+        let child_events = store.read(child.id(), SeqRange::all()).test_ok();
         assert!(!child_events
             .iter()
             .any(|e| e.payload.as_slice() == b"after-fork"));
@@ -3522,7 +3565,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn fork_beyond_head_returns_error() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("main").unwrap();
+        let tl = store.create_timeline("main").test_ok();
         let result = store.fork(tl.id(), Seq::from_u64(99), "bad-fork");
         assert!(matches!(result, Err(CoreError::ForkBeyondHead { .. })));
     }
@@ -3550,82 +3593,89 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_append_is_all_or_nothing_at_the_owned_event_ceiling() {
         let mut store = MemoryStore::new();
-        let timeline = store.create_timeline("bounded").unwrap();
+        let timeline = store.create_timeline("bounded").test_ok();
         let entity = EntityId::new();
         let two_drafts = [make_draft(entity, b"one"), make_draft(entity, b"two")];
 
         assert_eq!(
-            store.append_bounded(timeline.id(), &two_drafts, 1).unwrap(),
+            store
+                .append_bounded(timeline.id(), &two_drafts, 1)
+                .test_ok(),
             None
         );
         assert_eq!(
-            store.get_timeline(timeline.id()).unwrap().unwrap().head,
+            store.get_timeline(timeline.id()).test_ok().test_ok().head,
             Seq::ZERO
         );
         assert!(store
             .read_own(timeline.id(), SeqRange::all())
-            .unwrap()
+            .test_ok()
             .is_empty());
 
         let exact_fit = store
             .append_bounded(timeline.id(), &two_drafts, 2)
-            .unwrap()
-            .unwrap();
+            .test_ok()
+            .test_ok();
         assert_eq!(exact_fit.len(), 2);
         assert_eq!(exact_fit[0].seq, Seq::from_u64(1));
         assert_eq!(exact_fit[1].seq, Seq::from_u64(2));
 
         assert_eq!(
-            store.append_bounded(timeline.id(), &two_drafts, 3).unwrap(),
+            store
+                .append_bounded(timeline.id(), &two_drafts, 3)
+                .test_ok(),
             None
         );
         assert_eq!(
-            store.get_timeline(timeline.id()).unwrap().unwrap().head,
+            store.get_timeline(timeline.id()).test_ok().test_ok().head,
             Seq::from_u64(2)
         );
         assert_eq!(
             store
                 .read_own(timeline.id(), SeqRange::all())
-                .unwrap()
+                .test_ok()
                 .len(),
             2
         );
 
         let empty = store
             .append_bounded(timeline.id(), &[], 2)
-            .unwrap()
-            .unwrap();
+            .test_ok()
+            .test_ok();
         assert!(empty.is_empty());
         assert_eq!(
-            store.get_timeline(timeline.id()).unwrap().unwrap().head,
+            store.get_timeline(timeline.id()).test_ok().test_ok().head,
             Seq::from_u64(2)
         );
 
         let fork = store
             .fork(timeline.id(), Seq::from_u64(2), "bounded-fork")
-            .unwrap();
+            .test_ok();
         let fork_event = store
             .append_bounded(fork.id(), &[make_draft(entity, b"fork")], 1)
-            .unwrap()
-            .unwrap()
+            .test_ok()
+            .test_ok()
             .pop()
-            .unwrap();
+            .test_ok();
         assert_eq!(fork_event.seq, Seq::from_u64(3));
         assert_eq!(
             store
                 .append_bounded(fork.id(), &[make_draft(entity, b"too-many")], 1)
-                .unwrap(),
+                .test_ok(),
             None
         );
-        assert_eq!(store.read_own(fork.id(), SeqRange::all()).unwrap().len(), 1);
+        assert_eq!(
+            store.read_own(fork.id(), SeqRange::all()).test_ok().len(),
+            1
+        );
 
         let overflow_fork = store
             .fork(timeline.id(), Seq::from_u64(2), "overflow-fork")
-            .unwrap();
+            .test_ok();
         store
             .timelines
             .get_mut(&overflow_fork.id())
-            .unwrap()
+            .test_ok()
             .timeline
             .meta
             .fork_point = Some((timeline.id(), Seq::from_u64(u64::MAX)));
@@ -3636,14 +3686,14 @@ mod tests {
         assert_eq!(
             store
                 .get_timeline(overflow_fork.id())
-                .unwrap()
-                .unwrap()
+                .test_ok()
+                .test_ok()
                 .head,
             Seq::ZERO
         );
         assert!(store
             .read_own(overflow_fork.id(), SeqRange::all())
-            .unwrap()
+            .test_ok()
             .is_empty());
     }
 
@@ -3651,11 +3701,11 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_append_rejects_an_owned_head_overflow_before_mutation() {
         let mut store = MemoryStore::new();
-        let timeline = store.create_timeline("overflow-head").unwrap();
+        let timeline = store.create_timeline("overflow-head").test_ok();
         store
             .timelines
             .get_mut(&timeline.id())
-            .unwrap()
+            .test_ok()
             .timeline
             .head = Seq::from_u64(u64::MAX);
 
@@ -3669,7 +3719,7 @@ mod tests {
         ));
         assert!(store
             .read_own(timeline.id(), SeqRange::all())
-            .unwrap()
+            .test_ok()
             .is_empty());
     }
 
@@ -3677,10 +3727,10 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn list_timelines_returns_all() {
         let mut store = MemoryStore::new();
-        store.create_timeline("a").unwrap();
-        store.create_timeline("b").unwrap();
-        store.create_timeline("c").unwrap();
-        let list = store.list_timelines().unwrap();
+        store.create_timeline("a").test_ok();
+        store.create_timeline("b").test_ok();
+        store.create_timeline("c").test_ok();
+        let list = store.list_timelines().test_ok();
         assert_eq!(list.len(), 3);
     }
 
@@ -3688,13 +3738,13 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn replay_is_deterministic() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("main").unwrap();
+        let tl = store.create_timeline("main").test_ok();
         let entity = EntityId::new();
         let drafts: Vec<EventDraft> = (0..5u8).map(|i| make_draft(entity, &[i])).collect();
-        store.append(tl.id(), &drafts).unwrap();
+        store.append(tl.id(), &drafts).test_ok();
 
-        let r1 = store.read(tl.id(), SeqRange::all()).unwrap();
-        let r2 = store.read(tl.id(), SeqRange::all()).unwrap();
+        let r1 = store.read(tl.id(), SeqRange::all()).test_ok();
+        let r2 = store.read(tl.id(), SeqRange::all()).test_ok();
         let ids1: Vec<_> = r1.iter().map(|e| e.id).collect();
         let ids2: Vec<_> = r2.iter().map(|e| e.id).collect();
         assert_eq!(ids1, ids2);
@@ -3704,8 +3754,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn empty_batch_append_returns_empty() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("main").unwrap();
-        let result = store.append(tl.id(), &[]).unwrap();
+        let tl = store.create_timeline("main").test_ok();
+        let result = store.append(tl.id(), &[]).test_ok();
         assert!(result.is_empty());
     }
 
@@ -3713,13 +3763,13 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn fork_at_zero_has_empty_parent_events() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("main").unwrap();
+        let tl = store.create_timeline("main").test_ok();
         let entity = EntityId::new();
         store
             .append(tl.id(), &[make_draft(entity, b"after")])
-            .unwrap();
-        let child = store.fork(tl.id(), Seq::ZERO, "empty-fork").unwrap();
-        let child_events = store.read(child.id(), SeqRange::all()).unwrap();
+            .test_ok();
+        let child = store.fork(tl.id(), Seq::ZERO, "empty-fork").test_ok();
+        let child_events = store.read(child.id(), SeqRange::all()).test_ok();
         assert!(child_events.is_empty());
     }
 
@@ -3727,13 +3777,13 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn explicit_wall_time_is_preserved() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("main").unwrap();
+        let tl = store.create_timeline("main").test_ok();
         let entity = EntityId::new();
         let pinned = WallTime::from_micros(123_456_789);
         let draft = make_draft(entity, b"pinned").with_wall_time(pinned);
-        let committed = store.append(tl.id(), &[draft]).unwrap();
+        let committed = store.append(tl.id(), &[draft]).test_ok();
         assert_eq!(committed[0].wall_time, pinned);
-        let read_back = store.read(tl.id(), SeqRange::all()).unwrap();
+        let read_back = store.read(tl.id(), SeqRange::all()).test_ok();
         assert_eq!(read_back[0].wall_time, pinned);
     }
 
@@ -3741,11 +3791,11 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn absent_wall_time_yields_nonzero_timestamp() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("main").unwrap();
+        let tl = store.create_timeline("main").test_ok();
         let entity = EntityId::new();
         let draft = make_draft(entity, b"no-wall-time");
         // wall_time is None — store must call WallTime::now(), which is >0 on any real system.
-        let committed = store.append(tl.id(), &[draft]).unwrap();
+        let committed = store.append(tl.id(), &[draft]).test_ok();
         assert!(committed[0].wall_time.as_micros() > 0);
     }
 
@@ -3755,7 +3805,7 @@ mod tests {
         // Exercises MemoryStore::default()
         let store: MemoryStore = MemoryStore::default();
         // A fresh default store has no timelines.
-        let list = store.list_timelines().unwrap();
+        let list = store.list_timelines().test_ok();
         assert!(list.is_empty());
     }
 
@@ -3764,7 +3814,7 @@ mod tests {
     fn grandchild_fork_chain_stitches_correctly() {
         // Exercises compute_chain_hash_at for multi-level fork (parent timeline branch).
         let mut store = MemoryStore::new();
-        let root = store.create_timeline("root").unwrap();
+        let root = store.create_timeline("root").test_ok();
         let entity = EntityId::new();
 
         // Append 3 events to root.
@@ -3777,10 +3827,10 @@ mod tests {
                     make_draft(entity, b"r3"),
                 ],
             )
-            .unwrap();
+            .test_ok();
 
         // Fork root at seq 2 to get child.
-        let child = store.fork(root.id(), Seq::from_u64(2), "child").unwrap();
+        let child = store.fork(root.id(), Seq::from_u64(2), "child").test_ok();
 
         // Append 2 events to child.
         store
@@ -3788,21 +3838,21 @@ mod tests {
                 child.id(),
                 &[make_draft(entity, b"c1"), make_draft(entity, b"c2")],
             )
-            .unwrap();
+            .test_ok();
 
         // Fork child at logical seq 3 (r1, r2, c1) to get grandchild.
         let grandchild = store
             .fork(child.id(), Seq::from_u64(3), "grandchild")
-            .unwrap();
+            .test_ok();
 
         // Append to grandchild.
         store
             .append(grandchild.id(), &[make_draft(entity, b"g1")])
-            .unwrap();
+            .test_ok();
 
         // Grandchild logical view: r1, r2 (from root up to fork 2),
         // then c1 (from child up to fork 1), then g1.
-        let events = store.read(grandchild.id(), SeqRange::all()).unwrap();
+        let events = store.read(grandchild.id(), SeqRange::all()).test_ok();
         let payloads: Vec<&[u8]> = events.iter().map(|e| e.payload.as_slice()).collect();
         assert_eq!(payloads, vec![b"r1" as &[u8], b"r2", b"c1", b"g1"]);
     }
@@ -3820,14 +3870,14 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn read_fails_when_fork_parent_metadata_removed() {
         let mut store = MemoryStore::new();
-        let root = store.create_timeline("root").unwrap();
+        let root = store.create_timeline("root").test_ok();
         let entity = EntityId::new();
         store
             .append(root.id(), &[make_draft(entity, b"evt")])
-            .unwrap();
-        let child = store.fork(root.id(), Seq::from_u64(1), "child").unwrap();
+            .test_ok();
+        let child = store.fork(root.id(), Seq::from_u64(1), "child").test_ok();
         store.test_remove_timeline(root.id());
-        let err = store.read(child.id(), SeqRange::all()).unwrap_err();
+        let err = store.read(child.id(), SeqRange::all()).test_err();
         assert!(matches!(err, CoreError::TimelineNotFound(_)));
     }
 
@@ -3835,14 +3885,14 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn fork_fails_when_ancestor_metadata_removed() {
         let mut store = MemoryStore::new();
-        let root = store.create_timeline("root").unwrap();
+        let root = store.create_timeline("root").test_ok();
         let entity = EntityId::new();
         store
             .append(root.id(), &[make_draft(entity, b"evt")])
-            .unwrap();
-        let child = store.fork(root.id(), Seq::from_u64(1), "child").unwrap();
+            .test_ok();
+        let child = store.fork(root.id(), Seq::from_u64(1), "child").test_ok();
         store.test_remove_timeline(root.id());
-        let err = store.fork(child.id(), Seq::ZERO, "grandchild").unwrap_err();
+        let err = store.fork(child.id(), Seq::ZERO, "grandchild").test_err();
         assert!(matches!(err, CoreError::TimelineNotFound(_)));
     }
 
@@ -3850,14 +3900,14 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn read_rejects_cyclic_fork_ancestry() {
         let mut store = MemoryStore::new();
-        let timeline = store.create_timeline("cycle").unwrap();
+        let timeline = store.create_timeline("cycle").test_ok();
         store.test_corrupt(TestCorruption::ForkParent {
             timeline: timeline.id(),
             parent: timeline.id(),
             fork_seq: Seq::ZERO,
         });
 
-        let error = store.read(timeline.id(), SeqRange::all()).unwrap_err();
+        let error = store.read(timeline.id(), SeqRange::all()).test_err();
         assert!(error.to_string().contains("fork ancestry contains a cycle"));
         let bounded_error = store
             .read_bounded(
@@ -3865,7 +3915,7 @@ mod tests {
                 SeqRange::all(),
                 EventReadBounds::new(1, 1, 1, 1),
             )
-            .unwrap_err();
+            .test_err();
         assert!(bounded_error
             .to_string()
             .contains("fork ancestry contains a cycle"));
@@ -3881,15 +3931,15 @@ mod tests {
                 SeqRange::all(),
                 EventReadBounds::new(1, 1, 1, 1),
             )
-            .unwrap_err();
+            .test_err();
         assert!(bounded_error.to_string().contains("timeline not found"));
     }
 
     #[test]
     fn bounded_chain_rejects_a_missing_ancestor() {
         let mut store = MemoryStore::new();
-        let parent = store.create_timeline("parent").unwrap();
-        let child = store.fork(parent.id(), Seq::ZERO, "child").unwrap();
+        let parent = store.create_timeline("parent").test_ok();
+        let child = store.fork(parent.id(), Seq::ZERO, "child").test_ok();
         store.test_remove_timeline(parent.id());
 
         let error = store
@@ -3898,7 +3948,7 @@ mod tests {
                 SeqRange::all(),
                 EventReadBounds::new(1, 1, 1, 1),
             )
-            .unwrap_err();
+            .test_err();
         assert!(error
             .to_string()
             .contains(&format!("timeline not found: {}", parent.id())));
@@ -3908,24 +3958,24 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn multiple_forks_from_same_parent_are_independent() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("main").unwrap();
+        let tl = store.create_timeline("main").test_ok();
         let entity = EntityId::new();
         store
             .append(tl.id(), &[make_draft(entity, b"shared")])
-            .unwrap();
+            .test_ok();
 
-        let branch_a = store.fork(tl.id(), Seq::from_u64(1), "a").unwrap();
-        let branch_b = store.fork(tl.id(), Seq::from_u64(1), "b").unwrap();
+        let branch_a = store.fork(tl.id(), Seq::from_u64(1), "a").test_ok();
+        let branch_b = store.fork(tl.id(), Seq::from_u64(1), "b").test_ok();
 
         store
             .append(branch_a.id(), &[make_draft(entity, b"a-only")])
-            .unwrap();
+            .test_ok();
         store
             .append(branch_b.id(), &[make_draft(entity, b"b-only")])
-            .unwrap();
+            .test_ok();
 
-        let a_events = store.read(branch_a.id(), SeqRange::all()).unwrap();
-        let b_events = store.read(branch_b.id(), SeqRange::all()).unwrap();
+        let a_events = store.read(branch_a.id(), SeqRange::all()).test_ok();
+        let b_events = store.read(branch_b.id(), SeqRange::all()).test_ok();
 
         assert!(a_events.iter().any(|e| e.payload.as_slice() == b"a-only"));
         assert!(!a_events.iter().any(|e| e.payload.as_slice() == b"b-only"));
@@ -3939,22 +3989,22 @@ mod tests {
         use pos_core::store::{export_timeline, import_timeline_with_id};
 
         let mut src = MemoryStore::new();
-        let tl = src.create_timeline("shared").unwrap();
+        let tl = src.create_timeline("shared").test_ok();
         let entity = EntityId::new();
         let committed = src
             .append(
                 tl.id(),
                 &[make_draft(entity, b"one"), make_draft(entity, b"two")],
             )
-            .unwrap();
-        let export = export_timeline(&src, tl.id()).unwrap();
+            .test_ok();
+        let export = export_timeline(&src, tl.id()).test_ok();
         let original_tl_id = tl.id();
         let original_event_ids: Vec<_> = committed.iter().map(|e| e.id).collect();
 
         let mut dst = MemoryStore::new();
-        let imported = import_timeline_with_id(&mut dst, export).unwrap();
+        let imported = import_timeline_with_id(&mut dst, export).test_ok();
         assert_eq!(imported.id(), original_tl_id);
-        let events = dst.read(original_tl_id, SeqRange::all()).unwrap();
+        let events = dst.read(original_tl_id, SeqRange::all()).test_ok();
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].id, original_event_ids[0]);
         assert_eq!(events[1].id, original_event_ids[1]);
@@ -3966,14 +4016,12 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn create_timeline_with_meta_rejects_duplicate_and_missing_parent() {
         let mut store = MemoryStore::new();
-        let root = store.create_timeline("root").unwrap();
-        let err = store
-            .create_timeline_with_meta(root.meta.clone())
-            .unwrap_err();
+        let root = store.create_timeline("root").test_ok();
+        let err = store.create_timeline_with_meta(root.meta).test_err();
         assert!(matches!(err, CoreError::Storage(_)));
 
         let orphan = TimelineMeta::forked_from(TimelineId::new(), Seq::from_u64(1), "orphan");
-        let err = store.create_timeline_with_meta(orphan).unwrap_err();
+        let err = store.create_timeline_with_meta(orphan).test_err();
         assert!(matches!(err, CoreError::TimelineNotFound(_)));
     }
 
@@ -3981,31 +4029,31 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn create_timeline_with_meta_fork_uses_parent_chain() {
         let mut store = MemoryStore::new();
-        let root = store.create_timeline("root").unwrap();
+        let root = store.create_timeline("root").test_ok();
         let entity = EntityId::new();
         store
             .append(root.id(), &[make_draft(entity, b"r1")])
-            .unwrap();
+            .test_ok();
         let child_meta = TimelineMeta {
             id: TimelineId::new(),
             mode: pos_core::timeline::TimelineMode::Historical,
             name: Some("child".to_owned()),
             fork_point: Some((root.id(), Seq::from_u64(1))),
         };
-        let child = store.create_timeline_with_meta(child_meta).unwrap();
+        let child = store.create_timeline_with_meta(child_meta).test_ok();
         assert!(child.meta.fork_point.is_some());
-        store.append_committed(child.id(), &[]).unwrap();
+        store.append_committed(child.id(), &[]).test_ok();
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_committed_is_atomic_on_mid_batch_failure() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("t").unwrap();
+        let tl = store.create_timeline("t").test_ok();
         let entity = EntityId::new();
         let good = store
             .append(tl.id(), &[make_draft(entity, b"ok")])
-            .unwrap()
+            .test_ok()
             .remove(0);
 
         let mut bad = good.clone();
@@ -4014,21 +4062,21 @@ mod tests {
         bad.payload = CanonicalBytes::from_vec(b"bad".to_vec());
         bad.payload_hash = pos_core::Hash::from_bytes([9u8; 32]); // mismatch
 
-        let mut later = good.clone();
+        let mut later = good;
         later.id = EventId::new();
         later.seq = Seq::from_u64(3);
         later.payload = CanonicalBytes::from_vec(b"later".to_vec());
         later.payload_hash = pos_crypto::chain::hash_payload(&later.payload);
 
-        let err = store.append_committed(tl.id(), &[bad, later]).unwrap_err();
+        let err = store.append_committed(tl.id(), &[bad, later]).test_err();
         assert!(matches!(err, CoreError::Storage(_)));
 
         // No partial apply: still only the originally appended event.
-        let events = store.read(tl.id(), SeqRange::all()).unwrap();
+        let events = store.read(tl.id(), SeqRange::all()).test_ok();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].payload.as_slice(), b"ok");
         assert_eq!(
-            store.get_timeline(tl.id()).unwrap().unwrap().head,
+            store.get_timeline(tl.id()).test_ok().test_ok().head,
             Seq::from_u64(1)
         );
     }
@@ -4036,23 +4084,23 @@ mod tests {
     #[test]
     fn delete_timeline_removes_events_and_blocks_with_forks() {
         let mut store = MemoryStore::new();
-        let root = store.create_timeline("root").unwrap();
+        let root = store.create_timeline("root").test_ok();
         let entity = EntityId::new();
         store
             .append(root.id(), &[make_draft(entity, b"r1")])
-            .unwrap();
-        let child = store.fork(root.id(), Seq::from_u64(1), "child").unwrap();
+            .test_ok();
+        let child = store.fork(root.id(), Seq::from_u64(1), "child").test_ok();
 
-        let err = store.delete_timeline(root.id()).unwrap_err();
+        let err = store.delete_timeline(root.id()).test_err();
         assert_eq!(
             std::mem::discriminant(&err),
             std::mem::discriminant(&CoreError::Storage(String::new()))
         );
 
-        store.delete_timeline(child.id()).unwrap();
-        store.delete_timeline(root.id()).unwrap();
-        assert_eq!(store.get_timeline(root.id()).unwrap(), None);
-        let err = store.delete_timeline(root.id()).unwrap_err();
+        store.delete_timeline(child.id()).test_ok();
+        store.delete_timeline(root.id()).test_ok();
+        assert_eq!(store.get_timeline(root.id()).test_ok(), None);
+        let err = store.delete_timeline(root.id()).test_err();
         assert_eq!(
             std::mem::discriminant(&err),
             std::mem::discriminant(&CoreError::TimelineNotFound(TimelineId::new()))
@@ -4065,18 +4113,18 @@ mod tests {
         use pos_core::store::{export_timeline, import_timeline_with_id};
 
         let mut src = MemoryStore::new();
-        let tl = src.create_timeline("shared").unwrap();
+        let tl = src.create_timeline("shared").test_ok();
         let entity = EntityId::new();
-        let mut committed = src.append(tl.id(), &[make_draft(entity, b"one")]).unwrap();
-        let export = export_timeline(&src, tl.id()).unwrap();
+        let mut committed = src.append(tl.id(), &[make_draft(entity, b"one")]).test_ok();
+        let export = export_timeline(&src, tl.id()).test_ok();
         // Corrupt payload hash so append_committed fails after create.
         let mut bad_export = export;
         bad_export.events[0].payload_hash = pos_core::Hash::from_bytes([1u8; 32]);
 
         let mut dst = MemoryStore::new();
-        let err = import_timeline_with_id(&mut dst, bad_export).unwrap_err();
+        let err = import_timeline_with_id(&mut dst, bad_export).test_err();
         assert!(matches!(err, CoreError::Storage(_)));
-        assert!(dst.get_timeline(tl.id()).unwrap().is_none());
+        assert!(dst.get_timeline(tl.id()).test_ok().is_none());
         let _ = committed.remove(0);
     }
 
@@ -4084,47 +4132,41 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_committed_validates_seq_and_payload_hash() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("t").unwrap();
+        let tl = store.create_timeline("t").test_ok();
         let entity = EntityId::new();
         let mut good = store
             .append(tl.id(), &[make_draft(entity, b"x")])
-            .unwrap()
+            .test_ok()
             .remove(0);
 
         // Empty committed append is ok.
-        store.append_committed(tl.id(), &[]).unwrap();
+        store.append_committed(tl.id(), &[]).test_ok();
 
         // Collision with existing head (not contiguous — expects head+1).
-        let err = store
-            .append_committed(tl.id(), &[good.clone()])
-            .unwrap_err();
+        let err = store.append_committed(tl.id(), &[good.clone()]).test_err();
         assert!(matches!(err, CoreError::Storage(ref m) if m.contains("contiguous")));
 
         // Missing timeline.
         let err = store
             .append_committed(TimelineId::new(), &[good.clone()])
-            .unwrap_err();
+            .test_err();
         assert!(matches!(err, CoreError::TimelineNotFound(_)));
 
         // Bad payload hash.
         good.seq = Seq::from_u64(2);
         good.payload_hash = pos_core::Hash::from_bytes([9u8; 32]);
-        let err = store
-            .append_committed(tl.id(), &[good.clone()])
-            .unwrap_err();
+        let err = store.append_committed(tl.id(), &[good.clone()]).test_err();
         assert!(matches!(err, CoreError::Storage(_)));
 
         // Seq gap rejected.
         good.seq = Seq::from_u64(3);
         good.payload_hash = pos_crypto::chain::hash_payload(&good.payload);
-        let err = store
-            .append_committed(tl.id(), &[good.clone()])
-            .unwrap_err();
+        let err = store.append_committed(tl.id(), &[good.clone()]).test_err();
         assert!(matches!(err, CoreError::Storage(ref m) if m.contains("contiguous")));
 
         // Seq 0 rejected.
         good.seq = Seq::ZERO;
-        let err = store.append_committed(tl.id(), &[good]).unwrap_err();
+        let err = store.append_committed(tl.id(), &[good]).test_err();
         assert!(matches!(err, CoreError::Storage(_)));
     }
 
@@ -4132,19 +4174,19 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_committed_rejects_duplicate_event_id() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("t").unwrap();
+        let tl = store.create_timeline("t").test_ok();
         let entity = EntityId::new();
         let first = store
             .append(tl.id(), &[make_draft(entity, b"a")])
-            .unwrap()
+            .test_ok()
             .remove(0);
 
-        let mut dup = first.clone();
+        let mut dup = first;
         dup.seq = Seq::from_u64(2);
         dup.payload = CanonicalBytes::from_vec(b"b".to_vec());
         dup.payload_hash = pos_crypto::chain::hash_payload(&dup.payload);
         // same EventId as first
-        let err = store.append_committed(tl.id(), &[dup]).unwrap_err();
+        let err = store.append_committed(tl.id(), &[dup]).test_err();
         assert!(matches!(err, CoreError::Storage(ref m) if m.contains("duplicate")));
     }
 
@@ -4152,7 +4194,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_committed_rejects_duplicate_id_in_batch() {
         let mut store = MemoryStore::new();
-        let tl = store.create_timeline("t").unwrap();
+        let tl = store.create_timeline("t").test_ok();
         let entity = EntityId::new();
         let id = EventId::new();
         let mk = |seq: u64, payload: &[u8]| {
@@ -4173,14 +4215,14 @@ mod tests {
         };
         let err = store
             .append_committed(tl.id(), &[mk(1, b"a"), mk(2, b"b")])
-            .unwrap_err();
+            .test_err();
         assert!(matches!(err, CoreError::Storage(ref m) if m.contains("duplicate")));
     }
 
     #[test]
     fn generic_committed_geographic_events_are_rejected() {
         let mut store = MemoryStore::new();
-        let timeline = store.create_timeline("geo").unwrap();
+        let timeline = store.create_timeline("geo").test_ok();
         let payload = CanonicalBytes::from_vec(b"protected".to_vec());
         let event = Event {
             id: EventId::new(),
@@ -4206,7 +4248,10 @@ mod tests {
                 )],
             )
             .is_ok());
-        assert_eq!(store.read(timeline.id(), SeqRange::all()).unwrap().len(), 1);
+        assert_eq!(
+            store.read(timeline.id(), SeqRange::all()).test_ok().len(),
+            1
+        );
     }
 
     #[test]
@@ -4214,7 +4259,7 @@ mod tests {
         let store = MemoryStore::new();
         assert!(store
             .read_event_by_id(TimelineId::new(), EventId::new())
-            .unwrap_err()
+            .test_err()
             .to_string()
             .contains("not found"));
     }
@@ -4222,7 +4267,7 @@ mod tests {
     #[test]
     fn read_own_helper_returns_matching_event() {
         let mut store = MemoryStore::new();
-        let timeline = store.create_timeline("read-own-helper").unwrap();
+        let timeline = store.create_timeline("read-own-helper").test_ok();
         store
             .append(
                 timeline.id(),
@@ -4231,66 +4276,66 @@ mod tests {
                     make_draft(EntityId::new(), b"excluded-event"),
                 ],
             )
-            .unwrap();
+            .test_ok();
 
         let events = read_own(
             &store,
             timeline.id(),
             SeqRange::bounded(Seq::from_u64(1), Seq::from_u64(1)),
         )
-        .unwrap();
+        .test_ok();
         assert_eq!(events.len(), 1);
 
-        let all_events = read_own(&store, timeline.id(), SeqRange::all()).unwrap();
+        let all_events = read_own(&store, timeline.id(), SeqRange::all()).test_ok();
         assert_eq!(all_events.len(), 2);
     }
 
     #[test]
     fn child_reads_do_not_include_parent_events_after_a_fork_point() {
         let mut store = MemoryStore::new();
-        let parent = store.create_timeline("lookup-parent").unwrap();
+        let parent = store.create_timeline("lookup-parent").test_ok();
         store
             .append(parent.id(), &[make_draft(EntityId::new(), b"before-fork")])
-            .unwrap();
+            .test_ok();
         let child = store
             .fork(parent.id(), Seq::from_u64(1), "lookup-child")
-            .unwrap();
+            .test_ok();
         store
             .append(parent.id(), &[make_draft(EntityId::new(), b"after-fork")])
-            .unwrap();
+            .test_ok();
 
-        assert_eq!(store.read(child.id(), SeqRange::all()).unwrap().len(), 1);
+        assert_eq!(store.read(child.id(), SeqRange::all()).test_ok().len(), 1);
     }
 
     #[test]
     fn delete_timeline_helper_removes_append_identity() {
         let mut store = MemoryStore::new();
-        let timeline = store.create_timeline("delete-helper").unwrap();
+        let timeline = store.create_timeline("delete-helper").test_ok();
         let intent = AppendIntent::new(&make_draft(EntityId::new(), b"identified-event"));
         store
             .append_intent_or_duplicate(timeline.id(), append_identity(17, 17), intent)
-            .unwrap();
+            .test_ok();
 
-        let retained_timeline = store.create_timeline("retained-identity").unwrap();
+        let retained_timeline = store.create_timeline("retained-identity").test_ok();
         let retained = AppendIntent::new(&make_draft(EntityId::new(), b"retained-event"));
         store
             .append_intent_or_duplicate(retained_timeline.id(), append_identity(18, 18), retained)
-            .unwrap();
+            .test_ok();
 
         store
             .fork(retained_timeline.id(), Seq::ZERO, "retained-child")
-            .unwrap();
+            .test_ok();
 
-        delete_timeline(&mut store, timeline.id()).unwrap();
+        delete_timeline(&mut store, timeline.id()).test_ok();
         assert_eq!(store.append_identities.len(), 1);
     }
 
     #[test]
     fn delete_timeline_helper_handles_an_empty_identity_map() {
         let mut store = MemoryStore::new();
-        let timeline = store.create_timeline("delete-empty-identities").unwrap();
+        let timeline = store.create_timeline("delete-empty-identities").test_ok();
 
-        delete_timeline(&mut store, timeline.id()).unwrap();
+        delete_timeline(&mut store, timeline.id()).test_ok();
 
         assert!(store.append_identities.is_empty());
     }
@@ -4312,25 +4357,25 @@ mod tests {
         };
 
         let mut src = MemoryStore::new();
-        let root = src.create_timeline("root").unwrap();
+        let root = src.create_timeline("root").test_ok();
         let entity = EntityId::new();
         src.append(
             root.id(),
             &[make_draft(entity, b"p1"), make_draft(entity, b"p2")],
         )
-        .unwrap();
-        let child = src.fork(root.id(), Seq::from_u64(1), "child").unwrap();
+        .test_ok();
+        let child = src.fork(root.id(), Seq::from_u64(1), "child").test_ok();
         src.append(child.id(), &[make_draft(entity, b"c1")])
-            .unwrap();
+            .test_ok();
 
         // Logical export flattens fork meta.
-        let logical = export_timeline(&src, child.id()).unwrap();
+        let logical = export_timeline(&src, child.id()).test_ok();
         assert!(logical.timeline.meta.fork_point.is_none());
         assert_eq!(logical.events.len(), 2); // parent[..1] + child
 
         // Own export keeps CoW shape (`_raw` is a legacy alias of `_own`).
-        let own = export_timeline_own(&src, child.id()).unwrap();
-        let raw_alias = export_timeline_raw(&src, child.id()).unwrap();
+        let own = export_timeline_own(&src, child.id()).test_ok();
+        let raw_alias = export_timeline_raw(&src, child.id()).test_ok();
         assert_eq!(own.timeline.id(), raw_alias.timeline.id());
         assert_eq!(own.events.len(), raw_alias.events.len());
         assert_eq!(own.parent_fork_hash, raw_alias.parent_fork_hash);
@@ -4342,12 +4387,12 @@ mod tests {
         assert_eq!(own.events[0].payload.as_slice(), b"c1");
 
         let mut dst = MemoryStore::new();
-        let parent_export = export_timeline_own(&src, root.id()).unwrap();
-        import_timeline_with_id(&mut dst, parent_export).unwrap();
-        let imported = import_timeline_with_id(&mut dst, own).unwrap();
+        let parent_export = export_timeline_own(&src, root.id()).test_ok();
+        import_timeline_with_id(&mut dst, parent_export).test_ok();
+        let imported = import_timeline_with_id(&mut dst, own).test_ok();
         assert_eq!(imported.id(), child.id());
         assert!(imported.meta.fork_point.is_some());
-        let stitched = dst.read(child.id(), SeqRange::all()).unwrap();
+        let stitched = dst.read(child.id(), SeqRange::all()).test_ok();
         assert_eq!(stitched.len(), 2);
         assert_eq!(stitched[0].payload.as_slice(), b"p1");
         assert_eq!(stitched[1].payload.as_slice(), b"c1");
@@ -4357,21 +4402,21 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn read_own_skips_parent_events() {
         let mut store = MemoryStore::new();
-        let root = store.create_timeline("root").unwrap();
+        let root = store.create_timeline("root").test_ok();
         let entity = EntityId::new();
         store
             .append(root.id(), &[make_draft(entity, b"p1")])
-            .unwrap();
-        let child = store.fork(root.id(), Seq::from_u64(1), "child").unwrap();
+            .test_ok();
+        let child = store.fork(root.id(), Seq::from_u64(1), "child").test_ok();
         store
             .append(child.id(), &[make_draft(entity, b"c1")])
-            .unwrap();
-        let own = store.read_own(child.id(), SeqRange::all()).unwrap();
+            .test_ok();
+        let own = store.read_own(child.id(), SeqRange::all()).test_ok();
         assert_eq!(own.len(), 1);
         assert_eq!(own[0].payload.as_slice(), b"c1");
         let missing = store
             .read_own(TimelineId::new(), SeqRange::all())
-            .unwrap_err();
+            .test_err();
         assert!(matches!(missing, CoreError::TimelineNotFound(_)));
 
         let bounded = store
@@ -4379,7 +4424,7 @@ mod tests {
                 child.id(),
                 SeqRange::bounded(Seq::from_u64(1), Seq::from_u64(1)),
             )
-            .unwrap();
+            .test_ok();
         assert_eq!(bounded.len(), 1);
     }
 
@@ -4387,14 +4432,14 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn create_timeline_with_meta_rejects_fork_beyond_head() {
         let mut store = MemoryStore::new();
-        let root = store.create_timeline("root").unwrap();
+        let root = store.create_timeline("root").test_ok();
         let entity = EntityId::new();
         store
             .append(root.id(), &[make_draft(entity, b"p1")])
-            .unwrap();
+            .test_ok();
         let mut meta = TimelineMeta::forked_from(root.id(), Seq::from_u64(9), "bad");
         meta.id = TimelineId::new();
-        let err = store.create_timeline_with_meta(meta).unwrap_err();
+        let err = store.create_timeline_with_meta(meta).test_err();
         assert!(matches!(err, CoreError::ForkBeyondHead { .. }));
     }
 
@@ -4402,26 +4447,26 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn nested_fork_chain_hash_ignores_parent_events_after_fork() {
         let mut store = MemoryStore::new();
-        let root = store.create_timeline("root").unwrap();
+        let root = store.create_timeline("root").test_ok();
         let entity = EntityId::new();
         store
             .append(
                 root.id(),
                 &[make_draft(entity, b"r1"), make_draft(entity, b"r2")],
             )
-            .unwrap();
-        let mid = store.fork(root.id(), Seq::from_u64(1), "mid").unwrap();
+            .test_ok();
+        let mid = store.fork(root.id(), Seq::from_u64(1), "mid").test_ok();
         store
             .append(mid.id(), &[make_draft(entity, b"m1")])
-            .unwrap();
+            .test_ok();
         // Parent continues after fork — must not affect mid/leaf chain heads.
         store
             .append(root.id(), &[make_draft(entity, b"r3")])
-            .unwrap();
+            .test_ok();
 
         let mut leaf_meta = TimelineMeta::forked_from(mid.id(), Seq::from_u64(2), "leaf");
         leaf_meta.id = TimelineId::new();
-        let leaf = store.create_timeline_with_meta(leaf_meta).unwrap();
+        let leaf = store.create_timeline_with_meta(leaf_meta).test_ok();
 
         // Import-equivalent append on leaf must hash from the CoW snapshot, not root's new tip.
         let payload = CanonicalBytes::from_vec(b"l1".to_vec());
@@ -4438,8 +4483,8 @@ mod tests {
             signature: None,
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
-        store.append_committed(leaf.id(), &[ev]).unwrap();
-        let stitched = store.read(leaf.id(), SeqRange::all()).unwrap();
+        store.append_committed(leaf.id(), &[ev]).test_ok();
+        let stitched = store.read(leaf.id(), SeqRange::all()).test_ok();
         // leaf @ logical mid:2 → r1 + m1 + leaf l1; root's post-fork r3 stays invisible.
         assert_eq!(stitched.len(), 3);
         assert_eq!(stitched[0].payload.as_slice(), b"r1");
@@ -4454,23 +4499,23 @@ mod tests {
         use pos_core::store::{export_timeline, import_timeline_with_id};
 
         let mut src = MemoryStore::new();
-        let root = src.create_timeline("root").unwrap();
+        let root = src.create_timeline("root").test_ok();
         let entity = EntityId::new();
         src.append(
             root.id(),
             &[make_draft(entity, b"p1"), make_draft(entity, b"p2")],
         )
-        .unwrap();
-        let child = src.fork(root.id(), Seq::from_u64(1), "child").unwrap();
+        .test_ok();
+        let child = src.fork(root.id(), Seq::from_u64(1), "child").test_ok();
         src.append(child.id(), &[make_draft(entity, b"c1")])
-            .unwrap();
+            .test_ok();
 
-        let logical = export_timeline(&src, child.id()).unwrap();
+        let logical = export_timeline(&src, child.id()).test_ok();
         assert!(logical.timeline.meta.fork_point.is_none());
         assert_eq!(logical.timeline.head, Seq::from_u64(2));
         let parent_ids: std::collections::HashSet<_> = src
             .read_own(root.id(), SeqRange::all())
-            .unwrap()
+            .test_ok()
             .into_iter()
             .map(|e| e.id)
             .collect();
@@ -4479,9 +4524,9 @@ mod tests {
         }
 
         let mut dst = MemoryStore::new();
-        import_timeline_with_id(&mut dst, export_timeline(&src, root.id()).unwrap()).unwrap();
+        import_timeline_with_id(&mut dst, export_timeline(&src, root.id()).test_ok()).test_ok();
         // Flattened child import must not collide with parent EventIds.
-        import_timeline_with_id(&mut dst, logical).unwrap();
+        import_timeline_with_id(&mut dst, logical).test_ok();
     }
 
     #[test]
@@ -4500,7 +4545,7 @@ mod tests {
 
         let mut child_meta = TimelineMeta::forked_from(broken.id(), Seq::ZERO, "child");
         child_meta.id = TimelineId::new();
-        let err = store.create_timeline_with_meta(child_meta).unwrap_err();
+        let err = store.create_timeline_with_meta(child_meta).test_err();
         assert!(matches!(err, CoreError::TimelineNotFound(_)));
     }
 
@@ -4510,22 +4555,23 @@ mod tests {
         use pos_core::store::{export_timeline_own, import_timeline_with_id};
 
         let mut src = MemoryStore::new();
-        let root = src.create_timeline("root").unwrap();
+        let root = src.create_timeline("root").test_ok();
         let entity = EntityId::new();
-        src.append(root.id(), &[make_draft(entity, b"p1")]).unwrap();
-        let child = src.fork(root.id(), Seq::from_u64(1), "child").unwrap();
+        src.append(root.id(), &[make_draft(entity, b"p1")])
+            .test_ok();
+        let child = src.fork(root.id(), Seq::from_u64(1), "child").test_ok();
 
         let mut dst = MemoryStore::new();
         // Divergent parent with same id but different payload.
-        let mut parent_export = export_timeline_own(&src, root.id()).unwrap();
+        let mut parent_export = export_timeline_own(&src, root.id()).test_ok();
         parent_export.events[0].payload = CanonicalBytes::from_vec(b"OTHER".to_vec());
         parent_export.events[0].payload_hash =
             pos_crypto::chain::hash_payload(&parent_export.events[0].payload);
-        import_timeline_with_id(&mut dst, parent_export).unwrap();
+        import_timeline_with_id(&mut dst, parent_export).test_ok();
 
-        let child_export = export_timeline_own(&src, child.id()).unwrap();
+        let child_export = export_timeline_own(&src, child.id()).test_ok();
         assert!(child_export.parent_fork_hash.is_some());
-        let err = import_timeline_with_id(&mut dst, child_export).unwrap_err();
+        let err = import_timeline_with_id(&mut dst, child_export).test_err();
         assert!(matches!(err, CoreError::Storage(ref m) if m.contains("chain hash mismatch")));
     }
 
@@ -4603,7 +4649,7 @@ mod tests {
         let mut store = HashFailOnImport {
             base: MemoryStore::new(),
         };
-        let parent = store.create_timeline("root").unwrap();
+        let parent = store.create_timeline("root").test_ok();
         let mut meta = TimelineMeta::forked_from(parent.id(), Seq::ZERO, "child");
         meta.id = TimelineId::new();
         let export = TimelineExport {
@@ -4611,7 +4657,7 @@ mod tests {
             events: vec![],
             parent_fork_hash: Some(Hash::zero()),
         };
-        let err = import_timeline_with_id(&mut store, export).unwrap_err();
+        let err = import_timeline_with_id(&mut store, export).test_err();
         assert!(matches!(err, CoreError::Storage(ref m) if m.contains("chain lookup")));
     }
 
@@ -4619,10 +4665,10 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn with_hasher_uses_custom_hasher() {
         let mut store = MemoryStore::with_hasher(Box::new(pos_crypto::chain::Blake3Hasher));
-        let tl = store.create_timeline("hasher-test").unwrap();
+        let tl = store.create_timeline("hasher-test").test_ok();
         let entity = EntityId::new();
         let drafts = [make_draft(entity, b"payload")];
-        let events = store.append(tl.id(), &drafts).unwrap();
+        let events = store.append(tl.id(), &drafts).test_ok();
         assert_eq!(events.len(), 1);
         assert!(!events[0].payload_hash.as_bytes().iter().all(|b| *b == 0));
     }
@@ -4631,7 +4677,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn memory_boundary_rejects_non_v1_serialized_draft() {
         let draft = make_draft(EntityId::new(), b"payload");
-        let mut encoded = serde_json::to_value(draft).unwrap();
+        let mut encoded = serde_json::to_value(draft).test_ok();
         encoded["schema_version"] = serde_json::json!(2);
         assert!(serde_json::from_value::<EventDraft>(encoded).is_err());
     }

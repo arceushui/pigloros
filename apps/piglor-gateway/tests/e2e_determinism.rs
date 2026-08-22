@@ -24,6 +24,26 @@ use std::{
 };
 use tokio::{sync::oneshot, task::JoinHandle};
 
+trait TestResultExt<T, E> {
+    fn test_ok(self) -> Result<T, Box<dyn std::error::Error + Send + Sync>>;
+}
+
+impl<T, E: std::fmt::Debug> TestResultExt<T, E> for Result<T, E> {
+    fn test_ok(self) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
+        self.map_err(|error| format!("unexpected error: {error:?}").into())
+    }
+}
+
+trait TestOptionExt<T> {
+    fn test_ok(self) -> Result<T, Box<dyn std::error::Error + Send + Sync>>;
+}
+
+impl<T> TestOptionExt<T> for Option<T> {
+    fn test_ok(self) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
+        self.ok_or_else(|| "expected a value".into())
+    }
+}
+
 struct FixturePlugin {
     id: PluginId,
     name: &'static str,
@@ -89,10 +109,16 @@ impl Driver for ObservationProbeDriver {
             .and_then(|state| state.get("event_count"))
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        let mut log = self.log.lock().expect("probe log lock is healthy");
+        let Ok(mut log) = self.log.lock() else {
+            return Err(RuntimeError::InvalidPayload {
+                event_type: "observation-probe".to_owned(),
+                reason: "probe log lock is poisoned".to_owned(),
+            });
+        };
         if log.len() < 3 {
             log.push(count);
         }
+        drop(log);
         Ok(StepOutput::empty())
     }
 }
@@ -128,16 +154,19 @@ impl AgentPolicy for BarrierPolicy {
     fn decide(&mut self, context: &AgentContext) -> AgentAction {
         self.decisions.fetch_add(1, Ordering::SeqCst);
         if context.tick == 1 {
-            self.snapshot_ready
-                .take()
-                .expect("fast policy signals readiness once")
-                .send(())
-                .expect("snapshot readiness receiver is alive");
-            self.release
-                .lock()
-                .expect("policy release lock is healthy")
-                .recv()
-                .expect("policy release sender is alive");
+            let ready = self.snapshot_ready.take();
+            assert!(ready.is_some(), "fast policy signals readiness once");
+            if let Some(ready) = ready {
+                assert!(
+                    ready.send(()).is_ok(),
+                    "snapshot readiness receiver is alive"
+                );
+            }
+            let release = self.release.lock();
+            assert!(release.is_ok(), "policy release lock is healthy");
+            if let Ok(release) = release {
+                assert!(release.recv().is_ok(), "policy release sender is alive");
+            }
         }
         self.inner.decide(context)
     }
@@ -153,12 +182,12 @@ async fn request_http(
     method: &str,
     path: &str,
     body: Option<Value>,
-) -> HttpResponse {
+) -> Result<HttpResponse, Box<dyn std::error::Error + Send + Sync>> {
     let method = method.to_owned();
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || request_http_blocking(address, &method, &path, body))
         .await
-        .expect("HTTP helper joins")
+        .test_ok()?
 }
 
 fn request_http_blocking(
@@ -166,46 +195,41 @@ fn request_http_blocking(
     method: &str,
     path: &str,
     body: Option<Value>,
-) -> HttpResponse {
-    let payload = body.map_or_else(Vec::new, |value| {
-        serde_json::to_vec(&value).expect("JSON request serialization succeeds")
-    });
-    let mut stream = TcpStream::connect(address).expect("Gateway TCP listener accepts requests");
+) -> Result<HttpResponse, Box<dyn std::error::Error + Send + Sync>> {
+    let payload = body
+        .map_or_else(|| Ok(Vec::new()), |value| serde_json::to_vec(&value))
+        .test_ok()?;
+    let mut stream = TcpStream::connect(address).test_ok()?;
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
-        .expect("read timeout is configured");
+        .test_ok()?;
     stream
         .set_write_timeout(Some(Duration::from_secs(5)))
-        .expect("write timeout is configured");
+        .test_ok()?;
     write!(
         stream,
         "{method} {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         payload.len()
     )
-    .expect("HTTP request headers are written");
-    stream
-        .write_all(&payload)
-        .expect("HTTP request body is written");
-    stream.flush().expect("HTTP request is flushed");
+    .test_ok()?;
+    stream.write_all(&payload).test_ok()?;
+    stream.flush().test_ok()?;
 
     let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
-        .expect("complete HTTP response is read");
+    stream.read_to_end(&mut response).test_ok()?;
     let header_end = response
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
-        .expect("HTTP response contains a header terminator");
-    let headers = std::str::from_utf8(&response[..header_end]).expect("HTTP headers are UTF-8");
+        .test_ok()?;
+    let headers = std::str::from_utf8(&response[..header_end]).test_ok()?;
     let status = headers
         .lines()
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|code| code.parse::<u16>().ok())
-        .expect("HTTP response contains a numeric status");
-    let body = serde_json::from_slice(&response[header_end + 4..])
-        .expect("HTTP response contains a JSON body");
-    HttpResponse { status, body }
+        .test_ok()?;
+    let body = serde_json::from_slice(&response[header_end + 4..]).test_ok()?;
+    Ok(HttpResponse { status, body })
 }
 
 struct FixtureGuard {
@@ -217,25 +241,29 @@ struct FixtureGuard {
 impl FixtureGuard {
     fn release_policy(&mut self) {
         if let Some(release) = self.policy_release.take() {
-            let _ = release.send(());
+            match release.send(()) {
+                Ok(()) | Err(_) => {}
+            }
         }
     }
 
-    async fn shutdown(mut self) {
+    async fn shutdown(mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.release_policy();
         if let Some(shutdown) = self.server_shutdown.take() {
-            let _ = shutdown.send(());
+            match shutdown.send(()) {
+                Ok(()) | Err(()) => {}
+            }
         }
         if let Some(mut server) = self.server.take() {
             let Ok(joined) = tokio::time::timeout(Duration::from_secs(5), &mut server).await else {
                 server.abort();
-                let _ = server.await;
-                panic!("Gateway server did not shut down within five seconds");
+                drop(server.await);
+                return Err("Gateway server did not shut down within five seconds".into());
             };
-            joined
-                .expect("Gateway server task joins")
-                .expect("Gateway server shuts down cleanly");
+            let joined = joined.test_ok()?;
+            joined.test_ok()?;
         }
+        Ok(())
     }
 }
 
@@ -243,7 +271,9 @@ impl Drop for FixtureGuard {
     fn drop(&mut self) {
         self.release_policy();
         if let Some(shutdown) = self.server_shutdown.take() {
-            let _ = shutdown.send(());
+            match shutdown.send(()) {
+                Ok(()) | Err(()) => {}
+            }
         }
         if let Some(server) = self.server.take() {
             server.abort();
@@ -259,43 +289,59 @@ fn replay_registry() -> ProjectionRegistry {
     registry
 }
 
-fn snapshot_json(registry: &ProjectionRegistry) -> Value {
-    serde_json::to_value(registry.state_snapshot()).expect("projection state serializes")
+fn snapshot_json(
+    registry: &ProjectionRegistry,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    serde_json::to_value(registry.state_snapshot()).test_ok()
 }
 
-fn state_u64(registry: &ProjectionRegistry, reducer: &str, entity: EntityId, key: &str) -> u64 {
+fn state_u64(
+    registry: &ProjectionRegistry,
+    reducer: &str,
+    entity: EntityId,
+    key: &str,
+) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
     registry
         .state_for_reducer(reducer, &entity)
         .and_then(|state| state.get(key))
         .and_then(Value::as_u64)
-        .expect("expected integer projection field exists")
+        .test_ok()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::too_many_lines)] // One chronological E2E narrative; splitting would hide ordering.
-async fn multi_rate_human_ai_replay_is_deterministic() {
-    let database = tempfile::NamedTempFile::new().expect("temporary SQLite file is created");
-    let path = database
-        .path()
-        .to_str()
-        .expect("database path is UTF-8")
-        .to_owned();
+struct MultiRateScenario {
+    _database: tempfile::NamedTempFile,
+    path: String,
+    address: SocketAddr,
+    timeline: TimelineId,
+    human_body: EntityId,
+    human_entity: EntityId,
+    society_entity: EntityId,
+    fast_entity: EntityId,
+    slow_entity: EntityId,
+    fast_decisions: Arc<AtomicUsize>,
+    slow_decisions: Arc<AtomicUsize>,
+    probe_log: Arc<Mutex<Vec<u64>>>,
+    snapshot_ready: Option<mpsc::Sender<()>>,
+    ready_rx: Option<mpsc::Receiver<()>>,
+    release_rx: Option<mpsc::Receiver<()>>,
+    guard: FixtureGuard,
+}
+
+async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Error + Send + Sync>> {
+    let database = tempfile::NamedTempFile::new().test_ok()?;
+    let path = database.path().to_str().test_ok()?.to_owned();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("loopback listener binds");
-    let address = listener
-        .local_addr()
-        .expect("listener address is available");
+        .test_ok()?;
+    let address = listener.local_addr().test_ok()?;
     let human_body = EntityId::new();
     let human_entity = EntityId::new();
-    let gateway = Gateway::new_with_world_bodies_and_principal(
-        open_store(StoreConfig::Sqlite { path: path.clone() })
-            .expect("Gateway SQLite connection opens"),
-        [human_body],
-        ActionPrincipal::new(human_entity, [Kind::new("world.action.submit")]),
-    );
     let state = AppState {
-        gateway,
+        gateway: Gateway::new_with_world_bodies_and_principal(
+            open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok()?,
+            [human_body],
+            ActionPrincipal::new(human_entity, [Kind::new("world.action.submit")]),
+        ),
         ledger_view: LedgerView::default(),
         ledger_write: LedgerWriteMode::Disabled,
     };
@@ -303,31 +349,29 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
     let server = tokio::spawn(async move {
         axum::serve(listener, router(state))
             .with_graceful_shutdown(async {
-                let _ = shutdown_rx.await;
+                match shutdown_rx.await {
+                    Ok(()) | Err(_) => {}
+                }
             })
             .await
     });
     let (snapshot_ready, ready_rx) = mpsc::channel();
     let (policy_release, release_rx) = mpsc::channel();
-    let mut guard = FixtureGuard {
+    let guard = FixtureGuard {
         policy_release: Some(policy_release),
         server_shutdown: Some(server_shutdown),
         server: Some(server),
     };
-
     let created = request_http(
         address,
         "POST",
         "/v1/timelines",
         Some(json!({"name": "multi-rate-e2e"})),
     )
-    .await;
+    .await?;
     assert_eq!(created.status, 201);
-    let timeline_text = created.body["id"]
-        .as_str()
-        .expect("created Timeline response has id");
-    let timeline =
-        TimelineId::from_ulid(ulid::Ulid::from_string(timeline_text).expect("Timeline id parses"));
+    let timeline_text = created.body["id"].as_str().test_ok()?;
+    let timeline = TimelineId::from_ulid(ulid::Ulid::from_string(timeline_text).test_ok()?);
     let society_entity = EntityId::new();
     let fast_entity = EntityId::new();
     let slow_entity = EntityId::new();
@@ -343,12 +387,31 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
             "object": null,
         })),
     )
-    .await;
+    .await?;
     assert_eq!(signal.status, 201);
+    Ok(MultiRateScenario {
+        _database: database,
+        path,
+        address,
+        timeline,
+        human_body,
+        human_entity,
+        society_entity,
+        fast_entity,
+        slow_entity,
+        fast_decisions: Arc::new(AtomicUsize::new(0)),
+        slow_decisions: Arc::new(AtomicUsize::new(0)),
+        probe_log: Arc::new(Mutex::new(Vec::new())),
+        snapshot_ready: Some(snapshot_ready),
+        ready_rx: Some(ready_rx),
+        release_rx: Some(release_rx),
+        guard,
+    })
+}
 
-    let fast_decisions = Arc::new(AtomicUsize::new(0));
-    let slow_decisions = Arc::new(AtomicUsize::new(0));
-    let probe_log = Arc::new(Mutex::new(Vec::new()));
+fn register_experiment(
+    scenario: &mut MultiRateScenario,
+) -> Result<Experiment, Box<dyn std::error::Error + Send + Sync>> {
     let observation = FixturePlugin::new("observation", false, true);
     let society = SocietyPlugin::new();
     let fast = AgentPlugin::new();
@@ -357,71 +420,77 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
     let mut experiment = Experiment::new(ExperimentConfig {
         name: "multi-rate-host".to_owned(),
         stop: StopCondition::MaxTicks(10),
-        store_config: StoreConfig::Sqlite { path: path.clone() },
+        store_config: StoreConfig::Sqlite {
+            path: scenario.path.clone(),
+        },
     });
     experiment
         .register(&observation, Some(Box::new(EntityStateProjection)), None)
-        .expect("observation reducer registers");
+        .test_ok()?;
     experiment
         .register(&society, Some(Box::new(SocietyReducer)), None)
-        .expect("Society reducer registers");
+        .test_ok()?;
     experiment
         .register(
             &fast,
             Some(Box::new(AgentReducer)),
             Some(Box::new(AgentDriver::new(
-                fast_entity,
+                scenario.fast_entity,
                 Box::new(BarrierPolicy {
                     inner: RoundRobinPolicy::new(vec!["fast".to_owned()]),
-                    decisions: Arc::clone(&fast_decisions),
-                    snapshot_ready: Some(snapshot_ready),
-                    release: Mutex::new(release_rx),
+                    decisions: Arc::clone(&scenario.fast_decisions),
+                    snapshot_ready: Some(scenario.snapshot_ready.take().test_ok()?),
+                    release: Mutex::new(scenario.release_rx.take().test_ok()?),
                 }),
                 vec!["fast".to_owned()],
             ))),
         )
-        .expect("fast Agent registers");
+        .test_ok()?;
     experiment
         .register(
             &probe,
             None,
             Some(Box::new(ObservationProbeDriver {
-                subscriptions: vec![ProjectionKey::new(human_entity)],
-                log: Arc::clone(&probe_log),
+                subscriptions: vec![ProjectionKey::new(scenario.human_entity)],
+                log: Arc::clone(&scenario.probe_log),
             })),
         )
-        .expect("observation probe registers");
+        .test_ok()?;
     experiment
         .register(
             &slow,
             Some(Box::new(AgentReducer)),
             Some(Box::new(
                 AgentDriver::new(
-                    slow_entity,
+                    scenario.slow_entity,
                     Box::new(CountingPolicy {
                         inner: RoundRobinPolicy::new(vec!["slow".to_owned()]),
-                        decisions: Arc::clone(&slow_decisions),
+                        decisions: Arc::clone(&scenario.slow_decisions),
                     }),
                     vec!["slow".to_owned()],
                 )
                 .with_tick_interval(Duration::from_millis(200)),
             )),
         )
-        .expect("slow Agent registers");
+        .test_ok()?;
+    Ok(experiment)
+}
 
-    let mut session = experiment
-        .resume(timeline)
-        .expect("Experiment opens a second SQLite connection");
-    let pinned_wall_time = WallTime::from_micros(
-        u64::try_from(i64::MAX).expect("positive SQLite integer limit fits u64"),
-    );
-    let mut pending_store = open_store(StoreConfig::Sqlite { path: path.clone() })
-        .expect("pending-ingress SQLite connection opens");
+async fn run_tick_boundaries(
+    scenario: &mut MultiRateScenario,
+    mut session: pos_experiment::ExperimentSession,
+) -> Result<(pos_experiment::ExperimentSession, WallTime), Box<dyn std::error::Error + Send + Sync>>
+{
+    let pinned_wall_time = WallTime::from_micros(u64::try_from(i64::MAX).test_ok()?);
+    let mut pending_store = open_store(StoreConfig::Sqlite {
+        path: scenario.path.clone(),
+    })
+    .test_ok()?;
     let pending = pending_store
         .append(
-            timeline,
+            scenario.timeline,
             &[draft_signal(
-                fast_entity,
+                scenario.fast_entity,
                 &SocietySignal {
                     dimension: SocietyDimension::Trust,
                     value: 0.25,
@@ -431,14 +500,12 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
             )
             .with_wall_time(pinned_wall_time)],
         )
-        .expect("externally pending signal commits through EventStore");
+        .test_ok()?;
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].seq.as_u64(), 2);
     drop(pending_store);
     assert_eq!(
-        session
-            .step_cadenced(0)
-            .expect("zero-time boundary succeeds"),
+        session.step_cadenced(0).test_ok()?,
         TickOutcome::Advanced {
             folded_events: 3,
             emitted_events: 2,
@@ -448,24 +515,22 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
         let result = session.step_cadenced(100_000_000);
         (session, result)
     });
-    tokio::task::spawn_blocking(move || {
-        ready_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("fast policy reaches the immutable-snapshot barrier");
-    })
-    .await
-    .expect("snapshot readiness wait joins");
+    let ready_rx = scenario.ready_rx.take().test_ok()?;
+    tokio::task::spawn_blocking(move || ready_rx.recv_timeout(Duration::from_secs(5)).test_ok())
+        .await
+        .test_ok()?
+        .test_ok()?;
     let human = request_http(
-        address,
+        scenario.address,
         "POST",
-        &format!("/v1/timelines/{timeline}/actions"),
+        &format!("/v1/timelines/{}/actions", scenario.timeline),
         Some(json!({
-            "entity_id": human_entity.to_string(),
+            "entity_id": scenario.human_entity.to_string(),
             "event_type": "world.action",
             "capability": "world.action.submit",
             "payload": {
-                "actor_entity_id": human_entity.to_string(),
-                "body_entity_id": human_body.to_string(),
+                "actor_entity_id": scenario.human_entity.to_string(),
+                "body_entity_id": scenario.human_body.to_string(),
                 "action_kind": "impulse",
                 "params": [1],
                 "action_scope": 0,
@@ -474,35 +539,31 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
             },
         })),
     )
-    .await;
+    .await?;
     assert_eq!(human.status, 201);
-    guard.release_policy();
-    let (mut session, boundary_at_100_ms) =
-        session_task.await.expect("cadenced session task joins");
+    scenario.guard.release_policy();
+    let (mut session, boundary_at_100_ms) = session_task.await.test_ok()?;
     assert_eq!(
-        boundary_at_100_ms.expect("100 ms boundary succeeds"),
+        boundary_at_100_ms.test_ok()?,
         TickOutcome::Advanced {
             folded_events: 2,
             emitted_events: 1,
         }
     );
     assert_eq!(
-        session
-            .step_cadenced(200_000_000)
-            .expect("200 ms boundary succeeds"),
+        session.step_cadenced(200_000_000).test_ok()?,
         TickOutcome::Advanced {
             folded_events: 2,
             emitted_events: 2,
         }
     );
+    Ok((session, pinned_wall_time))
+}
 
-    assert_eq!(
-        *probe_log.lock().expect("probe log lock is healthy"),
-        vec![0, 0, 1]
-    );
-    assert_eq!(fast_decisions.load(Ordering::SeqCst), 3);
-    assert_eq!(slow_decisions.load(Ordering::SeqCst), 2);
-
+async fn poll_events(
+    address: SocketAddr,
+    timeline: TimelineId,
+) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
     let mut polled = Vec::new();
     let mut from_seq = 0_u64;
     let mut pages = 0_u8;
@@ -515,15 +576,9 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
             &format!("/v1/timelines/{timeline}/events?from_seq={from_seq}&limit=2"),
             None,
         )
-        .await;
+        .await?;
         assert_eq!(page.status, 200);
-        polled.extend(
-            page.body["events"]
-                .as_array()
-                .expect("event page contains an array")
-                .iter()
-                .cloned(),
-        );
+        polled.extend(page.body["events"].as_array().test_ok()?.iter().cloned());
         let Some(next) = page.body["next_from_seq"].as_u64() else {
             break;
         };
@@ -531,10 +586,19 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
         from_seq = next;
     }
     assert_eq!(polled.len(), 8);
+    Ok(polled)
+}
+
+fn assert_event_order(
+    human_entity: EntityId,
+    fast_entity: EntityId,
+    slow_entity: EntityId,
+    polled: &[Value],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     for (index, event) in polled.iter().enumerate() {
         assert_eq!(
-            event["seq"].as_u64().expect("event sequence is numeric"),
-            u64::try_from(index + 1).expect("fixture sequence fits u64")
+            event["seq"].as_u64().test_ok()?,
+            u64::try_from(index + 1).test_ok()?
         );
     }
     let human_seq = polled
@@ -543,7 +607,7 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
             event["event_type"] == "world.action" && event["entity"] == human_entity.to_string()
         })
         .and_then(|event| event["seq"].as_u64())
-        .expect("human action is present");
+        .test_ok()?;
     let blocked_fast_seq = polled
         .iter()
         .filter(|event| {
@@ -551,21 +615,20 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
         })
         .filter_map(|event| event["seq"].as_u64())
         .find(|seq| *seq > human_seq)
-        .expect("blocked fast action follows human ingress");
+        .test_ok()?;
     assert!(human_seq < blocked_fast_seq);
     let agent_order = polled
         .iter()
         .filter(|event| event["event_type"] == EVENT_TYPE_ACTION)
-        .map(|event| {
-            (
-                event["seq"].as_u64().expect("agent sequence is numeric"),
-                event["entity"]
-                    .as_str()
-                    .expect("agent entity is a string")
-                    .to_owned(),
-            )
-        })
-        .collect::<Vec<_>>();
+        .map(
+            |event| -> Result<_, Box<dyn std::error::Error + Send + Sync>> {
+                Ok((
+                    event["seq"].as_u64().test_ok()?,
+                    event["entity"].as_str().test_ok()?.to_owned(),
+                ))
+            },
+        )
+        .collect::<Result<Vec<_>, _>>()?;
     assert_eq!(
         agent_order,
         vec![
@@ -576,49 +639,75 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
             (8, slow_entity.to_string()),
         ]
     );
+    Ok(())
+}
 
-    let live = session.projections().expect("live session is healthy");
+fn assert_projection_state(
+    scenario: &MultiRateScenario,
+    session: &pos_experiment::ExperimentSession,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let live = session.projections().test_ok()?;
     assert_eq!(
-        state_u64(live, "observation", human_entity, "event_count"),
+        state_u64(live, "observation", scenario.human_entity, "event_count")?,
         1
     );
     assert_eq!(
-        state_u64(live, "observation", fast_entity, "event_count"),
+        state_u64(live, "observation", scenario.fast_entity, "event_count")?,
         4
     );
     assert_eq!(
-        state_u64(live, "observation", slow_entity, "event_count"),
+        state_u64(live, "observation", scenario.slow_entity, "event_count")?,
         2
     );
-    assert_eq!(state_u64(live, "society", society_entity, "signals"), 1);
-    assert_eq!(state_u64(live, "society", fast_entity, "signals"), 1);
-    assert_eq!(state_u64(live, "agent", fast_entity, "action_count"), 3);
-    assert_eq!(state_u64(live, "agent", slow_entity, "action_count"), 2);
     assert_eq!(
-        live.state_for_reducer("society", &society_entity)
+        state_u64(live, "society", scenario.society_entity, "signals")?,
+        1
+    );
+    assert_eq!(
+        state_u64(live, "society", scenario.fast_entity, "signals")?,
+        1
+    );
+    assert_eq!(
+        state_u64(live, "agent", scenario.fast_entity, "action_count")?,
+        3
+    );
+    assert_eq!(
+        state_u64(live, "agent", scenario.slow_entity, "action_count")?,
+        2
+    );
+    assert_eq!(
+        live.state_for_reducer("society", &scenario.society_entity)
             .and_then(|state| state.get("mean.trust"))
             .and_then(Value::as_f64),
         Some(0.75)
     );
     assert_eq!(
-        live.state_for_reducer("society", &fast_entity)
+        live.state_for_reducer("society", &scenario.fast_entity)
             .and_then(|state| state.get("mean.trust"))
             .and_then(Value::as_f64),
         Some(0.25)
     );
     assert_eq!(
-        live.state_for_reducer("observation", &fast_entity)
+        live.state_for_reducer("observation", &scenario.fast_entity)
             .and_then(|state| state.get("last_event_type"))
             .and_then(Value::as_str),
         Some(EVENT_TYPE_ACTION)
     );
-    let live_snapshot = snapshot_json(live);
+    snapshot_json(live)
+}
 
-    let first_store = open_store(StoreConfig::Sqlite { path: path.clone() })
-        .expect("first replay connection opens");
+fn assert_replay(
+    scenario: &MultiRateScenario,
+    live_snapshot: &Value,
+    pinned_wall_time: WallTime,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let first_store = open_store(StoreConfig::Sqlite {
+        path: scenario.path.clone(),
+    })
+    .test_ok()?;
     let stored = first_store
-        .read(timeline, SeqRange::all())
-        .expect("sequence-ordered history reads");
+        .read(scenario.timeline, SeqRange::all())
+        .test_ok()?;
     assert_eq!(stored.len(), 8);
     assert_eq!(stored[1].seq.as_u64(), 2);
     assert_eq!(stored[2].seq.as_u64(), 3);
@@ -628,15 +717,43 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
         "sequence order must deliberately conflict with wall-clock order"
     );
     let mut first_replay = replay_registry();
-    pos_time::replay(first_store.as_ref(), timeline, &mut first_replay)
-        .expect("first replay succeeds");
-    let second_store =
-        open_store(StoreConfig::Sqlite { path }).expect("second replay connection opens");
+    pos_time::replay(first_store.as_ref(), scenario.timeline, &mut first_replay).test_ok()?;
+    let second_store = open_store(StoreConfig::Sqlite {
+        path: scenario.path.clone(),
+    })
+    .test_ok()?;
     let mut second_replay = replay_registry();
-    pos_time::replay(second_store.as_ref(), timeline, &mut second_replay)
-        .expect("second replay succeeds");
-    assert_eq!(snapshot_json(&first_replay), live_snapshot);
-    assert_eq!(snapshot_json(&second_replay), live_snapshot);
+    pos_time::replay(second_store.as_ref(), scenario.timeline, &mut second_replay).test_ok()?;
+    assert_eq!(snapshot_json(&first_replay)?, *live_snapshot);
+    assert_eq!(snapshot_json(&second_replay)?, *live_snapshot);
+    Ok(())
+}
 
-    guard.shutdown().await;
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn multi_rate_human_ai_replay_is_deterministic() {
+    let result = multi_rate_human_ai_replay_is_deterministic_impl().await;
+    assert!(result.is_ok(), "multi-rate replay failed: {result:?}");
+}
+
+async fn multi_rate_human_ai_replay_is_deterministic_impl(
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut scenario = create_scenario().await?;
+    let experiment = register_experiment(&mut scenario)?;
+    let session = experiment.resume(scenario.timeline).test_ok()?;
+    let (session, pinned_wall_time) = run_tick_boundaries(&mut scenario, session).await?;
+    let polled = poll_events(scenario.address, scenario.timeline).await?;
+    assert_event_order(
+        scenario.human_entity,
+        scenario.fast_entity,
+        scenario.slow_entity,
+        &polled,
+    )?;
+
+    let live_snapshot = assert_projection_state(&scenario, &session)?;
+    assert_eq!(*scenario.probe_log.lock().test_ok()?, vec![0, 0, 1]);
+    assert_eq!(scenario.fast_decisions.load(Ordering::SeqCst), 3);
+    assert_eq!(scenario.slow_decisions.load(Ordering::SeqCst), 2);
+    assert_replay(&scenario, &live_snapshot, pinned_wall_time)?;
+    scenario.guard.shutdown().await?;
+    Ok(())
 }

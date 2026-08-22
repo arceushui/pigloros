@@ -104,21 +104,23 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn entity_json_round_trip() {
+    fn entity_json_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let e = Entity::new(EntityKind::new("location")).with_metadata("name", "Tokyo");
-        let s = serde_json::to_string(&e).unwrap();
-        let back: Entity = serde_json::from_str(&s).unwrap();
+        let s = serde_json::to_string(&e)?;
+        let back: Entity = serde_json::from_str(&s)?;
         assert_eq!(e, back);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn entity_cbor_round_trip() {
+    fn entity_cbor_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let e = Entity::new(EntityKind::new("agent"));
         let mut buf = Vec::new();
-        ciborium::into_writer(&e, &mut buf).unwrap();
-        let back: Entity = ciborium::from_reader(buf.as_slice()).unwrap();
+        ciborium::into_writer(&e, &mut buf)?;
+        let back: Entity = ciborium::from_reader(buf.as_slice())?;
         assert_eq!(e, back);
+        Ok(())
     }
 
     #[test]
@@ -146,25 +148,27 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn relationship_json_round_trip() {
+    fn relationship_json_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let src = EntityId::new();
         let tgt = EntityId::new();
         let r = Relationship::new(src, tgt, RelationshipKind::new("trusts"));
-        let s = serde_json::to_string(&r).unwrap();
-        let back: Relationship = serde_json::from_str(&s).unwrap();
+        let s = serde_json::to_string(&r)?;
+        let back: Relationship = serde_json::from_str(&s)?;
         assert_eq!(r, back);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn relationship_cbor_round_trip() {
+    fn relationship_cbor_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let src = EntityId::new();
         let tgt = EntityId::new();
         let r = Relationship::new(src, tgt, RelationshipKind::new("employs"));
         let mut buf = Vec::new();
-        ciborium::into_writer(&r, &mut buf).unwrap();
-        let back: Relationship = ciborium::from_reader(buf.as_slice()).unwrap();
+        ciborium::into_writer(&r, &mut buf)?;
+        let back: Relationship = ciborium::from_reader(buf.as_slice())?;
         assert_eq!(r, back);
+        Ok(())
     }
 
     #[test]
@@ -179,19 +183,20 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn entity_kind_json_round_trip() {
+    fn entity_kind_json_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let k = EntityKind::new("simulation.agent");
-        let back: EntityKind = serde_json::from_str(&serde_json::to_string(&k).unwrap()).unwrap();
+        let back: EntityKind = serde_json::from_str(&serde_json::to_string(&k)?)?;
         assert_eq!(k, back);
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn relationship_kind_json_round_trip() {
+    fn relationship_kind_json_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let k = RelationshipKind::new("co-located");
-        let back: RelationshipKind =
-            serde_json::from_str(&serde_json::to_string(&k).unwrap()).unwrap();
+        let back: RelationshipKind = serde_json::from_str(&serde_json::to_string(&k)?)?;
         assert_eq!(k, back);
+        Ok(())
     }
 
     #[test]

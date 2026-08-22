@@ -71,7 +71,7 @@ pub struct RoundRobinPolicy {
 
 impl RoundRobinPolicy {
     #[must_use]
-    pub fn new(actions: Vec<String>) -> Self {
+    pub const fn new(actions: Vec<String>) -> Self {
         Self { actions, cursor: 0 }
     }
 }
@@ -100,7 +100,7 @@ pub struct RandomSeedPolicy {
 
 impl RandomSeedPolicy {
     #[must_use]
-    pub fn new(actions: Vec<String>, seed: u64) -> Self {
+    pub const fn new(actions: Vec<String>, seed: u64) -> Self {
         Self {
             actions,
             seed,
@@ -215,7 +215,7 @@ impl AgentDriver {
 
     /// Override the deterministic interval between eligible Agent ticks.
     #[must_use]
-    pub fn with_tick_interval(mut self, tick_interval: Duration) -> Self {
+    pub const fn with_tick_interval(mut self, tick_interval: Duration) -> Self {
         self.tick_interval = tick_interval;
         self
     }
@@ -250,8 +250,12 @@ impl Driver for AgentDriver {
         };
 
         let mut buf = Vec::new();
-        // Writing to Vec<u8> is infallible with ciborium.
-        ciborium::into_writer(&payload, &mut buf).expect("ciborium write to Vec<u8> is infallible");
+        ciborium::into_writer(&payload, &mut buf).map_err(|error| {
+            RuntimeError::InvalidPayload {
+                event_type: EVENT_TYPE_ACTION.to_owned(),
+                reason: error.to_string(),
+            }
+        })?;
 
         let draft = pos_core::event::EventDraft::new(
             self.entity,
@@ -312,6 +316,27 @@ impl Reducer for AgentReducer {
 
 #[cfg(test)]
 mod tests {
+
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected agent fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing fixture value")))
+        }
+    }
+
     use super::*;
     use pos_core::{
         clock::{Seq, WallTime},
@@ -328,7 +353,7 @@ mod tests {
             tick: 0,
         };
         let mut buf = Vec::new();
-        ciborium::into_writer(&payload, &mut buf).unwrap();
+        ciborium::into_writer(&payload, &mut buf).test_ok();
 
         Event {
             id: EventId::new(),
@@ -492,8 +517,10 @@ mod tests {
         );
 
         let timeline = TimelineId::new();
-        let default_output = default.step(timeline, ObservationView::empty()).unwrap();
-        let overridden_output = overridden.step(timeline, ObservationView::empty()).unwrap();
+        let default_output = default.step(timeline, ObservationView::empty()).test_ok();
+        let overridden_output = overridden
+            .step(timeline, ObservationView::empty())
+            .test_ok();
         assert_eq!(default_output.drafts.len(), 1);
         assert_eq!(overridden_output.drafts.len(), 1);
         assert_eq!(
@@ -513,13 +540,13 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_step_produces_correct_event_type() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("test").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("test").test_ok();
         let entity = EntityId::new();
         let policy = Box::new(RoundRobinPolicy::new(vec!["act1".to_owned()]));
         let mut driver = AgentDriver::new(entity, policy, vec!["act1".to_owned()]);
 
-        let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
+        let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
         assert_eq!(out.drafts.len(), 1);
         assert_eq!(out.drafts[0].event_type.as_str(), EVENT_TYPE_ACTION);
     }
@@ -527,8 +554,8 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_step_produces_decodable_payload() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("test").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("test").test_ok();
         let entity = EntityId::new();
         let policy = Box::new(RoundRobinPolicy::new(vec![
             "jump".to_owned(),
@@ -537,9 +564,9 @@ mod tests {
         let mut driver =
             AgentDriver::new(entity, policy, vec!["jump".to_owned(), "duck".to_owned()]);
 
-        let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
+        let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
         let payload: ActionPayload =
-            ciborium::from_reader(out.drafts[0].payload.as_slice()).unwrap();
+            ciborium::from_reader(out.drafts[0].payload.as_slice()).test_ok();
 
         assert_eq!(payload.action, "jump");
         assert!((payload.confidence - 1.0).abs() < f64::EPSILON);
@@ -666,17 +693,17 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_tick_increments() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("test").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("test").test_ok();
         let entity = EntityId::new();
         let policy = Box::new(RoundRobinPolicy::new(vec!["a".to_owned()]));
         let mut driver = AgentDriver::new(entity, policy, vec!["a".to_owned()]);
 
-        driver.step(tl.id(), ObservationView::empty()).unwrap();
-        let out = driver.step(tl.id(), ObservationView::empty()).unwrap();
+        driver.step(tl.id(), ObservationView::empty()).test_ok();
+        let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
 
         let payload: ActionPayload =
-            ciborium::from_reader(out.drafts[0].payload.as_slice()).unwrap();
+            ciborium::from_reader(out.drafts[0].payload.as_slice()).test_ok();
         assert_eq!(payload.tick, 1);
     }
 
@@ -766,9 +793,9 @@ mod tests {
         let deterministic = make_action_event(entity, "legacy");
         let provider_payload =
             protocol::AgentActionV1::try_new("provider".to_owned(), 42, 7, [8; 32], [9; 32])
-                .unwrap()
+                .test_ok()
                 .encode()
-                .unwrap();
+                .test_ok();
         let provider = make_action_event_with_payload(entity, provider_payload);
 
         reducer.apply(&mut state, &deterministic);
@@ -795,9 +822,9 @@ mod tests {
 
         let mut malformed =
             protocol::AgentActionV1::try_new("provider".to_owned(), 42, 7, [8; 32], [9; 32])
-                .unwrap()
+                .test_ok()
                 .encode()
-                .unwrap();
+                .test_ok();
         malformed[6] = 2;
         let provider = make_action_event_with_payload(entity, malformed);
         reducer.apply(&mut state, &provider);
@@ -1014,7 +1041,7 @@ mod tests {
         assert!(!protocol::is_agent_action_wire(legacy.payload.as_slice()));
 
         let malformed = malformed_action_wire_candidates();
-        let expected_action_count = u64::try_from(malformed.len() + 1).unwrap();
+        let expected_action_count = u64::try_from(malformed.len() + 1).test_ok();
 
         let mut state = reducer.initial();
         reducer.apply(&mut state, &legacy);

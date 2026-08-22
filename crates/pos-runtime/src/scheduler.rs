@@ -47,6 +47,28 @@ mod tests {
     use pos_store::{open_store, StoreConfig};
     use std::time::Duration;
 
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected scheduler fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("missing scheduler fixture value"))
+            })
+        }
+    }
+
     struct SlowDriver {
         entity: EntityId,
         ticks: u32,
@@ -55,7 +77,7 @@ mod tests {
 
     impl SlowDriver {
         fn new(interval: Duration) -> Self {
-            SlowDriver {
+            Self {
                 entity: EntityId::new(),
                 ticks: 0,
                 interval,
@@ -91,7 +113,7 @@ mod tests {
 
     impl FastDriver {
         fn new() -> Self {
-            FastDriver {
+            Self {
                 entity: EntityId::new(),
                 ticks: 0,
             }
@@ -122,54 +144,54 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn all_drivers_fire_on_first_tick() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("t").test_ok();
         let mut reg = PluginRegistry::new();
         reg.register_driver(Box::new(SlowDriver::new(Duration::from_secs(1))));
         reg.register_driver(Box::new(FastDriver::new()));
         let mut sched = TickScheduler::new(reg);
-        let drafts = sched.tick(tl.id(), 0).unwrap();
+        let drafts = sched.tick(tl.id(), 0).test_ok();
         assert_eq!(drafts.len(), 2);
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn slow_driver_skipped_when_interval_not_elapsed() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("t").test_ok();
         let mut reg = PluginRegistry::new();
         reg.register_driver(Box::new(SlowDriver::new(Duration::from_secs(10))));
         reg.register_driver(Box::new(FastDriver::new()));
         let mut sched = TickScheduler::new(reg);
-        sched.tick(tl.id(), 0).unwrap();
-        let drafts = sched.tick(tl.id(), 1).unwrap();
+        sched.tick(tl.id(), 0).test_ok();
+        let drafts = sched.tick(tl.id(), 1).test_ok();
         assert_eq!(drafts.len(), 1);
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn slow_driver_fires_after_interval_elapsed() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("t").test_ok();
         let mut reg = PluginRegistry::new();
         reg.register_driver(Box::new(SlowDriver::new(Duration::from_millis(100))));
         reg.register_driver(Box::new(FastDriver::new()));
         let mut sched = TickScheduler::new(reg);
-        sched.tick(tl.id(), 0).unwrap();
-        let d = sched.tick(tl.id(), 50_000_000).unwrap();
+        sched.tick(tl.id(), 0).test_ok();
+        let d = sched.tick(tl.id(), 50_000_000).test_ok();
         assert_eq!(d.len(), 1);
-        let d = sched.tick(tl.id(), 100_000_000).unwrap();
+        let d = sched.tick(tl.id(), 100_000_000).test_ok();
         assert_eq!(d.len(), 2);
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn empty_registry_returns_empty() {
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        let tl = store.create_timeline("t").unwrap();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("t").test_ok();
         let reg = PluginRegistry::new();
         let mut sched = TickScheduler::new(reg);
-        let drafts = sched.tick(tl.id(), 0).unwrap();
+        let drafts = sched.tick(tl.id(), 0).test_ok();
         assert!(drafts.is_empty());
     }
 }
