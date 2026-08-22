@@ -78,6 +78,40 @@ mod coverage_paths {
         }
     }
 
+    struct RestoreFailureDriver {
+        aborts: Arc<Mutex<u32>>,
+    }
+
+    impl Driver for RestoreFailureDriver {
+        fn name(&self) -> &'static str {
+            "coverage-restore-failure"
+        }
+
+        fn step(
+            &mut self,
+            _: TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            Ok(StepOutput::empty())
+        }
+
+        fn stage_restore_from_history(
+            &mut self,
+            _: &DriverRecoveryEvidence,
+        ) -> Result<(), RuntimeError> {
+            Err(RuntimeError::InvalidRecoveryEvidence {
+                reason: "coverage restore failure",
+            })
+        }
+
+        fn abort_restore_from_history(&mut self) {
+            *self
+                .aborts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+        }
+    }
+
     #[test]
     fn restore_with_history_commits_and_advances_driver_cursor() {
         let timeline = TimelineId::new();
@@ -127,6 +161,31 @@ mod coverage_paths {
             event_cursors: vec![(id, Seq::ZERO)],
         });
         registry.commit_step();
+    }
+
+    #[test]
+    fn restore_failure_aborts_drivers_that_staged_before_the_failure() {
+        let timeline = TimelineId::new();
+        let aborts = Arc::new(Mutex::new(0));
+        let mut registry = PluginRegistry::new();
+        registry.register_driver(Box::new(RestoreDriver {
+            committed: Arc::new(Mutex::new(false)),
+        }));
+        registry.register_driver(Box::new(RestoreFailureDriver {
+            aborts: Arc::clone(&aborts),
+        }));
+
+        assert!(matches!(
+            registry
+                .restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[],),
+            Err(RuntimeError::InvalidRecoveryEvidence { .. })
+        ));
+        assert_eq!(
+            *aborts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            1
+        );
     }
 }
 

@@ -978,8 +978,20 @@ mod tests {
             "world.action.v1"
         )
         .is_err());
-        let malformed_events = serde_json::json!({"authoritative_events": ["bad"]});
+        let mut malformed_events = parse_json(&baseline)?;
+        malformed_events["authoritative_events"] = serde_json::json!(["bad"]);
         assert!(reproduce_fixture_json(&malformed_events.to_string()).is_err());
+        let mut invalid_sequence = parse_json(&baseline)?;
+        invalid_sequence["authoritative_events"][0]["seq"] = serde_json::json!(2);
+        assert!(reproduce_fixture_json(&invalid_sequence.to_string()).is_err());
+        let mut invalid_suffix = parse_json(&baseline)?;
+        invalid_suffix["authoritative_events"] = serde_json::json!(["bad"]);
+        assert!(verify_fork_json(
+            &invalid_suffix.to_string(),
+            &counterfactual,
+            "world.action.v1"
+        )
+        .is_err());
         Ok(())
     }
 
