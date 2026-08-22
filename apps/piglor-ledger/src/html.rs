@@ -38,12 +38,6 @@ fn fmt_brier(p: f64) -> String {
     format!("{p:.3}")
 }
 
-fn append_format_error(target: &mut String, result: std::fmt::Result) {
-    if result.is_err() {
-        target.push_str(" [formatting error]");
-    }
-}
-
 /// Render the HTML page for a [`LedgerView`].
 ///
 /// `pubkey_hex` is printed in the footer when `Some`; `None` produces a
@@ -83,26 +77,23 @@ pub fn render_html(view: &LedgerView, pubkey_hex: Option<&str>) -> String {
     // Headline (ADR-017 Decision 7): counts always; mean Brier only when
     // n_resolved >= 1, otherwise the explicit "no Brier Score yet" copy.
     s.push_str("<p class=\"headline\">");
-    let result = write!(
+    drop(write!(
         s,
         "{} pending / {} resolved",
         view.n_pending + view.n_overdue,
         view.n_resolved
-    );
-    append_format_error(&mut s, result);
+    ));
     if view.n_overdue > 0 {
-        let result = write!(s, " ({} overdue)", view.n_overdue);
-        append_format_error(&mut s, result);
+        drop(write!(s, " ({} overdue)", view.n_overdue));
     }
     match view.mean_brier {
         Some(b) => {
-            let result = write!(
+            drop(write!(
                 s,
                 " — mean Brier Score: {} (n={})",
                 fmt_brier(b),
                 view.n_resolved
-            );
-            append_format_error(&mut s, result);
+            ));
         }
         None => s.push_str(" — no Brier Score yet"),
     }
@@ -120,8 +111,7 @@ pub fn render_html(view: &LedgerView, pubkey_hex: Option<&str>) -> String {
     s.push_str("<p>Verify each entry matches its OSF registration</p>\n");
     match pubkey_hex {
         Some(pk) => {
-            let result = writeln!(s, "<p>Public key: <code>{}</code></p>", esc(pk));
-            append_format_error(&mut s, result);
+            drop(writeln!(s, "<p>Public key: <code>{}</code></p>", esc(pk)));
         }
         None => s.push_str("<p>Demo tier (TOML): entries are unsigned; verify with <code>b3sum</code> on the TOML files.</p>\n"),
     }

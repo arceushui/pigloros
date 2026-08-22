@@ -133,6 +133,18 @@ jobs:
           --fail-under-lines 99
           --fail-under-regions 99
           -- --include-ignored
+      - name: Export coverage details
+        if: always()
+        continue-on-error: true
+        run: cargo llvm-cov report --workspace --all-features --locked --json
+          --output-path "${{ runner.temp }}/coverage.json"
+      - name: Upload coverage details
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-details
+          path: ${{ runner.temp }}/coverage.json
+          if-no-files-found: ignore
 
 # ── Security & compliance ────────────────────────────────────────────────────
 

@@ -2221,6 +2221,25 @@ mod tests {
     }
 
     #[test]
+    fn causal_tick_resolution_stops_on_a_cycle() {
+        let id = EventId::new();
+        let event = Event {
+            id,
+            entity: fixed_id(1),
+            event_type: Kind::new("custom.event"),
+            payload: CanonicalBytes::from_static(b"cycle"),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(7),
+            causation_id: Some(id),
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        };
+        assert_eq!(authoritative_events(&[event])[0].tick, 7);
+    }
+
+    #[test]
     fn failure_probe_driver_reports_both_failure_classes() {
         let mut resource = FailureProbeDriver {
             class: "resource_exhaustion",
@@ -2420,6 +2439,28 @@ mod tests {
         let failure = failure_probe("unknown", 3).test_ok();
         assert_eq!(failure.class, PluginFailureClassV1::PluginCrash);
         assert!(!failure.committed);
+    }
+
+    #[test]
+    fn independent_fixture_reproduction_rejects_a_wrong_equality_claim() {
+        let report = MoatProofRun::new(input(), ExecutionModeV1::Local)
+            .test_ok()
+            .run()
+            .test_ok();
+        let expected = ComparisonV1 {
+            equal: true,
+            divergence: DivergenceClassV1::None,
+            left_digest: [0; 32],
+            right_digest: [0; 32],
+        };
+        assert!(matches!(
+            verify_independent_fixture_reproduction(
+                &report.baseline,
+                &report.counterfactual,
+                &expected,
+            ),
+            Err(MoatProofError::ReferenceDivergenceMismatch)
+        ));
     }
 }
 

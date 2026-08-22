@@ -6601,6 +6601,28 @@ pub mod tests {
     }
 
     #[test]
+    fn compares_authoritative_outputs_by_event_and_projection() -> Result<(), pos_core::CoreError> {
+        let left = evidence();
+        let mut right = left.clone();
+        assert_eq!(
+            compare_authoritative_outputs(&left, &right)?.divergence,
+            DivergenceClassV1::None
+        );
+        right.authoritative_events[0].payload_digest = [8; 32];
+        assert_eq!(
+            compare_authoritative_outputs(&left, &right)?.divergence,
+            DivergenceClassV1::AuthoritativeEvents
+        );
+        right = left.clone();
+        right.projections[0].state = serde_json::json!({"changed": true});
+        assert_eq!(
+            compare_authoritative_outputs(&left, &right)?.divergence,
+            DivergenceClassV1::Projections
+        );
+        Ok(())
+    }
+
+    #[test]
     fn compares_metadata_projection_and_trace_divergence() -> Result<(), pos_core::CoreError> {
         let left = evidence();
         let mut right = left.clone();
@@ -7926,6 +7948,16 @@ pub mod tests {
         let invalid = baseline.clone();
         assert_eq!(
             verify_counterfactual_fork(&baseline, &invalid, "proof.agent.reaction.v1"),
+            Err(EvidenceError::IncompleteForkSuffix)
+        );
+    }
+
+    #[test]
+    fn rejects_a_factual_suffix_with_incomplete_invalidation() {
+        let (baseline, counterfactual) = fork_pair();
+        let intervention = &counterfactual.authoritative_events[1];
+        assert_eq!(
+            verify_factual_suffix_invalidation(&baseline, &counterfactual, 1, intervention),
             Err(EvidenceError::IncompleteForkSuffix)
         );
     }

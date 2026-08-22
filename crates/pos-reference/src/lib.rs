@@ -916,6 +916,44 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn rejects_fixture_without_the_complete_reaction_chain() -> Result<(), ReferenceError> {
+        let mut value = parse_json(&fixture())?;
+        value["authoritative_events"] = serde_json::json!([
+            {
+                "seq": 1,
+                "tick": 1,
+                "entity": "body",
+                "event_type": "world.observation.v1",
+                "payload_digest": [1],
+                "causation_seq": null
+            },
+            {
+                "seq": 2,
+                "tick": 1,
+                "entity": "agent",
+                "event_type": "proof.agent.reaction.v1",
+                "payload_digest": [2],
+                "causation_seq": null
+            },
+            {
+                "seq": 3,
+                "tick": 2,
+                "entity": "society",
+                "event_type": "society.signal",
+                "payload_digest": [3],
+                "causation_seq": null
+            }
+        ]);
+        assert!(matches!(
+            reproduce_fixture_json(&value.to_string()),
+            Err(ReferenceError::InvalidForkEvidence(
+                "independent fixture reaction chain is incomplete"
+            ))
+        ));
+        Ok(())
+    }
+
     fn non_interference_fixture() -> serde_json::Value {
         let fixtures = [
             "NI-TOOL-001",

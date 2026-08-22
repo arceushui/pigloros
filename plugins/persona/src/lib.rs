@@ -30,12 +30,6 @@ pub const EVENT_TYPE_DECISION: &str = "persona.decision";
 /// Entity kind for personas.
 pub const ENTITY_KIND: &str = "persona";
 
-#[derive(Debug, thiserror::Error)]
-pub enum PersonaError {
-    #[error("persona decision payload encoding failed: {0}")]
-    Encoding(String),
-}
-
 // ---------------------------------------------------------------------------
 // Payload types (CBOR-serialized)
 // ---------------------------------------------------------------------------
@@ -205,15 +199,8 @@ impl PersonaModel {
     /// Chooses the option with the higher score and computes a regret probability
     /// based on score difference (closer scores = higher regret).
     ///
-    /// # Errors
-    /// Returns [`PersonaError::Encoding`] if the decision payload cannot be
-    /// represented by CBOR.
-    pub fn to_draft(
-        &self,
-        entity: EntityId,
-        option_a: &str,
-        option_b: &str,
-    ) -> Result<EventDraft, PersonaError> {
+    #[must_use]
+    pub fn to_draft(&self, entity: EntityId, option_a: &str, option_b: &str) -> EventDraft {
         let score_a = self.score_option(option_a);
         let score_b = self.score_option(option_b);
 
@@ -239,11 +226,11 @@ impl PersonaModel {
         // `Vec<u8>` is an infallible CBOR sink.
         drop(ciborium::into_writer(&payload, &mut buf));
 
-        Ok(EventDraft::new(
+        EventDraft::new(
             entity,
             Kind::new(EVENT_TYPE_DECISION),
             CanonicalBytes::from_vec(buf),
-        ))
+        )
     }
 }
 
@@ -315,11 +302,7 @@ impl Driver for PersonaEvalDriver {
         let predicted_prob = self.model.score_option(&pair.option_a);
         let decision = self
             .model
-            .to_draft(self.entity, &pair.option_a, &pair.option_b)
-            .map_err(|error| RuntimeError::InvalidPayload {
-                event_type: EVENT_TYPE_DECISION.to_owned(),
-                reason: error.to_string(),
-            })?;
+            .to_draft(self.entity, &pair.option_a, &pair.option_b);
         let prediction = draft_prediction(self.entity, &entity_id, predicted_prob, &prediction_id);
         let outcome = draft_outcome(self.entity, &prediction_id, pair.prefers_a);
 
@@ -728,9 +711,7 @@ mod tests {
     fn model_to_draft_chooses_higher_score() {
         let model = PersonaModel::new(vec![("spicy".to_owned(), 1.0)]);
         let entity = EntityId::new();
-        let draft = model
-            .to_draft(entity, "spicy pizza", "bland soup")
-            .test_ok();
+        let draft = model.to_draft(entity, "spicy pizza", "bland soup");
 
         assert_eq!(draft.event_type.as_str(), EVENT_TYPE_DECISION);
         assert_eq!(draft.entity, entity);
@@ -747,9 +728,7 @@ mod tests {
     fn model_to_draft_regret_prob_in_valid_range() {
         let model = PersonaModel::new(vec![("spicy".to_owned(), 1.0)]);
         let entity = EntityId::new();
-        let draft = model
-            .to_draft(entity, "spicy pizza", "bland soup")
-            .test_ok();
+        let draft = model.to_draft(entity, "spicy pizza", "bland soup");
 
         let payload: DecisionPayload = ciborium::from_reader(draft.payload.as_slice()).test_ok();
         assert!(payload.regret_prob >= 0.0);
@@ -761,7 +740,7 @@ mod tests {
     fn model_to_draft_close_scores_high_regret() {
         let model = PersonaModel::new(vec![]);
         let entity = EntityId::new();
-        let draft = model.to_draft(entity, "a", "b").test_ok();
+        let draft = model.to_draft(entity, "a", "b");
 
         // Both options score 0.5 (no match) → diff=0.0 → regret=0.5
         let payload: DecisionPayload = ciborium::from_reader(draft.payload.as_slice()).test_ok();
@@ -773,9 +752,7 @@ mod tests {
     fn model_to_draft_large_diff_low_regret() {
         let model = PersonaModel::new(vec![("best".to_owned(), 1.0)]);
         let entity = EntityId::new();
-        let draft = model
-            .to_draft(entity, "best option", "worst option")
-            .test_ok();
+        let draft = model.to_draft(entity, "best option", "worst option");
 
         // score_a = 1.0, score_b = 0.5, diff = 0.5 → regret = (1.0 - 0.5) * 0.5 = 0.25
         let payload: DecisionPayload = ciborium::from_reader(draft.payload.as_slice()).test_ok();
@@ -787,7 +764,7 @@ mod tests {
     fn model_to_draft_tie_chooses_a() {
         let model = PersonaModel::new(vec![]);
         let entity = EntityId::new();
-        let draft = model.to_draft(entity, "option a", "option b").test_ok();
+        let draft = model.to_draft(entity, "option a", "option b");
 
         // Both score 0.5 → tie, chooses option_a due to `>=` in comparison
         let payload: DecisionPayload = ciborium::from_reader(draft.payload.as_slice()).test_ok();
@@ -807,9 +784,7 @@ mod tests {
     fn model_to_draft_produces_valid_cbor() {
         let model = PersonaModel::new(vec![("good".to_owned(), 0.5)]);
         let entity = EntityId::new();
-        let draft = model
-            .to_draft(entity, "good choice", "bad choice")
-            .test_ok();
+        let draft = model.to_draft(entity, "good choice", "bad choice");
 
         // Verify CBOR round-trip
         let payload: DecisionPayload = ciborium::from_reader(draft.payload.as_slice()).test_ok();
@@ -870,7 +845,7 @@ mod tests {
     fn model_to_draft_option_b_wins() {
         let model = PersonaModel::new(vec![("best".to_owned(), 1.0)]);
         let entity = EntityId::new();
-        let draft = model.to_draft(entity, "worst", "best option").test_ok();
+        let draft = model.to_draft(entity, "worst", "best option");
 
         let payload: DecisionPayload = ciborium::from_reader(draft.payload.as_slice()).test_ok();
         assert_eq!(payload.chosen, "best option");
