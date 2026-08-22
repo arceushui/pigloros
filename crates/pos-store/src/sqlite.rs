@@ -1219,6 +1219,12 @@ impl SqliteStore {
         Ok(length)
     }
 
+    fn add_logical_segment(logical_head: u64, segment: u64) -> Result<u64, CoreError> {
+        logical_head
+            .checked_add(segment)
+            .ok_or_else(|| CoreError::Storage("logical Timeline head overflow".to_owned()))
+    }
+
     fn fork_chain_bounded_on(
         conn: &Connection,
         timeline_id: TimelineId,
@@ -3061,9 +3067,10 @@ impl EventStore for SqliteStore {
         let chain = self.fork_chain(id)?;
         let mut logical_head = 0_u64;
         for (index, (timeline, _)) in chain.iter().enumerate() {
-            logical_head = logical_head
-                .checked_add(self.logical_segment_length(&chain, index, *timeline)?)
-                .ok_or_else(|| CoreError::Storage("logical Timeline head overflow".to_owned()))?;
+            logical_head = Self::add_logical_segment(
+                logical_head,
+                self.logical_segment_length(&chain, index, *timeline)?,
+            )?;
         }
         Ok(Seq::from_u64(logical_head))
     }
@@ -9378,5 +9385,75 @@ mod coverage_entrypoints {
             rusqlite::params![event[0].id.to_string()],
         ));
         expect_err(store.read_event_by_id(timeline.id(), event[0].id));
+    }
+
+    #[test]
+    fn public_consent_resolution_rejects_malformed_durable_rows() {
+        let consent_id = ok(AdmissionSnapshotId::from_canonical(
+            "01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+        ));
+        for statement in [
+            "INSERT INTO geographic_cell_admission_consent_records
+             (consent_record_id, consent_revision, consent_record_hash, consent_record_cbor)
+             VALUES (?1, 'bad', zeroblob(32), zeroblob(1))",
+            "INSERT INTO geographic_cell_admission_consent_records
+             (consent_record_id, consent_revision, consent_record_hash, consent_record_cbor)
+             VALUES (?1, -1, zeroblob(32), zeroblob(1))",
+            "INSERT INTO geographic_cell_admission_consent_records
+             (consent_record_id, consent_revision, consent_record_hash, consent_record_cbor)
+             VALUES (?1, 12, zeroblob(31), zeroblob(1))",
+        ] {
+            let store = tests::new_store();
+            ok(store
+                .conn
+                .execute_batch("PRAGMA ignore_check_constraints = ON"));
+            ok(store
+                .conn
+                .execute(statement, rusqlite::params![consent_id.as_str()]));
+            expect_err(store.resolve_admission_consent(&consent_id, 12));
+        }
+    }
+
+    #[test]
+    fn retained_identity_query_and_logical_head_overflow_fail_closed() {
+        let mut store = tests::new_store();
+        let tx = ok(store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate));
+        ok(tx.execute_batch("DROP TABLE events"));
+        expect_err(SqliteStore::retained_event_matches_draft(
+            &tx,
+            "missing-event",
+            TimelineId::new(),
+            &tests::make_draft(EntityId::new(), b"payload"),
+        ));
+        ok(tx.rollback());
+
+        assert!(matches!(
+            SqliteStore::add_logical_segment(u64::MAX, 1),
+            Err(CoreError::Storage(message)) if message == "logical Timeline head overflow"
+        ));
+    }
+
+    #[test]
+    fn deleting_an_enrollment_target_revokes_the_durable_capability() {
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("enrollment-delete"));
+        let request = OwnTracksEnrollmentRequestV1::new(
+            timeline.id(),
+            EntityId::new(),
+            pos_core::geo_admission::GeoLocationAdmissionFenceV1::new(
+                1,
+                ([1; 32], 1, [2; 32]),
+                (1, false, 1),
+            ),
+            [3; 32],
+        );
+        ok(store.pair_owntracks_enrollment(request));
+        ok(store.delete_timeline(timeline.id()));
+        assert_eq!(
+            ok(store.owntracks_enrollment_status()).status(),
+            OwnTracksEnrollmentStatusV1::Revoked
+        );
     }
 }

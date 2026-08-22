@@ -1258,4 +1258,37 @@ mod tests {
         assert!(coord.translated_by(0.0, 0.0, f64::NAN).is_err());
         Ok(())
     }
+
+    #[test]
+    fn invalid_internal_positions_and_intermediates_fail_closed(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let capability = capability();
+        let invalid_position = Wgs84PositionV1 {
+            latitude_degrees: f64::NAN,
+            longitude_degrees: 0.0,
+            ellipsoidal_height_metres: 0.0,
+        };
+        assert!(matches!(
+            WorldOriginV1::new(
+                &capability,
+                [101; 16],
+                [102; 16],
+                1,
+                invalid_position,
+                [103; 32],
+                10_000.0,
+            ),
+            Err(WorldTransformError::NonFiniteCoordinate)
+        ));
+
+        let origin = origin(&capability, 10_000.0)?;
+        let mut transform = WorldTransformV1::new(&capability, origin)?;
+        transform.origin.origin_ecef = [f64::NAN, 0.0, 0.0];
+        let position = Wgs84PositionV1::new(35.0, -120.0, 100.0)?;
+        assert!(matches!(
+            transform.forward(&capability, position),
+            Err(WorldTransformError::NonFiniteCoordinate)
+        ));
+        Ok(())
+    }
 }

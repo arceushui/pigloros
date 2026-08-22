@@ -968,4 +968,25 @@ mod tests {
             Err(GeoCellError::InvalidResolution(16))
         );
     }
+
+    #[test]
+    fn defensive_h3_conversion_boundaries_fail_closed() {
+        assert!(H3Resolution(16).as_h3o().is_err());
+
+        let cloaker = H3ReferenceCloaker::new();
+        let malformed = GeoCellV1 {
+            index: CanonicalH3Index {
+                bytes: *b"not-a-cell-idx!",
+                text: "not-a-cell-idx!".to_owned(),
+            },
+            resolution: H3Resolution(9),
+        };
+        assert!(cloaker.parent(malformed, H3Resolution(0)).is_err());
+
+        let non_finite = Wgs84Point {
+            latitude: f64::NAN,
+            longitude: 0.0,
+        };
+        assert!(cloaker.from_wgs84(non_finite, H3Resolution(9)).is_err());
+    }
 }

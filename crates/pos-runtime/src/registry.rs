@@ -41,6 +41,7 @@ fn extend_unique_subscriptions(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_paths {
     use super::*;
     use crate::driver::{ObservationView, StepOutput, TimelineHistorySegment};

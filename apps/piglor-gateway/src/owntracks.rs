@@ -1022,6 +1022,15 @@ mod coverage_entrypoints {
             "bad-timeline".to_owned(),
             entity.clone(),
         ]));
+        expect_err(execute(&[
+            "pair".to_owned(),
+            database.display().to_string(),
+            directory.join("owner.key").display().to_string(),
+            "--consent-policy".to_owned(),
+            policy.display().to_string(),
+            timeline.clone(),
+            "bad-entity".to_owned(),
+        ]));
 
         let unsafe_parent = directory.join("unsafe");
         test_ok(std::fs::create_dir(&unsafe_parent));
@@ -1165,6 +1174,30 @@ mod coverage_entrypoints {
         expect_err(create_or_load_owner_key(
             &directory.join("missing-parent").join("owner.key"),
         ));
+
+        test_ok(std::fs::remove_dir_all(directory));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_key_filesystem_boundaries_fail_closed() {
+        let directory = temporary_directory("filesystem-errors");
+        let target_directory = directory.join("target-directory");
+        test_ok(std::fs::create_dir(&target_directory));
+        expect_err(create_or_load_owner_key(&target_directory));
+
+        let missing_parent = directory.join("missing-parent").join("owner.key");
+        expect_err(super::create_owner_key(&missing_parent));
+
+        let existing = directory.join("existing.key");
+        test_ok(std::fs::write(&existing, [0_u8; 32]));
+        expect_err(super::create_owner_key(&existing));
+
+        let removed = directory.join("removed.key");
+        test_ok(std::fs::write(&removed, [0_u8; 32]));
+        let metadata = test_ok(std::fs::metadata(&removed));
+        test_ok(std::fs::remove_file(&removed));
+        expect_err(super::load_existing_owner_key(&removed, &metadata));
 
         test_ok(std::fs::remove_dir_all(directory));
     }
