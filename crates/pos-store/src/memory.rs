@@ -4762,6 +4762,61 @@ mod coverage_entrypoints {
         });
         expect_err(store.read(child.id(), SeqRange::all()));
         expect_err(store.read_event_by_id(child.id(), EventId::new()));
+
+        let malformed_chain = ForkChain {
+            timelines: vec![root.id(), child.id()],
+            fork_seqs: Vec::new(),
+        };
+        expect_err(malformed_chain.segment_length(&store, 1, child.id()));
+        expect_err(store.append_or_duplicate_with_limit_visible(
+            TimelineId::new(),
+            identity(3, 3),
+            WallTime::from_micros(2),
+            &draft(b"missing-visible"),
+            None,
+        ));
+        expect_err(store.append_visible(TimelineId::new(), &[draft(b"missing-visible")]));
+
+        let protected = ok(store.create_timeline("coverage-protected"));
+        ok(
+            store.pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
+                protected.id(),
+                pos_core::EntityId::new(),
+                pos_core::GeoLocationAdmissionFenceV1::new(
+                    1,
+                    ([1; 32], 1, [2; 32]),
+                    (1, false, u64::MAX - 1),
+                ),
+                [42; 32],
+            )),
+        );
+        ok(store.delete_timeline(protected.id()));
+
+        let admitted = ok(store.create_timeline("coverage-admission"));
+        let admitted_entity = pos_core::EntityId::new();
+        let fence =
+            pos_core::GeoLocationAdmissionFenceV1::new(7, ([3; 32], 8, [4; 32]), (1, false, 1));
+        ok(
+            store.pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
+                admitted.id(),
+                admitted_entity,
+                fence,
+                [43; 32],
+            )),
+        );
+        store.test_remove_timeline(admitted.id());
+        let request = pos_core::geo_admission::GeoLocationAdmissionRequestV1::from_input(
+            pos_core::geo_admission::GeoLocationAdmissionInputV1::new(
+                admitted.id(),
+                admitted_entity,
+                pos_core::CanonicalBytes::from_static(b"missing-state"),
+                7,
+                ([3; 32], 8, [4; 32]),
+                (1, false, 2),
+                ([5; 32], [6; 32]),
+            ),
+        );
+        expect_err(store.admit_geo_location(request));
     }
 
     #[test]

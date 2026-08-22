@@ -1913,6 +1913,21 @@ mod tests {
     }
 
     #[test]
+    fn velocity_parameter_decoder_rejects_invalid_components() {
+        let invalid_first = cbor_encode(&ciborium::Value::Array(vec![
+            ciborium::Value::Float(f64::NAN),
+            ciborium::Value::Float(0.0),
+        ]));
+        assert_eq!(decode_velocity_params(&invalid_first), None);
+
+        let invalid_second = cbor_encode(&ciborium::Value::Array(vec![
+            ciborium::Value::Float(0.0),
+            ciborium::Value::Float(f64::INFINITY),
+        ]));
+        assert_eq!(decode_velocity_params(&invalid_second), None);
+    }
+
+    #[test]
     fn world_action_v1_trailing_params_are_rejected() {
         let mut action = sample_action();
         action.params_cbor = vec![0xf6, 0x00];
@@ -2614,6 +2629,21 @@ mod tests {
                 &[unknown_target],
             )
             .is_err());
+
+        let mut unknown_observation = sample_observation();
+        unknown_observation.body_entity_id = EntityId::new();
+        let unknown_target_observation = make_versioned_event(
+            1,
+            body,
+            EVENT_TYPE_OBSERVATION_V1,
+            unknown_observation.encode().test_ok(),
+        );
+        assert!(registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(timeline, Seq::from_u64(1))],
+                &[unknown_target_observation],
+            )
+            .is_ok());
     }
 
     fn assert_recovery_sequence(
@@ -2704,6 +2734,19 @@ mod tests {
             .test_ok();
         assert_malformed_recovery_events(&mut registry, timeline, body);
         assert_recovery_sequence(&mut registry, timeline, body);
+        let mut reduced = WorldReducer.initial();
+        WorldReducer.apply(
+            &mut reduced,
+            &make_versioned_event(
+                1,
+                body,
+                EVENT_TYPE_OBSERVATION_V1,
+                CanonicalBytes::from_static(b"malformed"),
+            ),
+        );
+        let mut direct_driver = WorldDriver::default();
+        direct_driver.commit_restore_from_history();
+        direct_driver.abort_step();
     }
 
     #[test]

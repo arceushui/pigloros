@@ -955,12 +955,36 @@ mod tests {
     }
 
     #[test]
-    fn rejects_private_reference_parser_boundaries() -> Result<(), ReferenceError> {
+    fn rejects_reference_pair_boundaries() -> Result<(), ReferenceError> {
         assert!(matches!(parse("not-json"), Err(ReferenceError::Json(_))));
         assert!(matches!(
             reproduce_fixture_json("not-json"),
             Err(ReferenceError::Json(_))
         ));
+        let (baseline, counterfactual) = fork_fixture();
+        assert!(matches!(
+            verify_fork_json("not-json", &counterfactual, "world.action.v1"),
+            Err(ReferenceError::Json(_))
+        ));
+        assert!(matches!(
+            verify_fork_json(&baseline, "not-json", "world.action.v1"),
+            Err(ReferenceError::Json(_))
+        ));
+        let mut invalid_baseline = parse_json(&baseline)?;
+        object_mut(&mut invalid_baseline)?.remove("contract");
+        assert!(verify_fork_json(
+            &invalid_baseline.to_string(),
+            &counterfactual,
+            "world.action.v1"
+        )
+        .is_err());
+        let malformed_events = serde_json::json!({"authoritative_events": ["bad"]});
+        assert!(reproduce_fixture_json(&malformed_events.to_string()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_reference_contract_boundaries() -> Result<(), ReferenceError> {
         assert!(matches!(
             validate_pair_metadata(&serde_json::Map::new(), &serde_json::Map::new()),
             Err(ReferenceError::MissingField("manifest"))
@@ -996,7 +1020,11 @@ mod tests {
                 "non-interference matrix is missing"
             ))
         ));
+        Ok(())
+    }
 
+    #[test]
+    fn rejects_reference_event_boundaries() {
         let empty = serde_json::Map::new();
         assert!(matches!(
             events(&empty),
@@ -1029,6 +1057,10 @@ mod tests {
             Err(ReferenceError::Json(_))
         ));
         assert!(matches!(
+            compare_json(&fixture(), "not-json"),
+            Err(ReferenceError::Json(_))
+        ));
+        assert!(matches!(
             validate_non_interference_matrix(&serde_json::Value::Bool(false)),
             Err(ReferenceError::InvalidForkEvidence(
                 "non-interference matrix is not an array"
@@ -1037,7 +1069,6 @@ mod tests {
         let object = serde_json::Map::new();
         assert_eq!(field_value(&object, "", "missing"), None);
         assert_eq!(field_value(&object, "missing", "field"), None);
-        Ok(())
     }
 
     fn non_interference_fixture() -> serde_json::Value {

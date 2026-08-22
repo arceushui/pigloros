@@ -2325,6 +2325,12 @@ mod tests {
             .test_ok();
         agent.abort_step();
         agent.abort_restore_from_history();
+        agent.commit_restore_from_history();
+        agent.abort_step();
+        agent.staged_tick = Some(7);
+        agent.commit_restore_from_history();
+        assert_eq!(agent.tick, 7);
+        agent.abort_step();
 
         let mut society = ProofSocietyDriver::new(fixed_id(3));
         society
@@ -2383,6 +2389,17 @@ mod tests {
             stop: StopCondition::MaxTicks(1),
             store_config: pos_store::StoreConfig::Memory,
         });
+        experiment
+            .register(
+                &agent_duplicate.world_plugin,
+                Some(Box::new(WorldReducer)),
+                Some(Box::new(world_driver(
+                    &agent_duplicate.input,
+                    agent_duplicate.body,
+                    agent_duplicate.config_entity,
+                ))),
+            )
+            .test_ok();
         assert!(register_plugins(&mut experiment, &agent_duplicate).is_err());
         assert!(build_registry(&agent_duplicate).is_err());
 

@@ -1493,9 +1493,45 @@ mod tests {
         ] {
             assert!(raw_definite_byte_string(&input).is_err());
         }
+        for payload_len in 0..4 {
+            let mut input = vec![0x5a];
+            input.extend(std::iter::repeat_n(0, payload_len));
+            assert!(raw_definite_byte_string(&input).is_err());
+        }
+        for payload_len in 0..8 {
+            let mut input = vec![0x5b];
+            input.extend(std::iter::repeat_n(0, payload_len));
+            assert!(raw_definite_byte_string(&input).is_err());
+        }
 
         assert_eq!(raw_tag_header_len(&[0xd8, 0]), Ok(Some(2)));
         assert_eq!(raw_array_header_len(&[0x98, 0]), Ok(Some(2)));
+
+        assert!(raw_byte_string_starts_with_action_magic(
+            &[0x44, b'P', b'A', b'A', b'1'],
+            false
+        ));
+        assert!(!raw_byte_string_starts_with_action_magic(
+            &[0x44, b'P', b'A', b'A', b'2'],
+            false
+        ));
+        assert!(!raw_byte_string_starts_with_action_magic(&[0x40], false));
+        assert!(raw_byte_string_starts_with_action_magic(
+            &[0x5f, 0x42, b'P', b'A', 0x42, b'A', b'1', 0xff],
+            false
+        ));
+        assert!(!raw_byte_string_starts_with_action_magic(
+            &[0x5f, 0xff],
+            false
+        ));
+        assert!(!raw_byte_string_starts_with_action_magic(
+            &[0x5f, 0x42, b'P'],
+            false
+        ));
+        assert!(raw_byte_string_starts_with_action_magic(
+            &[0x5f, 0x42, b'P'],
+            true
+        ));
     }
 
     #[test]
