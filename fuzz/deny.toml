@@ -22,13 +22,14 @@ allow = [
   "BSD-2-Clause",
   "BSD-3-Clause",
   "ISC",
-  "NCSA",
   "Unicode-3.0",
   "Zlib",
   "CC0-1.0",
   "MPL-2.0",
 ]
-exceptions = []
+exceptions = [
+  { crate = "libfuzzer-sys", allow = ["NCSA"] },
+]
 
 [licenses.private]
 ignore = true
@@ -37,7 +38,10 @@ ignore = true
 multiple-versions = "warn"
 wildcards = "warn"
 highlight = "all"
-deny = []
+deny = [
+  { crate = "openssl", use-instead = "rustls" },
+  { crate = "openssl-sys", use-instead = "rustls" },
+]
 
 [sources]
 unknown-registry = "deny"
