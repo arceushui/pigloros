@@ -207,10 +207,8 @@ fn decode_u64(val: &ciborium::Value) -> Result<u64, WorldCodecError> {
 fn decode_id(val: &ciborium::Value) -> Result<EntityId, WorldCodecError> {
     match val {
         ciborium::Value::Bytes(b) if b.len() == 16 => {
-            let arr: [u8; 16] = b
-                .as_slice()
-                .try_into()
-                .map_err(|_| WorldCodecError::WrongFieldType)?;
+            let mut arr = [0_u8; 16];
+            arr.copy_from_slice(b);
             let n = u128::from_be_bytes(arr);
             Ok(EntityId::from_ulid(ulid::Ulid::from(n)))
         }
@@ -1686,6 +1684,25 @@ mod tests {
         }
     }
 
+    struct YNonFiniteBackend;
+
+    impl WorldBackend for YNonFiniteBackend {
+        fn name(&self) -> &'static str {
+            "y-non-finite-test-backend"
+        }
+
+        fn step(&self, bodies: &[Body]) -> Vec<WorldObservation> {
+            bodies
+                .iter()
+                .map(|body| WorldObservation {
+                    entity_id: body.entity_id,
+                    x: body.x,
+                    y: f64::NAN,
+                })
+                .collect()
+        }
+    }
+
     struct OutOfRangeBackend;
 
     impl WorldBackend for OutOfRangeBackend {
@@ -1741,6 +1758,27 @@ mod tests {
             .test_err();
         assert!(error.to_string().contains("world.observation.v1"));
         assert!(error.to_string().contains("non-finite float value"));
+    }
+
+    #[test]
+    fn driver_rejects_non_finite_y_observation_payload() {
+        let entity = EntityId::new();
+        let mut driver = WorldDriver::new(
+            vec![Body {
+                entity_id: entity,
+                x: 0.0,
+                y: 0.0,
+                vx: 0.0,
+                vy: 0.0,
+            }],
+            Box::new(YNonFiniteBackend),
+            sample_config(),
+        );
+        let error = driver
+            .step(TimelineId::new(), ObservationView::empty())
+            .test_err();
+        assert!(error.to_string().contains("non-finite float value"));
+        driver.abort_step();
     }
 
     #[test]
@@ -1861,6 +1899,17 @@ mod tests {
             a.encode(),
             Err(WorldCodecError::NonCanonicalParamsCbor)
         ));
+        a.params_cbor = vec![0xff];
+        assert!(matches!(
+            a.encode(),
+            Err(WorldCodecError::NonCanonicalParamsCbor)
+        ));
+    }
+
+    #[test]
+    fn velocity_parameter_decoder_accepts_a_canonical_pair() {
+        let params = encode_vel_params(1.25, -2.5);
+        assert_eq!(decode_velocity_params(&params), Some((1.25, -2.5)));
     }
 
     #[test]
