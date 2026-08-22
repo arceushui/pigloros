@@ -8,6 +8,7 @@ on:
       - fuzz/**
       - crates/pos-core/**
       - apps/piglor-gateway/**
+      - Cargo.toml
       - Cargo.lock
       - .github/workflows/fuzz.yml
   schedule:

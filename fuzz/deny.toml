@@ -27,9 +27,7 @@ allow = [
   "CC0-1.0",
   "MPL-2.0",
 ]
-exceptions = [
-  { crate = "libfuzzer-sys", allow = ["NCSA"] },
-]
+exceptions = [{ crate = "libfuzzer-sys", allow = ["NCSA"] }]
 
 [licenses.private]
 ignore = true
