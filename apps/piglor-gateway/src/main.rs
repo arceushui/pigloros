@@ -325,6 +325,14 @@ mod coverage_tests {
 
     #[test]
     fn run_with_args_reports_parse_and_bind_errors() -> Result<(), Box<dyn std::error::Error>> {
+        let owntracks_error = super::run_with_args(&[
+            "piglor-gateway".to_owned(),
+            "owntracks".to_owned(),
+            "invalid".to_owned(),
+        ])
+        .test_err()?;
+        assert!(!owntracks_error.to_string().is_empty());
+
         let parse_error = super::run_with_args(&[
             "piglor-gateway".to_owned(),
             "serve".to_owned(),
@@ -646,6 +654,28 @@ mod tests {
             ))
             .test_err()?;
         assert!(missing_sqlite.to_string().contains("SQLite"));
+        let missing_owner = runtime
+            .block_on(serve_with_owntracks(
+                addr,
+                Some(database.to_str().test_ok()?),
+                Some(&directory.join("missing.key")),
+                async {},
+                LedgerView::default(),
+                LedgerWriteMode::Disabled,
+            ))
+            .test_err()?;
+        assert!(!missing_owner.to_string().is_empty());
+        let invalid_sqlite = runtime
+            .block_on(serve_with_owntracks(
+                addr,
+                Some(directory.as_path().to_str().test_ok()?),
+                Some(&owner_key),
+                async {},
+                LedgerView::default(),
+                LedgerWriteMode::Disabled,
+            ))
+            .test_err()?;
+        assert!(!invalid_sqlite.to_string().is_empty());
         std::fs::remove_dir_all(directory).test_ok()?;
 
         Ok(())
