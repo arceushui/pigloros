@@ -39,6 +39,7 @@ pos-state = { path = "../../crates/pos-state" }
 pos-time = { path = "../../crates/pos-time" }
 pos-plugin-agent = { path = "../../plugins/agent" }
 tempfile = { workspace = true }
+rusqlite = { workspace = true }
 
 [lints]
 workspace = true

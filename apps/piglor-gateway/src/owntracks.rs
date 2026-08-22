@@ -1201,4 +1201,102 @@ mod coverage_entrypoints {
 
         test_ok(std::fs::remove_dir_all(directory));
     }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn initialize_database(path: &std::path::Path) {
+        test_ok(pos_store::sqlite::SqliteStore::open(
+            &path.display().to_string(),
+        ));
+    }
+
+    #[test]
+    fn command_store_boundaries_fail_closed_on_malformed_and_rejected_state() {
+        let directory = temporary_directory("store-errors");
+        let policy = directory.join("consent.toml");
+        let owner_key = directory.join("owner.key");
+        test_ok(std::fs::write(&policy, policy_text()));
+        let timeline = TimelineId::new().to_string();
+        let entity = EntityId::new().to_string();
+
+        let malformed_database = directory.join("malformed.db");
+        initialize_database(&malformed_database);
+        let connection = test_ok(rusqlite::Connection::open(&malformed_database));
+        test_ok(connection.execute(
+            "INSERT INTO owntracks_enrollment (singleton, state_cbor) VALUES (1, zeroblob(1))",
+            [],
+        ));
+        drop(connection);
+        expect_err(execute(&[
+            "status".to_owned(),
+            malformed_database.display().to_string(),
+        ]));
+        expect_err(execute(&[
+            "pair".to_owned(),
+            malformed_database.display().to_string(),
+            owner_key.display().to_string(),
+            "--consent-policy".to_owned(),
+            policy.display().to_string(),
+            timeline,
+            entity,
+        ]));
+        expect_err(execute(&[
+            "rotate".to_owned(),
+            malformed_database.display().to_string(),
+            owner_key.display().to_string(),
+        ]));
+        expect_err(execute(&[
+            "revoke".to_owned(),
+            malformed_database.display().to_string(),
+        ]));
+
+        let pair_database = directory.join("pair-error.db");
+        initialize_database(&pair_database);
+        expect_err(execute(&[
+            "pair".to_owned(),
+            pair_database.display().to_string(),
+            owner_key.display().to_string(),
+            "--consent-policy".to_owned(),
+            policy.display().to_string(),
+            TimelineId::new().to_string(),
+            EntityId::new().to_string(),
+        ]));
+
+        let active_database = directory.join("active-error.db");
+        initialize_database(&active_database);
+        let active_entity = EntityId::new().to_string();
+        let mut active_store = test_ok(pos_store::sqlite::SqliteStore::open(
+            &active_database.display().to_string(),
+        ));
+        let active_timeline = test_ok(pos_core::EventStore::create_timeline(
+            &mut active_store,
+            "active-errors",
+        ));
+        drop(active_store);
+        test_ok(execute(&[
+            "pair".to_owned(),
+            active_database.display().to_string(),
+            owner_key.display().to_string(),
+            "--consent-policy".to_owned(),
+            policy.display().to_string(),
+            active_timeline.id().to_string(),
+            active_entity,
+        ]));
+        let connection = test_ok(rusqlite::Connection::open(&active_database));
+        test_ok(connection.execute_batch(
+            "CREATE TRIGGER deny_enrollment_write BEFORE INSERT ON owntracks_enrollment
+             BEGIN SELECT RAISE(ABORT, 'enrollment write denied'); END;",
+        ));
+        drop(connection);
+        expect_err(execute(&[
+            "rotate".to_owned(),
+            active_database.display().to_string(),
+            owner_key.display().to_string(),
+        ]));
+        expect_err(execute(&[
+            "revoke".to_owned(),
+            active_database.display().to_string(),
+        ]));
+
+        test_ok(std::fs::remove_dir_all(directory));
+    }
 }
