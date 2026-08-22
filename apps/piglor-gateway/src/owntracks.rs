@@ -1058,6 +1058,15 @@ mod coverage_entrypoints {
             directory_path.display().to_string(),
         ]));
         expect_err(execute(&[
+            "rotate".to_owned(),
+            directory_path.display().to_string(),
+            directory.join("missing.key").display().to_string(),
+        ]));
+        expect_err(execute(&[
+            "revoke".to_owned(),
+            directory_path.display().to_string(),
+        ]));
+        expect_err(execute(&[
             "pair".to_owned(),
             directory_path.display().to_string(),
             directory.join("owner.key").display().to_string(),
@@ -1185,6 +1194,8 @@ mod coverage_entrypoints {
         let target_directory = directory.join("target-directory");
         test_ok(std::fs::create_dir(&target_directory));
         expect_err(create_or_load_owner_key(&target_directory));
+        expect_err(load_owner_key(std::path::Path::new("/")));
+        expect_err(super::create_owner_key(std::path::Path::new("/")));
 
         let missing_parent = directory.join("missing-parent").join("owner.key");
         expect_err(super::create_owner_key(&missing_parent));

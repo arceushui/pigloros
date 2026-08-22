@@ -1281,13 +1281,36 @@ mod tests {
             Err(WorldTransformError::NonFiniteCoordinate)
         ));
 
-        let origin = origin(&capability, 10_000.0)?;
-        let mut transform = WorldTransformV1::new(&capability, origin)?;
+        let base_origin = origin(&capability, 10_000.0)?;
+        let mut transform = WorldTransformV1::new(&capability, base_origin)?;
         transform.origin.origin_ecef = [f64::NAN, 0.0, 0.0];
         let position = Wgs84PositionV1::new(35.0, -120.0, 100.0)?;
         assert!(matches!(
             transform.forward(&capability, position),
             Err(WorldTransformError::NonFiniteCoordinate)
+        ));
+
+        let forward_transform = WorldTransformV1::new(&capability, origin(&capability, 10_000.0)?)?;
+        let invalid_position = Wgs84PositionV1 {
+            latitude_degrees: f64::NAN,
+            longitude_degrees: 0.0,
+            ellipsoidal_height_metres: 0.0,
+        };
+        assert!(matches!(
+            forward_transform.forward(&capability, invalid_position),
+            Err(WorldTransformError::NonFiniteCoordinate)
+        ));
+
+        let mut invalid_origin = origin(&capability, 10_000.0)?;
+        invalid_origin.origin_definition_digest[0] ^= 1;
+        let mut registry = WorldOriginRegistryV1::new();
+        assert!(matches!(
+            registry.register(&capability, invalid_origin),
+            Err(WorldTransformError::InvalidOriginDigest)
+        ));
+        assert!(matches!(
+            registry.restore(&capability, vec![invalid_origin]),
+            Err(WorldTransformError::InvalidOriginDigest)
         ));
         Ok(())
     }

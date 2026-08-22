@@ -949,16 +949,13 @@ impl PluginRegistry {
         let snapshot = self.snapshot_for_subscriptions(due_subscriptions.iter());
         for (id, entry) in &mut self.plugins {
             if due_driver_ids.remove(id) {
-                let Some(driver) = entry.driver.as_mut() else {
-                    return Err(RuntimeError::NoDriver {
-                        name: entry.name.clone(),
-                    });
-                };
-                let observations = snapshot.view_for(driver.subscriptions());
-                let output = invoke_driver(driver.as_mut(), timeline, observations)?;
-                reject_geographic_drafts(&output)?;
-                entry.last_tick = Some(now_ns);
-                all_drafts.extend(output.drafts);
+                if let Some(driver) = entry.driver.as_mut() {
+                    let observations = snapshot.view_for(driver.subscriptions());
+                    let output = invoke_driver(driver.as_mut(), timeline, observations)?;
+                    reject_geographic_drafts(&output)?;
+                    entry.last_tick = Some(now_ns);
+                    all_drafts.extend(output.drafts);
+                }
             }
         }
         debug_assert!(due_driver_ids.is_empty());
