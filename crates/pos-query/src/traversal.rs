@@ -86,6 +86,7 @@ pub fn causal_chain(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use pos_core::{
@@ -98,6 +99,7 @@ mod tests {
         fn test_ok(self) -> T;
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
         fn test_ok(self) -> T {
             self.unwrap_or_else(|error| {
@@ -108,6 +110,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     impl<T> TestValueExt<T> for Option<T> {
         fn test_ok(self) -> T {
             self.unwrap_or_else(|| {
@@ -120,6 +123,7 @@ mod tests {
         fn test_err(self) -> E;
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
         fn test_err(self) -> E {
             match self {
@@ -131,6 +135,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn make_draft(entity: EntityId, event_type: &str) -> EventDraft {
         EventDraft::new(
             entity,
@@ -139,6 +144,7 @@ mod tests {
         )
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn make_draft_with_cause(entity: EntityId, event_type: &str, cause: EventId) -> EventDraft {
         let mut d = make_draft(entity, event_type);
         d.causation_id = Some(cause);

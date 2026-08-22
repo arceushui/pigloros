@@ -93,6 +93,7 @@ impl SchemaRegistry {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use pos_core::{

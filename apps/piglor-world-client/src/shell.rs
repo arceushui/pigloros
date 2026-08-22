@@ -254,6 +254,7 @@ fn update_cursor(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::fmt::Debug;
     use std::time::Duration;

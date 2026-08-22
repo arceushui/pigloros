@@ -1,0 +1,206 @@
+package pigloros:plugin@0.1.0;
+
+interface contract-v1 {
+  type bytes = list<u8>;
+
+  record digest32 {
+    value: bytes,
+  }
+
+  record bounded-text {
+    utf8: bytes,
+  }
+
+  record artifact-ref {
+    schema-id: u32,
+    byte-length: u64,
+    digest: digest32,
+  }
+
+  record timeline-position {
+    timeline-id: bytes,
+    seq: u64,
+    tick: u64,
+    scheduler-position: u32,
+  }
+
+  enum invocation-kind {
+    reduce,
+    drive,
+  }
+
+  enum dependency-class {
+    exogenous-frozen,
+    intervention-assigned,
+    endogenous-recomputed,
+    fixed-policy,
+    presentation-only,
+  }
+
+  record capability-declaration {
+    capability-id: bounded-text,
+    operation: bounded-text,
+    resource-pattern: bounded-text,
+    purpose: bounded-text,
+    audience: bounded-text,
+    required: bool,
+    max-calls: u32,
+    max-request-bytes: u32,
+    max-response-bytes: u32,
+  }
+
+  record dependency-descriptor {
+    dependency-id: bounded-text,
+    release-digest: digest32,
+    world: bounded-text,
+    abi-major: u16,
+    min-abi-minor: u16,
+    max-abi-minor: u16,
+    required-features: list<bounded-text>,
+    required-capabilities: list<bounded-text>,
+    dependency-class: dependency-class,
+  }
+
+  record migration-descriptor {
+    from-state-schema: digest32,
+    to-state-schema: digest32,
+    migration-id: bounded-text,
+    migration-component: artifact-ref,
+    deterministic-budget-id: bounded-text,
+    reverse-migration-id: option<bounded-text>,
+  }
+
+  record plugin-descriptor {
+    plugin-id: bounded-text,
+    release-semver: bounded-text,
+    world: bounded-text,
+    abi-major: u16,
+    min-abi-minor: u16,
+    max-abi-minor: u16,
+    required-features: list<bounded-text>,
+    event-schema-digests: list<digest32>,
+    state-schema-digest: digest32,
+    capabilities: list<capability-declaration>,
+    migrations: list<migration-descriptor>,
+    dependencies: list<dependency-descriptor>,
+    manifest-digest: digest32,
+    release-digest: digest32,
+  }
+
+  record plugin-invocation {
+    invocation-id: bytes,
+    kind: invocation-kind,
+    timeline-position: timeline-position,
+    output-base-ordinal: u32,
+    principal-ref: artifact-ref,
+    authorization-decision: artifact-ref,
+    observation-snapshot: artifact-ref,
+    observation-bytes: bytes,
+    prior-state-schema: digest32,
+    prior-state-bytes: bytes,
+    execution-profile-digest: digest32,
+    trust-policy-snapshot-digest: digest32,
+    deterministic-budget-id: bounded-text,
+    deterministic-random-domain: digest32,
+    provenance-root: digest32,
+  }
+
+  record event-draft {
+    event-schema-id: u32,
+    entity-id: bytes,
+    event-type: bounded-text,
+    canonical-payload: bytes,
+    dependency-digests: list<digest32>,
+  }
+
+  record trace-annotation {
+    annotation-schema-id: u32,
+    canonical-bytes: bytes,
+    dependency-digests: list<digest32>,
+  }
+
+  record plugin-output {
+    invocation-id: bytes,
+    event-drafts: list<event-draft>,
+    next-state-schema: digest32,
+    next-state-bytes: bytes,
+    trace-annotations: list<trace-annotation>,
+    consumed-dependencies: list<digest32>,
+    output-digest: digest32,
+  }
+
+  record field-ref {
+    schema-id: u32,
+    field-ordinal: u16,
+  }
+
+  variant plugin-error-code {
+    invalid-invocation(field-ref),
+    unsupported-schema(u32),
+    capability-required(bounded-text),
+    dependency-missing(digest32),
+    deterministic-budget-exhausted,
+    invalid-state(field-ref),
+    migration-rejected(field-ref),
+    guest-declared-failure(u16),
+  }
+
+  record plugin-error {
+    code: plugin-error-code,
+    canonical-coordinate: option<bytes>,
+    related-digest: option<digest32>,
+  }
+
+  record migration-request {
+    migration-id: bounded-text,
+    from-state-schema: digest32,
+    to-state-schema: digest32,
+    prior-state-bytes: bytes,
+    deterministic-budget-id: bounded-text,
+    provenance-root: digest32,
+  }
+
+  record migration-output {
+    migration-id: bounded-text,
+    to-state-schema: digest32,
+    migrated-state-bytes: bytes,
+    consumed-dependencies: list<digest32>,
+    output-digest: digest32,
+  }
+}
+
+interface host-v1 {
+  use contract-v1.{bounded-text, bytes, digest32, plugin-error};
+
+  simulation-time: func() -> u64;
+  deterministic-random: func(
+    domain: digest32,
+    offset: u64,
+    length: u32,
+  ) -> result<bytes, plugin-error>;
+  record-operational-log: func(
+    category: u16,
+    message: bounded-text,
+  ) -> result<_, plugin-error>;
+}
+
+interface guest-v1 {
+  use contract-v1.{
+    migration-output,
+    migration-request,
+    plugin-descriptor,
+    plugin-error,
+    plugin-invocation,
+    plugin-output,
+  };
+
+  describe: func() -> result<plugin-descriptor, plugin-error>;
+  reduce: func(input: plugin-invocation) -> result<plugin-output, plugin-error>;
+  drive: func(input: plugin-invocation) -> result<plugin-output, plugin-error>;
+  migrate-state: func(input: migration-request) -> result<migration-output, plugin-error>;
+}
+
+world community-plugin {
+  import host-v1;
+  export guest-v1;
+}

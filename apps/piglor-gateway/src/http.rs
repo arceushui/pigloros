@@ -30,6 +30,7 @@ pub struct AppState {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_tests {
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
@@ -249,11 +250,7 @@ fn bounded_events_response(
         };
         let event_seq = event.seq.as_u64();
         let view = EventView::try_from(&event)?;
-        events.push(serde_json::to_value(view).map_err(|error| {
-            GatewayError::Store(CoreError::Storage(format!(
-                "EventView serialization failed: {error}"
-            )))
-        })?);
+        events.push(crate::event_view_json(&view));
         let next_from_seq = source
             .peek()
             .map(|next| Seq::from_u64(next.seq.as_u64()))
@@ -282,13 +279,7 @@ fn bounded_events_response(
 }
 
 fn serialized_len(value: &serde_json::Value) -> Result<usize, GatewayError> {
-    serde_json::to_vec(value)
-        .map(|bytes| bytes.len())
-        .map_err(|error| {
-            GatewayError::Store(CoreError::Storage(format!(
-                "JSON response serialization failed: {error}"
-            )))
-        })
+    Ok(crate::serialized_json_len(value))
 }
 
 async fn post_action(
@@ -1382,6 +1373,8 @@ mod tests {
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         let r = GatewayError::LedgerWriteDisabled.into_response();
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let r = GatewayError::ActionAuthorizationUnavailable.into_response();
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
         let r = GatewayError::LedgerUnavailable.into_response();
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         let r = GatewayError::Ledger(pos_plugin_ledger::LedgerError::InvalidPrediction(

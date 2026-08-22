@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 //! A deliberately dependency-light second evaluator for Wave 8 evidence.
 //!
@@ -82,6 +83,26 @@ pub fn verify_fork_json(
     {
         return Err(ReferenceError::InvalidForkEvidence("manifest mismatch"));
     }
+    for evidence in [&baseline, &counterfactual] {
+        let contract = evidence
+            .get("contract")
+            .and_then(serde_json::Value::as_object)
+            .ok_or(ReferenceError::MissingField("contract"))?;
+        let boundary = contract
+            .get("plugin_boundary")
+            .and_then(serde_json::Value::as_object)
+            .ok_or(ReferenceError::InvalidForkEvidence(
+                "plugin boundary is not an object",
+            ))?;
+        validate_plugin_boundary_shape(boundary)?;
+        let matrix =
+            contract
+                .get("non_interference")
+                .ok_or(ReferenceError::InvalidForkEvidence(
+                    "non-interference matrix is missing",
+                ))?;
+        validate_non_interference_matrix(matrix)?;
+    }
     let Some(cut) = counterfactual_manifest
         .get("fork_cut_seq")
         .and_then(serde_json::Value::as_u64)
@@ -125,11 +146,16 @@ pub fn verify_fork_json(
         .iter()
         .map(|event| (event.seq, event))
         .collect::<BTreeMap<_, _>>();
-    let complete_endogenous_suffix = counterfactual_suffix
+    let endogenous_counterfactual_suffix = counterfactual_suffix
+        .iter()
+        .filter(|event| is_endogenous_event(&event.event_type))
+        .copied()
+        .collect::<Vec<_>>();
+    let complete_endogenous_suffix = endogenous_counterfactual_suffix
         .iter()
         .filter(|event| event.seq > intervention.seq)
         .find(|candidate| {
-            let tail = counterfactual_suffix
+            let tail = endogenous_counterfactual_suffix
                 .iter()
                 .filter(|event| event.seq >= candidate.seq)
                 .collect::<Vec<_>>();
@@ -149,11 +175,27 @@ pub fn verify_fork_json(
     Ok(())
 }
 
+fn is_endogenous_event(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "world.action.v1" | "world.observation.v1" | "proof.agent.reaction.v1" | "society.signal"
+    )
+}
+
 /// Reproduce the public causal contract of the proof fixture without linking
 /// the runtime, reducers, or plugin implementations. This is intentionally a
 /// small independent model: it checks the reaction chain, not private payload
 /// representation or generated Event IDs.
 fn verify_reference_kernel(events: &[ReferenceEvent]) -> Result<(), ReferenceError> {
+    if events.first().map_or(true, |event| event.seq != 1)
+        || events
+            .windows(2)
+            .any(|pair| pair[1].seq != pair[0].seq.saturating_add(1))
+    {
+        return Err(ReferenceError::InvalidForkEvidence(
+            "independent Event sequence is not contiguous",
+        ));
+    }
     let event_types = events
         .iter()
         .map(|event| event.event_type.as_str())
@@ -236,10 +278,12 @@ fn events(
                     .ok_or(ReferenceError::InvalidForkEvidence(
                         "Event payload digest is missing",
                     ))?;
-            let causation_seq = event
-                .get("causation_seq")
-                .and_then(|value| (!value.is_null()).then(|| value.as_u64()))
-                .flatten();
+            let causation_seq = match event.get("causation_seq") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(value) => Some(value.as_u64().ok_or(ReferenceError::InvalidForkEvidence(
+                    "Event causation sequence is invalid",
+                ))?),
+            };
             Ok(ReferenceEvent {
                 seq,
                 entity,
@@ -299,6 +343,9 @@ pub fn compare_json(left: &str, right: &str) -> Result<ReferenceComparisonV1, Re
         "evaluator_digest",
         "replay_claim",
         "plugin_versions",
+        "scenario_room_digest",
+        "scheduler_digest",
+        "budget_digest",
     ];
     if manifest_fields.iter().any(|field| {
         field_value(&left, "manifest", field) != field_value(&right, "manifest", field)
@@ -322,6 +369,7 @@ pub fn compare_json(left: &str, right: &str) -> Result<ReferenceComparisonV1, Re
         "participant_views",
         "plugin_failures",
         "consent_audit",
+        "contract",
     ]
     .iter()
     .any(|field| field_value(&left, "", field) != field_value(&right, "", field))
@@ -353,6 +401,7 @@ fn parse(value: &str) -> Result<serde_json::Map<String, serde_json::Value>, Refe
         "participant_views",
         "plugin_failures",
         "consent_audit",
+        "contract",
     ];
     for field in required {
         if !object.contains_key(field) {
@@ -384,6 +433,9 @@ fn parse(value: &str) -> Result<serde_json::Map<String, serde_json::Value>, Refe
         "evaluator_digest",
         "replay_claim",
         "plugin_versions",
+        "scenario_room_digest",
+        "scheduler_digest",
+        "budget_digest",
     ];
     for field in manifest_fields {
         if !manifest.contains_key(field) {
@@ -395,7 +447,221 @@ fn parse(value: &str) -> Result<serde_json::Map<String, serde_json::Value>, Refe
             return Err(ReferenceError::UnexpectedField(field.clone()));
         }
     }
+    validate_contract_shape(&object)?;
     Ok(object)
+}
+
+fn validate_contract_shape(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), ReferenceError> {
+    let contract = object
+        .get("contract")
+        .and_then(serde_json::Value::as_object)
+        .ok_or(ReferenceError::InvalidForkEvidence(
+            "contract is not an object",
+        ))?;
+    let required = [
+        "scenario_room",
+        "plugin_boundary",
+        "knowledge_snapshots",
+        "authorization_decisions",
+        "counterfactual",
+        "atomicity",
+        "conformance_report",
+        "non_interference",
+    ];
+    for field in required {
+        if !contract.contains_key(field) {
+            return Err(ReferenceError::InvalidForkEvidence(
+                "contract field is missing",
+            ));
+        }
+    }
+    if contract
+        .keys()
+        .any(|field| !required.contains(&field.as_str()))
+        || !contract
+            .get("scenario_room")
+            .is_some_and(serde_json::Value::is_object)
+        || !contract
+            .get("plugin_boundary")
+            .is_some_and(serde_json::Value::is_object)
+        || !contract
+            .get("counterfactual")
+            .is_some_and(serde_json::Value::is_object)
+        || !contract
+            .get("conformance_report")
+            .is_some_and(serde_json::Value::is_object)
+        || !contract
+            .get("knowledge_snapshots")
+            .is_some_and(serde_json::Value::is_array)
+        || !contract
+            .get("authorization_decisions")
+            .is_some_and(serde_json::Value::is_array)
+        || !contract
+            .get("atomicity")
+            .is_some_and(serde_json::Value::is_array)
+        || !contract
+            .get("non_interference")
+            .is_some_and(serde_json::Value::is_array)
+    {
+        return Err(ReferenceError::InvalidForkEvidence(
+            "contract shape is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_plugin_boundary_shape(
+    boundary: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), ReferenceError> {
+    let required = [
+        "manifest_version",
+        "plugin_id",
+        "world",
+        "abi_major",
+        "min_abi_minor",
+        "max_abi_minor",
+        "wit_digest",
+        "component_digest",
+        "imported_interfaces",
+        "exported_interfaces",
+        "network_allowed",
+        "filesystem_allowed",
+        "fresh_worker_required",
+        "memory_bytes",
+        "fuel",
+        "host_call_limit",
+        "event_draft_limit",
+        "state_bytes_limit",
+        "observation_bytes_limit",
+        "manifest_digest",
+        "release_digest",
+    ];
+    if required.iter().any(|field| !boundary.contains_key(*field))
+        || boundary
+            .keys()
+            .any(|field| !required.contains(&field.as_str()))
+        || boundary.get("manifest_version") != Some(&serde_json::json!(1))
+        || boundary.get("world")
+            != Some(&serde_json::json!("pigloros:plugin/community-plugin@0.1.0"))
+        || boundary.get("abi_major") != Some(&serde_json::json!(0))
+        || boundary.get("min_abi_minor") != Some(&serde_json::json!(1))
+        || boundary.get("max_abi_minor") != Some(&serde_json::json!(1))
+        || boundary.get("imported_interfaces") != Some(&serde_json::json!(["host-v1"]))
+        || boundary.get("exported_interfaces") != Some(&serde_json::json!(["guest-v1"]))
+        || boundary.get("network_allowed") != Some(&serde_json::json!(false))
+        || boundary.get("filesystem_allowed") != Some(&serde_json::json!(false))
+        || boundary.get("fresh_worker_required") != Some(&serde_json::json!(true))
+        || boundary
+            .get("plugin_id")
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(str::is_empty)
+        || boundary
+            .get("wit_digest")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(Vec::is_empty)
+        || boundary
+            .get("component_digest")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(Vec::is_empty)
+        || boundary
+            .get("manifest_digest")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(Vec::is_empty)
+        || boundary
+            .get("release_digest")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(Vec::is_empty)
+    {
+        return Err(ReferenceError::InvalidForkEvidence(
+            "plugin boundary semantics are invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_non_interference_matrix(value: &serde_json::Value) -> Result<(), ReferenceError> {
+    let cases = value.as_array().ok_or(ReferenceError::InvalidForkEvidence(
+        "non-interference matrix is not an array",
+    ))?;
+    if cases.len() != 192 {
+        return Err(ReferenceError::InvalidForkEvidence(
+            "non-interference matrix has the wrong size",
+        ));
+    }
+    let fixtures = [
+        "NI-TOOL-001",
+        "NI-CACHE-002",
+        "NI-STATE-003",
+        "NI-OBS-004",
+        "NI-TIME-005",
+        "NI-PUBLIC-006",
+        "NI-EVAL-007",
+        "NI-FORK-008",
+        "NI-ARCHIVE-009",
+        "NI-NET-010",
+        "NI-SERVICE-011",
+        "NI-CRASH-012",
+    ];
+    let variants = ["success", "denial", "warm_cache", "cold_cache"];
+    let modes = ["local", "air_gapped", "replay", "fork"];
+    let mut index = 0;
+    for fixture in fixtures {
+        for variant in variants {
+            for mode in modes {
+                let case = cases[index]
+                    .as_object()
+                    .ok_or(ReferenceError::InvalidForkEvidence(
+                        "non-interference case is not an object",
+                    ))?;
+                let required = [
+                    "fixture_id",
+                    "variant",
+                    "mode",
+                    "control_input_digest",
+                    "canary_input_digest",
+                    "authoritative_digest",
+                    "public_digest",
+                    "operational_digest",
+                    "authoritative_equal",
+                    "public_equal",
+                    "operational_equal",
+                    "provenance_digest",
+                ];
+                if required.iter().any(|field| !case.contains_key(*field))
+                    || case.keys().any(|field| !required.contains(&field.as_str()))
+                    || case.get("fixture_id") != Some(&serde_json::json!(fixture))
+                    || case.get("variant") != Some(&serde_json::json!(variant))
+                    || case.get("mode") != Some(&serde_json::json!(mode))
+                    || case.get("authoritative_equal") != Some(&serde_json::json!(true))
+                    || case.get("public_equal") != Some(&serde_json::json!(true))
+                    || case.get("operational_equal") != Some(&serde_json::json!(true))
+                    || case.get("control_input_digest") == case.get("canary_input_digest")
+                    || [
+                        "control_input_digest",
+                        "canary_input_digest",
+                        "authoritative_digest",
+                        "public_digest",
+                        "operational_digest",
+                        "provenance_digest",
+                    ]
+                    .iter()
+                    .any(|field| {
+                        case.get(*field)
+                            .and_then(serde_json::Value::as_array)
+                            .is_none_or(Vec::is_empty)
+                    })
+                {
+                    return Err(ReferenceError::InvalidForkEvidence(
+                        "non-interference case is invalid",
+                    ));
+                }
+                index += 1;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn field_value<'a>(
@@ -412,6 +678,7 @@ fn field_value<'a>(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -455,7 +722,10 @@ mod tests {
                 "artifact_closure_digest": [5],
                 "evaluator_digest": [6],
                 "replay_claim": "exact",
-                "plugin_versions": {"world": "1"}
+                "plugin_versions": {"world": "1"},
+                "scenario_room_digest": [7],
+                "scheduler_digest": [8],
+                "budget_digest": [9]
             },
             "authoritative_events": [{
                 "seq": 1,
@@ -469,7 +739,39 @@ mod tests {
             "uncertainty": [],
             "participant_views": [],
             "plugin_failures": [],
-            "consent_audit": {"subject": "s"}
+            "consent_audit": {"subject": "s"},
+            "contract": {
+                "scenario_room": {},
+                "plugin_boundary": {
+                    "manifest_version": 1,
+                    "plugin_id": "pigloros.wave8.proof-plugin",
+                    "world": "pigloros:plugin/community-plugin@0.1.0",
+                    "abi_major": 0,
+                    "min_abi_minor": 1,
+                    "max_abi_minor": 1,
+                    "wit_digest": [1],
+                    "component_digest": [1],
+                    "imported_interfaces": ["host-v1"],
+                    "exported_interfaces": ["guest-v1"],
+                    "network_allowed": false,
+                    "filesystem_allowed": false,
+                    "fresh_worker_required": true,
+                    "memory_bytes": 1,
+                    "fuel": 1,
+                    "host_call_limit": 1,
+                    "event_draft_limit": 1,
+                    "state_bytes_limit": 1,
+                    "observation_bytes_limit": 1,
+                    "manifest_digest": [1],
+                    "release_digest": [1]
+                },
+                "knowledge_snapshots": [],
+                "authorization_decisions": [],
+                "counterfactual": {},
+                "atomicity": [],
+                "conformance_report": {},
+                "non_interference": []
+            }
         })
         .to_string()
     }
@@ -528,6 +830,47 @@ mod tests {
         Ok(())
     }
 
+    fn non_interference_fixture() -> serde_json::Value {
+        let fixtures = [
+            "NI-TOOL-001",
+            "NI-CACHE-002",
+            "NI-STATE-003",
+            "NI-OBS-004",
+            "NI-TIME-005",
+            "NI-PUBLIC-006",
+            "NI-EVAL-007",
+            "NI-FORK-008",
+            "NI-ARCHIVE-009",
+            "NI-NET-010",
+            "NI-SERVICE-011",
+            "NI-CRASH-012",
+        ];
+        let variants = ["success", "denial", "warm_cache", "cold_cache"];
+        let modes = ["local", "air_gapped", "replay", "fork"];
+        let mut cases = Vec::with_capacity(192);
+        for fixture in fixtures {
+            for variant in variants {
+                for mode in modes {
+                    cases.push(serde_json::json!({
+                        "fixture_id": fixture,
+                        "variant": variant,
+                        "mode": mode,
+                        "control_input_digest": [1],
+                        "canary_input_digest": [2],
+                        "authoritative_digest": [3],
+                        "public_digest": [4],
+                        "operational_digest": [5],
+                        "authoritative_equal": true,
+                        "public_equal": true,
+                        "operational_equal": true,
+                        "provenance_digest": [6]
+                    }));
+                }
+            }
+        }
+        serde_json::Value::Array(cases)
+    }
+
     fn fork_fixture() -> (String, String) {
         let manifest = serde_json::json!({
             "format_version": 1,
@@ -544,7 +887,10 @@ mod tests {
             "artifact_closure_digest": [5],
             "evaluator_digest": [6],
             "replay_claim": "exact",
-            "plugin_versions": {"world": "1"}
+            "plugin_versions": {"world": "1"},
+            "scenario_room_digest": [7],
+            "scheduler_digest": [8],
+            "budget_digest": [9]
         });
         let event = |seq, entity, event_type, payload_digest, causation_seq| {
             serde_json::json!({
@@ -568,7 +914,39 @@ mod tests {
             "uncertainty": [],
             "participant_views": [],
             "plugin_failures": [],
-            "consent_audit": {"subject": "s"}
+            "consent_audit": {"subject": "s"},
+            "contract": {
+                "scenario_room": {},
+                "plugin_boundary": {
+                    "manifest_version": 1,
+                    "plugin_id": "pigloros.wave8.proof-plugin",
+                    "world": "pigloros:plugin/community-plugin@0.1.0",
+                    "abi_major": 0,
+                    "min_abi_minor": 1,
+                    "max_abi_minor": 1,
+                    "wit_digest": [1],
+                    "component_digest": [1],
+                    "imported_interfaces": ["host-v1"],
+                    "exported_interfaces": ["guest-v1"],
+                    "network_allowed": false,
+                    "filesystem_allowed": false,
+                    "fresh_worker_required": true,
+                    "memory_bytes": 1,
+                    "fuel": 1,
+                    "host_call_limit": 1,
+                    "event_draft_limit": 1,
+                    "state_bytes_limit": 1,
+                    "observation_bytes_limit": 1,
+                    "manifest_digest": [1],
+                    "release_digest": [1]
+                },
+                "knowledge_snapshots": [],
+                "authorization_decisions": [],
+                "counterfactual": {},
+                "atomicity": [],
+                "conformance_report": {},
+                "non_interference": non_interference_fixture()
+            }
         });
         let mut counterfactual = baseline.clone();
         counterfactual["authoritative_events"] = serde_json::json!([
@@ -660,6 +1038,20 @@ mod tests {
     #[test]
     fn independently_rejects_kernel_boundaries() -> Result<(), ReferenceError> {
         let (baseline, counterfactual) = fork_fixture();
+        let mut noncontiguous = parse_json(&baseline)?;
+        noncontiguous["authoritative_events"][1]["seq"] = serde_json::json!(3);
+        noncontiguous["authoritative_events"][2]["seq"] = serde_json::json!(4);
+        assert!(matches!(
+            verify_fork_json(
+                &noncontiguous.to_string(),
+                &counterfactual,
+                "world.action.v1"
+            ),
+            Err(ReferenceError::InvalidForkEvidence(
+                "independent Event sequence is not contiguous"
+            ))
+        ));
+
         let mut incomplete_kernel = parse_json(&counterfactual)?;
         incomplete_kernel["authoritative_events"] = serde_json::json!([{
             "seq": 1,
@@ -698,6 +1090,20 @@ mod tests {
     #[test]
     fn independently_rejects_cyclic_and_copied_suffixes() -> Result<(), ReferenceError> {
         let (baseline, counterfactual) = fork_fixture();
+        let mut cyclic_tail = parse_json(&counterfactual)?;
+        cyclic_tail["authoritative_events"][2]["causation_seq"] = serde_json::json!(3);
+        let cyclic_result =
+            verify_fork_json(&baseline, &cyclic_tail.to_string(), "world.action.v1");
+        assert!(
+            matches!(
+                cyclic_result,
+                Err(ReferenceError::InvalidForkEvidence(
+                    "causal tail is incomplete"
+                ))
+            ),
+            "{cyclic_result:?}"
+        );
+
         let mut cycle_baseline = parse_json(&baseline)?;
         cycle_baseline["manifest"]["fork_cut_seq"] = serde_json::json!(3);
         array_mut(&mut cycle_baseline["authoritative_events"])?.extend([
@@ -761,6 +1167,73 @@ mod tests {
     #[test]
     fn rejects_malformed_reference_events_and_manifests() -> Result<(), ReferenceError> {
         let (baseline, counterfactual) = fork_fixture();
+        let mut missing_baseline_manifest = parse_json(&baseline)?;
+        missing_baseline_manifest["manifest"] = serde_json::Value::Null;
+        assert!(matches!(
+            verify_fork_json(
+                &missing_baseline_manifest.to_string(),
+                &counterfactual,
+                "world.action.v1"
+            ),
+            Err(ReferenceError::MissingField("manifest"))
+        ));
+
+        let mut missing_counterfactual_manifest = parse_json(&counterfactual)?;
+        missing_counterfactual_manifest["manifest"] = serde_json::Value::Null;
+        assert!(matches!(
+            verify_fork_json(
+                &baseline,
+                &missing_counterfactual_manifest.to_string(),
+                "world.action.v1"
+            ),
+            Err(ReferenceError::MissingField("manifest"))
+        ));
+
+        let mut missing_contract = parse_json(&baseline)?;
+        missing_contract["contract"] = serde_json::Value::Null;
+        let missing_contract_result = verify_fork_json(
+            &missing_contract.to_string(),
+            &counterfactual,
+            "world.action.v1",
+        );
+        assert!(
+            matches!(
+                missing_contract_result,
+                Err(ReferenceError::InvalidForkEvidence(
+                    "contract is not an object"
+                ))
+            ),
+            "{missing_contract_result:?}"
+        );
+
+        let mut invalid_boundary = parse_json(&baseline)?;
+        invalid_boundary["contract"]["plugin_boundary"] = serde_json::Value::Null;
+        assert!(matches!(
+            verify_fork_json(
+                &invalid_boundary.to_string(),
+                &counterfactual,
+                "world.action.v1"
+            ),
+            Err(ReferenceError::InvalidForkEvidence(
+                "contract shape is invalid"
+            ))
+        ));
+
+        let mut missing_matrix = parse_json(&baseline)?;
+        if let Some(contract) = missing_matrix["contract"].as_object_mut() {
+            contract.remove("non_interference");
+        }
+        assert!(matches!(
+            verify_fork_json(
+                &missing_matrix.to_string(),
+                &counterfactual,
+                "world.action.v1"
+            ),
+            Err(ReferenceError::InvalidForkEvidence(
+                "contract field is missing"
+            ))
+        ));
+
         let mut cases = Vec::new();
         cases.push(serde_json::json!("not-an-event"));
         cases.push(serde_json::json!({"entity": "body"}));
@@ -823,6 +1296,189 @@ mod tests {
                 "world.action.v1"
             ),
             Err(ReferenceError::UnexpectedField(field)) if field == "unknown"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_every_contract_and_matrix_shape_boundary() -> Result<(), ReferenceError> {
+        let (baseline, counterfactual) = fork_fixture();
+        let contract_fields = [
+            "scenario_room",
+            "plugin_boundary",
+            "knowledge_snapshots",
+            "authorization_decisions",
+            "counterfactual",
+            "atomicity",
+            "conformance_report",
+            "non_interference",
+        ];
+        for field in contract_fields {
+            let mut value = parse_json(&counterfactual)?;
+            object_mut(&mut value["contract"])?.remove(field);
+            assert!(matches!(
+                verify_fork_json(&baseline, &value.to_string(), "world.action.v1"),
+                Err(ReferenceError::InvalidForkEvidence(
+                    "contract field is missing"
+                ))
+            ));
+        }
+
+        for field in [
+            "scenario_room",
+            "plugin_boundary",
+            "counterfactual",
+            "conformance_report",
+            "knowledge_snapshots",
+            "authorization_decisions",
+            "atomicity",
+            "non_interference",
+        ] {
+            let mut value = parse_json(&counterfactual)?;
+            value["contract"][field] = serde_json::json!(true);
+            assert!(matches!(
+                verify_fork_json(&baseline, &value.to_string(), "world.action.v1"),
+                Err(ReferenceError::InvalidForkEvidence(
+                    "contract shape is invalid"
+                ))
+            ));
+        }
+        let mut unknown_contract = parse_json(&counterfactual)?;
+        unknown_contract["contract"]["unknown"] = serde_json::json!(true);
+        assert!(matches!(
+            verify_fork_json(&baseline, &unknown_contract.to_string(), "world.action.v1"),
+            Err(ReferenceError::InvalidForkEvidence(
+                "contract shape is invalid"
+            ))
+        ));
+
+        let boundary_fields = [
+            ("manifest_version", serde_json::json!(2)),
+            ("plugin_id", serde_json::json!("")),
+            (
+                "world",
+                serde_json::json!("pigloros:plugin/incorrect@0.1.0"),
+            ),
+            ("abi_major", serde_json::json!(1)),
+            ("min_abi_minor", serde_json::json!(2)),
+            ("max_abi_minor", serde_json::json!(2)),
+            ("imported_interfaces", serde_json::json!(["other"])),
+            ("exported_interfaces", serde_json::json!(["other"])),
+            ("network_allowed", serde_json::json!(true)),
+            ("filesystem_allowed", serde_json::json!(true)),
+            ("fresh_worker_required", serde_json::json!(false)),
+            ("wit_digest", serde_json::json!([])),
+            ("component_digest", serde_json::json!([])),
+            ("manifest_digest", serde_json::json!([])),
+            ("release_digest", serde_json::json!([])),
+        ];
+        for (field, invalid) in boundary_fields {
+            let mut value = parse_json(&counterfactual)?;
+            value["contract"]["plugin_boundary"][field] = invalid;
+            assert!(matches!(
+                verify_fork_json(&baseline, &value.to_string(), "world.action.v1"),
+                Err(ReferenceError::InvalidForkEvidence(
+                    "plugin boundary semantics are invalid"
+                ))
+            ));
+        }
+        let mut missing_boundary_field = parse_json(&counterfactual)?;
+        object_mut(&mut missing_boundary_field["contract"]["plugin_boundary"])?.remove("fuel");
+        assert!(matches!(
+            verify_fork_json(
+                &baseline,
+                &missing_boundary_field.to_string(),
+                "world.action.v1"
+            ),
+            Err(ReferenceError::InvalidForkEvidence(
+                "plugin boundary semantics are invalid"
+            ))
+        ));
+        let mut unknown_boundary_field = parse_json(&counterfactual)?;
+        unknown_boundary_field["contract"]["plugin_boundary"]["unknown"] = serde_json::json!(1);
+        assert!(matches!(
+            verify_fork_json(
+                &baseline,
+                &unknown_boundary_field.to_string(),
+                "world.action.v1"
+            ),
+            Err(ReferenceError::InvalidForkEvidence(
+                "plugin boundary semantics are invalid"
+            ))
+        ));
+
+        let matrix_cases = [
+            ("fixture_id", serde_json::json!("wrong")),
+            ("variant", serde_json::json!("wrong")),
+            ("mode", serde_json::json!("wrong")),
+            ("authoritative_equal", serde_json::json!(false)),
+            ("public_equal", serde_json::json!(false)),
+            ("operational_equal", serde_json::json!(false)),
+            ("control_input_digest", serde_json::json!([2])),
+            ("canary_input_digest", serde_json::json!([])),
+            ("authoritative_digest", serde_json::json!([])),
+            ("public_digest", serde_json::json!([])),
+            ("operational_digest", serde_json::json!([])),
+            ("provenance_digest", serde_json::json!([])),
+        ];
+        for (field, invalid) in matrix_cases {
+            let mut value = parse_json(&counterfactual)?;
+            value["contract"]["non_interference"][0][field] = invalid;
+            assert!(matches!(
+                verify_fork_json(&baseline, &value.to_string(), "world.action.v1"),
+                Err(ReferenceError::InvalidForkEvidence(
+                    "non-interference case is invalid"
+                ))
+            ));
+        }
+        let mut matrix_not_array = parse_json(&counterfactual)?;
+        matrix_not_array["contract"]["non_interference"] = serde_json::json!(true);
+        assert!(matches!(
+            verify_fork_json(&baseline, &matrix_not_array.to_string(), "world.action.v1"),
+            Err(ReferenceError::InvalidForkEvidence(
+                "contract shape is invalid"
+            ))
+        ));
+        let mut matrix_wrong_size = parse_json(&counterfactual)?;
+        matrix_wrong_size["contract"]["non_interference"] = serde_json::json!([]);
+        assert!(matches!(
+            verify_fork_json(&baseline, &matrix_wrong_size.to_string(), "world.action.v1"),
+            Err(ReferenceError::InvalidForkEvidence(
+                "non-interference matrix has the wrong size"
+            ))
+        ));
+        let mut matrix_not_object = parse_json(&counterfactual)?;
+        matrix_not_object["contract"]["non_interference"][0] = serde_json::json!(true);
+        assert!(matches!(
+            verify_fork_json(&baseline, &matrix_not_object.to_string(), "world.action.v1"),
+            Err(ReferenceError::InvalidForkEvidence(
+                "non-interference case is not an object"
+            ))
+        ));
+        let mut matrix_missing_field = parse_json(&counterfactual)?;
+        object_mut(&mut matrix_missing_field["contract"]["non_interference"][0])?
+            .remove("fixture_id");
+        assert!(matches!(
+            verify_fork_json(
+                &baseline,
+                &matrix_missing_field.to_string(),
+                "world.action.v1"
+            ),
+            Err(ReferenceError::InvalidForkEvidence(
+                "non-interference case is invalid"
+            ))
+        ));
+        let mut matrix_unknown_field = parse_json(&counterfactual)?;
+        matrix_unknown_field["contract"]["non_interference"][0]["unknown"] = serde_json::json!(1);
+        assert!(matches!(
+            verify_fork_json(
+                &baseline,
+                &matrix_unknown_field.to_string(),
+                "world.action.v1"
+            ),
+            Err(ReferenceError::InvalidForkEvidence(
+                "non-interference case is invalid"
+            ))
         ));
         Ok(())
     }

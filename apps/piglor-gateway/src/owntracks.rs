@@ -892,6 +892,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_tests {
     trait TestResultExt<T, E> {
         fn test_ok(self) -> Result<T, Box<dyn std::error::Error>>;
@@ -942,5 +943,226 @@ mod coverage_tests {
         std::fs::remove_dir_all(directory).test_ok()?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod coverage_entrypoints {
+    use super::*;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn test_ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+        result.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("unexpected coverage error: {error:?}")))
+        })
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn expect_err<T, E: std::fmt::Debug>(result: Result<T, E>) {
+        if result.is_ok() {
+            std::panic::resume_unwind(Box::new("expected a fail-closed error"));
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn expect_equal<T: PartialEq + std::fmt::Debug>(left: T, right: T) {
+        if left != right {
+            std::panic::resume_unwind(Box::new(format!(
+                "coverage fixture values differed: {left:?} != {right:?}"
+            )));
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn temporary_directory(label: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "piglor-gateway-owntracks-entry-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        test_ok(std::fs::create_dir(&path));
+        path
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn policy_text() -> &'static str {
+        "schema_version = 1\nconsent_identity = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\nconsent_revision = 1\npolicy_version = 1\nbinding_revision = 1\nwithdrawn = false\npurpose = \"local_pairing\"\nprecision = \"exact\"\nsource_time_bucket = \"minute\"\nvisibility = \"paired_devices_only\"\n"
+    }
+
+    #[test]
+    fn command_entrypoints_fail_closed_at_each_local_boundary() {
+        let directory = temporary_directory("commands");
+        let database = directory.join("enrollment.db");
+        let policy = directory.join("consent.toml");
+        test_ok(std::fs::write(&policy, policy_text()));
+        let timeline = TimelineId::new().to_string();
+        let entity = EntityId::new().to_string();
+
+        expect_err(execute(&[
+            "pair".to_owned(),
+            database.display().to_string(),
+            directory.join("owner.key").display().to_string(),
+            "--consent-policy".to_owned(),
+            directory.join("missing.toml").display().to_string(),
+            timeline.clone(),
+            entity.clone(),
+        ]));
+        expect_err(execute(&[
+            "pair".to_owned(),
+            database.display().to_string(),
+            directory.join("owner.key").display().to_string(),
+            "--consent-policy".to_owned(),
+            policy.display().to_string(),
+            "bad-timeline".to_owned(),
+            entity.clone(),
+        ]));
+
+        let unsafe_parent = directory.join("unsafe");
+        test_ok(std::fs::create_dir(&unsafe_parent));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = test_ok(std::fs::metadata(&unsafe_parent)).permissions();
+            permissions.set_mode(0o777);
+            test_ok(std::fs::set_permissions(&unsafe_parent, permissions));
+        }
+        expect_err(execute(&[
+            "pair".to_owned(),
+            database.display().to_string(),
+            unsafe_parent.join("owner.key").display().to_string(),
+            "--consent-policy".to_owned(),
+            policy.display().to_string(),
+            timeline.clone(),
+            entity.clone(),
+        ]));
+
+        let directory_path = directory.join("database-directory");
+        test_ok(std::fs::create_dir(&directory_path));
+        expect_err(execute(&[
+            "status".to_owned(),
+            directory_path.display().to_string(),
+        ]));
+        expect_err(execute(&[
+            "pair".to_owned(),
+            directory_path.display().to_string(),
+            directory.join("owner.key").display().to_string(),
+            "--consent-policy".to_owned(),
+            policy.display().to_string(),
+            timeline,
+            entity,
+        ]));
+        expect_err(execute(&[
+            "rotate".to_owned(),
+            database.display().to_string(),
+            directory.join("missing.key").display().to_string(),
+        ]));
+        expect_err(execute(&[
+            "revoke".to_owned(),
+            database.display().to_string(),
+        ]));
+        expect_err(execute(&["unknown".to_owned()]));
+
+        test_ok(std::fs::remove_dir_all(directory));
+    }
+
+    #[test]
+    fn active_enrollment_commands_cover_terminal_states() {
+        let directory = temporary_directory("active");
+        let database = directory.join("enrollment.db");
+        let policy = directory.join("consent.toml");
+        let owner_key = directory.join("owner.key");
+        test_ok(std::fs::write(&policy, policy_text()));
+        let mut store = test_ok(pos_store::sqlite::SqliteStore::open(
+            &database.display().to_string(),
+        ));
+        let timeline = test_ok(pos_core::EventStore::create_timeline(
+            &mut store,
+            "active-enrollment",
+        ));
+        test_ok(
+            pos_core::OwnTracksEnrollmentStore::pair_owntracks_enrollment(
+                &mut store,
+                pos_core::OwnTracksEnrollmentRequestV1::new(
+                    timeline.id(),
+                    pos_core::EntityId::new(),
+                    pos_core::GeoLocationAdmissionFenceV1::new(
+                        1,
+                        ([1; 32], 1, [2; 32]),
+                        (1, false, 1),
+                    ),
+                    [3; 32],
+                ),
+            ),
+        );
+        drop(store);
+
+        expect_err(execute(&[
+            "pair".to_owned(),
+            database.display().to_string(),
+            owner_key.display().to_string(),
+            "--consent-policy".to_owned(),
+            policy.display().to_string(),
+            timeline.id().to_string(),
+            pos_core::EntityId::new().to_string(),
+        ]));
+        let _ = test_ok(execute(&[
+            "status".to_owned(),
+            database.display().to_string(),
+        ]));
+        test_ok(create_or_load_owner_key(&owner_key));
+        let _ = test_ok(execute(&[
+            "rotate".to_owned(),
+            database.display().to_string(),
+            owner_key.display().to_string(),
+        ]));
+        let _ = test_ok(execute(&[
+            "revoke".to_owned(),
+            database.display().to_string(),
+        ]));
+        let _ = test_ok(execute(&[
+            "status".to_owned(),
+            database.display().to_string(),
+        ]));
+        expect_err(execute(&[
+            "rotate".to_owned(),
+            database.display().to_string(),
+            owner_key.display().to_string(),
+        ]));
+
+        test_ok(std::fs::remove_dir_all(directory));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_key_entrypoints_cover_missing_malformed_and_unsafe_paths() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = temporary_directory("keys");
+        let key_path = directory.join("owner.key");
+        let key = test_ok(create_or_load_owner_key(&key_path));
+        expect_equal(test_ok(load_owner_key(&key_path)), key);
+        expect_err(load_owner_key(&directory.join("missing.key")));
+
+        let malformed = directory.join("malformed.key");
+        test_ok(std::fs::write(&malformed, [0_u8; 31]));
+        let mut permissions = test_ok(std::fs::metadata(&malformed)).permissions();
+        permissions.set_mode(0o600);
+        test_ok(std::fs::set_permissions(&malformed, permissions));
+        expect_err(load_owner_key(&malformed));
+
+        let unsafe_parent = directory.join("unsafe");
+        test_ok(std::fs::create_dir(&unsafe_parent));
+        let mut permissions = test_ok(std::fs::metadata(&unsafe_parent)).permissions();
+        permissions.set_mode(0o777);
+        test_ok(std::fs::set_permissions(&unsafe_parent, permissions));
+        expect_err(create_or_load_owner_key(&unsafe_parent.join("owner.key")));
+        expect_err(create_or_load_owner_key(
+            &directory.join("missing-parent").join("owner.key"),
+        ));
+
+        test_ok(std::fs::remove_dir_all(directory));
     }
 }

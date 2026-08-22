@@ -9,6 +9,7 @@
 pub mod executor;
 mod http;
 pub mod ledger_config;
+pub mod owntracks;
 pub mod owntracks_http;
 
 pub use http::{router, router_for_addr, spectator_router, AppState};
@@ -57,6 +58,7 @@ pub struct LedgerEntryView {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_tests {
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
@@ -816,12 +818,19 @@ impl From<executor::StoreExecutorError> for GatewayError {
 fn accepted_event_coordinates(
     outcome: &GeoLocationAdmissionOutcome,
 ) -> Result<(EventId, Seq), GatewayError> {
-    let event_id = outcome.event_id().ok_or_else(|| {
+    checked_event_coordinates(outcome.event_id(), outcome.event_seq())
+}
+
+fn checked_event_coordinates(
+    event_id: Option<EventId>,
+    seq: Option<Seq>,
+) -> Result<(EventId, Seq), GatewayError> {
+    let event_id = event_id.ok_or_else(|| {
         GatewayError::Store(CoreError::Storage(
             "accepted geographic admission is missing its Event ID".to_owned(),
         ))
     })?;
-    let seq = outcome.event_seq().ok_or_else(|| {
+    let seq = seq.ok_or_else(|| {
         GatewayError::Store(CoreError::Storage(
             "accepted geographic admission is missing its Event sequence".to_owned(),
         ))
@@ -987,17 +996,12 @@ impl Gateway {
                 timeline,
                 entity,
             } => {
-                if admission.is_accepted() {
+                let result = classify_owntracks_admission(&admission)?;
+                if matches!(result, OwnTracksIngressResult::Accepted) {
                     let (event_id, seq) = accepted_event_coordinates(&admission)?;
                     self.publish_geographic_notice(timeline, event_id, entity, seq);
-                    Ok(OwnTracksIngressResult::Accepted)
-                } else if admission.is_duplicate() {
-                    Ok(OwnTracksIngressResult::Duplicate)
-                } else if admission.is_conflict() {
-                    Ok(OwnTracksIngressResult::Conflict)
-                } else {
-                    Ok(OwnTracksIngressResult::Unavailable)
                 }
+                Ok(result)
             }
         }
     }
@@ -1575,12 +1579,17 @@ fn parse_entity_id(s: &str) -> Result<EntityId, GatewayError> {
 
 fn json_to_cbor(value: &serde_json::Value) -> Result<CanonicalBytes, GatewayError> {
     let mut buf = Vec::new();
-    ciborium::into_writer(value, &mut buf).map_err(|error| {
-        GatewayError::Store(CoreError::Storage(format!(
-            "JSON-to-CBOR encoding failed: {error}"
-        )))
-    })?;
+    // `Vec<u8>` is an infallible CBOR sink; JSON values have no fallible
+    // serializer hooks at this boundary.
+    drop(ciborium::into_writer(value, &mut buf));
     Ok(CanonicalBytes::from_vec(buf))
+}
+
+fn serialized_json_len(value: &serde_json::Value) -> usize {
+    let mut bytes = Vec::new();
+    // `serde_json::Value` writes into `Vec<u8>` without an I/O failure mode.
+    let _result = serde_json::to_writer(&mut bytes, value);
+    bytes.len()
 }
 
 /// Serialize the exact wire fields derived from a draft, using the longest
@@ -1595,16 +1604,11 @@ fn draft_event_response_len(draft: &EventDraft) -> Result<usize, GatewayError> {
         payload: decode_cbor_json(payload),
         payload_hex: hex_encode(payload),
     };
-    serde_json::to_vec(&serde_json::json!({
+    let value = serde_json::json!({
         "events": [view],
         "next_from_seq": u64::MAX,
-    }))
-    .map(|bytes| bytes.len())
-    .map_err(|error| {
-        GatewayError::Store(CoreError::Storage(format!(
-            "EventView serialization failed: {error}"
-        )))
-    })
+    });
+    Ok(serialized_json_len(&value))
 }
 
 /// Request body for `POST /v1/timelines`.
@@ -1705,6 +1709,43 @@ impl TryFrom<&Event> for EventView {
     }
 }
 
+fn classify_owntracks_admission(
+    admission: &GeoLocationAdmissionOutcome,
+) -> Result<OwnTracksIngressResult, GatewayError> {
+    if admission.is_accepted() {
+        let _ = accepted_event_coordinates(admission)?;
+        Ok(OwnTracksIngressResult::Accepted)
+    } else if admission.is_duplicate() {
+        Ok(OwnTracksIngressResult::Duplicate)
+    } else if admission.is_conflict() {
+        Ok(OwnTracksIngressResult::Conflict)
+    } else {
+        Ok(OwnTracksIngressResult::Unavailable)
+    }
+}
+
+fn event_view_json(view: &EventView) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    object.insert("id".to_owned(), serde_json::Value::String(view.id.clone()));
+    object.insert(
+        "entity".to_owned(),
+        serde_json::Value::String(view.entity.clone()),
+    );
+    object.insert(
+        "event_type".to_owned(),
+        serde_json::Value::String(view.event_type.clone()),
+    );
+    object.insert("seq".to_owned(), serde_json::json!(view.seq));
+    if let Some(payload) = &view.payload {
+        object.insert("payload".to_owned(), payload.clone());
+    }
+    object.insert(
+        "payload_hex".to_owned(),
+        serde_json::Value::String(view.payload_hex.clone()),
+    );
+    serde_json::Value::Object(object)
+}
+
 fn decode_cbor_json(bytes: &[u8]) -> Option<serde_json::Value> {
     ciborium::from_reader(bytes).ok()
 }
@@ -1761,6 +1802,7 @@ mod tests {
         clock::{Seq, WallTime},
         crypto::Hash,
         event::SchemaVersion,
+        geo_admission::GeoLocationAdmissionIntentV1,
         ids::EventId,
         store::{export_timeline_own, import_timeline_with_id},
         timeline::TimelineMeta,
@@ -1882,6 +1924,19 @@ mod tests {
                 )
                 .await,
             Err(GatewayError::InvalidId(_))
+        ));
+        assert!(matches!(
+            gateway
+                .submit_identified_json_action(
+                    &TimelineId::new().to_string(),
+                    &actor.to_string(),
+                    EVENT_TYPE_ACTION,
+                    &serde_json::json!({}),
+                    "world.action.submit",
+                    "missing-timeline",
+                )
+                .await,
+            Err(GatewayError::Store(CoreError::TimelineNotFound(_)))
         ));
         assert!(matches!(
             gateway
@@ -3472,6 +3527,47 @@ mod tests {
             .test_err();
         assert!(matches!(err, GatewayError::InvalidId(_)));
         drop(gw);
+    }
+
+    #[test]
+    fn accepted_coordinate_validation_reports_missing_metadata() {
+        assert!(matches!(
+            checked_event_coordinates(None, Some(Seq::from_u64(1))),
+            Err(GatewayError::Store(CoreError::Storage(_)))
+        ));
+        assert!(matches!(
+            checked_event_coordinates(Some(EventId::new()), None),
+            Err(GatewayError::Store(CoreError::Storage(_)))
+        ));
+
+        let accepted = GeoLocationAdmissionOutcome::accepted(EventId::new(), Seq::from_u64(1));
+        assert!(matches!(
+            classify_owntracks_admission(&accepted),
+            Ok(OwnTracksIngressResult::Accepted)
+        ));
+        let retained = GeoLocationAdmissionIntentV1::from_owner_keyed_bytes([1; 32]);
+        let duplicate = GeoLocationAdmissionOutcome::classify_retained_intent(
+            retained,
+            retained,
+            EventId::new(),
+        );
+        assert!(matches!(
+            classify_owntracks_admission(&duplicate),
+            Ok(OwnTracksIngressResult::Duplicate)
+        ));
+        let conflict = GeoLocationAdmissionOutcome::classify_retained_intent(
+            retained,
+            GeoLocationAdmissionIntentV1::from_owner_keyed_bytes([2; 32]),
+            EventId::new(),
+        );
+        assert!(matches!(
+            classify_owntracks_admission(&conflict),
+            Ok(OwnTracksIngressResult::Conflict)
+        ));
+        assert!(matches!(
+            classify_owntracks_admission(&GeoLocationAdmissionOutcome::unavailable()),
+            Ok(OwnTracksIngressResult::Unavailable)
+        ));
     }
 
     #[tokio::test]

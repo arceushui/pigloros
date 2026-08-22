@@ -37,6 +37,7 @@ pub enum FaultStage {
 }
 
 #[cfg(all(test, unix))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod injected_fault {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;

@@ -89,9 +89,9 @@ codegen-units = 1
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
-warnings = { level = "deny", priority = -2 }
-future_incompatible = { level = "deny", priority = -1 }
-rust_2024_compatibility = { level = "deny", priority = -1 }
+warnings = "deny"
+future_incompatible = "deny"
+rust_2024_compatibility = "deny"
 unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(coverage_nightly)",
   "cfg(coverage)",

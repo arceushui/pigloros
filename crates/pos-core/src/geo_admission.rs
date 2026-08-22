@@ -631,6 +631,7 @@ impl GeoLocationAdmissionOutcome {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::{EntityId, EventId, Seq, TimelineId};
@@ -855,5 +856,13 @@ mod tests {
         assert!(link
             .validate_for(&snapshot, timeline, EventId::new(), event_seq)
             .is_err());
+    }
+
+    #[test]
+    fn snapshot_exposes_its_immutable_consent() {
+        let admission_request = request(TimelineId::new());
+        let snapshot = admission_request.snapshot();
+        assert_eq!(snapshot.consent().policy_version(), 1);
+        assert_eq!(snapshot.consent().admission_epoch(), 9);
     }
 }

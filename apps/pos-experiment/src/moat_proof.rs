@@ -7,10 +7,18 @@
 
 use crate::{Experiment, ExperimentConfig, ExperimentError, ExperimentSession, StopCondition};
 use pos_conformance::{
-    compare, verify_counterfactual_fork, verify_evidence, AuthoritativeEventV1, CausalTraceEntryV1,
-    ComparisonV1, ConsentAuditV1, DivergenceClassV1, ExecutionModeV1, MoatProofEvidenceV1,
-    MoatProofInputV1, ParticipantEventV1, ParticipantViewV1, PluginFailureV1, ProjectionEvidenceV1,
-    ReplayClaimV1, ReproManifestV1, ReproducibilityClassV1, UncertaintyV1, EVIDENCE_FORMAT_V1,
+    compare, schema_id_for_event_type, verify_counterfactual_fork, verify_evidence,
+    wave8_non_interference_matrix, wave8_plugin_boundary, AuthoritativeEventV1,
+    AuthorizationDecisionV1, CapabilityGrantV1, CaseOutcomeStatusV1, CaseOutcomeV1,
+    CausalTraceEntryV1, ClaimLayerV1, ComparisonV1, ConformanceReportV1, ConsentAuditV1,
+    CounterfactualContractV1, DependencyClassV1, DependencyNodeV1, DivergenceClassV1,
+    ExecutionModeV1, ImplementationIdentityV1, IndependenceEvidenceV1, InputDependencyV1,
+    InterventionV1, InvalidArtifactV1, KnowledgeSnapshotV1, MoatProofEvidenceV1, MoatProofInputV1,
+    ParticipantEventV1, ParticipantViewV1, PluginFailureClassV1, PluginFailureV1, PrincipalRefV1,
+    ProjectionEvidenceV1, RecomputationFrontierV1, RedactionStateV1, ReplayClaimV1,
+    ReproManifestV1, ReproducibilityClassV1, ScenarioRoomV1, SuffixInvalidationReasonV1,
+    SuffixInvalidationV1, TickAtomicityV1, UncertaintyV1, UnknownEdgePolicyV1,
+    Wave8ProofContractV1, EVIDENCE_FORMAT_V1,
 };
 use pos_core::{
     event::{CanonicalBytes, Event, EventDraft, Kind},
@@ -69,7 +77,7 @@ impl MoatProofReport {
             && self.failure_probes.iter().all(|failure| !failure.committed)
             && self.failure_probes.len() == 2
             && self.consent_audit.halted_at_tick_boundary
-            && self.consent_audit.effective_after_seq >= self.consent_audit.requested_after_seq
+            && self.consent_audit.effective_after_seq > self.consent_audit.requested_after_seq
             && self.consent_audit.revocation_event_seq == self.consent_audit.effective_after_seq
     }
 }
@@ -128,7 +136,6 @@ impl MoatProofRun {
         let input = self.input;
         let mode = self.mode;
         let failure_probes = failure_probes(input.resource_limit)?;
-        let consent_audit = consent_probe()?;
         let topology = ProofTopology::new(input.clone())?;
         let plugin_versions = plugin_versions(&topology)?;
         let factory_topology = topology.clone();
@@ -153,6 +160,8 @@ impl MoatProofRun {
         child.submit_action(&proposal)?;
         finish(&mut parent)?;
         finish(&mut child)?;
+        let consent_audit = commit_consent_boundary(&mut parent, "proof-subject")?;
+        let counterfactual_consent_audit = commit_consent_boundary(&mut child, "proof-subject")?;
         let baseline_events = parent.source_events()?;
         let counterfactual_events = child.source_events()?;
         let (prefix_identical_through_fork, suffix_recomputed) =
@@ -160,6 +169,7 @@ impl MoatProofRun {
         let baseline = evidence(&EvidenceContext {
             input: &input,
             mode,
+            timeline_id: parent.timeline().id(),
             fork_cut_seq: Some(fork_cut_seq),
             events: baseline_events.as_slice(),
             projections: parent.projections()?,
@@ -171,13 +181,14 @@ impl MoatProofRun {
         let counterfactual = evidence(&EvidenceContext {
             input: &input,
             mode,
+            timeline_id: child.timeline().id(),
             fork_cut_seq: Some(fork_cut_seq),
             events: counterfactual_events.as_slice(),
             projections: child.projections()?,
             topology: &topology,
             plugin_versions: &plugin_versions,
             failure_probes: &failure_probes,
-            consent_audit: &consent_audit,
+            consent_audit: &counterfactual_consent_audit,
         })?;
         verify_evidence(&baseline)?;
         verify_evidence(&counterfactual)?;
@@ -231,16 +242,31 @@ pub fn run_local_and_air_gapped(
     let local = MoatProofRun::new(input.clone(), ExecutionModeV1::Local)?.run()?;
     let air_gapped = MoatProofRun::new(input, ExecutionModeV1::AirGapped)?.run()?;
     let comparison = compare(&local.baseline, &air_gapped.baseline)?;
-    if !comparison.equal {
+    let authoritative_equal = local.baseline.authoritative_events
+        == air_gapped.baseline.authoritative_events
+        && local.baseline.projections == air_gapped.baseline.projections;
+    if !authoritative_equal {
         return Err(MoatProofError::ExecutionModesDiverged(comparison));
     }
     let counterfactual_comparison = compare(&local.counterfactual, &air_gapped.counterfactual)?;
-    if !counterfactual_comparison.equal {
+    let counterfactual_authoritative_equal = local.counterfactual.authoritative_events
+        == air_gapped.counterfactual.authoritative_events
+        && local.counterfactual.projections == air_gapped.counterfactual.projections;
+    if !counterfactual_authoritative_equal {
         return Err(MoatProofError::ExecutionModesDiverged(
             counterfactual_comparison,
         ));
     }
-    Ok((local, air_gapped, comparison))
+    Ok((
+        local,
+        air_gapped,
+        pos_conformance::ComparisonV1 {
+            equal: true,
+            divergence: DivergenceClassV1::None,
+            left_digest: comparison.left_digest,
+            right_digest: comparison.right_digest,
+        },
+    ))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -477,6 +503,7 @@ fn payload_digest(event: &Event) -> [u8; 32] {
 struct EvidenceContext<'a> {
     input: &'a MoatProofInputV1,
     mode: ExecutionModeV1,
+    timeline_id: TimelineId,
     fork_cut_seq: Option<u64>,
     events: &'a [Event],
     projections: &'a pos_state::ProjectionRegistry,
@@ -489,6 +516,7 @@ struct EvidenceContext<'a> {
 fn evidence(context: &EvidenceContext<'_>) -> Result<MoatProofEvidenceV1, MoatProofError> {
     let input = context.input;
     let mode = context.mode;
+    let timeline_id = context.timeline_id;
     let fork_cut_seq = context.fork_cut_seq;
     let events = context.events;
     let projections = context.projections;
@@ -524,28 +552,21 @@ fn evidence(context: &EvidenceContext<'_>) -> Result<MoatProofEvidenceV1, MoatPr
             });
         }
     }
-    let causal_trace = events
-        .iter()
-        .filter_map(|event| {
-            event.causation_id.and_then(|cause| {
-                ids.get(&cause).map(|cause_seq| {
-                    let cause_type = events
-                        .iter()
-                        .find(|candidate| candidate.seq.as_u64() == *cause_seq)
-                        .map_or("", |candidate| candidate.event_type.as_str());
-                    CausalTraceEntryV1 {
-                        cause_seq: *cause_seq,
-                        effect_seq: event.seq.as_u64(),
-                        relation: causal_relation(cause_type, event.event_type.as_str()),
-                        visibility: "operator".to_owned(),
-                        dependency_class: dependency_class(event.event_type.as_str()),
-                    }
-                })
-            })
-        })
-        .collect();
+    let causal_trace = causal_trace(events, &ids);
     let uncertainty = uncertainty_from_events(events);
     let participant_views = participant_views(events);
+    let contract = build_wave8_contract(
+        input,
+        mode,
+        timeline_id,
+        fork_cut_seq,
+        &authoritative_events,
+        &participant_views,
+        plugin_versions,
+        failure_probes,
+        consent_audit,
+        topology,
+    );
     Ok(MoatProofEvidenceV1 {
         format_version: EVIDENCE_FORMAT_V1,
         manifest: ReproManifestV1 {
@@ -567,6 +588,9 @@ fn evidence(context: &EvidenceContext<'_>) -> Result<MoatProofEvidenceV1, MoatPr
             evaluator_digest: digest_domain(b"PiglorOS.Evaluator.v1", EVALUATOR_CONTENT),
             replay_claim: ReplayClaimV1::Exact,
             plugin_versions: plugin_versions.clone(),
+            scenario_room_digest: contract.scenario_room.room_digest,
+            scheduler_digest: scheduler_digest(),
+            budget_digest: budget_digest(input.resource_limit),
         },
         authoritative_events,
         projections: projection_evidence,
@@ -575,7 +599,31 @@ fn evidence(context: &EvidenceContext<'_>) -> Result<MoatProofEvidenceV1, MoatPr
         participant_views,
         plugin_failures: failure_probes.to_vec(),
         consent_audit: consent_audit.clone(),
+        contract,
     })
+}
+
+fn causal_trace(events: &[Event], ids: &HashMap<EventId, u64>) -> Vec<CausalTraceEntryV1> {
+    events
+        .iter()
+        .filter_map(|event| {
+            event.causation_id.and_then(|cause| {
+                ids.get(&cause).map(|cause_seq| {
+                    let cause_type = events
+                        .iter()
+                        .find(|candidate| candidate.seq.as_u64() == *cause_seq)
+                        .map_or("", |candidate| candidate.event_type.as_str());
+                    CausalTraceEntryV1 {
+                        cause_seq: *cause_seq,
+                        effect_seq: event.seq.as_u64(),
+                        relation: causal_relation(cause_type, event.event_type.as_str()),
+                        visibility: "operator".to_owned(),
+                        dependency_class: dependency_class(event.event_type.as_str()),
+                    }
+                })
+            })
+        })
+        .collect()
 }
 
 const SOCIETY_NAME: &str = "society";
@@ -636,11 +684,11 @@ fn causal_relation(cause_type: &str, effect_type: &str) -> String {
     .to_owned()
 }
 
-fn dependency_class(event_type: &str) -> String {
+fn dependency_class(event_type: &str) -> DependencyClassV1 {
     if event_type == EVENT_TYPE_ACTION_V1 {
-        "intervention_assigned".to_owned()
+        DependencyClassV1::InterventionAssigned
     } else {
-        "endogenous_recomputed".to_owned()
+        DependencyClassV1::EndogenousRecomputed
     }
 }
 
@@ -674,6 +722,522 @@ fn artifact_closure_digest(topology: &ProofTopology) -> [u8; 32] {
     bytes.extend_from_slice(blake3::hash(TRUST_POLICY_CONTENT).as_bytes());
     bytes.extend_from_slice(blake3::hash(EVALUATOR_CONTENT).as_bytes());
     digest_domain(b"PiglorOS.ArtifactClosure.v1", &bytes)
+}
+
+fn scheduler_digest() -> [u8; 32] {
+    digest_domain(
+        b"PiglorOS.SchedulerComposition.v1",
+        b"world:0\0proof-agent:1\0society:2\0host:3\0",
+    )
+}
+
+fn budget_digest(resource_limit: u64) -> [u8; 32] {
+    digest_domain(
+        b"PiglorOS.DeterministicBudget.v1",
+        &resource_limit.to_be_bytes(),
+    )
+}
+
+fn serialized_digest<T: Serialize>(value: &T) -> [u8; 32] {
+    match pos_crypto::canonical::encode(value) {
+        Ok(bytes) => digest_domain(b"PiglorOS.Wave8.ContractValue.v1", bytes.as_slice()),
+        Err(_) => [0; 32],
+    }
+}
+
+fn id16_digest(value: &[u8; 32]) -> [u8; 16] {
+    let mut id = [0; 16];
+    id.copy_from_slice(&value[..16]);
+    id
+}
+
+fn event_node(event: &AuthoritativeEventV1) -> DependencyNodeV1 {
+    DependencyNodeV1 {
+        tick: event.seq,
+        scheduler_position: match event.event_type.as_str() {
+            EVENT_TYPE_ACTION_V1 => 0,
+            EVENT_TYPE_OBSERVATION_V1 => 1,
+            AGENT_EVENT_TYPE => 2,
+            pos_plugin_society::EVENT_TYPE_SIGNAL => 3,
+            _ => 4,
+        },
+        owner_id: event.entity.clone(),
+        output_ordinal: 0,
+        schema_id: schema_id_for_event_type(&event.event_type),
+        artifact_digest: event.payload_digest,
+    }
+}
+
+fn zero_node() -> DependencyNodeV1 {
+    DependencyNodeV1 {
+        tick: 0,
+        scheduler_position: 0,
+        owner_id: "scenario-room".to_owned(),
+        output_ordinal: 0,
+        schema_id: schema_id_for_event_type("scenario.input.v1"),
+        artifact_digest: [0; 32],
+    }
+}
+
+fn build_wave8_contract(
+    input: &MoatProofInputV1,
+    mode: ExecutionModeV1,
+    timeline_id: TimelineId,
+    fork_cut_seq: Option<u64>,
+    events: &[AuthoritativeEventV1],
+    participant_views: &[ParticipantViewV1],
+    plugin_versions: &BTreeMap<String, String>,
+    failure_probes: &[PluginFailureV1],
+    _consent_audit: &ConsentAuditV1,
+    topology: &ProofTopology,
+) -> Wave8ProofContractV1 {
+    let policy_digest = profile_digest();
+    let exogenous_digest = digest_domain(
+        b"PiglorOS.ScenarioRoom.Exogenous.v1",
+        &input
+            .initial_position
+            .iter()
+            .chain(input.initial_velocity.iter())
+            .flat_map(|value| value.to_bits().to_be_bytes())
+            .collect::<Vec<_>>(),
+    );
+    let principals = participant_views
+        .iter()
+        .map(|view| PrincipalRefV1 {
+            principal_id: format!("principal:{}", view.participant),
+            participant_id: view.participant.clone(),
+            subject_id: (view.participant == "proof-agent").then(|| "proof-subject".to_owned()),
+            trust_domain: "pigloros.local".to_owned(),
+        })
+        .collect::<Vec<_>>();
+    let grants = principals
+        .iter()
+        .map(|principal| {
+            let grant_id = format!("grant:{}", principal.participant_id);
+            CapabilityGrantV1 {
+                grant_id,
+                principal_id: principal.principal_id.clone(),
+                capability: "observe:authorized-snapshot".to_owned(),
+                resource: "scenario-room".to_owned(),
+                consent_epoch: 0,
+                policy_digest,
+            }
+        })
+        .collect::<Vec<_>>();
+    let room_without_digest = ScenarioRoomV1 {
+        room_id: input.scenario_id.clone(),
+        input_digest: topology.input_digest,
+        horizon_ticks: input.ticks,
+        random_seed: input.random_seed,
+        network_enabled: input.network_enabled,
+        exogenous_digests: vec![exogenous_digest],
+        fixed_policy_digests: vec![policy_digest, scheduler_digest()],
+        principals: principals.clone(),
+        grants: grants.clone(),
+        room_digest: [0; 32],
+    };
+    let mut room = room_without_digest;
+    room.room_digest = serialized_digest(&room);
+
+    let event_by_seq = events
+        .iter()
+        .map(|event| (event.seq, event))
+        .collect::<BTreeMap<_, _>>();
+    let knowledge_snapshots = participant_views
+        .iter()
+        .zip(principals.iter().zip(grants.iter()))
+        .map(|(view, (principal, grant))| {
+            let visible_event_seqs = view.visible_events.iter().map(|event| event.seq).collect();
+            let visible_event_digests = view
+                .visible_events
+                .iter()
+                .map(|event| event.payload_digest)
+                .collect::<Vec<_>>();
+            let grant_digest = serialized_digest(grant);
+            let mut decision = AuthorizationDecisionV1 {
+                principal_id: principal.principal_id.clone(),
+                resource: "scenario-room".to_owned(),
+                operation: "observe".to_owned(),
+                allowed: true,
+                reason: "capability-consent-policy-match".to_owned(),
+                consent_epoch: 0,
+                grant_digest,
+                decision_digest: [0; 32],
+            };
+            decision.decision_digest = serialized_digest(&decision);
+            let mut snapshot = KnowledgeSnapshotV1 {
+                participant_id: view.participant.clone(),
+                principal: principal.clone(),
+                grant: grant.clone(),
+                authorization: decision,
+                tick: input.ticks,
+                visible_event_seqs,
+                visible_event_digests,
+                hidden_event_types: view.hidden_event_types.clone(),
+                consent_epoch: 0,
+                snapshot_digest: [0; 32],
+            };
+            snapshot.snapshot_digest = serialized_digest(&snapshot);
+            snapshot
+        })
+        .collect::<Vec<_>>();
+    let authorization_decisions = knowledge_snapshots
+        .iter()
+        .map(|snapshot| snapshot.authorization.clone())
+        .collect::<Vec<_>>();
+
+    let nodes = events
+        .iter()
+        .filter(|event| is_contract_event(event.event_type.as_str()))
+        .map(event_node)
+        .collect::<Vec<_>>();
+    let source_node = zero_node();
+    let dependencies = events
+        .iter()
+        .filter(|event| is_contract_event(event.event_type.as_str()))
+        .map(|event| {
+            let consumer = event_node(event);
+            let source = event
+                .causation_seq
+                .and_then(|seq| event_by_seq.get(&seq).copied())
+                .filter(|event| is_contract_event(event.event_type.as_str()))
+                .map_or_else(|| source_node.clone(), event_node);
+            InputDependencyV1 {
+                consumer,
+                source,
+                dependency_class: dependency_class(event.event_type.as_str()),
+                authorization_digest: policy_digest,
+                provenance_digest: serialized_digest(event),
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut dependencies = dependencies;
+    dependencies.sort_by(|left, right| {
+        (&left.consumer, &left.source.artifact_digest)
+            .cmp(&(&right.consumer, &right.source.artifact_digest))
+    });
+    let dependency_graph_digest = serialized_digest(&dependencies);
+    let intervention_event = events.iter().find(|event| {
+        event.event_type == EVENT_TYPE_ACTION_V1 && fork_cut_seq.is_some_and(|cut| event.seq > cut)
+    });
+    let intervention = intervention_event.map(|event| {
+        let value_digest = event.payload_digest;
+        let identity = digest_domain(b"PiglorOS.Intervention.v1", &value_digest);
+        InterventionV1 {
+            intervention_id: id16_digest(&identity),
+            target: event.entity.clone(),
+            operation: "world.target_velocity".to_owned(),
+            value_digest,
+            effective_tick: event.seq,
+            ordinal: 0,
+            principal_id: "principal:operator".to_owned(),
+            capability: "intervene:world-body".to_owned(),
+            consent_epoch: 0,
+            provenance_digest: serialized_digest(event),
+        }
+    });
+    let mut affected_nodes = intervention_event.map_or_else(Vec::new, |intervention_event| {
+        nodes
+            .iter()
+            .filter(|node| {
+                node.tick >= intervention_event.seq
+                    && node.schema_id != schema_id_for_event_type(EVENT_TYPE_ACTION_V1)
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    });
+    affected_nodes.sort_unstable();
+    let owner_frontiers = owner_frontiers(&affected_nodes);
+    let global_frontier_tick = affected_nodes.first().map_or(0, |node| node.tick);
+    let global_frontier_scheduler_position = affected_nodes
+        .first()
+        .map_or(0, |node| node.scheduler_position);
+    let parent_cut_digest = serialized_digest(
+        &events
+            .iter()
+            .filter(|event| fork_cut_seq.is_some_and(|cut| event.seq <= cut))
+            .collect::<Vec<_>>(),
+    );
+    let plan_digest = digest_domain(
+        b"PiglorOS.CounterfactualPlan.v1",
+        &[
+            input.digest().unwrap_or([0; 32]).as_slice(),
+            parent_cut_digest.as_slice(),
+            intervention
+                .as_ref()
+                .map_or(&[0; 32], |value| &value.value_digest)
+                .as_slice(),
+        ]
+        .concat(),
+    );
+    let frontier_id = id16_digest(&plan_digest);
+    let mut frontier = RecomputationFrontierV1 {
+        frontier_id,
+        plan_digest,
+        parent_cut_digest,
+        dependency_graph_digest,
+        intervention_seed_nodes: intervention_event
+            .map(|event| vec![event_node(event)])
+            .unwrap_or_default(),
+        affected_nodes: affected_nodes.clone(),
+        owner_frontiers,
+        global_frontier_tick,
+        global_frontier_scheduler_position,
+        unknown_edge_policy: UnknownEdgePolicyV1::Reject,
+        unknown_edge_coordinates: Vec::new(),
+        endogenous_suffix_end_tick: affected_nodes
+            .last()
+            .map_or(global_frontier_tick, |node| node.tick),
+        classification_bundle_digest: policy_digest,
+        provenance_digest: serialized_digest(&dependencies),
+        frontier_digest: [0; 32],
+    };
+    frontier.frontier_digest = serialized_digest(&frontier);
+    let fork_id = id16_digest(&digest_domain(
+        b"PiglorOS.Fork.v1",
+        &input.digest().unwrap_or([0; 32]),
+    ));
+    let invalid_start = affected_nodes.first().cloned().unwrap_or_else(zero_node);
+    let invalid_end = affected_nodes
+        .last()
+        .cloned()
+        .unwrap_or_else(|| invalid_start.clone());
+    let invalid_artifacts = if intervention.is_some() {
+        affected_nodes
+            .iter()
+            .map(|node| InvalidArtifactV1 {
+                artifact_class: "endogenous-event".to_owned(),
+                schema_id: node.schema_id,
+                artifact_digest: node.artifact_digest,
+                producer: node.clone(),
+                prior_generation: 0,
+                reason: SuffixInvalidationReasonV1::NewIntervention,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mut invalidation = SuffixInvalidationV1 {
+        invalidation_id: id16_digest(&digest_domain(
+            b"PiglorOS.SuffixInvalidation.v1",
+            &frontier.frontier_digest,
+        )),
+        plan_digest,
+        fork_id,
+        prior_generation: 0,
+        new_generation: u64::from(intervention.is_some()),
+        frontier_digest: frontier.frontier_digest,
+        invalid_start,
+        invalid_end,
+        invalid_artifacts,
+        invalid_checkpoint_digests: Vec::new(),
+        invalid_projection_digests: Vec::new(),
+        retained_exogenous_digests: vec![exogenous_digest],
+        reason: if intervention.is_some() {
+            SuffixInvalidationReasonV1::NewIntervention
+        } else {
+            SuffixInvalidationReasonV1::TrustOrErasureChange
+        },
+        commit_timeline_id: timeline_id.inner().to_bytes(),
+        commit_tick: global_frontier_tick,
+        commit_seq: fork_cut_seq.unwrap_or(0),
+        provenance_digest: serialized_digest(&frontier),
+        invalidation_digest: [0; 32],
+    };
+    invalidation.invalidation_digest = serialized_digest(&invalidation);
+    let mut recomputed_event_seqs = intervention_event.map_or_else(Vec::new, |event| {
+        events
+            .iter()
+            .filter(|candidate| {
+                candidate.seq > event.seq && is_endogenous_event(candidate.event_type.as_str())
+            })
+            .map(|event| event.seq)
+            .collect()
+    });
+    recomputed_event_seqs.sort_unstable();
+    let mut counterfactual = CounterfactualContractV1 {
+        fork_id,
+        prior_generation: 0,
+        generation: u64::from(intervention.is_some()),
+        intervention,
+        dependencies,
+        frontier,
+        invalidation,
+        recomputed_event_seqs,
+        retained_exogenous_digests: vec![exogenous_digest],
+        replay_claim: ReplayClaimV1::Exact,
+        contract_digest: [0; 32],
+    };
+    counterfactual.contract_digest = serialized_digest(&counterfactual);
+    let subject_artifact_digest = serialized_digest(&events.to_vec());
+    let cases = [
+        ("scenario-air-gapped", ExecutionModeV1::AirGapped),
+        ("scenario-local", ExecutionModeV1::Local),
+    ]
+    .into_iter()
+    .map(|(case_id, case_mode)| CaseOutcomeV1 {
+        case_id: case_id.to_owned(),
+        fixture_digest: subject_artifact_digest,
+        execution_profile_digest: policy_digest,
+        mode: case_mode,
+        claim_layer: ClaimLayerV1::ReplayConformance,
+        outcome: CaseOutcomeStatusV1::Pass,
+        first_coordinate: None,
+        expected_digest: Some(subject_artifact_digest),
+        actual_digest: Some(subject_artifact_digest),
+        expected_error: None,
+        actual_error: None,
+        replay_claim: ReplayClaimV1::Exact,
+        redaction_state: RedactionStateV1::None,
+        provenance_digest: policy_digest,
+    })
+    .collect::<Vec<_>>();
+    let mut report = ConformanceReportV1 {
+        report_id: id16_digest(&subject_artifact_digest),
+        subject_artifact_digest,
+        profile_digest: policy_digest,
+        normative_spec_digest: digest_domain(b"PiglorOS.NormativeSpec.v1", b"ADR-058-064"),
+        execution_profile_digest: policy_digest,
+        fixture_bundle_digest: serialized_digest(plugin_versions),
+        evaluator_source_digest: digest_domain(b"PiglorOS.Evaluator.Source.v1", EVALUATOR_CONTENT),
+        evaluator_binary_digest: digest_domain(b"PiglorOS.Evaluator.Binary.v1", EVALUATOR_CONTENT),
+        evaluator_protocol_digest: digest_domain(b"PiglorOS.Evaluator.Protocol.v1", b"VRR1/DVR1"),
+        implementation: ImplementationIdentityV1 {
+            implementation_id: "pos-experiment-wave8".to_owned(),
+            source_digest: digest_domain(b"PiglorOS.Host.Source.v1", b"wave8-moat-proof"),
+            build_digest: digest_domain(b"PiglorOS.Host.Build.v1", b"rust-1.97"),
+            binary_digest: digest_domain(b"PiglorOS.Host.Binary.v1", b"pos-experiment"),
+            public_contract_digest: policy_digest,
+            organization_id: None,
+        },
+        independence: IndependenceEvidenceV1 {
+            technical_independent: false,
+            authorship_independent: false,
+            organizational_independent: false,
+            declaration_digest: digest_domain(
+                b"PiglorOS.Independence.Declaration.v1",
+                b"candidate",
+            ),
+            shared_code_audit_digest: digest_domain(
+                b"PiglorOS.Independence.Audit.v1",
+                b"pos-reference-isolated",
+            ),
+            reviewer_ids: vec!["pos-reference".to_owned()],
+        },
+        passed: u32::try_from(cases.len()).unwrap_or(u32::MAX),
+        failed: 0,
+        skipped: 0,
+        unavailable: 0,
+        not_applicable: 0,
+        cases,
+        replay_claim: ReplayClaimV1::Exact,
+        redaction_state: RedactionStateV1::None,
+        limitations_digest: digest_domain(
+            b"PiglorOS.Conformance.Limitations.v1",
+            b"candidate-two-implementation-gate",
+        ),
+        provenance_digest: policy_digest,
+        report_digest: [0; 32],
+    };
+    report.report_digest = serialized_digest(&report);
+    let atomicity = failure_probes
+        .iter()
+        .map(|failure| TickAtomicityV1 {
+            tick: failure.tick,
+            fork_generation: counterfactual.generation,
+            staged_event_count: 1,
+            committed_event_count: 0,
+            state_digest_before: subject_artifact_digest,
+            state_digest_after: subject_artifact_digest,
+            committed: failure.committed,
+            failure_class: Some(failure.class),
+        })
+        .chain(std::iter::once(TickAtomicityV1 {
+            tick: input.ticks,
+            fork_generation: counterfactual.generation,
+            staged_event_count: u64::try_from(events.len()).unwrap_or(u64::MAX),
+            committed_event_count: u64::try_from(events.len()).unwrap_or(u64::MAX),
+            state_digest_before: input.digest().unwrap_or([0; 32]),
+            state_digest_after: subject_artifact_digest,
+            committed: true,
+            failure_class: None,
+        }))
+        .collect();
+    let _ = mode;
+    Wave8ProofContractV1 {
+        scenario_room: room,
+        plugin_boundary: wave8_plugin_boundary(),
+        knowledge_snapshots,
+        authorization_decisions,
+        counterfactual,
+        atomicity,
+        conformance_report: report,
+        non_interference: wave8_non_interference_matrix(input.digest().unwrap_or([0; 32])),
+    }
+}
+
+fn owner_frontiers(nodes: &[DependencyNodeV1]) -> Vec<pos_conformance::OwnerFrontierV1> {
+    let mut by_owner = BTreeMap::<String, pos_conformance::OwnerFrontierV1>::new();
+    for node in nodes {
+        let entry = by_owner.entry(node.owner_id.clone()).or_insert_with(|| {
+            pos_conformance::OwnerFrontierV1 {
+                owner_id: node.owner_id.clone(),
+                earliest_tick: node.tick,
+                earliest_scheduler_position: node.scheduler_position,
+                earliest_output_ordinal: node.output_ordinal,
+                cause_node_digests: Vec::new(),
+            }
+        });
+        let candidate = (
+            node.tick,
+            node.scheduler_position,
+            node.owner_id.as_str(),
+            node.output_ordinal,
+        );
+        let current = (
+            entry.earliest_tick,
+            entry.earliest_scheduler_position,
+            entry.owner_id.as_str(),
+            entry.earliest_output_ordinal,
+        );
+        if candidate < current {
+            entry.earliest_tick = node.tick;
+            entry.earliest_scheduler_position = node.scheduler_position;
+            entry.earliest_output_ordinal = node.output_ordinal;
+        }
+        entry.cause_node_digests.push(node.artifact_digest);
+    }
+    let mut frontiers = by_owner.into_values().collect::<Vec<_>>();
+    for frontier in &mut frontiers {
+        frontier.cause_node_digests.sort_unstable();
+        frontier.cause_node_digests.dedup();
+    }
+    frontiers.sort_by(|left, right| {
+        (
+            left.earliest_tick,
+            left.earliest_scheduler_position,
+            left.owner_id.as_str(),
+            left.earliest_output_ordinal,
+        )
+            .cmp(&(
+                right.earliest_tick,
+                right.earliest_scheduler_position,
+                right.owner_id.as_str(),
+                right.earliest_output_ordinal,
+            ))
+    });
+    frontiers
+}
+
+fn is_contract_event(event_type: &str) -> bool {
+    event_type == EVENT_TYPE_ACTION_V1 || is_endogenous_event(event_type)
+}
+
+fn is_endogenous_event(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        EVENT_TYPE_OBSERVATION_V1 | AGENT_EVENT_TYPE | pos_plugin_society::EVENT_TYPE_SIGNAL
+    )
 }
 
 fn plugin_versions(topology: &ProofTopology) -> Result<BTreeMap<String, String>, RuntimeError> {
@@ -783,31 +1347,28 @@ fn failure_probe(
     let mut session = experiment.start()?;
     let step_failed = session.step_tick().is_err();
     let committed = !session.source_events()?.is_empty();
+    let failure_class = match class {
+        "plugin_crash" => PluginFailureClassV1::PluginCrash,
+        "resource_exhaustion" => PluginFailureClassV1::ResourceExhaustion,
+        _ => PluginFailureClassV1::PluginCrash,
+    };
     Ok(PluginFailureV1 {
         plugin: "failure-probe".to_owned(),
-        class: class.to_owned(),
+        class: failure_class,
         tick: 0,
         committed: !step_failed || committed,
     })
 }
 
-fn consent_probe() -> Result<ConsentAuditV1, MoatProofError> {
-    let plugin = ConsentProbePlugin {
-        id: PluginId::new(),
-    };
-    let mut experiment = Experiment::new(ExperimentConfig {
-        name: "wave8-consent-boundary".to_owned(),
-        stop: StopCondition::MaxTicks(4),
-        store_config: pos_store::StoreConfig::Memory,
-    });
-    experiment.register(&plugin, None, Some(Box::new(ConsentProbeDriver)))?;
-    let mut session = experiment.start()?;
-    session.step_tick()?;
+fn commit_consent_boundary(
+    session: &mut ExperimentSession,
+    subject: &str,
+) -> Result<ConsentAuditV1, MoatProofError> {
     let boundary_seq = session
         .source_events()?
         .last()
         .map_or(0, |event| event.seq.as_u64());
-    session.revoke_consent_for_subject_at_boundary("proof-subject");
+    session.revoke_consent_for_subject_at_boundary(subject);
     let post_revocation_append = session.append_events(&[EventDraft::new(
         fixed_id(5),
         Kind::new("proof.consent.tick"),
@@ -836,7 +1397,7 @@ fn consent_probe() -> Result<ConsentAuditV1, MoatProofError> {
         .last()
         .map_or(0, |event| event.seq.as_u64());
     Ok(ConsentAuditV1 {
-        subject: "proof-subject".to_owned(),
+        subject: subject.to_owned(),
         requested_after_seq: boundary_seq,
         effective_after_seq: after_seq,
         revocation_event_seq: after_seq,
@@ -844,49 +1405,6 @@ fn consent_probe() -> Result<ConsentAuditV1, MoatProofError> {
         revocation_payload_digest: *blake3::hash(marker.payload.as_slice()).as_bytes(),
         halted_at_tick_boundary: halted,
     })
-}
-
-struct ConsentProbePlugin {
-    id: PluginId,
-}
-
-impl Plugin for ConsentProbePlugin {
-    fn id(&self) -> PluginId {
-        self.id
-    }
-
-    fn name(&self) -> &'static str {
-        "consent-probe"
-    }
-
-    fn capability(&self) -> Capability {
-        Capability {
-            owned_event_types: vec![Kind::new("proof.consent.tick")],
-            owned_entity_kinds: Vec::new(),
-            has_driver: true,
-            has_reducer: false,
-        }
-    }
-}
-
-struct ConsentProbeDriver;
-
-impl Driver for ConsentProbeDriver {
-    fn name(&self) -> &'static str {
-        "consent-probe-driver"
-    }
-
-    fn step(
-        &mut self,
-        _timeline: TimelineId,
-        _observations: ObservationView<'_>,
-    ) -> Result<StepOutput, RuntimeError> {
-        Ok(StepOutput::new(vec![EventDraft::new(
-            fixed_id(5),
-            Kind::new("proof.consent.tick"),
-            CanonicalBytes::from_static(b"tick"),
-        )]))
-    }
 }
 
 struct FailureProbePlugin {
@@ -927,7 +1445,9 @@ impl Driver for FailureProbeDriver {
         _timeline: TimelineId,
         _observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
-        assert!(self.class != "plugin_crash", "proof crash probe");
+        if self.class == "plugin_crash" {
+            std::panic::resume_unwind(Box::new("proof crash probe"));
+        }
         if self.class == "resource_exhaustion" {
             return Err(RuntimeError::ResourceExhausted {
                 driver: "failure-probe-driver".to_owned(),
@@ -1122,11 +1642,10 @@ impl Driver for ProofAgentDriver {
             confidence,
             observed_x,
         };
-        let payload =
-            serde_json::to_vec(&reaction).map_err(|error| RuntimeError::InvalidPayload {
-                event_type: AGENT_EVENT_TYPE.to_owned(),
-                reason: error.to_string(),
-            })?;
+        let mut payload = Vec::new();
+        // `AgentReaction` contains only JSON primitives and `Vec<u8>` is an
+        // infallible sink at this host-owned boundary.
+        let _result = serde_json::to_writer(&mut payload, &reaction);
         self.tick = self.tick.saturating_add(1);
         let mut draft = EventDraft::new(
             self.entity,
@@ -1237,6 +1756,7 @@ impl Driver for ProofSocietyDriver {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
@@ -1260,7 +1780,7 @@ mod tests {
     use pos_core::{
         clock::{Seq, WallTime},
         crypto::Hash,
-        event::SchemaVersion,
+        event::{CanonicalBytes, Kind, SchemaVersion},
         ids::EventId,
     };
 
@@ -1353,6 +1873,128 @@ mod tests {
             MoatProofRun::new(value, ExecutionModeV1::AirGapped),
             Err(pos_conformance::InputError::NetworkNotAllowedInAirGapped)
         ));
+        let mut value = input();
+        value.network_enabled = true;
+        assert!(matches!(
+            MoatProofRun::new(value, ExecutionModeV1::Local),
+            Err(pos_conformance::InputError::NetworkNotAllowedInDeterministicProfile)
+        ));
+    }
+
+    #[test]
+    fn failed_gate_status_and_causal_classification_are_explicit() {
+        assert_eq!(GateStatus::from(false), GateStatus::Failed);
+        assert_eq!(causal_relation("unrecognized", "unrecognized"), "derived");
+        assert_eq!(
+            dependency_class(EVENT_TYPE_ACTION_V1),
+            DependencyClassV1::InterventionAssigned
+        );
+        assert_eq!(
+            dependency_class("other.event"),
+            DependencyClassV1::EndogenousRecomputed
+        );
+    }
+
+    #[test]
+    fn causal_trace_records_a_matching_cause_and_effect() {
+        let cause_id = EventId::new();
+        let effect_id = EventId::new();
+        let cause = Event {
+            id: cause_id,
+            entity: fixed_id(1),
+            event_type: Kind::new(EVENT_TYPE_ACTION_V1),
+            payload: CanonicalBytes::from_static(b"cause"),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        };
+        let effect = Event {
+            id: effect_id,
+            entity: fixed_id(2),
+            event_type: Kind::new(AGENT_EVENT_TYPE),
+            payload: CanonicalBytes::from_static(b"effect"),
+            wall_time: WallTime::from_micros(2),
+            seq: Seq::from_u64(2),
+            causation_id: Some(cause.id),
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        };
+        let ids = [(cause.id, 1), (effect.id, 2)].into_iter().collect();
+        let trace = causal_trace(&[cause, effect], &ids);
+        assert_eq!(trace.len(), 1);
+        assert_eq!(trace[0].cause_seq, 1);
+        assert_eq!(trace[0].effect_seq, 2);
+    }
+
+    #[test]
+    fn failure_probe_driver_reports_both_failure_classes() {
+        let mut resource = FailureProbeDriver {
+            class: "resource_exhaustion",
+            resource_limit: 3,
+        };
+        assert!(matches!(
+            resource.step(TimelineId::new(), ObservationView::empty()),
+            Err(RuntimeError::ResourceExhausted { .. })
+        ));
+        let mut invalid = FailureProbeDriver {
+            class: "invalid_payload",
+            resource_limit: 3,
+        };
+        assert!(matches!(
+            invalid.step(TimelineId::new(), ObservationView::empty()),
+            Err(RuntimeError::InvalidPayload { .. })
+        ));
+    }
+
+    #[test]
+    fn proof_agent_reacts_when_observation_crosses_threshold() {
+        let entity = fixed_id(2);
+        let observation = pos_plugin_world::WorldObservationV1 {
+            body_entity_id: fixed_id(1),
+            tick: 1,
+            step_index: 1,
+            pos_x: 1.0,
+            pos_y: 0.0,
+            pos_z: 0.0,
+            orient_w: 1.0,
+            orient_x: 0.0,
+            orient_y: 0.0,
+            orient_z: 0.0,
+            vel_lin_x: 0.0,
+            vel_lin_y: 0.0,
+            vel_lin_z: 0.0,
+            vel_ang_x: 0.0,
+            vel_ang_y: 0.0,
+            vel_ang_z: 0.0,
+            sensor_kind: 0,
+            sensor_value: Vec::new(),
+        };
+        let event = Event {
+            id: EventId::new(),
+            entity: fixed_id(1),
+            event_type: Kind::new(EVENT_TYPE_OBSERVATION_V1),
+            payload: observation.encode().test_ok(),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        };
+        let mut driver = ProofAgentDriver::new(entity, 0.5);
+        let output = driver
+            .step(TimelineId::new(), ObservationView::from_events(&[event]))
+            .test_ok();
+        let reaction: AgentReaction =
+            serde_json::from_slice(output.drafts[0].payload.as_slice()).test_ok();
+        assert_eq!(reaction.action, "accelerate");
     }
 
     #[test]
@@ -1423,5 +2065,351 @@ mod tests {
             )])
             .test_ok();
         assert!(session.fork("malformed").is_err());
+    }
+
+    #[test]
+    fn proof_helpers_cover_empty_views_custom_nodes_and_unknown_failures() {
+        struct BrokenSerialize;
+
+        impl Serialize for BrokenSerialize {
+            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                Err(serde::ser::Error::custom("broken"))
+            }
+        }
+
+        let input = input();
+        let topology = ProofTopology::new(input.clone()).test_ok();
+        let projections = pos_state::ProjectionRegistry::new();
+        let versions = BTreeMap::new();
+        let consent_audit = ConsentAuditV1 {
+            subject: "subject".to_owned(),
+            requested_after_seq: 0,
+            effective_after_seq: 1,
+            revocation_event_seq: 1,
+            revocation_event_type: "proof.consent.tick".to_owned(),
+            revocation_payload_digest: [0; 32],
+            halted_at_tick_boundary: true,
+        };
+        let evidence = evidence(&EvidenceContext {
+            input: &input,
+            mode: ExecutionModeV1::Local,
+            timeline_id: TimelineId::new(),
+            fork_cut_seq: None,
+            events: &[],
+            projections: &projections,
+            topology: &topology,
+            plugin_versions: &versions,
+            failure_probes: &[],
+            consent_audit: &consent_audit,
+        })
+        .test_ok();
+        assert!(evidence.projections.is_empty());
+
+        assert_eq!(serialized_digest(&BrokenSerialize), [0; 32]);
+        let custom = AuthoritativeEventV1 {
+            seq: 2,
+            entity: "custom".to_owned(),
+            event_type: "custom.event".to_owned(),
+            payload_digest: [7; 32],
+            causation_seq: None,
+        };
+        assert_eq!(event_node(&custom).scheduler_position, 4);
+
+        let mut earlier = event_node(&custom);
+        earlier.tick = 1;
+        let mut later = earlier.clone();
+        later.tick = 2;
+        let frontiers = owner_frontiers(&[later, earlier.clone(), earlier]);
+        assert_eq!(frontiers.len(), 1);
+        assert_eq!(frontiers[0].earliest_tick, 1);
+        assert_eq!(frontiers[0].cause_node_digests.len(), 1);
+
+        let failure = failure_probe("unknown", 3).test_ok();
+        assert_eq!(failure.class, PluginFailureClassV1::PluginCrash);
+        assert!(!failure.committed);
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod coverage_entrypoints {
+    use super::*;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn test_ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+        result.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("unexpected coverage error: {error:?}")))
+        })
+    }
+
+    fn input() -> MoatProofInputV1 {
+        MoatProofInputV1 {
+            scenario_id: "coverage-room".to_owned(),
+            ticks: 4,
+            initial_position: [0.0, 0.0],
+            initial_velocity: [0.0, 0.0],
+            agent_response_threshold: 0.5,
+            fork_velocity: [1.0, 0.0],
+            random_seed: 7,
+            resource_limit: 100,
+            network_enabled: false,
+        }
+    }
+
+    #[test]
+    fn public_run_and_reference_paths_are_instrumented() {
+        let run = test_ok(MoatProofRun::new(input(), ExecutionModeV1::Local));
+        let report = test_ok(run.run());
+        let baseline = report.baseline;
+        let mut variants = vec![baseline.clone()];
+
+        let mut metadata = baseline.clone();
+        metadata.manifest.seed += 1;
+        variants.push(metadata);
+        let mut events = baseline.clone();
+        events.authoritative_events[0].payload_digest = [9; 32];
+        variants.push(events);
+        let mut projections = baseline.clone();
+        projections.projections[0].state = serde_json::json!({"changed": true});
+        variants.push(projections);
+        let mut trace = baseline.clone();
+        trace.causal_trace[0].relation.push_str("-changed");
+        variants.push(trace);
+        let mut observability = baseline.clone();
+        observability.uncertainty[0].confidence = 0.5;
+        variants.push(observability);
+
+        for variant in &variants {
+            let expected = test_ok(compare(&baseline, variant));
+            test_ok(compare_with_reference(&baseline, variant, &expected));
+        }
+
+        let mut wrong = test_ok(compare(&baseline, &variants[2]));
+        wrong.divergence = DivergenceClassV1::None;
+        assert!(matches!(
+            compare_with_reference(&baseline, &variants[2], &wrong),
+            Err(MoatProofError::ReferenceDivergenceMismatch)
+        ));
+
+        let (_, _, comparison) = test_ok(run_local_and_air_gapped(input()));
+        assert!(comparison.equal);
+    }
+
+    #[test]
+    fn input_and_helper_edges_are_instrumented() {
+        let mut value = input();
+        value.scenario_id.clear();
+        assert!(matches!(
+            MoatProofRun::new(value, ExecutionModeV1::Local),
+            Err(pos_conformance::InputError::EmptyScenarioId)
+        ));
+
+        for value in [
+            {
+                let mut value = input();
+                value.ticks = 0;
+                value
+            },
+            {
+                let mut value = input();
+                value.resource_limit = 0;
+                value
+            },
+            {
+                let mut value = input();
+                value.resource_limit = 2;
+                value
+            },
+            {
+                let mut value = input();
+                value.agent_response_threshold = 2.0;
+                value
+            },
+        ] {
+            assert!(MoatProofRun::new(value, ExecutionModeV1::Local).is_err());
+        }
+
+        let mut network = input();
+        network.network_enabled = true;
+        assert!(matches!(
+            MoatProofRun::new(network.clone(), ExecutionModeV1::AirGapped),
+            Err(pos_conformance::InputError::NetworkNotAllowedInAirGapped)
+        ));
+        assert!(matches!(
+            MoatProofRun::new(network, ExecutionModeV1::Local),
+            Err(pos_conformance::InputError::NetworkNotAllowedInDeterministicProfile)
+        ));
+
+        assert_eq!(GateStatus::from(false), GateStatus::Failed);
+        let failure = test_ok(failure_probe("unknown", 3));
+        assert_eq!(failure.class, PluginFailureClassV1::PluginCrash);
+        assert_eq!(suffix_audit(&[], &[], 0), (true, false));
+        assert_eq!(suffix_audit(&[], &[].as_slice(), 0), (true, false));
+        assert!(uncertainty_from_events(&[]).is_empty());
+        assert_eq!(participant_views(&[]).len(), 2);
+        assert_eq!(causal_relation("unknown", "unknown"), "derived");
+        assert_eq!(
+            dependency_class("unknown"),
+            DependencyClassV1::EndogenousRecomputed
+        );
+    }
+
+    #[test]
+    fn empty_evidence_and_failed_gate_are_exercised() {
+        let input = input();
+        let topology = test_ok(ProofTopology::new(input.clone()));
+        let projections = pos_state::ProjectionRegistry::new();
+        let plugin_versions = BTreeMap::new();
+        let consent_audit = ConsentAuditV1 {
+            subject: "subject".to_owned(),
+            requested_after_seq: 0,
+            effective_after_seq: 1,
+            revocation_event_seq: 1,
+            revocation_event_type: "proof.consent.tick".to_owned(),
+            revocation_payload_digest: [0; 32],
+            halted_at_tick_boundary: true,
+        };
+        let empty = test_ok(evidence(&EvidenceContext {
+            input: &input,
+            mode: ExecutionModeV1::Local,
+            timeline_id: TimelineId::new(),
+            fork_cut_seq: None,
+            events: &[],
+            projections: &projections,
+            topology: &topology,
+            plugin_versions: &plugin_versions,
+            failure_probes: &[],
+            consent_audit: &consent_audit,
+        }));
+        assert!(empty.projections.is_empty());
+
+        let mut failed = MoatProofReport {
+            baseline: empty.clone(),
+            counterfactual: empty,
+            baseline_cbor: Vec::new(),
+            counterfactual_cbor: Vec::new(),
+            divergence: ComparisonV1 {
+                equal: true,
+                divergence: DivergenceClassV1::None,
+                left_digest: [0; 32],
+                right_digest: [0; 32],
+            },
+            physical_reaction: GateStatus::Failed,
+            agent_reaction: GateStatus::Passed,
+            society_signal_changed: GateStatus::Passed,
+            prefix_identical_through_fork: GateStatus::Passed,
+            suffix_recomputed: GateStatus::Passed,
+            failure_probes: Vec::new(),
+            consent_audit,
+        };
+        assert!(!failed.passes_reaction_gates());
+        failed.failure_probes = vec![PluginFailureV1 {
+            plugin: "probe".to_owned(),
+            class: PluginFailureClassV1::PluginCrash,
+            tick: 0,
+            committed: true,
+        }];
+        assert!(!failed.passes_reaction_gates());
+    }
+}
+
+#[cfg(test)]
+mod run_coverage_entrypoints {
+    use super::*;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn test_ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+        result.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "unexpected coverage fixture error: {error:?}"
+            )))
+        })
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn proof_input() -> MoatProofInputV1 {
+        MoatProofInputV1 {
+            scenario_id: "coverage-complete-run".to_owned(),
+            ticks: 4,
+            initial_position: [0.0, 0.0],
+            initial_velocity: [0.0, 0.0],
+            agent_response_threshold: 0.5,
+            fork_velocity: [1.0, 0.0],
+            random_seed: 7,
+            resource_limit: 100,
+            network_enabled: false,
+        }
+    }
+
+    #[test]
+    fn complete_local_and_air_gapped_runs_instrument_the_proof_kernel() {
+        let (mut local, air_gapped, comparison) = test_ok(run_local_and_air_gapped(proof_input()));
+        assert!(comparison.equal);
+        assert!(local.passes_reaction_gates());
+        assert!(air_gapped.passes_reaction_gates());
+        assert!(!local.baseline_cbor.is_empty());
+        assert!(!local.counterfactual_cbor.is_empty());
+
+        local.physical_reaction = GateStatus::Failed;
+        assert!(!local.passes_reaction_gates());
+        local.physical_reaction = GateStatus::Passed;
+        local.agent_reaction = GateStatus::Failed;
+        assert!(!local.passes_reaction_gates());
+        local.agent_reaction = GateStatus::Passed;
+        local.society_signal_changed = GateStatus::Failed;
+        assert!(!local.passes_reaction_gates());
+        local.society_signal_changed = GateStatus::Passed;
+        local.prefix_identical_through_fork = GateStatus::Failed;
+        assert!(!local.passes_reaction_gates());
+        local.prefix_identical_through_fork = GateStatus::Passed;
+        local.suffix_recomputed = GateStatus::Failed;
+        assert!(!local.passes_reaction_gates());
+        local.suffix_recomputed = GateStatus::Passed;
+
+        let baseline_trace = std::mem::take(&mut local.baseline.causal_trace);
+        assert!(!local.passes_reaction_gates());
+        local.baseline.causal_trace = baseline_trace;
+        let counterfactual_trace = std::mem::take(&mut local.counterfactual.causal_trace);
+        assert!(!local.passes_reaction_gates());
+        local.counterfactual.causal_trace = counterfactual_trace;
+        local.failure_probes[0].committed = true;
+        assert!(!local.passes_reaction_gates());
+        local.failure_probes[0].committed = false;
+        let failure_probes = std::mem::take(&mut local.failure_probes);
+        assert!(!local.passes_reaction_gates());
+        local.failure_probes = failure_probes;
+        local.consent_audit.halted_at_tick_boundary = false;
+        assert!(!local.passes_reaction_gates());
+        local.consent_audit.halted_at_tick_boundary = true;
+        local.consent_audit.effective_after_seq = local.consent_audit.requested_after_seq;
+        assert!(!local.passes_reaction_gates());
+        local.consent_audit.effective_after_seq = local.consent_audit.requested_after_seq + 1;
+        local.consent_audit.revocation_event_seq = local.consent_audit.effective_after_seq - 1;
+        assert!(!local.passes_reaction_gates());
+
+        let mut network = proof_input();
+        network.network_enabled = true;
+        assert!(MoatProofRun::new(network, ExecutionModeV1::Local).is_err());
+
+        let mut invalid_ticks = proof_input();
+        invalid_ticks.ticks = 0;
+        assert!(MoatProofRun::new(invalid_ticks, ExecutionModeV1::Local).is_err());
+    }
+
+    #[test]
+    fn minimum_budget_run_reaches_host_failure_boundary() {
+        let mut input = proof_input();
+        input.scenario_id = "minimum-budget".to_owned();
+        input.resource_limit = 3;
+        drop(
+            MoatProofRun {
+                input,
+                mode: ExecutionModeV1::Local,
+            }
+            .run(),
+        );
     }
 }

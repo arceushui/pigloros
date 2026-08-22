@@ -1131,7 +1131,7 @@ impl ExperimentSession {
         subject: String,
     ) -> Result<TickOutcome, ExperimentError> {
         let draft = EventDraft::new(
-            EntityId::new(),
+            consent_marker_entity(&subject),
             Kind::new(pos_runtime::HOST_CONSENT_REVOCATION_EVENT_TYPE),
             CanonicalBytes::from_vec(subject.into_bytes()),
         );
@@ -1305,6 +1305,16 @@ impl ExperimentSession {
                 }
             })
     }
+}
+
+fn consent_marker_entity(subject: &str) -> EntityId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"PiglorOS.ConsentRevocationMarker.v1\0");
+    hasher.update(subject.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&digest.as_bytes()[..16]);
+    EntityId::from_ulid(ulid::Ulid::from(u128::from_be_bytes(bytes)))
 }
 
 // ---------------------------------------------------------------------------
@@ -1510,6 +1520,7 @@ impl BacktestRunner {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
@@ -4432,6 +4443,92 @@ mod tests {
 }
 
 #[cfg(test)]
+mod coverage_entrypoints {
+    use super::*;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn ok<T, E: std::fmt::Debug>(value: Result<T, E>) -> T {
+        value.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("unexpected coverage error: {error:?}")))
+        })
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn expect_err<T, E: std::fmt::Debug>(value: Result<T, E>) {
+        if value.is_ok() {
+            std::panic::resume_unwind(Box::new("expected a rejected coverage value"));
+        }
+    }
+
+    fn config(name: &str, stop: StopCondition) -> ExperimentConfig {
+        ExperimentConfig {
+            name: name.to_owned(),
+            stop,
+            store_config: StoreConfig::Memory,
+        }
+    }
+
+    #[test]
+    fn recovery_and_branch_entrypoints_fail_closed_without_state() {
+        let result = RunResult {
+            timeline_id: pos_core::ids::TimelineId::new(),
+            ticks: 0,
+            total_events: 0,
+            manifest: ReproManifest::new(
+                pos_core::ids::TimelineId::new(),
+                pos_core::crypto::Hash::from_bytes([0; 32]),
+                pos_core::clock::WallTime::from_micros(0),
+            ),
+            projections: pos_state::ProjectionRegistry::new(),
+            store_config: None,
+        };
+        expect_err(result.branch("missing-recipe"));
+
+        let result = RunResult {
+            store_config: Some(StoreConfig::Memory),
+            ..result
+        };
+        expect_err(result.branch("missing-timeline"));
+
+        let store = pos_store::memory::MemoryStore::new();
+        expect_err(read_completed_prefix_at(
+            &store,
+            pos_core::ids::TimelineId::new(),
+            pos_core::clock::Seq::ZERO,
+        ));
+        expect_err(timeline_ancestry(
+            &store,
+            pos_core::ids::TimelineId::new(),
+            pos_core::clock::Seq::ZERO,
+        ));
+    }
+
+    #[test]
+    fn empty_host_and_backtest_paths_are_exercised() {
+        let experiment = Experiment::new(config("empty-start", StopCondition::MaxTicks(2)));
+        let mut session = ok(experiment.start());
+        let _ = ok(session.step_tick());
+        let _ = ok(session.step());
+        let _ = ok(session.projections());
+        let _ = ok(session.source_events());
+        expect_err(session.fork("missing-factory"));
+
+        let experiment = Experiment::new(config("supplied-store", StopCondition::MaxTicks(1)));
+        let _ = ok(experiment.start_with_store(Box::new(pos_store::memory::MemoryStore::new())));
+
+        let config = BacktestConfig {
+            experiment_name: "empty-backtest".to_owned(),
+            train_ticks: 0,
+            eval_ticks: 0,
+            store_config: StoreConfig::Memory,
+        };
+        let runner = BacktestRunner::new(config, pos_runtime::PluginRegistry::new);
+        let _ = ok(runner.run());
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod integration_tests {
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
@@ -4524,6 +4621,7 @@ mod integration_tests {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod backtest_tests {
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
@@ -5227,6 +5325,7 @@ mod fault_injection_tests {
             )
             .test_ok();
         let mut session = experiment.start().test_ok();
+        assert_eq!(session.append_events(&[]).test_ok(), 0);
         Connection::open(&path)
             .test_ok()
             .execute_batch(
@@ -5242,6 +5341,25 @@ mod fault_injection_tests {
         assert!(matches!(
             session.step_tick(),
             Err(ExperimentError::SessionFaulted)
+        ));
+    }
+
+    #[test]
+    fn default_consent_revocation_uses_the_session_subject() {
+        let mut session = Experiment::new(ExperimentConfig {
+            name: "default-consent-revocation".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        })
+        .start()
+        .test_ok();
+        session.revoke_consent_at_boundary();
+        assert!(matches!(
+            session.step_tick(),
+            Ok(TickOutcome::Advanced {
+                emitted_events: 1,
+                ..
+            })
         ));
     }
 
@@ -5285,11 +5403,19 @@ mod fault_injection_tests {
             .test_ok();
 
         assert!(matches!(
-            session.step_tick(),
+            session.append_events(&[EventDraft::new(
+                EntityId::new(),
+                Kind::new("session.post-capture"),
+                CanonicalBytes::from_static(b"append-fault"),
+            )]),
             Err(ExperimentError::Store(_))
         ));
         assert!(matches!(
             session.step_tick(),
+            Err(ExperimentError::SessionFaulted)
+        ));
+        assert!(matches!(
+            session.append_events(&[]),
             Err(ExperimentError::SessionFaulted)
         ));
     }

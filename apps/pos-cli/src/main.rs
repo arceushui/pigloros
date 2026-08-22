@@ -1692,6 +1692,7 @@ mod coverage_tests {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod store_info_coverage {
     trait TestValueExt<T> {
         fn test_ok(self) -> T;

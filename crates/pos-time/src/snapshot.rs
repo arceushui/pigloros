@@ -119,6 +119,7 @@ pub fn verify_snapshot_consistency(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
 
     trait TestValueExt<T> {
@@ -353,6 +354,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod extra_tests {
     trait TestValueExt<T> {
         fn test_ok(self) -> T;

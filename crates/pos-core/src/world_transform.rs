@@ -502,9 +502,6 @@ impl WorldTransformV1 {
         for _ in 0..INVERSE_ITERATIONS {
             let prime_radius = prime_vertical_radius(latitude);
             let cosine = latitude.cos();
-            if !prime_radius.is_finite() {
-                return Err(WorldTransformError::NonConvergent);
-            }
             let height = horizontal_distance / cosine - prime_radius;
             let denominator = prime_radius + height;
             if !denominator.is_finite() || denominator.to_bits() == 0 {
@@ -523,9 +520,6 @@ impl WorldTransformV1 {
         let cosine = latitude.cos();
         let prime_radius = prime_vertical_radius(latitude);
         let height = horizontal_distance / cosine - prime_radius;
-        if !height.is_finite() {
-            return Err(WorldTransformError::NonConvergent);
-        }
         let position = Wgs84PositionV1::new(
             latitude.to_degrees(),
             normalize_longitude_degrees(longitude.to_degrees()),
@@ -799,6 +793,7 @@ fn definition_digest(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -1153,6 +1148,13 @@ mod tests {
         non_convergent_transform.origin.origin_ecef = [1.0, 0.0, 1.0];
         assert!(matches!(
             non_convergent_transform.inverse(&capability, zero_coordinate),
+            Err(WorldTransformError::NonConvergent)
+        ));
+
+        let mut residual_transform = WorldTransformV1::new(&capability, origin)?;
+        residual_transform.origin.origin_ecef = [1.0, 1.0, 1.0];
+        assert!(matches!(
+            residual_transform.inverse(&capability, zero_coordinate),
             Err(WorldTransformError::NonConvergent)
         ));
 

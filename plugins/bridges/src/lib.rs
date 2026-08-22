@@ -325,6 +325,7 @@ impl Reducer for BridgeReducer {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     trait TestValueExt<T> {
         fn test_ok(self) -> T;

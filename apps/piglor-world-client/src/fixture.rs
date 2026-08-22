@@ -151,6 +151,7 @@ fn validate_export(export: &TimelineExport) -> Result<(), ClientError> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::super::{decode_fixture, fixture_bytes};
     use super::*;

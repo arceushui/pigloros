@@ -1402,6 +1402,7 @@ fn validate_printable_ascii(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
 
     trait TestValueExt<T> {
@@ -1459,6 +1460,42 @@ mod tests {
             let catalogue = ActionCatalogueV1::try_new(vec!["a".repeat(length)]);
             assert_eq!(catalogue.is_ok(), valid, "identifier byte length {length}");
         }
+    }
+
+    #[test]
+    fn raw_action_wire_helpers_reject_empty_and_truncated_headers() {
+        assert_eq!(raw_tagged_array_payload_offset(&[]), Err(()));
+        assert_eq!(raw_tag_header_len(&[]), Err(()));
+        assert_eq!(raw_array_header_len(&[]), Err(()));
+        assert_eq!(raw_definite_byte_string(&[]), Err(()));
+
+        for input in [
+            vec![0xd8],
+            vec![0xd9, 0],
+            vec![0xda, 0, 0, 0],
+            vec![0xdb, 0, 0, 0, 0, 0, 0, 0],
+        ] {
+            assert!(raw_tag_header_len(&input).is_err());
+        }
+        for input in [
+            vec![0x98],
+            vec![0x99, 0],
+            vec![0x9a, 0, 0, 0],
+            vec![0x9b, 0, 0, 0, 0, 0, 0, 0],
+        ] {
+            assert!(raw_array_header_len(&input).is_err());
+        }
+        for input in [
+            vec![0x58],
+            vec![0x59, 0],
+            vec![0x5a, 0, 0, 0],
+            vec![0x5b, 0, 0, 0, 0, 0, 0, 0],
+        ] {
+            assert!(raw_definite_byte_string(&input).is_err());
+        }
+
+        assert_eq!(raw_tag_header_len(&[0xd8, 0]), Ok(Some(2)));
+        assert_eq!(raw_array_header_len(&[0x98, 0]), Ok(Some(2)));
     }
 
     #[test]

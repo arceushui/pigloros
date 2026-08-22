@@ -296,6 +296,7 @@ pub fn import_timeline_with_verified_signatures(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

@@ -392,6 +392,7 @@ fn normalize_attempt(attempt: ProviderAttempt, catalogue: &ActionCatalogueV1) ->
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
 
     trait TestValueExt<T> {

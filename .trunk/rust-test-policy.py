@@ -19,7 +19,9 @@ from pathlib import Path
 DOC_IGNORE = re.compile(r"```(?:rust,)?ignore\b")
 COV_OFF = re.compile(r"coverage\s*\(\s*off\s*\)")
 TEST_ATTR = re.compile(r"#\[\s*(?:tokio::)?test(?:\s*\([^)]*\))?\s*\]")
-CFG_TEST = re.compile(r"#\[\s*cfg\s*\(\s*test\s*\)\s*\]")
+CFG_TEST = re.compile(
+    r"#\[\s*cfg\s*\(\s*(?:test|all\s*\(\s*test\s*,\s*unix\s*\))\s*\)\s*\]"
+)
 MOD_START = re.compile(r"\bmod\s+[A-Za-z_][A-Za-z0-9_]*")
 
 

@@ -820,6 +820,7 @@ impl StoreExecutor {
     }
 
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn panic_for_test(&self) -> Result<(), StoreExecutorError> {
         let result = submit!(self, |reply| Command::Panic { reply });
         drop(
@@ -834,6 +835,7 @@ impl StoreExecutor {
     }
 
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn panic_read_for_test(&self) -> Result<(), StoreExecutorError> {
         let result = submit!(self, |reply| Command::PanicRead { reply });
         drop(
@@ -2550,7 +2552,7 @@ mod tests {
         let (sender, _receiver) = tokio::sync::mpsc::channel(1);
         let executor = super::StoreExecutor::from_sender_for_test(sender);
         let state = std::sync::Arc::clone(&executor.control.state);
-        std::thread::spawn(move || {
+        let _ = std::thread::spawn(move || {
             let _guard = state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2613,6 +2615,99 @@ mod tests {
         drop(executor);
 
         Ok(())
+    }
+
+    #[test]
+    fn submission_and_join_helpers_recover_poisoned_ordinals() {
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        let executor = super::StoreExecutor::from_sender_for_test(sender);
+        let control = std::sync::Arc::clone(&executor.control);
+        let _ = std::thread::spawn(move || {
+            let _guard = control
+                .next_admission_ordinal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::panic::resume_unwind(Box::new("poison ordinal lock for test"));
+        })
+        .join()
+        .test_err();
+        let (reply, _result) = tokio::sync::oneshot::channel();
+        assert!(executor
+            .try_submit(
+                Command::Create {
+                    name: "poisoned-ordinal".to_owned(),
+                    reply,
+                },
+                Instant::now(),
+                std::sync::Arc::new(super::CommandLifecycle::new()),
+            )
+            .is_ok());
+
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        let executor = super::StoreExecutor::from_sender_for_test(sender);
+        let control = std::sync::Arc::clone(&executor.control);
+        let _ = std::thread::spawn(move || {
+            let _guard = control
+                .join_task
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::panic::resume_unwind(Box::new("poison join-task lock for helper test"));
+        })
+        .join()
+        .test_err();
+        let _ = executor.has_join_work();
+
+        let control = std::sync::Arc::clone(&executor.control);
+        let _ = std::thread::spawn(move || {
+            let _guard = control
+                .join
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::panic::resume_unwind(Box::new("poison join lock for helper test"));
+        })
+        .join()
+        .test_err();
+        let _ = executor.has_join_work();
+    }
+
+    #[test]
+    fn admission_ordinal_overflow_is_typed_and_releases_capacity() {
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        let executor = super::StoreExecutor::from_sender_for_test(sender);
+        *executor.control.next_admission_ordinal.lock().test_value() = u64::MAX;
+        let (reply, _result) = tokio::sync::oneshot::channel();
+        assert!(matches!(
+            executor.try_submit_with_admission_for_test(
+                Command::Create {
+                    name: "overflow".to_owned(),
+                    reply,
+                },
+                Instant::now(),
+                std::sync::Arc::new(super::CommandLifecycle::new()),
+            ),
+            Err(super::StoreExecutorError::Store(CoreError::Storage(message)))
+                if message.contains("admission ordinal overflow")
+        ));
+        assert_eq!(
+            executor.control.global_budget.available_permits(),
+            super::QUEUE_CAPACITY
+        );
+    }
+
+    #[test]
+    fn closed_reply_maps_unhealthy_state_to_unhealthy_error() {
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        let executor = super::StoreExecutor::from_sender_for_test(sender);
+        {
+            let mut state = executor.control.state.lock().test_value();
+            *state = super::LifecycleState::Unhealthy {
+                retryable_shutdown: false,
+            };
+        }
+        assert!(matches!(
+            executor.reply_closed_error(),
+            super::StoreExecutorError::Unhealthy
+        ));
     }
 
     #[tokio::test]

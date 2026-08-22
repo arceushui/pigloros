@@ -941,11 +941,6 @@ impl ActionApprover for WorldPlugin {
             if action.actor_entity_id != proposal.actor_entity_id {
                 return Err(ActionRejected::InvalidActorEntityId);
             }
-            if action.action_scope != ACTION_SCOPE_SINGLE_BODY {
-                return Err(ActionRejected::DomainValidationFailed(
-                    "invalid action scope".to_owned(),
-                ));
-            }
             if action.catalogue_version != self.catalogue_version {
                 return Err(ActionRejected::DomainValidationFailed(
                     "catalogue version mismatch".to_owned(),
@@ -1142,7 +1137,17 @@ impl WorldDriver {
     }
 
     fn checked_f32(value: f64, axis: &'static str) -> Result<f32, RuntimeError> {
-        value.to_f32().ok_or_else(|| RuntimeError::InvalidPayload {
+        if !value.is_finite() {
+            return Err(RuntimeError::InvalidPayload {
+                event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
+                reason: format!("backend produced a non-finite float value for {axis}"),
+            });
+        }
+        let converted = value.to_f32().unwrap_or(f32::NAN);
+        if converted.is_finite() {
+            return Ok(converted);
+        }
+        Err(RuntimeError::InvalidPayload {
             event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
             reason: format!("backend produced a non-representable {axis} coordinate"),
         })
@@ -1479,6 +1484,7 @@ impl Reducer for WorldReducer {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
 
     trait TestValueExt<T> {
@@ -1682,6 +1688,25 @@ mod tests {
         }
     }
 
+    struct OutOfRangeBackend;
+
+    impl WorldBackend for OutOfRangeBackend {
+        fn name(&self) -> &'static str {
+            "out-of-range-test-backend"
+        }
+
+        fn step(&self, bodies: &[Body]) -> Vec<WorldObservation> {
+            bodies
+                .iter()
+                .map(|body| WorldObservation {
+                    entity_id: body.entity_id,
+                    x: f64::MAX,
+                    y: body.y,
+                })
+                .collect()
+        }
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_rejects_invalid_config_payload() {
@@ -1718,6 +1743,33 @@ mod tests {
             .test_err();
         assert!(error.to_string().contains("world.observation.v1"));
         assert!(error.to_string().contains("non-finite float value"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn driver_rejects_coordinate_outside_f32_range() {
+        let entity = EntityId::new();
+        let mut driver = WorldDriver::new(
+            vec![Body {
+                entity_id: entity,
+                x: 0.0,
+                y: 0.0,
+                vx: 0.0,
+                vy: 0.0,
+            }],
+            Box::new(OutOfRangeBackend),
+            sample_config(),
+        );
+        let error = driver
+            .step(TimelineId::new(), ObservationView::empty())
+            .test_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("non-representable x coordinate")
+                || message.contains("non-finite float value"),
+            "unexpected coordinate error: {message}"
+        );
+        driver.abort_step();
     }
 
     #[test]
@@ -2238,6 +2290,117 @@ mod tests {
     }
 
     #[test]
+    fn world_codecs_cover_each_typed_decode_boundary() {
+        let action = sample_action().encode().test_ok();
+        for (index, replacement) in [
+            (0, ciborium::Value::Integer(1.into())),
+            (1, ciborium::Value::Text("version".to_owned())),
+            (2, ciborium::Value::Integer(1.into())),
+            (3, ciborium::Value::Integer(1.into())),
+            (4, ciborium::Value::Integer(1.into())),
+            (5, ciborium::Value::Integer(1.into())),
+            (6, ciborium::Value::Text("scope".to_owned())),
+            (7, ciborium::Value::Text("catalogue".to_owned())),
+            (8, ciborium::Value::Text("tick".to_owned())),
+        ] {
+            assert!(
+                WorldActionV1::decode(&rewrite_array_field(&action, index, replacement)).is_err()
+            );
+        }
+        assert!(WorldActionV1::decode(&rewrite_array_field(
+            &action,
+            6,
+            ciborium::Value::Integer(u64::MAX.into()),
+        ))
+        .is_err());
+        assert!(WorldActionV1::decode(&rewrite_array_field(
+            &action,
+            7,
+            ciborium::Value::Integer(u64::MAX.into()),
+        ))
+        .is_err());
+
+        let observation = sample_observation().encode().test_ok();
+        for index in 0..20 {
+            assert!(WorldObservationV1::decode(&rewrite_array_field(
+                &observation,
+                index,
+                ciborium::Value::Text("wrong".to_owned()),
+            ))
+            .is_err());
+        }
+
+        let float_positions = [
+            |value: &mut WorldObservationV1| value.pos_x = f32::NAN,
+            |value: &mut WorldObservationV1| value.pos_y = f32::NAN,
+            |value: &mut WorldObservationV1| value.pos_z = f32::NAN,
+            |value: &mut WorldObservationV1| value.orient_w = f32::NAN,
+            |value: &mut WorldObservationV1| value.orient_x = f32::NAN,
+            |value: &mut WorldObservationV1| value.orient_y = f32::NAN,
+            |value: &mut WorldObservationV1| value.orient_z = f32::NAN,
+            |value: &mut WorldObservationV1| value.vel_lin_x = f32::NAN,
+            |value: &mut WorldObservationV1| value.vel_lin_y = f32::NAN,
+            |value: &mut WorldObservationV1| value.vel_lin_z = f32::NAN,
+            |value: &mut WorldObservationV1| value.vel_ang_x = f32::NAN,
+            |value: &mut WorldObservationV1| value.vel_ang_y = f32::NAN,
+            |value: &mut WorldObservationV1| value.vel_ang_z = f32::NAN,
+        ];
+        for mutate in float_positions {
+            let mut invalid = sample_observation();
+            mutate(&mut invalid);
+            assert!(matches!(
+                invalid.encode(),
+                Err(WorldCodecError::NonFiniteFloat)
+            ));
+        }
+        let config = sample_config().encode().test_ok();
+        for (index, replacement) in [
+            (0, ciborium::Value::Integer(1.into())),
+            (1, ciborium::Value::Text("version".to_owned())),
+            (2, ciborium::Value::Text("timestep".to_owned())),
+            (3, ciborium::Value::Text("convention".to_owned())),
+            (4, ciborium::Value::Text("gravity".to_owned())),
+            (5, ciborium::Value::Text("gravity".to_owned())),
+            (6, ciborium::Value::Text("gravity".to_owned())),
+            (7, ciborium::Value::Integer(1.into())),
+            (8, ciborium::Value::Integer(1.into())),
+            (9, ciborium::Value::Integer(1.into())),
+            (10, ciborium::Value::Text("action-schema".to_owned())),
+            (11, ciborium::Value::Text("observation-schema".to_owned())),
+            (12, ciborium::Value::Text("resolution".to_owned())),
+            (13, ciborium::Value::Text("catalogue".to_owned())),
+        ] {
+            assert!(
+                WorldConfigV1::decode(&rewrite_array_field(&config, index, replacement)).is_err()
+            );
+        }
+        assert!(WorldConfigV1::decode(&rewrite_array_field(
+            &config,
+            2,
+            ciborium::Value::Integer(u64::MAX.into()),
+        ))
+        .is_err());
+        assert!(WorldConfigV1::decode(&rewrite_array_field(
+            &config,
+            12,
+            ciborium::Value::Integer(u64::MAX.into()),
+        ))
+        .is_err());
+        for mutate in [
+            |value: &mut WorldConfigV1| value.gravity_x = f32::NAN,
+            |value: &mut WorldConfigV1| value.gravity_y = f32::NAN,
+            |value: &mut WorldConfigV1| value.gravity_z = f32::NAN,
+        ] {
+            let mut invalid = sample_config();
+            mutate(&mut invalid);
+            assert!(matches!(
+                invalid.encode(),
+                Err(WorldCodecError::NonFiniteFloat)
+            ));
+        }
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_driver_emits_config_on_first_step() {
         let mut store = open_store(StoreConfig::Memory).test_ok();
@@ -2397,6 +2560,85 @@ mod tests {
                 )
                 .is_err());
         }
+
+        let unknown_target_action = WorldActionV1 {
+            actor_entity_id: body,
+            body_entity_id: EntityId::new(),
+            action_kind: ActionKindV1::Impulse,
+            params_cbor: encode_vel_params(1.0, 0.0),
+            action_scope: ACTION_SCOPE_SINGLE_BODY,
+            catalogue_version: 1,
+            tick: 0,
+        };
+        let unknown_target = make_versioned_event(
+            1,
+            body,
+            EVENT_TYPE_ACTION_V1,
+            unknown_target_action.encode().test_ok(),
+        );
+        assert!(registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(timeline, Seq::from_u64(1))],
+                &[unknown_target],
+            )
+            .is_err());
+
+        let mut first_action = WorldActionV1 {
+            actor_entity_id: body,
+            body_entity_id: body,
+            action_kind: ActionKindV1::Impulse,
+            params_cbor: encode_vel_params(1.0, 0.0),
+            action_scope: ACTION_SCOPE_SINGLE_BODY,
+            catalogue_version: 1,
+            tick: 0,
+        };
+        let first = make_versioned_event(
+            1,
+            body,
+            EVENT_TYPE_ACTION_V1,
+            first_action.encode().test_ok(),
+        );
+        first_action.tick = 1;
+        let second = make_versioned_event(
+            2,
+            body,
+            EVENT_TYPE_ACTION_V1,
+            first_action.encode().test_ok(),
+        );
+        registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(timeline, Seq::from_u64(2))],
+                &[first, second],
+            )
+            .test_ok();
+
+        let malformed_config = make_versioned_event(
+            1,
+            body,
+            EVENT_TYPE_CONFIG_V1,
+            CanonicalBytes::from_static(b"malformed"),
+        );
+        assert!(registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(timeline, Seq::from_u64(1))],
+                &[malformed_config],
+            )
+            .is_err());
+
+        let mut mismatched_config = sample_config();
+        mismatched_config.backend_id = "different-backend".to_owned();
+        let mismatched_config = make_versioned_event(
+            1,
+            body,
+            EVENT_TYPE_CONFIG_V1,
+            mismatched_config.encode().test_ok(),
+        );
+        assert!(registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(timeline, Seq::from_u64(1))],
+                &[mismatched_config],
+            )
+            .is_err());
     }
 
     #[test]
@@ -3284,6 +3526,48 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn driver_updates_causation_for_repeated_actions_on_one_body() {
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("test").test_ok();
+        let entity = EntityId::new();
+        let mut driver = WorldDriver::new(
+            vec![Body {
+                entity_id: entity,
+                x: 0.0,
+                y: 0.0,
+                vx: 0.0,
+                vy: 0.0,
+            }],
+            Box::new(SimpleKinematicBackend::new()),
+            sample_config(),
+        );
+        let action = WorldActionV1 {
+            actor_entity_id: EntityId::new(),
+            body_entity_id: entity,
+            action_kind: ActionKindV1::Impulse,
+            params_cbor: encode_vel_params(1.0, 0.0),
+            action_scope: ACTION_SCOPE_SINGLE_BODY,
+            catalogue_version: 1,
+            tick: 0,
+        };
+        let mut first = make_action_event_from(entity, &action);
+        first.seq = Seq::from_u64(1);
+        let mut second = make_action_event_from(entity, &action);
+        second.seq = Seq::from_u64(2);
+        let events = vec![first, second];
+        let output = driver
+            .step(tl.id(), ObservationView::from_events(&events))
+            .test_ok();
+        let observation = output
+            .drafts
+            .iter()
+            .find(|draft| draft.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
+            .test_ok();
+        assert!(WorldObservationV1::decode(&observation.payload).is_ok());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_rejects_malformed_action_payload() {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("test").test_ok();
@@ -3325,6 +3609,65 @@ mod tests {
             }
             other => std::panic::resume_unwind(Box::new(format!("unexpected error: {other:?}"))),
         }
+        driver.abort_step();
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn driver_rejects_unknown_action_target_and_parameters() {
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("test").test_ok();
+        let entity = EntityId::new();
+        let body = Body {
+            entity_id: entity,
+            x: 0.0,
+            y: 0.0,
+            vx: 0.0,
+            vy: 0.0,
+        };
+        let mut driver = WorldDriver::new(
+            vec![body],
+            Box::new(SimpleKinematicBackend::new()),
+            sample_config(),
+        );
+
+        let unknown_target = WorldActionV1 {
+            actor_entity_id: EntityId::new(),
+            body_entity_id: EntityId::new(),
+            action_kind: ActionKindV1::Impulse,
+            params_cbor: encode_vel_params(1.0, 1.0),
+            action_scope: ACTION_SCOPE_SINGLE_BODY,
+            catalogue_version: 1,
+            tick: 0,
+        };
+        let error = driver
+            .step(
+                tl.id(),
+                ObservationView::from_events(&[make_action_event_from(entity, &unknown_target)]),
+            )
+            .test_err();
+        assert!(matches!(error, RuntimeError::InvalidPayload { .. }));
+        driver.abort_step();
+
+        let invalid_parameters = WorldActionV1 {
+            actor_entity_id: EntityId::new(),
+            body_entity_id: entity,
+            action_kind: ActionKindV1::Impulse,
+            params_cbor: vec![0xf6],
+            action_scope: ACTION_SCOPE_SINGLE_BODY,
+            catalogue_version: 1,
+            tick: 0,
+        };
+        let error = driver
+            .step(
+                tl.id(),
+                ObservationView::from_events(&[make_action_event_from(
+                    entity,
+                    &invalid_parameters,
+                )]),
+            )
+            .test_err();
+        assert!(matches!(error, RuntimeError::InvalidPayload { .. }));
         driver.abort_step();
     }
 
@@ -3551,5 +3894,129 @@ mod tests {
                 "unknown body entity ID".to_owned()
             ))
         );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_plugin_v1_approver_enforces_capability_and_domain() {
+        let actor = EntityId::new();
+        let body = EntityId::new();
+        let plugin = WorldPlugin::new().with_bodies(vec![body]);
+        let mut action = sample_action();
+        action.actor_entity_id = actor;
+        action.body_entity_id = body;
+        action.catalogue_version = 1;
+        let payload = action.encode().test_ok();
+
+        let valid = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION_V1),
+            actor,
+            payload.clone(),
+            Kind::new("world.action.v1.submit"),
+        );
+        let valid_result = plugin.approve(&valid);
+        assert!(
+            valid_result.is_ok(),
+            "v1 valid proposal rejected: {valid_result:?}"
+        );
+
+        let wrong_capability = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION_V1),
+            actor,
+            payload.clone(),
+            Kind::new("world.action.submit"),
+        );
+        assert_eq!(
+            plugin.approve(&wrong_capability),
+            Err(ActionRejected::CapabilityNotGranted)
+        );
+
+        let too_large = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION_V1),
+            actor,
+            CanonicalBytes::from_vec(vec![0; MAX_PROPOSED_ACTION_PAYLOAD_BYTES + 1]),
+            Kind::new("world.action.v1.submit"),
+        );
+        assert!(matches!(
+            plugin.approve(&too_large),
+            Err(ActionRejected::PayloadTooLarge { .. })
+        ));
+
+        let malformed = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION_V1),
+            actor,
+            CanonicalBytes::from_vec(vec![0xff]),
+            Kind::new("world.action.v1.submit"),
+        );
+        assert!(matches!(
+            plugin.approve(&malformed),
+            Err(ActionRejected::DomainValidationFailed(_))
+        ));
+
+        let mut wrong_actor_action = action.clone();
+        wrong_actor_action.actor_entity_id = EntityId::new();
+        let wrong_actor = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION_V1),
+            actor,
+            wrong_actor_action.encode().test_ok(),
+            Kind::new("world.action.v1.submit"),
+        );
+        assert_eq!(
+            plugin.approve(&wrong_actor),
+            Err(ActionRejected::InvalidActorEntityId)
+        );
+
+        let wrong_scope = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION_V1),
+            actor,
+            rewrite_array_field(&payload, 6, ciborium::Value::Integer(1.into())),
+            Kind::new("world.action.v1.submit"),
+        );
+        assert!(matches!(
+            plugin.approve(&wrong_scope),
+            Err(ActionRejected::DomainValidationFailed(_))
+        ));
+
+        let mut wrong_catalogue_action = action.clone();
+        wrong_catalogue_action.catalogue_version = 99;
+        let wrong_catalogue = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION_V1),
+            actor,
+            wrong_catalogue_action.encode().test_ok(),
+            Kind::new("world.action.v1.submit"),
+        );
+        assert!(matches!(
+            plugin.approve(&wrong_catalogue),
+            Err(ActionRejected::DomainValidationFailed(_))
+        ));
+
+        let mut wrong_kind_action = action.clone();
+        wrong_kind_action.action_kind = ActionKindV1::TargetVelocity;
+        let wrong_kind = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION_V1),
+            actor,
+            wrong_kind_action.encode().test_ok(),
+            Kind::new("world.action.v1.submit"),
+        );
+        let restricted = WorldPlugin::new()
+            .with_bodies(vec![body])
+            .with_allowed_actions(vec!["impulse".to_owned()]);
+        assert!(matches!(
+            restricted.approve(&wrong_kind),
+            Err(ActionRejected::DomainValidationFailed(_))
+        ));
+
+        let mut unknown_body_action = action;
+        unknown_body_action.body_entity_id = EntityId::new();
+        let unknown_body = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION_V1),
+            actor,
+            unknown_body_action.encode().test_ok(),
+            Kind::new("world.action.v1.submit"),
+        );
+        assert!(matches!(
+            plugin.approve(&unknown_body),
+            Err(ActionRejected::DomainValidationFailed(_))
+        ));
     }
 }

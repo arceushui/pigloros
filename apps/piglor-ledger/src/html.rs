@@ -38,10 +38,8 @@ fn fmt_brier(p: f64) -> String {
     format!("{p:.3}")
 }
 
-fn append_format(result: std::fmt::Result, output: &mut String) {
-    if result.is_err() {
-        output.push_str("[formatting error]");
-    }
+fn ignore_format(result: std::fmt::Result) {
+    let _result = result;
 }
 
 /// Render the HTML page for a [`LedgerView`].
@@ -83,29 +81,23 @@ pub fn render_html(view: &LedgerView, pubkey_hex: Option<&str>) -> String {
     // Headline (ADR-017 Decision 7): counts always; mean Brier only when
     // n_resolved >= 1, otherwise the explicit "no Brier Score yet" copy.
     s.push_str("<p class=\"headline\">");
-    append_format(
-        write!(
-            s,
-            "{} pending / {} resolved",
-            view.n_pending + view.n_overdue,
-            view.n_resolved
-        ),
-        &mut s,
-    );
+    ignore_format(write!(
+        s,
+        "{} pending / {} resolved",
+        view.n_pending + view.n_overdue,
+        view.n_resolved
+    ));
     if view.n_overdue > 0 {
-        append_format(write!(s, " ({} overdue)", view.n_overdue), &mut s);
+        ignore_format(write!(s, " ({} overdue)", view.n_overdue));
     }
     match view.mean_brier {
         Some(b) => {
-            append_format(
-                write!(
-                    s,
-                    " — mean Brier Score: {} (n={})",
-                    fmt_brier(b),
-                    view.n_resolved
-                ),
-                &mut s,
-            );
+            ignore_format(write!(
+                s,
+                " — mean Brier Score: {} (n={})",
+                fmt_brier(b),
+                view.n_resolved
+            ));
         }
         None => s.push_str(" — no Brier Score yet"),
     }
@@ -123,10 +115,7 @@ pub fn render_html(view: &LedgerView, pubkey_hex: Option<&str>) -> String {
     s.push_str("<p>Verify each entry matches its OSF registration</p>\n");
     match pubkey_hex {
         Some(pk) => {
-            append_format(
-                writeln!(s, "<p>Public key: <code>{}</code></p>", esc(pk)),
-                &mut s,
-            );
+            ignore_format(writeln!(s, "<p>Public key: <code>{}</code></p>", esc(pk)));
         }
         None => s.push_str("<p>Demo tier (TOML): entries are unsigned; verify with <code>b3sum</code> on the TOML files.</p>\n"),
     }

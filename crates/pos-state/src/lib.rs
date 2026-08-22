@@ -293,6 +293,7 @@ impl RelationshipIndex {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use pos_core::{
@@ -644,6 +645,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod extra_tests {
     use super::*;
 
@@ -660,6 +662,7 @@ mod extra_tests {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod wave3_tests {
     use super::*;
     use pos_core::{

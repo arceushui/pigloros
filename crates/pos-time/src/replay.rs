@@ -44,6 +44,7 @@ pub fn replay_at(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
 
     trait TestValueExt<T> {

@@ -97,6 +97,7 @@ fn digest_from_values(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::super::{decode_fixture, fixture_bytes, project_fixture};
     use super::{digest_from_state, digest_from_values, sorted_events};

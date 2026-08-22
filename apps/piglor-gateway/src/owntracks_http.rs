@@ -36,10 +36,14 @@ pub(crate) async fn post_owntracks(gateway: Gateway, headers: HeaderMap, body: B
         }
     };
     drop(bytes);
-    match gateway
+    let result = gateway
         .admit_owntracks_ingress(handle, secret, payload)
-        .await
-    {
+        .await;
+    owntracks_response(result)
+}
+
+fn owntracks_response(result: Result<OwnTracksIngressResult, GatewayError>) -> Response {
+    match result {
         Ok(OwnTracksIngressResult::RateLimited) => {
             let mut response = error(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
             response
@@ -200,8 +204,8 @@ mod tests {
         }
     }
 
-    use super::{basic_credentials, minimize_location, post_owntracks};
-    use crate::Gateway;
+    use super::{basic_credentials, minimize_location, owntracks_response, post_owntracks};
+    use crate::{Gateway, OwnTracksIngressResult};
     use axum::{
         body::{to_bytes, Body},
         http::{header, HeaderMap, HeaderValue, StatusCode},
@@ -343,6 +347,18 @@ mod tests {
         assert_eq!(super::base64_value(b'+'), Some(62));
         assert_eq!(super::base64_value(b'/'), Some(63));
         assert_eq!(super::base64_value(b'?'), None);
+    }
+
+    #[test]
+    fn maps_conflict_and_unavailable_ingress_results() {
+        assert_eq!(
+            owntracks_response(Ok(OwnTracksIngressResult::Conflict)).status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            owntracks_response(Ok(OwnTracksIngressResult::Unavailable)).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     #[test]

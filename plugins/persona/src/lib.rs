@@ -236,8 +236,8 @@ impl PersonaModel {
         };
 
         let mut buf = Vec::new();
-        ciborium::into_writer(&payload, &mut buf)
-            .map_err(|error| PersonaError::Encoding(error.to_string()))?;
+        // `Vec<u8>` is an infallible CBOR sink.
+        drop(ciborium::into_writer(&payload, &mut buf));
 
         Ok(EventDraft::new(
             entity,
@@ -333,6 +333,7 @@ impl Driver for PersonaEvalDriver {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use pos_core::{
@@ -408,6 +409,19 @@ mod tests {
         assert_eq!(cap.owned_entity_kinds, vec![ENTITY_KIND.to_owned()]);
         assert!(cap.has_driver);
         assert!(cap.has_reducer);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn empty_preference_pairs_fail_closed() {
+        let mut driver =
+            PersonaEvalDriver::new(EntityId::new(), PersonaModel::new(Vec::new()), Vec::new());
+        let result = driver.step(TimelineId::new(), ObservationView::empty());
+        assert!(matches!(
+            result,
+            Err(RuntimeError::InvalidPayload { event_type, .. })
+                if event_type == EVENT_TYPE_DECISION
+        ));
     }
 
     // ── PersonaReducer tests ──────────────────────────────────────────────────

@@ -86,6 +86,7 @@ pub fn public_key_from_verifying_key(vk: &VerifyingKey) -> PublicKey {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use std::fmt::Debug;

@@ -75,6 +75,7 @@ pub const fn genesis_hash() -> Hash {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

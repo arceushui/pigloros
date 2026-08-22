@@ -355,6 +355,7 @@ fn constant_time_equal(left: &[u8; 32], right: &[u8; 32]) -> bool {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::CanonicalBytes;
@@ -381,5 +382,42 @@ mod tests {
     fn cover_from_persistence_bytes_error_path() {
         // Invalid bytes → Serialization error
         assert!(OwnTracksEnrollmentStateV1::from_persistence_bytes(b"not-valid-cbor").is_err());
+    }
+
+    #[test]
+    fn cover_from_persistence_bytes_validation_path() {
+        let invalid = OwnTracksEnrollmentStateV1 {
+            schema_version: OWNTRACKS_ENROLLMENT_SCHEMA_VERSION,
+            status: OwnTracksEnrollmentStatusV1::Active,
+            timeline: None,
+            entity: None,
+            fence: None,
+            verifier: None,
+        };
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&invalid, &mut bytes).unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("unexpected CBOR error: {error:?}")))
+        });
+        assert!(OwnTracksEnrollmentStateV1::from_persistence_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn cover_prepare_ingress_rejects_withdrawn_consent() {
+        let state = OwnTracksEnrollmentStateV1 {
+            schema_version: OWNTRACKS_ENROLLMENT_SCHEMA_VERSION,
+            status: OwnTracksEnrollmentStatusV1::Active,
+            timeline: Some(TimelineId::new()),
+            entity: Some(EntityId::new()),
+            fence: Some(GeoLocationAdmissionFenceV1::new(
+                1,
+                ([0; 32], 1, [0; 32]),
+                (1, true, 1),
+            )),
+            verifier: Some([0; 32]),
+        };
+        assert!(matches!(
+            state.prepare_owntracks_ingress(&dummy_input()),
+            Err(CoreError::GeographicAdmissionValidationFailed)
+        ));
     }
 }

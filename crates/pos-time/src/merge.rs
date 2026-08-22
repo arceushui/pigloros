@@ -239,6 +239,7 @@ pub fn can_merge_conflict_free(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
 
     trait TestValueExt<T> {

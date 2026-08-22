@@ -54,5 +54,6 @@ pub use store::{is_valid_osf_link, LedgerError, LedgerStore, NewPrediction, Reso
 pub use toml_store::TomlLedgerStore;
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[doc(hidden)]
 pub mod contract;

@@ -21,13 +21,11 @@ macro_rules! output_stderr {
 }
 
 use piglor_gateway::{
-    router_for_addr, AppState, Gateway, LedgerConfig, LedgerWriteMode, OwnTracksOwnerKey,
+    owntracks, router_for_addr, AppState, Gateway, LedgerConfig, LedgerWriteMode, OwnTracksOwnerKey,
 };
 use piglor_ledger::LedgerView;
 use pos_store::{open_store, StoreConfig};
 use std::{ffi::OsString, future::Future, net::SocketAddr, path::PathBuf, pin::Pin};
-
-pub mod owntracks;
 
 type ShutdownFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
@@ -252,6 +250,16 @@ async fn serve_with_owntracks(
         .await;
     let shutdown_result = gateway.shutdown().await;
     drop(gateway);
+    finish_run(serve_result, shutdown_result)
+}
+
+fn finish_run<E>(
+    serve_result: Result<(), std::io::Error>,
+    shutdown_result: Result<(), E>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
     match (serve_result, shutdown_result) {
         (Err(error), _) => Err(Box::new(error)),
         (Ok(()), Err(error)) => Err(Box::new(error)),
@@ -260,8 +268,9 @@ async fn serve_with_owntracks(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_tests {
-    use super::handle_run_error;
+    use super::{finish_run, handle_run_error};
     use std::fmt;
 
     trait TestResultExt<T, E> {
@@ -288,6 +297,21 @@ mod coverage_tests {
     #[test]
     fn error_handler_is_callable_at_public_process_seam() {
         handle_run_error(&ProbeError);
+    }
+
+    #[test]
+    fn finish_run_reports_serve_and_shutdown_failures() {
+        assert!(finish_run(
+            Err(std::io::Error::other("serve")),
+            Ok::<(), std::io::Error>(()),
+        )
+        .is_err());
+        assert!(finish_run(
+            Ok::<(), std::io::Error>(()),
+            Err(std::io::Error::other("shutdown")),
+        )
+        .is_err());
+        assert!(finish_run(Ok::<(), std::io::Error>(()), Ok::<(), std::io::Error>(()),).is_ok());
     }
 
     #[test]
@@ -997,6 +1021,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod shutdown_signal_tests {
     #[tokio::test]
     async fn completed_signal_is_observed_without_process_signals() {

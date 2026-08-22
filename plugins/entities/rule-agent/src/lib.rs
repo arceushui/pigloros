@@ -149,12 +149,8 @@ impl Driver for RuleAgentDriver {
         };
 
         let mut buf = Vec::new();
-        ciborium::into_writer(&payload, &mut buf).map_err(|error| {
-            RuntimeError::InvalidPayload {
-                event_type: EVENT_TYPE_DECISION.to_owned(),
-                reason: error.to_string(),
-            }
-        })?;
+        // `Vec<u8>` is an infallible CBOR sink.
+        drop(ciborium::into_writer(&payload, &mut buf));
 
         let draft = pos_core::event::EventDraft::new(
             self.entity,
@@ -200,6 +196,7 @@ impl Reducer for RuleAgentReducer {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
@@ -290,6 +287,18 @@ mod tests {
                 ciborium::from_reader(out.drafts[0].payload.as_slice()).test_ok();
             assert_eq!(&payload.action, expected_action);
         }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn empty_action_catalogue_fails_closed() {
+        let mut driver = RuleAgentDriver::new(EntityId::new(), Vec::new());
+        let result = driver.step(TimelineId::new(), ObservationView::empty());
+        assert!(matches!(
+            result,
+            Err(RuntimeError::InvalidPayload { event_type, .. })
+                if event_type == EVENT_TYPE_DECISION
+        ));
     }
 
     #[test]

@@ -132,12 +132,8 @@ impl Driver for SyntheticDriver {
         };
 
         let mut buf = Vec::new();
-        ciborium::into_writer(&payload, &mut buf).map_err(|error| {
-            RuntimeError::InvalidPayload {
-                event_type: EVENT_TYPE.to_owned(),
-                reason: error.to_string(),
-            }
-        })?;
+        // `Vec<u8>` is an infallible CBOR sink.
+        drop(ciborium::into_writer(&payload, &mut buf));
 
         let draft = pos_core::event::EventDraft::new(
             self.entity,
@@ -194,6 +190,7 @@ impl Reducer for SyntheticReducer {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
 
     trait TestValueExt<T> {

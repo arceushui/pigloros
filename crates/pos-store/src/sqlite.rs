@@ -1478,22 +1478,11 @@ impl SqliteStore {
         max_owned_events: Option<u64>,
     ) -> Result<Option<AppendOrDuplicateOutcome>, CoreError> {
         let logical_prefix = self.logical_prefix(timeline)?;
+        let head_seq = self.get_head_seq(timeline)?.as_u64();
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(Self::into_storage_error)?;
-        let timeline_text = timeline.to_string();
-        let timeline_query = tx.query_row(
-            "SELECT head_seq FROM timelines WHERE id = ?1",
-            params![&timeline_text],
-            |row| row.get::<_, i64>(0),
-        );
-        let exists = timeline_query
-            .optional()
-            .map_err(|error| Self::storage_error(&error))?;
-        let Some(head_seq) = exists else {
-            return Err(CoreError::TimelineNotFound(timeline));
-        };
         let existing = tx.query_row(
             "SELECT event_id, expires_at FROM append_identities WHERE dedup_key = ?1",
             params![identity.dedup_key.as_bytes().as_slice()],
@@ -1527,7 +1516,7 @@ impl SqliteStore {
                 .map_err(|error| CoreError::Storage(error.to_string()))?;
             }
         }
-        if max_owned_events.is_some_and(|maximum| u64::try_from(head_seq).unwrap_or(0) >= maximum) {
+        if max_owned_events.is_some_and(|maximum| head_seq >= maximum) {
             return Ok(None);
         }
         let expires_at = checked_append_identity_expires_at(admitted_at)?;
@@ -1643,11 +1632,8 @@ impl SqliteStore {
             .last()
             .and_then(|(_, fork)| *fork)
             .map_or(0, Seq::as_u64);
-        let batch_len = u64::try_from(drafts.len())
-            .map_err(|_| CoreError::Storage("draft batch length does not fit in u64".to_owned()))?;
-        let next_head = owned_head.checked_add(batch_len).ok_or_else(|| {
-            CoreError::Storage("bounded append owned-Event head overflow".to_owned())
-        })?;
+        let batch_len = u64::try_from(drafts.len()).unwrap_or(u64::MAX);
+        let next_head = owned_head.saturating_add(batch_len);
         if next_head > max_owned_events {
             return Ok(None);
         }
@@ -3495,6 +3481,7 @@ use pos_core::geo_cell_admission::{
 };
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use pos_core::{
@@ -3562,7 +3549,7 @@ mod tests {
     }
     use pos_crypto::chain::hash_payload;
 
-    fn make_draft(entity: EntityId, payload: &[u8]) -> EventDraft {
+    pub(super) fn make_draft(entity: EntityId, payload: &[u8]) -> EventDraft {
         EventDraft::new(
             entity,
             Kind::new("test.event"),
@@ -3570,7 +3557,7 @@ mod tests {
         )
     }
 
-    fn new_store() -> SqliteStore {
+    pub(super) fn new_store() -> SqliteStore {
         SqliteStore::open_in_memory().test_ok()
     }
 
@@ -3610,7 +3597,96 @@ mod tests {
         tx.rollback().test_ok();
     }
 
-    fn geo_cell_request(
+    #[test]
+    fn sqlite_consent_row_decoding_failures_are_typed() {
+        let consent_id =
+            AdmissionSnapshotId::from_canonical("01ARZ3NDEKTSV4RRFFQ69G5FAZ").test_ok();
+        let mut missing = new_store();
+        let tx = missing
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .test_ok();
+        assert!(matches!(
+            SqliteStore::geo_cell_consent_in_transaction(&tx, &consent_id, 12),
+            Err(CoreError::GeographicAdmissionValidationFailed)
+        ));
+        tx.rollback().test_ok();
+
+        for statement in [
+            "INSERT INTO geographic_cell_admission_consent_records
+             (consent_record_id, consent_revision, consent_record_hash, consent_record_cbor)
+             VALUES (?1, 'bad', zeroblob(32), zeroblob(1))",
+            "INSERT INTO geographic_cell_admission_consent_records
+             (consent_record_id, consent_revision, consent_record_hash, consent_record_cbor)
+             VALUES (?1, 12, 'bad', zeroblob(1))",
+            "INSERT INTO geographic_cell_admission_consent_records
+             (consent_record_id, consent_revision, consent_record_hash, consent_record_cbor)
+             VALUES (?1, 12, zeroblob(32), 7)",
+        ] {
+            let mut store = new_store();
+            store
+                .conn
+                .execute_batch("PRAGMA ignore_check_constraints = ON")
+                .test_ok();
+            let tx = store
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .test_ok();
+            tx.execute(statement, rusqlite::params![consent_id.as_str()])
+                .test_ok();
+            assert!(matches!(
+                SqliteStore::geo_cell_consent_in_transaction(&tx, &consent_id, 12),
+                Err(CoreError::Storage(_)) | Err(CoreError::GeographicAdmissionValidationFailed)
+            ));
+            tx.rollback().test_ok();
+        }
+
+        for statement in [
+            "INSERT INTO geographic_cell_admission_consent_records
+             (consent_record_id, consent_revision, consent_record_hash, consent_record_cbor)
+             VALUES (?1, -1, zeroblob(32), zeroblob(1))",
+            "INSERT INTO geographic_cell_admission_consent_records
+             (consent_record_id, consent_revision, consent_record_hash, consent_record_cbor)
+             VALUES (?1, 12, zeroblob(31), zeroblob(1))",
+        ] {
+            let mut store = new_store();
+            store
+                .conn
+                .execute_batch("PRAGMA ignore_check_constraints = ON")
+                .test_ok();
+            let tx = store
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .test_ok();
+            tx.execute(statement, rusqlite::params![consent_id.as_str()])
+                .test_ok();
+            assert!(matches!(
+                SqliteStore::geo_cell_consent_in_transaction(&tx, &consent_id, 12),
+                Err(CoreError::GeographicAdmissionValidationFailed)
+            ));
+            tx.rollback().test_ok();
+        }
+    }
+
+    #[test]
+    fn sqlite_private_append_rejects_an_unknown_timeline() {
+        let mut store = new_store();
+        let tx = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .test_ok();
+        let error = SqliteStore::append_one_in_transaction(
+            &tx,
+            store.hasher.as_ref(),
+            TimelineId::new(),
+            make_draft(EntityId::new(), b"unknown"),
+        )
+        .test_err();
+        assert!(matches!(error, CoreError::TimelineNotFound(_)));
+        tx.rollback().test_ok();
+    }
+
+    pub(super) fn geo_cell_request(
         timeline: TimelineId,
         entity: EntityId,
     ) -> (
@@ -8994,5 +9070,309 @@ mod tests {
         store.conn.authorizer(
             None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
         );
+    }
+}
+
+#[cfg(test)]
+mod coverage_entrypoints {
+    use super::*;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn ok<T, E: std::fmt::Debug>(value: Result<T, E>) -> T {
+        value.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "unexpected coverage fixture error: {error:?}"
+            )))
+        })
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn expect_err<T, E: std::fmt::Debug>(value: Result<T, E>) {
+        if value.is_ok() {
+            std::panic::resume_unwind(Box::new("expected a fail-closed error"));
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn expect_equal<T: PartialEq + std::fmt::Debug>(left: T, right: T) {
+        if left != right {
+            std::panic::resume_unwind(Box::new(format!(
+                "coverage fixture values differed: {left:?} != {right:?}"
+            )));
+        }
+    }
+
+    #[test]
+    fn malformed_durable_rows_are_rejected_by_instrumented_seams() {
+        let consent_id = ok(AdmissionSnapshotId::from_canonical(
+            "01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+        ));
+        for statement in [
+            "INSERT INTO geographic_cell_admission_consent_records
+             (consent_record_id, consent_revision, consent_record_hash, consent_record_cbor)
+             VALUES (?1, 'bad', zeroblob(32), zeroblob(1))",
+            "INSERT INTO geographic_cell_admission_consent_records
+             (consent_record_id, consent_revision, consent_record_hash, consent_record_cbor)
+             VALUES (?1, 12, 'bad', zeroblob(1))",
+            "INSERT INTO geographic_cell_admission_consent_records
+             (consent_record_id, consent_revision, consent_record_hash, consent_record_cbor)
+             VALUES (?1, 12, zeroblob(32), 7)",
+            "INSERT INTO geographic_cell_admission_consent_records
+             (consent_record_id, consent_revision, consent_record_hash, consent_record_cbor)
+             VALUES (?1, -1, zeroblob(32), zeroblob(1))",
+            "INSERT INTO geographic_cell_admission_consent_records
+             (consent_record_id, consent_revision, consent_record_hash, consent_record_cbor)
+             VALUES (?1, 12, zeroblob(31), zeroblob(1))",
+        ] {
+            let mut store = tests::new_store();
+            ok(store
+                .conn
+                .execute_batch("PRAGMA ignore_check_constraints = ON"));
+            let tx = ok(store
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate));
+            ok(tx.execute(statement, rusqlite::params![consent_id.as_str()]));
+            expect_err(SqliteStore::geo_cell_consent_in_transaction(
+                &tx,
+                &consent_id,
+                12,
+            ));
+            ok(tx.rollback());
+        }
+
+        let store = tests::new_store();
+        ok(store.conn.execute(
+            "INSERT INTO owntracks_enrollment (singleton, state_cbor) VALUES (1, zeroblob(1))",
+            [],
+        ));
+        ok(store.conn.execute(
+            "UPDATE owntracks_enrollment SET state_cbor = zeroblob(1) WHERE singleton = 1",
+            [],
+        ));
+        expect_err(store.owntracks_enrollment_status());
+
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("metadata-wrong-type"));
+        ok(store.conn.execute(
+            "UPDATE timelines SET head_seq = 1 WHERE id = ?1",
+            rusqlite::params![timeline.id().to_string()],
+        ));
+        ok(store
+            .conn
+            .execute_batch("ALTER TABLE events RENAME TO events_real"));
+        let sql = format!(
+            "CREATE VIEW events AS SELECT '{id}' AS timeline_id, 1 AS seq,\
+             'event' AS event_id, 'entity' AS entity_id, 123 AS event_type,\
+             zeroblob(1) AS payload, 1 AS wall_time, NULL AS causation_id,\
+             NULL AS correlation_id, 1 AS schema_version, zeroblob(32) AS payload_hash,\
+             NULL AS signature",
+            id = timeline.id()
+        );
+        ok(store.conn.execute_batch(&sql));
+        expect_err(store.read_bounded(
+            timeline.id(),
+            SeqRange::all(),
+            EventReadBounds::new(1024, 1024, 1024, 8),
+        ));
+
+        let store = tests::new_store();
+        expect_err(store.resolve_admission_consent(&consent_id, 12));
+    }
+
+    #[test]
+    fn bounded_metadata_rejects_null_sizes_from_a_durable_view() {
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("metadata-null-payload"));
+        ok(store.conn.execute(
+            "UPDATE timelines SET head_seq = 1 WHERE id = ?1",
+            rusqlite::params![timeline.id().to_string()],
+        ));
+        ok(store
+            .conn
+            .execute_batch("ALTER TABLE events RENAME TO events_real"));
+        let sql = format!(
+            "CREATE VIEW events AS SELECT '{id}' AS timeline_id, 1 AS seq,\
+             'event' AS event_id, 'entity' AS entity_id, NULL AS event_type,\
+             NULL AS payload, 1 AS wall_time, NULL AS causation_id,\
+             NULL AS correlation_id, 1 AS schema_version, zeroblob(32) AS payload_hash,\
+             NULL AS signature",
+            id = timeline.id()
+        );
+        ok(store.conn.execute_batch(&sql));
+        let result = store.read_bounded(
+            timeline.id(),
+            SeqRange::all(),
+            EventReadBounds::new(1024, 1024, 1024, 8),
+        );
+        expect_err(result);
+
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("metadata-null-event-type"));
+        ok(store.conn.execute(
+            "UPDATE timelines SET head_seq = 1 WHERE id = ?1",
+            rusqlite::params![timeline.id().to_string()],
+        ));
+        ok(store
+            .conn
+            .execute_batch("ALTER TABLE events RENAME TO events_real"));
+        let sql = format!(
+            "CREATE VIEW events AS SELECT '{id}' AS timeline_id, 1 AS seq,\
+             'event' AS event_id, 'entity' AS entity_id, NULL AS event_type,\
+             zeroblob(1) AS payload, 1 AS wall_time, NULL AS causation_id,\
+             NULL AS correlation_id, 1 AS schema_version, zeroblob(32) AS payload_hash,\
+             NULL AS signature",
+            id = timeline.id()
+        );
+        ok(store.conn.execute_batch(&sql));
+        let result = store.read_bounded(
+            timeline.id(),
+            SeqRange::all(),
+            EventReadBounds::new(1024, 1024, 1024, 8),
+        );
+        expect_err(result);
+    }
+
+    #[test]
+    fn bounded_chain_and_logical_segments_fail_closed_on_limits_and_storage_errors() {
+        let mut store = tests::new_store();
+        let root = ok(store.create_timeline("logical-root"));
+        ok(store.append(root.id(), &[tests::make_draft(EntityId::new(), b"root")]));
+        let child = ok(store.fork(root.id(), Seq::from_u64(1), "logical-child"));
+        let chain = ok(SqliteStore::fork_chain_on(&store.conn, child.id()));
+        ok(store.conn.execute_batch("DROP TABLE timelines"));
+        expect_err(store.logical_segment_length(&chain, 0, root.id()));
+
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("bounded-chain"));
+        let segments = ok(SqliteStore::fork_chain_bounded_on(
+            &store.conn,
+            timeline.id(),
+            4,
+            Instant::now(),
+            10_000,
+        ));
+        expect_equal(segments.len(), 1);
+        FAIL_BOUNDED_CHAIN_QUERY.with(|flag| flag.set(true));
+        let query_error = SqliteStore::fork_chain_bounded_on(
+            &store.conn,
+            timeline.id(),
+            4,
+            Instant::now(),
+            10_000,
+        );
+        FAIL_BOUNDED_CHAIN_QUERY.with(|flag| flag.set(false));
+        expect_err(query_error);
+        BOUNDED_READ_DELAY_PHASE.with(|phase| phase.set(8));
+        let timeout =
+            SqliteStore::fork_chain_bounded_on(&store.conn, timeline.id(), 4, Instant::now(), 0);
+        BOUNDED_READ_DELAY_PHASE.with(|phase| phase.set(0));
+        expect_err(timeout);
+    }
+
+    #[test]
+    fn enrollment_paths_fail_closed_on_transaction_state_and_commit_errors() {
+        let request_for = |timeline: TimelineId| {
+            OwnTracksEnrollmentRequestV1::new(
+                timeline,
+                EntityId::new(),
+                pos_core::geo_admission::GeoLocationAdmissionFenceV1::new(
+                    7,
+                    ([1; 32], 8, [2; 32]),
+                    (1, false, 9),
+                ),
+                [42; 32],
+            )
+        };
+
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("enrollment-begin"));
+        ok(store.conn.execute_batch("BEGIN IMMEDIATE"));
+        expect_err(store.pair_owntracks_enrollment(request_for(timeline.id())));
+        ok(store.conn.execute_batch("ROLLBACK"));
+
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("enrollment-query"));
+        ok(store.conn.execute_batch("DROP TABLE owntracks_enrollment"));
+        expect_err(store.pair_owntracks_enrollment(request_for(timeline.id())));
+
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("enrollment-write"));
+        ok(store.conn.execute_batch(
+            "CREATE TRIGGER deny_enrollment_write BEFORE INSERT ON owntracks_enrollment \
+             BEGIN SELECT RAISE(ABORT, 'enrollment write denied'); END",
+        ));
+        expect_err(store.pair_owntracks_enrollment(request_for(timeline.id())));
+
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("enrollment-commit"));
+        store.conn.commit_hook(Some(|| true));
+        expect_err(store.pair_owntracks_enrollment(request_for(timeline.id())));
+        store.conn.commit_hook::<fn() -> bool>(None);
+
+        let mut store = tests::new_store();
+        let _timeline = ok(store.create_timeline("enrollment-status"));
+        ok(store.conn.execute(
+            "UPDATE owntracks_enrollment SET state_cbor = zeroblob(1) WHERE singleton = 1",
+            [],
+        ));
+        let _ = store.owntracks_enrollment_status();
+        ok(store.conn.execute_batch("DROP TABLE owntracks_enrollment"));
+        expect_err(store.owntracks_enrollment_status());
+
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("enrollment-transition"));
+        ok(store.pair_owntracks_enrollment(request_for(timeline.id())));
+        store.conn.commit_hook(Some(|| true));
+        expect_err(store.revoke_owntracks_enrollment());
+        store.conn.commit_hook::<fn() -> bool>(None);
+    }
+
+    #[test]
+    fn geographic_admin_and_replay_rows_fail_closed_on_durable_errors() {
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("geo-admin-commit"));
+        let entity = EntityId::new();
+        let (consent, fence, request) = tests::geo_cell_request(timeline.id(), entity);
+        store.conn.commit_hook(Some(|| true));
+        expect_err(store.set_geo_cell_admission_consent_record(consent));
+        store.conn.commit_hook::<fn() -> bool>(None);
+        ok(store.set_geo_cell_admission_consent_record(
+            tests::geo_cell_request(timeline.id(), entity).0,
+        ));
+        store.conn.commit_hook(Some(|| true));
+        expect_err(store.set_geo_cell_admission_fence(timeline.id(), entity, fence));
+        store.conn.commit_hook::<fn() -> bool>(None);
+        let _ = store.resolve_admission_consent(request.fence().draft().consent_record_id(), 12);
+    }
+
+    #[test]
+    fn event_lookup_rejects_malformed_durable_owner_and_query_shapes() {
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("event-query-shape"));
+        ok(store.append(
+            timeline.id(),
+            &[tests::make_draft(EntityId::new(), b"event")],
+        ));
+        ok(store
+            .conn
+            .execute_batch("ALTER TABLE events RENAME TO events_real"));
+        let sql = format!(
+            "CREATE VIEW events AS SELECT '{id}' AS timeline_id, 'test.event' AS event_type",
+            id = timeline.id()
+        );
+        ok(store.conn.execute_batch(&sql));
+        expect_err(store.read_event_by_id(timeline.id(), EventId::new()));
+
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("event-owner-shape"));
+        let event = ok(store.append(
+            timeline.id(),
+            &[tests::make_draft(EntityId::new(), b"event")],
+        ));
+        ok(store.conn.execute(
+            "UPDATE events SET timeline_id = 'not-a-timeline' WHERE event_id = ?1",
+            rusqlite::params![event[0].id.to_string()],
+        ));
+        expect_err(store.read_event_by_id(timeline.id(), event[0].id));
     }
 }

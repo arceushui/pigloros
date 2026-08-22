@@ -103,6 +103,7 @@ ulid_newtype!(PluginId, "Identifies a registered plugin.");
 ulid_newtype!(RelationshipId, "Unique identifier for a relationship.");
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use proptest::{prop_assert, prop_assert_eq};

@@ -95,6 +95,7 @@ impl EventQuery {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use pos_core::{
@@ -108,6 +109,7 @@ mod tests {
         fn test_ok(self) -> T;
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
         fn test_ok(self) -> T {
             self.unwrap_or_else(|error| {
@@ -118,6 +120,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     impl<T> TestValueExt<T> for Option<T> {
         fn test_ok(self) -> T {
             self.unwrap_or_else(|| {
@@ -126,6 +129,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn make_draft(entity: EntityId, event_type: &str) -> EventDraft {
         EventDraft::new(
             entity,
@@ -134,6 +138,7 @@ mod tests {
         )
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn setup_store() -> (Box<dyn EventStore>, TimelineId, EntityId, EntityId) {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("test").test_ok();

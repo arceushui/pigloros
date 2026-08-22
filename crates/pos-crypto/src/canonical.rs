@@ -143,6 +143,7 @@ fn write_cbor<W: Write>(value: &Value, writer: W) -> Result<(), CoreError> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use std::fmt::Debug;

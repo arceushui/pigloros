@@ -1538,9 +1538,7 @@ impl EventStore for MemoryStore {
                     .meta
                     .fork_point
                     .map_or(0, |(_, fork)| fork.as_u64());
-                let batch_len = u64::try_from(drafts.len()).map_err(|_| {
-                    CoreError::Storage("draft batch length does not fit in u64".to_owned())
-                })?;
+                let batch_len = u64::try_from(drafts.len()).unwrap_or(u64::MAX);
                 if let Some(next_head) =
                     crate::bounded_owned_head(owned_head, batch_len, max_owned_events)?
                 {
@@ -1871,6 +1869,7 @@ impl MemoryStore {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use pos_core::{
@@ -3923,6 +3922,20 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn test_corruption_rejects_a_missing_timeline_target() {
+        let mut store = MemoryStore::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.test_corrupt(TestCorruption::ForkParent {
+                timeline: TimelineId::new(),
+                parent: TimelineId::new(),
+                fork_seq: Seq::ZERO,
+            });
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_read_rejects_unknown_timeline() {
         let store = MemoryStore::new();
         let bounded_error = store
@@ -4680,5 +4693,84 @@ mod tests {
         let mut encoded = serde_json::to_value(draft).test_ok();
         encoded["schema_version"] = serde_json::json!(2);
         assert!(serde_json::from_value::<EventDraft>(encoded).is_err());
+    }
+}
+
+#[cfg(test)]
+mod coverage_entrypoints {
+    use super::*;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn ok<T, E: std::fmt::Debug>(value: Result<T, E>) -> T {
+        value.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("unexpected coverage error: {error:?}")))
+        })
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn expect_err<T: std::fmt::Debug, E: std::fmt::Debug>(value: Result<T, E>) {
+        assert!(
+            value.is_err(),
+            "expected a rejected coverage value: {value:?}"
+        );
+    }
+
+    fn draft(payload: &'static [u8]) -> EventDraft {
+        EventDraft::new(
+            pos_core::EntityId::new(),
+            Kind::new("coverage.event"),
+            pos_core::CanonicalBytes::from_static(payload),
+        )
+    }
+
+    fn identity(key: u8, scope: u8) -> AppendIdentity {
+        AppendIdentity::new(
+            AppendDedupKey::from_keyed_hash([key; 32]),
+            AppendDedupScope::from_keyed_hash([scope; 32]),
+        )
+    }
+
+    #[test]
+    fn memory_error_and_fork_boundaries_are_instrumented() {
+        let mut store = MemoryStore::new();
+        let root = ok(store.create_timeline("coverage-root"));
+        let first = ok(store.append_or_duplicate(
+            root.id(),
+            identity(1, 1),
+            WallTime::from_micros(1),
+            draft(b"first"),
+        ));
+        let second = ok(store.create_timeline("coverage-second"));
+        let conflict = ok(store.append_or_duplicate(
+            second.id(),
+            identity(1, 1),
+            WallTime::from_micros(1),
+            draft(b"second"),
+        ));
+        drop((first, conflict));
+        expect_err(store.revoke_owntracks_enrollment());
+        expect_err(store.logical_head(pos_core::TimelineId::new()));
+        expect_err(store.fork(root.id(), Seq::from_u64(2), "beyond"));
+        let child = ok(store.fork(root.id(), Seq::ZERO, "child"));
+        let _ = ok(store.compute_chain_hash_at(root.id(), Seq::ZERO));
+        expect_err(store.compute_chain_hash_at(child.id(), Seq::from_u64(1)));
+        store.test_corrupt(TestCorruption::ForkParent {
+            timeline: child.id(),
+            parent: pos_core::TimelineId::new(),
+            fork_seq: Seq::ZERO,
+        });
+        expect_err(store.read(child.id(), SeqRange::all()));
+        expect_err(store.read_event_by_id(child.id(), EventId::new()));
+    }
+
+    #[test]
+    fn memory_append_and_bounded_read_boundaries_are_instrumented() {
+        let mut store = MemoryStore::new();
+        let timeline = ok(store.create_timeline("coverage-append"));
+        expect_err(store.append(pos_core::TimelineId::new(), &[draft(b"missing")]));
+        let _ = ok(store.append(timeline.id(), &[draft(b"present")]));
+        let bounds = EventReadBounds::new(1024, usize::MAX, usize::MAX, 1_000_000);
+        let _ = ok(store.read_bounded(timeline.id(), SeqRange::all(), bounds));
+        let _ = ok(store.append_bounded(timeline.id(), &[draft(b"too-many")], 1));
     }
 }

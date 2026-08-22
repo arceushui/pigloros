@@ -40,6 +40,96 @@ fn extend_unique_subscriptions(
     }
 }
 
+#[cfg(test)]
+mod coverage_paths {
+    use super::*;
+    use crate::driver::{ObservationView, StepOutput, TimelineHistorySegment};
+    use pos_core::{
+        clock::{Seq, WallTime},
+        crypto::Hash,
+        event::{CanonicalBytes, Kind, SchemaVersion},
+        ids::{EntityId, EventId, TimelineId},
+        Event,
+    };
+    use std::sync::{Arc, Mutex};
+
+    struct RestoreDriver {
+        committed: Arc<Mutex<bool>>,
+    }
+
+    impl Driver for RestoreDriver {
+        fn name(&self) -> &'static str {
+            "coverage-restore"
+        }
+
+        fn step(
+            &mut self,
+            _: TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            Ok(StepOutput::empty())
+        }
+
+        fn commit_restore_from_history(&mut self) {
+            *self
+                .committed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        }
+    }
+
+    #[test]
+    fn restore_with_history_commits_and_advances_driver_cursor() {
+        let timeline = TimelineId::new();
+        let committed = Arc::new(Mutex::new(false));
+        let mut registry = PluginRegistry::new();
+        registry.register_driver(Box::new(RestoreDriver {
+            committed: Arc::clone(&committed),
+        }));
+        assert!(registry.step_all(timeline).is_ok());
+        let event = Event {
+            id: EventId::new(),
+            entity: EntityId::new(),
+            event_type: Kind::new("coverage.restore"),
+            payload: CanonicalBytes::from_static(b"history"),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        };
+        let result = registry.restore_driver_state(
+            &[TimelineHistorySegment::new(timeline, Seq::from_u64(1))],
+            &[event],
+        );
+        assert!(result.is_ok());
+        assert!(*committed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner));
+    }
+
+    #[test]
+    fn transaction_cleanup_ignores_unresolvable_staged_identifiers() {
+        let id = PluginId::new();
+        let mut registry = PluginRegistry::new();
+        registry.pending_step = Some(PendingStep {
+            driver_ids: vec![id],
+            cadence_updates: Vec::new(),
+            event_cursors: Vec::new(),
+        });
+        registry.abort_step();
+
+        registry.pending_step = Some(PendingStep {
+            driver_ids: vec![id],
+            cadence_updates: vec![(id, 1)],
+            event_cursors: vec![(id, Seq::ZERO)],
+        });
+        registry.commit_step();
+    }
+}
+
 fn validate_recovery_evidence(
     timeline_segments: &[TimelineHistorySegment],
     events: &[Event],
@@ -935,6 +1025,7 @@ impl Default for PluginRegistry {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::driver::{ObservationView, SnapshotAnchor, StepOutput};
@@ -1331,6 +1422,70 @@ mod tests {
     }
 
     #[test]
+    fn panicking_restore_commit_is_reported_and_poisoned() {
+        struct RestoreCommitPanickingDriver;
+
+        impl Driver for RestoreCommitPanickingDriver {
+            fn name(&self) -> &'static str {
+                "restore-commit-panicking"
+            }
+
+            fn step(
+                &mut self,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                Ok(StepOutput::empty())
+            }
+
+            fn commit_restore_from_history(&mut self) {
+                std::panic::resume_unwind(Box::new("restore commit panic"));
+            }
+        }
+
+        let timeline = TimelineId::new();
+        let mut registry = PluginRegistry::new();
+        registry.register_driver(Box::new(RestoreCommitPanickingDriver));
+        let error = registry
+            .restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[])
+            .test_err();
+        assert!(matches!(error, RuntimeError::DriverRestorePanicked { .. }));
+    }
+
+    #[test]
+    fn panicking_step_commit_marks_the_driver_poisoned() {
+        struct StepCommitPanickingDriver;
+
+        impl Driver for StepCommitPanickingDriver {
+            fn name(&self) -> &'static str {
+                "step-commit-panicking"
+            }
+
+            fn step(
+                &mut self,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                Ok(StepOutput::empty())
+            }
+
+            fn commit_step(&mut self) {
+                std::panic::resume_unwind(Box::new("step commit panic"));
+            }
+        }
+
+        let mut registry = PluginRegistry::new();
+        registry.register_driver(Box::new(StepCommitPanickingDriver));
+        registry
+            .step_all_anchored(TimelineId::new(), Seq::ZERO)
+            .test_ok();
+        registry.commit_step();
+        assert!(registry
+            .step_all_anchored(TimelineId::new(), Seq::ZERO)
+            .is_err());
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn failed_driver_recovery_aborts_every_earlier_staged_driver() {
         #[derive(Default)]
@@ -1671,6 +1826,24 @@ mod tests {
         reg.register(&p, None, None).test_ok();
         let drafts = reg.step_all(tl.id()).test_ok();
         assert!(drafts.is_empty());
+    }
+
+    #[test]
+    fn direct_driver_selection_reports_missing_entries() {
+        let mut registry = PluginRegistry::new();
+        let snapshot = ObservationSnapshot::default();
+        let missing = registry
+            .invoke_selected_driver(PluginId::new(), TimelineId::new(), &snapshot, &[])
+            .test_err();
+        assert!(matches!(missing, RuntimeError::NoDriver { .. }));
+
+        let plugin = simple_plugin("registered-without-driver", &[]);
+        let plugin_id = plugin.id;
+        registry.register(&plugin, None, None).test_ok();
+        let absent = registry
+            .invoke_selected_driver(plugin_id, TimelineId::new(), &snapshot, &[])
+            .test_err();
+        assert!(matches!(absent, RuntimeError::NoDriver { .. }));
     }
 
     #[test]

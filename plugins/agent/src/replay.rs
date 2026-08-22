@@ -380,6 +380,7 @@ fn advance_driver_tick(current: u64) -> Result<u64, ReplayVerificationError> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::{
         advance_driver_tick, validate_recovery_sequence, ReplayVerificationError, VerificationEvent,
