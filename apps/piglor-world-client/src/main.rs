@@ -1,5 +1,6 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+#[cfg(all(feature = "runtime", not(target_arch = "wasm32")))]
 macro_rules! output_stderr {
     ($($arg:tt)*) => {{
         let mut output = std::io::stderr().lock();
