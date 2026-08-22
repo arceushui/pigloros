@@ -9,15 +9,11 @@ publish.workspace = true
 [dependencies]
 pos-core = { path = "../pos-core" }
 serde = { workspace = true }
-serde_bytes = { workspace = true }
 ciborium = { workspace = true }
 blake3 = { workspace = true }
 ed25519-dalek = { workspace = true }
-rand = { workspace = true }
 rand_core = { version = "0.6", features = ["getrandom"] }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-bytes = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

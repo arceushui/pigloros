@@ -58,7 +58,7 @@ impl std::fmt::Display for VerifyReport {
 ///
 /// # Errors
 /// Returns [`CliError`] on adapter failure. Verification *failures* are
-/// reported via [`VerifyReport`] (a non-error path) so the CLI prints a
+/// reported via `VerifyReport` (a non-error path) so the CLI prints a
 /// readable report — only infrastructure errors propagate as `Err`.
 pub fn run(
     source: &Source,

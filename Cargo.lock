@@ -4303,8 +4303,6 @@ dependencies = [
  "pos-experiment",
  "pos-plugin-rule-agent",
  "pos-plugin-synthetic-obs",
- "pos-query",
- "pos-runtime",
  "pos-state",
  "pos-store",
  "pos-time",
@@ -4312,7 +4310,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.20",
  "ulid",
 ]
 
@@ -4337,7 +4334,6 @@ dependencies = [
  "bytes",
  "ciborium",
  "proptest",
- "rand 0.9.5",
  "serde",
  "serde_bytes",
  "serde_json",
@@ -4350,17 +4346,13 @@ name = "pos-crypto"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "bytes",
  "ciborium",
  "ed25519-dalek",
  "pos-core",
  "proptest",
- "rand 0.9.5",
  "rand_core 0.6.4",
  "serde",
- "serde_bytes",
  "serde_json",
- "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -4378,13 +4370,11 @@ dependencies = [
  "pos-plugin-society",
  "pos-plugin-synthetic-obs",
  "pos-plugin-world",
- "pos-query",
  "pos-reference",
  "pos-runtime",
  "pos-state",
  "pos-store",
  "pos-time",
- "proptest",
  "rusqlite",
  "serde",
  "serde_json",
@@ -4415,7 +4405,6 @@ dependencies = [
  "ciborium",
  "pos-core",
  "pos-plugin-geo",
- "pos-runtime",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -4427,7 +4416,6 @@ version = "0.1.0"
 dependencies = [
  "ciborium",
  "pos-core",
- "pos-runtime",
  "pos-store",
  "serde",
  "serde_json",
@@ -4442,8 +4430,6 @@ dependencies = [
  "h3o",
  "pos-core",
  "pos-crypto",
- "pos-runtime",
- "pos-store",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -4479,7 +4465,6 @@ dependencies = [
  "pos-store",
  "serde",
  "serde_json",
- "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -4492,7 +4477,6 @@ dependencies = [
  "pos-store",
  "serde",
  "serde_json",
- "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -4517,7 +4501,6 @@ dependencies = [
  "pos-store",
  "serde",
  "serde_json",
- "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -4541,9 +4524,6 @@ version = "0.1.0"
 dependencies = [
  "pos-core",
  "pos-store",
- "proptest",
- "serde",
- "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -4562,8 +4542,6 @@ dependencies = [
  "pos-core",
  "pos-state",
  "pos-store",
- "proptest",
- "serde",
  "serde_json",
  "thiserror 2.0.20",
 ]
@@ -4574,9 +4552,7 @@ version = "0.1.0"
 dependencies = [
  "pos-core",
  "proptest",
- "serde",
  "serde_json",
- "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -4584,16 +4560,12 @@ name = "pos-store"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "bytes",
  "ciborium",
  "pos-core",
  "pos-crypto",
- "proptest",
  "rusqlite",
- "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.20",
  "ulid",
 ]
 

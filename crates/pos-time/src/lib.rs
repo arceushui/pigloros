@@ -9,10 +9,10 @@
 //!
 //! | Module | Purpose |
 //! |--------|---------|
-//! | [`replay`] | Fold all (or partial) events through a `ProjectionRegistry` |
-//! | [`snapshot`] | Capture and verify state snapshots |
-//! | [`compare`] | Diff two divergent timelines after a fork |
-//! | [`merge`] | Conflict-free / strategy-guided timeline merge |
+//! | [`mod@replay`] | Fold all (or partial) events through a `ProjectionRegistry` |
+//! | [`mod@snapshot`] | Capture and verify state snapshots |
+//! | [`compare()`] | Diff two divergent timelines after a fork |
+//! | [`merge()`] | Conflict-free / strategy-guided timeline merge |
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 pub mod compare;

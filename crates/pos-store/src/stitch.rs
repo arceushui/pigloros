@@ -1,7 +1,7 @@
-//! Shared fork-chain stitching for [`EventStore`] backends.
+//! Shared fork-chain stitching for [`pos_core::EventStore`] backends.
 //!
 //! Child timelines restart local `seq` at 1. Callers that read a forked timeline
-//! must see a single logical sequence: parent[`0..=fork_seq`] + child events,
+//! must see a single logical sequence: parent `0..=fork_seq` + child events,
 //! renumbered to `1..n`, then filtered by the requested [`SeqRange`].
 
 use pos_core::{clock::Seq, event::Event, store::SeqRange};

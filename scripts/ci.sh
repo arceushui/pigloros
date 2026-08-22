@@ -32,11 +32,21 @@ else
   echo "WARNING: cargo-deny not on PATH; skipping (install: cargo install cargo-deny)"
 fi
 
+echo "==> cargo shear (dependency and source layout policy)"
+if command -v cargo-shear >/dev/null 2>&1; then
+  cargo shear --deny-warnings
+else
+  echo "WARNING: cargo-shear not on PATH; skipping (install: cargo install cargo-shear)"
+fi
+
 echo "==> disabled feature isolation"
 cargo check --workspace --all-targets --no-default-features --locked
 
 echo "==> fmt"
 cargo fmt --all -- --check
+
+echo "==> rustdoc (warnings denied)"
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
 
 echo "==> test (--include-ignored)"
 # Run ignored tests too so #[ignore] cannot silently skip a path.

@@ -142,7 +142,9 @@ For agent-based development, see **[AGENTS.md](AGENTS.md)** and **[CONTEXT.md](C
 # Or individually:
 trunk check --all          # rustfmt + rust-test-policy + actionlint + …
 cargo deny --locked check  # dependency bans/licenses/advisories/sources
+cargo shear --deny-warnings # unused/misplaced dependencies and unlinked Rust files
 cargo fmt --all -- --check
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
 cargo test --workspace --locked -- --include-ignored
 cargo clippy --workspace --all-targets --locked -- -D warnings -W clippy::pedantic
 # `#[coverage(off)]` is ONLY ever applied to #[test] functions / #[cfg(test)] modules —
@@ -151,7 +153,7 @@ RUSTC_BOOTSTRAP=1 cargo llvm-cov --workspace --locked --summary-only \
   --fail-under-lines 99 --fail-under-regions 99 -- --include-ignored
 ```
 
-CI (GitHub Actions): **Trunk Check** (`rust-test-policy`), **cargo-deny**, **fmt**, **test** (`--include-ignored`), **clippy pedantic**, **llvm-cov** (99% lines and 99% regions, with bounded hosted-runner parallelism), **docker-build** (image + smoke test), **deploy** (workflow_dispatch: build → smoke → push to ghcr.io). See `.github/workflows/`. The repository-wide LLVM gate is intentionally executed in the hosted `coverage` job with bounded parallelism; when local instrumentation exceeds available memory, run the other local gates and use that Actions job for the coverage execution without lowering the threshold.
+CI (GitHub Actions): **Trunk Check** (`rust-test-policy`), **cargo-deny** (all features), **cargo-shear**, **fmt**, **rustdoc** (`-D warnings`), **test** (`--include-ignored`), **clippy pedantic**, **llvm-cov** (99% lines and 99% regions, with bounded hosted-runner parallelism), **docker-build** (image + smoke test), **deploy** (workflow_dispatch: build → smoke → push to ghcr.io), plus scheduled mutation, fuzzing, ThreadSanitizer, and CodeQL workflows. See `.github/workflows/`. The repository-wide LLVM gate is intentionally executed in the hosted `coverage` job with bounded parallelism; when local instrumentation exceeds available memory, run the other local gates and use that Actions job for the coverage execution without lowering the threshold.
 
 Quality floor: **800+ tests · 0 failures · at least 99% line and 99% region coverage · clippy pedantic clean**
 

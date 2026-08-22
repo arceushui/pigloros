@@ -1,0 +1,74 @@
+# Nightly ThreadSanitizer coverage for repository-owned store, runtime, and
+# Gateway executor concurrency paths. SQLite's WAL shared-memory implementation
+# is intentionally excluded because TSan reports a known third-party race there.
+# This is intentionally separate from stable CI:
+# TSan requires nightly rustc and can be substantially slower.
+name: thread-sanitizer
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: thread-sanitizer-${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  tsan:
+    name: ThreadSanitizer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      RUSTFLAGS: -Zsanitizer=thread
+      TSAN_OPTIONS: halt_on_error=1:detect_deadlocks=1
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - run: rm -f rust-toolchain.toml
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: nightly-2026-07-01
+          components: rust-src
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: tsan-nightly-2026-07-01
+      - name: Run concurrency tests under ThreadSanitizer
+        run: |
+          set -euo pipefail
+          cargo +nightly-2026-07-01 test \
+            -Zbuild-std \
+            --target x86_64-unknown-linux-gnu \
+            -p pos-runtime \
+            --all-features \
+            --locked \
+            --tests \
+            -- --include-ignored 2>&1 | tee "${RUNNER_TEMP}/tsan.log"
+          cargo +nightly-2026-07-01 test \
+            -Zbuild-std \
+            --target x86_64-unknown-linux-gnu \
+            -p pos-store \
+            --all-features \
+            --locked \
+            --lib \
+            -- memory::tests --include-ignored 2>&1 | tee -a "${RUNNER_TEMP}/tsan.log"
+          cargo +nightly-2026-07-01 test \
+            -Zbuild-std \
+            --target x86_64-unknown-linux-gnu \
+            -p piglor-gateway \
+            --all-features \
+            --locked \
+            --lib \
+            -- executor::tests --include-ignored 2>&1 | tee -a "${RUNNER_TEMP}/tsan.log"
+      - name: Upload ThreadSanitizer log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: thread-sanitizer-log
+          path: ${{ runner.temp }}/tsan.log
+          if-no-files-found: ignore

@@ -1,0 +1,68 @@
+# Targeted libFuzzer coverage for the two untrusted parsing boundaries:
+# canonical event bytes and Gateway JSON request bodies.
+name: fuzz
+
+on:
+  pull_request:
+    paths:
+      - "fuzz/**"
+      - "crates/pos-core/**"
+      - "apps/piglor-gateway/**"
+      - "Cargo.lock"
+      - ".github/workflows/fuzz.yml"
+  schedule:
+    - cron: "31 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - event_decode
+          - gateway_requests
+    env:
+      FUZZ_SECONDS: ${{ github.event_name == 'pull_request' && 60 || 300 }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - run: rm -f rust-toolchain.toml
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: nightly-2026-07-01
+          components: rust-src
+      - uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2
+        with:
+          tool: cargo-fuzz
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: fuzz-nightly-2026-07-01-${{ matrix.target }}
+          workspaces: fuzz
+      - name: Run ${{ matrix.target }}
+        working-directory: fuzz
+        run: |
+          set -euo pipefail
+          mkdir -p "artifacts/${{ matrix.target }}"
+          cargo +nightly-2026-07-01 check --locked --bins
+          cargo +nightly-2026-07-01 fuzz run "${{ matrix.target }}" -- \
+            -max_total_time="${FUZZ_SECONDS}" \
+            -artifact_prefix="artifacts/${{ matrix.target }}/"
+      - name: Upload fuzz artifacts and corpus
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: |
+            fuzz/artifacts
+            fuzz/corpus
+          if-no-files-found: ignore

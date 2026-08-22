@@ -72,7 +72,7 @@ pub struct OutcomePayload {
     pub outcome: bool,
 }
 
-/// Build an `eval.prediction` [`EventDraft`].
+/// Build an `eval.prediction` [`pos_core::EventDraft`].
 ///
 /// # Panics
 /// Never panics; CBOR encoding of [`PredictionPayload`] is infallible.
@@ -99,7 +99,7 @@ pub fn draft_prediction(
     )
 }
 
-/// Build an `eval.outcome` [`EventDraft`].
+/// Build an `eval.outcome` [`pos_core::EventDraft`].
 ///
 /// # Panics
 /// Never panics; CBOR encoding of [`OutcomePayload`] is infallible.
