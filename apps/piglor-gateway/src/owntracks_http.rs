@@ -82,7 +82,7 @@ fn basic_credentials(headers: &HeaderMap) -> Option<([u8; 32], [u8; 32])> {
     let decoded = decode_base64(encoded)?;
     let separator = decoded.iter().position(|byte| *byte == b':')?;
     let (handle, secret_with_separator) = decoded.split_at(separator);
-    let secret = secret_with_separator.get(1..)?;
+    let secret = &secret_with_separator[1..];
     Some((decode_hex_32(handle)?, decode_hex_32(secret)?))
 }
 
@@ -205,21 +205,22 @@ mod tests {
     }
 
     use super::{basic_credentials, minimize_location, owntracks_response, post_owntracks};
-    use crate::{Gateway, OwnTracksIngressResult};
+    use crate::{Gateway, GatewayError, OwnTracksIngressResult};
     use axum::{
         body::{to_bytes, Body},
         http::{header, HeaderMap, HeaderValue, StatusCode},
     };
     use pos_core::{
-        EntityId, EventStore, GeoLocationAdmissionFenceV1, OwnTracksEnrollmentRequestV1,
+        CoreError, EntityId, EventStore, GeoLocationAdmissionFenceV1, OwnTracksEnrollmentRequestV1,
         OwnTracksEnrollmentStore,
     };
     use pos_store::{memory::MemoryStore, open_store, StoreConfig};
     use tokio::sync::mpsc;
 
     #[test]
-    fn basic_credentials_reject_malformed_values() {
+    fn basic_credentials_reject_malformed_values() -> Result<(), Box<dyn std::error::Error>> {
         let mut headers = HeaderMap::new();
+        assert_eq!(basic_credentials(&headers), None);
         headers.insert(
             header::AUTHORIZATION,
             HeaderValue::from_static(
@@ -232,6 +233,27 @@ mod tests {
             HeaderValue::from_static("Basic not-base64"),
         );
         assert_eq!(basic_credentials(&headers), None);
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer YWJj"),
+        );
+        assert_eq!(basic_credentials(&headers), None);
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Basic YWJj"),
+        );
+        assert_eq!(basic_credentials(&headers), None);
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Basic OmJi"),
+        );
+        assert_eq!(basic_credentials(&headers), None);
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_bytes(b"Basic \xff")?,
+        );
+        assert_eq!(basic_credentials(&headers), None);
+        Ok(())
     }
 
     #[test]
@@ -327,6 +349,15 @@ mod tests {
         assert!(minimize_location(br#"{"_type":"waypoint","lat":0,"lon":0,"tst":1}"#).is_err());
         assert!(minimize_location(br#"{"_type":"location","lat":91,"lon":0,"tst":1}"#).is_err());
         assert!(minimize_location(br#"{"_type":"location","lat":0,"lon":0,"tst":1.5}"#).is_err());
+        for missing in [
+            br"{}".as_slice(),
+            br"[]".as_slice(),
+            br#"{"_type":"location","lon":0,"tst":1}"#.as_slice(),
+            br#"{"_type":"location","lat":0,"tst":1}"#.as_slice(),
+            br#"{"_type":"location","lat":0,"lon":0}"#.as_slice(),
+        ] {
+            assert!(minimize_location(missing).is_err());
+        }
 
         Ok(())
     }
@@ -352,11 +383,42 @@ mod tests {
     #[test]
     fn maps_conflict_and_unavailable_ingress_results() {
         assert_eq!(
+            owntracks_response(&Ok(OwnTracksIngressResult::Accepted)).status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            owntracks_response(&Ok(OwnTracksIngressResult::Duplicate)).status(),
+            StatusCode::OK
+        );
+        let rate_limited = owntracks_response(&Ok(OwnTracksIngressResult::RateLimited));
+        assert_eq!(rate_limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            rate_limited
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("1")
+        );
+        assert_eq!(
             owntracks_response(&Ok(OwnTracksIngressResult::Conflict)).status(),
             StatusCode::FORBIDDEN
         );
         assert_eq!(
             owntracks_response(&Ok(OwnTracksIngressResult::Unavailable)).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            owntracks_response(&Err(GatewayError::Store(
+                CoreError::GeographicAdmissionAuthenticationFailed,
+            )))
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            owntracks_response(&Err(GatewayError::Store(CoreError::Storage(
+                "closed".to_owned(),
+            ))))
+            .status(),
             StatusCode::SERVICE_UNAVAILABLE
         );
     }

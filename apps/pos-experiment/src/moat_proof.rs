@@ -2375,6 +2375,29 @@ mod tests {
     }
 
     #[test]
+    fn plugin_registration_rejects_duplicate_topology_ids() {
+        let mut agent_duplicate = ProofTopology::new(input()).test_ok();
+        agent_duplicate.agent_plugin.id = agent_duplicate.world_plugin.id();
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "duplicate-agent".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: pos_store::StoreConfig::Memory,
+        });
+        assert!(register_plugins(&mut experiment, &agent_duplicate).is_err());
+        assert!(build_registry(&agent_duplicate).is_err());
+
+        let mut society_duplicate = ProofTopology::new(input()).test_ok();
+        society_duplicate.society_plugin.id = society_duplicate.world_plugin.id();
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "duplicate-society".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: pos_store::StoreConfig::Memory,
+        });
+        assert!(register_plugins(&mut experiment, &society_duplicate).is_err());
+        assert!(build_registry(&society_duplicate).is_err());
+    }
+
+    #[test]
     fn proof_helpers_cover_empty_views_custom_nodes_and_unknown_failures() {
         struct BrokenSerialize;
 

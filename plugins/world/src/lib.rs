@@ -1315,75 +1315,73 @@ impl Driver for WorldDriver {
             causation_by_body: Vec::new(),
         };
         for event in evidence.events() {
+            let event_type = event.header().event_type().as_str();
             let Some(payload) = event.payload() else {
                 continue;
             };
-            match event.header().event_type().as_str() {
-                EVENT_TYPE_ACTION_V1 => {
-                    let action = WorldActionV1::decode(payload).map_err(|error| {
-                        RuntimeError::InvalidPayload {
-                            event_type: EVENT_TYPE_ACTION_V1.to_owned(),
-                            reason: error.to_string(),
-                        }
-                    })?;
-                    if !Self::apply_action_to_entities(&mut restored.entities, &action) {
-                        return Err(RuntimeError::InvalidPayload {
-                            event_type: EVENT_TYPE_ACTION_V1.to_owned(),
-                            reason: "action target or velocity parameters are invalid".to_owned(),
-                        });
+            if event_type == EVENT_TYPE_ACTION_V1 {
+                let action = WorldActionV1::decode(payload).map_err(|error| {
+                    RuntimeError::InvalidPayload {
+                        event_type: EVENT_TYPE_ACTION_V1.to_owned(),
+                        reason: error.to_string(),
                     }
+                })?;
+                if !Self::apply_action_to_entities(&mut restored.entities, &action) {
+                    return Err(RuntimeError::InvalidPayload {
+                        event_type: EVENT_TYPE_ACTION_V1.to_owned(),
+                        reason: "action target or velocity parameters are invalid".to_owned(),
+                    });
+                }
+                restored
+                    .applied_action_seqs
+                    .push(event.header().seq().as_u64());
+                if let Some((_, causation)) = restored
+                    .causation_by_body
+                    .iter_mut()
+                    .find(|(body, _)| *body == action.body_entity_id)
+                {
+                    *causation = event.header().id();
+                } else {
                     restored
-                        .applied_action_seqs
-                        .push(event.header().seq().as_u64());
-                    if let Some((_, causation)) = restored
                         .causation_by_body
-                        .iter_mut()
-                        .find(|(body, _)| *body == action.body_entity_id)
-                    {
-                        *causation = event.header().id();
-                    } else {
-                        restored
-                            .causation_by_body
-                            .push((action.body_entity_id, event.header().id()));
-                    }
-                    restored.tick = restored.tick.max(action.tick.saturating_add(1));
+                        .push((action.body_entity_id, event.header().id()));
                 }
-                EVENT_TYPE_OBSERVATION_V1 => {
-                    let observation = WorldObservationV1::decode(payload).map_err(|error| {
-                        RuntimeError::InvalidPayload {
-                            event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
-                            reason: error.to_string(),
-                        }
-                    })?;
-                    if let Some(body) = restored
-                        .entities
-                        .iter_mut()
-                        .find(|body| body.entity_id == observation.body_entity_id)
-                    {
-                        body.x = f64::from(observation.pos_x);
-                        body.y = f64::from(observation.pos_y);
+                restored.tick = restored.tick.max(action.tick.saturating_add(1));
+            } else if event_type == EVENT_TYPE_OBSERVATION_V1 {
+                let observation = WorldObservationV1::decode(payload).map_err(|error| {
+                    RuntimeError::InvalidPayload {
+                        event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
+                        reason: error.to_string(),
                     }
-                    restored.tick = restored.tick.max(observation.tick.saturating_add(1));
-                    restored.step_index = restored
-                        .step_index
-                        .max(observation.step_index.saturating_add(1));
+                })?;
+                if let Some(body) = restored
+                    .entities
+                    .iter_mut()
+                    .find(|body| body.entity_id == observation.body_entity_id)
+                {
+                    body.x = f64::from(observation.pos_x);
+                    body.y = f64::from(observation.pos_y);
                 }
-                EVENT_TYPE_CONFIG_V1 => {
-                    let config = WorldConfigV1::decode(payload).map_err(|error| {
-                        RuntimeError::InvalidPayload {
-                            event_type: EVENT_TYPE_CONFIG_V1.to_owned(),
-                            reason: error.to_string(),
-                        }
-                    })?;
-                    if config != self.config {
-                        return Err(RuntimeError::InvalidPayload {
-                            event_type: EVENT_TYPE_CONFIG_V1.to_owned(),
-                            reason: "recovered world configuration differs from the pinned configuration".to_owned(),
-                        });
+                restored.tick = restored.tick.max(observation.tick.saturating_add(1));
+                restored.step_index = restored
+                    .step_index
+                    .max(observation.step_index.saturating_add(1));
+            } else if event_type == EVENT_TYPE_CONFIG_V1 {
+                let config = WorldConfigV1::decode(payload).map_err(|error| {
+                    RuntimeError::InvalidPayload {
+                        event_type: EVENT_TYPE_CONFIG_V1.to_owned(),
+                        reason: error.to_string(),
                     }
-                    restored.config_emitted = true;
+                })?;
+                if config != self.config {
+                    return Err(RuntimeError::InvalidPayload {
+                        event_type: EVENT_TYPE_CONFIG_V1.to_owned(),
+                        reason:
+                            "recovered world configuration differs from the pinned configuration"
+                                .to_owned(),
+                    });
                 }
-                _ => {}
+                restored.config_emitted = true;
             }
         }
         self.staged_restore = Some(restored);

@@ -1419,6 +1419,27 @@ mod tests {
             Err(RuntimeError::PendingDriverStep)
         ));
         registry.abort_step();
+
+        let event = Event {
+            id: EventId::new(),
+            entity: EntityId::new(),
+            event_type: Kind::new("restoration.fixture"),
+            payload: CanonicalBytes::from_static(b"history"),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        };
+        registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(timeline, Seq::from_u64(1))],
+                &[event],
+            )
+            .test_ok();
+        assert_eq!(state.lock().test_ok().restores, 2);
     }
 
     #[test]

@@ -5410,8 +5410,8 @@ fn verify_counterfactual_contract(evidence: &MoatProofEvidenceV1) -> Result<(), 
             return Err(EvidenceError::InvalidDependencyGraph);
         }
     }
-    if counterfactual.intervention.is_some() {
-        verify_intervention_contract(evidence, counterfactual)?;
+    if let Some(intervention) = counterfactual.intervention.as_ref() {
+        verify_intervention_contract(evidence, counterfactual, intervention)?;
     }
     Ok(())
 }
@@ -5419,15 +5419,13 @@ fn verify_counterfactual_contract(evidence: &MoatProofEvidenceV1) -> Result<(), 
 fn verify_intervention_contract(
     evidence: &MoatProofEvidenceV1,
     counterfactual: &CounterfactualContractV1,
+    intervention: &InterventionV1,
 ) -> Result<(), EvidenceError> {
     let event_by_seq = evidence
         .authoritative_events
         .iter()
         .map(|event| (event.seq, event))
         .collect::<BTreeMap<_, _>>();
-    let Some(intervention) = counterfactual.intervention.as_ref() else {
-        return Err(EvidenceError::InvalidDependencyGraph);
-    };
     let Some(event) = evidence.authoritative_events.iter().find(|event| {
         event.event_type == "world.action.v1"
             && event.tick == intervention.effective_tick
