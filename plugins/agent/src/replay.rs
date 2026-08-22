@@ -565,6 +565,17 @@ mod tests {
         assert_eq!(checkpoint.last_verified(), Seq::from_u64(2));
         assert_eq!(checkpoint.verified_decisions(), 1);
         assert_eq!(verifier.verify(&events, Some(checkpoint))?, checkpoint);
+        let mut malformed_suffix = events.clone();
+        malformed_suffix.push(source_event(
+            3,
+            target_agent,
+            super::RECORDER_EVENT_TYPE,
+            b"bad".to_vec(),
+        ));
+        assert_eq!(
+            verifier.verify(&malformed_suffix, Some(checkpoint)),
+            Err(ReplayVerificationError::InvalidDecisionRecord)
+        );
         assert_eq!(
             verifier.verify(
                 &events,

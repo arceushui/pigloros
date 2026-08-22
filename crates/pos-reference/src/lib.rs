@@ -978,6 +978,15 @@ mod tests {
             "world.action.v1"
         )
         .is_err());
+        let mut invalid_contract = parse_json(&baseline)?;
+        invalid_contract["contract"]["plugin_boundary"]["network_allowed"] =
+            serde_json::json!(true);
+        assert!(verify_fork_json(
+            &invalid_contract.to_string(),
+            &counterfactual,
+            "world.action.v1"
+        )
+        .is_err());
         let mut malformed_events = parse_json(&baseline)?;
         malformed_events["authoritative_events"] = serde_json::json!(["bad"]);
         assert!(reproduce_fixture_json(&malformed_events.to_string()).is_err());
