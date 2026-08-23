@@ -6001,7 +6001,7 @@ mod tests {
             &[],
             |value| decode_divergence(value).map(|_| ()),
         );
-        reject_fields(encode_bounds(&fixture.bounds), 8, &[], |value| {
+        reject_fields(&encode_bounds(&fixture.bounds), 8, &[], |value| {
             decode_bounds(value).map(|_| ())
         });
         reject_fields(
