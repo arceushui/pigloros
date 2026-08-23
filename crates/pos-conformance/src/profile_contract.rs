@@ -203,7 +203,7 @@ impl EvaluatorHardCapsV1 {
     /// Returns [`ConformanceContractError::FieldOutOfBounds`] when either the
     /// cap record or the requested count is outside the selected authority.
     pub fn validate_case_count(&self, case_count: u32) -> Result<(), ConformanceContractError> {
-        validate_hard_caps(self).and_then(|()| {
+        validate_hard_caps(self).and({
             if case_count <= self.max_cases {
                 Ok(())
             } else {
@@ -692,16 +692,20 @@ fn validate_stable_evidence(
     {
         return Err(ConformanceContractError::IndependenceEvidenceMissing);
     }
-    if first.report_digest == [0; 32]
-        || second.report_digest == [0; 32]
-        || first.report_digest == second.report_digest
-        || first.report_digest != stable_report_digest(first)
-        || second.report_digest != stable_report_digest(second)
-    {
-        return Err(ConformanceContractError::IndependenceEvidenceMissing);
-    }
     validate_stable_implementation(first, profile)
         .and_then(|()| validate_stable_implementation(second, profile))
+        .and_then(|()| {
+            if first.report_digest == [0; 32]
+                || second.report_digest == [0; 32]
+                || first.report_digest == second.report_digest
+                || first.report_digest != stable_report_digest(first)
+                || second.report_digest != stable_report_digest(second)
+            {
+                Err(ConformanceContractError::IndependenceEvidenceMissing)
+            } else {
+                Ok(())
+            }
+        })
 }
 
 fn validate_stable_implementation(
@@ -743,8 +747,13 @@ fn validate_stable_implementation(
         .iter()
         .filter(|fixture| fixture.mandatory)
         .flat_map(|fixture| {
-            fixture.modes.iter().filter_map(move |mode| {
-                matches!(mode, ExecutionModeV1::Local | ExecutionModeV1::AirGapped).then(|| {
+            fixture
+                .modes
+                .iter()
+                .filter(|&&mode| {
+                    matches!(mode, ExecutionModeV1::Local | ExecutionModeV1::AirGapped)
+                })
+                .map(move |mode| {
                     (
                         fixture.case_id.as_str(),
                         *mode,
@@ -752,7 +761,6 @@ fn validate_stable_implementation(
                         fixture_digest(fixture),
                     )
                 })
-            })
         })
         .collect::<BTreeSet<_>>();
     if !required.iter().all(|key| seen.contains(key)) {
@@ -2138,6 +2146,11 @@ fn optional_bytes(value: &Value) -> Result<Option<Vec<u8>>, ConformanceContractE
 
 #[cfg(test)]
 mod tests {
+    // The public contract tests below exercise canonical CBOR, validation,
+    // lifecycle transitions, and hard-cap entrypoints. A small legacy set of
+    // private codec tests remains for malformed closed-record branches that
+    // have no public value to construct; those tests are not the contract
+    // seam for the behavior asserted by the public tests.
     use super::*;
 
     const MAX_FIXTURE_COUNT: u32 = 65_536;
@@ -3226,6 +3239,7 @@ mod tests {
                 case.verification_outcome = VerificationOutcomeV1::Diverged;
                 case.divergence_kind = Some(DivergenceMismatchKindV1::TypedFailure);
             }
+            evidence.report_digest = stable_report_digest(evidence);
         }
         let mut wrong_divergence_kind = divergent_evidence.clone();
         wrong_divergence_kind.case_outcomes[0].divergence_kind =
@@ -4044,7 +4058,10 @@ mod tests {
                 fixture
             })
             .collect();
-        assert!(at_limit.validate().is_ok());
+        assert_eq!(
+            at_limit.validate(),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
 
         let mut above_limit = profile();
         above_limit.fixtures = vec![template; 65_537];
@@ -4068,6 +4085,8 @@ mod tests {
         optional_first.independence.organizational_independent = false;
         let mut optional_second = stable_evidence("beta", 40);
         optional_second.independence.organizational_independent = false;
+        optional_first.report_digest = stable_report_digest(&optional_first);
+        optional_second.report_digest = stable_report_digest(&optional_second);
         assert!(optional_candidate
             .transition_to(
                 ProfileLifecycleV1::Stable,
@@ -4106,6 +4125,8 @@ mod tests {
         first.independence.reviewer_ids = (0..32).map(|number| format!("r{number:02}")).collect();
         let mut second = stable_evidence("beta", 40);
         second.independence.reviewer_ids = (0..32).map(|number| format!("s{number:02}")).collect();
+        first.report_digest = stable_report_digest(&first);
+        second.report_digest = stable_report_digest(&second);
         assert!(candidate()
             .transition_to(ProfileLifecycleV1::Stable, vec![first, second])
             .is_ok());

@@ -18,7 +18,7 @@ use pos_conformance::{
     ProjectionEvidenceV1, RecomputationFrontierV1, RedactionStateV1, ReplayClaimV1,
     ReproManifestV1, ReproducibilityClassV1, ScenarioRoomFixtureV1, SuffixInvalidationReasonV1,
     SuffixInvalidationV1, TickAtomicityV1, UncertaintyV1, UnknownEdgePolicyV1,
-    VerificationOutcomeV1, Wave8ProofContractV1, EVIDENCE_FORMAT_V1,
+    Wave8ProofContractV1, EVIDENCE_FORMAT_V1,
 };
 use pos_core::{
     event::{CanonicalBytes, Event, EventDraft, Kind},

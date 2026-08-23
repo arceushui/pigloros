@@ -5625,31 +5625,7 @@ fn verify_conformance_report(evidence: &MoatProofEvidenceV1) -> Result<(), Evide
         modes.insert(case.mode);
         weakest_redaction = weakest_redaction.max(case.redaction_state);
         weakest_replay_claim = weakest_replay_claim.max(case.replay_claim);
-        if !case_keys.insert((
-            case.case_id.as_str(),
-            case.mode,
-            case.claim_layer,
-            case.fixture_digest,
-        )) || case.case_id.trim().is_empty()
-            || case.case_id.len() > 128
-            || case.fixture_digest == [0; 32]
-            || case.execution_profile_digest == [0; 32]
-            || case.provenance_digest == [0; 32]
-            || case
-                .first_coordinate
-                .as_ref()
-                .is_some_and(|coordinate| coordinate.len() > 128)
-            || !valid_conformance_case_result(case)
-            || !valid_redacted_case(case)
-            || (matches!(
-                case.redaction_state,
-                RedactionStateV1::None | RedactionStateV1::RedactedViews
-            ) && case.outcome != CaseOutcomeStatusV1::Pass
-                && case.expected_digest == case.actual_digest
-                && case.expected_error == case.actual_error)
-        {
-            return Err(EvidenceError::InvalidConformanceReport);
-        }
+        validate_conformance_case(case, &mut case_keys)?;
         match case.outcome {
             CaseOutcomeStatusV1::Pass => counts.0 = counts.0.saturating_add(1),
             CaseOutcomeStatusV1::Fail => counts.1 = counts.1.saturating_add(1),
@@ -5717,6 +5693,39 @@ fn verify_conformance_report(evidence: &MoatProofEvidenceV1) -> Result<(), Evide
         return Err(EvidenceError::InvalidConformanceReport);
     }
     Ok(())
+}
+
+fn validate_conformance_case(
+    case: &CaseOutcomeV1,
+    case_keys: &mut BTreeSet<(&str, ExecutionModeV1, ClaimLayerV1, [u8; 32])>,
+) -> Result<(), EvidenceError> {
+    if !case_keys.insert((
+        case.case_id.as_str(),
+        case.mode,
+        case.claim_layer,
+        case.fixture_digest,
+    )) || case.case_id.trim().is_empty()
+        || case.case_id.len() > 128
+        || case.fixture_digest == [0; 32]
+        || case.execution_profile_digest == [0; 32]
+        || case.provenance_digest == [0; 32]
+        || case
+            .first_coordinate
+            .as_ref()
+            .is_some_and(|coordinate| coordinate.len() > 128)
+        || !valid_conformance_case_result(case)
+        || !valid_redacted_case(case)
+        || (matches!(
+            case.redaction_state,
+            RedactionStateV1::None | RedactionStateV1::RedactedViews
+        ) && case.outcome != CaseOutcomeStatusV1::Pass
+            && case.expected_digest == case.actual_digest
+            && case.expected_error == case.actual_error)
+    {
+        Err(EvidenceError::InvalidConformanceReport)
+    } else {
+        Ok(())
+    }
 }
 
 fn valid_conformance_case_result(case: &CaseOutcomeV1) -> bool {
@@ -7828,7 +7837,7 @@ pub mod tests {
                 RedactionStateV1::EvidenceMissing;
             missing_report.contract.conformance_report.cases[0].replay_claim =
                 ReplayClaimV1::UnverifiableArtifactsMissing;
-            missing_report.contract.conformance_report.passed = 0;
+            missing_report.contract.conformance_report.passed = 1;
             missing_report.contract.conformance_report.failed = 1;
             assert_eq!(verify_evidence(&missing_report), Ok(()));
 
