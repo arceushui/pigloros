@@ -1116,20 +1116,28 @@ async fn worker_loop_async(
                 expire_envelope(pending.remove(index));
                 continue;
             }
-            let envelope = pending.remove(index);
-            let class = envelope.class;
+            let CommandEnvelope {
+                command,
+                class,
+                admission_ordinal,
+                global_permit,
+                read_permit,
+                ..
+            } = pending.remove(index);
+            let permit_owners = (global_permit, read_permit);
             #[cfg(test)]
             if let Some(observer) = &observer {
-                observer.selected(envelope.admission_ordinal, class, reads_since_write);
+                observer.selected(admission_ordinal, class, reads_since_write);
             }
-            let _permit_owners = (&envelope.global_permit, &envelope.read_permit);
             match class {
                 CommandClass::Read => {
                     reads_since_write = reads_since_write.saturating_add(1).min(READ_BURST);
                 }
                 CommandClass::Write => reads_since_write = 0,
             }
-            match catch_unwind(AssertUnwindSafe(|| execute(&mut state, envelope.command))) {
+            let execution = catch_unwind(AssertUnwindSafe(|| execute(&mut state, command)));
+            drop(permit_owners);
+            match execution {
                 Ok(()) => {}
                 Err(payload) => {
                     set_lifecycle_state(
