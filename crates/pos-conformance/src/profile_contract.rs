@@ -450,8 +450,7 @@ impl EvaluatorRequestV1 {
             || self.output_capability.report_bytes_limit == 0
             || self.output_capability.report_bytes_limit > MAX_PROFILE_BYTES as u64
             || self.output_capability.diagnostic_bytes_limit > MAX_DIAGNOSTIC_BYTES
-            || self.output_capability.capability_digest
-                != self.expected_output_capability_digest()
+            || self.output_capability.capability_digest != self.expected_output_capability_digest()
         {
             return Err(ConformanceContractError::FieldOutOfBounds);
         }
@@ -876,9 +875,7 @@ fn validate_stable_implementation(
                 &profile.independence_requirements,
             )
         })
-        .and_then(|()| {
-            validate_stable_attestation(evidence, &profile.independence_requirements)
-        })
+        .and_then(|()| validate_stable_attestation(evidence, &profile.independence_requirements))
         .and_then(|()| {
             if profile
                 .fixtures
@@ -3609,8 +3606,20 @@ mod tests {
         }
 
         for expected in [
-            Value::Array(vec![uint(0), Value::Null, Value::Null, Value::Null, Value::Null]),
-            Value::Array(vec![uint(1), Value::Null, Value::Null, Value::Null, Value::Null]),
+            Value::Array(vec![
+                uint(0),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+            ]),
+            Value::Array(vec![
+                uint(1),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+            ]),
             Value::Array(vec![
                 uint(2),
                 Value::Null,

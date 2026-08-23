@@ -24,8 +24,7 @@ pub use profile_contract::{
     ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1, FixtureInputMemberV1,
     FixtureProvenanceV1, IndependenceRequirementsV1, ProfileLifecycleV1,
     StableEvidenceAttestationV1, StableImplementationEvidenceV1, SubjectAdapterKindV1,
-    CONFORMANCE_PROFILE_MAGIC_V1,
-    EVALUATOR_REQUEST_MAGIC_V1,
+    CONFORMANCE_PROFILE_MAGIC_V1, EVALUATOR_REQUEST_MAGIC_V1,
 };
 
 /// Version of the first independent proof-evidence envelope.
