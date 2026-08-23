@@ -2559,12 +2559,12 @@ mod tests {
             ConsentGrantedV1::decode(&grant_event.payload).test_ok(),
             grant
         );
-        assert_eq!(token.grant_seq, 1);
+        assert_eq!(token.grant_seq(), 1);
 
         let revocation = ConsentRevokedV1 {
-            subject_id: token.subject_id,
-            grantee_id: token.grantee_id,
-            grant_seq: token.grant_seq,
+            subject_id: token.subject_id(),
+            grantee_id: token.grantee_id(),
+            grant_seq: token.grant_seq(),
             fence_seq: 2,
         };
         let revocation_event = gateway

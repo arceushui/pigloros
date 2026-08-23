@@ -26,10 +26,7 @@ pub const EVENT_TYPE_CONSENT_REVOKED_V1: &str = "consent.revoked.v1";
 /// Returns whether an event type is reserved to the Gateway consent host.
 #[must_use]
 pub fn is_consent_event_type(event_type: &Kind) -> bool {
-    matches!(
-        event_type.as_str(),
-        EVENT_TYPE_CONSENT_GRANTED_V1 | EVENT_TYPE_CONSENT_REVOKED_V1
-    )
+    event_type.as_str().starts_with("consent.")
 }
 
 // magic ASCII "CGV1" = h'43475631'
@@ -265,16 +262,31 @@ pub struct ConsentGranted {
 }
 
 impl ConsentGranted {
-    /// Encode to canonical CBOR bytes.
+    /// Validate every value-level constraint of the V1 grant contract.
+    ///
+    /// This single validation boundary is used both before encoding and after
+    /// decoding so the encoder cannot emit a grant its decoder rejects.
     ///
     /// # Errors
-    /// Returns [`ConsentCodecError::PurposeTooLong`] if `purpose` exceeds 128 bytes.
-    pub fn encode(&self) -> Result<CanonicalBytes, ConsentCodecError> {
+    /// Returns a closed codec error when a field is outside the V1 contract.
+    pub fn validate(&self) -> Result<(), ConsentCodecError> {
         if self.purpose.len() > MAX_PURPOSE_BYTES {
             return Err(ConsentCodecError::PurposeTooLong {
                 size: self.purpose.len(),
             });
         }
+        if self.modalities & !0x0F != 0 || self.min_geo_resolution > 1 {
+            return Err(ConsentCodecError::FieldOutOfBounds);
+        }
+        Ok(())
+    }
+
+    /// Encode to canonical CBOR bytes.
+    ///
+    /// # Errors
+    /// Returns [`ConsentCodecError::PurposeTooLong`] if `purpose` exceeds 128 bytes.
+    pub fn encode(&self) -> Result<CanonicalBytes, ConsentCodecError> {
+        self.validate().and_then(|()| {
         let arr = Value::Array(vec![
             cbor_bytes(&MAGIC_CGV1),
             cbor_u8(VERSION_V1),
@@ -290,6 +302,7 @@ impl ConsentGranted {
             cbor_u64(self.grant_seq),
         ]);
         cbor_encode(&arr).map(CanonicalBytes::from_vec)
+        })
     }
 
     /// Decode from canonical CBOR bytes.
@@ -306,9 +319,6 @@ impl ConsentGranted {
                         decode_tstr_max(&items[4], MAX_PURPOSE_BYTES).and_then(|purpose| {
                             decode_u8(&items[5]).and_then(|modalities| {
                                 decode_u8(&items[6]).and_then(|min_geo_resolution| {
-                                    if modalities & !0x0F != 0 || min_geo_resolution > 1 {
-                                        return Err(ConsentCodecError::FieldOutOfBounds);
-                                    }
                                     decode_bool(&items[7]).and_then(|fork_permitted| {
                                         decode_bool(&items[8]).and_then(|export_permitted| {
                                             decode_u16(&items[9]).and_then(|retention_days| {
@@ -324,6 +334,8 @@ impl ConsentGranted {
                                                         retention_days,
                                                         expiry_secs,
                                                         grant_seq,
+                                                    }).and_then(|grant| {
+                                                        grant.validate().map(|()| grant)
                                                     })
                                                 })
                                             })
@@ -418,12 +430,12 @@ impl ConsentRevoked {
 /// `token.fence_seq > current_timeline_head` (ADR-039 section 3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsentCapabilityToken {
-    pub subject_id: EntityId,
-    pub grantee_id: EntityId,
-    pub modalities: u8,
-    pub grant_seq: u64,
+    subject_id: EntityId,
+    grantee_id: EntityId,
+    modalities: u8,
+    grant_seq: u64,
     /// `u64::MAX` until revocation; set to `consent.revoked.v1.fence_seq` on revocation.
-    pub fence_seq: u64,
+    fence_seq: u64,
 }
 
 impl ConsentCapabilityToken {
@@ -448,6 +460,24 @@ impl ConsentCapabilityToken {
     #[must_use]
     pub const fn is_valid_at(&self, timeline_head: u64) -> bool {
         self.fence_seq > timeline_head
+    }
+
+    /// Return the subject bound to this host-issued capability.
+    #[must_use]
+    pub const fn subject_id(&self) -> EntityId {
+        self.subject_id
+    }
+
+    /// Return the grantee bound to this host-issued capability.
+    #[must_use]
+    pub const fn grantee_id(&self) -> EntityId {
+        self.grantee_id
+    }
+
+    /// Return the durable sequence of the bound grant.
+    #[must_use]
+    pub const fn grant_seq(&self) -> u64 {
+        self.grant_seq
     }
 
     /// Apply the matching durable revocation without mutating Timeline history.
@@ -595,14 +625,14 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn only_exact_gateway_consent_event_types_are_reserved() {
+    fn the_entire_gateway_consent_namespace_is_reserved() {
         assert!(is_consent_event_type(&Kind::new(
             EVENT_TYPE_CONSENT_GRANTED_V1
         )));
         assert!(is_consent_event_type(&Kind::new(
             EVENT_TYPE_CONSENT_REVOKED_V1
         )));
-        assert!(!is_consent_event_type(&Kind::new("consent.granted.v2")));
+        assert!(is_consent_event_type(&Kind::new("consent.granted.v2")));
         assert!(!is_consent_event_type(&Kind::new("world.observation.v1")));
     }
 

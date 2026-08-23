@@ -56,7 +56,7 @@ pub fn schema_id_for_event_type(event_type: &str) -> u32 {
         "world.observation.v1" => 101,
         "proof.agent.reaction.v1" => 200,
         "society.signal" => 300,
-        "pos.host.consent.revoked.v1" => 400,
+        "consent.revoked.v1" => 400,
         _ => {
             let mut input = Vec::with_capacity(33 + event_type.len());
             input.extend_from_slice(b"PiglorOS.EventSchemaId.v1\0");
@@ -5336,7 +5336,7 @@ fn verify_consent_audit(
     events: &[AuthoritativeEventV1],
 ) -> Result<(), EvidenceError> {
     if audit.subject.trim().is_empty()
-        || audit.revocation_event_type != "pos.host.consent.revoked.v1"
+        || audit.revocation_event_type != "consent.revoked.v1"
         || audit.revocation_payload_digest == [0; 32]
         || audit.effective_after_seq <= audit.requested_after_seq
         || audit.revocation_event_seq != audit.effective_after_seq
@@ -6532,7 +6532,7 @@ pub mod tests {
                     seq: 3,
                     tick: 2,
                     entity: "host".to_owned(),
-                    event_type: "pos.host.consent.revoked.v1".to_owned(),
+                    event_type: "consent.revoked.v1".to_owned(),
                     payload_digest: [7; 32],
                     causation_seq: None,
                 },
@@ -6561,7 +6561,7 @@ pub mod tests {
                 hidden_event_types: vec![
                     "private.note".to_owned(),
                     "proof.agent.reaction.v1".to_owned(),
-                    "pos.host.consent.revoked.v1".to_owned(),
+                    "consent.revoked.v1".to_owned(),
                 ],
                 visible_events: vec![ParticipantEventV1 {
                     seq: 1,
@@ -6575,7 +6575,7 @@ pub mod tests {
                 requested_after_seq: 1,
                 effective_after_seq: 3,
                 revocation_event_seq: 3,
-                revocation_event_type: "pos.host.consent.revoked.v1".to_owned(),
+                revocation_event_type: "consent.revoked.v1".to_owned(),
                 revocation_payload_digest: [7; 32],
                 halted_at_tick_boundary: true,
             },
@@ -7774,7 +7774,7 @@ pub mod tests {
                 "world.observation.v1",
                 "proof.agent.reaction.v1",
                 "society.signal",
-                "pos.host.consent.revoked.v1",
+                "consent.revoked.v1",
                 "unknown.event.v1",
             ] {
                 assert_ne!(schema_id_for_event_type(event_type), 0);
@@ -7880,7 +7880,7 @@ pub mod tests {
                     seq: 4,
                     tick: 3,
                     entity: "host".to_owned(),
-                    event_type: "pos.host.consent.revoked.v1".to_owned(),
+                    event_type: "consent.revoked.v1".to_owned(),
                     payload_digest: [7; 32],
                     causation_seq: None,
                 });

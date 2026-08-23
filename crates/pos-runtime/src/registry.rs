@@ -388,8 +388,8 @@ impl PluginRegistry {
             json_schema: None,
         });
         schemas.register(EventTypeSchema {
-            event_type: pos_core::event::Kind::new(crate::HOST_CONSENT_REVOCATION_EVENT_TYPE),
-            description: "Host-owned durable consent revocation marker".to_owned(),
+            event_type: pos_core::event::Kind::new(pos_core::EVENT_TYPE_CONSENT_REVOKED_V1),
+            description: "Gateway-owned durable consent revocation marker".to_owned(),
             json_schema: None,
         });
         Self {
@@ -471,9 +471,14 @@ impl PluginRegistry {
                 name: entry.name.clone(),
             });
         };
+        let visible_events: Vec<Event> = committed_events
+            .iter()
+            .filter(|event| !pos_core::is_consent_event_type(&event.event_type))
+            .cloned()
+            .collect();
         let observations = snapshot.view_for_events_after(
             driver.subscriptions(),
-            committed_events,
+            &visible_events,
             driver.event_subscriptions(),
             entry.event_cursor,
         );
@@ -2563,10 +2568,10 @@ mod tests {
                 .schemas
                 .iter()
                 .map(|schema| schema.event_type.as_str())
-                .collect::<Vec<_>>(),
+            .collect::<Vec<_>>(),
             vec![
                 "a.event",
-                "pos.host.consent.revoked.v1",
+                pos_core::EVENT_TYPE_CONSENT_REVOKED_V1,
                 "runtime.recorded_output",
                 "z.event",
             ]

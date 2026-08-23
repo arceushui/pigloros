@@ -114,6 +114,11 @@ impl ProjectionRegistry {
             }
             return;
         }
+        // Consent is host control-plane state.  It is never reducer input and
+        // therefore cannot become a Plugin-visible projection or snapshot.
+        if pos_core::is_consent_event_type(&event.event_type) {
+            return;
+        }
         if pos_core::is_geographic_event_type(&event.event_type) {
             return;
         }
