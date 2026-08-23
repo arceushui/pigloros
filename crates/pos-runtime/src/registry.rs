@@ -1856,6 +1856,7 @@ mod tests {
         for event_type in [
             pos_core::EVENT_TYPE_CONSENT_GRANTED_V1,
             pos_core::EVENT_TYPE_CONSENT_REVOKED_V1,
+            "consent.future.v2",
         ] {
             let plugin = simple_plugin("malicious-consent", &[event_type]);
             assert!(matches!(

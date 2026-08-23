@@ -701,6 +701,9 @@ pub enum GatewayError {
     /// A host grant must bind the sequence it is about to commit.
     #[error("consent grant sequence does not match the current Timeline position")]
     ConsentGrantSequenceMismatch,
+    /// A host revocation must bind the sequence it is about to commit.
+    #[error("consent revocation fence does not match the current Timeline position")]
+    ConsentRevocationFenceMismatch,
 }
 
 /// An existing, owner-only `OwnTracks` activation key loaded from disk.
@@ -1117,10 +1120,11 @@ impl Gateway {
 
     /// Append one Gateway-owned consent revocation at its durable fence.
     ///
-    /// The caller supplies the exact event sequence selected by the host.
+    /// The executor atomically verifies that the supplied fence matches the
+    /// logical sequence committed by this revocation.
     ///
     /// # Errors
-    /// Returns a closed codec, Timeline, or bounded append error.
+    /// Returns a closed Timeline, fence, or bounded append error.
     pub async fn issue_consent_revocation(
         &self,
         timeline_id: &str,
@@ -1139,23 +1143,22 @@ impl Gateway {
                 "consent revocation did not name an active grant".to_owned(),
             )));
         }
-        let payload = match revocation.encode() {
-            Ok(payload) => payload,
-            Err(error) => return Err(error.into()),
-        };
         let event = match self
-            .append_draft(
+            .store
+            .append_consent_revocation(
                 timeline,
-                EventDraft::new(
-                    revocation.subject_id,
-                    Kind::new(EVENT_TYPE_CONSENT_REVOKED_V1),
-                    payload,
-                ),
+                revocation.clone(),
+                self.limits.max_events_per_timeline,
             )
             .await
         {
+            Err(executor::StoreExecutorError::Store(CoreError::Storage(message)))
+                if message == "consent revocation fence mismatch" =>
+            {
+                return Err(GatewayError::ConsentRevocationFenceMismatch)
+            }
             Ok(event) => event,
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         };
         // The exact session was checked above and this authority never removes
         // sessions, so a second absence would violate the host-only invariant.
@@ -2720,6 +2723,27 @@ mod tests {
             .issue_consent_grant(&timeline.id().to_string(), consent_grant(EntityId::new(), 1))
             .await
             .test_ok();
+        let fence_error = gateway
+            .issue_consent_revocation(
+                &timeline.id().to_string(),
+                ConsentRevokedV1 {
+                    subject_id: token.subject_id(),
+                    grantee_id: token.grantee_id(),
+                    grant_seq: token.grant_seq(),
+                    fence_seq: grant_event.seq.as_u64(),
+                },
+            )
+            .await
+            .test_err();
+        assert!(matches!(
+            fence_error,
+            GatewayError::ConsentRevocationFenceMismatch
+        ));
+        let page = gateway
+            .read_events_page(&timeline.id().to_string(), 0, 2)
+            .await
+            .test_ok();
+        assert_eq!(page.events.len(), 1);
         let ceiling_error = gateway
             .issue_consent_revocation(
                 &timeline.id().to_string(),

@@ -429,6 +429,28 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn reducers_never_observe_reserved_consent_namespace_events() {
+        let mut registry = ProjectionRegistry::new();
+        registry.register("events", Box::new(EntityStateProjection));
+        let entity = EntityId::new();
+        let consent_event = Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new("consent.future.v2"),
+            payload: CanonicalBytes::from_static(b"host-only"),
+            seq: pos_core::clock::Seq::from_u64(1),
+            wall_time: WallTime::now(),
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        };
+        registry.apply_event(&consent_event);
+        assert!(registry.state_for(&entity).is_none());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_state_for_returns_first_reducers_view() {
         let mut registry = ProjectionRegistry::new();
         registry.register("first", Box::new(EntityStateProjection));

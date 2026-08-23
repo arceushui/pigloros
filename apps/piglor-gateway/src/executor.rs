@@ -14,8 +14,9 @@ use pos_core::{
         PurgeOutcome, SeqRange,
     },
     timeline::Timeline,
-    ConsentGrantedV1, CoreError, OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1,
-    OwnTracksIngressStore, EVENT_TYPE_CONSENT_GRANTED_V1,
+    ConsentGrantedV1, ConsentRevokedV1, CoreError, OwnTracksIngressInputV1,
+    OwnTracksIngressRateKeyV1, OwnTracksIngressStore, EVENT_TYPE_CONSENT_GRANTED_V1,
+    EVENT_TYPE_CONSENT_REVOKED_V1,
 };
 use std::{
     collections::HashMap,
@@ -99,6 +100,12 @@ enum Command {
         maximum: u64,
         reply: oneshot::Sender<Result<Event, StoreExecutorError>>,
     },
+    AppendConsentRevocation {
+        timeline: TimelineId,
+        revocation: ConsentRevokedV1,
+        maximum: u64,
+        reply: oneshot::Sender<Result<Event, StoreExecutorError>>,
+    },
     AppendIdentified {
         timeline: TimelineId,
         identity: AppendIdentity,
@@ -139,6 +146,7 @@ impl Command {
             | Self::Create { .. }
             | Self::Append { .. }
             | Self::AppendConsentGrant { .. }
+            | Self::AppendConsentRevocation { .. }
             | Self::AppendIdentified { .. } => CommandClass::Write,
             #[cfg(test)]
             Self::Panic { .. } => CommandClass::Write,
@@ -927,6 +935,19 @@ impl StoreExecutor {
             reply,
         })
     }
+    pub(crate) async fn append_consent_revocation(
+        &self,
+        timeline: TimelineId,
+        revocation: ConsentRevokedV1,
+        maximum: u64,
+    ) -> Result<Event, StoreExecutorError> {
+        submit!(self, |reply| Command::AppendConsentRevocation {
+            timeline,
+            revocation,
+            maximum,
+            reply,
+        })
+    }
     pub(crate) async fn append_identified(
         &self,
         timeline: TimelineId,
@@ -1184,6 +1205,9 @@ fn expire_command(command: Command) {
         Command::AppendConsentGrant { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
+        Command::AppendConsentRevocation { reply, .. } => {
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+        }
         Command::AppendIdentified { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
@@ -1329,6 +1353,12 @@ fn execute(state: &mut ExecutorState, command: Command) {
             maximum,
             reply,
         } => execute_append_consent_grant_command(state, timeline, &grant, maximum, reply),
+        Command::AppendConsentRevocation {
+            timeline,
+            revocation,
+            maximum,
+            reply,
+        } => execute_append_consent_revocation_command(state, timeline, &revocation, maximum, reply),
         Command::AppendIdentified {
             timeline,
             identity,
@@ -1487,6 +1517,44 @@ fn execute_append_consent_grant_command(
                 &[EventDraft::new(
                     grant.subject_id,
                     Kind::new(EVENT_TYPE_CONSENT_GRANTED_V1),
+                    payload,
+                )],
+                maximum,
+            )
+        })
+        .and_then(|events| {
+            events.ok_or_else(|| CoreError::Storage("event limit reached".to_owned()))
+        })
+        .map(|mut events| events.remove(0));
+    send_store_result(reply, result);
+}
+
+fn execute_append_consent_revocation_command(
+    state: &mut ExecutorState,
+    timeline: TimelineId,
+    revocation: &ConsentRevokedV1,
+    maximum: u64,
+    reply: oneshot::Sender<Result<Event, StoreExecutorError>>,
+) {
+    let store = state.store.event_store();
+    let result = store
+        .logical_head(timeline)
+        .and_then(|head| {
+            if revocation.fence_seq != head.as_u64().saturating_add(1) {
+                return Err(CoreError::Storage(
+                    "consent revocation fence mismatch".to_owned(),
+                ));
+            }
+            revocation
+                .encode()
+                .map_err(|error| CoreError::Storage(error.to_string()))
+        })
+        .and_then(|payload| {
+            store.append_bounded(
+                timeline,
+                &[EventDraft::new(
+                    revocation.subject_id,
+                    Kind::new(EVENT_TYPE_CONSENT_REVOKED_V1),
                     payload,
                 )],
                 maximum,
