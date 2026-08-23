@@ -1002,11 +1002,12 @@ impl ConsentAuthority {
         Ok(())
     }
 
-    /// Replay a Timeline-bound slice of durable consent history.
+    /// Restore a complete Timeline-bound snapshot from durable consent history.
     ///
-    /// Existing sessions are retained so callers may replay history
-    /// incrementally. The decoded slice is applied atomically: malformed or
-    /// unmatched history leaves the current sessions unchanged.
+    /// Existing sessions for `timeline_id` are replaced atomically by the
+    /// decoded history; sessions on other Timelines are retained. An empty
+    /// history therefore clears the target Timeline. Malformed or unmatched
+    /// history leaves all current sessions unchanged.
     ///
     /// # Errors
     /// Returns [`ConsentCodecError`] when a durable consent payload is invalid
@@ -1051,6 +1052,7 @@ impl ConsentAuthority {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut restored = sessions.clone();
+            restored.retain(|(active_timeline, _, _, _), _| *active_timeline != timeline_id);
             for event in decoded {
                 match event {
                     RestoredConsentEvent::Granted(grant) => {
@@ -2330,12 +2332,20 @@ mod tests {
         authority
             .restore_from_history(
                 timeline,
-                &[event(
-                    EVENT_TYPE_CONSENT_REVOKED_V1,
-                    revocation_payload,
-                    revocation.subject_id,
-                    revocation.fence_seq,
-                )],
+                &[
+                    event(
+                        EVENT_TYPE_CONSENT_GRANTED_V1,
+                        grant.encode().test_ok(),
+                        grant.subject_id,
+                        grant.grant_seq,
+                    ),
+                    event(
+                        EVENT_TYPE_CONSENT_REVOKED_V1,
+                        revocation_payload,
+                        revocation.subject_id,
+                        revocation.fence_seq,
+                    ),
+                ],
             )
             .test_ok();
         assert_eq!(
@@ -2775,6 +2785,12 @@ mod tests {
             authority.validate_revocation_on_timeline(TimelineId::new(), &revocation),
             Err(ConsentError::NoConsent)
         );
+
+        let reservation = authority
+            .begin_revocation_on_timeline(timeline, &revocation)
+            .test_ok();
+        authority.restore_from_history(timeline, &[]).test_ok();
+        assert_eq!(reservation.commit_durable(), Err(ConsentError::NoConsent));
     }
 
     #[test]
