@@ -354,7 +354,7 @@ impl ConformanceProfileV1 {
             return Err(ConformanceContractError::ProfileLifecycleInvalid);
         }
         next.profile_digest = next.digest();
-        Ok(next)
+        next.validate().map(|()| next)
     }
 }
 
@@ -375,6 +375,7 @@ impl EvaluatorRequestV1 {
             || zero_digest(&self.evaluator_hard_caps_digest)
             || zero_digest(&self.output_capability.capability_digest)
             || self.output_capability.report_bytes_limit == 0
+            || self.output_capability.report_bytes_limit > MAX_PROFILE_BYTES as u64
             || self.output_capability.diagnostic_bytes_limit > MAX_DIAGNOSTIC_BYTES
         {
             return Err(ConformanceContractError::FieldOutOfBounds);
@@ -444,7 +445,9 @@ fn validate_profile(profile: &ConformanceProfileV1) -> Result<(), ConformanceCon
         .and_then(|()| validate_fixtures(profile))
         .and_then(|()| validate_allowed_divergences(&profile.allowed_divergences))
         .and_then(|()| match profile.lifecycle {
-            ProfileLifecycleV1::Candidate if profile.fixtures.is_empty() => {
+            ProfileLifecycleV1::Candidate | ProfileLifecycleV1::Stable
+                if profile.fixtures.is_empty() =>
+            {
                 Err(ConformanceContractError::ExpectedResultMissing)
             }
             ProfileLifecycleV1::Stable => validate_stable_evidence(profile),
@@ -508,6 +511,27 @@ fn validate_fixture(
         .inputs
         .iter()
         .try_for_each(validate_input_member)
+        .and_then(|()| {
+            let input_bytes = fixture.inputs.iter().try_fold(0_u64, |total, input| {
+                total.checked_add(input.size_bytes)
+            });
+            if input_bytes.ok_or(ConformanceContractError::FieldOutOfBounds)?
+                > profile.evaluator_protocol.hard_caps.max_total_bundle_bytes
+                || fixture.modes.contains(&ExecutionModeV1::AirGapped)
+                    && fixture.capability_policy.network_allowed
+                || matches!(
+                    &fixture.expected,
+                    ExpectedResultV1::CanonicalBytes { bytes, .. }
+                        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > fixture.bounds.output_bytes
+                            || u64::try_from(bytes.len()).unwrap_or(u64::MAX)
+                                > profile.evaluator_protocol.hard_caps.max_member_bytes
+                )
+            {
+                Err(ConformanceContractError::FieldOutOfBounds)
+            } else {
+                Ok(())
+            }
+        })
         .and_then(|()| validate_bounds(&fixture.bounds))
         .and_then(|()| validate_capability_policy(&fixture.capability_policy))
         .and_then(|()| validate_fixture_provenance(&fixture.provenance))
@@ -3282,6 +3306,42 @@ mod tests {
                 };
             },
             ConformanceContractError::DivergenceClassificationMismatch,
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_lifecycle_and_fixture_resource_limits_fail_closed() {
+        let mut empty = profile();
+        empty.fixtures.clear();
+        assert_eq!(
+            empty.transition_to(ProfileLifecycleV1::Candidate, vec![]),
+            Err(ConformanceContractError::ExpectedResultMissing)
+        );
+        empty.lifecycle = ProfileLifecycleV1::Stable;
+        empty.profile_digest = empty.digest();
+        assert_eq!(
+            empty.validate(),
+            Err(ConformanceContractError::ExpectedResultMissing)
+        );
+
+        reject_profile_change(
+            |value| value.fixtures[0].capability_policy.network_allowed = true,
+            ConformanceContractError::FieldOutOfBounds,
+        );
+        reject_profile_change(
+            |value| value.fixtures[0].bounds.output_bytes = 1,
+            ConformanceContractError::FieldOutOfBounds,
+        );
+        reject_profile_change(
+            |value| value.evaluator_protocol.hard_caps.max_total_bundle_bytes = 1,
+            ConformanceContractError::FieldOutOfBounds,
+        );
+        let mut request = request();
+        request.output_capability.report_bytes_limit = 16_777_217;
+        assert_eq!(
+            request.validate(),
+            Err(ConformanceContractError::FieldOutOfBounds)
         );
     }
 }
