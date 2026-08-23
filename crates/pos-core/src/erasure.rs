@@ -1307,6 +1307,8 @@ pub struct ErasureCoordinatorRecordV1 {
     acknowledgements: Vec<ErasureAcknowledgementV1>,
     /// The committed terminal receipt, if any.
     receipt: Option<ErasureReceiptV1>,
+    /// Exact caller-supplied terminal input used for idempotent retries.
+    receipt_input: Option<ErasureReceiptInputV1>,
     authorize_provenance: Option<ErasureReferenceV1>,
     freeze_provenance: Option<ErasureReferenceV1>,
     dispatch_provenance: Option<ErasureReferenceV1>,
@@ -1338,14 +1340,16 @@ impl ErasureCoordinatorRecordV1 {
                 | ErasureLifecycleV1::Rejected
         ) && (!self.targets.is_empty()
             || !self.acknowledgements.is_empty()
-            || self.receipt.is_some())
+            || self.receipt.is_some()
+            || self.receipt_input.is_some())
         {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         if lifecycle == ErasureLifecycleV1::AccessFrozen
             && (self.targets.is_empty()
                 || !self.acknowledgements.is_empty()
-                || self.receipt.is_some())
+                || self.receipt.is_some()
+                || self.receipt_input.is_some())
         {
             return Err(ErasureErrorV1::PolicyConflict);
         }
@@ -1353,7 +1357,7 @@ impl ErasureCoordinatorRecordV1 {
             lifecycle,
             ErasureLifecycleV1::DestructionDispatched
                 | ErasureLifecycleV1::AwaitingAcknowledgements
-        ) && (self.targets.is_empty() || self.receipt.is_some())
+        ) && (self.targets.is_empty() || self.receipt.is_some() || self.receipt_input.is_some())
         {
             return Err(ErasureErrorV1::PolicyConflict);
         }
@@ -1381,6 +1385,9 @@ impl ErasureCoordinatorRecordV1 {
             let Some(receipt) = self.receipt.as_ref() else {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             };
+            if self.receipt_input.is_none() {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
             let mut acknowledgements = self.acknowledgements.clone();
             acknowledgements.sort_unstable();
             if receipt.terminal_state() != self.state.state_digest()
@@ -1495,6 +1502,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                             targets: Vec::new(),
                             acknowledgements: Vec::new(),
                             receipt: None,
+                            receipt_input: None,
                             authorize_provenance: None,
                             freeze_provenance: None,
                             dispatch_provenance: None,
@@ -1738,6 +1746,10 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     }
     /// Commit a receipt only when its closure and acknowledgement evidence match this record.
     ///
+    /// A terminal retry must reproduce the exact input admitted for that
+    /// receipt.  Core-derived ERC1 fields are normalized only on the first
+    /// commit; changing them on a retry is a conflicting operation.
+    ///
     /// # Errors
     ///
     /// Returns a closed error for injected evidence or a conflicting terminal retry.
@@ -1748,18 +1760,11 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     ) -> Result<ErasureReceiptV1, ErasureErrorV1> {
         self.record(request).and_then(|mut record| {
             if let Some(stored) = record.receipt.clone() {
-                return Self::normalize_receipt_input(request, self.coordinator, &record, input)
-                    .and_then(ErasureReceiptV1::new)
-                    .map_or_else(
-                        |_| Err(ErasureErrorV1::PolicyConflict),
-                        |candidate| {
-                            if candidate.receipt_digest() == stored.receipt_digest() {
-                                Ok(stored)
-                            } else {
-                                Err(ErasureErrorV1::PolicyConflict)
-                            }
-                        },
-                    );
+                return if record.receipt_input.as_ref() == Some(&input) {
+                    Ok(stored)
+                } else {
+                    Err(ErasureErrorV1::PolicyConflict)
+                };
             }
             if record.state.lifecycle() == ErasureLifecycleV1::DestructionDispatched {
                 let freeze_position = record.state.freeze_position();
@@ -1822,6 +1827,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         if record.state.lifecycle() != ErasureLifecycleV1::AwaitingAcknowledgements {
             return Err(ErasureErrorV1::PolicyConflict);
         }
+        record.receipt_input = Some(input.clone());
         let complete = acknowledgements_match_closure(&record.targets, &record.acknowledgements)
             && record
                 .acknowledgements

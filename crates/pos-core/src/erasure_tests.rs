@@ -387,6 +387,8 @@ fn coordinator_freezes_closure_and_commits_only_derived_terminal_outcomes(
         committed.replay_claim(),
         ErasureReplayClaimV1::StructuralOnly
     );
+    let mut conflicting_identity = complete_input.clone();
+    conflicting_identity.terminal_state = reference(99);
     assert_eq!(
         coordinator.finalize(reference(1), complete_input)?,
         committed
@@ -396,16 +398,8 @@ fn coordinator_freezes_closure_and_commits_only_derived_terminal_outcomes(
         .cloned()
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     assert_eq!(coordinator.acknowledge(reference(1), ack)?, terminal_state);
-    let mut conflicting_retry = receipt_input(
-        ErasureLifecycleV1::Complete,
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-    );
-    conflicting_retry.inventories.artifacts = vec![inventory_result(ack.target)];
-    conflicting_retry.signature = reference(99);
     assert_eq!(
-        coordinator.finalize(reference(1), conflicting_retry),
+        coordinator.finalize(reference(1), conflicting_identity),
         Err(ErasureErrorV1::PolicyConflict)
     );
     assert_eq!(
