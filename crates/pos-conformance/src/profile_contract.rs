@@ -1956,7 +1956,7 @@ mod tests {
                 cpu_fuel: 1,
                 memory_bytes: 1,
                 event_count: 1,
-                output_bytes: 1,
+                output_bytes: 1024,
                 storage_bytes: 1,
                 execution_steps: 1,
                 simulation_time_ns: 1,
@@ -2711,7 +2711,7 @@ mod tests {
         );
         reject(
             &|value| value.public_schema_digests = vec![digest(3), digest(2)],
-            ConformanceContractError::FieldOutOfBounds,
+            ConformanceContractError::NonCanonicalOrder,
         );
         reject(
             &|value| value.fixtures[0].modes.clear(),
@@ -3091,11 +3091,11 @@ mod tests {
         );
         reject_profile_change(
             |value| value.execution_profile_digests = vec![digest(1), digest(1)],
-            ConformanceContractError::FieldOutOfBounds,
+            ConformanceContractError::NonCanonicalOrder,
         );
         reject_profile_change(
             |value| value.public_schema_digests = vec![digest(2), digest(2)],
-            ConformanceContractError::FieldOutOfBounds,
+            ConformanceContractError::NonCanonicalOrder,
         );
         reject_profile_change(
             |value| value.execution_profile_digests = vec![[0; 32]],
@@ -3123,7 +3123,7 @@ mod tests {
         );
         reject_profile_change(
             |value| value.fixtures[0].modes = vec![ExecutionModeV1::Local, ExecutionModeV1::Local],
-            ConformanceContractError::FieldOutOfBounds,
+            ConformanceContractError::NonCanonicalOrder,
         );
     }
 
@@ -3158,7 +3158,7 @@ mod tests {
                 let input = value.fixtures[0].inputs[0].clone();
                 value.fixtures[0].inputs = vec![input.clone(), input];
             },
-            ConformanceContractError::FieldOutOfBounds,
+            ConformanceContractError::NonCanonicalOrder,
         );
         reject_profile_change(
             |value| value.fixtures[0].inputs[0].member_id = String::new(),
