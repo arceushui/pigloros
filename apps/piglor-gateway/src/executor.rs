@@ -1109,6 +1109,13 @@ async fn worker_loop_async(
                 observer.drain_completed(pending.len(), disconnected);
             }
             let index = select_pending_index(&pending, reads_since_write);
+            if !pending[index]
+                .lifecycle
+                .claim_for_execution(pending[index].deadline)
+            {
+                expire_envelope(pending.remove(index));
+                continue;
+            }
             let envelope = pending.remove(index);
             let class = envelope.class;
             #[cfg(test)]
@@ -1116,10 +1123,6 @@ async fn worker_loop_async(
                 observer.selected(envelope.admission_ordinal, class, reads_since_write);
             }
             let _permit_owners = (&envelope.global_permit, &envelope.read_permit);
-            if !envelope.lifecycle.claim_for_execution(envelope.deadline) {
-                expire_envelope(envelope);
-                continue;
-            }
             match class {
                 CommandClass::Read => {
                     reads_since_write = reads_since_write.saturating_add(1).min(READ_BURST);
@@ -1242,10 +1245,8 @@ fn expire_command(command: Command) {
     }
 }
 
-fn expire_envelope(envelope: CommandEnvelope) {
-    match envelope {
-        CommandEnvelope { command, .. } => expire_command(command),
-    }
+fn expire_envelope(CommandEnvelope { command, .. }: CommandEnvelope) {
+    expire_command(command);
 }
 
 fn send_store_result<T>(

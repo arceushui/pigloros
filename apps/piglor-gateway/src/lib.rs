@@ -1156,6 +1156,13 @@ impl Gateway {
             {
                 return Err(GatewayError::ConsentRevocationFenceMismatch)
             }
+            Err(executor::StoreExecutorError::Store(CoreError::Storage(message)))
+                if message == "event limit reached" =>
+            {
+                return Err(GatewayError::EventLimitReached {
+                    maximum: self.limits.max_events_per_timeline,
+                })
+            }
             Ok(event) => event,
             Err(error) => return Err(error.into()),
         };
