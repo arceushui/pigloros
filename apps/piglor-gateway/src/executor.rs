@@ -368,6 +368,12 @@ enum ExecutionClaim {
     Expired,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartOutcome {
+    Started,
+    AlreadyStarted,
+}
+
 struct CommandLifecycle {
     phase: AtomicU8,
 }
@@ -379,21 +385,25 @@ impl CommandLifecycle {
         }
     }
 
-    fn start(&self) -> Option<()> {
-        self.phase
+    fn start(&self) -> StartOutcome {
+        match self
+            .phase
             .compare_exchange(
                 CommandPhase::Queued as u8,
                 CommandPhase::Started as u8,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
-            .ok()
-            .map(|_| ())
+        {
+            Ok(_) => StartOutcome::Started,
+            Err(_) => StartOutcome::AlreadyStarted,
+        }
     }
 
     fn claim_for_execution(&self, deadline: Instant) -> ExecutionClaim {
-        if self.start().is_none() {
-            return ExecutionClaim::Expired;
+        match self.start() {
+            StartOutcome::Started => {}
+            StartOutcome::AlreadyStarted => return ExecutionClaim::Expired,
         }
         if Instant::now() >= deadline {
             let _transition = self.phase.compare_exchange(
@@ -422,7 +432,7 @@ impl CommandLifecycle {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod command_lifecycle_tests {
-    use super::{CommandLifecycle, ExecutionClaim};
+    use super::{CommandLifecycle, ExecutionClaim, StartOutcome};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -438,6 +448,14 @@ mod command_lifecycle_tests {
             lifecycle.claim_for_execution(deadline),
             ExecutionClaim::Expired
         ));
+    }
+
+    #[test]
+    fn lifecycle_start_has_one_owner() {
+        let lifecycle = CommandLifecycle::new();
+
+        assert_eq!(lifecycle.start(), StartOutcome::Started);
+        assert_eq!(lifecycle.start(), StartOutcome::AlreadyStarted);
     }
 }
 
