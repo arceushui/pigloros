@@ -714,7 +714,6 @@ fn durable_terminal_record_checks_reject_independent_receipt_mismatches(
             3 => receipt.0.request = reference(99),
             4 => receipt.0.required_targets.clear(),
             5 => receipt.0.acknowledgements.clear(),
-            _ => unreachable!(),
         }
         assert_eq!(
             ErasureCoordinatorRecordV1::from_parts(parts, reference(2)),
