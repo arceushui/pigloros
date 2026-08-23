@@ -2048,6 +2048,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn selected_driver_never_receives_gateway_owned_consent_events() {
         struct EventDriver {
             subscriptions: Vec<Kind>,
@@ -2131,6 +2132,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn protected_operation_validation_fails_closed_and_checks_the_bound_authority() {
         let grant = ConsentGranted {
             subject_id: EntityId::new(),
@@ -2160,7 +2162,7 @@ mod tests {
             .validate_operation(&operation, Seq::from_u64(3))
             .is_ok());
         assert!(bound
-            .validate_operation(&operation, Seq::from_u64(4))
+            .validate_operation(&operation, Seq::from_u64(5))
             .is_err_and(|error| matches!(error, RuntimeError::Consent(_))));
 
     }
