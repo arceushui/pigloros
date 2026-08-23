@@ -1666,7 +1666,7 @@ mod tests {
             Err(ConsentError::NoConsent)
         );
 
-        let mut missing = token.clone();
+        let mut missing = token;
         missing.grant_seq += 1;
         assert_eq!(
             authority.validate_on_timeline(timeline, &missing, 0, 0),
@@ -1722,7 +1722,7 @@ mod tests {
             .restore_from_history(
                 timeline,
                 &[
-                    event(EVENT_TYPE_CONSENT_GRANTED_V1, grant_payload.clone()),
+                    event(EVENT_TYPE_CONSENT_GRANTED_V1, grant_payload),
                     event("world.observation.v1", CanonicalBytes::from_static(b"ignored")),
                 ],
             )
