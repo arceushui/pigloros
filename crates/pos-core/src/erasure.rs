@@ -3103,7 +3103,7 @@ mod tests {
         let other_entry = inventory_result(second.target);
 
         let inventories = ErasureReceiptInventoriesV1 {
-            artifacts: vec![entry.clone(); ERASURE_MAX_INVENTORY_RESULTS],
+            artifacts: vec![entry; ERASURE_MAX_INVENTORY_RESULTS],
             keys: Vec::new(),
             replicas: Vec::new(),
             backups: Vec::new(),
@@ -3116,7 +3116,7 @@ mod tests {
                 replicas: Vec::new(),
                 backups: Vec::new(),
             };
-            let entries = vec![entry.clone(); ERASURE_MAX_INVENTORY_RESULTS + 1];
+            let entries = vec![entry; ERASURE_MAX_INVENTORY_RESULTS + 1];
             match field {
                 0 => oversized.artifacts = entries,
                 1 => oversized.keys = entries,
@@ -3133,7 +3133,7 @@ mod tests {
                 replicas: Vec::new(),
                 backups: Vec::new(),
             };
-            let entries = vec![entry.clone(), entry.clone()];
+            let entries = vec![entry, entry];
             match field {
                 0 => duplicated.artifacts = entries,
                 1 => duplicated.keys = entries,
@@ -3143,8 +3143,8 @@ mod tests {
             assert!(inventories_have_duplicate_targets(&duplicated));
         }
         assert!(has_duplicate_by_inventory_target(&[
-            entry.clone(),
-            entry.clone(),
+            entry,
+            entry,
         ]));
         assert!(has_duplicate_by_target(&[first, first]));
         assert!(acknowledgements_are_closure_subset(&[first.target], &[first]));
