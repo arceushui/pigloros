@@ -762,9 +762,9 @@ impl Experiment {
         let ancestry = timeline_ancestry(store.as_ref(), timeline_id, folded_through)?;
         self.registry.restore_driver_state(&ancestry, &events)?;
         hydrate_projections(&mut self.registry, &events);
-        let consent_revoked = events.iter().any(|event| {
-            event.event_type.as_str() == pos_core::EVENT_TYPE_CONSENT_REVOKED_V1
-        });
+        let consent_revoked = events
+            .iter()
+            .any(|event| event.event_type.as_str() == pos_core::EVENT_TYPE_CONSENT_REVOKED_V1);
         Ok(ExperimentSession {
             config: self.config,
             registry: self.registry,
@@ -1126,10 +1126,7 @@ impl ExperimentSession {
         }
     }
 
-    fn commit_consent_revocation(
-        &mut self,
-        subject: &str,
-    ) -> Result<TickOutcome, ExperimentError> {
+    fn commit_consent_revocation(&mut self, subject: &str) -> Result<TickOutcome, ExperimentError> {
         let subject_id = consent_marker_entity(subject);
         let emitted_events = lock_store(&self.store)
             .and_then(|mut store| {
