@@ -2910,9 +2910,9 @@ mod tests {
         let typed_candidate = typed
             .transition_to(ProfileLifecycleV1::Candidate, vec![])
             .unwrap_or_else(|_| profile());
-        let fixture_digest = fixture_digest(&typed_candidate.fixtures[0]);
-        let typed_evidence = typed_failure_evidence("alpha", 30, fixture_digest);
-        let typed_evidence_second = typed_failure_evidence("beta", 40, fixture_digest);
+        let typed_fixture_digest = fixture_digest(&typed_candidate.fixtures[0]);
+        let typed_evidence = typed_failure_evidence("alpha", 30, typed_fixture_digest);
+        let typed_evidence_second = typed_failure_evidence("beta", 40, typed_fixture_digest);
         assert!(typed_candidate
             .transition_to(
                 ProfileLifecycleV1::Stable,
