@@ -2,10 +2,10 @@ use pos_core::{
     clock::Seq,
     event::{CanonicalBytes, EventDraft, Kind},
     ids::{EntityId, TimelineId},
-    ConsentAuthority, ConsentError, ConsentGranted,
+    ConsentAuthority, ConsentCapabilityToken, ConsentError, ConsentGate, ConsentGranted,
 };
 use pos_runtime::{Driver, ObservationView, PluginRegistry, RuntimeError, StepOutput};
-use std::fmt::Debug;
+use std::{fmt::Debug, sync::Arc};
 
 fn test_ok<T, E: Debug>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|error| {
@@ -89,4 +89,123 @@ fn protected_public_seam_checks_timeline_and_rechecks_at_commit_head() {
         error,
         RuntimeError::Consent(ConsentError::NoConsent)
     ));
+}
+
+#[test]
+fn protected_public_seam_fails_closed_without_a_bound_gate() {
+    let timeline = TimelineId::new();
+    let subject = EntityId::new();
+    let authority = ConsentAuthority::new();
+    let token = authority.record_grant_on_timeline(timeline, &grant(subject));
+    let mut registry = PluginRegistry::new();
+    registry.register_driver(Box::new(ProtectedEventDriver { entity: subject }));
+
+    let error = test_err(registry.step_all_anchored_protected(
+        timeline,
+        Seq::ZERO,
+        token,
+        1,
+        &[],
+    ));
+    assert!(matches!(
+        error,
+        RuntimeError::ConsentOperationUnavailable
+    ));
+}
+
+struct MismatchedDraftGate {
+    returned: ConsentCapabilityToken,
+}
+
+impl ConsentGate for MismatchedDraftGate {
+    fn check_consent(
+        &self,
+        _: TimelineId,
+        _: EntityId,
+        _: &Kind,
+        _: u64,
+    ) -> Result<ConsentCapabilityToken, ConsentError> {
+        Ok(self.returned.clone())
+    }
+
+    fn validate_token(
+        &self,
+        _: TimelineId,
+        _: &ConsentCapabilityToken,
+        _: u64,
+        _: u64,
+    ) -> Result<(), ConsentError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn protected_public_seam_rejects_a_gate_that_returns_a_different_token() {
+    let timeline = TimelineId::new();
+    let subject = EntityId::new();
+    let issuing_authority = ConsentAuthority::new();
+    let token = issuing_authority.record_grant_on_timeline(timeline, &grant(subject));
+    let other_authority = ConsentAuthority::new();
+    let returned = other_authority.record_grant_on_timeline(timeline, &grant(subject));
+    let mut registry = PluginRegistry::new().with_consent_gate(Arc::new(MismatchedDraftGate {
+        returned,
+    }));
+    registry.register_driver(Box::new(ProtectedEventDriver { entity: subject }));
+
+    let error = test_err(registry.step_all_anchored_protected(
+        timeline,
+        Seq::ZERO,
+        token,
+        1,
+        &[],
+    ));
+    assert!(matches!(
+        error,
+        RuntimeError::Consent(ConsentError::NoConsent)
+    ));
+}
+
+#[test]
+fn protected_public_seam_rejects_a_draft_for_an_unconsented_subject() {
+    let timeline = TimelineId::new();
+    let subject = EntityId::new();
+    let authority = ConsentAuthority::new();
+    let token = authority.record_grant_on_timeline(timeline, &grant(subject));
+    let mut registry = PluginRegistry::new().with_consent_authority(authority);
+    registry.register_driver(Box::new(ProtectedEventDriver {
+        entity: EntityId::new(),
+    }));
+
+    let error = test_err(registry.step_all_anchored_protected(
+        timeline,
+        Seq::ZERO,
+        token,
+        1,
+        &[],
+    ));
+    assert!(matches!(
+        error,
+        RuntimeError::Consent(ConsentError::NoConsent)
+    ));
+}
+
+#[test]
+fn protected_cadenced_public_seam_stages_and_commits() {
+    let timeline = TimelineId::new();
+    let subject = EntityId::new();
+    let authority = ConsentAuthority::new();
+    let token = authority.record_grant_on_timeline(timeline, &grant(subject));
+    let mut registry = PluginRegistry::new().with_consent_authority(authority);
+    registry.register_driver(Box::new(ProtectedEventDriver { entity: subject }));
+
+    let drafts = test_ok(registry.tick_cadenced_anchored_protected(
+        timeline,
+        0,
+        Seq::ZERO,
+        token,
+        1,
+        &[],
+    ));
+    assert_eq!(drafts.len(), 1);
+    registry.commit_step_at(Seq::ZERO);
 }

@@ -888,7 +888,12 @@ pub trait ConsentRevocationFoldListener: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{event::Kind, ids::EntityId};
+    use crate::{
+        clock::WallTime,
+        crypto::Hash,
+        event::{Event, Kind, SchemaVersion},
+        ids::{EntityId, EventId},
+    };
 
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
@@ -1624,6 +1629,133 @@ mod tests {
                 99,
             )
             .is_ok());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn timeline_bound_authority_rejects_wrong_subject_timeline_and_session() {
+        let authority = ConsentAuthority::new();
+        let timeline = TimelineId::new();
+        let grant = sample_granted();
+        let token = authority.record_grant_on_timeline(timeline, &grant);
+
+        assert!(authority
+            .check_consent(
+                timeline,
+                grant.subject_id,
+                &Kind::new("world.observation.v1"),
+                0,
+            )
+            .is_ok());
+        assert_eq!(
+            authority.check_consent(
+                TimelineId::new(),
+                grant.subject_id,
+                &Kind::new("world.observation.v1"),
+                0,
+            ),
+            Err(ConsentError::NoConsent)
+        );
+        assert_eq!(
+            authority.check_consent(
+                timeline,
+                EntityId::new(),
+                &Kind::new("world.observation.v1"),
+                0,
+            ),
+            Err(ConsentError::NoConsent)
+        );
+
+        let mut missing = token.clone();
+        missing.grant_seq += 1;
+        assert_eq!(
+            authority.validate_on_timeline(timeline, &missing, 0, 0),
+            Err(ConsentError::NoConsent)
+        );
+
+        let wrong_timeline_revocation = sample_revoked(&grant);
+        assert_eq!(
+            authority.record_revocation_on_timeline(
+                TimelineId::new(),
+                &wrong_timeline_revocation,
+            ),
+            Err(ConsentError::NoConsent)
+        );
+
+        let wrong_session_revocation = ConsentRevoked {
+            grant_seq: grant.grant_seq + 1,
+            ..wrong_timeline_revocation
+        };
+        assert_eq!(
+            authority.record_revocation_on_timeline(timeline, &wrong_session_revocation),
+            Err(ConsentError::NoConsent)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn restore_from_history_rebuilds_and_revokes_timeline_sessions() {
+        fn event(event_type: &str, payload: CanonicalBytes) -> Event {
+            Event {
+                id: EventId::new(),
+                entity: EntityId::new(),
+                event_type: Kind::new(event_type),
+                payload,
+                wall_time: WallTime::from_micros(1),
+                seq: crate::clock::Seq::from_u64(1),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: SchemaVersion::V1,
+                signature: None,
+                payload_hash: Hash::from_bytes([0; 32]),
+            }
+        }
+
+        let authority = ConsentAuthority::new();
+        let timeline = TimelineId::new();
+        let grant = sample_granted();
+        let grant_payload = grant.encode().test_ok();
+        let revocation = sample_revoked(&grant);
+        let revocation_payload = revocation.encode().test_ok();
+
+        authority
+            .restore_from_history(
+                timeline,
+                &[
+                    event(EVENT_TYPE_CONSENT_GRANTED_V1, grant_payload.clone()),
+                    event("world.observation.v1", CanonicalBytes::from_static(b"ignored")),
+                ],
+            )
+            .test_ok();
+        let token = authority
+            .check_consent(
+                timeline,
+                grant.subject_id,
+                &Kind::new("world.observation.v1"),
+                0,
+            )
+            .test_ok();
+
+        authority
+            .restore_from_history(
+                timeline,
+                &[event(EVENT_TYPE_CONSENT_REVOKED_V1, revocation_payload)],
+            )
+            .test_ok();
+        assert_eq!(
+            authority.validate_on_timeline(timeline, &token, 100, 0),
+            Err(ConsentError::Revoked)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn default_consent_gate_token_validation_fails_closed() {
+        let gate = test_gate(u64::MAX);
+        assert_eq!(
+            gate.validate_token(gate.timeline(), &gate.token, 0, 0),
+            Err(ConsentError::NoConsent)
+        );
     }
 
     // -- Error display --
