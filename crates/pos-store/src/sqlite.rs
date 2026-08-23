@@ -3751,20 +3751,20 @@ mod tests {
             .set_geo_cell_admission_fence(timeline.id(), entity, fence)
             .test_ok();
 
-        store.conn.commit_hook(Some(|| true));
+        store.conn.commit_hook(Some(|| true)).test_ok();
         assert!(matches!(
             store.admit(request.clone()),
             Ok(GeographicAdmissionOutcome::OutcomeUnknown)
         ));
-        store.conn.commit_hook::<fn() -> bool>(None);
+        store.conn.commit_hook::<fn() -> bool>(None).test_ok();
         assert!(store.admit(request.clone()).test_ok().is_accepted());
 
-        store.conn.commit_hook(Some(|| true));
+        store.conn.commit_hook(Some(|| true)).test_ok();
         assert!(matches!(
             store.admit(request.clone()),
             Ok(GeographicAdmissionOutcome::OutcomeUnknown)
         ));
-        store.conn.commit_hook::<fn() -> bool>(None);
+        store.conn.commit_hook::<fn() -> bool>(None).test_ok();
         assert!(store.admit(request).test_ok().is_duplicate());
     }
 
@@ -4288,7 +4288,7 @@ mod tests {
                 rusqlite::params![event_id.to_string()],
             )
             .test_ok();
-        commit_failure.conn.commit_hook(Some(|| true));
+        commit_failure.conn.commit_hook(Some(|| true)).test_ok();
         assert!(commit_failure
             .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).test_ok())
             .is_err());
@@ -4366,7 +4366,7 @@ mod tests {
 
         let mut commit = new_store();
         let timeline = commit.create_timeline("commit").test_ok();
-        commit.conn.commit_hook(Some(|| true));
+        commit.conn.commit_hook(Some(|| true)).test_ok();
         assert!(commit
             .append_or_duplicate(
                 timeline.id(),
@@ -7438,7 +7438,7 @@ mod tests {
         let tl = store.create_timeline("main").test_ok();
         let entity = EntityId::new();
         // Returning true from the commit hook forces SQLite to convert COMMIT into rollback.
-        store.conn.commit_hook(Some(|| true));
+        store.conn.commit_hook(Some(|| true)).test_ok();
         let err = store
             .append(tl.id(), &[make_draft(entity, b"x")])
             .test_err();
@@ -7447,7 +7447,7 @@ mod tests {
             .append_bounded(tl.id(), &[make_draft(entity, b"bounded")], 1)
             .test_err();
         assert!(matches!(bounded_err, CoreError::Storage(_)));
-        store.conn.commit_hook::<fn() -> bool>(None);
+        store.conn.commit_hook::<fn() -> bool>(None).test_ok();
         assert!(store
             .read_own(tl.id(), SeqRange::all())
             .test_ok()
@@ -7463,7 +7463,7 @@ mod tests {
         store
             .set_geo_location_admission_fence(timeline.id(), entity, geographic_fence())
             .test_ok();
-        store.conn.commit_hook(Some(|| true));
+        store.conn.commit_hook(Some(|| true)).test_ok();
 
         let outcome = store
             .admit_geo_location(geographic_request(timeline.id(), entity))
@@ -7488,7 +7488,7 @@ mod tests {
             .admit_geo_location(request.clone())
             .test_ok()
             .is_accepted());
-        store.conn.commit_hook(Some(|| true));
+        store.conn.commit_hook(Some(|| true)).test_ok();
 
         let outcome = store.admit_geo_location(request).test_ok();
 
@@ -7694,11 +7694,15 @@ mod tests {
                     } else {
                         rusqlite::hooks::Authorization::Allow
                     }
-                }));
+                }))
+                .test_ok();
             assert_storage_err(store.delete_timeline(timeline.id()));
-            store.conn.authorizer(
-                None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
-            );
+            store
+                .conn
+                .authorizer(
+                    None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+                )
+                .test_ok();
             assert!(store.get_timeline(timeline.id()).test_ok().is_some());
             store.delete_timeline(timeline.id()).test_ok();
         }
@@ -7914,11 +7918,15 @@ mod tests {
                     } else {
                         rusqlite::hooks::Authorization::Allow
                     }
-                }));
+                }))
+                .test_ok();
             assert!(store.delete_timeline(timeline.id()).is_err());
-            store.conn.authorizer(
-                None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
-            );
+            store
+                .conn
+                .authorizer(
+                    None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+                )
+                .test_ok();
             assert!(store.get_timeline(timeline.id()).test_ok().is_some());
             store.delete_timeline(timeline.id()).test_ok();
         }
@@ -7984,7 +7992,7 @@ mod tests {
     fn delete_timeline_fails_when_commit_hook_aborts() {
         let mut store = new_store();
         let tl = store.create_timeline("t").test_ok();
-        store.conn.commit_hook(Some(|| true));
+        store.conn.commit_hook(Some(|| true)).test_ok();
         let err = store.delete_timeline(tl.id()).test_err();
         assert!(matches!(err, CoreError::Storage(_)));
     }
@@ -8265,7 +8273,7 @@ mod tests {
         ev.id = EventId::new();
         ev.seq = Seq::from_u64(2);
         ev.payload_hash = hash_payload(&ev.payload);
-        store.conn.commit_hook(Some(|| true));
+        store.conn.commit_hook(Some(|| true)).test_ok();
         let err = store.append_committed(tl.id(), &[ev]).test_err();
         assert!(matches!(err, CoreError::Storage(_)));
     }
@@ -8528,7 +8536,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn import_committed_fails_when_commit_hook_aborts() {
         let mut store = new_store();
-        store.conn.commit_hook(Some(|| true));
+        store.conn.commit_hook(Some(|| true)).test_ok();
         let err = store
             .import_committed(TimelineMeta::root("x"), &[])
             .test_err();
@@ -8892,11 +8900,14 @@ mod tests {
 
         let mut commit_store = new_store();
         let commit_parent = commit_store.create_timeline("commit-error").test_ok();
-        commit_store.conn.commit_hook(Some(|| true));
+        commit_store.conn.commit_hook(Some(|| true)).test_ok();
         assert!(commit_store
             .fork(commit_parent.id(), Seq::ZERO, "child")
             .is_err());
-        commit_store.conn.commit_hook::<fn() -> bool>(None);
+        commit_store
+            .conn
+            .commit_hook::<fn() -> bool>(None)
+            .test_ok();
         let timeline_count: i64 = commit_store
             .conn
             .query_row("SELECT COUNT(*) FROM timelines", [], |row| row.get(0))
@@ -9072,11 +9083,15 @@ mod tests {
                 } else {
                     rusqlite::hooks::Authorization::Allow
                 }
-            }));
+            }))
+            .test_ok();
         assert!(store.delete_timeline(timeline.id()).is_err());
-        store.conn.authorizer(
-            None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
-        );
+        store
+            .conn
+            .authorizer(
+                None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+            )
+            .test_ok();
     }
 }
 
@@ -9314,9 +9329,9 @@ mod coverage_entrypoints {
 
         let mut store = tests::new_store();
         let timeline = ok(store.create_timeline("enrollment-commit"));
-        store.conn.commit_hook(Some(|| true));
+        ok(store.conn.commit_hook(Some(|| true)));
         expect_err(store.pair_owntracks_enrollment(request_for(timeline.id())));
-        store.conn.commit_hook::<fn() -> bool>(None);
+        ok(store.conn.commit_hook::<fn() -> bool>(None));
 
         let mut store = tests::new_store();
         let _timeline = ok(store.create_timeline("enrollment-status"));
@@ -9331,9 +9346,9 @@ mod coverage_entrypoints {
         let mut store = tests::new_store();
         let timeline = ok(store.create_timeline("enrollment-transition"));
         ok(store.pair_owntracks_enrollment(request_for(timeline.id())));
-        store.conn.commit_hook(Some(|| true));
+        ok(store.conn.commit_hook(Some(|| true)));
         expect_err(store.revoke_owntracks_enrollment());
-        store.conn.commit_hook::<fn() -> bool>(None);
+        ok(store.conn.commit_hook::<fn() -> bool>(None));
     }
 
     #[test]
@@ -9356,9 +9371,9 @@ mod coverage_entrypoints {
         expect_err(store.prepare_owntracks_ingress(input.clone()));
 
         let mut store = tests::new_store();
-        store.conn.commit_hook(Some(|| true));
+        ok(store.conn.commit_hook(Some(|| true)));
         expect_err(store.prepare_owntracks_ingress(input));
-        store.conn.commit_hook::<fn() -> bool>(None);
+        ok(store.conn.commit_hook::<fn() -> bool>(None));
 
         let mut store = tests::new_store();
         let timeline = ok(store.create_timeline("ingress-commit"));
@@ -9380,13 +9395,13 @@ mod coverage_entrypoints {
             [4; 32],
             CanonicalBytes::from_vec(vec![5]),
         );
-        store.conn.commit_hook(Some(|| true));
+        ok(store.conn.commit_hook(Some(|| true)));
         let active_result = store.prepare_owntracks_ingress(active_input);
         assert!(
             active_result.is_ok(),
             "active ingress result: {active_result:?}"
         );
-        store.conn.commit_hook::<fn() -> bool>(None);
+        ok(store.conn.commit_hook::<fn() -> bool>(None));
 
         let mut store = tests::new_store();
         let timeline = ok(store.create_timeline("ingress-locked-transition"));
@@ -9447,15 +9462,15 @@ mod coverage_entrypoints {
         let timeline = ok(store.create_timeline("geo-admin-commit"));
         let entity = EntityId::new();
         let (consent, fence, request) = tests::geo_cell_request(timeline.id(), entity);
-        store.conn.commit_hook(Some(|| true));
+        ok(store.conn.commit_hook(Some(|| true)));
         expect_err(store.set_geo_cell_admission_consent_record(consent));
-        store.conn.commit_hook::<fn() -> bool>(None);
+        ok(store.conn.commit_hook::<fn() -> bool>(None));
         ok(store.set_geo_cell_admission_consent_record(
             tests::geo_cell_request(timeline.id(), entity).0,
         ));
-        store.conn.commit_hook(Some(|| true));
+        ok(store.conn.commit_hook(Some(|| true)));
         expect_err(store.set_geo_cell_admission_fence(timeline.id(), entity, fence));
-        store.conn.commit_hook::<fn() -> bool>(None);
+        ok(store.conn.commit_hook::<fn() -> bool>(None));
         std::mem::drop(
             store.resolve_admission_consent(request.fence().draft().consent_record_id(), 12),
         );
