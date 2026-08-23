@@ -6893,7 +6893,7 @@ pub mod tests {
         oversized_report.cases = (0..=65_536)
             .map(|index| {
                 let mut case = template.clone();
-                case.case_id = format!("{index:05}");
+                case.case_id = format!("{index:05}{}", "x".repeat(123));
                 case
             })
             .collect();
@@ -7160,6 +7160,13 @@ pub mod tests {
         assert_eq!(
             verify_evidence(&invalid),
             Err(EvidenceError::InvalidConsentAudit)
+        );
+
+        let mut invalid = evidence();
+        invalid.manifest.execution_mode = ExecutionModeV1::Replay;
+        assert_eq!(
+            verify_evidence(&invalid),
+            Err(EvidenceError::InvalidConformanceReport)
         );
     }
 

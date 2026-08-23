@@ -886,13 +886,6 @@ fn validate_report_binding(
     {
         return Err(ConformanceContractError::IndependenceEvidenceMissing);
     }
-    if report
-        .cases
-        .iter()
-        .any(|case| case.execution_profile_digest != report.execution_profile_digest)
-    {
-        return Err(ConformanceContractError::IndependenceEvidenceMissing);
-    }
     Ok(())
 }
 
@@ -3037,6 +3030,37 @@ mod tests {
         assert_eq!(
             divergence.validate(),
             Err(ConformanceContractError::DivergenceClassificationMismatch)
+        );
+    }
+
+    #[test]
+    fn public_stable_report_binding_and_hard_cap_divergence_seams_are_fail_closed() {
+        let mut mismatched_report = stable_evidence("alpha", 30);
+        mismatched_report.report.cases[0].outcome = CaseOutcomeStatusV1::Fail;
+        refresh_report_counts(&mut mismatched_report.report);
+        assert_eq!(
+            candidate().transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![mismatched_report, stable_evidence("beta", 40)],
+            ),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+
+        let mut capped = profile();
+        let coordinate = vec![b'a'; 129];
+        capped.allowed_divergences = vec![AllowedDivergenceV1 {
+            classification: DivergenceMismatchKindV1::TypedFailure,
+            first_coordinate: coordinate.clone(),
+        }];
+        capped.fixtures[0].expected = ExpectedResultV1::AllowedDivergence {
+            classification: DivergenceMismatchKindV1::TypedFailure,
+            first_coordinate: coordinate,
+        };
+        capped.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::Diverged;
+        capped.profile_digest = capped.digest();
+        assert_eq!(
+            capped.validate_with_hard_caps(&original_hard_caps()),
+            Err(ConformanceContractError::FieldOutOfBounds)
         );
     }
 
