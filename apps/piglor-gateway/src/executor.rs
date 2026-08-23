@@ -1781,8 +1781,8 @@ mod tests {
     }
 
     use super::{
-        execute_append_command, execute_owntracks_ingress, Command, ExecutorState, ExecutorStore,
-        OwnTracksRateLimiter,
+        execute_append_command, execute_append_consent_revocation_command,
+        execute_owntracks_ingress, Command, ExecutorState, ExecutorStore, OwnTracksRateLimiter,
     };
     use pos_core::{
         event::{Event, EventDraft},
@@ -3302,9 +3302,10 @@ mod tests {
 
         let (sender, _receiver) = tokio::sync::mpsc::channel(1);
         let executor = super::StoreExecutor::from_sender_for_test(sender);
-        let join = std::sync::Arc::clone(&executor.control.join);
+        let control = std::sync::Arc::clone(&executor.control);
         std::thread::spawn(move || {
-            let _guard = join
+            let _guard = control
+                .join
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             std::panic::resume_unwind(Box::new("poison join lock for registration test"));
