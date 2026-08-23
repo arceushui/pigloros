@@ -391,8 +391,7 @@ impl CommandLifecycle {
             CommandPhase::Started as u8,
             Ordering::AcqRel,
             Ordering::Acquire,
-        )
-        {
+        ) {
             Ok(_) => StartOutcome::Started,
             Err(_) => StartOutcome::AlreadyStarted,
         }
