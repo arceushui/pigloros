@@ -209,9 +209,7 @@ pub fn render_redirect() -> String {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::test_helpers::TestResultExt;
-    use pos_plugin_ledger::{LedgerEntryView, LedgerStore, TomlLedgerStore};
-    use std::path::Path;
+    use pos_plugin_ledger::LedgerEntryView;
 
     fn view(
         entries: Vec<LedgerEntryView>,
@@ -380,26 +378,6 @@ mod tests {
         assert!(!html.contains("href=\"javascript:"));
         assert!(!html.contains(">OSF</a>"));
         assert!(html.contains("OSF link unavailable"));
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    #[test]
-    fn repository_seed_predictions_remain_included_and_renderable(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let seed = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../seed");
-        let ledger = TomlLedgerStore::new(seed).load("2026-07-29").test_ok()?;
-
-        assert_eq!(ledger.entries().len(), 3);
-        assert!(ledger.warnings().is_empty());
-        let html = render_html(&LedgerView::from(&ledger), None);
-        assert_eq!(html.matches("<article class=\"entry ").count(), 3);
-        assert_eq!(
-            html.matches("href=\"https://osf.io/TODO-register-before-merge\"")
-                .count(),
-            3
-        );
-
-        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]

@@ -309,7 +309,9 @@ jobs:
             sleep 1
           done
           curl -sf http://localhost:8080/health | grep '"ok":true'
-          curl -sf http://localhost:8080/v1/ledger | grep '"domain":"piglor.com"'
+          ledger_json="$(curl -sf http://localhost:8080/v1/ledger)"
+          printf '%s\n' "$ledger_json" | grep '"domain":"piglor.com"'
+          printf '%s\n' "$ledger_json" | grep '"ledger":\[\]'
           docker stop pigloros-smoke
 
   world-client-wasm:
