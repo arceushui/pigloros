@@ -3239,10 +3239,10 @@ mod tests {
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         };
 
-        let fields = match encode_profile(&profile(), true) {
-            Value::Array(fields) => fields,
-            _ => unreachable!(),
-        };
+        let fields = encode_profile(&profile(), true)
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         let mut wrong_array = fields.clone();
         wrong_array[8] = Value::Bool(true);
         reject_profile(Value::Array(wrong_array));
@@ -3260,32 +3260,22 @@ mod tests {
         reject_profile(Value::Array(wrong_bytes));
 
         let mut wrong_bool = fields.clone();
-        let fixtures = match &mut wrong_bool[8] {
-            Value::Array(fixtures) => fixtures,
-            _ => unreachable!(),
-        };
-        let fixture = match &mut fixtures[0] {
-            Value::Array(fixture) => fixture,
-            _ => unreachable!(),
-        };
-        fixture[1] = Value::Map(Vec::new());
+        for fixtures in wrong_bool[8].as_array_mut() {
+            for fixture in fixtures[0].as_array_mut() {
+                fixture[1] = Value::Map(Vec::new());
+            }
+        }
         reject_profile(Value::Array(wrong_bool));
 
         let mut wrong_typed_error = fields.clone();
-        let fixtures = match &mut wrong_typed_error[8] {
-            Value::Array(fixtures) => fixtures,
-            _ => unreachable!(),
-        };
-        let fixture = match &mut fixtures[0] {
-            Value::Array(fixture) => fixture,
-            _ => unreachable!(),
-        };
-        let expected = match &mut fixture[8] {
-            Value::Array(expected) => expected,
-            _ => unreachable!(),
-        };
-        expected[0] = uint(1);
-        expected[3] = Value::Bool(true);
+        for fixtures in wrong_typed_error[8].as_array_mut() {
+            for fixture in fixtures[0].as_array_mut() {
+                for expected in fixture[8].as_array_mut() {
+                    expected[0] = uint(1);
+                    expected[3] = Value::Bool(true);
+                }
+            }
+        }
         reject_profile(Value::Array(wrong_typed_error));
 
         let mut trailing = encode_value(&Value::Array(fields)).unwrap_or_default();
@@ -3300,15 +3290,13 @@ mod tests {
             Err(ConformanceContractError::FieldOutOfBounds)
         );
 
-        let mut fields = match encode_request(&request(), true) {
-            Value::Array(fields) => fields,
-            _ => unreachable!(),
-        };
-        let identity = match &mut fields[7] {
-            Value::Array(identity) => identity,
-            _ => unreachable!(),
-        };
-        identity[5] = Value::Null;
+        let mut fields = encode_request(&request(), true)
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        for identity in fields[7].as_array_mut() {
+            identity[5] = Value::Null;
+        }
         let bytes = encode_value(&Value::Array(fields)).unwrap_or_default();
         assert!(EvaluatorRequestV1::from_canonical_cbor(&bytes).is_err());
 
