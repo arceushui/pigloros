@@ -481,9 +481,10 @@ fn coordinator_trait_interface_covers_each_lifecycle_operation() -> Result<(), E
     let acknowledgement = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
     let port = test_port(true, vec![acknowledgement.target]);
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+    let submitted_request = request()?;
     let submitted = {
         let api: &mut dyn ErasureCoordinator = &mut coordinator;
-        let submitted = api.submit(request()?)?;
+        let submitted = api.submit(submitted_request.clone())?;
         assert_eq!(
             api.authorize(reference(1), reference(9))?.lifecycle(),
             ErasureLifecycleV1::Authorized
@@ -541,6 +542,22 @@ fn coordinator_trait_interface_covers_each_lifecycle_operation() -> Result<(), E
         api.finalize(reference(1), input)?.lifecycle(),
         ErasureLifecycleV1::Complete
     );
+    let persisted = coordinator
+        .port
+        .records
+        .borrow()
+        .first()
+        .cloned()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    assert_eq!(persisted.request(), &submitted_request);
+    assert_eq!(persisted.state().lifecycle(), ErasureLifecycleV1::Complete);
+    assert_eq!(persisted.targets(), &[acknowledgement.target]);
+    assert_eq!(persisted.acknowledgements(), &[acknowledgement]);
+    assert!(persisted.receipt().is_some());
+    assert!(persisted.receipt_input().is_some());
+    assert_eq!(persisted.authorize_provenance(), Some(reference(9)));
+    assert_eq!(persisted.freeze_provenance(), Some(reference(9)));
+    assert_eq!(persisted.dispatch_provenance(), Some(reference(9)));
     Ok(())
 }
 
@@ -783,6 +800,12 @@ fn coordinator_freezes_closure_and_commits_only_derived_terminal_outcomes(
         )?,
         frozen
     );
+    assert_eq!(
+        coordinator
+            .authorize(reference(1), reference(9))?
+            .lifecycle(),
+        ErasureLifecycleV1::AccessFrozen
+    );
     let mut conflicting_freeze = change(
         ErasureLifecycleV1::AccessFrozen,
         Some(10),
@@ -797,6 +820,12 @@ fn coordinator_freezes_closure_and_commits_only_derived_terminal_outcomes(
     coordinator.dispatch_destruction(reference(1), reference(9))?;
     assert_eq!(
         coordinator
+            .authorize(reference(1), reference(9))?
+            .lifecycle(),
+        ErasureLifecycleV1::DestructionDispatched
+    );
+    assert_eq!(
+        coordinator
             .dispatch_destruction(reference(1), reference(9))?
             .lifecycle(),
         ErasureLifecycleV1::DestructionDispatched
@@ -808,6 +837,12 @@ fn coordinator_freezes_closure_and_commits_only_derived_terminal_outcomes(
     assert_eq!(
         coordinator.acknowledge(reference(1), ack)?,
         coordinator.acknowledge(reference(1), ack)?
+    );
+    assert_eq!(
+        coordinator
+            .authorize(reference(1), reference(9))?
+            .lifecycle(),
+        ErasureLifecycleV1::AwaitingAcknowledgements
     );
     let injected = acknowledgement(2, ErasureAcknowledgementOutcomeV1::Acknowledged);
     assert_eq!(
@@ -1330,6 +1365,36 @@ fn receipt_public_seam_rejections() {
     assert_eq!(
         ErasureReceiptV1::new(oversized),
         Err(ErasureErrorV1::ScopeInvalid)
+    );
+    let mut oversized_inventory = receipt_input(
+        ErasureLifecycleV1::PartialFailure,
+        Vec::new(),
+        vec![reference(8)],
+        Vec::new(),
+    );
+    oversized_inventory.inventories.artifacts =
+        vec![inventory_result(ack.target); ERASURE_MAX_INVENTORY_RESULTS + 1];
+    assert_eq!(
+        ErasureReceiptV1::new(oversized_inventory),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    let second_target = acknowledgement(2, ErasureAcknowledgementOutcomeV1::Acknowledged);
+    let mut incomplete_closure = receipt_input(
+        ErasureLifecycleV1::Complete,
+        vec![ack],
+        vec![second_target.owner],
+        Vec::new(),
+    );
+    incomplete_closure
+        .required_targets
+        .push(second_target.target);
+    incomplete_closure
+        .inventories
+        .artifacts
+        .push(inventory_result(second_target.target));
+    assert_eq!(
+        ErasureReceiptV1::new(incomplete_closure),
+        Err(ErasureErrorV1::PolicyConflict)
     );
     let mut strengthened = receipt_input(
         ErasureLifecycleV1::Complete,
@@ -2346,6 +2411,28 @@ fn public_state_owner_accessors_and_freeze_rejection_remain_exact() -> Result<()
             )?
             .lifecycle(),
         ErasureLifecycleV1::AccessFrozen
+    );
+    Ok(())
+}
+
+#[test]
+fn public_freeze_rejects_a_required_target_closure_over_the_bound() -> Result<(), ErasureErrorV1> {
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let port = test_port(true, vec![target; ERASURE_MAX_INVENTORY_RESULTS + 1]);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+    coordinator.submit(request()?, reference(3))?;
+    coordinator.authorize(reference(1), reference(9))?;
+    assert_eq!(
+        coordinator.freeze_inventory(
+            reference(1),
+            change(
+                ErasureLifecycleV1::AccessFrozen,
+                Some(10),
+                Vec::new(),
+                Vec::new(),
+            ),
+        ),
+        Err(ErasureErrorV1::ScopeInvalid)
     );
     Ok(())
 }
