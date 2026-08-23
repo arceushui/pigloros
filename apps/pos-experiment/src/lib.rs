@@ -381,9 +381,7 @@ fn append_driver_drafts(
     } else {
         let head = store.logical_head(timeline_id)?;
         match registry.append_and_commit_step_at(store, head, 0, &drafts) {
-            Ok(events) => {
-                Ok(u64::try_from(events.len()).unwrap_or(u64::MAX))
-            }
+            Ok(events) => Ok(u64::try_from(events.len()).unwrap_or(u64::MAX)),
             Err(pos_runtime::RuntimeError::Store(error)) => Err(ExperimentError::Store(error)),
             Err(error) => Err(error.into()),
         }
@@ -889,11 +887,7 @@ impl ExperimentSession {
 
     /// Bind a timeline-issued capability for protected Tick Boundaries.
     #[must_use]
-    pub fn with_protected_token(
-        mut self,
-        token: ConsentCapabilityToken,
-        now_secs: u64,
-    ) -> Self {
+    pub fn with_protected_token(mut self, token: ConsentCapabilityToken, now_secs: u64) -> Self {
         self.operation_token = Some(token);
         self.operation_now_secs = now_secs;
         self
@@ -1125,27 +1119,29 @@ impl ExperimentSession {
                 self.operation_now_secs,
                 &committed_events,
             ),
-            (StepRequest::Cadenced(now_ns), Some(token)) => self
-                .registry
-                .tick_cadenced_anchored_protected(
+            (StepRequest::Cadenced(now_ns), Some(token)) => {
+                self.registry.tick_cadenced_anchored_protected(
                     self.timeline.id(),
                     now_ns,
                     self.boundary.folded_through,
                     token,
                     self.operation_now_secs,
                     &committed_events,
-                ),
+                )
+            }
             (StepRequest::AllDrivers, None) => self.registry.step_all_anchored_with_events(
                 self.timeline.id(),
                 self.boundary.folded_through,
                 &committed_events,
             ),
-            (StepRequest::Cadenced(now_ns), None) => self.registry.tick_cadenced_anchored_with_events(
-                self.timeline.id(),
-                now_ns,
-                self.boundary.folded_through,
-                &committed_events,
-            ),
+            (StepRequest::Cadenced(now_ns), None) => {
+                self.registry.tick_cadenced_anchored_with_events(
+                    self.timeline.id(),
+                    now_ns,
+                    self.boundary.folded_through,
+                    &committed_events,
+                )
+            }
         };
         let drafts = match selected {
             Ok(drafts) => drafts,
@@ -1186,9 +1182,7 @@ impl ExperimentSession {
                 })
                 .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
             {
-                Ok(count) => {
-                    count
-                }
+                Ok(count) => count,
                 Err(error) => {
                     self.health = SessionHealth::Faulted;
                     return Err(error);

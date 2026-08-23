@@ -5348,10 +5348,7 @@ fn verify_consent_audit(
     events: &[AuthoritativeEventV1],
 ) -> Result<(), EvidenceError> {
     if audit.subject.trim().is_empty()
-        || !matches!(
-            audit.revocation_event_type.as_str(),
-            "consent.revoked.v1"
-        )
+        || !matches!(audit.revocation_event_type.as_str(), "consent.revoked.v1")
         || audit.revocation_payload_digest == [0; 32]
         || audit.effective_after_seq <= audit.requested_after_seq
         || audit.revocation_event_seq != audit.effective_after_seq

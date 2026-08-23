@@ -414,10 +414,8 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
 
 fn register_experiment(
     scenario: &mut MultiRateScenario,
-) -> Result<
-    (Experiment, pos_core::ConsentCapabilityToken),
-    Box<dyn std::error::Error + Send + Sync>,
-> {
+) -> Result<(Experiment, pos_core::ConsentCapabilityToken), Box<dyn std::error::Error + Send + Sync>>
+{
     let observation = FixturePlugin::new("observation", false, true);
     let society = SocietyPlugin::new();
     let fast = AgentPlugin::new();
