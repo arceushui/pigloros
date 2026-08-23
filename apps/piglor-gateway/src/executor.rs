@@ -1119,7 +1119,7 @@ async fn worker_loop_async(
             let CommandEnvelope {
                 command,
                 class,
-                admission_ordinal,
+                admission_ordinal: _admission_ordinal,
                 global_permit,
                 read_permit,
                 ..
@@ -1127,7 +1127,7 @@ async fn worker_loop_async(
             let permit_owners = (global_permit, read_permit);
             #[cfg(test)]
             if let Some(observer) = &observer {
-                observer.selected(admission_ordinal, class, reads_since_write);
+                observer.selected(_admission_ordinal, class, reads_since_write);
             }
             match class {
                 CommandClass::Read => {
