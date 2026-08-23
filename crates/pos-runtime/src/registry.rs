@@ -2007,6 +2007,12 @@ mod tests {
         let drafts = reg.step_all(tl.id()).test_ok();
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].event_type.as_str(), "driver.tick");
+
+        let anchored = reg
+            .step_all_anchored_with_events(tl.id(), Seq::ZERO, &[])
+            .test_ok();
+        assert_eq!(anchored.len(), 1);
+        assert_eq!(anchored[0].event_type.as_str(), "driver.tick");
     }
 
     #[test]
