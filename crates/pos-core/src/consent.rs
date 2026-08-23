@@ -1012,6 +1012,10 @@ impl ConsentAuthority {
                 count: events.len(),
             });
         }
+        self.active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(active_timeline, _, _, _), _| *active_timeline != timeline_id);
         for event in events {
             match event.event_type.as_str() {
                 EVENT_TYPE_CONSENT_GRANTED_V1 => {
@@ -2665,6 +2669,12 @@ mod tests {
             authority.validate_revocation_on_timeline(TimelineId::new(), &revocation),
             Err(ConsentError::NoConsent)
         );
+
+        let reservation = authority
+            .begin_revocation_on_timeline(timeline, &revocation)
+            .test_ok();
+        authority.restore_from_history(timeline, &[]).test_ok();
+        assert_eq!(reservation.commit_durable(), Err(ConsentError::NoConsent));
     }
 
     #[test]
