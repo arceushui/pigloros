@@ -3807,6 +3807,7 @@ mod tests {
         // The output cap is inclusive at its documented maximum.
         let mut request_at_limit = request();
         request_at_limit.output_capability.report_bytes_limit = MAX_PROFILE_BYTES as u64;
+        request_at_limit.request_digest = request_at_limit.digest();
         assert_eq!(request_at_limit.validate(), Ok(()));
 
         // Each independence identity is authoritative on its own.  Keeping the
@@ -3861,9 +3862,7 @@ mod tests {
             .transition_to(ProfileLifecycleV1::Stable, vec![accepted.clone(), second])
             .is_ok());
         let case_changes: [fn(&mut CaseOutcomeV1); 3] = [
-            |case: &mut CaseOutcomeV1| {
-                case.actual_error = Some(SafeErrorCodeV1::DigestMismatch);
-            },
+            |case: &mut CaseOutcomeV1| case.actual_error = Some(SafeErrorCodeV1::DigestMismatch),
             |case: &mut CaseOutcomeV1| case.fixture_digest = [0; 32],
             |case: &mut CaseOutcomeV1| case.provenance_digest = [0; 32],
         ];
