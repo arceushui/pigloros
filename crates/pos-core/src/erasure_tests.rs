@@ -1836,6 +1836,12 @@ fn state_wire_enum_roundtrip() -> Result<(), ErasureErrorV1> {
         replay_claim: ErasureReplayClaimV1::StructuralOnly,
         provenance: reference(9),
     })?;
+    let partial = waiting.transition(change(
+        ErasureLifecycleV1::PartialFailure,
+        Some(10),
+        vec![reference(44)],
+        Vec::new(),
+    ))?;
     let rejected = submitted.transition(change(
         ErasureLifecycleV1::Rejected,
         None,
@@ -1843,20 +1849,10 @@ fn state_wire_enum_roundtrip() -> Result<(), ErasureErrorV1> {
         Vec::new(),
     ))?;
     for state in [
-        submitted, authorized, frozen, dispatched, waiting, complete, rejected,
+        submitted, authorized, frozen, dispatched, waiting, complete, partial, rejected,
     ] {
         let encoded = state.to_canonical_cbor()?;
-        if matches!(
-            state.lifecycle(),
-            ErasureLifecycleV1::Complete | ErasureLifecycleV1::PartialFailure
-        ) {
-            assert_eq!(
-                ErasureStateV1::from_canonical_cbor(&encoded),
-                Err(ErasureErrorV1::PolicyConflict)
-            );
-        } else {
-            assert_eq!(ErasureStateV1::from_canonical_cbor(&encoded)?, state);
-        }
+        assert_eq!(ErasureStateV1::from_canonical_cbor(&encoded)?, state);
         assert_ne!(state.state_digest(), reference(0));
     }
 

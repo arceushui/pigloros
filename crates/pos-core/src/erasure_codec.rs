@@ -137,12 +137,6 @@ pub(super) fn state_from_fields(fields: &[Value]) -> Result<ErasureStateV1, Eras
                         provenance,
                         state_digest,
                     };
-                    if matches!(
-                        state.lifecycle,
-                        ErasureLifecycleV1::Complete | ErasureLifecycleV1::PartialFailure
-                    ) {
-                        return Err(ErasureErrorV1::PolicyConflict);
-                    }
                     state.validate().and_then(|()| state.clone().with_digest()).and_then(|expected| {
                         if expected.state_digest == state.state_digest {
                             Ok(state)
