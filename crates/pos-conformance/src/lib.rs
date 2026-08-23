@@ -122,7 +122,7 @@ mod coverage_entrypoints {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn replace_evidence_case_coordinate(
-        evidence: ciborium::Value,
+        evidence: &ciborium::Value,
         coordinate: ciborium::Value,
     ) -> ciborium::Value {
         let mut evidence_fields = evidence.as_array().map_or_else(Vec::new, Clone::clone);
@@ -132,7 +132,9 @@ mod coverage_entrypoints {
         let mut report_fields = contract_fields[6]
             .as_array()
             .map_or_else(Vec::new, Clone::clone);
-        let mut cases = report_fields[13].as_array().map_or_else(Vec::new, Clone::clone);
+        let mut cases = report_fields[13]
+            .as_array()
+            .map_or_else(Vec::new, Clone::clone);
         let mut case = cases[0].as_array().map_or_else(Vec::new, Clone::clone);
         case[8] = coordinate;
         cases[0] = ciborium::Value::Array(case);
@@ -282,22 +284,26 @@ mod coverage_entrypoints {
         let evidence = tests::evidence();
         let encoded = decode_value(ok(evidence.to_canonical_cbor()));
         let exact = replace_evidence_case_coordinate(
-            encoded.clone(),
+            &encoded,
             ciborium::Value::Bytes(vec![b'x'; 128]),
         );
         assert!(MoatProofEvidenceV1::from_canonical_cbor(&encode_value(&exact)).is_ok());
 
         let oversized = replace_evidence_case_coordinate(
-            encoded.clone(),
+            &encoded,
             ciborium::Value::Bytes(vec![b'x'; 129]),
         );
-        expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(&oversized)));
+        expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
+            &oversized,
+        )));
 
         let wrong_type = replace_evidence_case_coordinate(
-            encoded,
+            &encoded,
             ciborium::Value::Text("coordinate".to_owned()),
         );
-        expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(&wrong_type)));
+        expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
+            &wrong_type,
+        )));
     }
 }
 

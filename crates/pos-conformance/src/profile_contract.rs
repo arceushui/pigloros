@@ -860,14 +860,20 @@ fn validate_fixture_verification_outcome(
         | (ExpectedResultV1::AllowedDivergence { .. }, VerificationOutcomeV1::Diverged, None) => {
             Ok(())
         }
-        (ExpectedResultV1::TypedFailure(error), outcome, Some(expected_error))
-            if *error == expected_error
-                && !matches!(
-                    outcome,
-                    VerificationOutcomeV1::VerifiedExact | VerificationOutcomeV1::Diverged
-                ) =>
-        {
-            Ok(())
+        (ExpectedResultV1::TypedFailure(error), outcome, Some(expected_error)) => {
+            if *error != expected_error {
+                Err(ConformanceContractError::ExpectedResultMissing)
+            } else {
+                match outcome {
+                    VerificationOutcomeV1::VerifiedExact | VerificationOutcomeV1::Diverged => {
+                        Err(ConformanceContractError::ExpectedResultMissing)
+                    }
+                    VerificationOutcomeV1::InvalidManifest
+                    | VerificationOutcomeV1::UnverifiableArtifactsMissing
+                    | VerificationOutcomeV1::IncompatibleProfile
+                    | VerificationOutcomeV1::ResourceLimitExceeded => Ok(()),
+                }
+            }
         }
         _ => Err(ConformanceContractError::ExpectedResultMissing),
     }
@@ -901,12 +907,15 @@ const fn bounded_ascii(value: &str, maximum: usize) -> bool {
 
 fn semantic_version(value: &str) -> bool {
     let mut components = value.split('.');
-    components.clone().count() == 3
-        && components.all(|component| {
-            !component.is_empty()
-                && component.len() <= 10
-                && component.bytes().all(|byte| byte.is_ascii_digit())
-        })
+    if components.clone().count() != 3 {
+        return false;
+    }
+    components.all(|component| {
+        if component.is_empty() || component.len() > 10 {
+            return false;
+        }
+        component.bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
 
 fn zero_digest(value: &[u8; 32]) -> bool {
@@ -1520,9 +1529,9 @@ fn preflight_cbor(bytes: &[u8]) -> Result<(), ConformanceContractError> {
             .get(*index..end)
             .ok_or(ConformanceContractError::InvalidEncoding)?;
         *index = end;
-        Ok(value
-            .iter()
-            .fold(0_u64, |total, byte| total << 8 | u64::from(*byte)))
+        let mut encoded = [0_u8; 8];
+        encoded[8 - width..].copy_from_slice(value);
+        Ok(u64::from_be_bytes(encoded))
     }
     fn item(bytes: &[u8], index: &mut usize, depth: u8) -> Result<(), ConformanceContractError> {
         if depth > MAX_STRUCTURAL_NESTING {
@@ -1536,16 +1545,19 @@ fn preflight_cbor(bytes: &[u8]) -> Result<(), ConformanceContractError> {
         let length = read_length(bytes, index, initial & 0x1f)?;
         match major {
             0 | 1 => Ok(()),
-            7 if matches!(initial & 0x1f, 20..=22) => Ok(()),
+            7 => match initial & 0x1f {
+                20..=22 => Ok(()),
+                _ => Err(ConformanceContractError::InvalidEncoding),
+            },
             2 | 3 => {
                 let count = usize::try_from(length)
                     .map_err(|_| ConformanceContractError::FieldOutOfBounds)?;
                 let end = index
                     .checked_add(count)
                     .ok_or(ConformanceContractError::FieldOutOfBounds)?;
-                if end > bytes.len() {
-                    return Err(ConformanceContractError::InvalidEncoding);
-                }
+                bytes
+                    .get(*index..end)
+                    .ok_or(ConformanceContractError::InvalidEncoding)?;
                 *index = end;
                 Ok(())
             }
@@ -2577,6 +2589,15 @@ mod tests {
 
     #[test]
     fn strict_decoder_rejects_trailing_unknown_and_forbidden_cbor_forms() {
+        let mut wide_integer = profile();
+        wide_integer.fixtures[0].bounds.cpu_fuel = u64::from(u32::MAX) + 1;
+        wide_integer.profile_digest = wide_integer.digest();
+        let wide_integer_bytes = wide_integer.to_canonical_cbor().unwrap_or_default();
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor(&wide_integer_bytes),
+            Ok(wide_integer)
+        );
+
         let mut trailing = profile().to_canonical_cbor().unwrap_or_default();
         trailing.push(0);
         assert_eq!(
@@ -2639,6 +2660,14 @@ mod tests {
             invalid_version.validate(),
             Err(ConformanceContractError::FieldOutOfBounds)
         );
+        for version in ["1.0.0.0", "1..0", "1.alpha.0", "12345678901.0.0"] {
+            let mut invalid_version = profile();
+            invalid_version.semantic_version = version.to_owned();
+            assert_eq!(
+                invalid_version.validate(),
+                Err(ConformanceContractError::FieldOutOfBounds)
+            );
+        }
         let mut zero_predecessor = profile();
         zero_predecessor.previous_profile_digest = Some([0; 32]);
         assert_eq!(
@@ -3309,6 +3338,14 @@ mod tests {
         accept(&|caps| caps.max_member_bytes = 1);
         accept(&|caps| caps.max_total_bundle_bytes = 1);
         accept(&|caps| caps.max_compression_expansion = 1);
+        reject(&|caps| caps.max_cases = MAX_FIXTURES as u32 + 1);
+        reject(&|caps| {
+            caps.max_bundle_members = MAX_FIXTURES as u32 + 1;
+        });
+        reject(&|caps| {
+            caps.max_member_path_bytes = MAX_STRING_BYTES as u32 + 1;
+        });
+        reject(&|caps| caps.max_member_bytes = MAX_MEMBER_BYTES + 1);
     }
 
     #[test]
@@ -3541,6 +3578,26 @@ mod tests {
             ),
             Err(ConformanceContractError::IndependenceEvidenceMissing)
         );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_typed_failure_outcomes_are_closed_and_error_bound() {
+        for outcome in [
+            VerificationOutcomeV1::InvalidManifest,
+            VerificationOutcomeV1::UnverifiableArtifactsMissing,
+            VerificationOutcomeV1::IncompatibleProfile,
+            VerificationOutcomeV1::ResourceLimitExceeded,
+        ] {
+            let mut typed = profile();
+            typed.fixtures[0].expected =
+                ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ClosureIncomplete);
+            typed.fixtures[0].expected_verification_outcome = outcome;
+            typed.fixtures[0].expected_verification_error =
+                Some(SafeErrorCodeV1::ClosureIncomplete);
+            typed.profile_digest = typed.digest();
+            assert!(typed.validate().is_ok());
+        }
     }
 
     #[test]
