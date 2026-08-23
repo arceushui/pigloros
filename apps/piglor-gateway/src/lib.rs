@@ -578,7 +578,9 @@ fn gateway_action_registry_with_authority(
         Some(Box::new(WorldPlugin::new().with_bodies(bodies))),
         [Kind::new(EVENT_TYPE_ACTION)],
     );
-    registration.expect("Gateway action registration must be valid");
+    if registration.is_err() {
+        return Arc::new(PluginRegistry::new());
+    }
     if let Some(authority) = authority {
         registry = registry.with_consent_authority(authority);
     }
