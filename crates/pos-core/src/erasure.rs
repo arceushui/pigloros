@@ -1085,7 +1085,11 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     /// Returns a closed authentication or conflicting-identity error.
     pub fn submit(&mut self, request: ErasureRequestV1, provenance: ErasureReferenceV1) -> Result<ErasureStateV1, ErasureErrorV1> {
         if let Some(record) = self.records.iter().find(|record| record.request.reference() == request.reference()) {
-            return if record.request != request { Err(ErasureErrorV1::PolicyConflict) } else { Ok(record.state.clone()) };
+            return if record.request.eq(&request) {
+                Ok(record.state.clone())
+            } else {
+                Err(ErasureErrorV1::PolicyConflict)
+            };
         }
         self.port.authenticate(&request).and_then(|()| {
             ErasureStateV1::submitted(request.reference(), self.coordinator, provenance).inspect(|state| {
