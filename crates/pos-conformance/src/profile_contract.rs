@@ -2502,6 +2502,39 @@ mod tests {
     }
 
     #[test]
+    fn public_closed_result_codecs_cover_each_v1_discriminant() {
+        for outcome in [
+            VerificationOutcomeV1::VerifiedExact,
+            VerificationOutcomeV1::Diverged,
+            VerificationOutcomeV1::InvalidManifest,
+            VerificationOutcomeV1::UnverifiableArtifactsMissing,
+            VerificationOutcomeV1::IncompatibleProfile,
+            VerificationOutcomeV1::ResourceLimitExceeded,
+        ] {
+            assert_eq!(
+                decode_verification_outcome(&verification_outcome(outcome)),
+                Ok(outcome)
+            );
+        }
+        for kind in [
+            DivergenceMismatchKindV1::EventIdentity,
+            DivergenceMismatchKindV1::EventOrder,
+            DivergenceMismatchKindV1::CanonicalBytes,
+            DivergenceMismatchKindV1::ProjectionCheckpoint,
+            DivergenceMismatchKindV1::TypedFailure,
+            DivergenceMismatchKindV1::Artifact,
+            DivergenceMismatchKindV1::SchemaOrUpcaster,
+            DivergenceMismatchKindV1::NumericProfile,
+            DivergenceMismatchKindV1::ProhibitedOperationalInput,
+        ] {
+            assert_eq!(
+                decode_divergence_mismatch(&divergence_mismatch(kind)),
+                Ok(kind)
+            );
+        }
+    }
+
+    #[test]
     fn expected_typed_failure_and_classified_divergence_are_profile_data() {
         let mut typed_failure = profile();
         typed_failure.fixtures[0].expected =
