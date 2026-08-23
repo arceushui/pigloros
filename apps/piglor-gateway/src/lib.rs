@@ -1071,6 +1071,9 @@ impl Gateway {
     /// Append one Gateway-owned consent grant and issue its enforcement token.
     ///
     /// No Plugin or HTTP action route can construct this event type.
+    ///
+    /// # Errors
+    /// Returns a closed codec, Timeline, or grant-sequence error.
     pub async fn issue_consent_grant(
         &self,
         timeline_id: &str,
@@ -1105,6 +1108,9 @@ impl Gateway {
     /// Append one Gateway-owned consent revocation at its durable fence.
     ///
     /// The caller supplies the exact event sequence selected by the host.
+    ///
+    /// # Errors
+    /// Returns a closed codec, Timeline, or bounded append error.
     pub async fn issue_consent_revocation(
         &self,
         timeline_id: &str,
