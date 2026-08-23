@@ -2114,7 +2114,7 @@ mod tests {
         let mut constrained_grant = sample_granted();
         constrained_grant.fork_permitted = false;
         constrained_grant.min_geo_resolution = 1;
-        constrained_grant.retention_days = 1;
+        constrained_grant.retention_days = 0;
         let constrained_token = authority.record_grant_on_timeline(timeline, &constrained_grant);
         assert_eq!(
             constrained_token.authorize_event_type(&Kind::new("timeline.fork.v1")),
