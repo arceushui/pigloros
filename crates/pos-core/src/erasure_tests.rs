@@ -362,26 +362,28 @@ fn record_after_freeze(
             Vec::new(),
         ),
     )?;
-    coordinator
+    let record = coordinator
         .port
         .records
         .borrow()
         .first()
         .cloned()
-        .ok_or(ErasureErrorV1::ProvenanceMissing)
+        .ok_or(ErasureErrorV1::ProvenanceMissing);
+    record
 }
 
 fn record_after_submit() -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
     let port = test_port(true, Vec::new());
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
     coordinator.submit(request()?, reference(3))?;
-    coordinator
+    let record = coordinator
         .port
         .records
         .borrow()
         .first()
         .cloned()
-        .ok_or(ErasureErrorV1::ProvenanceMissing)
+        .ok_or(ErasureErrorV1::ProvenanceMissing);
+    record
 }
 
 fn record_after_acknowledgement() -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
@@ -401,13 +403,14 @@ fn record_after_acknowledgement() -> Result<ErasureCoordinatorRecordV1, ErasureE
     )?;
     coordinator.dispatch_destruction(reference(1), reference(9))?;
     coordinator.acknowledge(reference(1), ack)?;
-    coordinator
+    let record = coordinator
         .port
         .records
         .borrow()
         .first()
         .cloned()
-        .ok_or(ErasureErrorV1::ProvenanceMissing)
+        .ok_or(ErasureErrorV1::ProvenanceMissing);
+    record
 }
 
 fn complete_record() -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
@@ -451,13 +454,14 @@ fn complete_record() -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
     input.terminal_state = terminal.state_digest();
     input.inventories.artifacts = vec![inventory_result(ack.target)];
     coordinator.finalize(reference(1), input)?;
-    coordinator
+    let record = coordinator
         .port
         .records
         .borrow()
         .first()
         .cloned()
-        .ok_or(ErasureErrorV1::ProvenanceMissing)
+        .ok_or(ErasureErrorV1::ProvenanceMissing);
+    record
 }
 #[test]
 fn coordinator_public_retries_reject_injection_and_query_existing() -> Result<(), ErasureErrorV1> {
