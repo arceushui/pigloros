@@ -3198,7 +3198,7 @@ mod tests {
                 reject_profile(Value::Array(malformed));
             }
 
-            let mut oversized_fixtures = fields.clone();
+            let mut oversized_fixtures = fields;
             oversized_fixtures[8] = Value::Array(vec![Value::Null; MAX_FIXTURES + 1]);
             reject_profile(Value::Array(oversized_fixtures));
         }
