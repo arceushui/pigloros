@@ -314,11 +314,7 @@ enum AnchoredSelection {
     Cadenced { now_ns: u128 },
 }
 
-type AnchoredSelectionResult = (
-    Vec<PluginId>,
-    Vec<(PluginId, u128)>,
-    Vec<ProjectionKey>,
-);
+type AnchoredSelectionResult = (Vec<PluginId>, Vec<(PluginId, u128)>, Vec<ProjectionKey>);
 
 /// The central plugin registry.
 ///

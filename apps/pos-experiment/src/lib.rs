@@ -1117,29 +1117,29 @@ impl ExperimentSession {
                 self.operation_now_secs,
                 committed_events,
             ),
-            (StepRequest::Cadenced(now_ns), Some(token)) => self
-                .registry
-                .tick_cadenced_anchored_protected(
+            (StepRequest::Cadenced(now_ns), Some(token)) => {
+                self.registry.tick_cadenced_anchored_protected(
                     self.timeline.id(),
                     now_ns,
                     self.boundary.folded_through,
                     token,
                     self.operation_now_secs,
                     committed_events,
-                ),
+                )
+            }
             (StepRequest::AllDrivers, None) => self.registry.step_all_anchored_with_events(
                 self.timeline.id(),
                 self.boundary.folded_through,
                 committed_events,
             ),
-            (StepRequest::Cadenced(now_ns), None) => self
-                .registry
-                .tick_cadenced_anchored_with_events(
+            (StepRequest::Cadenced(now_ns), None) => {
+                self.registry.tick_cadenced_anchored_with_events(
                     self.timeline.id(),
                     now_ns,
                     self.boundary.folded_through,
                     committed_events,
-                ),
+                )
+            }
         }
     }
 

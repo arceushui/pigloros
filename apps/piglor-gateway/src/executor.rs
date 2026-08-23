@@ -1305,7 +1305,9 @@ fn expire_command(command: Command) {
         Command::AppendConsentGrant { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
-        Command::AppendConsentRevocation { reservation, reply, .. } => {
+        Command::AppendConsentRevocation {
+            reservation, reply, ..
+        } => {
             reservation.abort_durable();
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
