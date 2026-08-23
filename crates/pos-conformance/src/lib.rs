@@ -16,6 +16,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 
+mod profile_contract;
+
+pub use profile_contract::{
+    AllowedDivergenceV1, CapabilityPolicyV1, ConformanceContractError, ConformanceProfileV1,
+    EvaluatorHardCapsV1, EvaluatorOutputCapabilityV1, EvaluatorProtocolV1, EvaluatorRequestV1,
+    ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1, FixtureInputMemberV1,
+    FixtureProvenanceV1, IndependenceRequirementsV1, ProfileLifecycleV1,
+    StableImplementationEvidenceV1, SubjectAdapterKindV1, CONFORMANCE_PROFILE_MAGIC_V1,
+    EVALUATOR_REQUEST_MAGIC_V1,
+};
+
 /// Version of the first independent proof-evidence envelope.
 pub const EVIDENCE_FORMAT_V1: u32 = 1;
 /// Magic for the portable verification/replay record envelope.

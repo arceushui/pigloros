@@ -1,0 +1,2078 @@
+//! Immutable public conformance-profile and evaluator-request contracts.
+//!
+//! This module deliberately references an execution profile only by digest.
+//! ADR-058 owns execution behaviour; this contract owns the fixture oracle,
+//! evaluator identity, independence evidence, and lifecycle claim.
+
+use crate::{
+    CaseOutcomeStatusV1, CaseOutcomeV1, ClaimLayerV1, ExecutionModeV1, ImplementationIdentityV1,
+    IndependenceEvidenceV1, RedactionStateV1, ReplayClaimV1, SafeErrorCodeV1,
+};
+use ciborium::value::Value;
+use std::io::Cursor;
+
+/// Magic for the first immutable conformance-profile record.
+pub const CONFORMANCE_PROFILE_MAGIC_V1: &str = "CPF1";
+/// Magic for the public evaluator request record.
+pub const EVALUATOR_REQUEST_MAGIC_V1: &str = "EVR1";
+const MAX_PROFILE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_EXECUTION_PROFILES: usize = 64;
+const MAX_FIXTURES: usize = 65_536;
+const MAX_STRING_BYTES: usize = 256;
+const MAX_COORDINATE_BYTES: usize = 128;
+const MAX_DIAGNOSTIC_BYTES: u64 = 1024 * 1024;
+const MAX_MEMBER_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_TOTAL_BUNDLE_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_COMPRESSION_EXPANSION: u32 = 100;
+const MAX_STRUCTURAL_NESTING: u8 = 32;
+
+/// Closed safe errors exposed by the CPF1 and evaluator-request interfaces.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum ConformanceContractError {
+    /// The bytes are malformed, noncanonical, or contain a forbidden CBOR type.
+    InvalidEncoding,
+    /// The record magic or schema version is not supported.
+    UnsupportedVersion,
+    /// A required value exceeds its specified bound.
+    FieldOutOfBounds,
+    /// A pre-sorted record list is not canonical or contains a duplicate identity.
+    NonCanonicalOrder,
+    /// A content-addressed value does not match its declared digest.
+    FixtureDigestMismatch,
+    /// A fixture omitted its immutable expected result.
+    ExpectedResultMissing,
+    /// Required independent implementation evidence is absent or insufficient.
+    IndependenceEvidenceMissing,
+    /// A result differs without its exact declared divergence class and coordinate.
+    DivergenceClassificationMismatch,
+    /// The requested profile lifecycle transition is invalid.
+    ProfileLifecycleInvalid,
+    /// Required source, build, licence, or publication provenance is absent.
+    ProvenanceMissing,
+    /// A fixture references an execution profile outside the CPF1 inventory.
+    UnknownExecutionProfile,
+}
+
+impl std::fmt::Display for ConformanceContractError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidEncoding => "invalid conformance contract encoding",
+            Self::UnsupportedVersion => "unsupported conformance contract version",
+            Self::FieldOutOfBounds => "conformance contract field is out of bounds",
+            Self::NonCanonicalOrder => "conformance contract records are not canonically ordered",
+            Self::FixtureDigestMismatch => "fixture content does not match its expected digest",
+            Self::ExpectedResultMissing => "fixture has no immutable expected result",
+            Self::IndependenceEvidenceMissing => "independent implementation evidence is missing",
+            Self::DivergenceClassificationMismatch => "divergence is not classified by the profile",
+            Self::ProfileLifecycleInvalid => "profile lifecycle transition is invalid",
+            Self::ProvenanceMissing => "required conformance provenance is missing",
+            Self::UnknownExecutionProfile => "fixture references an unknown execution profile",
+        })
+    }
+}
+
+impl std::error::Error for ConformanceContractError {}
+
+/// Immutable lifecycle states. There is no reverse or skip transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum ProfileLifecycleV1 {
+    Draft,
+    Candidate,
+    Stable,
+    Retired,
+}
+
+/// A public adapter used by an evaluator; private Rust and storage access are absent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum SubjectAdapterKindV1 {
+    ExportedArtifact,
+    PublicGatewayProtocol,
+    PublicPluginProtocol,
+}
+
+/// One immutable digest-identified input member.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FixtureInputMemberV1 {
+    pub member_id: String,
+    pub size_bytes: u64,
+    pub digest: [u8; 32],
+    pub provenance_digest: [u8; 32],
+}
+
+/// The expected public result of a fixture. It is data, never an oracle call.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExpectedResultV1 {
+    CanonicalBytes {
+        bytes: Vec<u8>,
+        digest: [u8; 32],
+    },
+    TypedFailure(SafeErrorCodeV1),
+    AllowedDivergence {
+        classification: u8,
+        first_coordinate: Vec<u8>,
+    },
+}
+
+/// One profile-approved classified divergence and its first canonical coordinate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AllowedDivergenceV1 {
+    pub classification: u8,
+    pub first_coordinate: Vec<u8>,
+}
+
+/// Deterministic limits required by every fixture.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FixtureBoundsV1 {
+    pub cpu_fuel: u64,
+    pub memory_bytes: u64,
+    pub event_count: u64,
+    pub output_bytes: u64,
+    pub storage_bytes: u64,
+    pub execution_steps: u64,
+    pub simulation_time_ns: u64,
+    pub watchdog_ms: u64,
+}
+
+/// Default-deny network and capability declaration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CapabilityPolicyV1 {
+    pub network_allowed: bool,
+    pub capability_ids: Vec<String>,
+}
+
+/// Required licence and supply-chain provenance for a fixture.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FixtureProvenanceV1 {
+    pub licence_id: String,
+    pub notices_digest: [u8; 32],
+    pub sbom_digest: [u8; 32],
+    pub source_digest: [u8; 32],
+    pub build_digest: [u8; 32],
+    pub publication_review_digest: [u8; 32],
+    pub limitations_digest: [u8; 32],
+}
+
+/// One ordered fixture/expected-result descriptor in a CPF1 bundle.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FixtureDescriptorV1 {
+    pub case_id: String,
+    pub mandatory: bool,
+    pub claim_layer: ClaimLayerV1,
+    pub execution_profile_digest: [u8; 32],
+    pub public_schema_digest: [u8; 32],
+    pub modes: Vec<ExecutionModeV1>,
+    pub subject_adapter: SubjectAdapterKindV1,
+    pub inputs: Vec<FixtureInputMemberV1>,
+    pub expected: ExpectedResultV1,
+    pub expected_verification_error: Option<SafeErrorCodeV1>,
+    pub replay_claim: ReplayClaimV1,
+    pub redaction_state: RedactionStateV1,
+    pub bounds: FixtureBoundsV1,
+    pub capability_policy: CapabilityPolicyV1,
+    pub provenance: FixtureProvenanceV1,
+    pub compatibility_digest: [u8; 32],
+}
+
+/// Exact evaluator protocol and its compiled hard ceilings.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvaluatorHardCapsV1 {
+    pub max_profile_bytes: u64,
+    pub max_cases: u32,
+    pub max_bundle_members: u32,
+    pub max_member_path_bytes: u16,
+    pub max_member_bytes: u64,
+    pub max_total_bundle_bytes: u64,
+    pub max_compression_expansion: u32,
+    pub max_structural_nesting: u8,
+    pub max_coordinate_bytes: u16,
+    pub max_diagnostic_bytes: u64,
+}
+
+/// Evaluator protocol identity and report/request schema identities.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvaluatorProtocolV1 {
+    pub protocol_id: String,
+    pub protocol_digest: [u8; 32],
+    pub request_schema_digest: [u8; 32],
+    pub report_schema_digest: [u8; 32],
+    pub hard_caps: EvaluatorHardCapsV1,
+}
+
+/// The minimum independence labels required by a profile lifecycle state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndependenceRequirementsV1 {
+    pub technical_independence_required: bool,
+    pub authorship_independence_required: bool,
+    pub organizational_independence_required: bool,
+    pub requirements_digest: [u8; 32],
+}
+
+/// Evidence from one separately developed implementation under test.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StableImplementationEvidenceV1 {
+    pub implementation: ImplementationIdentityV1,
+    pub independence: IndependenceEvidenceV1,
+    pub evaluator_protocol_digest: [u8; 32],
+    pub case_outcomes: Vec<CaseOutcomeV1>,
+}
+
+/// Immutable CPF1 public contract. It deliberately carries no aggregate pass flag.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConformanceProfileV1 {
+    pub profile_id: String,
+    pub semantic_version: String,
+    pub lifecycle: ProfileLifecycleV1,
+    pub normative_spec_digest: [u8; 32],
+    pub execution_profile_digests: Vec<[u8; 32]>,
+    pub public_schema_digests: Vec<[u8; 32]>,
+    pub fixtures: Vec<FixtureDescriptorV1>,
+    pub allowed_divergences: Vec<AllowedDivergenceV1>,
+    pub evaluator_protocol: EvaluatorProtocolV1,
+    pub independence_requirements: IndependenceRequirementsV1,
+    pub compatibility_digest: [u8; 32],
+    pub limitations_digest: [u8; 32],
+    pub provenance_digest: [u8; 32],
+    pub previous_profile_digest: Option<[u8; 32]>,
+    pub stable_evidence: Vec<StableImplementationEvidenceV1>,
+    pub profile_digest: [u8; 32],
+}
+
+/// Bounded output authority supplied to the evaluator process.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvaluatorOutputCapabilityV1 {
+    pub capability_digest: [u8; 32],
+    pub report_bytes_limit: u64,
+    pub diagnostic_bytes_limit: u64,
+}
+
+/// Exact public evaluator input request; it binds all authority-relevant identities.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvaluatorRequestV1 {
+    pub request_id: [u8; 16],
+    pub conformance_profile_digest: [u8; 32],
+    pub fixture_bundle_digest: [u8; 32],
+    pub subject_adapter: SubjectAdapterKindV1,
+    pub subject_artifact_digest: [u8; 32],
+    pub implementation: ImplementationIdentityV1,
+    pub execution_profile_digest: [u8; 32],
+    pub trust_policy_snapshot_digest: [u8; 32],
+    pub output_capability: EvaluatorOutputCapabilityV1,
+    pub evaluator_protocol_digest: [u8; 32],
+    pub evaluator_hard_caps_digest: [u8; 32],
+    pub request_digest: [u8; 32],
+}
+
+impl ConformanceProfileV1 {
+    /// Validate the closed CPF1 contract without reading private implementation state.
+    pub fn validate(&self) -> Result<(), ConformanceContractError> {
+        validate_profile(self)
+    }
+
+    /// Return canonical CPF1 bytes after validating the immutable contract and digest.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ConformanceContractError> {
+        self.validate().and_then(|()| {
+            let expected = self.digest();
+            if self.profile_digest == expected {
+                encode_value(&encode_profile(self, true))
+            } else {
+                Err(ConformanceContractError::FixtureDigestMismatch)
+            }
+        })
+    }
+
+    /// Decode exact-length canonical CPF1 bytes and validate every contract invariant.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ConformanceContractError> {
+        if bytes.len() > MAX_PROFILE_BYTES {
+            return Err(ConformanceContractError::FieldOutOfBounds);
+        }
+        decode_value(bytes)
+            .and_then(|value| decode_profile(&value))
+            .and_then(|profile| {
+                profile.validate().and_then(|()| {
+                    if profile.profile_digest == profile.digest() {
+                        Ok(profile)
+                    } else {
+                        Err(ConformanceContractError::FixtureDigestMismatch)
+                    }
+                })
+            })
+    }
+
+    /// Digest the canonical profile fields excluding the self-referential digest field.
+    #[must_use]
+    pub fn digest(&self) -> [u8; 32] {
+        digest_bytes(
+            b"PiglorOS.ConformanceProfile.v1",
+            &encode_profile(self, false),
+        )
+    }
+
+    /// Promote only along the closed lifecycle graph and never manufacture Stable evidence.
+    pub fn transition_to(
+        &self,
+        target: ProfileLifecycleV1,
+        stable_evidence: Vec<StableImplementationEvidenceV1>,
+    ) -> Result<Self, ConformanceContractError> {
+        let permitted = matches!(
+            (self.lifecycle, target),
+            (ProfileLifecycleV1::Draft, ProfileLifecycleV1::Candidate)
+                | (ProfileLifecycleV1::Candidate, ProfileLifecycleV1::Stable)
+                | (ProfileLifecycleV1::Candidate, ProfileLifecycleV1::Retired)
+                | (ProfileLifecycleV1::Stable, ProfileLifecycleV1::Retired)
+        );
+        if !permitted {
+            return Err(ConformanceContractError::ProfileLifecycleInvalid);
+        }
+        let mut next = self.clone();
+        next.lifecycle = target;
+        next.stable_evidence = stable_evidence;
+        next.profile_digest = [0; 32];
+        if target == ProfileLifecycleV1::Stable {
+            validate_stable_evidence(&next)?;
+        } else if !next.stable_evidence.is_empty() {
+            return Err(ConformanceContractError::ProfileLifecycleInvalid);
+        }
+        next.profile_digest = next.digest();
+        Ok(next)
+    }
+}
+
+impl EvaluatorRequestV1 {
+    /// Validate this public-only evaluator request.
+    pub fn validate(&self) -> Result<(), ConformanceContractError> {
+        if self.request_id == [0; 16]
+            || zero_digest(&self.conformance_profile_digest)
+            || zero_digest(&self.fixture_bundle_digest)
+            || zero_digest(&self.subject_artifact_digest)
+            || zero_digest(&self.execution_profile_digest)
+            || zero_digest(&self.trust_policy_snapshot_digest)
+            || zero_digest(&self.evaluator_protocol_digest)
+            || zero_digest(&self.evaluator_hard_caps_digest)
+            || zero_digest(&self.output_capability.capability_digest)
+            || self.output_capability.report_bytes_limit == 0
+            || self.output_capability.diagnostic_bytes_limit > MAX_DIAGNOSTIC_BYTES
+        {
+            return Err(ConformanceContractError::FieldOutOfBounds);
+        }
+        validate_identity(&self.implementation).and_then(|()| {
+            if self.request_digest == self.digest() {
+                Ok(())
+            } else {
+                Err(ConformanceContractError::FixtureDigestMismatch)
+            }
+        })
+    }
+
+    /// Return exact canonical evaluator-request bytes.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ConformanceContractError> {
+        self.validate()
+            .and_then(|()| encode_value(&encode_request(self, true)))
+    }
+
+    /// Decode and verify exact canonical evaluator-request bytes.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ConformanceContractError> {
+        if bytes.len() > MAX_PROFILE_BYTES {
+            return Err(ConformanceContractError::FieldOutOfBounds);
+        }
+        decode_value(bytes)
+            .and_then(|value| decode_request(&value))
+            .and_then(|request| request.validate().map(|()| request))
+    }
+
+    /// Digest the request fields excluding its self-referential digest field.
+    #[must_use]
+    pub fn digest(&self) -> [u8; 32] {
+        digest_bytes(
+            b"PiglorOS.EvaluatorRequest.v1",
+            &encode_request(self, false),
+        )
+    }
+}
+
+fn validate_profile(profile: &ConformanceProfileV1) -> Result<(), ConformanceContractError> {
+    if !bounded_text(&profile.profile_id, MAX_STRING_BYTES)
+        || !bounded_text(&profile.semantic_version, MAX_STRING_BYTES)
+        || zero_digest(&profile.normative_spec_digest)
+        || zero_digest(&profile.compatibility_digest)
+        || zero_digest(&profile.limitations_digest)
+        || zero_digest(&profile.provenance_digest)
+        || profile.execution_profile_digests.is_empty()
+        || profile.execution_profile_digests.len() > MAX_EXECUTION_PROFILES
+        || profile.fixtures.len() > MAX_FIXTURES
+        || !strictly_ordered(&profile.execution_profile_digests)
+        || !strictly_ordered(&profile.public_schema_digests)
+        || profile.execution_profile_digests.iter().any(zero_digest)
+        || profile.public_schema_digests.iter().any(zero_digest)
+    {
+        return Err(ConformanceContractError::FieldOutOfBounds);
+    }
+    validate_protocol(&profile.evaluator_protocol)
+        .and_then(|()| validate_independence_requirements(&profile.independence_requirements))
+        .and_then(|()| validate_fixtures(profile))
+        .and_then(|()| validate_allowed_divergences(&profile.allowed_divergences))
+        .and_then(|()| match profile.lifecycle {
+            ProfileLifecycleV1::Candidate if profile.fixtures.is_empty() => {
+                Err(ConformanceContractError::ExpectedResultMissing)
+            }
+            ProfileLifecycleV1::Stable => validate_stable_evidence(profile),
+            _ if profile.stable_evidence.is_empty() => Ok(()),
+            _ => Err(ConformanceContractError::ProfileLifecycleInvalid),
+        })
+}
+
+fn validate_fixtures(profile: &ConformanceProfileV1) -> Result<(), ConformanceContractError> {
+    if profile
+        .fixtures
+        .windows(2)
+        .any(|pair| fixture_key(&pair[0]) >= fixture_key(&pair[1]))
+    {
+        return Err(ConformanceContractError::NonCanonicalOrder);
+    }
+    profile.fixtures.iter().try_for_each(|fixture| {
+        validate_fixture(fixture, profile).and_then(|()| {
+            validate_expected_result(&fixture.expected, &profile.allowed_divergences)
+        })
+    })
+}
+
+fn validate_fixture(
+    fixture: &FixtureDescriptorV1,
+    profile: &ConformanceProfileV1,
+) -> Result<(), ConformanceContractError> {
+    if !bounded_text(&fixture.case_id, 128)
+        || zero_digest(&fixture.public_schema_digest)
+        || zero_digest(&fixture.compatibility_digest)
+        || !profile
+            .execution_profile_digests
+            .contains(&fixture.execution_profile_digest)
+        || fixture.modes.is_empty()
+        || !strictly_ordered(&fixture.modes)
+        || fixture
+            .inputs
+            .windows(2)
+            .any(|pair| pair[0].member_id >= pair[1].member_id)
+    {
+        return Err(
+            if profile
+                .execution_profile_digests
+                .contains(&fixture.execution_profile_digest)
+            {
+                ConformanceContractError::FieldOutOfBounds
+            } else {
+                ConformanceContractError::UnknownExecutionProfile
+            },
+        );
+    }
+    fixture
+        .inputs
+        .iter()
+        .try_for_each(validate_input_member)
+        .and_then(|()| validate_bounds(&fixture.bounds))
+        .and_then(|()| validate_capability_policy(&fixture.capability_policy))
+        .and_then(|()| validate_fixture_provenance(&fixture.provenance))
+}
+
+fn validate_stable_evidence(
+    profile: &ConformanceProfileV1,
+) -> Result<(), ConformanceContractError> {
+    if profile.stable_evidence.len() != 2 {
+        return Err(ConformanceContractError::IndependenceEvidenceMissing);
+    }
+    let first = &profile.stable_evidence[0];
+    let second = &profile.stable_evidence[1];
+    if first.implementation.implementation_id >= second.implementation.implementation_id
+        || first.evaluator_protocol_digest != profile.evaluator_protocol.protocol_digest
+        || second.evaluator_protocol_digest != profile.evaluator_protocol.protocol_digest
+    {
+        return Err(ConformanceContractError::IndependenceEvidenceMissing);
+    }
+    validate_stable_implementation(first, profile)
+        .and_then(|()| validate_stable_implementation(second, profile))
+}
+
+fn validate_stable_implementation(
+    evidence: &StableImplementationEvidenceV1,
+    profile: &ConformanceProfileV1,
+) -> Result<(), ConformanceContractError> {
+    validate_identity(&evidence.implementation)
+        .and_then(|()| {
+            validate_independence_evidence(
+                &evidence.independence,
+                &profile.independence_requirements,
+            )
+        })
+        .and_then(|()| {
+            if profile
+                .fixtures
+                .iter()
+                .filter(|fixture| fixture.mandatory)
+                .flat_map(|fixture| {
+                    fixture
+                        .modes
+                        .iter()
+                        .filter(|mode| {
+                            matches!(mode, ExecutionModeV1::Local | ExecutionModeV1::AirGapped)
+                        })
+                        .map(move |mode| (fixture, *mode))
+                })
+                .any(|(fixture, mode)| {
+                    !evidence
+                        .case_outcomes
+                        .iter()
+                        .any(|case| case.mode == mode && case_matches_fixture(case, fixture))
+                })
+            {
+                Err(ConformanceContractError::IndependenceEvidenceMissing)
+            } else {
+                Ok(())
+            }
+        })
+}
+
+fn case_matches_fixture(case: &CaseOutcomeV1, fixture: &FixtureDescriptorV1) -> bool {
+    if case.case_id != fixture.case_id
+        || case.claim_layer != fixture.claim_layer
+        || case.execution_profile_digest != fixture.execution_profile_digest
+        || case.outcome != CaseOutcomeStatusV1::Pass
+    {
+        return false;
+    }
+    match &fixture.expected {
+        ExpectedResultV1::CanonicalBytes { digest, .. } => {
+            case.expected_digest == Some(*digest) && case.actual_digest == Some(*digest)
+        }
+        ExpectedResultV1::TypedFailure(error) => {
+            case.expected_error == Some(*error) && case.actual_error == Some(*error)
+        }
+        ExpectedResultV1::AllowedDivergence {
+            classification: _,
+            first_coordinate,
+        } => case
+            .first_coordinate
+            .as_ref()
+            .is_some_and(|coordinate| coordinate.as_bytes() == first_coordinate),
+    }
+}
+
+fn validate_identity(identity: &ImplementationIdentityV1) -> Result<(), ConformanceContractError> {
+    if !bounded_text(&identity.implementation_id, 128)
+        || identity
+            .organization_id
+            .as_ref()
+            .is_some_and(|id| !bounded_text(id, 128))
+        || zero_digest(&identity.source_digest)
+        || zero_digest(&identity.build_digest)
+        || zero_digest(&identity.binary_digest)
+        || zero_digest(&identity.public_contract_digest)
+    {
+        Err(ConformanceContractError::ProvenanceMissing)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_independence_evidence(
+    evidence: &IndependenceEvidenceV1,
+    requirements: &IndependenceRequirementsV1,
+) -> Result<(), ConformanceContractError> {
+    if (requirements.technical_independence_required && !evidence.technical_independent)
+        || (requirements.authorship_independence_required && !evidence.authorship_independent)
+        || (requirements.organizational_independence_required
+            && !evidence.organizational_independent)
+        || evidence.reviewer_ids.is_empty()
+        || evidence.reviewer_ids.len() > 32
+        || evidence
+            .reviewer_ids
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        || evidence
+            .reviewer_ids
+            .iter()
+            .any(|id| !bounded_text(id, 128))
+        || zero_digest(&evidence.declaration_digest)
+        || zero_digest(&evidence.shared_code_audit_digest)
+    {
+        Err(ConformanceContractError::IndependenceEvidenceMissing)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_independence_requirements(
+    requirements: &IndependenceRequirementsV1,
+) -> Result<(), ConformanceContractError> {
+    if zero_digest(&requirements.requirements_digest) {
+        Err(ConformanceContractError::IndependenceEvidenceMissing)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_protocol(protocol: &EvaluatorProtocolV1) -> Result<(), ConformanceContractError> {
+    if !bounded_text(&protocol.protocol_id, 128)
+        || zero_digest(&protocol.protocol_digest)
+        || zero_digest(&protocol.request_schema_digest)
+        || zero_digest(&protocol.report_schema_digest)
+    {
+        Err(ConformanceContractError::ProvenanceMissing)
+    } else {
+        validate_hard_caps(&protocol.hard_caps)
+    }
+}
+
+fn validate_hard_caps(caps: &EvaluatorHardCapsV1) -> Result<(), ConformanceContractError> {
+    if caps.max_profile_bytes == 0
+        || caps.max_profile_bytes > MAX_PROFILE_BYTES as u64
+        || caps.max_cases == 0
+        || caps.max_cases as usize > MAX_FIXTURES
+        || caps.max_bundle_members == 0
+        || caps.max_bundle_members as usize > MAX_FIXTURES
+        || caps.max_member_path_bytes == 0
+        || caps.max_member_path_bytes as usize > MAX_STRING_BYTES
+        || caps.max_member_bytes == 0
+        || caps.max_member_bytes > MAX_MEMBER_BYTES
+        || caps.max_total_bundle_bytes == 0
+        || caps.max_total_bundle_bytes > MAX_TOTAL_BUNDLE_BYTES
+        || caps.max_compression_expansion == 0
+        || caps.max_compression_expansion > MAX_COMPRESSION_EXPANSION
+        || caps.max_structural_nesting == 0
+        || caps.max_structural_nesting > MAX_STRUCTURAL_NESTING
+        || caps.max_coordinate_bytes == 0
+        || caps.max_coordinate_bytes as usize > MAX_COORDINATE_BYTES
+        || caps.max_diagnostic_bytes > MAX_DIAGNOSTIC_BYTES
+    {
+        Err(ConformanceContractError::FieldOutOfBounds)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_input_member(member: &FixtureInputMemberV1) -> Result<(), ConformanceContractError> {
+    if !bounded_ascii(&member.member_id, MAX_STRING_BYTES)
+        || member.size_bytes == 0
+        || member.size_bytes > MAX_MEMBER_BYTES
+        || zero_digest(&member.digest)
+        || zero_digest(&member.provenance_digest)
+    {
+        Err(ConformanceContractError::ProvenanceMissing)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_bounds(bounds: &FixtureBoundsV1) -> Result<(), ConformanceContractError> {
+    if [
+        bounds.cpu_fuel,
+        bounds.memory_bytes,
+        bounds.event_count,
+        bounds.output_bytes,
+        bounds.storage_bytes,
+        bounds.execution_steps,
+        bounds.simulation_time_ns,
+        bounds.watchdog_ms,
+    ]
+    .contains(&0)
+    {
+        Err(ConformanceContractError::FieldOutOfBounds)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_capability_policy(policy: &CapabilityPolicyV1) -> Result<(), ConformanceContractError> {
+    if policy
+        .capability_ids
+        .windows(2)
+        .any(|pair| pair[0] >= pair[1])
+        || policy
+            .capability_ids
+            .iter()
+            .any(|id| !bounded_text(id, 128))
+    {
+        Err(ConformanceContractError::NonCanonicalOrder)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_fixture_provenance(
+    value: &FixtureProvenanceV1,
+) -> Result<(), ConformanceContractError> {
+    if !bounded_text(&value.licence_id, 128)
+        || zero_digest(&value.notices_digest)
+        || zero_digest(&value.sbom_digest)
+        || zero_digest(&value.source_digest)
+        || zero_digest(&value.build_digest)
+        || zero_digest(&value.publication_review_digest)
+        || zero_digest(&value.limitations_digest)
+    {
+        Err(ConformanceContractError::ProvenanceMissing)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_expected_result(
+    expected: &ExpectedResultV1,
+    allowed: &[AllowedDivergenceV1],
+) -> Result<(), ConformanceContractError> {
+    match expected {
+        ExpectedResultV1::CanonicalBytes { bytes, digest } => {
+            if bytes.is_empty() || *blake3::hash(bytes).as_bytes() != *digest {
+                Err(ConformanceContractError::FixtureDigestMismatch)
+            } else {
+                Ok(())
+            }
+        }
+        ExpectedResultV1::TypedFailure(_) => Ok(()),
+        ExpectedResultV1::AllowedDivergence {
+            classification,
+            first_coordinate,
+        } => {
+            if first_coordinate.is_empty()
+                || first_coordinate.len() > MAX_COORDINATE_BYTES
+                || !allowed.iter().any(|value| {
+                    value.classification == *classification
+                        && value.first_coordinate == *first_coordinate
+                })
+            {
+                Err(ConformanceContractError::DivergenceClassificationMismatch)
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+fn validate_allowed_divergences(
+    values: &[AllowedDivergenceV1],
+) -> Result<(), ConformanceContractError> {
+    if values
+        .windows(2)
+        .any(|pair| divergence_key(&pair[0]) >= divergence_key(&pair[1]))
+        || values.iter().any(|value| {
+            value.first_coordinate.is_empty() || value.first_coordinate.len() > MAX_COORDINATE_BYTES
+        })
+    {
+        Err(ConformanceContractError::NonCanonicalOrder)
+    } else {
+        Ok(())
+    }
+}
+
+fn bounded_text(value: &str, maximum: usize) -> bool {
+    !value.is_empty() && value.len() <= maximum
+}
+
+fn bounded_ascii(value: &str, maximum: usize) -> bool {
+    bounded_text(value, maximum) && value.is_ascii()
+}
+
+fn zero_digest(value: &[u8; 32]) -> bool {
+    *value == [0; 32]
+}
+
+fn strictly_ordered<T: Ord>(values: &[T]) -> bool {
+    values.windows(2).all(|pair| pair[0] < pair[1])
+}
+
+fn fixture_key(value: &FixtureDescriptorV1) -> (&str, ClaimLayerV1, [u8; 32]) {
+    (
+        &value.case_id,
+        value.claim_layer,
+        value.execution_profile_digest,
+    )
+}
+
+fn divergence_key(value: &AllowedDivergenceV1) -> (u8, &[u8]) {
+    (value.classification, &value.first_coordinate)
+}
+
+fn digest_bytes(domain: &[u8], value: &Value) -> [u8; 32] {
+    let bytes = encode_value(value).unwrap_or_default();
+    let mut source = Vec::with_capacity(domain.len() + bytes.len() + 1);
+    source.extend_from_slice(domain);
+    source.push(0);
+    source.extend_from_slice(&bytes);
+    *blake3::hash(&source).as_bytes()
+}
+
+fn encode_profile(profile: &ConformanceProfileV1, include_digest: bool) -> Value {
+    Value::Array(vec![
+        text(CONFORMANCE_PROFILE_MAGIC_V1),
+        uint(1),
+        text(&profile.profile_id),
+        text(&profile.semantic_version),
+        lifecycle(profile.lifecycle),
+        digest(&profile.normative_spec_digest),
+        digest_list(&profile.execution_profile_digests),
+        digest_list(&profile.public_schema_digests),
+        Value::Array(profile.fixtures.iter().map(encode_fixture).collect()),
+        Value::Array(
+            profile
+                .allowed_divergences
+                .iter()
+                .map(encode_divergence)
+                .collect(),
+        ),
+        encode_protocol(&profile.evaluator_protocol),
+        encode_requirements(&profile.independence_requirements),
+        digest(&profile.compatibility_digest),
+        digest(&profile.limitations_digest),
+        digest(&profile.provenance_digest),
+        optional(profile.previous_profile_digest.as_ref().map(digest)),
+        Value::Array(
+            profile
+                .stable_evidence
+                .iter()
+                .map(encode_stable_evidence)
+                .collect(),
+        ),
+        if include_digest {
+            digest(&profile.profile_digest)
+        } else {
+            Value::Null
+        },
+    ])
+}
+
+fn encode_fixture(value: &FixtureDescriptorV1) -> Value {
+    Value::Array(vec![
+        text(&value.case_id),
+        Value::Bool(value.mandatory),
+        claim_layer(value.claim_layer),
+        digest(&value.execution_profile_digest),
+        digest(&value.public_schema_digest),
+        Value::Array(value.modes.iter().copied().map(mode).collect()),
+        adapter(value.subject_adapter),
+        Value::Array(value.inputs.iter().map(encode_input).collect()),
+        encode_expected(&value.expected),
+        optional(value.expected_verification_error.map(safe_error)),
+        replay_claim(value.replay_claim),
+        redaction(value.redaction_state),
+        encode_bounds(&value.bounds),
+        encode_capability_policy(&value.capability_policy),
+        encode_fixture_provenance(&value.provenance),
+        digest(&value.compatibility_digest),
+    ])
+}
+
+fn encode_input(value: &FixtureInputMemberV1) -> Value {
+    Value::Array(vec![
+        text(&value.member_id),
+        uint(value.size_bytes),
+        digest(&value.digest),
+        digest(&value.provenance_digest),
+    ])
+}
+
+fn encode_expected(value: &ExpectedResultV1) -> Value {
+    match value {
+        ExpectedResultV1::CanonicalBytes {
+            bytes,
+            digest: value_digest,
+        } => Value::Array(vec![
+            uint(0),
+            Value::Bytes(bytes.clone()),
+            digest(value_digest),
+            Value::Null,
+            Value::Null,
+        ]),
+        ExpectedResultV1::TypedFailure(error) => Value::Array(vec![
+            uint(1),
+            Value::Null,
+            Value::Null,
+            safe_error(*error),
+            Value::Null,
+        ]),
+        ExpectedResultV1::AllowedDivergence {
+            classification,
+            first_coordinate,
+        } => Value::Array(vec![
+            uint(2),
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Array(vec![
+                uint(u64::from(*classification)),
+                Value::Bytes(first_coordinate.clone()),
+            ]),
+        ]),
+    }
+}
+
+fn encode_divergence(value: &AllowedDivergenceV1) -> Value {
+    Value::Array(vec![
+        uint(u64::from(value.classification)),
+        Value::Bytes(value.first_coordinate.clone()),
+    ])
+}
+
+fn encode_bounds(value: &FixtureBoundsV1) -> Value {
+    Value::Array(vec![
+        uint(value.cpu_fuel),
+        uint(value.memory_bytes),
+        uint(value.event_count),
+        uint(value.output_bytes),
+        uint(value.storage_bytes),
+        uint(value.execution_steps),
+        uint(value.simulation_time_ns),
+        uint(value.watchdog_ms),
+    ])
+}
+
+fn encode_capability_policy(value: &CapabilityPolicyV1) -> Value {
+    Value::Array(vec![
+        Value::Bool(value.network_allowed),
+        strings(&value.capability_ids),
+    ])
+}
+
+fn encode_fixture_provenance(value: &FixtureProvenanceV1) -> Value {
+    Value::Array(vec![
+        text(&value.licence_id),
+        digest(&value.notices_digest),
+        digest(&value.sbom_digest),
+        digest(&value.source_digest),
+        digest(&value.build_digest),
+        digest(&value.publication_review_digest),
+        digest(&value.limitations_digest),
+    ])
+}
+
+fn encode_protocol(value: &EvaluatorProtocolV1) -> Value {
+    Value::Array(vec![
+        text(&value.protocol_id),
+        digest(&value.protocol_digest),
+        digest(&value.request_schema_digest),
+        digest(&value.report_schema_digest),
+        encode_hard_caps(&value.hard_caps),
+    ])
+}
+
+fn encode_hard_caps(value: &EvaluatorHardCapsV1) -> Value {
+    Value::Array(vec![
+        uint(value.max_profile_bytes),
+        uint(u64::from(value.max_cases)),
+        uint(u64::from(value.max_bundle_members)),
+        uint(u64::from(value.max_member_path_bytes)),
+        uint(value.max_member_bytes),
+        uint(value.max_total_bundle_bytes),
+        uint(u64::from(value.max_compression_expansion)),
+        uint(u64::from(value.max_structural_nesting)),
+        uint(u64::from(value.max_coordinate_bytes)),
+        uint(value.max_diagnostic_bytes),
+    ])
+}
+
+fn encode_requirements(value: &IndependenceRequirementsV1) -> Value {
+    Value::Array(vec![
+        Value::Bool(value.technical_independence_required),
+        Value::Bool(value.authorship_independence_required),
+        Value::Bool(value.organizational_independence_required),
+        digest(&value.requirements_digest),
+    ])
+}
+
+fn encode_stable_evidence(value: &StableImplementationEvidenceV1) -> Value {
+    Value::Array(vec![
+        encode_identity(&value.implementation),
+        encode_independence(&value.independence),
+        digest(&value.evaluator_protocol_digest),
+        Value::Array(value.case_outcomes.iter().map(encode_case).collect()),
+    ])
+}
+
+fn encode_request(request: &EvaluatorRequestV1, include_digest: bool) -> Value {
+    Value::Array(vec![
+        text(EVALUATOR_REQUEST_MAGIC_V1),
+        uint(1),
+        digest16(&request.request_id),
+        digest(&request.conformance_profile_digest),
+        digest(&request.fixture_bundle_digest),
+        adapter(request.subject_adapter),
+        digest(&request.subject_artifact_digest),
+        encode_identity(&request.implementation),
+        digest(&request.execution_profile_digest),
+        digest(&request.trust_policy_snapshot_digest),
+        encode_output_capability(&request.output_capability),
+        digest(&request.evaluator_protocol_digest),
+        digest(&request.evaluator_hard_caps_digest),
+        if include_digest {
+            digest(&request.request_digest)
+        } else {
+            Value::Null
+        },
+    ])
+}
+
+fn encode_output_capability(value: &EvaluatorOutputCapabilityV1) -> Value {
+    Value::Array(vec![
+        digest(&value.capability_digest),
+        uint(value.report_bytes_limit),
+        uint(value.diagnostic_bytes_limit),
+    ])
+}
+
+fn decode_profile(value: &Value) -> Result<ConformanceProfileV1, ConformanceContractError> {
+    let fields = array(value, 18)?;
+    if text_value(&fields[0])? != CONFORMANCE_PROFILE_MAGIC_V1 || uint_value(&fields[1])? != 1 {
+        return Err(ConformanceContractError::UnsupportedVersion);
+    }
+    Ok(ConformanceProfileV1 {
+        profile_id: text_value(&fields[2])?,
+        semantic_version: text_value(&fields[3])?,
+        lifecycle: decode_lifecycle(&fields[4])?,
+        normative_spec_digest: digest_value(&fields[5])?,
+        execution_profile_digests: digest_list_value(&fields[6])?,
+        public_schema_digests: digest_list_value(&fields[7])?,
+        fixtures: array_values(&fields[8])?
+            .iter()
+            .map(decode_fixture)
+            .collect::<Result<Vec<_>, _>>()?,
+        allowed_divergences: array_values(&fields[9])?
+            .iter()
+            .map(decode_divergence)
+            .collect::<Result<Vec<_>, _>>()?,
+        evaluator_protocol: decode_protocol(&fields[10])?,
+        independence_requirements: decode_requirements(&fields[11])?,
+        compatibility_digest: digest_value(&fields[12])?,
+        limitations_digest: digest_value(&fields[13])?,
+        provenance_digest: digest_value(&fields[14])?,
+        previous_profile_digest: optional_digest(&fields[15])?,
+        stable_evidence: array_values(&fields[16])?
+            .iter()
+            .map(decode_stable_evidence)
+            .collect::<Result<Vec<_>, _>>()?,
+        profile_digest: digest_value(&fields[17])?,
+    })
+}
+
+fn decode_fixture(value: &Value) -> Result<FixtureDescriptorV1, ConformanceContractError> {
+    let fields = array(value, 16)?;
+    Ok(FixtureDescriptorV1 {
+        case_id: text_value(&fields[0])?,
+        mandatory: bool_value(&fields[1])?,
+        claim_layer: decode_claim_layer(&fields[2])?,
+        execution_profile_digest: digest_value(&fields[3])?,
+        public_schema_digest: digest_value(&fields[4])?,
+        modes: array_values(&fields[5])?
+            .iter()
+            .map(decode_mode)
+            .collect::<Result<Vec<_>, _>>()?,
+        subject_adapter: decode_adapter(&fields[6])?,
+        inputs: array_values(&fields[7])?
+            .iter()
+            .map(decode_input)
+            .collect::<Result<Vec<_>, _>>()?,
+        expected: decode_expected(&fields[8])?,
+        expected_verification_error: optional_safe_error(&fields[9])?,
+        replay_claim: decode_replay_claim(&fields[10])?,
+        redaction_state: decode_redaction(&fields[11])?,
+        bounds: decode_bounds(&fields[12])?,
+        capability_policy: decode_capability_policy(&fields[13])?,
+        provenance: decode_fixture_provenance(&fields[14])?,
+        compatibility_digest: digest_value(&fields[15])?,
+    })
+}
+
+fn decode_input(value: &Value) -> Result<FixtureInputMemberV1, ConformanceContractError> {
+    let fields = array(value, 4)?;
+    Ok(FixtureInputMemberV1 {
+        member_id: text_value(&fields[0])?,
+        size_bytes: uint_value(&fields[1])?,
+        digest: digest_value(&fields[2])?,
+        provenance_digest: digest_value(&fields[3])?,
+    })
+}
+
+fn decode_expected(value: &Value) -> Result<ExpectedResultV1, ConformanceContractError> {
+    let fields = array(value, 5)?;
+    match uint_value(&fields[0])? {
+        0 => Ok(ExpectedResultV1::CanonicalBytes {
+            bytes: bytes_value(&fields[1])?,
+            digest: digest_value(&fields[2])?,
+        }),
+        1 => Ok(ExpectedResultV1::TypedFailure(decode_safe_error(
+            &fields[3],
+        )?)),
+        2 => {
+            let divergence = array(&fields[4], 2)?;
+            Ok(ExpectedResultV1::AllowedDivergence {
+                classification: u8::try_from(uint_value(&divergence[0])?)
+                    .map_err(|_| ConformanceContractError::FieldOutOfBounds)?,
+                first_coordinate: bytes_value(&divergence[1])?,
+            })
+        }
+        _ => Err(ConformanceContractError::ExpectedResultMissing),
+    }
+}
+
+fn decode_divergence(value: &Value) -> Result<AllowedDivergenceV1, ConformanceContractError> {
+    let fields = array(value, 2)?;
+    Ok(AllowedDivergenceV1 {
+        classification: u8::try_from(uint_value(&fields[0])?)
+            .map_err(|_| ConformanceContractError::FieldOutOfBounds)?,
+        first_coordinate: bytes_value(&fields[1])?,
+    })
+}
+
+fn decode_bounds(value: &Value) -> Result<FixtureBoundsV1, ConformanceContractError> {
+    let fields = array(value, 8)?;
+    Ok(FixtureBoundsV1 {
+        cpu_fuel: uint_value(&fields[0])?,
+        memory_bytes: uint_value(&fields[1])?,
+        event_count: uint_value(&fields[2])?,
+        output_bytes: uint_value(&fields[3])?,
+        storage_bytes: uint_value(&fields[4])?,
+        execution_steps: uint_value(&fields[5])?,
+        simulation_time_ns: uint_value(&fields[6])?,
+        watchdog_ms: uint_value(&fields[7])?,
+    })
+}
+
+fn decode_capability_policy(value: &Value) -> Result<CapabilityPolicyV1, ConformanceContractError> {
+    let fields = array(value, 2)?;
+    Ok(CapabilityPolicyV1 {
+        network_allowed: bool_value(&fields[0])?,
+        capability_ids: strings_value(&fields[1])?,
+    })
+}
+
+fn decode_fixture_provenance(
+    value: &Value,
+) -> Result<FixtureProvenanceV1, ConformanceContractError> {
+    let fields = array(value, 7)?;
+    Ok(FixtureProvenanceV1 {
+        licence_id: text_value(&fields[0])?,
+        notices_digest: digest_value(&fields[1])?,
+        sbom_digest: digest_value(&fields[2])?,
+        source_digest: digest_value(&fields[3])?,
+        build_digest: digest_value(&fields[4])?,
+        publication_review_digest: digest_value(&fields[5])?,
+        limitations_digest: digest_value(&fields[6])?,
+    })
+}
+
+fn decode_protocol(value: &Value) -> Result<EvaluatorProtocolV1, ConformanceContractError> {
+    let fields = array(value, 5)?;
+    Ok(EvaluatorProtocolV1 {
+        protocol_id: text_value(&fields[0])?,
+        protocol_digest: digest_value(&fields[1])?,
+        request_schema_digest: digest_value(&fields[2])?,
+        report_schema_digest: digest_value(&fields[3])?,
+        hard_caps: decode_hard_caps(&fields[4])?,
+    })
+}
+
+fn decode_hard_caps(value: &Value) -> Result<EvaluatorHardCapsV1, ConformanceContractError> {
+    let fields = array(value, 10)?;
+    Ok(EvaluatorHardCapsV1 {
+        max_profile_bytes: uint_value(&fields[0])?,
+        max_cases: u32_value(&fields[1])?,
+        max_bundle_members: u32_value(&fields[2])?,
+        max_member_path_bytes: u16_value(&fields[3])?,
+        max_member_bytes: uint_value(&fields[4])?,
+        max_total_bundle_bytes: uint_value(&fields[5])?,
+        max_compression_expansion: u32_value(&fields[6])?,
+        max_structural_nesting: u8_value(&fields[7])?,
+        max_coordinate_bytes: u16_value(&fields[8])?,
+        max_diagnostic_bytes: uint_value(&fields[9])?,
+    })
+}
+
+fn decode_requirements(
+    value: &Value,
+) -> Result<IndependenceRequirementsV1, ConformanceContractError> {
+    let fields = array(value, 4)?;
+    Ok(IndependenceRequirementsV1 {
+        technical_independence_required: bool_value(&fields[0])?,
+        authorship_independence_required: bool_value(&fields[1])?,
+        organizational_independence_required: bool_value(&fields[2])?,
+        requirements_digest: digest_value(&fields[3])?,
+    })
+}
+
+fn decode_stable_evidence(
+    value: &Value,
+) -> Result<StableImplementationEvidenceV1, ConformanceContractError> {
+    let fields = array(value, 4)?;
+    Ok(StableImplementationEvidenceV1 {
+        implementation: decode_identity(&fields[0])?,
+        independence: decode_independence(&fields[1])?,
+        evaluator_protocol_digest: digest_value(&fields[2])?,
+        case_outcomes: array_values(&fields[3])?
+            .iter()
+            .map(decode_case)
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn decode_request(value: &Value) -> Result<EvaluatorRequestV1, ConformanceContractError> {
+    let fields = array(value, 14)?;
+    if text_value(&fields[0])? != EVALUATOR_REQUEST_MAGIC_V1 || uint_value(&fields[1])? != 1 {
+        return Err(ConformanceContractError::UnsupportedVersion);
+    }
+    Ok(EvaluatorRequestV1 {
+        request_id: digest16_value(&fields[2])?,
+        conformance_profile_digest: digest_value(&fields[3])?,
+        fixture_bundle_digest: digest_value(&fields[4])?,
+        subject_adapter: decode_adapter(&fields[5])?,
+        subject_artifact_digest: digest_value(&fields[6])?,
+        implementation: decode_identity(&fields[7])?,
+        execution_profile_digest: digest_value(&fields[8])?,
+        trust_policy_snapshot_digest: digest_value(&fields[9])?,
+        output_capability: decode_output_capability(&fields[10])?,
+        evaluator_protocol_digest: digest_value(&fields[11])?,
+        evaluator_hard_caps_digest: digest_value(&fields[12])?,
+        request_digest: digest_value(&fields[13])?,
+    })
+}
+
+fn decode_output_capability(
+    value: &Value,
+) -> Result<EvaluatorOutputCapabilityV1, ConformanceContractError> {
+    let fields = array(value, 3)?;
+    Ok(EvaluatorOutputCapabilityV1 {
+        capability_digest: digest_value(&fields[0])?,
+        report_bytes_limit: uint_value(&fields[1])?,
+        diagnostic_bytes_limit: uint_value(&fields[2])?,
+    })
+}
+
+fn encode_identity(value: &ImplementationIdentityV1) -> Value {
+    Value::Array(vec![
+        text(&value.implementation_id),
+        digest(&value.source_digest),
+        digest(&value.build_digest),
+        digest(&value.binary_digest),
+        digest(&value.public_contract_digest),
+        optional(value.organization_id.as_deref().map(text)),
+    ])
+}
+
+fn decode_identity(value: &Value) -> Result<ImplementationIdentityV1, ConformanceContractError> {
+    let fields = array(value, 6)?;
+    Ok(ImplementationIdentityV1 {
+        implementation_id: text_value(&fields[0])?,
+        source_digest: digest_value(&fields[1])?,
+        build_digest: digest_value(&fields[2])?,
+        binary_digest: digest_value(&fields[3])?,
+        public_contract_digest: digest_value(&fields[4])?,
+        organization_id: optional_text(&fields[5])?,
+    })
+}
+
+fn encode_independence(value: &IndependenceEvidenceV1) -> Value {
+    Value::Array(vec![
+        Value::Bool(value.technical_independent),
+        Value::Bool(value.authorship_independent),
+        Value::Bool(value.organizational_independent),
+        digest(&value.declaration_digest),
+        digest(&value.shared_code_audit_digest),
+        strings(&value.reviewer_ids),
+    ])
+}
+
+fn decode_independence(value: &Value) -> Result<IndependenceEvidenceV1, ConformanceContractError> {
+    let fields = array(value, 6)?;
+    Ok(IndependenceEvidenceV1 {
+        technical_independent: bool_value(&fields[0])?,
+        authorship_independent: bool_value(&fields[1])?,
+        organizational_independent: bool_value(&fields[2])?,
+        declaration_digest: digest_value(&fields[3])?,
+        shared_code_audit_digest: digest_value(&fields[4])?,
+        reviewer_ids: strings_value(&fields[5])?,
+    })
+}
+
+fn encode_case(value: &CaseOutcomeV1) -> Value {
+    Value::Array(vec![
+        text(&value.case_id),
+        digest(&value.fixture_digest),
+        digest(&value.execution_profile_digest),
+        mode(value.mode),
+        claim_layer(value.claim_layer),
+        case_outcome(value.outcome),
+        optional(value.first_coordinate.as_deref().map(text)),
+        optional(value.expected_digest.as_ref().map(digest)),
+        optional(value.actual_digest.as_ref().map(digest)),
+        optional(value.expected_error.map(safe_error)),
+        optional(value.actual_error.map(safe_error)),
+        replay_claim(value.replay_claim),
+        redaction(value.redaction_state),
+        digest(&value.provenance_digest),
+    ])
+}
+
+fn decode_case(value: &Value) -> Result<CaseOutcomeV1, ConformanceContractError> {
+    let fields = array(value, 14)?;
+    Ok(CaseOutcomeV1 {
+        case_id: text_value(&fields[0])?,
+        fixture_digest: digest_value(&fields[1])?,
+        execution_profile_digest: digest_value(&fields[2])?,
+        mode: decode_mode(&fields[3])?,
+        claim_layer: decode_claim_layer(&fields[4])?,
+        outcome: decode_case_outcome(&fields[5])?,
+        first_coordinate: optional_text(&fields[6])?,
+        expected_digest: optional_digest(&fields[7])?,
+        actual_digest: optional_digest(&fields[8])?,
+        expected_error: optional_safe_error(&fields[9])?,
+        actual_error: optional_safe_error(&fields[10])?,
+        replay_claim: decode_replay_claim(&fields[11])?,
+        redaction_state: decode_redaction(&fields[12])?,
+        provenance_digest: digest_value(&fields[13])?,
+    })
+}
+
+fn encode_value(value: &Value) -> Result<Vec<u8>, ConformanceContractError> {
+    validate_value(value).and_then(|()| {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(value, &mut bytes)
+            .map(|()| bytes)
+            .map_err(|_| ConformanceContractError::InvalidEncoding)
+    })
+}
+
+fn decode_value(bytes: &[u8]) -> Result<Value, ConformanceContractError> {
+    let mut cursor = Cursor::new(bytes);
+    let value = ciborium::from_reader(&mut cursor)
+        .map_err(|_| ConformanceContractError::InvalidEncoding)?;
+    if cursor.position() != u64::try_from(bytes.len()).unwrap_or(u64::MAX) {
+        return Err(ConformanceContractError::InvalidEncoding);
+    }
+    encode_value(&value).and_then(|canonical| {
+        if canonical == bytes {
+            Ok(value)
+        } else {
+            Err(ConformanceContractError::InvalidEncoding)
+        }
+    })
+}
+
+fn validate_value(value: &Value) -> Result<(), ConformanceContractError> {
+    match value {
+        Value::Array(values) => values.iter().try_for_each(validate_value),
+        Value::Bytes(_) | Value::Text(_) | Value::Integer(_) | Value::Bool(_) | Value::Null => {
+            Ok(())
+        }
+        _ => Err(ConformanceContractError::InvalidEncoding),
+    }
+}
+
+fn array(value: &Value, length: usize) -> Result<&[Value], ConformanceContractError> {
+    match value {
+        Value::Array(values) if values.len() == length => Ok(values),
+        _ => Err(ConformanceContractError::InvalidEncoding),
+    }
+}
+
+fn array_values(value: &Value) -> Result<&[Value], ConformanceContractError> {
+    match value {
+        Value::Array(values) => Ok(values),
+        _ => Err(ConformanceContractError::InvalidEncoding),
+    }
+}
+
+fn text_value(value: &Value) -> Result<String, ConformanceContractError> {
+    match value {
+        Value::Text(value) => Ok(value.clone()),
+        _ => Err(ConformanceContractError::InvalidEncoding),
+    }
+}
+fn optional_text(value: &Value) -> Result<Option<String>, ConformanceContractError> {
+    if matches!(value, Value::Null) {
+        Ok(None)
+    } else {
+        text_value(value).map(Some)
+    }
+}
+fn bytes_value(value: &Value) -> Result<Vec<u8>, ConformanceContractError> {
+    match value {
+        Value::Bytes(value) => Ok(value.clone()),
+        _ => Err(ConformanceContractError::InvalidEncoding),
+    }
+}
+fn bool_value(value: &Value) -> Result<bool, ConformanceContractError> {
+    match value {
+        Value::Bool(value) => Ok(*value),
+        _ => Err(ConformanceContractError::InvalidEncoding),
+    }
+}
+fn uint_value(value: &Value) -> Result<u64, ConformanceContractError> {
+    match value {
+        Value::Integer(value) => {
+            u64::try_from(*value).map_err(|_| ConformanceContractError::InvalidEncoding)
+        }
+        _ => Err(ConformanceContractError::InvalidEncoding),
+    }
+}
+fn u8_value(value: &Value) -> Result<u8, ConformanceContractError> {
+    u8::try_from(uint_value(value)?).map_err(|_| ConformanceContractError::FieldOutOfBounds)
+}
+fn u16_value(value: &Value) -> Result<u16, ConformanceContractError> {
+    u16::try_from(uint_value(value)?).map_err(|_| ConformanceContractError::FieldOutOfBounds)
+}
+fn u32_value(value: &Value) -> Result<u32, ConformanceContractError> {
+    u32::try_from(uint_value(value)?).map_err(|_| ConformanceContractError::FieldOutOfBounds)
+}
+fn digest_value(value: &Value) -> Result<[u8; 32], ConformanceContractError> {
+    bytes_value(value).and_then(|value| {
+        value
+            .as_slice()
+            .try_into()
+            .map_err(|_| ConformanceContractError::InvalidEncoding)
+    })
+}
+fn digest16_value(value: &Value) -> Result<[u8; 16], ConformanceContractError> {
+    bytes_value(value).and_then(|value| {
+        value
+            .as_slice()
+            .try_into()
+            .map_err(|_| ConformanceContractError::InvalidEncoding)
+    })
+}
+fn optional_digest(value: &Value) -> Result<Option<[u8; 32]>, ConformanceContractError> {
+    if matches!(value, Value::Null) {
+        Ok(None)
+    } else {
+        digest_value(value).map(Some)
+    }
+}
+fn digest_list_value(value: &Value) -> Result<Vec<[u8; 32]>, ConformanceContractError> {
+    array_values(value).and_then(|values| values.iter().map(digest_value).collect())
+}
+fn strings_value(value: &Value) -> Result<Vec<String>, ConformanceContractError> {
+    array_values(value).and_then(|values| values.iter().map(text_value).collect())
+}
+
+fn text(value: &str) -> Value {
+    Value::Text(value.to_owned())
+}
+fn uint(value: u64) -> Value {
+    Value::Integer(value.into())
+}
+fn digest(value: &[u8; 32]) -> Value {
+    Value::Bytes(value.to_vec())
+}
+fn digest16(value: &[u8; 16]) -> Value {
+    Value::Bytes(value.to_vec())
+}
+fn optional(value: Option<Value>) -> Value {
+    value.unwrap_or(Value::Null)
+}
+fn digest_list(values: &[[u8; 32]]) -> Value {
+    Value::Array(values.iter().map(digest).collect())
+}
+fn strings(values: &[String]) -> Value {
+    Value::Array(values.iter().map(|value| text(value)).collect())
+}
+
+fn lifecycle(value: ProfileLifecycleV1) -> Value {
+    uint(match value {
+        ProfileLifecycleV1::Draft => 0,
+        ProfileLifecycleV1::Candidate => 1,
+        ProfileLifecycleV1::Stable => 2,
+        ProfileLifecycleV1::Retired => 3,
+    })
+}
+fn decode_lifecycle(value: &Value) -> Result<ProfileLifecycleV1, ConformanceContractError> {
+    match uint_value(value)? {
+        0 => Ok(ProfileLifecycleV1::Draft),
+        1 => Ok(ProfileLifecycleV1::Candidate),
+        2 => Ok(ProfileLifecycleV1::Stable),
+        3 => Ok(ProfileLifecycleV1::Retired),
+        _ => Err(ConformanceContractError::UnsupportedVersion),
+    }
+}
+fn adapter(value: SubjectAdapterKindV1) -> Value {
+    uint(match value {
+        SubjectAdapterKindV1::ExportedArtifact => 0,
+        SubjectAdapterKindV1::PublicGatewayProtocol => 1,
+        SubjectAdapterKindV1::PublicPluginProtocol => 2,
+    })
+}
+fn decode_adapter(value: &Value) -> Result<SubjectAdapterKindV1, ConformanceContractError> {
+    match uint_value(value)? {
+        0 => Ok(SubjectAdapterKindV1::ExportedArtifact),
+        1 => Ok(SubjectAdapterKindV1::PublicGatewayProtocol),
+        2 => Ok(SubjectAdapterKindV1::PublicPluginProtocol),
+        _ => Err(ConformanceContractError::InvalidEncoding),
+    }
+}
+fn mode(value: ExecutionModeV1) -> Value {
+    uint(match value {
+        ExecutionModeV1::Local => 0,
+        ExecutionModeV1::AirGapped => 1,
+        ExecutionModeV1::Replay => 2,
+        ExecutionModeV1::Fork => 3,
+    })
+}
+fn decode_mode(value: &Value) -> Result<ExecutionModeV1, ConformanceContractError> {
+    match uint_value(value)? {
+        0 => Ok(ExecutionModeV1::Local),
+        1 => Ok(ExecutionModeV1::AirGapped),
+        2 => Ok(ExecutionModeV1::Replay),
+        3 => Ok(ExecutionModeV1::Fork),
+        _ => Err(ConformanceContractError::InvalidEncoding),
+    }
+}
+fn claim_layer(value: ClaimLayerV1) -> Value {
+    uint(match value {
+        ClaimLayerV1::ArtifactIntegrity => 0,
+        ClaimLayerV1::ReplayConformance => 1,
+        ClaimLayerV1::KnowledgeNonInterference => 2,
+        ClaimLayerV1::GatewayClientConformance => 3,
+        ClaimLayerV1::PluginConformance => 4,
+        ClaimLayerV1::MetricConformance => 5,
+        ClaimLayerV1::EmpiricalEvaluation => 6,
+    })
+}
+fn decode_claim_layer(value: &Value) -> Result<ClaimLayerV1, ConformanceContractError> {
+    match uint_value(value)? {
+        0 => Ok(ClaimLayerV1::ArtifactIntegrity),
+        1 => Ok(ClaimLayerV1::ReplayConformance),
+        2 => Ok(ClaimLayerV1::KnowledgeNonInterference),
+        3 => Ok(ClaimLayerV1::GatewayClientConformance),
+        4 => Ok(ClaimLayerV1::PluginConformance),
+        5 => Ok(ClaimLayerV1::MetricConformance),
+        6 => Ok(ClaimLayerV1::EmpiricalEvaluation),
+        _ => Err(ConformanceContractError::InvalidEncoding),
+    }
+}
+fn case_outcome(value: CaseOutcomeStatusV1) -> Value {
+    uint(match value {
+        CaseOutcomeStatusV1::Pass => 0,
+        CaseOutcomeStatusV1::Fail => 1,
+        CaseOutcomeStatusV1::Skip => 2,
+        CaseOutcomeStatusV1::Unavailable => 3,
+        CaseOutcomeStatusV1::NotApplicable => 4,
+    })
+}
+fn decode_case_outcome(value: &Value) -> Result<CaseOutcomeStatusV1, ConformanceContractError> {
+    match uint_value(value)? {
+        0 => Ok(CaseOutcomeStatusV1::Pass),
+        1 => Ok(CaseOutcomeStatusV1::Fail),
+        2 => Ok(CaseOutcomeStatusV1::Skip),
+        3 => Ok(CaseOutcomeStatusV1::Unavailable),
+        4 => Ok(CaseOutcomeStatusV1::NotApplicable),
+        _ => Err(ConformanceContractError::InvalidEncoding),
+    }
+}
+fn replay_claim(value: ReplayClaimV1) -> Value {
+    uint(match value {
+        ReplayClaimV1::Exact => 0,
+        ReplayClaimV1::ExactAuthoritativeWithRedactedViews => 1,
+        ReplayClaimV1::StructuralOnly => 2,
+        ReplayClaimV1::UnverifiableArtifactsMissing => 3,
+        ReplayClaimV1::IncompatibleProfile => 4,
+    })
+}
+fn decode_replay_claim(value: &Value) -> Result<ReplayClaimV1, ConformanceContractError> {
+    match uint_value(value)? {
+        0 => Ok(ReplayClaimV1::Exact),
+        1 => Ok(ReplayClaimV1::ExactAuthoritativeWithRedactedViews),
+        2 => Ok(ReplayClaimV1::StructuralOnly),
+        3 => Ok(ReplayClaimV1::UnverifiableArtifactsMissing),
+        4 => Ok(ReplayClaimV1::IncompatibleProfile),
+        _ => Err(ConformanceContractError::InvalidEncoding),
+    }
+}
+fn redaction(value: RedactionStateV1) -> Value {
+    uint(match value {
+        RedactionStateV1::None => 0,
+        RedactionStateV1::RedactedViews => 1,
+        RedactionStateV1::StructuralOnly => 2,
+        RedactionStateV1::EvidenceMissing => 3,
+    })
+}
+fn decode_redaction(value: &Value) -> Result<RedactionStateV1, ConformanceContractError> {
+    match uint_value(value)? {
+        0 => Ok(RedactionStateV1::None),
+        1 => Ok(RedactionStateV1::RedactedViews),
+        2 => Ok(RedactionStateV1::StructuralOnly),
+        3 => Ok(RedactionStateV1::EvidenceMissing),
+        _ => Err(ConformanceContractError::InvalidEncoding),
+    }
+}
+fn safe_error(value: SafeErrorCodeV1) -> Value {
+    uint(match value {
+        SafeErrorCodeV1::InvalidEncoding => 0,
+        SafeErrorCodeV1::UnsupportedVersion => 1,
+        SafeErrorCodeV1::FieldOutOfBounds => 2,
+        SafeErrorCodeV1::NonCanonicalOrder => 3,
+        SafeErrorCodeV1::DigestMismatch => 4,
+        SafeErrorCodeV1::SignatureInvalid => 5,
+        SafeErrorCodeV1::TrustRootUnknown => 6,
+        SafeErrorCodeV1::TrustSnapshotRollback => 7,
+        SafeErrorCodeV1::ArtifactRevoked => 8,
+        SafeErrorCodeV1::ClosureIncomplete => 9,
+        SafeErrorCodeV1::ProfileClassMismatch => 10,
+        SafeErrorCodeV1::ProfileUnsupported => 11,
+        SafeErrorCodeV1::ProvenanceMissing => 12,
+        SafeErrorCodeV1::ResourceLimitExceeded => 13,
+    })
+}
+fn decode_safe_error(value: &Value) -> Result<SafeErrorCodeV1, ConformanceContractError> {
+    match uint_value(value)? {
+        0 => Ok(SafeErrorCodeV1::InvalidEncoding),
+        1 => Ok(SafeErrorCodeV1::UnsupportedVersion),
+        2 => Ok(SafeErrorCodeV1::FieldOutOfBounds),
+        3 => Ok(SafeErrorCodeV1::NonCanonicalOrder),
+        4 => Ok(SafeErrorCodeV1::DigestMismatch),
+        5 => Ok(SafeErrorCodeV1::SignatureInvalid),
+        6 => Ok(SafeErrorCodeV1::TrustRootUnknown),
+        7 => Ok(SafeErrorCodeV1::TrustSnapshotRollback),
+        8 => Ok(SafeErrorCodeV1::ArtifactRevoked),
+        9 => Ok(SafeErrorCodeV1::ClosureIncomplete),
+        10 => Ok(SafeErrorCodeV1::ProfileClassMismatch),
+        11 => Ok(SafeErrorCodeV1::ProfileUnsupported),
+        12 => Ok(SafeErrorCodeV1::ProvenanceMissing),
+        13 => Ok(SafeErrorCodeV1::ResourceLimitExceeded),
+        _ => Err(ConformanceContractError::InvalidEncoding),
+    }
+}
+fn optional_safe_error(value: &Value) -> Result<Option<SafeErrorCodeV1>, ConformanceContractError> {
+    if matches!(value, Value::Null) {
+        Ok(None)
+    } else {
+        decode_safe_error(value).map(Some)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn digest(seed: u8) -> [u8; 32] {
+        [seed; 32]
+    }
+
+    fn profile() -> ConformanceProfileV1 {
+        let expected_bytes = b"public expected bytes".to_vec();
+        let fixture = FixtureDescriptorV1 {
+            case_id: "ART-001".to_owned(),
+            mandatory: true,
+            claim_layer: ClaimLayerV1::ArtifactIntegrity,
+            execution_profile_digest: digest(1),
+            public_schema_digest: digest(2),
+            modes: vec![ExecutionModeV1::Local, ExecutionModeV1::AirGapped],
+            subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
+            inputs: vec![FixtureInputMemberV1 {
+                member_id: "fixture.json".to_owned(),
+                size_bytes: 12,
+                digest: digest(3),
+                provenance_digest: digest(4),
+            }],
+            expected: ExpectedResultV1::CanonicalBytes {
+                digest: *blake3::hash(&expected_bytes).as_bytes(),
+                bytes: expected_bytes,
+            },
+            expected_verification_error: None,
+            replay_claim: ReplayClaimV1::Exact,
+            redaction_state: RedactionStateV1::None,
+            bounds: FixtureBoundsV1 {
+                cpu_fuel: 1,
+                memory_bytes: 1,
+                event_count: 1,
+                output_bytes: 1,
+                storage_bytes: 1,
+                execution_steps: 1,
+                simulation_time_ns: 1,
+                watchdog_ms: 1,
+            },
+            capability_policy: CapabilityPolicyV1 {
+                network_allowed: false,
+                capability_ids: vec!["read-public-bundle".to_owned()],
+            },
+            provenance: FixtureProvenanceV1 {
+                licence_id: "MIT".to_owned(),
+                notices_digest: digest(5),
+                sbom_digest: digest(6),
+                source_digest: digest(7),
+                build_digest: digest(8),
+                publication_review_digest: digest(9),
+                limitations_digest: digest(10),
+            },
+            compatibility_digest: digest(11),
+        };
+        let mut profile = ConformanceProfileV1 {
+            profile_id: "pigloros.w8.artifact-integrity".to_owned(),
+            semantic_version: "1.0.0".to_owned(),
+            lifecycle: ProfileLifecycleV1::Draft,
+            normative_spec_digest: digest(12),
+            execution_profile_digests: vec![digest(1)],
+            public_schema_digests: vec![digest(2)],
+            fixtures: vec![fixture],
+            allowed_divergences: vec![],
+            evaluator_protocol: EvaluatorProtocolV1 {
+                protocol_id: "pigloros.evaluator.v1".to_owned(),
+                protocol_digest: digest(13),
+                request_schema_digest: digest(14),
+                report_schema_digest: digest(15),
+                hard_caps: EvaluatorHardCapsV1 {
+                    max_profile_bytes: MAX_PROFILE_BYTES as u64,
+                    max_cases: MAX_FIXTURES as u32,
+                    max_bundle_members: MAX_FIXTURES as u32,
+                    max_member_path_bytes: MAX_STRING_BYTES as u16,
+                    max_member_bytes: MAX_MEMBER_BYTES,
+                    max_total_bundle_bytes: MAX_TOTAL_BUNDLE_BYTES,
+                    max_compression_expansion: MAX_COMPRESSION_EXPANSION,
+                    max_structural_nesting: MAX_STRUCTURAL_NESTING,
+                    max_coordinate_bytes: MAX_COORDINATE_BYTES as u16,
+                    max_diagnostic_bytes: MAX_DIAGNOSTIC_BYTES,
+                },
+            },
+            independence_requirements: IndependenceRequirementsV1 {
+                technical_independence_required: true,
+                authorship_independence_required: true,
+                organizational_independence_required: false,
+                requirements_digest: digest(16),
+            },
+            compatibility_digest: digest(17),
+            limitations_digest: digest(18),
+            provenance_digest: digest(19),
+            previous_profile_digest: None,
+            stable_evidence: vec![],
+            profile_digest: [0; 32],
+        };
+        profile.profile_digest = profile.digest();
+        profile
+    }
+
+    #[test]
+    fn cpf1_round_trips_exactly_and_uses_a_self_verifying_digest() {
+        let value = profile();
+        let bytes = value.to_canonical_cbor().unwrap_or_default();
+        assert_eq!(ConformanceProfileV1::from_canonical_cbor(&bytes), Ok(value));
+    }
+
+    #[test]
+    fn cpf1_rejects_mutated_profile_digest_and_unknown_execution_profile() {
+        let mut value = profile();
+        value.profile_digest = digest(200);
+        assert_eq!(
+            value.to_canonical_cbor(),
+            Err(ConformanceContractError::FixtureDigestMismatch)
+        );
+        let mut value = profile();
+        value.fixtures[0].execution_profile_digest = digest(200);
+        value.profile_digest = value.digest();
+        assert_eq!(
+            value.validate(),
+            Err(ConformanceContractError::UnknownExecutionProfile)
+        );
+    }
+
+    #[test]
+    fn lifecycle_cannot_skip_or_fabricate_stable_evidence() {
+        let value = profile();
+        assert_eq!(
+            value.transition_to(ProfileLifecycleV1::Stable, vec![]),
+            Err(ConformanceContractError::ProfileLifecycleInvalid)
+        );
+        let candidate = value
+            .transition_to(ProfileLifecycleV1::Candidate, vec![])
+            .unwrap_or_else(|_| profile());
+        assert_eq!(
+            candidate.transition_to(ProfileLifecycleV1::Stable, vec![]),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+    }
+
+    #[test]
+    fn evaluator_request_round_trips_with_all_identity_bindings() {
+        let mut request = EvaluatorRequestV1 {
+            request_id: [1; 16],
+            conformance_profile_digest: digest(1),
+            fixture_bundle_digest: digest(2),
+            subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
+            subject_artifact_digest: digest(3),
+            implementation: ImplementationIdentityV1 {
+                implementation_id: "independent-impl".to_owned(),
+                source_digest: digest(4),
+                build_digest: digest(5),
+                binary_digest: digest(6),
+                public_contract_digest: digest(7),
+                organization_id: None,
+            },
+            execution_profile_digest: digest(8),
+            trust_policy_snapshot_digest: digest(9),
+            output_capability: EvaluatorOutputCapabilityV1 {
+                capability_digest: digest(10),
+                report_bytes_limit: 1,
+                diagnostic_bytes_limit: MAX_DIAGNOSTIC_BYTES,
+            },
+            evaluator_protocol_digest: digest(11),
+            evaluator_hard_caps_digest: digest(12),
+            request_digest: [0; 32],
+        };
+        request.request_digest = request.digest();
+        let bytes = request.to_canonical_cbor().unwrap_or_default();
+        assert_eq!(EvaluatorRequestV1::from_canonical_cbor(&bytes), Ok(request));
+    }
+
+    #[test]
+    fn closed_enums_encode_every_declared_value_and_reject_unknown_values() {
+        for value in [
+            ProfileLifecycleV1::Draft,
+            ProfileLifecycleV1::Candidate,
+            ProfileLifecycleV1::Stable,
+            ProfileLifecycleV1::Retired,
+        ] {
+            assert_eq!(decode_lifecycle(&lifecycle(value)), Ok(value));
+        }
+        for value in [
+            SubjectAdapterKindV1::ExportedArtifact,
+            SubjectAdapterKindV1::PublicGatewayProtocol,
+            SubjectAdapterKindV1::PublicPluginProtocol,
+        ] {
+            assert_eq!(decode_adapter(&adapter(value)), Ok(value));
+        }
+        for value in [
+            ExecutionModeV1::Local,
+            ExecutionModeV1::AirGapped,
+            ExecutionModeV1::Replay,
+            ExecutionModeV1::Fork,
+        ] {
+            assert_eq!(decode_mode(&mode(value)), Ok(value));
+        }
+        for value in [
+            ClaimLayerV1::ArtifactIntegrity,
+            ClaimLayerV1::ReplayConformance,
+            ClaimLayerV1::KnowledgeNonInterference,
+            ClaimLayerV1::GatewayClientConformance,
+            ClaimLayerV1::PluginConformance,
+            ClaimLayerV1::MetricConformance,
+            ClaimLayerV1::EmpiricalEvaluation,
+        ] {
+            assert_eq!(decode_claim_layer(&claim_layer(value)), Ok(value));
+        }
+        for value in [
+            CaseOutcomeStatusV1::Pass,
+            CaseOutcomeStatusV1::Fail,
+            CaseOutcomeStatusV1::Skip,
+            CaseOutcomeStatusV1::Unavailable,
+            CaseOutcomeStatusV1::NotApplicable,
+        ] {
+            assert_eq!(decode_case_outcome(&case_outcome(value)), Ok(value));
+        }
+        for value in [
+            ReplayClaimV1::Exact,
+            ReplayClaimV1::ExactAuthoritativeWithRedactedViews,
+            ReplayClaimV1::StructuralOnly,
+            ReplayClaimV1::UnverifiableArtifactsMissing,
+            ReplayClaimV1::IncompatibleProfile,
+        ] {
+            assert_eq!(decode_replay_claim(&replay_claim(value)), Ok(value));
+        }
+        for value in [
+            RedactionStateV1::None,
+            RedactionStateV1::RedactedViews,
+            RedactionStateV1::StructuralOnly,
+            RedactionStateV1::EvidenceMissing,
+        ] {
+            assert_eq!(decode_redaction(&redaction(value)), Ok(value));
+        }
+        for value in [
+            SafeErrorCodeV1::InvalidEncoding,
+            SafeErrorCodeV1::UnsupportedVersion,
+            SafeErrorCodeV1::FieldOutOfBounds,
+            SafeErrorCodeV1::NonCanonicalOrder,
+            SafeErrorCodeV1::DigestMismatch,
+            SafeErrorCodeV1::SignatureInvalid,
+            SafeErrorCodeV1::TrustRootUnknown,
+            SafeErrorCodeV1::TrustSnapshotRollback,
+            SafeErrorCodeV1::ArtifactRevoked,
+            SafeErrorCodeV1::ClosureIncomplete,
+            SafeErrorCodeV1::ProfileClassMismatch,
+            SafeErrorCodeV1::ProfileUnsupported,
+            SafeErrorCodeV1::ProvenanceMissing,
+            SafeErrorCodeV1::ResourceLimitExceeded,
+        ] {
+            assert_eq!(decode_safe_error(&safe_error(value)), Ok(value));
+        }
+        let unknown = uint(99);
+        assert!(decode_lifecycle(&unknown).is_err());
+        assert!(decode_adapter(&unknown).is_err());
+        assert!(decode_mode(&unknown).is_err());
+        assert!(decode_claim_layer(&unknown).is_err());
+        assert!(decode_case_outcome(&unknown).is_err());
+        assert!(decode_replay_claim(&unknown).is_err());
+        assert!(decode_redaction(&unknown).is_err());
+        assert!(decode_safe_error(&unknown).is_err());
+    }
+
+    #[test]
+    fn expected_typed_failure_and_classified_divergence_are_profile_data() {
+        let mut typed_failure = profile();
+        typed_failure.fixtures[0].expected =
+            ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ClosureIncomplete);
+        typed_failure.profile_digest = typed_failure.digest();
+        let typed_bytes = typed_failure.to_canonical_cbor().unwrap_or_default();
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor(&typed_bytes),
+            Ok(typed_failure)
+        );
+
+        let mut divergence = profile();
+        divergence.allowed_divergences = vec![AllowedDivergenceV1 {
+            classification: 4,
+            first_coordinate: b"timeline/7".to_vec(),
+        }];
+        divergence.fixtures[0].expected = ExpectedResultV1::AllowedDivergence {
+            classification: 4,
+            first_coordinate: b"timeline/7".to_vec(),
+        };
+        divergence.profile_digest = divergence.digest();
+        assert!(divergence.to_canonical_cbor().is_ok());
+        divergence.fixtures[0].expected = ExpectedResultV1::AllowedDivergence {
+            classification: 99,
+            first_coordinate: b"timeline/8".to_vec(),
+        };
+        divergence.profile_digest = divergence.digest();
+        assert_eq!(
+            divergence.validate(),
+            Err(ConformanceContractError::DivergenceClassificationMismatch)
+        );
+    }
+
+    #[test]
+    fn strict_decoder_rejects_trailing_unknown_and_forbidden_cbor_forms() {
+        let bytes = profile().to_canonical_cbor().unwrap_or_default();
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor(&trailing),
+            Err(ConformanceContractError::InvalidEncoding)
+        );
+        for value in [
+            Value::Array(vec![]),
+            Value::Map(vec![]),
+            Value::Tag(0, Box::new(Value::Null)),
+            Value::Float(1.0),
+        ] {
+            let mut malformed = Vec::new();
+            let result = ciborium::into_writer(&value, &mut malformed);
+            assert!(result.is_ok());
+            assert_eq!(
+                ConformanceProfileV1::from_canonical_cbor(&malformed),
+                Err(ConformanceContractError::InvalidEncoding)
+            );
+        }
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor(&[
+                0x9f, 0x64, b'C', b'P', b'F', b'1', 0x01, 0xff
+            ]),
+            Err(ConformanceContractError::InvalidEncoding)
+        );
+    }
+
+    #[test]
+    fn bounds_ordering_and_provenance_fail_closed() {
+        for bounds in [
+            FixtureBoundsV1 {
+                cpu_fuel: 0,
+                memory_bytes: 1,
+                event_count: 1,
+                output_bytes: 1,
+                storage_bytes: 1,
+                execution_steps: 1,
+                simulation_time_ns: 1,
+                watchdog_ms: 1,
+            },
+            FixtureBoundsV1 {
+                cpu_fuel: 1,
+                memory_bytes: 0,
+                event_count: 1,
+                output_bytes: 1,
+                storage_bytes: 1,
+                execution_steps: 1,
+                simulation_time_ns: 1,
+                watchdog_ms: 1,
+            },
+            FixtureBoundsV1 {
+                cpu_fuel: 1,
+                memory_bytes: 1,
+                event_count: 0,
+                output_bytes: 1,
+                storage_bytes: 1,
+                execution_steps: 1,
+                simulation_time_ns: 1,
+                watchdog_ms: 1,
+            },
+            FixtureBoundsV1 {
+                cpu_fuel: 1,
+                memory_bytes: 1,
+                event_count: 1,
+                output_bytes: 0,
+                storage_bytes: 1,
+                execution_steps: 1,
+                simulation_time_ns: 1,
+                watchdog_ms: 1,
+            },
+            FixtureBoundsV1 {
+                cpu_fuel: 1,
+                memory_bytes: 1,
+                event_count: 1,
+                output_bytes: 1,
+                storage_bytes: 0,
+                execution_steps: 1,
+                simulation_time_ns: 1,
+                watchdog_ms: 1,
+            },
+            FixtureBoundsV1 {
+                cpu_fuel: 1,
+                memory_bytes: 1,
+                event_count: 1,
+                output_bytes: 1,
+                storage_bytes: 1,
+                execution_steps: 0,
+                simulation_time_ns: 1,
+                watchdog_ms: 1,
+            },
+            FixtureBoundsV1 {
+                cpu_fuel: 1,
+                memory_bytes: 1,
+                event_count: 1,
+                output_bytes: 1,
+                storage_bytes: 1,
+                execution_steps: 1,
+                simulation_time_ns: 0,
+                watchdog_ms: 1,
+            },
+            FixtureBoundsV1 {
+                cpu_fuel: 1,
+                memory_bytes: 1,
+                event_count: 1,
+                output_bytes: 1,
+                storage_bytes: 1,
+                execution_steps: 1,
+                simulation_time_ns: 1,
+                watchdog_ms: 0,
+            },
+        ] {
+            let mut value = profile();
+            value.fixtures[0].bounds = bounds;
+            value.profile_digest = value.digest();
+            assert_eq!(
+                value.validate(),
+                Err(ConformanceContractError::FieldOutOfBounds)
+            );
+        }
+        let mut unordered = profile();
+        unordered.execution_profile_digests = vec![digest(2), digest(1)];
+        unordered.profile_digest = unordered.digest();
+        assert_eq!(
+            unordered.validate(),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+        let mut missing_provenance = profile();
+        missing_provenance.fixtures[0].provenance.sbom_digest = [0; 32];
+        missing_provenance.profile_digest = missing_provenance.digest();
+        assert_eq!(
+            missing_provenance.validate(),
+            Err(ConformanceContractError::ProvenanceMissing)
+        );
+    }
+}
