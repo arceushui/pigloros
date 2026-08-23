@@ -73,10 +73,7 @@ mod lifecycle_coverage_tests {
             None,
             Err(std::io::Error::other("runtime construction failed")),
         );
-        let final_state = match lifecycle.lock() {
-            Ok(state) => *state,
-            Err(poisoned) => *poisoned.into_inner(),
-        };
+        let final_state = *lifecycle.lock().expect("lifecycle remains unpoisoned");
         assert!(matches!(final_state, LifecycleState::Unhealthy { .. }));
     }
 
@@ -85,7 +82,8 @@ mod lifecycle_coverage_tests {
         let lifecycle = Arc::new(Mutex::new(LifecycleState::Open));
         let shutdown = Arc::new(Notify::new());
         shutdown.notify_one();
-        let (_sender, mut receiver) = mpsc::channel(1);
+        let (sender, mut receiver) = mpsc::channel(1);
+        drop(sender);
         worker_loop(
             &lifecycle,
             shutdown,
@@ -94,10 +92,7 @@ mod lifecycle_coverage_tests {
             None,
             None,
         );
-        let final_state = match lifecycle.lock() {
-            Ok(state) => *state,
-            Err(poisoned) => *poisoned.into_inner(),
-        };
+        let final_state = *lifecycle.lock().expect("lifecycle remains unpoisoned");
         assert_eq!(final_state, LifecycleState::Closed);
     }
 }
