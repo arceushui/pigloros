@@ -2556,18 +2556,18 @@ mod tests {
         });
 
         assert!(matches!(
-            records.recv().test_ok(),
+            records.recv().test_ok().test_value(),
             super::SchedulerTrace::Admitted { .. }
         ));
         assert!(matches!(
-            records.recv().test_ok(),
+            records.recv().test_ok().test_value(),
             super::SchedulerTrace::DrainCompleted { pending: 1, .. }
         ));
         task.abort();
         assert!(task.await.is_err());
-        gate_sender.send(()).test_ok();
+        gate_sender.send(()).test_ok().test_value();
         assert!(matches!(
-            records.recv().test_ok(),
+            records.recv().test_ok().test_value(),
             super::SchedulerTrace::Selected { .. }
         ));
 
@@ -2578,7 +2578,8 @@ mod tests {
                 EventReadBounds::new(1024, 1024, 16, 8),
             )
             .await
-            .test_ok();
+            .test_ok()
+            .test_value();
         assert_eq!(events.len(), 1);
         let mut protected_append_count = 0;
         assert_eq!(
@@ -2592,7 +2593,7 @@ mod tests {
             Err(pos_core::ConsentError::Revoked)
         );
         assert_eq!(protected_append_count, 0);
-        executor.shutdown().await.test_ok();
+        executor.shutdown().await.test_ok().test_value();
     }
 
     #[tokio::test]
