@@ -1751,6 +1751,24 @@ mod tests {
         }
     }
 
+    async fn receive_scheduler_trace(
+        records: &std::sync::mpsc::Receiver<super::SchedulerTrace>,
+    ) -> Result<super::SchedulerTrace, String> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match records.try_recv() {
+                    Ok(record) => return Ok(record),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => tokio::task::yield_now().await,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        return Err("scheduler trace channel disconnected".to_owned());
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| "scheduler trace timed out".to_owned())?
+    }
+
     trait TestOptionExt<T> {
         fn test_ok(self) -> Result<T, Box<dyn std::error::Error + Send + Sync>>;
         fn test_value(self) -> T;
@@ -2553,18 +2571,18 @@ mod tests {
         });
 
         assert!(matches!(
-            records.recv().test_ok().test_value(),
+            receive_scheduler_trace(&records).await.test_ok().test_value(),
             super::SchedulerTrace::Admitted { .. }
         ));
         assert!(matches!(
-            records.recv().test_ok().test_value(),
+            receive_scheduler_trace(&records).await.test_ok().test_value(),
             super::SchedulerTrace::DrainCompleted { pending: 1, .. }
         ));
         task.abort();
         assert!(task.await.is_err());
         gate_sender.send(()).test_ok().test_value();
         assert!(matches!(
-            records.recv().test_ok().test_value(),
+            receive_scheduler_trace(&records).await.test_ok().test_value(),
             super::SchedulerTrace::Selected { .. }
         ));
 
