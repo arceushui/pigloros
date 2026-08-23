@@ -508,7 +508,7 @@ pub struct Gateway {
     limits: GatewayLimits,
     owntracks_enabled: bool,
     consent_authority: ConsentAuthority,
-    consent_history_locks: Arc<tokio::sync::Mutex<ConsentHistoryLocks>>,
+    consent_history_locks: Arc<ConsentHistoryLocks>,
     action_registry: Arc<PluginRegistry>,
     action_principal: Option<ActionPrincipal>,
 }
