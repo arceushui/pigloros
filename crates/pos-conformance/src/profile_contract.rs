@@ -3162,6 +3162,82 @@ mod tests {
     }
 
     #[test]
+    fn public_profile_and_request_codecs_reject_nested_malformed_records() {
+        let reject_profile = |value: Value| {
+            let bytes = encode_value(&value).unwrap_or_default();
+            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+        };
+        let reject_request = |value: Value| {
+            let bytes = encode_value(&value).unwrap_or_default();
+            assert!(EvaluatorRequestV1::from_canonical_cbor(&bytes).is_err());
+        };
+
+        if let Value::Array(fields) = encode_profile(&profile(), true) {
+            for index in 0..17 {
+                let mut malformed = fields.clone();
+                if let Value::Array(fixtures) = &mut malformed[8] {
+                    if let Value::Array(fixture) = &mut fixtures[0] {
+                        fixture[index] = Value::Map(Vec::new());
+                    }
+                }
+                reject_profile(Value::Array(malformed));
+            }
+            for index in 0..5 {
+                let mut malformed = fields.clone();
+                if let Value::Array(protocol) = &mut malformed[10] {
+                    protocol[index] = Value::Map(Vec::new());
+                }
+                reject_profile(Value::Array(malformed));
+            }
+            for index in 0..4 {
+                let mut malformed = fields.clone();
+                if let Value::Array(requirements) = &mut malformed[11] {
+                    requirements[index] = Value::Map(Vec::new());
+                }
+                reject_profile(Value::Array(malformed));
+            }
+
+            let mut oversized_fixtures = fields.clone();
+            oversized_fixtures[8] = Value::Array(vec![Value::Null; MAX_FIXTURES + 1]);
+            reject_profile(Value::Array(oversized_fixtures));
+        }
+
+        if let Value::Array(fields) = encode_request(&request(), true) {
+            for index in 0..6 {
+                let mut malformed = fields.clone();
+                if let Value::Array(identity) = &mut malformed[7] {
+                    identity[index] = Value::Map(Vec::new());
+                }
+                reject_request(Value::Array(malformed));
+            }
+            for index in 0..3 {
+                let mut malformed = fields.clone();
+                if let Value::Array(output) = &mut malformed[10] {
+                    output[index] = Value::Map(Vec::new());
+                }
+                reject_request(Value::Array(malformed));
+            }
+        }
+
+        let mut typed = profile();
+        typed.fixtures[0].expected =
+            ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ClosureIncomplete);
+        typed.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::InvalidManifest;
+        typed.fixtures[0].expected_verification_error = Some(SafeErrorCodeV1::ClosureIncomplete);
+        typed.profile_digest = typed.digest();
+        if let Value::Array(mut fields) = encode_profile(&typed, true) {
+            if let Value::Array(fixtures) = &mut fields[8] {
+                if let Value::Array(fixture) = &mut fixtures[0] {
+                    if let Value::Array(expected) = &mut fixture[8] {
+                        expected[3] = Value::Map(Vec::new());
+                    }
+                }
+            }
+            reject_profile(Value::Array(fields));
+        }
+    }
+
+    #[test]
     fn bounds_ordering_and_provenance_fail_closed() {
         for bounds in zero_bound_variants() {
             let mut value = profile();
