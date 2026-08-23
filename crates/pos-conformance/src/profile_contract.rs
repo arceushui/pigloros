@@ -3341,6 +3341,25 @@ mod tests {
     }
 
     #[test]
+    fn public_stable_transition_rejects_an_invalid_external_policy() {
+        let candidate = candidate();
+        let mut first = stable_evidence("alpha", 30);
+        let mut second = stable_evidence("beta", 40);
+        refresh_stable_report_for_profile(&mut first, &candidate);
+        refresh_stable_report_for_profile(&mut second, &candidate);
+        let mut invalid_policy = trusted_root_policy();
+        invalid_policy.trust_policy_snapshot_digest = digest(99);
+        assert_eq!(
+            candidate.transition_to_with_trust_policy(
+                ProfileLifecycleV1::Stable,
+                vec![first, second],
+                &invalid_policy,
+            ),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+    }
+
+    #[test]
     fn public_stable_validator_rejects_report_shape_mismatches() {
         let mut value = stable_profile();
         value.stable_evidence[0].report.cases.pop();
@@ -3370,6 +3389,19 @@ mod tests {
         let mut value = stable_profile();
         value.stable_evidence[0].case_outcomes[0].provenance_digest = digest(99);
         refresh_stable_report(&mut value.stable_evidence[0]);
+        assert_eq!(
+            value.validate_with_trust_policy(&trusted_root_policy()),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+    }
+
+    #[test]
+    fn public_stable_validator_rejects_report_case_outcome_mismatch() {
+        let mut value = stable_profile();
+        value.stable_evidence[0].report.cases[0].actual_digest = digest(99);
+        value.stable_evidence[0].report.report_digest =
+            value.stable_evidence[0].report.digest().unwrap_or([0; 32]);
+        refresh_stable_attestation(&mut value.stable_evidence[0]);
         assert_eq!(
             value.validate_with_trust_policy(&trusted_root_policy()),
             Err(ConformanceContractError::IndependenceEvidenceMissing)
