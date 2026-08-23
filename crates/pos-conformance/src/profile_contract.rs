@@ -2490,4 +2490,106 @@ mod tests {
             Err(ConformanceContractError::FieldOutOfBounds)
         );
     }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn cpf1_public_seams_cover_remaining_identity_order_and_stable_result_variants() {
+        let mut wrong_digest = profile();
+        wrong_digest.profile_digest = digest(99);
+        let bytes = encode_value(&encode_profile(&wrong_digest, true)).unwrap_or_default();
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor(&bytes),
+            Err(ConformanceContractError::FixtureDigestMismatch)
+        );
+
+        let candidate = profile()
+            .transition_to(ProfileLifecycleV1::Candidate, vec![])
+            .unwrap_or_else(|_| profile());
+        assert!(candidate.validate().is_ok());
+        let mut unordered = candidate.clone();
+        let mut later = unordered.fixtures[0].clone();
+        later.case_id = "ZZZ".to_owned();
+        unordered.fixtures = vec![later, unordered.fixtures[0].clone()];
+        unordered.profile_digest = unordered.digest();
+        assert_eq!(
+            unordered.validate(),
+            Err(ConformanceContractError::NonCanonicalOrder)
+        );
+
+        let mut invalid_protocol = profile();
+        invalid_protocol.evaluator_protocol.request_schema_digest = [0; 32];
+        invalid_protocol.profile_digest = invalid_protocol.digest();
+        assert_eq!(
+            invalid_protocol.validate(),
+            Err(ConformanceContractError::ProvenanceMissing)
+        );
+        let mut invalid_requirements = profile();
+        invalid_requirements
+            .independence_requirements
+            .requirements_digest = [0; 32];
+        invalid_requirements.profile_digest = invalid_requirements.digest();
+        assert_eq!(
+            invalid_requirements.validate(),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+        let mut invalid_caps = profile();
+        invalid_caps
+            .evaluator_protocol
+            .hard_caps
+            .max_coordinate_bytes = MAX_COORDINATE_COUNT_BYTES + 1;
+        invalid_caps.profile_digest = invalid_caps.digest();
+        assert_eq!(
+            invalid_caps.validate(),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+
+        let mut typed = profile();
+        typed.fixtures[0].expected =
+            ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ClosureIncomplete);
+        let typed_candidate = typed
+            .transition_to(ProfileLifecycleV1::Candidate, vec![])
+            .unwrap_or_else(|_| profile());
+        let mut typed_evidence = stable_evidence("alpha", 30);
+        for case in &mut typed_evidence.case_outcomes {
+            case.expected_digest = None;
+            case.actual_digest = None;
+            case.expected_error = Some(SafeErrorCodeV1::ClosureIncomplete);
+            case.actual_error = Some(SafeErrorCodeV1::ClosureIncomplete);
+        }
+        let mut typed_evidence_second = stable_evidence("beta", 40);
+        for case in &mut typed_evidence_second.case_outcomes {
+            case.expected_digest = None;
+            case.actual_digest = None;
+            case.expected_error = Some(SafeErrorCodeV1::ClosureIncomplete);
+            case.actual_error = Some(SafeErrorCodeV1::ClosureIncomplete);
+        }
+        assert!(typed_candidate
+            .transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![typed_evidence, typed_evidence_second]
+            )
+            .is_ok());
+
+        let mut divergent = profile();
+        divergent.fixtures[0].expected = ExpectedResultV1::AllowedDivergence {
+            classification: 4,
+            first_coordinate: b"timeline/7".to_vec(),
+        };
+        let divergent_candidate = divergent
+            .transition_to(ProfileLifecycleV1::Candidate, vec![])
+            .unwrap_or_else(|_| profile());
+        let mut divergent_evidence = stable_evidence("alpha", 30);
+        let mut divergent_second = stable_evidence("beta", 40);
+        for evidence in [&mut divergent_evidence, &mut divergent_second] {
+            for case in &mut evidence.case_outcomes {
+                case.first_coordinate = Some("timeline/7".to_owned());
+            }
+        }
+        assert!(divergent_candidate
+            .transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![divergent_evidence, divergent_second]
+            )
+            .is_ok());
+    }
 }
