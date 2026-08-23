@@ -266,14 +266,14 @@ mod fixtures {
 fn exported_decoders_reject_terminal_digest_after_nested_decode() {
     assert_eq!(
         ConformanceProfileV1::from_canonical_cbor(&fixtures::profile(0, false)),
-        Err(ConformanceContractError::FieldOutOfBounds)
+        Err(ConformanceContractError::InvalidEncoding)
     );
     assert_eq!(
         ConformanceProfileV1::from_canonical_cbor(&fixtures::profile(2, true)),
-        Err(ConformanceContractError::FieldOutOfBounds)
+        Err(ConformanceContractError::InvalidEncoding)
     );
     assert_eq!(
         EvaluatorRequestV1::from_canonical_cbor(&fixtures::request()),
-        Err(ConformanceContractError::FieldOutOfBounds)
+        Err(ConformanceContractError::InvalidEncoding)
     );
 }
