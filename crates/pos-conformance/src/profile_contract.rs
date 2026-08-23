@@ -2506,7 +2506,7 @@ mod tests {
             .transition_to(ProfileLifecycleV1::Candidate, vec![])
             .unwrap_or_else(|_| profile());
         assert!(candidate.validate().is_ok());
-        let mut unordered = candidate.clone();
+        let mut unordered = candidate;
         let mut later = unordered.fixtures[0].clone();
         later.case_id = "ZZZ".to_owned();
         unordered.fixtures = vec![later, unordered.fixtures[0].clone()];
