@@ -8,7 +8,7 @@
 //! plugin. A second implementation can deserialize the JSON representation,
 //! compare authoritative evidence, and classify a divergence without
 //! importing the implementation under test.
-#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use blake3::Hash;
 use ciborium::value::Value;
