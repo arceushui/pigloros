@@ -2049,19 +2049,6 @@ mod tests {
             }
         }
 
-        let mut store = open_store(StoreConfig::Memory).test_ok();
-        let timeline = store.create_timeline("driver-consent").test_ok();
-        let mut registry = PluginRegistry::new();
-        registry.register_driver(Box::new(ConsentDriver));
-        assert!(matches!(
-            registry.step_all(timeline.id()),
-            Err(RuntimeError::ConsentDraft { .. })
-        ));
-        assert!(matches!(
-            registry.tick_cadenced(timeline.id(), 0),
-            Err(RuntimeError::ConsentDraft { .. })
-        ));
-
         struct AllowedDriver;
         impl crate::driver::Driver for AllowedDriver {
             fn name(&self) -> &'static str {
@@ -2080,6 +2067,19 @@ mod tests {
                 )]))
             }
         }
+
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let timeline = store.create_timeline("driver-consent").test_ok();
+        let mut registry = PluginRegistry::new();
+        registry.register_driver(Box::new(ConsentDriver));
+        assert!(matches!(
+            registry.step_all(timeline.id()),
+            Err(RuntimeError::ConsentDraft { .. })
+        ));
+        assert!(matches!(
+            registry.tick_cadenced(timeline.id(), 0),
+            Err(RuntimeError::ConsentDraft { .. })
+        ));
 
         let mut allowed = PluginRegistry::new();
         allowed.register_driver(Box::new(AllowedDriver));
