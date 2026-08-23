@@ -915,11 +915,11 @@ impl ErasureReceiptV1 {
     ) -> Result<(), ErasureErrorV1> {
         match resolver.resolve_state(self.terminal_state()) {
             Ok(Some(terminal)) => {
-                if terminal.request() != self.0.request
-                    || terminal.lifecycle() != self.0.lifecycle
-                    || terminal.freeze_position() != Some(self.0.freeze_position)
-                    || terminal.replay_claim() != self.0.replay_claim
-                {
+                let matches_receipt = terminal.request() == self.0.request
+                    && terminal.lifecycle() == self.0.lifecycle
+                    && terminal.freeze_position() == Some(self.0.freeze_position)
+                    && terminal.replay_claim() == self.0.replay_claim;
+                if !matches_receipt {
                     return Err(ErasureErrorV1::PolicyConflict);
                 }
                 verify_predecessor_chain(terminal, resolver)
@@ -958,13 +958,13 @@ fn verify_predecessor_chain<R: ErasureStateResolverV1>(
         if let Some(previous_digest) = current.previous_state() {
             match resolver.resolve_state(previous_digest) {
                 Ok(Some(previous)) => {
-                    if previous.state_digest() != previous_digest
-                        || !previous.lifecycle().permits(current.lifecycle())
-                        || !freeze_is_monotonic(previous.freeze_position(), current.freeze_position())
-                        || !previous
+                    let predecessor_is_valid = previous.state_digest() == previous_digest
+                        && previous.lifecycle().permits(current.lifecycle())
+                        && freeze_is_monotonic(previous.freeze_position(), current.freeze_position())
+                        && previous
                             .replay_claim()
-                            .preserves_or_weakens(current.replay_claim())
-                    {
+                            .preserves_or_weakens(current.replay_claim());
+                    if !predecessor_is_valid {
                         return Err(ErasureErrorV1::ProvenanceMissing);
                     }
                     current = previous;
@@ -1085,7 +1085,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     /// Returns a closed authentication or conflicting-identity error.
     pub fn submit(&mut self, request: ErasureRequestV1, provenance: ErasureReferenceV1) -> Result<ErasureStateV1, ErasureErrorV1> {
         if let Some(record) = self.records.iter().find(|record| record.request.reference() == request.reference()) {
-            return if record.request == request { Ok(record.state.clone()) } else { Err(ErasureErrorV1::PolicyConflict) };
+            return if record.request != request { Err(ErasureErrorV1::PolicyConflict) } else { Ok(record.state.clone()) };
         }
         self.port.authenticate(&request).and_then(|()| {
             ErasureStateV1::submitted(request.reference(), self.coordinator, provenance).inspect(|state| {
@@ -1123,9 +1123,9 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     pub fn freeze_inventory(&mut self, request: ErasureReferenceV1, transition: ErasureStateTransitionV1) -> Result<ErasureStateV1, ErasureErrorV1> {
         let Some(index) = self.records.iter().position(|record| record.request.reference() == request) else { return Err(ErasureErrorV1::ProvenanceMissing); };
         if self.records[index].state.lifecycle() == ErasureLifecycleV1::AccessFrozen { return Ok(self.records[index].state.clone()); }
-        if self.records[index].state.lifecycle() != ErasureLifecycleV1::Authorized
-            || transition.lifecycle != ErasureLifecycleV1::AccessFrozen
-        {
+        let freeze_is_authorized = self.records[index].state.lifecycle() == ErasureLifecycleV1::Authorized
+            && transition.lifecycle == ErasureLifecycleV1::AccessFrozen;
+        if !freeze_is_authorized {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         self.port.required_targets(request).and_then(|mut targets| {
@@ -1917,7 +1917,7 @@ fn cbor_item_end(bytes: &[u8], offset: usize, depth: usize, maximum_array: usize
     cbor_argument(bytes, offset + 1, initial & 0x1f).and_then(|(argument, next)| match major {
         0 | 1 => Ok(next),
         2 | 3 => match usize::try_from(argument) {
-            Ok(length) if length <= bytes.len().saturating_sub(next) => Ok(next + length),
+            Ok(length) if length <= bytes.len().saturating_sub(next) => Ok(next.saturating_add(length)),
             _ => Err(ErasureErrorV1::InvalidEncoding),
         },
         4 if argument <= maximum_array as u64 => {
