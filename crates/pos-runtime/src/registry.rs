@@ -390,7 +390,12 @@ impl PluginRegistry {
             extend_unique_subscriptions(&mut subscriptions, &mut seen, entry.subscriptions());
         }
 
-        self.authorize_snapshot_subscriptions(timeline, timeline_head, operation, subscriptions.iter())?;
+        self.authorize_snapshot_subscriptions(
+            timeline,
+            timeline_head,
+            operation,
+            subscriptions.iter(),
+        )?;
         Ok(self.snapshot_for_subscriptions(subscriptions.iter()))
     }
 
@@ -646,14 +651,7 @@ impl PluginRegistry {
     fn collect_anchored_selection(
         &self,
         selection: AnchoredSelection,
-    ) -> Result<
-        (
-            Vec<PluginId>,
-            Vec<(PluginId, u128)>,
-            Vec<ProjectionKey>,
-        ),
-        RuntimeError,
-    > {
+    ) -> Result<(Vec<PluginId>, Vec<(PluginId, u128)>, Vec<ProjectionKey>), RuntimeError> {
         let mut driver_ids = Vec::new();
         let mut cadence_updates = Vec::new();
         let mut seen_subscriptions = HashSet::new();
@@ -719,11 +717,10 @@ impl PluginRegistry {
             &operation,
             subscriptions.iter(),
         )?;
-        let snapshot = ObservationSnapshot::from_anchored_subscriptions(
-            anchor,
-            subscriptions.iter(),
-            |key| self.projections.state_for(key.entity_id()).cloned(),
-        );
+        let snapshot =
+            ObservationSnapshot::from_anchored_subscriptions(anchor, subscriptions.iter(), |key| {
+                self.projections.state_for(key.entity_id()).cloned()
+            });
         let mut all_drafts = Vec::new();
         let mut staged_driver_ids = Vec::new();
         for id in driver_ids {
@@ -818,14 +815,12 @@ impl PluginRegistry {
         let Some(pending) = self.pending_step.take() else {
             return Ok(());
         };
-        if let Err(error) = self
-            .validate_operation(
-                pending.timeline,
-                &pending.operation,
-                timeline_head,
-                Some(commit_now_secs),
-            )
-        {
+        if let Err(error) = self.validate_operation(
+            pending.timeline,
+            &pending.operation,
+            timeline_head,
+            Some(commit_now_secs),
+        ) {
             let _ = self.abort_drivers(&pending.driver_ids);
             return Err(error);
         }

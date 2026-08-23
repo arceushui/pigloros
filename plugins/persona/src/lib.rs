@@ -922,14 +922,9 @@ mod tests {
             .register(&eval, Some(Box::new(EvalReducer)), None)
             .test_ok();
         for _ in 0..5 {
-            let drafts = registry.step_all_anchored_protected(
-                tl.id(),
-                Seq::ZERO,
-                _token.clone(),
-                0,
-                &[],
-            )
-            .test_ok();
+            let drafts = registry
+                .step_all_anchored_protected(tl.id(), Seq::ZERO, _token.clone(), 0, &[])
+                .test_ok();
             registry.schemas.validate_batch(&drafts).test_ok();
             store.append(tl.id(), &drafts).test_ok();
             registry.commit_step_at(Seq::ZERO, 0).test_ok();

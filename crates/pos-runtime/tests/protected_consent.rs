@@ -5,7 +5,10 @@ use pos_core::{
     ConsentAuthority, ConsentCapabilityToken, ConsentError, ConsentGate, ConsentGranted,
 };
 use pos_runtime::{Driver, ObservationView, PluginRegistry, RuntimeError, StepOutput};
-use std::{fmt::Debug, sync::{Arc, Mutex}};
+use std::{
+    fmt::Debug,
+    sync::{Arc, Mutex},
+};
 
 fn test_ok<T, E: Debug>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|error| {
@@ -101,7 +104,10 @@ fn protected_public_seam_fails_closed_without_a_bound_gate() {
     registry.register_driver(Box::new(ProtectedEventDriver { entity: subject }));
 
     let error = test_err(registry.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[]));
-    assert!(matches!(error, RuntimeError::Consent(ConsentError::NoConsent)));
+    assert!(matches!(
+        error,
+        RuntimeError::Consent(ConsentError::NoConsent)
+    ));
 }
 
 struct MismatchedDraftGate {
@@ -240,13 +246,7 @@ fn protected_public_seam_revalidates_at_the_fresh_commit_fence_time() {
     let mut registry = PluginRegistry::new().with_consent_gate(gate);
     registry.register_driver(Box::new(ProtectedEventDriver { entity: subject }));
 
-    let drafts = test_ok(registry.step_all_anchored_protected(
-        timeline,
-        Seq::ZERO,
-        token,
-        1,
-        &[],
-    ));
+    let drafts = test_ok(registry.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[]));
     assert_eq!(drafts.len(), 1);
     test_ok(registry.commit_step_at(Seq::ZERO, 2));
 
@@ -274,21 +274,14 @@ fn protected_append_fence_rejects_before_store_append() {
     });
     let mut registry = PluginRegistry::new().with_consent_gate(gate);
     registry.register_driver(Box::new(ProtectedEventDriver { entity: subject }));
-    let drafts = test_ok(registry.step_all_anchored_protected(
-        timeline.id(),
-        Seq::ZERO,
-        token,
-        1,
-        &[],
-    ));
+    let drafts =
+        test_ok(registry.step_all_anchored_protected(timeline.id(), Seq::ZERO, token, 1, &[]));
 
-    let error = test_err(registry.append_and_commit_step_at(
-        store.as_mut(),
-        Seq::ZERO,
-        2,
-        &drafts,
+    let error = test_err(registry.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 2, &drafts));
+    assert!(matches!(
+        error,
+        RuntimeError::Consent(ConsentError::Expired)
     ));
-    assert!(matches!(error, RuntimeError::Consent(ConsentError::Expired)));
     assert_eq!(
         test_ok(store.logical_head(timeline.id())),
         Seq::ZERO,
