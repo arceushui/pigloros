@@ -468,31 +468,26 @@ fn coordinator_exposes_unknown_and_port_failure_contracts() -> Result<(), Erasur
         ),
     )?;
     coordinator.dispatch_destruction(reference(1), reference(9))?;
-    let dispatched = coordinator
+    let mut negative = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Negative);
+    negative.target = target;
+    coordinator.acknowledge(reference(1), negative)?;
+    let awaiting = coordinator
         .existing(reference(1))
         .cloned()
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    let mut awaiting_change = change(
-        ErasureLifecycleV1::AwaitingAcknowledgements,
-        dispatched.freeze_position(),
-        Vec::new(),
-        Vec::new(),
-    );
-    awaiting_change.provenance = reference(4);
-    let awaiting = dispatched.transition(awaiting_change)?;
     let mut terminal_change = change(
         ErasureLifecycleV1::PartialFailure,
         awaiting.freeze_position(),
-        vec![target.replica_id],
         Vec::new(),
+        vec![negative.owner],
     );
     terminal_change.provenance = reference(4);
     let terminal = awaiting.transition(terminal_change)?;
     let mut input = receipt_input(
         ErasureLifecycleV1::PartialFailure,
+        vec![negative],
         Vec::new(),
-        vec![target.replica_id],
-        Vec::new(),
+        vec![negative.owner],
     );
     input.terminal_state = terminal.state_digest();
     input.required_targets = vec![target];
@@ -640,6 +635,8 @@ fn coordinator_freezes_closure_and_commits_only_derived_terminal_outcomes(
 #[test]
 fn coordinator_derives_partial_failure_for_a_missing_frozen_target() -> Result<(), ErasureErrorV1> {
     let missing = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
+    let mut negative = missing;
+    negative.outcome = ErasureAcknowledgementOutcomeV1::Negative;
     let port = test_port(true, vec![missing.target]);
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
     coordinator.submit(request()?, reference(3))?;
@@ -654,31 +651,24 @@ fn coordinator_derives_partial_failure_for_a_missing_frozen_target() -> Result<(
         ),
     )?;
     coordinator.dispatch_destruction(reference(1), reference(9))?;
-    let dispatched = coordinator
+    coordinator.acknowledge(reference(1), negative)?;
+    let awaiting = coordinator
         .existing(reference(1))
         .cloned()
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    let mut awaiting_change = change(
-        ErasureLifecycleV1::AwaitingAcknowledgements,
-        dispatched.freeze_position(),
-        Vec::new(),
-        Vec::new(),
-    );
-    awaiting_change.provenance = reference(4);
-    let awaiting = dispatched.transition(awaiting_change)?;
     let mut terminal_change = change(
         ErasureLifecycleV1::PartialFailure,
         awaiting.freeze_position(),
-        vec![missing.target.replica_id],
         Vec::new(),
+        vec![negative.owner],
     );
     terminal_change.provenance = reference(4);
     let terminal = awaiting.transition(terminal_change)?;
     let mut input = receipt_input(
         ErasureLifecycleV1::PartialFailure,
+        vec![negative],
         Vec::new(),
-        vec![missing.target.replica_id],
-        Vec::new(),
+        vec![negative.owner],
     );
     input.terminal_state = terminal.state_digest();
     input.required_targets = vec![missing.target];
