@@ -3110,6 +3110,53 @@ mod tests {
     }
 
     #[test]
+    fn public_profile_codec_round_trips_nested_stable_report_variants() {
+        let mut typed = profile();
+        typed.fixtures[0].expected = ExpectedResultV1::TypedFailure(
+            SafeErrorCodeV1::ClosureIncomplete,
+        );
+        typed.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::InvalidManifest;
+        typed.fixtures[0].expected_verification_error = Some(SafeErrorCodeV1::ClosureIncomplete);
+        typed.profile_digest = typed.digest();
+        let typed_bytes = typed.to_canonical_cbor().unwrap_or_default();
+        assert_eq!(ConformanceProfileV1::from_canonical_cbor(&typed_bytes), Ok(typed));
+
+        let mut divergent = profile();
+        let coordinate = b"timeline/7".to_vec();
+        divergent.allowed_divergences = vec![AllowedDivergenceV1 {
+            classification: DivergenceMismatchKindV1::TypedFailure,
+            first_coordinate: coordinate.clone(),
+        }];
+        divergent.fixtures[0].expected = ExpectedResultV1::AllowedDivergence {
+            classification: DivergenceMismatchKindV1::TypedFailure,
+            first_coordinate: coordinate,
+        };
+        divergent.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::Diverged;
+        divergent.profile_digest = divergent.digest();
+        let candidate = divergent
+            .transition_to(ProfileLifecycleV1::Candidate, vec![])
+            .unwrap_or_else(|_| profile());
+        let fixture_digest = fixture_digest(&candidate.fixtures[0]);
+        let mut first = stable_evidence("alpha", 30);
+        let mut second = stable_evidence("beta", 40);
+        for evidence in [&mut first, &mut second] {
+            for case in &mut evidence.case_outcomes {
+                case.fixture_digest = fixture_digest;
+                case.first_coordinate = Some(b"timeline/7".to_vec());
+                case.actual_digest = Some([99; 32]);
+                case.verification_outcome = VerificationOutcomeV1::Diverged;
+                case.divergence_kind = Some(DivergenceMismatchKindV1::TypedFailure);
+            }
+            refresh_stable_report_for_profile(evidence, &candidate);
+        }
+        let stable = candidate
+            .transition_to(ProfileLifecycleV1::Stable, vec![first, second])
+            .unwrap_or_else(|_| profile());
+        let stable_bytes = stable.to_canonical_cbor().unwrap_or_default();
+        assert_eq!(ConformanceProfileV1::from_canonical_cbor(&stable_bytes), Ok(stable));
+    }
+
+    #[test]
     fn bounds_ordering_and_provenance_fail_closed() {
         for bounds in zero_bound_variants() {
             let mut value = profile();
