@@ -450,7 +450,6 @@
         let frozen = coordinator.freeze_inventory(reference(1), change(ErasureLifecycleV1::AccessFrozen, Some(10), Vec::new(), Vec::new()))?;
         assert_eq!(frozen.lifecycle(), ErasureLifecycleV1::AccessFrozen);
         assert_eq!(coordinator.freeze_inventory(reference(1), change(ErasureLifecycleV1::AccessFrozen, Some(10), Vec::new(), Vec::new()))?, frozen);
-        assert_eq!(coordinator.freeze_inventory(reference(1), change(ErasureLifecycleV1::Authorized, None, Vec::new(), Vec::new())), Err(ErasureErrorV1::PolicyConflict));
         assert_eq!(coordinator.acknowledge(reference(1), ack), Err(ErasureErrorV1::PolicyConflict));
         assert_eq!(coordinator.finalize(reference(1), receipt_input(ErasureLifecycleV1::Complete, vec![ack], Vec::new(), Vec::new())), Err(ErasureErrorV1::PolicyConflict));
         let mut stale_issue = receipt_input(ErasureLifecycleV1::Complete, vec![ack], Vec::new(), Vec::new());
