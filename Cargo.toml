@@ -67,7 +67,7 @@ proptest = "1"
 tempfile = "3"
 
 # Data files
-toml = "0.8"
+toml = "1.1"
 url = "2"
 
 # Gateway (Wave 6 / ADR-014)
