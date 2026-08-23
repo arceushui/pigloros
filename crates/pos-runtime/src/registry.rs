@@ -543,6 +543,9 @@ impl PluginRegistry {
             let subject = protected_token.map_or(draft.entity, ConsentCapabilityToken::subject_id);
             match protected_token {
                 Some(token) => {
+                    if draft.entity != token.subject_id() {
+                        return Err(RuntimeError::Consent(pos_core::ConsentError::NoConsent));
+                    }
                     token
                         .authorize_event_type(&draft.event_type)
                         .map_err(RuntimeError::Consent)?;
