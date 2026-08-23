@@ -1435,9 +1435,8 @@ fn receipt_value(input: &ErasureReceiptInputV1) -> Value {
     ])
 }
 fn receipt_core_value(input: &ErasureReceiptInputV1) -> Result<Value, ErasureErrorV1> {
-    let mut fields = match receipt_value(input) {
-        Value::Array(fields) => fields,
-        _ => return Err(ErasureErrorV1::InvalidEncoding),
+    let Value::Array(mut fields) = receipt_value(input) else {
+        return Err(ErasureErrorV1::InvalidEncoding);
     };
     fields.remove(16);
     Ok(Value::Array(fields))
