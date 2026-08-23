@@ -363,6 +363,11 @@ enum CommandPhase {
     Expired = 2,
 }
 
+enum ExecutionClaim {
+    Claimed,
+    Expired,
+}
+
 struct CommandLifecycle {
     phase: AtomicU8,
 }
@@ -385,9 +390,9 @@ impl CommandLifecycle {
             .is_ok()
     }
 
-    fn claim_for_execution(&self, deadline: Instant) -> bool {
+    fn claim_for_execution(&self, deadline: Instant) -> ExecutionClaim {
         if !self.start() {
-            return false;
+            return ExecutionClaim::Expired;
         }
         if Instant::now() >= deadline {
             let _transition = self.phase.compare_exchange(
@@ -396,9 +401,9 @@ impl CommandLifecycle {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             );
-            return false;
+            return ExecutionClaim::Expired;
         }
-        true
+        ExecutionClaim::Claimed
     }
 
     fn expire_if_queued(&self) -> bool {
@@ -1132,10 +1137,10 @@ async fn worker_loop_async(
             observer.drain_completed(pending.len(), disconnected);
         }
         let index = select_pending_index(&pending, reads_since_write);
-        if !pending[index]
-            .lifecycle
-            .claim_for_execution(pending[index].deadline)
-        {
+        if matches!(
+            pending[index].lifecycle.claim_for_execution(pending[index].deadline),
+            ExecutionClaim::Expired
+        ) {
             expire_envelope(pending.remove(index));
             continue;
         }
@@ -1162,7 +1167,7 @@ async fn worker_loop_async(
         let execution = catch_unwind(AssertUnwindSafe(|| execute(&mut state, command)));
         drop(permit_owners);
         match execution {
-            Ok(()) => {}
+            Ok(CommandExecution::Completed) => {}
             Err(payload) => {
                 set_lifecycle_state(
                     lifecycle_state.as_ref(),
@@ -1368,7 +1373,11 @@ fn owntracks_key(
     *hasher.finalize().as_bytes()
 }
 
-fn execute(state: &mut ExecutorState, command: Command) {
+enum CommandExecution {
+    Completed,
+}
+
+fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
     match command {
         Command::AdmitOwnTracksIngress {
             basic_handle,
@@ -1433,7 +1442,8 @@ fn execute(state: &mut ExecutorState, command: Command) {
             drop(reply.send(Err(StoreExecutorError::Unhealthy)));
             std::panic::resume_unwind(Box::new("test store executor read worker panic"));
         }
-    }
+    };
+    CommandExecution::Completed
 }
 
 fn execute_owntracks_command(

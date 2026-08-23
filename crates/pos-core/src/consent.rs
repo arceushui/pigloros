@@ -1243,6 +1243,8 @@ mod tests {
         grant.expiry_secs = 20;
         let token = authority.record_grant(&grant);
 
+        assert_eq!(token.grant_seq(), grant.grant_seq);
+
         assert!(authority.validate(&token, 1, 19).is_ok());
         assert_eq!(
             authority.validate(&token, 1, 20),

@@ -7779,6 +7779,9 @@ pub mod tests {
             ] {
                 assert_ne!(schema_id_for_event_type(event_type), 0);
             }
+            assert_eq!(schema_id_for_event_type("society.signal"), 300);
+            assert_eq!(schema_id_for_event_type("consent.revoked.v1"), 400);
+            assert_ne!(schema_id_for_event_type("unknown.event.v1"), 1);
             for claim in [
                 ReplayClaimV1::Exact,
                 ReplayClaimV1::ExactAuthoritativeWithRedactedViews,
