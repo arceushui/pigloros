@@ -3112,14 +3112,16 @@ mod tests {
     #[test]
     fn public_profile_codec_round_trips_nested_stable_report_variants() {
         let mut typed = profile();
-        typed.fixtures[0].expected = ExpectedResultV1::TypedFailure(
-            SafeErrorCodeV1::ClosureIncomplete,
-        );
+        typed.fixtures[0].expected =
+            ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ClosureIncomplete);
         typed.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::InvalidManifest;
         typed.fixtures[0].expected_verification_error = Some(SafeErrorCodeV1::ClosureIncomplete);
         typed.profile_digest = typed.digest();
         let typed_bytes = typed.to_canonical_cbor().unwrap_or_default();
-        assert_eq!(ConformanceProfileV1::from_canonical_cbor(&typed_bytes), Ok(typed));
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor(&typed_bytes),
+            Ok(typed)
+        );
 
         let mut divergent = profile();
         let coordinate = b"timeline/7".to_vec();
@@ -3153,7 +3155,10 @@ mod tests {
             .transition_to(ProfileLifecycleV1::Stable, vec![first, second])
             .unwrap_or_else(|_| profile());
         let stable_bytes = stable.to_canonical_cbor().unwrap_or_default();
-        assert_eq!(ConformanceProfileV1::from_canonical_cbor(&stable_bytes), Ok(stable));
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor(&stable_bytes),
+            Ok(stable)
+        );
     }
 
     #[test]
