@@ -1388,7 +1388,7 @@ fn execute(state: &mut ExecutorState, command: Command) {
             maximum,
             reply,
         } => {
-            execute_append_consent_revocation_command(state, timeline, &revocation, maximum, reply)
+            execute_append_consent_revocation_command(state, timeline, &revocation, maximum, reply);
         }
         Command::AppendIdentified {
             timeline,
