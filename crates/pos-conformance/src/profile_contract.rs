@@ -3239,6 +3239,92 @@ mod tests {
     }
 
     #[test]
+    fn public_seams_cover_closed_helper_errors() {
+        let reject_profile = |value: Value| {
+            let bytes = encode_value(&value).unwrap_or_default();
+            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+        };
+
+        let profile_value = encode_profile(&profile(), true);
+        if let Value::Array(fields) = profile_value {
+            let mut wrong_array = fields.clone();
+            wrong_array[8] = Value::Map(Vec::new());
+            reject_profile(Value::Array(wrong_array));
+
+            let mut wrong_text = fields.clone();
+            wrong_text[2] = Value::Map(Vec::new());
+            reject_profile(Value::Array(wrong_text));
+
+            let mut wrong_uint = fields.clone();
+            wrong_uint[1] = Value::Map(Vec::new());
+            reject_profile(Value::Array(wrong_uint));
+
+            let mut wrong_bytes = fields.clone();
+            wrong_bytes[5] = Value::Map(Vec::new());
+            reject_profile(Value::Array(wrong_bytes));
+
+            let mut wrong_bool = fields.clone();
+            if let Value::Array(fixtures) = &mut wrong_bool[8] {
+                if let Value::Array(fixture) = &mut fixtures[0] {
+                    fixture[1] = Value::Map(Vec::new());
+                }
+            }
+            reject_profile(Value::Array(wrong_bool));
+
+            let mut wrong_typed_error = fields.clone();
+            if let Value::Array(fixtures) = &mut wrong_typed_error[8] {
+                if let Value::Array(fixture) = &mut fixtures[0] {
+                    if let Value::Array(expected) = &mut fixture[8] {
+                        expected[0] = uint(1);
+                        expected[3] = Value::Map(Vec::new());
+                    }
+                }
+            }
+            reject_profile(Value::Array(wrong_typed_error));
+
+            let mut trailing = encode_value(&Value::Array(fields)).unwrap_or_default();
+            trailing.push(0);
+            assert!(ConformanceProfileV1::from_canonical_cbor(&trailing).is_err());
+        }
+
+        let mut invalid_bounds = profile();
+        invalid_bounds.fixtures[0].bounds.cpu_fuel = 0;
+        invalid_bounds.profile_digest = invalid_bounds.digest();
+        assert_eq!(
+            invalid_bounds.to_canonical_cbor(),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+
+        let request_value = encode_request(&request(), true);
+        if let Value::Array(mut fields) = request_value {
+            if let Value::Array(identity) = &mut fields[7] {
+                identity[5] = Value::Null;
+            }
+            let bytes = encode_value(&Value::Array(fields)).unwrap_or_default();
+            assert!(EvaluatorRequestV1::from_canonical_cbor(&bytes).is_err());
+        }
+
+        let candidate = profile()
+            .transition_to(ProfileLifecycleV1::Candidate, vec![])
+            .unwrap_or_else(|_| profile());
+        let fixture_digest = fixture_digest(&candidate.fixtures[0]);
+        let mut first = stable_evidence("alpha", 30);
+        let mut second = stable_evidence("beta", 40);
+        for evidence in [&mut first, &mut second] {
+            for case in &mut evidence.case_outcomes {
+                case.fixture_digest = fixture_digest;
+            }
+            refresh_stable_report_for_profile(evidence, &candidate);
+        }
+        first.report.cases[0].provenance_digest = [88; 32];
+        first.report.report_digest = first.report.digest().unwrap_or([0; 32]);
+        assert_eq!(
+            candidate.transition_to(ProfileLifecycleV1::Stable, vec![first, second]),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+    }
+
+    #[test]
     fn bounds_ordering_and_provenance_fail_closed() {
         for bounds in zero_bound_variants() {
             let mut value = profile();
