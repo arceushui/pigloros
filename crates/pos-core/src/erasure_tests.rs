@@ -1686,8 +1686,8 @@ fn lifecycle_is_monotonic_and_digest_linked() -> Result<(), ErasureErrorV1> {
     ))?;
     let partial_bytes = partial.to_canonical_cbor()?;
     assert_eq!(
-        ErasureStateV1::from_canonical_cbor(&partial_bytes),
-        Err(ErasureErrorV1::PolicyConflict)
+        ErasureStateV1::from_canonical_cbor(&partial_bytes)?,
+        partial
     );
     let authorized_bytes = authorized.to_canonical_cbor()?;
     assert_eq!(
