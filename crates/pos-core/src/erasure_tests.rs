@@ -356,6 +356,124 @@ fn coordinator_reloads_durable_identity_after_restart() -> Result<(), ErasureErr
 }
 
 #[test]
+fn coordinator_trait_interface_covers_each_lifecycle_operation() -> Result<(), ErasureErrorV1> {
+    let acknowledgement = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
+    let port = test_port(true, vec![acknowledgement.target]);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+    let submitted = {
+        let api: &mut dyn ErasureCoordinator = &mut coordinator;
+        let submitted = api.submit(request()?)?;
+        assert_eq!(
+            api.authorize(reference(1), reference(9))?.lifecycle(),
+            ErasureLifecycleV1::Authorized
+        );
+        assert_eq!(
+            api.freeze_access(
+                reference(1),
+                change(
+                    ErasureLifecycleV1::AccessFrozen,
+                    Some(10),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            )?
+            .lifecycle(),
+            ErasureLifecycleV1::AccessFrozen
+        );
+        assert_eq!(
+            api.dispatch_destruction(reference(1), reference(9))?
+                .lifecycle(),
+            ErasureLifecycleV1::DestructionDispatched
+        );
+        assert_eq!(
+            api.acknowledge(reference(1), acknowledgement)?.lifecycle(),
+            ErasureLifecycleV1::AwaitingAcknowledgements
+        );
+        submitted
+    };
+    assert_eq!(submitted.lifecycle(), ErasureLifecycleV1::Submitted);
+    let awaiting = coordinator
+        .existing(reference(1))
+        .cloned()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let terminal = awaiting.transition({
+        let mut transition = change(
+            ErasureLifecycleV1::Complete,
+            awaiting.freeze_position(),
+            Vec::new(),
+            Vec::new(),
+        );
+        transition.acknowledged_targets = vec![acknowledgement.target];
+        transition.provenance = reference(4);
+        transition
+    })?;
+    let mut input = receipt_input(
+        ErasureLifecycleV1::Complete,
+        vec![acknowledgement],
+        Vec::new(),
+        Vec::new(),
+    );
+    input.terminal_state = terminal.state_digest();
+    input.inventories.artifacts = vec![inventory_result(acknowledgement.target)];
+    let api: &mut dyn ErasureCoordinator = &mut coordinator;
+    assert_eq!(
+        api.finalize(reference(1), input)?.lifecycle(),
+        ErasureLifecycleV1::Complete
+    );
+    Ok(())
+}
+
+#[test]
+fn coordinator_finalize_from_dispatched_state_admits_partial_receipt() -> Result<(), ErasureErrorV1>
+{
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let mut coordinator =
+        ErasureCoordinatorStateMachineV1::new(test_port(true, vec![target]), reference(2));
+    coordinator.submit(request()?, reference(3))?;
+    coordinator.authorize(reference(1), reference(9))?;
+    coordinator.freeze_inventory(
+        reference(1),
+        change(
+            ErasureLifecycleV1::AccessFrozen,
+            Some(10),
+            Vec::new(),
+            Vec::new(),
+        ),
+    )?;
+    coordinator.dispatch_destruction(reference(1), reference(9))?;
+    let dispatched = coordinator
+        .existing(reference(1))
+        .cloned()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let awaiting = dispatched.transition(change(
+        ErasureLifecycleV1::AwaitingAcknowledgements,
+        dispatched.freeze_position(),
+        Vec::new(),
+        Vec::new(),
+    ))?;
+    let terminal = awaiting.transition(change(
+        ErasureLifecycleV1::PartialFailure,
+        awaiting.freeze_position(),
+        vec![target.replica_id],
+        Vec::new(),
+    ))?;
+    let mut input = receipt_input(
+        ErasureLifecycleV1::PartialFailure,
+        Vec::new(),
+        vec![target.replica_id],
+        Vec::new(),
+    );
+    input.terminal_state = terminal.state_digest();
+    input.provenance = reference(9);
+    input.inventories.artifacts = vec![inventory_result(target)];
+    assert_eq!(
+        coordinator.finalize(reference(1), input)?.lifecycle(),
+        ErasureLifecycleV1::PartialFailure
+    );
+    Ok(())
+}
+
+#[test]
 fn coordinator_exposes_unknown_and_port_failure_contracts() -> Result<(), ErasureErrorV1> {
     let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
     let mut unknown =
