@@ -2415,6 +2415,10 @@ mod tests {
             Ok(Some(Timeline::new(TimelineMeta::root("scripted"))))
         }
 
+        fn logical_head(&self, _id: TimelineId) -> Result<Seq, CoreError> {
+            Ok(Seq::ZERO)
+        }
+
         fn append_intent_or_duplicate_bounded(
             &mut self,
             _timeline: TimelineId,
@@ -2825,7 +2829,7 @@ mod tests {
             .create_timeline("consent-revocation-append-error")
             .await
             .test_ok();
-        let (grant, token) = gateway
+        let (_, token) = gateway
             .issue_consent_grant(
                 &timeline.id().to_string(),
                 consent_grant(EntityId::new(), 1),
@@ -2839,7 +2843,7 @@ mod tests {
                     subject_id: token.subject_id(),
                     grantee_id: token.grantee_id(),
                     grant_seq: token.grant_seq(),
-                    fence_seq: grant.seq.as_u64().saturating_add(1),
+                    fence_seq: Seq::ZERO.as_u64().saturating_add(1),
                 },
             )
             .await
