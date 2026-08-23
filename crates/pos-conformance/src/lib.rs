@@ -5730,10 +5730,7 @@ fn valid_conformance_case_result(case: &CaseOutcomeV1) -> bool {
         && case.expected_error.is_none()
         && case.actual_error.is_none()
         && case.first_coordinate.is_some();
-    case.outcome != CaseOutcomeStatusV1::Pass
-        || exact
-        || typed_failure
-        || allowed_divergence
+    case.outcome != CaseOutcomeStatusV1::Pass || exact || typed_failure || allowed_divergence
 }
 
 fn valid_redacted_case(case: &CaseOutcomeV1) -> bool {

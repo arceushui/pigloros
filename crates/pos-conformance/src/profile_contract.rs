@@ -6,8 +6,8 @@
 
 use crate::{
     CaseOutcomeStatusV1, ClaimLayerV1, DivergenceMismatchKindV1, ExecutionModeV1,
-    ImplementationIdentityV1, IndependenceEvidenceV1, RedactionStateV1, ReplayClaimV1,
-    ProfileCaseOutcomeV1, SafeErrorCodeV1, VerificationOutcomeV1,
+    ImplementationIdentityV1, IndependenceEvidenceV1, ProfileCaseOutcomeV1, RedactionStateV1,
+    ReplayClaimV1, SafeErrorCodeV1, VerificationOutcomeV1,
 };
 use ciborium::value::Value;
 use std::collections::BTreeSet;
@@ -658,7 +658,12 @@ fn validate_stable_implementation(
 }
 
 fn stable_case_key(case: &CaseOutcomeV1) -> (&str, ExecutionModeV1, ClaimLayerV1, [u8; 32]) {
-    (&case.case_id, case.mode, case.claim_layer, case.fixture_digest)
+    (
+        &case.case_id,
+        case.mode,
+        case.claim_layer,
+        case.fixture_digest,
+    )
 }
 
 fn case_matches_fixture(case: &CaseOutcomeV1, fixture: &FixtureDescriptorV1) -> bool {
