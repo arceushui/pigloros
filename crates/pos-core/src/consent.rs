@@ -626,6 +626,11 @@ struct ActiveConsent {
 
 type ActiveConsentSessions = HashMap<(TimelineId, EntityId, EntityId, u64), ActiveConsent>;
 
+enum RestoredConsentEvent {
+    Granted(ConsentGranted),
+    Revoked(ConsentRevoked),
+}
+
 /// Host-owned reservation that serializes a durable revocation with protected
 /// appends using the same [`ConsentAuthority`] state.
 ///
@@ -1015,11 +1020,6 @@ impl ConsentAuthority {
             return Err(ConsentCodecError::HistoryTooLong {
                 count: events.len(),
             });
-        }
-
-        enum RestoredConsentEvent {
-            Granted(ConsentGranted),
-            Revoked(ConsentRevoked),
         }
 
         let mut decoded = Vec::with_capacity(events.len());
