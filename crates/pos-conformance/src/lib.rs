@@ -5620,8 +5620,10 @@ fn verify_conformance_report(evidence: &MoatProofEvidenceV1) -> Result<(), Evide
     let mut modes = BTreeSet::new();
     let mut case_keys = BTreeSet::new();
     let mut counts = (0_u32, 0_u32, 0_u32, 0_u32, 0_u32);
+    let mut weakest_redaction = RedactionStateV1::None;
     for case in &report.cases {
         modes.insert(case.mode);
+        weakest_redaction = weakest_redaction.max(case.redaction_state);
         if !case_keys.insert((
             case.case_id.as_str(),
             case.mode,
@@ -5636,12 +5638,8 @@ fn verify_conformance_report(evidence: &MoatProofEvidenceV1) -> Result<(), Evide
                 .first_coordinate
                 .as_ref()
                 .is_some_and(|coordinate| coordinate.len() > 128)
-            || case.redaction_state != RedactionStateV1::None
-            || (case.outcome == CaseOutcomeStatusV1::Pass
-                && (case.expected_digest.is_none()
-                    || case.expected_digest != case.actual_digest
-                    || case.expected_error.is_some()
-                    || case.actual_error.is_some()))
+            || !valid_conformance_case_result(case)
+            || !valid_redacted_case(case)
             || (case.outcome != CaseOutcomeStatusV1::Pass
                 && case.expected_digest == case.actual_digest
                 && case.expected_error == case.actual_error)
@@ -5679,6 +5677,7 @@ fn verify_conformance_report(evidence: &MoatProofEvidenceV1) -> Result<(), Evide
             .reviewer_ids
             .windows(2)
             .any(|pair| pair[0] >= pair[1])
+        || report.redaction_state != weakest_redaction
         || report.cases.is_empty()
         || !modes.contains(&evidence.manifest.execution_mode)
         || report.cases.windows(2).any(|pair| {
@@ -5713,6 +5712,43 @@ fn verify_conformance_report(evidence: &MoatProofEvidenceV1) -> Result<(), Evide
         return Err(EvidenceError::InvalidConformanceReport);
     }
     Ok(())
+}
+
+fn valid_conformance_case_result(case: &CaseOutcomeV1) -> bool {
+    let exact = case.expected_digest.is_some()
+        && case.expected_digest == case.actual_digest
+        && case.expected_error.is_none()
+        && case.actual_error.is_none()
+        && case.first_coordinate.is_none();
+    let typed_failure = case.expected_digest.is_none()
+        && case.actual_digest.is_none()
+        && case.expected_error.is_some()
+        && case.expected_error == case.actual_error
+        && case.first_coordinate.is_none();
+    let allowed_divergence = case.expected_digest.is_some()
+        && case.actual_digest.is_some()
+        && case.expected_digest != case.actual_digest
+        && case.expected_error.is_none()
+        && case.actual_error.is_none()
+        && case.first_coordinate.is_some();
+    case.outcome != CaseOutcomeStatusV1::Pass
+        || exact
+        || typed_failure
+        || allowed_divergence
+}
+
+fn valid_redacted_case(case: &CaseOutcomeV1) -> bool {
+    match case.redaction_state {
+        RedactionStateV1::None | RedactionStateV1::RedactedViews => true,
+        RedactionStateV1::StructuralOnly => {
+            case.expected_digest.is_none()
+                && case.actual_digest.is_none()
+                && case.expected_error.is_none()
+                && case.actual_error.is_none()
+                && case.first_coordinate.is_none()
+        }
+        RedactionStateV1::EvidenceMissing => case.outcome != CaseOutcomeStatusV1::Pass,
+    }
 }
 
 fn verify_atomicity(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceError> {
@@ -7710,6 +7746,30 @@ pub mod tests {
             report_cases.contract.conformance_report.unavailable = 1;
             report_cases.contract.conformance_report.not_applicable = 1;
             assert_eq!(verify_wave8_contract(&report_cases), Ok(()));
+
+            let mut typed_report = value.clone();
+            typed_report.contract.conformance_report.cases[0].expected_digest = None;
+            typed_report.contract.conformance_report.cases[0].actual_digest = None;
+            typed_report.contract.conformance_report.cases[0].expected_error =
+                Some(SafeErrorCodeV1::ClosureIncomplete);
+            typed_report.contract.conformance_report.cases[0].actual_error =
+                Some(SafeErrorCodeV1::ClosureIncomplete);
+            assert_eq!(verify_evidence(&typed_report), Ok(()));
+
+            let mut divergence_report = value.clone();
+            divergence_report.contract.conformance_report.cases[0].actual_digest =
+                Some([15; 32]);
+            divergence_report.contract.conformance_report.cases[0].first_coordinate =
+                Some(vec![1, 2]);
+            assert_eq!(verify_evidence(&divergence_report), Ok(()));
+
+            let mut redacted_report = value.clone();
+            redacted_report.contract.conformance_report.cases[0].redaction_state =
+                RedactionStateV1::RedactedViews;
+            redacted_report.contract.conformance_report.redaction_state =
+                RedactionStateV1::RedactedViews;
+            assert_eq!(verify_evidence(&redacted_report), Ok(()));
+
             let mut invalid_report = report_cases.clone();
             invalid_report.contract.conformance_report.passed = 0;
             assert_eq!(
