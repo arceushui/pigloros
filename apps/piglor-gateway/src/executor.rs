@@ -2324,6 +2324,46 @@ mod tests {
         );
 
         let (reply, receiver) = tokio::sync::oneshot::channel();
+        let draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new("expired"),
+            CanonicalBytes::from_static(b"payload"),
+        );
+        assert_expired(
+            Command::AppendIdentified {
+                timeline: TimelineId::new(),
+                identity: AppendIdentity::new(
+                    AppendDedupKey::from_keyed_hash([1; 32]),
+                    AppendDedupScope::from_keyed_hash([2; 32]),
+                ),
+                intent: AppendIntent::new(&draft),
+                maximum: 1,
+                reply,
+            },
+            receiver,
+        );
+
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(
+            Command::GetTimeline {
+                timeline: TimelineId::new(),
+                reply,
+            },
+            receiver,
+        );
+
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(Command::Panic { reply }, receiver);
+
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(Command::PanicRead { reply }, receiver);
+
+        Ok(())
+    }
+
+    #[test]
+    fn expired_consent_write_commands_reply() {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(
             Command::AppendConsentGrant {
                 timeline: TimelineId::new(),
@@ -2360,43 +2400,6 @@ mod tests {
             },
             receiver,
         );
-
-        let (reply, receiver) = tokio::sync::oneshot::channel();
-        let draft = EventDraft::new(
-            EntityId::new(),
-            Kind::new("expired"),
-            CanonicalBytes::from_static(b"payload"),
-        );
-        assert_expired(
-            Command::AppendIdentified {
-                timeline: TimelineId::new(),
-                identity: AppendIdentity::new(
-                    AppendDedupKey::from_keyed_hash([1; 32]),
-                    AppendDedupScope::from_keyed_hash([2; 32]),
-                ),
-                intent: AppendIntent::new(&draft),
-                maximum: 1,
-                reply,
-            },
-            receiver,
-        );
-
-        let (reply, receiver) = tokio::sync::oneshot::channel();
-        assert_expired(
-            Command::GetTimeline {
-                timeline: TimelineId::new(),
-                reply,
-            },
-            receiver,
-        );
-
-        let (reply, receiver) = tokio::sync::oneshot::channel();
-        assert_expired(Command::Panic { reply }, receiver);
-
-        let (reply, receiver) = tokio::sync::oneshot::channel();
-        assert_expired(Command::PanicRead { reply }, receiver);
-
-        Ok(())
     }
 
     #[tokio::test]
@@ -2726,6 +2729,7 @@ mod tests {
             executor.current_state(),
             super::LifecycleState::Unhealthy { .. }
         ));
+        drop(executor);
         Ok(())
     }
 
