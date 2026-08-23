@@ -4,7 +4,7 @@
 //! worker.  Commands are linearised by one bounded FIFO and executed by one
 //! dedicated OS thread.
 use pos_core::{
-    event::{Event, EventDraft},
+    event::{Event, EventDraft, Kind},
     geo_admission::{
         GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore,
     },
@@ -14,7 +14,8 @@ use pos_core::{
         PurgeOutcome, SeqRange,
     },
     timeline::Timeline,
-    CoreError, OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1, OwnTracksIngressStore,
+    ConsentGrantedV1, CoreError, OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1,
+    OwnTracksIngressStore, EVENT_TYPE_CONSENT_GRANTED_V1,
 };
 use std::{
     collections::{HashMap, VecDeque},
@@ -92,6 +93,12 @@ enum Command {
         maximum: Option<u64>,
         reply: oneshot::Sender<Result<Vec<Event>, StoreExecutorError>>,
     },
+    AppendConsentGrant {
+        timeline: TimelineId,
+        grant: ConsentGrantedV1,
+        maximum: u64,
+        reply: oneshot::Sender<Result<Event, StoreExecutorError>>,
+    },
     AppendIdentified {
         timeline: TimelineId,
         identity: AppendIdentity,
@@ -131,6 +138,7 @@ impl Command {
             | Self::Purge { .. }
             | Self::Create { .. }
             | Self::Append { .. }
+            | Self::AppendConsentGrant { .. }
             | Self::AppendIdentified { .. } => CommandClass::Write,
             #[cfg(test)]
             Self::Panic { .. } => CommandClass::Write,
@@ -918,6 +926,19 @@ impl StoreExecutor {
             reply,
         })
     }
+    pub(crate) async fn append_consent_grant(
+        &self,
+        timeline: TimelineId,
+        grant: ConsentGrantedV1,
+        maximum: u64,
+    ) -> Result<Event, StoreExecutorError> {
+        submit!(self, |reply| Command::AppendConsentGrant {
+            timeline,
+            grant,
+            maximum,
+            reply,
+        })
+    }
     pub(crate) async fn append_identified(
         &self,
         timeline: TimelineId,
@@ -1189,6 +1210,9 @@ fn expire_command(command: Command) {
         Command::Append { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
+        Command::AppendConsentGrant { reply, .. } => {
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+        }
         Command::AppendIdentified { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
@@ -1328,6 +1352,12 @@ fn execute(state: &mut ExecutorState, command: Command) {
             maximum,
             reply,
         } => execute_append_command(state, timeline, &drafts, maximum, reply),
+        Command::AppendConsentGrant {
+            timeline,
+            grant,
+            maximum,
+            reply,
+        } => execute_append_consent_grant_command(state, timeline, grant, maximum, reply),
         Command::AppendIdentified {
             timeline,
             identity,
@@ -1457,6 +1487,48 @@ fn execute_append_command(
             }),
         None => store.append(timeline, drafts),
     };
+    send_store_result(reply, result);
+}
+
+fn execute_append_consent_grant_command(
+    state: &mut ExecutorState,
+    timeline: TimelineId,
+    grant: ConsentGrantedV1,
+    maximum: u64,
+    reply: oneshot::Sender<Result<Event, StoreExecutorError>>,
+) {
+    let store = state.store.event_store();
+    let result = store
+        .logical_head(timeline)
+        .and_then(|head| {
+            if grant.grant_seq != head.as_u64().saturating_add(1) {
+                return Err(CoreError::Storage(
+                    "consent grant sequence mismatch".to_owned(),
+                ));
+            }
+            grant
+                .encode()
+                .map_err(|error| CoreError::Storage(error.to_string()))
+        })
+        .and_then(|payload| {
+            store.append_bounded(
+                timeline,
+                &[EventDraft::new(
+                    grant.subject_id,
+                    Kind::new(EVENT_TYPE_CONSENT_GRANTED_V1),
+                    payload,
+                )],
+                maximum,
+            )
+        })
+        .and_then(|events| {
+            events.ok_or_else(|| CoreError::Storage("event limit reached".to_owned()))
+        })
+        .and_then(|mut events| {
+            events
+                .pop()
+                .ok_or_else(|| CoreError::Storage("empty append".to_owned()))
+        });
     send_store_result(reply, result);
 }
 

@@ -27,9 +27,9 @@ use pos_core::{
         EventReadBounds, EventStore, PurgeOutcome, SeqRange,
     },
     timeline::Timeline,
-    ActionRejected, Capability, ConsentCapabilityToken, ConsentCodecError, ConsentGrantedV1,
-    ConsentRevokedV1, CoreError, Plugin, ProposedAction, EVENT_TYPE_CONSENT_GRANTED_V1,
-    EVENT_TYPE_CONSENT_REVOKED_V1,
+    ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
+    ConsentGrantedV1, ConsentRevokedV1, CoreError, Plugin, ProposedAction,
+    EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
 };
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
 use pos_plugin_world::{WorldPlugin, EVENT_TYPE_ACTION};
@@ -494,6 +494,7 @@ pub struct Gateway {
     bus: broadcast::Sender<EventNotice>,
     limits: GatewayLimits,
     owntracks_enabled: bool,
+    consent_authority: ConsentAuthority,
     action_registry: Arc<PluginRegistry>,
     action_principal: Option<ActionPrincipal>,
 }
@@ -859,6 +860,7 @@ impl Gateway {
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            consent_authority: ConsentAuthority::new(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         }
@@ -876,6 +878,7 @@ impl Gateway {
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            consent_authority: ConsentAuthority::new(),
             action_registry: gateway_action_registry_with_bodies(bodies),
             action_principal: None,
         }
@@ -894,6 +897,7 @@ impl Gateway {
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            consent_authority: ConsentAuthority::new(),
             action_registry: gateway_action_registry_with_bodies(bodies),
             action_principal: Some(principal),
         }
@@ -914,6 +918,7 @@ impl Gateway {
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            consent_authority: ConsentAuthority::new(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         }
@@ -934,6 +939,7 @@ impl Gateway {
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: true,
+            consent_authority: ConsentAuthority::new(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         }
@@ -950,6 +956,7 @@ impl Gateway {
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: true,
+            consent_authority: ConsentAuthority::new(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         }
@@ -1080,28 +1087,21 @@ impl Gateway {
         grant: ConsentGrantedV1,
     ) -> Result<(Event, ConsentCapabilityToken), GatewayError> {
         let timeline = parse_timeline_id(timeline_id)?;
-        let expected = self
+        let event = match self
             .store
-            .timeline(timeline)
-            .await?
-            .ok_or(GatewayError::ResourceUnavailable)?
-            .head
-            .as_u64()
-            .saturating_add(1);
-        if grant.grant_seq != expected {
-            return Err(GatewayError::ConsentGrantSequenceMismatch);
-        }
-        let token = ConsentCapabilityToken::from_grant(&grant);
-        let event = self
-            .append_draft(
-                timeline,
-                EventDraft::new(
-                    grant.subject_id,
-                    Kind::new(EVENT_TYPE_CONSENT_GRANTED_V1),
-                    grant.encode()?,
-                ),
-            )
-            .await?;
+            .append_consent_grant(timeline, grant.clone(), self.limits.max_events_per_timeline)
+            .await
+        {
+            Err(executor::StoreExecutorError::Store(CoreError::Storage(message)))
+                if message == "consent grant sequence mismatch" =>
+            {
+                return Err(GatewayError::ConsentGrantSequenceMismatch)
+            }
+            Err(error) => return Err(error.into()),
+            Ok(event) => event,
+        };
+        self.publish_notice(timeline, &event);
+        let token = self.consent_authority.record_grant(&grant);
         Ok((event, token))
     }
 
@@ -1117,15 +1117,24 @@ impl Gateway {
         revocation: ConsentRevokedV1,
     ) -> Result<Event, GatewayError> {
         let timeline = parse_timeline_id(timeline_id)?;
-        self.append_draft(
-            timeline,
-            EventDraft::new(
-                revocation.subject_id,
-                Kind::new(EVENT_TYPE_CONSENT_REVOKED_V1),
-                revocation.encode()?,
-            ),
-        )
-        .await
+        let event = self
+            .append_draft(
+                timeline,
+                EventDraft::new(
+                    revocation.subject_id,
+                    Kind::new(EVENT_TYPE_CONSENT_REVOKED_V1),
+                    revocation.encode()?,
+                ),
+            )
+            .await?;
+        self.consent_authority
+            .record_revocation(&revocation)
+            .map_err(|_| {
+                GatewayError::Store(CoreError::Storage(
+                    "consent revocation did not name an active grant".to_owned(),
+                ))
+            })?;
+        Ok(event)
     }
 
     /// Poll one bounded page of Timeline events, starting at `from_seq` (inclusive).
@@ -1578,6 +1587,7 @@ impl Gateway {
             bus: broadcast::channel(capacity).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            consent_authority: ConsentAuthority::new(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         }
@@ -1590,6 +1600,7 @@ impl Gateway {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            consent_authority: ConsentAuthority::new(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         }
@@ -1602,6 +1613,7 @@ impl Gateway {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits,
             owntracks_enabled: false,
+            consent_authority: ConsentAuthority::new(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         }
@@ -2090,6 +2102,7 @@ mod tests {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            consent_authority: ConsentAuthority::new(),
             action_registry: gateway_action_registry_with_bodies([body]),
             action_principal: Some(ActionPrincipal::new(
                 actor,
@@ -3729,6 +3742,7 @@ mod tests {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            consent_authority: ConsentAuthority::new(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         };
@@ -3744,6 +3758,7 @@ mod tests {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            consent_authority: ConsentAuthority::new(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         };
@@ -3765,6 +3780,7 @@ mod tests {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            consent_authority: ConsentAuthority::new(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         };
@@ -3787,6 +3803,7 @@ mod tests {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            consent_authority: ConsentAuthority::new(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         };
@@ -3808,6 +3825,7 @@ mod tests {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            consent_authority: ConsentAuthority::new(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         };
@@ -3830,6 +3848,7 @@ mod tests {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            consent_authority: ConsentAuthority::new(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         };
@@ -3886,6 +3905,7 @@ mod tests {
                 bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
                 limits: GatewayLimits::LOCAL_DEFAULT,
                 owntracks_enabled: false,
+                consent_authority: ConsentAuthority::new(),
                 action_registry: gateway_action_registry(),
                 action_principal: None,
             };

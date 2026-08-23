@@ -11,8 +11,8 @@ use pos_core::{
     clock::Seq,
     event::{Event, EventDraft, Kind},
     ids::PluginId,
-    ActionApprover, ActionRejected, Plugin, ProposedAction, Reducer,
-    MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+    ActionApprover, ActionRejected, ConsentAuthority, ConsentCapabilityToken, ConsentError, Plugin,
+    ProposedAction, Reducer, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
 use pos_state::ProjectionRegistry;
 
@@ -153,6 +153,8 @@ mod coverage_paths {
             driver_ids: vec![id],
             cadence_updates: Vec::new(),
             event_cursors: Vec::new(),
+            operation: OperationContext::Public,
+            observed_through: Seq::ZERO,
         });
         registry.abort_step();
 
@@ -160,6 +162,8 @@ mod coverage_paths {
             driver_ids: vec![id],
             cadence_updates: vec![(id, 1)],
             event_cursors: vec![(id, Seq::ZERO)],
+            operation: OperationContext::Public,
+            observed_through: Seq::ZERO,
         });
         registry.commit_step();
     }
@@ -286,6 +290,22 @@ struct PendingStep {
     driver_ids: Vec<PluginId>,
     cadence_updates: Vec<(PluginId, u128)>,
     event_cursors: Vec<(PluginId, Seq)>,
+    operation: OperationContext,
+    observed_through: Seq,
+}
+
+/// Explicit host operation authorization for a Driver Tick or projection read.
+///
+/// `Public` is deliberately explicit at every host call site. `Protected` is
+/// only usable when it carries a capability issued by the authority bound to
+/// this registry.
+#[derive(Clone)]
+pub enum OperationContext {
+    Public,
+    Protected {
+        token: ConsentCapabilityToken,
+        now_secs: u64,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -309,6 +329,7 @@ pub struct PluginRegistry {
     run_mode: RunMode,
     resource_limit: Option<u64>,
     poisoned_driver: Option<String>,
+    consent_authority: Option<ConsentAuthority>,
 }
 
 impl PluginRegistry {
@@ -401,6 +422,7 @@ impl PluginRegistry {
             run_mode,
             resource_limit: None,
             poisoned_driver: None,
+            consent_authority: None,
         }
     }
 
@@ -409,6 +431,32 @@ impl PluginRegistry {
     pub const fn with_resource_limit(mut self, limit: u64) -> Self {
         self.resource_limit = Some(limit);
         self
+    }
+
+    /// Bind the concrete host-owned consent authority used for protected work.
+    #[must_use]
+    pub fn with_consent_authority(mut self, authority: ConsentAuthority) -> Self {
+        self.consent_authority = Some(authority);
+        self
+    }
+
+    fn validate_operation(
+        &self,
+        operation: &OperationContext,
+        timeline_head: Seq,
+    ) -> Result<(), RuntimeError> {
+        match operation {
+            OperationContext::Public => Ok(()),
+            OperationContext::Protected { token, now_secs } => self
+                .consent_authority
+                .as_ref()
+                .ok_or(RuntimeError::ConsentOperationUnavailable)
+                .and_then(|authority| {
+                    authority
+                        .validate(token, timeline_head.as_u64(), *now_secs)
+                        .map_err(RuntimeError::Consent)
+                }),
+        }
     }
 
     fn reject_unanchored_drivers(&self) -> Result<(), RuntimeError> {
@@ -492,8 +540,10 @@ impl PluginRegistry {
         observed_through: Seq,
         selection: AnchoredSelection,
         committed_events: &[Event],
+        operation: OperationContext,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.ensure_no_pending_step()?;
+        self.validate_operation(&operation, observed_through)?;
         let mut driver_ids = Vec::new();
         let mut cadence_updates = Vec::new();
         let mut event_cursors = Vec::new();
@@ -577,6 +627,8 @@ impl PluginRegistry {
             driver_ids: staged_driver_ids,
             cadence_updates,
             event_cursors,
+            operation,
+            observed_through,
         });
         Ok(all_drafts)
     }
@@ -586,6 +638,13 @@ impl PluginRegistry {
         let Some(pending) = self.pending_step.take() else {
             return;
         };
+        if self
+            .validate_operation(&pending.operation, pending.observed_through)
+            .is_err()
+        {
+            let _ = self.abort_drivers(&pending.driver_ids);
+            return;
+        }
         for id in &pending.driver_ids {
             if let Some(driver) = self
                 .plugins
@@ -1016,6 +1075,7 @@ impl PluginRegistry {
             observed_through,
             AnchoredSelection::Cadenced { now_ns },
             &[],
+            OperationContext::Public,
         )
     }
 
@@ -1035,6 +1095,7 @@ impl PluginRegistry {
             observed_through,
             AnchoredSelection::Cadenced { now_ns },
             committed_events,
+            OperationContext::Public,
         )
     }
 
@@ -1085,7 +1146,13 @@ impl PluginRegistry {
         timeline: pos_core::ids::TimelineId,
         observed_through: Seq,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
-        self.step_anchored_transaction(timeline, observed_through, AnchoredSelection::All, &[])
+        self.step_anchored_transaction(
+            timeline,
+            observed_through,
+            AnchoredSelection::All,
+            &[],
+            OperationContext::Public,
+        )
     }
 
     /// Step all Drivers with a host-filtered committed Event prefix.
@@ -1103,6 +1170,7 @@ impl PluginRegistry {
             observed_through,
             AnchoredSelection::All,
             committed_events,
+            OperationContext::Public,
         )
     }
 }

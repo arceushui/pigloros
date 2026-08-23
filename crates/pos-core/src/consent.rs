@@ -634,33 +634,6 @@ pub trait ConsentRevocationFoldListener: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// FieldState - Replay sentinel for destroyed keys (ADR-039)
-// ---------------------------------------------------------------------------
-
-/// State of a sensitive field when replaying after key destruction.
-///
-/// When a subject's data key is destroyed on revocation, Replay returns
-/// `FieldState::RedactedDestroyed` for encrypted fields - not an error,
-/// not null - so Replay remains deterministic.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FieldState {
-    /// The field is present and decryptable.
-    Present(CanonicalBytes),
-    /// The field's encryption key has been destroyed; content is unavailable.
-    RedactedDestroyed,
-}
-
-impl FieldState {
-    /// Compose a later erasure/redaction outcome without ever restoring data.
-    #[must_use]
-    pub fn redacted_destroyed(self) -> Self {
-        match self {
-            Self::Present(_) | Self::RedactedDestroyed => Self::RedactedDestroyed,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1316,29 +1289,6 @@ mod tests {
         assert!(gate
             .check_consent(EntityId::new(), &Kind::new("persona.update.v1"), 99)
             .is_ok());
-    }
-
-    // -- FieldState --
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn field_state_present_and_redacted() {
-        let present = FieldState::Present(CanonicalBytes::from_vec(vec![0x01]));
-        assert!(matches!(present, FieldState::Present(_)));
-        let redacted = FieldState::RedactedDestroyed;
-        assert!(matches!(redacted, FieldState::RedactedDestroyed));
-        assert_ne!(
-            redacted,
-            FieldState::Present(CanonicalBytes::from_vec(vec![]))
-        );
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn field_state_redaction_is_irreversible() {
-        let erased = FieldState::Present(CanonicalBytes::from_vec(vec![0x01])).redacted_destroyed();
-        assert_eq!(erased, FieldState::RedactedDestroyed);
-        assert_eq!(erased.redacted_destroyed(), FieldState::RedactedDestroyed);
     }
 
     // -- Error display --
