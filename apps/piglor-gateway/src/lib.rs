@@ -2566,7 +2566,7 @@ mod tests {
             .test_ok();
         assert_eq!(
             grant_event.event_type.as_str(),
-            EVENT_TYPE_CONSENT_GRANTED_V1
+            pos_core::EVENT_TYPE_CONSENT_GRANTED_V1
         );
         assert_eq!(
             ConsentGrantedV1::decode(&grant_event.payload).test_ok(),

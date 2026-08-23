@@ -1278,6 +1278,7 @@ osf_link = \"https://osf.io/example\"\n";
                     bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
                     limits: crate::GatewayLimits::LOCAL_DEFAULT,
                     owntracks_enabled: false,
+                    consent_authority: pos_core::ConsentAuthority::new(),
                     action_registry: crate::gateway_action_registry(),
                     action_principal: None,
                 },
