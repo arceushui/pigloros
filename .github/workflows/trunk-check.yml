@@ -10,7 +10,7 @@ on:
     branches: [main]
   pull_request:
   schedule:
-    - cron: "17 2 * * *"
+    - cron: 17 2 * * *
   workflow_dispatch:
 
 concurrency:
