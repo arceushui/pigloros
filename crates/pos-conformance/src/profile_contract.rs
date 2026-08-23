@@ -3338,12 +3338,12 @@ mod tests {
         accept(&|caps| caps.max_member_bytes = 1);
         accept(&|caps| caps.max_total_bundle_bytes = 1);
         accept(&|caps| caps.max_compression_expansion = 1);
-        reject(&|caps| caps.max_cases = MAX_FIXTURES as u32 + 1);
+        reject(&|caps| caps.max_cases = 65_537);
         reject(&|caps| {
-            caps.max_bundle_members = MAX_FIXTURES as u32 + 1;
+            caps.max_bundle_members = 65_537;
         });
         reject(&|caps| {
-            caps.max_member_path_bytes = MAX_STRING_BYTES as u16 + 1;
+            caps.max_member_path_bytes = 257;
         });
         reject(&|caps| caps.max_member_bytes = MAX_MEMBER_BYTES + 1);
     }
