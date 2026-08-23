@@ -6,8 +6,6 @@
 
 use std::cmp::Ordering;
 
-use ciborium::value::Value;
-
 const VERSION: u64 = 1;
 const ERQ1: &str = "ERQ1";
 const ERS1: &str = "ERS1";

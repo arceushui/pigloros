@@ -2,6 +2,7 @@
     fn test_digest(reference: ErasureReferenceV1) -> Value { Value::Bytes(reference.digest().to_vec()) }
     fn test_text(value: &str) -> Value { Value::Text(value.to_owned()) }
     use super::*;
+    use ciborium::value::Value;
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -1376,7 +1377,7 @@
                 }
             }
         }
-        for previous in [submitted, authorized, frozen, dispatched] {
+        for previous in [submitted, authorized.clone(), frozen.clone(), dispatched.clone()] {
             assert_eq!(
                 ErasureReceiptV1::new(input.clone())?.verify_history(&ReplyResolver {
                     terminal: terminal.clone(),
