@@ -463,6 +463,25 @@ fn complete_record() -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
         .ok_or(ErasureErrorV1::ProvenanceMissing);
     record
 }
+
+fn reject_terminal_receipt_mutation(
+    record: &ErasureCoordinatorRecordV1,
+    mutate: impl FnOnce(&mut ErasureReceiptV1),
+) -> Result<(), ErasureErrorV1> {
+    let mut parts = record_parts(record);
+    mutate(
+        parts
+            .receipt
+            .as_mut()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?,
+    );
+    assert_eq!(
+        ErasureCoordinatorRecordV1::from_parts(parts, reference(2)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
 #[test]
 fn coordinator_public_retries_reject_injection_and_query_existing() -> Result<(), ErasureErrorV1> {
     let acknowledgement = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
@@ -701,25 +720,24 @@ fn durable_record_lifecycle_checks_reject_independent_receipt_fields() -> Result
 fn durable_terminal_record_checks_reject_independent_receipt_mismatches(
 ) -> Result<(), ErasureErrorV1> {
     let record = complete_record()?;
-    for mismatch in 0..6 {
-        let mut parts = record_parts(&record);
-        let receipt = parts
-            .receipt
-            .as_mut()
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        match mismatch {
-            0 => receipt.0.terminal_state = reference(99),
-            1 => receipt.0.lifecycle = ErasureLifecycleV1::PartialFailure,
-            2 => receipt.0.coordinator = reference(99),
-            3 => receipt.0.request = reference(99),
-            4 => receipt.0.required_targets.clear(),
-            5 => receipt.0.acknowledgements.clear(),
-        }
-        assert_eq!(
-            ErasureCoordinatorRecordV1::from_parts(parts, reference(2)),
-            Err(ErasureErrorV1::PolicyConflict)
-        );
-    }
+    reject_terminal_receipt_mutation(&record, |receipt| {
+        receipt.0.terminal_state = reference(99);
+    })?;
+    reject_terminal_receipt_mutation(&record, |receipt| {
+        receipt.0.lifecycle = ErasureLifecycleV1::PartialFailure;
+    })?;
+    reject_terminal_receipt_mutation(&record, |receipt| {
+        receipt.0.coordinator = reference(99);
+    })?;
+    reject_terminal_receipt_mutation(&record, |receipt| {
+        receipt.0.request = reference(99);
+    })?;
+    reject_terminal_receipt_mutation(&record, |receipt| {
+        receipt.0.required_targets.clear();
+    })?;
+    reject_terminal_receipt_mutation(&record, |receipt| {
+        receipt.0.acknowledgements.clear();
+    })?;
 
     let mut altered_state = record_parts(&record);
     altered_state.state.pending_owners = vec![reference(99)];
