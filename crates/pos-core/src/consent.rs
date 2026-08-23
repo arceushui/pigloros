@@ -563,11 +563,14 @@ impl ConsentAuthority {
             revocation.grantee_id,
             revocation.grant_seq,
         );
-        let sessions = self
-            .active
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !sessions.contains_key(&key) {
+        let active = {
+            let sessions = self
+                .active
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            sessions.contains_key(&key)
+        };
+        if !active {
             return Err(ConsentError::NoConsent);
         }
         Ok(())
@@ -584,14 +587,16 @@ impl ConsentAuthority {
             revocation.grantee_id,
             revocation.grant_seq,
         );
-        let mut sessions = self
-            .active
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(active) = sessions.get_mut(&key) else {
-            return Err(ConsentError::NoConsent);
-        };
-        active.token.fence_seq = active.token.fence_seq.min(revocation.fence_seq);
+        {
+            let mut sessions = self
+                .active
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(active) = sessions.get_mut(&key) else {
+                return Err(ConsentError::NoConsent);
+            };
+            active.token.fence_seq = active.token.fence_seq.min(revocation.fence_seq);
+        }
         Ok(())
     }
 

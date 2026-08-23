@@ -542,6 +542,7 @@ impl StoreExecutor {
             Err(poisoned) => poisoned.into_inner(),
         };
         *join = Some(worker);
+        drop(join);
         Self { control }
     }
 

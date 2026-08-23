@@ -1470,6 +1470,7 @@ impl BacktestRunner {
             .and_then(|(events, ancestry)| {
                 eval_registry
                     .restore_driver_state(&ancestry, &events)
+                    .map_err(ExperimentError::from)
                     .map(|()| events)
             }) {
             Ok(events) => events,

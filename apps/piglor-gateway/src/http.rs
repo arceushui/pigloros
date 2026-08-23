@@ -357,7 +357,8 @@ impl IntoResponse for GatewayError {
             | Self::InvalidPageLimit { .. }
             | Self::InvalidEventsQuery(_)
             | Self::ConsentCodec(_)
-            | Self::ConsentGrantSequenceMismatch => StatusCode::BAD_REQUEST,
+            | Self::ConsentGrantSequenceMismatch
+            | Self::ConsentRevocationFenceMismatch => StatusCode::BAD_REQUEST,
             Self::ActionRejected(ar) => match ar {
                 ActionRejected::UnknownEventType => StatusCode::BAD_REQUEST,
                 ActionRejected::CapabilityNotGranted => StatusCode::FORBIDDEN,
@@ -1348,6 +1349,8 @@ osf_link = \"https://osf.io/example\"\n";
         .into_response();
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
         let r = GatewayError::InvalidEventsQuery("bad".into()).into_response();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        let r = GatewayError::ConsentRevocationFenceMismatch.into_response();
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
         let r = GatewayError::TimelineLimitReached { maximum: 1 }.into_response();
         assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
