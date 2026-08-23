@@ -14,7 +14,7 @@ use pos_core::{
     crypto::Hash,
     event::{EventDraft, Kind},
     ids::EntityId,
-    ReproManifest, Timeline,
+    ConsentAuthority, ConsentCapabilityToken, ReproManifest, Timeline,
 };
 use pos_runtime::PluginRegistry;
 use pos_store::{open_store, StoreConfig};
@@ -169,6 +169,8 @@ pub struct ExperimentSession {
     last_simulation_time_ns: Option<u128>,
     consent_revoked: bool,
     consent_revocation_pending: Option<String>,
+    operation_token: Option<ConsentCapabilityToken>,
+    operation_now_secs: u64,
 }
 
 /// Result of one interactive tick-boundary attempt.
@@ -640,6 +642,13 @@ impl Experiment {
         self
     }
 
+    /// Bind the host-owned consent authority used for protected Tick Boundaries.
+    #[must_use]
+    pub fn with_consent_authority(mut self, authority: ConsentAuthority) -> Self {
+        self.registry = self.registry.with_consent_authority(authority);
+        self
+    }
+
     /// Register a plugin (wires schemas + reducer + driver).
     ///
     /// # Errors
@@ -730,6 +739,8 @@ impl Experiment {
             last_simulation_time_ns: None,
             consent_revoked: false,
             consent_revocation_pending: None,
+            operation_token: None,
+            operation_now_secs: 0,
         })
     }
 
@@ -818,6 +829,8 @@ impl Experiment {
             last_simulation_time_ns: None,
             consent_revoked,
             consent_revocation_pending: None,
+            operation_token: None,
+            operation_now_secs: 0,
         })
     }
 
@@ -873,6 +886,18 @@ impl ExperimentSession {
     #[must_use]
     pub const fn timeline(&self) -> &Timeline {
         &self.timeline
+    }
+
+    /// Bind a timeline-issued capability for protected Tick Boundaries.
+    #[must_use]
+    pub fn with_protected_token(
+        mut self,
+        token: ConsentCapabilityToken,
+        now_secs: u64,
+    ) -> Self {
+        self.operation_token = Some(token);
+        self.operation_now_secs = now_secs;
+        self
     }
 
     /// Advance one complete tick.
@@ -1086,13 +1111,30 @@ impl ExperimentSession {
 
         let (mut folded_events, committed_events) = self.prepare_tick()?;
 
-        let selected = match request {
-            StepRequest::AllDrivers => self.registry.step_all_anchored_with_events(
+        let selected = match (request, self.operation_token.clone()) {
+            (StepRequest::AllDrivers, Some(token)) => self.registry.step_all_anchored_protected(
+                self.timeline.id(),
+                self.boundary.folded_through,
+                token,
+                self.operation_now_secs,
+                &committed_events,
+            ),
+            (StepRequest::Cadenced(now_ns), Some(token)) => self
+                .registry
+                .tick_cadenced_anchored_protected(
+                    self.timeline.id(),
+                    now_ns,
+                    self.boundary.folded_through,
+                    token,
+                    self.operation_now_secs,
+                    &committed_events,
+                ),
+            (StepRequest::AllDrivers, None) => self.registry.step_all_anchored_with_events(
                 self.timeline.id(),
                 self.boundary.folded_through,
                 &committed_events,
             ),
-            StepRequest::Cadenced(now_ns) => self.registry.tick_cadenced_anchored_with_events(
+            (StepRequest::Cadenced(now_ns), None) => self.registry.tick_cadenced_anchored_with_events(
                 self.timeline.id(),
                 now_ns,
                 self.boundary.folded_through,
@@ -1114,7 +1156,7 @@ impl ExperimentSession {
         }
         let emitted_events = if drafts.is_empty() {
             self.registry
-                .commit_step_at(self.boundary.folded_through, 0)?;
+                .commit_step_at(self.boundary.folded_through, self.operation_now_secs)?;
             0
         } else {
             match lock_store(&self.store)
@@ -1123,7 +1165,12 @@ impl ExperimentSession {
                         .logical_head(self.timeline.id())
                         .map_err(ExperimentError::from)?;
                     self.registry
-                        .append_and_commit_step_at(store.as_mut(), head, 0, &drafts)
+                        .append_and_commit_step_at(
+                            store.as_mut(),
+                            head,
+                            self.operation_now_secs,
+                            &drafts,
+                        )
                         .map_err(ExperimentError::from)
                 })
                 .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
@@ -1298,6 +1345,8 @@ impl ExperimentSession {
                 last_simulation_time_ns: None,
                 consent_revoked: self.consent_revoked,
                 consent_revocation_pending: self.consent_revocation_pending.clone(),
+                operation_token: None,
+                operation_now_secs: 0,
             })
     }
 

@@ -1,6 +1,9 @@
 use piglor_gateway::{router, ActionPrincipal, AppState, Gateway, LedgerWriteMode};
 use piglor_ledger::LedgerView;
-use pos_core::{Capability, EntityId, Kind, Plugin, PluginId, TimelineId, WallTime};
+use pos_core::{
+    Capability, ConsentAuthority, ConsentGranted, EntityId, Kind, Plugin, PluginId, TimelineId,
+    WallTime,
+};
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition, TickOutcome};
 use pos_plugin_agent::{
     AgentAction, AgentContext, AgentDriver, AgentPlugin, AgentPolicy, AgentReducer,
@@ -411,7 +414,10 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
 
 fn register_experiment(
     scenario: &mut MultiRateScenario,
-) -> Result<Experiment, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<
+    (Experiment, pos_core::ConsentCapabilityToken),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
     let observation = FixturePlugin::new("observation", false, true);
     let society = SocietyPlugin::new();
     let fast = AgentPlugin::new();
@@ -473,7 +479,21 @@ fn register_experiment(
             )),
         )
         .test_ok()?;
-    Ok(experiment)
+    let authority = ConsentAuthority::new();
+    let grant = ConsentGranted {
+        subject_id: scenario.human_entity,
+        grantee_id: EntityId::new(),
+        purpose: "multi-rate-projection-observation".to_owned(),
+        modalities: 0,
+        min_geo_resolution: 0,
+        fork_permitted: false,
+        export_permitted: false,
+        retention_days: 0,
+        expiry_secs: 0,
+        grant_seq: 1,
+    };
+    let token = authority.record_grant_on_timeline(scenario.timeline, &grant);
+    Ok((experiment.with_consent_authority(authority), token))
 }
 
 async fn run_tick_boundaries(
@@ -738,8 +758,11 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
 async fn multi_rate_human_ai_replay_is_deterministic_impl(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut scenario = create_scenario().await?;
-    let experiment = register_experiment(&mut scenario)?;
-    let session = experiment.resume(scenario.timeline).test_ok()?;
+    let (experiment, token) = register_experiment(&mut scenario)?;
+    let session = experiment
+        .resume(scenario.timeline)
+        .test_ok()?
+        .with_protected_token(token, 0);
     let (session, pinned_wall_time) = run_tick_boundaries(&mut scenario, session).await?;
     let polled = poll_events(scenario.address, scenario.timeline).await?;
     assert_event_order(
