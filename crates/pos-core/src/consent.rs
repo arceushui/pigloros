@@ -591,6 +591,9 @@ impl ConsentAuthority {
     }
 
     /// Confirm that a durable revocation names an active session on a Timeline.
+    ///
+    /// # Errors
+    /// Returns [`ConsentError::NoConsent`] when no active session matches.
     pub fn validate_revocation_on_timeline(
         &self,
         timeline_id: TimelineId,
@@ -635,6 +638,9 @@ impl ConsentAuthority {
     }
 
     /// Apply a durable revocation to its matching Timeline-bound session.
+    ///
+    /// # Errors
+    /// Returns [`ConsentError::NoConsent`] when no active session matches.
     pub fn record_revocation_on_timeline(
         &self,
         timeline_id: TimelineId,
@@ -686,6 +692,10 @@ impl ConsentAuthority {
     }
 
     /// Revalidate an exact host session against its bound Timeline.
+    ///
+    /// # Errors
+    /// Returns [`ConsentError::NoConsent`] for a mismatched authority, token,
+    /// or Timeline; otherwise returns revocation or expiry errors.
     pub fn validate_on_timeline(
         &self,
         timeline_id: TimelineId,
@@ -745,11 +755,12 @@ impl ConsentAuthority {
             match event.event_type.as_str() {
                 EVENT_TYPE_CONSENT_GRANTED_V1 => {
                     let grant = ConsentGranted::decode(&event.payload)?;
-                    let _ = self.record_grant_on_timeline(timeline_id, &grant);
+                    let _token = self.record_grant_on_timeline(timeline_id, &grant);
                 }
                 EVENT_TYPE_CONSENT_REVOKED_V1 => {
                     let revocation = ConsentRevoked::decode(&event.payload)?;
-                    let _ = self.record_revocation_with_timeline(timeline_id, &revocation);
+                    let _revocation =
+                        self.record_revocation_with_timeline(timeline_id, &revocation);
                 }
                 _ => {}
             }
@@ -824,19 +835,21 @@ impl ConsentGate for ConsentAuthority {
         if is_consent_event_type(event_type) {
             return Err(ConsentError::ConsentEventsForbidden);
         }
-        let sessions = self
-            .active
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let candidates = sessions.values().filter(|active| {
-            active.token.timeline_id == timeline_id && active.token.subject_id == subject
-        });
-        for active in candidates {
-            if active.token.is_valid_at(timeline_head) {
-                return Ok(active.token.clone());
-            }
-        }
-        Err(ConsentError::NoConsent)
+        let candidate = {
+            let sessions = self
+                .active
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            sessions
+                .values()
+                .find(|active| {
+                    active.token.timeline_id == timeline_id
+                        && active.token.subject_id == subject
+                        && active.token.is_valid_at(timeline_head)
+                })
+                .map(|active| active.token.clone())
+        };
+        candidate.ok_or(ConsentError::NoConsent)
     }
 
     fn validate_token(
