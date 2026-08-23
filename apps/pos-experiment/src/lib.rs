@@ -5485,8 +5485,14 @@ mod fault_injection_tests {
             });
         }
         session.revoke_consent_at_boundary();
-        assert!(matches!(session.step_tick(), Err(ExperimentError::Store(_))));
-        assert!(matches!(session.step_tick(), Err(ExperimentError::SessionFaulted)));
+        assert!(matches!(
+            session.step_tick(),
+            Err(ExperimentError::Store(_))
+        ));
+        assert!(matches!(
+            session.step_tick(),
+            Err(ExperimentError::SessionFaulted)
+        ));
     }
 
     #[test]
@@ -5510,8 +5516,14 @@ mod fault_injection_tests {
             });
         }
         session.revoke_consent_at_boundary();
-        assert!(matches!(session.step_tick(), Err(ExperimentError::Store(_))));
-        assert!(matches!(session.step_tick(), Err(ExperimentError::SessionFaulted)));
+        assert!(matches!(
+            session.step_tick(),
+            Err(ExperimentError::Store(_))
+        ));
+        assert!(matches!(
+            session.step_tick(),
+            Err(ExperimentError::SessionFaulted)
+        ));
     }
 
     #[test]
