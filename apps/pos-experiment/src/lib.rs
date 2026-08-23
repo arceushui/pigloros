@@ -3498,10 +3498,10 @@ mod tests {
             }
             TransactionCase::PostCaptureFailure => {
                 assert!(result.is_err(), "{path:?} {case:?}");
-                assert_eq!(state.commits, 1, "{path:?} {case:?}");
-                assert_eq!(state.committed_tick, 1, "{path:?} {case:?}");
-                assert_eq!(state.aborts, 0, "{path:?} {case:?}");
-                assert_eq!(state.capture_commits, [0, 1], "{path:?} {case:?}");
+                assert_eq!(state.commits, 0, "{path:?} {case:?}");
+                assert_eq!(state.committed_tick, 0, "{path:?} {case:?}");
+                assert_eq!(state.aborts, 1, "{path:?} {case:?}");
+                assert_eq!(state.capture_commits, [0], "{path:?} {case:?}");
             }
         }
         drop(state);
