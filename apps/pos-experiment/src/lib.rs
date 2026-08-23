@@ -3698,7 +3698,7 @@ mod tests {
         let database = tempfile::NamedTempFile::new().test_ok();
         let path = database.path().to_str().test_ok().to_owned();
         let entity = EntityId::new();
-        let plugin = make_plugin("consent-ticker", &["consent.event"]);
+        let plugin = make_plugin("consent-ticker", &["experiment.tick"]);
         let plugin_id = plugin.id;
         let store_config = StoreConfig::Sqlite { path };
         let config = ExperimentConfig {
@@ -3711,7 +3711,7 @@ mod tests {
             .register(
                 &plugin,
                 None,
-                Some(Box::new(FixedDriver::new(entity, "consent.event", 1))),
+                Some(Box::new(FixedDriver::new(entity, "experiment.tick", 1))),
             )
             .test_ok();
         let mut session = experiment.start().test_ok();
@@ -3728,7 +3728,7 @@ mod tests {
         assert!(matches!(
             session.append_events(&[EventDraft::new(
                 entity,
-                Kind::new("consent.event"),
+                Kind::new("experiment.tick"),
                 CanonicalBytes::from_static(b"blocked"),
             )]),
             Err(ExperimentError::ConsentRevoked)
@@ -3747,7 +3747,7 @@ mod tests {
         let resumed_plugin = TestPlugin {
             id: plugin_id,
             name: "consent-ticker",
-            event_types: vec![Kind::new("consent.event")],
+            event_types: vec![Kind::new("experiment.tick")],
             has_reducer: false,
         };
         let mut recovery = Experiment::new(ExperimentConfig {
@@ -3759,7 +3759,7 @@ mod tests {
             .register(
                 &resumed_plugin,
                 None,
-                Some(Box::new(FixedDriver::new(entity, "consent.event", 1))),
+                Some(Box::new(FixedDriver::new(entity, "experiment.tick", 1))),
             )
             .test_ok();
         let resumed_result = recovery.resume(timeline_id);
@@ -3777,7 +3777,7 @@ mod tests {
         assert!(matches!(
             resumed.append_events(&[EventDraft::new(
                 entity,
-                Kind::new("consent.event"),
+                Kind::new("experiment.tick"),
                 CanonicalBytes::from_static(b"still-blocked"),
             )]),
             Err(ExperimentError::ConsentRevoked)
