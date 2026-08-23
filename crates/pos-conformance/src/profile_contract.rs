@@ -3162,6 +3162,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn public_profile_and_request_codecs_reject_nested_malformed_records() {
         let reject_profile = |value: Value| {
             let bytes = encode_value(&value).unwrap_or_default();
