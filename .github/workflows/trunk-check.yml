@@ -31,5 +31,6 @@ jobs:
 
       - name: Trunk Check
         uses: trunk-io/trunk-action@e1234e67a86010d61ddac8d8ebf4b783e2ffd2fa # v2.0.0
-        with:
-          check-mode: all
+        # Leave check-mode unset so Trunk autodetects the PR diff and bounds
+        # its rustfmt invocation to changed files. The required `fmt` job
+        # still runs the repository-wide `cargo fmt --all -- --check` gate.
