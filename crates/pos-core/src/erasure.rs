@@ -2327,6 +2327,31 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn coordinator_and_receipt_reject_each_public_injected_or_stale_seam() -> Result<(), ErasureErrorV1> {
+        let ack = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
+        let port = TestCoordinatorPort { accepted: true, targets: vec![ack.target] };
+        let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+        coordinator.submit(request()?, reference(3))?;
+        assert_eq!(coordinator.advance(reference(1), change(ErasureLifecycleV1::Submitted, None, Vec::new(), Vec::new()))?.lifecycle(), ErasureLifecycleV1::Submitted);
+        assert_eq!(coordinator.advance(reference(1), change(ErasureLifecycleV1::AccessFrozen, Some(10), Vec::new(), Vec::new())), Err(ErasureErrorV1::PolicyConflict));
+        assert_eq!(coordinator.freeze_inventory(reference(1), change(ErasureLifecycleV1::AccessFrozen, Some(10), Vec::new(), Vec::new())), Err(ErasureErrorV1::PolicyConflict));
+        assert_eq!(coordinator.acknowledge(reference(1), ack), Err(ErasureErrorV1::PolicyConflict));
+        assert_eq!(coordinator.finalize(reference(1), receipt_input(ErasureLifecycleV1::Complete, vec![ack], Vec::new(), Vec::new())), Err(ErasureErrorV1::PolicyConflict));
+        let mut stale_issue = receipt_input(ErasureLifecycleV1::Complete, vec![ack], Vec::new(), Vec::new());
+        stale_issue.issue_position = 9;
+        assert_eq!(ErasureReceiptV1::new(stale_issue), Err(ErasureErrorV1::PolicyConflict));
+        let mut invented_ack = receipt_input(ErasureLifecycleV1::Complete, vec![ack], Vec::new(), Vec::new());
+        invented_ack.acknowledgements[0].target = acknowledgement(2, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+        assert_eq!(ErasureReceiptV1::new(invented_ack), Err(ErasureErrorV1::ScopeInvalid));
+        let mut missing_inventory = receipt_input(ErasureLifecycleV1::Complete, vec![ack], Vec::new(), Vec::new());
+        missing_inventory.inventories.artifacts.clear();
+        assert_eq!(ErasureReceiptV1::new(missing_inventory), Err(ErasureErrorV1::ScopeInvalid));
+        for invalid in [&[0x18, 0][..], &[0x1a, 0, 0, 0, 1][..], &[0x60, 0][..]] {
+            assert_eq!(ErasureReceiptV1::from_canonical_cbor(invalid), Err(ErasureErrorV1::InvalidEncoding));
+        }
+        Ok(())
+    }
+    #[test]
     fn request_is_canonical_and_bounded() -> Result<(), ErasureErrorV1> {
         let first = request()?;
         let second = ErasureRequestV1::new(request_input(vec![reference(7), reference(8)]))?;
