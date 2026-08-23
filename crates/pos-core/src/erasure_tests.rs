@@ -464,6 +464,7 @@ fn coordinator_finalize_from_dispatched_state_admits_partial_receipt() -> Result
         Vec::new(),
     );
     input.terminal_state = terminal.state_digest();
+    input.required_targets = vec![target];
     input.provenance = reference(9);
     input.inventories.artifacts = vec![inventory_result(target)];
     assert_eq!(
@@ -705,10 +706,8 @@ fn coordinator_freezes_closure_and_commits_only_derived_terminal_outcomes(
 #[test]
 fn coordinator_rejects_conflicting_first_finalize_and_retries() -> Result<(), ErasureErrorV1> {
     let ack = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
-    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
-        test_port(true, vec![ack.target]),
-        reference(2),
-    );
+    let mut coordinator =
+        ErasureCoordinatorStateMachineV1::new(test_port(true, vec![ack.target]), reference(2));
     coordinator.submit(request()?, reference(3))?;
     coordinator.authorize(reference(1), reference(9))?;
     coordinator.freeze_inventory(
