@@ -1015,7 +1015,7 @@ pub struct IndependenceEvidenceV1 {
 }
 
 /// One public conformance case. The wire representation is the exact
-/// Fourteen-field public conformance case record.
+/// Sixteen-field public conformance case record.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaseOutcomeV1 {
@@ -1025,7 +1025,9 @@ pub struct CaseOutcomeV1 {
     pub mode: ExecutionModeV1,
     pub claim_layer: ClaimLayerV1,
     pub outcome: CaseOutcomeStatusV1,
-    pub first_coordinate: Option<String>,
+    pub verification_outcome: VerificationOutcomeV1,
+    pub divergence_kind: Option<DivergenceMismatchKindV1>,
+    pub first_coordinate: Option<Vec<u8>>,
     pub expected_digest: Option<[u8; 32]>,
     pub actual_digest: Option<[u8; 32]>,
     pub expected_error: Option<SafeErrorCodeV1>,
@@ -3455,7 +3457,13 @@ pub mod strict_codec {
             enum_mode(case.mode),
             enum_claim_layer(case.claim_layer),
             enum_case_outcome(case.outcome),
-            optional(case.first_coordinate.as_deref().map(text)),
+            enum_verification_outcome(case.verification_outcome),
+            optional(case.divergence_kind.map(enum_divergence_mismatch)),
+            optional(
+                case.first_coordinate
+                    .as_ref()
+                    .map(|coordinate| Value::Bytes(coordinate.clone())),
+            ),
             optional(case.expected_digest.as_ref().map(digest)),
             optional(case.actual_digest.as_ref().map(digest)),
             optional_safe_error(case.expected_error),
@@ -3467,7 +3475,7 @@ pub mod strict_codec {
     }
 
     fn decode_case(value: &Value) -> Result<CaseOutcomeV1, StrictCborError> {
-        let fields = array(value, "case_outcome", 14)?;
+        let fields = array(value, "case_outcome", 16)?;
         Ok(CaseOutcomeV1 {
             case_id: string(&fields[0], "case_id")?,
             fixture_digest: bytes(&fields[1], "case_fixture")?,
@@ -3475,22 +3483,32 @@ pub mod strict_codec {
             mode: decode_mode(&fields[3])?,
             claim_layer: decode_claim_layer(&fields[4])?,
             outcome: decode_case_outcome(&fields[5])?,
-            first_coordinate: optional_string(&fields[6], "case_coordinate")?,
-            expected_digest: if matches!(fields[7], Value::Null) {
+            verification_outcome: decode_verification_outcome(&fields[6])?,
+            divergence_kind: if matches!(fields[7], Value::Null) {
                 None
             } else {
-                Some(bytes(&fields[7], "case_expected_digest")?)
+                Some(decode_divergence_mismatch(&fields[7])?)
             },
-            actual_digest: if matches!(fields[8], Value::Null) {
+            first_coordinate: if matches!(fields[8], Value::Null) {
                 None
             } else {
-                Some(bytes(&fields[8], "case_actual_digest")?)
+                Some(bytes(&fields[8], "case_coordinate")?)
             },
-            expected_error: decode_optional_safe_error(&fields[9])?,
-            actual_error: decode_optional_safe_error(&fields[10])?,
-            replay_claim: decode_replay_claim(&fields[11])?,
-            redaction_state: decode_redaction_state(&fields[12])?,
-            provenance_digest: bytes(&fields[13], "case_provenance")?,
+            expected_digest: if matches!(fields[9], Value::Null) {
+                None
+            } else {
+                Some(bytes(&fields[9], "case_expected_digest")?)
+            },
+            actual_digest: if matches!(fields[10], Value::Null) {
+                None
+            } else {
+                Some(bytes(&fields[10], "case_actual_digest")?)
+            },
+            expected_error: decode_optional_safe_error(&fields[11])?,
+            actual_error: decode_optional_safe_error(&fields[12])?,
+            replay_claim: decode_replay_claim(&fields[13])?,
+            redaction_state: decode_redaction_state(&fields[14])?,
+            provenance_digest: bytes(&fields[15], "case_provenance")?,
         })
     }
 
@@ -4141,7 +4159,7 @@ pub mod strict_codec {
                 reject_each_field(&case_value, decode_case);
 
                 let mut case_with_all_optionals = contract.conformance_report.cases[0].clone();
-                case_with_all_optionals.first_coordinate = Some("tick=1".to_owned());
+                case_with_all_optionals.first_coordinate = Some(b"tick=1".to_vec());
                 case_with_all_optionals.expected_digest = Some([24; 32]);
                 case_with_all_optionals.actual_digest = Some([25; 32]);
                 case_with_all_optionals.expected_error = Some(SafeErrorCodeV1::DigestMismatch);
@@ -6440,6 +6458,8 @@ pub mod tests {
                 mode: ExecutionModeV1::AirGapped,
                 claim_layer: ClaimLayerV1::ReplayConformance,
                 outcome: CaseOutcomeStatusV1::Pass,
+                verification_outcome: VerificationOutcomeV1::VerifiedExact,
+                divergence_kind: None,
                 first_coordinate: None,
                 expected_digest: Some([14; 32]),
                 actual_digest: Some([14; 32]),
@@ -6456,6 +6476,8 @@ pub mod tests {
                 mode: ExecutionModeV1::Local,
                 claim_layer: ClaimLayerV1::ReplayConformance,
                 outcome: CaseOutcomeStatusV1::Pass,
+                verification_outcome: VerificationOutcomeV1::VerifiedExact,
+                divergence_kind: None,
                 first_coordinate: None,
                 expected_digest: Some([14; 32]),
                 actual_digest: Some([14; 32]),
@@ -7796,7 +7818,7 @@ pub mod tests {
 
             let mut invalid_coordinate = report_cases.clone();
             invalid_coordinate.contract.conformance_report.cases[0].first_coordinate =
-                Some("x".repeat(129));
+                Some(vec![b'x'; 129]);
             assert_eq!(
                 verify_wave8_contract(&invalid_coordinate),
                 Err(EvidenceError::InvalidConformanceReport)

@@ -5,8 +5,9 @@
 //! evaluator identity, independence evidence, and lifecycle claim.
 
 use crate::{
-    CaseOutcomeStatusV1, CaseOutcomeV1, ClaimLayerV1, ExecutionModeV1, ImplementationIdentityV1,
-    IndependenceEvidenceV1, RedactionStateV1, ReplayClaimV1, SafeErrorCodeV1,
+    CaseOutcomeStatusV1, CaseOutcomeV1, ClaimLayerV1, DivergenceMismatchKindV1, ExecutionModeV1,
+    ImplementationIdentityV1, IndependenceEvidenceV1, RedactionStateV1, ReplayClaimV1,
+    SafeErrorCodeV1, VerificationOutcomeV1,
 };
 use ciborium::value::Value;
 use std::io::Cursor;
@@ -111,7 +112,7 @@ pub enum ExpectedResultV1 {
     },
     TypedFailure(SafeErrorCodeV1),
     AllowedDivergence {
-        classification: u8,
+        classification: DivergenceMismatchKindV1,
         first_coordinate: Vec<u8>,
     },
 }
@@ -119,7 +120,7 @@ pub enum ExpectedResultV1 {
 /// One profile-approved classified divergence and its first canonical coordinate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AllowedDivergenceV1 {
-    pub classification: u8,
+    pub classification: DivergenceMismatchKindV1,
     pub first_coordinate: Vec<u8>,
 }
 
@@ -167,6 +168,7 @@ pub struct FixtureDescriptorV1 {
     pub subject_adapter: SubjectAdapterKindV1,
     pub inputs: Vec<FixtureInputMemberV1>,
     pub expected: ExpectedResultV1,
+    pub expected_verification_outcome: VerificationOutcomeV1,
     pub expected_verification_error: Option<SafeErrorCodeV1>,
     pub replay_claim: ReplayClaimV1,
     pub redaction_state: RedactionStateV1,
@@ -425,7 +427,7 @@ impl EvaluatorRequestV1 {
 
 fn validate_profile(profile: &ConformanceProfileV1) -> Result<(), ConformanceContractError> {
     if !bounded_text(&profile.profile_id, MAX_STRING_BYTES)
-        || !bounded_text(&profile.semantic_version, MAX_STRING_BYTES)
+        || !semantic_version(&profile.semantic_version)
         || zero_digest(&profile.normative_spec_digest)
         || zero_digest(&profile.compatibility_digest)
         || zero_digest(&profile.limitations_digest)
@@ -433,12 +435,18 @@ fn validate_profile(profile: &ConformanceProfileV1) -> Result<(), ConformanceCon
         || profile.execution_profile_digests.is_empty()
         || profile.execution_profile_digests.len() > MAX_EXECUTION_PROFILES
         || profile.fixtures.len() > MAX_FIXTURES
-        || !strictly_ordered(&profile.execution_profile_digests)
-        || !strictly_ordered(&profile.public_schema_digests)
         || profile.execution_profile_digests.iter().any(zero_digest)
         || profile.public_schema_digests.iter().any(zero_digest)
+        || profile
+            .previous_profile_digest
+            .is_some_and(|digest| zero_digest(&digest))
     {
         return Err(ConformanceContractError::FieldOutOfBounds);
+    }
+    if !strictly_ordered(&profile.execution_profile_digests)
+        || !strictly_ordered(&profile.public_schema_digests)
+    {
+        return Err(ConformanceContractError::NonCanonicalOrder);
     }
     validate_protocol(&profile.evaluator_protocol)
         .and_then(|()| validate_independence_requirements(&profile.independence_requirements))
@@ -465,9 +473,11 @@ fn validate_fixtures(profile: &ConformanceProfileV1) -> Result<(), ConformanceCo
         return Err(ConformanceContractError::NonCanonicalOrder);
     }
     profile.fixtures.iter().try_for_each(|fixture| {
-        validate_fixture(fixture, profile).and_then(|()| {
-            validate_expected_result(&fixture.expected, &profile.allowed_divergences)
-        })
+        validate_fixture(fixture, profile)
+            .and_then(|()| {
+                validate_expected_result(&fixture.expected, &profile.allowed_divergences)
+            })
+            .and_then(|()| validate_fixture_verification_outcome(fixture))
     })
 }
 
@@ -485,11 +495,6 @@ fn validate_fixture(
             .public_schema_digests
             .contains(&fixture.public_schema_digest)
         || fixture.modes.is_empty()
-        || !strictly_ordered(&fixture.modes)
-        || fixture
-            .inputs
-            .windows(2)
-            .any(|pair| pair[0].member_id >= pair[1].member_id)
     {
         return Err(if zero_digest(&fixture.public_schema_digest) {
             ConformanceContractError::FieldOutOfBounds
@@ -506,6 +511,14 @@ fn validate_fixture(
         } else {
             ConformanceContractError::FieldOutOfBounds
         });
+    }
+    if !strictly_ordered(&fixture.modes)
+        || fixture
+            .inputs
+            .windows(2)
+            .any(|pair| pair[0].member_id >= pair[1].member_id)
+    {
+        return Err(ConformanceContractError::NonCanonicalOrder);
     }
     fixture
         .inputs
@@ -603,6 +616,8 @@ fn case_matches_fixture(case: &CaseOutcomeV1, fixture: &FixtureDescriptorV1) -> 
         || case.claim_layer != fixture.claim_layer
         || case.execution_profile_digest != fixture.execution_profile_digest
         || case.outcome != CaseOutcomeStatusV1::Pass
+        || case.expected_error != fixture.expected_verification_error
+        || case.actual_error != fixture.expected_verification_error
         || case.replay_claim != fixture.replay_claim
         || case.redaction_state != fixture.redaction_state
         || case.provenance_digest != fixture_provenance_digest(&fixture.provenance)
@@ -611,18 +626,23 @@ fn case_matches_fixture(case: &CaseOutcomeV1, fixture: &FixtureDescriptorV1) -> 
     }
     match &fixture.expected {
         ExpectedResultV1::CanonicalBytes { digest, .. } => {
-            case.expected_digest == Some(*digest) && case.actual_digest == Some(*digest)
+            case.verification_outcome == VerificationOutcomeV1::VerifiedExact
+                && case.expected_digest == Some(*digest)
+                && case.actual_digest == Some(*digest)
         }
         ExpectedResultV1::TypedFailure(error) => {
-            case.expected_error == Some(*error) && case.actual_error == Some(*error)
+            case.verification_outcome == fixture.expected_verification_outcome
+                && case.expected_error == Some(*error)
+                && case.actual_error == Some(*error)
         }
         ExpectedResultV1::AllowedDivergence {
-            classification: _,
+            classification,
             first_coordinate,
-        } => case
-            .first_coordinate
-            .as_ref()
-            .is_some_and(|coordinate| coordinate.as_bytes() == first_coordinate),
+        } => {
+            case.verification_outcome == VerificationOutcomeV1::Diverged
+                && case.divergence_kind == Some(*classification)
+                && case.first_coordinate.as_ref() == Some(first_coordinate)
+        }
     }
 }
 
@@ -826,6 +846,31 @@ fn validate_expected_result(
     }
 }
 
+fn validate_fixture_verification_outcome(
+    fixture: &FixtureDescriptorV1,
+) -> Result<(), ConformanceContractError> {
+    match (
+        &fixture.expected,
+        fixture.expected_verification_outcome,
+        fixture.expected_verification_error,
+    ) {
+        (ExpectedResultV1::CanonicalBytes { .. }, VerificationOutcomeV1::VerifiedExact, None)
+        | (ExpectedResultV1::AllowedDivergence { .. }, VerificationOutcomeV1::Diverged, None) => {
+            Ok(())
+        }
+        (ExpectedResultV1::TypedFailure(error), outcome, Some(expected_error))
+            if *error == expected_error
+                && !matches!(
+                    outcome,
+                    VerificationOutcomeV1::VerifiedExact | VerificationOutcomeV1::Diverged
+                ) =>
+        {
+            Ok(())
+        }
+        _ => Err(ConformanceContractError::ExpectedResultMissing),
+    }
+}
+
 fn validate_allowed_divergences(
     values: &[AllowedDivergenceV1],
 ) -> Result<(), ConformanceContractError> {
@@ -850,6 +895,16 @@ const fn bounded_text(value: &str, maximum: usize) -> bool {
 
 const fn bounded_ascii(value: &str, maximum: usize) -> bool {
     bounded_text(value, maximum) && value.is_ascii()
+}
+
+fn semantic_version(value: &str) -> bool {
+    let mut components = value.split('.');
+    components.clone().count() == 3
+        && components.all(|component| {
+            !component.is_empty()
+                && component.len() <= 10
+                && component.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 
 fn zero_digest(value: &[u8; 32]) -> bool {
@@ -931,6 +986,7 @@ fn encode_fixture(value: &FixtureDescriptorV1) -> Value {
         adapter(value.subject_adapter),
         Value::Array(value.inputs.iter().map(encode_input).collect()),
         encode_expected(&value.expected),
+        verification_outcome(value.expected_verification_outcome),
         optional(value.expected_verification_error.map(safe_error)),
         replay_claim(value.replay_claim),
         redaction(value.redaction_state),
@@ -978,7 +1034,7 @@ fn encode_expected(value: &ExpectedResultV1) -> Value {
             Value::Null,
             Value::Null,
             Value::Array(vec![
-                uint(u64::from(*classification)),
+                divergence_mismatch(*classification),
                 Value::Bytes(first_coordinate.clone()),
             ]),
         ]),
@@ -987,7 +1043,7 @@ fn encode_expected(value: &ExpectedResultV1) -> Value {
 
 fn encode_divergence(value: &AllowedDivergenceV1) -> Value {
     Value::Array(vec![
-        uint(u64::from(value.classification)),
+        divergence_mismatch(value.classification),
         Value::Bytes(value.first_coordinate.clone()),
     ])
 }
@@ -1133,7 +1189,7 @@ fn decode_profile(value: &Value) -> Result<ConformanceProfileV1, ConformanceCont
 }
 
 fn decode_fixture(value: &Value) -> Result<FixtureDescriptorV1, ConformanceContractError> {
-    let fields = array(value, 16)?;
+    let fields = array(value, 17)?;
     Ok(FixtureDescriptorV1 {
         case_id: text_value(&fields[0])?,
         mandatory: bool_value(&fields[1])?,
@@ -1150,13 +1206,14 @@ fn decode_fixture(value: &Value) -> Result<FixtureDescriptorV1, ConformanceContr
             .map(decode_input)
             .collect::<Result<Vec<_>, _>>()?,
         expected: decode_expected(&fields[8])?,
-        expected_verification_error: optional_safe_error(&fields[9])?,
-        replay_claim: decode_replay_claim(&fields[10])?,
-        redaction_state: decode_redaction(&fields[11])?,
-        bounds: decode_bounds(&fields[12])?,
-        capability_policy: decode_capability_policy(&fields[13])?,
-        provenance: decode_fixture_provenance(&fields[14])?,
-        compatibility_digest: digest_value(&fields[15])?,
+        expected_verification_outcome: decode_verification_outcome(&fields[9])?,
+        expected_verification_error: optional_safe_error(&fields[10])?,
+        replay_claim: decode_replay_claim(&fields[11])?,
+        redaction_state: decode_redaction(&fields[12])?,
+        bounds: decode_bounds(&fields[13])?,
+        capability_policy: decode_capability_policy(&fields[14])?,
+        provenance: decode_fixture_provenance(&fields[15])?,
+        compatibility_digest: digest_value(&fields[16])?,
     })
 }
 
@@ -1183,8 +1240,7 @@ fn decode_expected(value: &Value) -> Result<ExpectedResultV1, ConformanceContrac
         2 => {
             let divergence = array(&fields[4], 2)?;
             Ok(ExpectedResultV1::AllowedDivergence {
-                classification: u8::try_from(uint_value(&divergence[0])?)
-                    .map_err(|_| ConformanceContractError::FieldOutOfBounds)?,
+                classification: decode_divergence_mismatch(&divergence[0])?,
                 first_coordinate: bytes_value(&divergence[1])?,
             })
         }
@@ -1195,8 +1251,7 @@ fn decode_expected(value: &Value) -> Result<ExpectedResultV1, ConformanceContrac
 fn decode_divergence(value: &Value) -> Result<AllowedDivergenceV1, ConformanceContractError> {
     let fields = array(value, 2)?;
     Ok(AllowedDivergenceV1 {
-        classification: u8::try_from(uint_value(&fields[0])?)
-            .map_err(|_| ConformanceContractError::FieldOutOfBounds)?,
+        classification: decode_divergence_mismatch(&fields[0])?,
         first_coordinate: bytes_value(&fields[1])?,
     })
 }
@@ -1378,7 +1433,14 @@ fn encode_case(value: &CaseOutcomeV1) -> Value {
         mode(value.mode),
         claim_layer(value.claim_layer),
         case_outcome(value.outcome),
-        optional(value.first_coordinate.as_deref().map(text)),
+        verification_outcome(value.verification_outcome),
+        optional(value.divergence_kind.map(divergence_mismatch)),
+        optional(
+            value
+                .first_coordinate
+                .as_ref()
+                .map(|coordinate| Value::Bytes(coordinate.clone())),
+        ),
         optional(value.expected_digest.as_ref().map(digest)),
         optional(value.actual_digest.as_ref().map(digest)),
         optional(value.expected_error.map(safe_error)),
@@ -1390,7 +1452,7 @@ fn encode_case(value: &CaseOutcomeV1) -> Value {
 }
 
 fn decode_case(value: &Value) -> Result<CaseOutcomeV1, ConformanceContractError> {
-    let fields = array(value, 14)?;
+    let fields = array(value, 16)?;
     Ok(CaseOutcomeV1 {
         case_id: text_value(&fields[0])?,
         fixture_digest: digest_value(&fields[1])?,
@@ -1398,14 +1460,16 @@ fn decode_case(value: &Value) -> Result<CaseOutcomeV1, ConformanceContractError>
         mode: decode_mode(&fields[3])?,
         claim_layer: decode_claim_layer(&fields[4])?,
         outcome: decode_case_outcome(&fields[5])?,
-        first_coordinate: optional_text(&fields[6])?,
-        expected_digest: optional_digest(&fields[7])?,
-        actual_digest: optional_digest(&fields[8])?,
-        expected_error: optional_safe_error(&fields[9])?,
-        actual_error: optional_safe_error(&fields[10])?,
-        replay_claim: decode_replay_claim(&fields[11])?,
-        redaction_state: decode_redaction(&fields[12])?,
-        provenance_digest: digest_value(&fields[13])?,
+        verification_outcome: decode_verification_outcome(&fields[6])?,
+        divergence_kind: optional_divergence_mismatch(&fields[7])?,
+        first_coordinate: optional_bytes(&fields[8])?,
+        expected_digest: optional_digest(&fields[9])?,
+        actual_digest: optional_digest(&fields[10])?,
+        expected_error: optional_safe_error(&fields[11])?,
+        actual_error: optional_safe_error(&fields[12])?,
+        replay_claim: decode_replay_claim(&fields[13])?,
+        redaction_state: decode_redaction(&fields[14])?,
+        provenance_digest: digest_value(&fields[15])?,
     })
 }
 
@@ -1703,6 +1767,67 @@ fn decode_case_outcome(value: &Value) -> Result<CaseOutcomeStatusV1, Conformance
         _ => Err(ConformanceContractError::InvalidEncoding),
     }
 }
+fn verification_outcome(value: VerificationOutcomeV1) -> Value {
+    uint(match value {
+        VerificationOutcomeV1::VerifiedExact => 0,
+        VerificationOutcomeV1::Diverged => 1,
+        VerificationOutcomeV1::InvalidManifest => 2,
+        VerificationOutcomeV1::UnverifiableArtifactsMissing => 3,
+        VerificationOutcomeV1::IncompatibleProfile => 4,
+        VerificationOutcomeV1::ResourceLimitExceeded => 5,
+    })
+}
+fn decode_verification_outcome(
+    value: &Value,
+) -> Result<VerificationOutcomeV1, ConformanceContractError> {
+    match uint_value(value)? {
+        0 => Ok(VerificationOutcomeV1::VerifiedExact),
+        1 => Ok(VerificationOutcomeV1::Diverged),
+        2 => Ok(VerificationOutcomeV1::InvalidManifest),
+        3 => Ok(VerificationOutcomeV1::UnverifiableArtifactsMissing),
+        4 => Ok(VerificationOutcomeV1::IncompatibleProfile),
+        5 => Ok(VerificationOutcomeV1::ResourceLimitExceeded),
+        _ => Err(ConformanceContractError::InvalidEncoding),
+    }
+}
+fn divergence_mismatch(value: DivergenceMismatchKindV1) -> Value {
+    uint(match value {
+        DivergenceMismatchKindV1::EventIdentity => 0,
+        DivergenceMismatchKindV1::EventOrder => 1,
+        DivergenceMismatchKindV1::CanonicalBytes => 2,
+        DivergenceMismatchKindV1::ProjectionCheckpoint => 3,
+        DivergenceMismatchKindV1::TypedFailure => 4,
+        DivergenceMismatchKindV1::Artifact => 5,
+        DivergenceMismatchKindV1::SchemaOrUpcaster => 6,
+        DivergenceMismatchKindV1::NumericProfile => 7,
+        DivergenceMismatchKindV1::ProhibitedOperationalInput => 8,
+    })
+}
+fn decode_divergence_mismatch(
+    value: &Value,
+) -> Result<DivergenceMismatchKindV1, ConformanceContractError> {
+    match uint_value(value)? {
+        0 => Ok(DivergenceMismatchKindV1::EventIdentity),
+        1 => Ok(DivergenceMismatchKindV1::EventOrder),
+        2 => Ok(DivergenceMismatchKindV1::CanonicalBytes),
+        3 => Ok(DivergenceMismatchKindV1::ProjectionCheckpoint),
+        4 => Ok(DivergenceMismatchKindV1::TypedFailure),
+        5 => Ok(DivergenceMismatchKindV1::Artifact),
+        6 => Ok(DivergenceMismatchKindV1::SchemaOrUpcaster),
+        7 => Ok(DivergenceMismatchKindV1::NumericProfile),
+        8 => Ok(DivergenceMismatchKindV1::ProhibitedOperationalInput),
+        _ => Err(ConformanceContractError::InvalidEncoding),
+    }
+}
+fn optional_divergence_mismatch(
+    value: &Value,
+) -> Result<Option<DivergenceMismatchKindV1>, ConformanceContractError> {
+    if matches!(value, Value::Null) {
+        Ok(None)
+    } else {
+        decode_divergence_mismatch(value).map(Some)
+    }
+}
 fn replay_claim(value: ReplayClaimV1) -> Value {
     uint(match value {
         ReplayClaimV1::Exact => 0,
@@ -1783,6 +1908,13 @@ fn optional_safe_error(value: &Value) -> Result<Option<SafeErrorCodeV1>, Conform
         decode_safe_error(value).map(Some)
     }
 }
+fn optional_bytes(value: &Value) -> Result<Option<Vec<u8>>, ConformanceContractError> {
+    if matches!(value, Value::Null) {
+        Ok(None)
+    } else {
+        bytes_value(value).map(Some)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1816,6 +1948,7 @@ mod tests {
                 digest: *blake3::hash(&expected_bytes).as_bytes(),
                 bytes: expected_bytes,
             },
+            expected_verification_outcome: VerificationOutcomeV1::VerifiedExact,
             expected_verification_error: None,
             replay_claim: ReplayClaimV1::Exact,
             redaction_state: RedactionStateV1::None,
@@ -1904,6 +2037,8 @@ mod tests {
             mode,
             claim_layer: fixture.claim_layer,
             outcome: CaseOutcomeStatusV1::Pass,
+            verification_outcome: fixture.expected_verification_outcome,
+            divergence_kind: None,
             first_coordinate: None,
             expected_digest: Some(expected_digest),
             actual_digest: Some(expected_digest),
@@ -2337,6 +2472,8 @@ mod tests {
         assert!(decode_replay_claim(&unknown).is_err());
         assert!(decode_redaction(&unknown).is_err());
         assert!(decode_safe_error(&unknown).is_err());
+        assert!(decode_verification_outcome(&unknown).is_err());
+        assert!(decode_divergence_mismatch(&unknown).is_err());
     }
 
     #[test]
@@ -2344,6 +2481,10 @@ mod tests {
         let mut typed_failure = profile();
         typed_failure.fixtures[0].expected =
             ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ClosureIncomplete);
+        typed_failure.fixtures[0].expected_verification_outcome =
+            VerificationOutcomeV1::InvalidManifest;
+        typed_failure.fixtures[0].expected_verification_error =
+            Some(SafeErrorCodeV1::ClosureIncomplete);
         typed_failure.profile_digest = typed_failure.digest();
         let typed_bytes = typed_failure.to_canonical_cbor().unwrap_or_default();
         assert_eq!(
@@ -2353,17 +2494,18 @@ mod tests {
 
         let mut divergence = profile();
         divergence.allowed_divergences = vec![AllowedDivergenceV1 {
-            classification: 4,
+            classification: DivergenceMismatchKindV1::TypedFailure,
             first_coordinate: b"timeline/7".to_vec(),
         }];
         divergence.fixtures[0].expected = ExpectedResultV1::AllowedDivergence {
-            classification: 4,
+            classification: DivergenceMismatchKindV1::TypedFailure,
             first_coordinate: b"timeline/7".to_vec(),
         };
+        divergence.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::Diverged;
         divergence.profile_digest = divergence.digest();
         assert!(divergence.to_canonical_cbor().is_ok());
         divergence.fixtures[0].expected = ExpectedResultV1::AllowedDivergence {
-            classification: 99,
+            classification: DivergenceMismatchKindV1::Artifact,
             first_coordinate: b"timeline/8".to_vec(),
         };
         divergence.profile_digest = divergence.digest();
@@ -2429,6 +2571,18 @@ mod tests {
         unordered.profile_digest = unordered.digest();
         assert_eq!(
             unordered.validate(),
+            Err(ConformanceContractError::NonCanonicalOrder)
+        );
+        let mut invalid_version = profile();
+        invalid_version.semantic_version = "1.0".to_owned();
+        assert_eq!(
+            invalid_version.validate(),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+        let mut zero_predecessor = profile();
+        zero_predecessor.previous_profile_digest = Some([0; 32]);
+        assert_eq!(
+            zero_predecessor.validate(),
             Err(ConformanceContractError::FieldOutOfBounds)
         );
         let mut missing_provenance = profile();
@@ -2451,11 +2605,11 @@ mod tests {
         let canonical_expected = &fixture.expected;
         let typed_expected = ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ClosureIncomplete);
         let divergence_expected = ExpectedResultV1::AllowedDivergence {
-            classification: 4,
+            classification: DivergenceMismatchKindV1::TypedFailure,
             first_coordinate: b"timeline/7".to_vec(),
         };
         let divergence = AllowedDivergenceV1 {
-            classification: 4,
+            classification: DivergenceMismatchKindV1::TypedFailure,
             first_coordinate: b"timeline/7".to_vec(),
         };
 
@@ -2590,7 +2744,7 @@ mod tests {
         reject(
             &|value| {
                 value.allowed_divergences = vec![AllowedDivergenceV1 {
-                    classification: 1,
+                    classification: DivergenceMismatchKindV1::EventOrder,
                     first_coordinate: vec![],
                 }];
             },
@@ -2726,6 +2880,8 @@ mod tests {
         let mut typed = profile();
         typed.fixtures[0].expected =
             ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ClosureIncomplete);
+        typed.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::InvalidManifest;
+        typed.fixtures[0].expected_verification_error = Some(SafeErrorCodeV1::ClosureIncomplete);
         let typed_candidate = typed
             .transition_to(ProfileLifecycleV1::Candidate, vec![])
             .unwrap_or_else(|_| profile());
@@ -2735,6 +2891,7 @@ mod tests {
             case.actual_digest = None;
             case.expected_error = Some(SafeErrorCodeV1::ClosureIncomplete);
             case.actual_error = Some(SafeErrorCodeV1::ClosureIncomplete);
+            case.verification_outcome = VerificationOutcomeV1::InvalidManifest;
         }
         let mut typed_evidence_second = stable_evidence("beta", 40);
         for case in &mut typed_evidence_second.case_outcomes {
@@ -2742,6 +2899,7 @@ mod tests {
             case.actual_digest = None;
             case.expected_error = Some(SafeErrorCodeV1::ClosureIncomplete);
             case.actual_error = Some(SafeErrorCodeV1::ClosureIncomplete);
+            case.verification_outcome = VerificationOutcomeV1::InvalidManifest;
         }
         assert!(typed_candidate
             .transition_to(
@@ -2752,9 +2910,14 @@ mod tests {
 
         let mut divergent = profile();
         divergent.fixtures[0].expected = ExpectedResultV1::AllowedDivergence {
-            classification: 4,
+            classification: DivergenceMismatchKindV1::TypedFailure,
             first_coordinate: b"timeline/7".to_vec(),
         };
+        divergent.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::Diverged;
+        divergent.allowed_divergences = vec![AllowedDivergenceV1 {
+            classification: DivergenceMismatchKindV1::TypedFailure,
+            first_coordinate: b"timeline/7".to_vec(),
+        }];
         let divergent_candidate = divergent
             .transition_to(ProfileLifecycleV1::Candidate, vec![])
             .unwrap_or_else(|_| profile());
@@ -2762,9 +2925,21 @@ mod tests {
         let mut divergent_second = stable_evidence("beta", 40);
         for evidence in [&mut divergent_evidence, &mut divergent_second] {
             for case in &mut evidence.case_outcomes {
-                case.first_coordinate = Some("timeline/7".to_owned());
+                case.first_coordinate = Some(b"timeline/7".to_vec());
+                case.verification_outcome = VerificationOutcomeV1::Diverged;
+                case.divergence_kind = Some(DivergenceMismatchKindV1::TypedFailure);
             }
         }
+        let mut wrong_divergence_kind = divergent_evidence.clone();
+        wrong_divergence_kind.case_outcomes[0].divergence_kind =
+            Some(DivergenceMismatchKindV1::Artifact);
+        assert_eq!(
+            divergent_candidate.clone().transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![wrong_divergence_kind, divergent_second.clone()],
+            ),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
         assert!(divergent_candidate
             .transition_to(
                 ProfileLifecycleV1::Stable,
@@ -2852,18 +3027,19 @@ mod tests {
         let mut divergent = profile();
         divergent.allowed_divergences = vec![
             AllowedDivergenceV1 {
-                classification: 1,
+                classification: DivergenceMismatchKindV1::EventOrder,
                 first_coordinate: b"a".to_vec(),
             },
             AllowedDivergenceV1 {
-                classification: 2,
+                classification: DivergenceMismatchKindV1::CanonicalBytes,
                 first_coordinate: b"b".to_vec(),
             },
         ];
         divergent.fixtures[0].expected = ExpectedResultV1::AllowedDivergence {
-            classification: 1,
+            classification: DivergenceMismatchKindV1::EventOrder,
             first_coordinate: b"a".to_vec(),
         };
+        divergent.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::Diverged;
         divergent.profile_digest = divergent.digest();
         let bytes = divergent.to_canonical_cbor().unwrap_or_default();
         assert_eq!(
@@ -3029,11 +3205,11 @@ mod tests {
             |value| {
                 value.allowed_divergences = vec![
                     AllowedDivergenceV1 {
-                        classification: 1,
+                        classification: DivergenceMismatchKindV1::EventOrder,
                         first_coordinate: b"b".to_vec(),
                     },
                     AllowedDivergenceV1 {
-                        classification: 1,
+                        classification: DivergenceMismatchKindV1::EventOrder,
                         first_coordinate: b"a".to_vec(),
                     },
                 ];
@@ -3227,6 +3403,8 @@ mod tests {
         let mut typed = profile();
         typed.fixtures[0].expected =
             ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ClosureIncomplete);
+        typed.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::InvalidManifest;
+        typed.fixtures[0].expected_verification_error = Some(SafeErrorCodeV1::ClosureIncomplete);
         let typed_candidate = typed
             .transition_to(ProfileLifecycleV1::Candidate, vec![])
             .unwrap_or_else(|_| profile());
@@ -3236,6 +3414,7 @@ mod tests {
                 case.actual_digest = None;
                 case.expected_error = Some(SafeErrorCodeV1::ClosureIncomplete);
                 case.actual_error = Some(SafeErrorCodeV1::ClosureIncomplete);
+                case.verification_outcome = VerificationOutcomeV1::InvalidManifest;
             }
             first
         };
@@ -3263,14 +3442,14 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn public_divergence_identity_and_coordinate_bounds_are_exact() {
         let allowed = AllowedDivergenceV1 {
-            classification: 4,
+            classification: DivergenceMismatchKindV1::TypedFailure,
             first_coordinate: b"timeline/7".to_vec(),
         };
         reject_profile_change(
             |value| {
                 value.allowed_divergences = vec![allowed.clone()];
                 value.fixtures[0].expected = ExpectedResultV1::AllowedDivergence {
-                    classification: 5,
+                    classification: DivergenceMismatchKindV1::Artifact,
                     first_coordinate: b"timeline/7".to_vec(),
                 };
             },
@@ -3278,9 +3457,15 @@ mod tests {
         );
         reject_profile_change(
             |value| {
+                value.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::Diverged;
+            },
+            ConformanceContractError::ExpectedResultMissing,
+        );
+        reject_profile_change(
+            |value| {
                 value.allowed_divergences = vec![allowed.clone()];
                 value.fixtures[0].expected = ExpectedResultV1::AllowedDivergence {
-                    classification: 4,
+                    classification: DivergenceMismatchKindV1::TypedFailure,
                     first_coordinate: b"timeline/8".to_vec(),
                 };
             },
@@ -3289,7 +3474,7 @@ mod tests {
         reject_profile_change(
             |value| {
                 value.allowed_divergences = vec![AllowedDivergenceV1 {
-                    classification: 4,
+                    classification: DivergenceMismatchKindV1::TypedFailure,
                     first_coordinate: vec![b'a'; 129],
                 }];
             },
@@ -3298,13 +3483,14 @@ mod tests {
 
         let mut exact = profile();
         exact.allowed_divergences = vec![AllowedDivergenceV1 {
-            classification: 4,
+            classification: DivergenceMismatchKindV1::TypedFailure,
             first_coordinate: vec![b'a'; 128],
         }];
         exact.fixtures[0].expected = ExpectedResultV1::AllowedDivergence {
-            classification: 4,
+            classification: DivergenceMismatchKindV1::TypedFailure,
             first_coordinate: vec![b'a'; 128],
         };
+        exact.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::Diverged;
         exact.profile_digest = exact.digest();
         assert!(exact.validate().is_ok());
     }
@@ -3405,11 +3591,11 @@ mod tests {
         reject_profile_change(
             |value| {
                 value.allowed_divergences = vec![AllowedDivergenceV1 {
-                    classification: 4,
+                    classification: DivergenceMismatchKindV1::TypedFailure,
                     first_coordinate: b"a".to_vec(),
                 }];
                 value.fixtures[0].expected = ExpectedResultV1::AllowedDivergence {
-                    classification: 4,
+                    classification: DivergenceMismatchKindV1::TypedFailure,
                     first_coordinate: Vec::new(),
                 };
             },
