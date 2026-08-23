@@ -86,7 +86,7 @@ fn protected_public_seam_checks_timeline_and_rechecks_at_commit_head() {
     let error = test_err(registry.commit_step_at(Seq::from_u64(1), 2));
     assert!(matches!(
         error,
-        RuntimeError::Consent(ConsentError::NoConsent)
+        RuntimeError::Consent(ConsentError::Revoked)
     ));
 
     let wrong_timeline = TimelineId::new();
