@@ -369,6 +369,7 @@ fn protected_public_seam_aborts_when_the_gate_rejects_a_draft() {
 }
 
 #[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn ordinary_step_and_tick_enforce_projection_and_draft_boundaries() {
     use pos_store::{open_store, StoreConfig};
 
