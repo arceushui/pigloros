@@ -5,6 +5,7 @@ use pos_core::{CanonicalBytes, CoreError, PublicKey, Signature};
 use rand::{rand_core::UnwrapErr, rngs::SysRng};
 
 /// Generate a new Ed25519 signing key pair.
+#[must_use]
 pub fn generate_keypair() -> (SigningKey, VerifyingKey) {
     let mut csprng = UnwrapErr(SysRng);
     let signing_key = SigningKey::generate(&mut csprng);
