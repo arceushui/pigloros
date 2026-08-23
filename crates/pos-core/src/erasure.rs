@@ -3168,7 +3168,7 @@ mod tests {
             cbor_item_end(&[0x58, 1], 0, 0, 1),
             Err(ErasureErrorV1::InvalidEncoding)
         );
-        assert_eq!(cbor_item_end(&[0x58, 1, 0], 0, 0, 1), Ok(3));
+        assert_eq!(cbor_item_end(&[0x41, 0], 0, 0, 1), Ok(2));
         assert_eq!(
             cbor_item_end(&[0x81, 0x18, 0], 0, 0, 1),
             Err(ErasureErrorV1::InvalidEncoding)
