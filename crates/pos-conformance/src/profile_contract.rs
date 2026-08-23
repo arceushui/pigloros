@@ -2468,10 +2468,10 @@ mod tests {
             Err(ConformanceContractError::IndependenceEvidenceMissing)
         );
 
-        let mut request = request();
-        request.request_id = [0; 16];
+        let mut invalid_request = request();
+        invalid_request.request_id = [0; 16];
         assert_eq!(
-            request.validate(),
+            invalid_request.validate(),
             Err(ConformanceContractError::FieldOutOfBounds)
         );
         let mut request = request();
