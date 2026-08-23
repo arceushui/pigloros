@@ -467,15 +467,7 @@ impl ConformanceProfileV1 {
         }
         decode_value(bytes)
             .and_then(|value| decode_profile(&value))
-            .and_then(|profile| {
-                profile.validate_with_trust_policy(policy).and_then(|()| {
-                    if profile.profile_digest == profile.digest() {
-                        Ok(profile)
-                    } else {
-                        Err(ConformanceContractError::FixtureDigestMismatch)
-                    }
-                })
-            })
+            .and_then(|profile| profile.validate_with_trust_policy(policy).map(|()| profile))
     }
 
     /// Validate a profile, requiring a trusted-root policy for Stable profiles.
@@ -3333,10 +3325,15 @@ mod tests {
     #[test]
     fn public_stable_transition_with_policy_validates_the_published_profile() {
         let policy = trusted_root_policy();
-        let stable = candidate()
+        let candidate = candidate();
+        let mut first = stable_evidence("alpha", 30);
+        let mut second = stable_evidence("beta", 40);
+        refresh_stable_report_for_profile(&mut first, &candidate);
+        refresh_stable_report_for_profile(&mut second, &candidate);
+        let stable = candidate
             .transition_to_with_trust_policy(
                 ProfileLifecycleV1::Stable,
-                vec![stable_evidence("alpha", 30), stable_evidence("beta", 40)],
+                vec![first, second],
                 &policy,
             )
             .unwrap_or_else(|_| profile());
@@ -3348,6 +3345,8 @@ mod tests {
         let mut value = stable_profile();
         value.stable_evidence[0].report.cases.pop();
         refresh_report_counts(&mut value.stable_evidence[0].report);
+        value.stable_evidence[0].report.report_digest =
+            value.stable_evidence[0].report.digest().unwrap_or([0; 32]);
         refresh_stable_attestation(&mut value.stable_evidence[0]);
         assert_eq!(
             value.validate_with_trust_policy(&trusted_root_policy()),
@@ -3357,6 +3356,8 @@ mod tests {
         let mut value = stable_profile();
         value.stable_evidence[0].report.cases[0].outcome = CaseOutcomeStatusV1::Fail;
         refresh_report_counts(&mut value.stable_evidence[0].report);
+        value.stable_evidence[0].report.report_digest =
+            value.stable_evidence[0].report.digest().unwrap_or([0; 32]);
         refresh_stable_attestation(&mut value.stable_evidence[0]);
         assert_eq!(
             value.validate_with_trust_policy(&trusted_root_policy()),
@@ -3365,12 +3366,9 @@ mod tests {
     }
 
     #[test]
-    fn public_stable_validator_rejects_case_outcome_mismatch() {
+    fn public_stable_validator_rejects_case_identity_mismatch() {
         let mut value = stable_profile();
-        value.stable_evidence[0].case_outcomes[0].verification_outcome =
-            VerificationOutcomeV1::Diverged;
-        value.stable_evidence[0].case_outcomes[0].divergence_kind =
-            Some(DivergenceMismatchKindV1::TypedFailure);
+        value.stable_evidence[0].case_outcomes[0].provenance_digest = digest(99);
         refresh_stable_report(&mut value.stable_evidence[0]);
         assert_eq!(
             value.validate_with_trust_policy(&trusted_root_policy()),
