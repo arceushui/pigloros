@@ -3398,7 +3398,7 @@ mod tests {
     #[test]
     fn public_stable_validator_rejects_report_case_outcome_mismatch() {
         let mut value = stable_profile();
-        value.stable_evidence[0].report.cases[0].actual_digest = digest(99);
+        value.stable_evidence[0].report.cases[0].actual_digest = Some(digest(99));
         value.stable_evidence[0].report.report_digest =
             value.stable_evidence[0].report.digest().unwrap_or([0; 32]);
         refresh_stable_attestation(&mut value.stable_evidence[0]);
