@@ -5,9 +5,9 @@
 //! evaluator identity, independence evidence, and lifecycle claim.
 
 use crate::{
-    CaseOutcomeStatusV1, CaseOutcomeV1, ClaimLayerV1, DivergenceMismatchKindV1, ExecutionModeV1,
+    CaseOutcomeStatusV1, ClaimLayerV1, DivergenceMismatchKindV1, ExecutionModeV1,
     ImplementationIdentityV1, IndependenceEvidenceV1, RedactionStateV1, ReplayClaimV1,
-    SafeErrorCodeV1, VerificationOutcomeV1,
+    ProfileCaseOutcomeV1, SafeErrorCodeV1, VerificationOutcomeV1,
 };
 use ciborium::value::Value;
 use std::io::Cursor;
@@ -16,6 +16,7 @@ use std::io::Cursor;
 pub const CONFORMANCE_PROFILE_MAGIC_V1: &str = "CPF1";
 /// Magic for the public evaluator request record.
 pub const EVALUATOR_REQUEST_MAGIC_V1: &str = "EVR1";
+type CaseOutcomeV1 = ProfileCaseOutcomeV1;
 const MAX_PROFILE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EXECUTION_PROFILES: usize = 64;
 const MAX_FIXTURES: usize = 65_536;

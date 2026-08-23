@@ -23,7 +23,8 @@ pub use profile_contract::{
     EvaluatorHardCapsV1, EvaluatorOutputCapabilityV1, EvaluatorProtocolV1, EvaluatorRequestV1,
     ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1, FixtureInputMemberV1,
     FixtureProvenanceV1, IndependenceRequirementsV1, ProfileLifecycleV1,
-    StableImplementationEvidenceV1, SubjectAdapterKindV1, CONFORMANCE_PROFILE_MAGIC_V1,
+    ProfileCaseOutcomeV1, StableImplementationEvidenceV1, SubjectAdapterKindV1,
+    CONFORMANCE_PROFILE_MAGIC_V1,
     EVALUATOR_REQUEST_MAGIC_V1,
 };
 
@@ -1061,11 +1062,38 @@ pub struct IndependenceEvidenceV1 {
     pub reviewer_ids: Vec<String>,
 }
 
-/// One public conformance case. The wire representation is the exact
-/// Sixteen-field public conformance case record.
+/// One CNR1 public conformance case.
+///
+/// The wire representation is the exact fourteen-field ADR-062 record. CPF1
+/// carries the richer [`ProfileCaseOutcomeV1`] record separately because
+/// verification outcome and divergence classification are profile semantics,
+/// not part of the stable CNR1 report shape.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaseOutcomeV1 {
+    pub case_id: String,
+    pub fixture_digest: [u8; 32],
+    pub execution_profile_digest: [u8; 32],
+    pub mode: ExecutionModeV1,
+    pub claim_layer: ClaimLayerV1,
+    pub outcome: CaseOutcomeStatusV1,
+    pub first_coordinate: Option<Vec<u8>>,
+    pub expected_digest: Option<[u8; 32]>,
+    pub actual_digest: Option<[u8; 32]>,
+    pub expected_error: Option<SafeErrorCodeV1>,
+    pub actual_error: Option<SafeErrorCodeV1>,
+    pub replay_claim: ReplayClaimV1,
+    pub redaction_state: RedactionStateV1,
+    pub provenance_digest: [u8; 32],
+}
+
+/// CPF1-only case evidence with profile verification semantics.
+///
+/// This is intentionally a separately named record from [`CaseOutcomeV1`].
+/// Adding these fields to CNR1 would silently change its exact fourteen-field
+/// wire contract while retaining the `CNR1`/version `1` identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProfileCaseOutcomeV1 {
     pub case_id: String,
     pub fixture_digest: [u8; 32],
     pub execution_profile_digest: [u8; 32],
@@ -3504,8 +3532,6 @@ pub mod strict_codec {
             enum_mode(case.mode),
             enum_claim_layer(case.claim_layer),
             enum_case_outcome(case.outcome),
-            enum_verification_outcome(case.verification_outcome),
-            optional(case.divergence_kind.map(enum_divergence_mismatch)),
             optional(
                 case.first_coordinate
                     .as_ref()
@@ -3522,7 +3548,7 @@ pub mod strict_codec {
     }
 
     fn decode_case(value: &Value) -> Result<CaseOutcomeV1, StrictCborError> {
-        let fields = array(value, "case_outcome", 16)?;
+        let fields = array(value, "case_outcome", 14)?;
         Ok(CaseOutcomeV1 {
             case_id: string(&fields[0], "case_id")?,
             fixture_digest: bytes(&fields[1], "case_fixture")?,
@@ -3530,16 +3556,10 @@ pub mod strict_codec {
             mode: decode_mode(&fields[3])?,
             claim_layer: decode_claim_layer(&fields[4])?,
             outcome: decode_case_outcome(&fields[5])?,
-            verification_outcome: decode_verification_outcome(&fields[6])?,
-            divergence_kind: if matches!(fields[7], Value::Null) {
+            first_coordinate: if matches!(fields[6], Value::Null) {
                 None
             } else {
-                Some(decode_divergence_mismatch(&fields[7])?)
-            },
-            first_coordinate: if matches!(fields[8], Value::Null) {
-                None
-            } else {
-                match &fields[8] {
+                match &fields[6] {
                     Value::Bytes(bytes) if bytes.len() <= 128 => Some(bytes.clone()),
                     _ => {
                         return Err(StrictCborError::InvalidField {
@@ -3548,21 +3568,21 @@ pub mod strict_codec {
                     }
                 }
             },
-            expected_digest: if matches!(fields[9], Value::Null) {
+            expected_digest: if matches!(fields[7], Value::Null) {
                 None
             } else {
-                Some(bytes(&fields[9], "case_expected_digest")?)
+                Some(bytes(&fields[7], "case_expected_digest")?)
             },
-            actual_digest: if matches!(fields[10], Value::Null) {
+            actual_digest: if matches!(fields[8], Value::Null) {
                 None
             } else {
-                Some(bytes(&fields[10], "case_actual_digest")?)
+                Some(bytes(&fields[8], "case_actual_digest")?)
             },
-            expected_error: decode_optional_safe_error(&fields[11])?,
-            actual_error: decode_optional_safe_error(&fields[12])?,
-            replay_claim: decode_replay_claim(&fields[13])?,
-            redaction_state: decode_redaction_state(&fields[14])?,
-            provenance_digest: bytes(&fields[15], "case_provenance")?,
+            expected_error: decode_optional_safe_error(&fields[9])?,
+            actual_error: decode_optional_safe_error(&fields[10])?,
+            replay_claim: decode_replay_claim(&fields[11])?,
+            redaction_state: decode_redaction_state(&fields[12])?,
+            provenance_digest: bytes(&fields[13], "case_provenance")?,
         })
     }
 
@@ -6512,8 +6532,6 @@ pub mod tests {
                 mode: ExecutionModeV1::AirGapped,
                 claim_layer: ClaimLayerV1::ReplayConformance,
                 outcome: CaseOutcomeStatusV1::Pass,
-                verification_outcome: VerificationOutcomeV1::VerifiedExact,
-                divergence_kind: None,
                 first_coordinate: None,
                 expected_digest: Some([14; 32]),
                 actual_digest: Some([14; 32]),
@@ -6530,8 +6548,6 @@ pub mod tests {
                 mode: ExecutionModeV1::Local,
                 claim_layer: ClaimLayerV1::ReplayConformance,
                 outcome: CaseOutcomeStatusV1::Pass,
-                verification_outcome: VerificationOutcomeV1::VerifiedExact,
-                divergence_kind: None,
                 first_coordinate: None,
                 expected_digest: Some([14; 32]),
                 actual_digest: Some([14; 32]),

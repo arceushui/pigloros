@@ -1248,8 +1248,6 @@ fn build_conformance_report(
         mode,
         claim_layer: ClaimLayerV1::ReplayConformance,
         outcome: CaseOutcomeStatusV1::Pass,
-        verification_outcome: VerificationOutcomeV1::VerifiedExact,
-        divergence_kind: None,
         first_coordinate: None,
         expected_digest: Some(subject_artifact_digest),
         actual_digest: Some(subject_artifact_digest),
