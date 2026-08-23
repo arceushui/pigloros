@@ -2378,6 +2378,13 @@ mod tests {
         let mut missing_inventory = receipt_input(ErasureLifecycleV1::Complete, vec![ack], Vec::new(), Vec::new());
         missing_inventory.inventories.artifacts.clear();
         assert_eq!(ErasureReceiptV1::new(missing_inventory), Err(ErasureErrorV1::ScopeInvalid));
+        let mut oversized = receipt_input(ErasureLifecycleV1::PartialFailure, Vec::new(), vec![reference(8)], Vec::new());
+        oversized.acknowledgements = vec![ack; ERASURE_MAX_INVENTORY_RESULTS + 1];
+        assert_eq!(ErasureReceiptV1::new(oversized), Err(ErasureErrorV1::ScopeInvalid));
+        let mut strengthened = receipt_input(ErasureLifecycleV1::Complete, vec![ack], Vec::new(), Vec::new());
+        strengthened.inventories.artifacts[0].transition.from = ErasureReplayClaimV1::StructuralOnly;
+        strengthened.inventories.artifacts[0].transition.to = ErasureReplayClaimV1::Exact;
+        assert_eq!(ErasureReceiptV1::new(strengthened), Err(ErasureErrorV1::PolicyConflict));
         for invalid in [&[0x18, 0][..], &[0x1a, 0, 0, 0, 1][..], &[0x60, 0][..]] {
             assert_eq!(ErasureReceiptV1::from_canonical_cbor(invalid), Err(ErasureErrorV1::InvalidEncoding));
         }
