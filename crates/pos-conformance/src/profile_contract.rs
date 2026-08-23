@@ -3297,6 +3297,27 @@ mod tests {
             ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&bytes, &policy),
             Ok(stable)
         );
+
+        let oversized = vec![0; MAX_PROFILE_BYTES + 1];
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&oversized, &policy),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+
+        let mut tampered = encode_profile(&stable, true);
+        replace_profile_path(&mut tampered, &[17], digest(99));
+        let tampered_bytes = encode_value(&tampered).unwrap_or_default();
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&tampered_bytes, &policy,),
+            Err(ConformanceContractError::FixtureDigestMismatch)
+        );
+
+        let mut invalid_candidate = candidate_profile;
+        invalid_candidate.profile_digest = digest(99);
+        assert_eq!(
+            invalid_candidate.validate_with_trust_policy(&policy),
+            Err(ConformanceContractError::FixtureDigestMismatch)
+        );
     }
 
     #[test]
@@ -3362,6 +3383,27 @@ mod tests {
             Err(ConformanceContractError::FixtureDigestMismatch)
         );
 
+        let mut invalid_profile_digest = profile();
+        invalid_profile_digest.profile_digest = digest(99);
+        assert_eq!(
+            request.validate_against_profile(&invalid_profile_digest),
+            Err(ConformanceContractError::FixtureDigestMismatch)
+        );
+
+        let mut protocol_profile = profile();
+        protocol_profile.evaluator_protocol.protocol_digest = digest(99);
+        protocol_profile.profile_digest = protocol_profile.digest();
+        let mut protocol_request = request();
+        protocol_request.conformance_profile_digest = protocol_profile.profile_digest;
+        protocol_request.fixture_bundle_digest = fixture_bundle_digest(&protocol_profile);
+        protocol_request.output_capability.capability_digest =
+            protocol_request.expected_output_capability_digest();
+        protocol_request.request_digest = protocol_request.digest();
+        assert_eq!(
+            protocol_request.validate_against_profile(&protocol_profile),
+            Err(ConformanceContractError::FixtureDigestMismatch)
+        );
+
         let mut unknown_execution = request.clone();
         unknown_execution.execution_profile_digest = digest(99);
         unknown_execution.output_capability.capability_digest =
@@ -3398,6 +3440,8 @@ mod tests {
         capped_protocol.hard_caps.max_profile_bytes = 1;
         capped_request.output_capability.report_bytes_limit = 2;
         capped_request.evaluator_hard_caps_digest = capped_protocol.hard_caps.digest();
+        capped_request.output_capability.capability_digest =
+            capped_request.expected_output_capability_digest();
         capped_request.request_digest = capped_request.digest();
         assert_eq!(
             capped_request.validate_with_protocol(&capped_protocol),
@@ -3603,10 +3647,36 @@ mod tests {
         mismatched_report.report.cases[0].actual_digest = Some([99; 32]);
         mismatched_report.report.cases[0].first_coordinate = Some(vec![1]);
         refresh_report_counts(&mut mismatched_report.report);
+        refresh_stable_attestation(&mut mismatched_report);
         assert_eq!(
             candidate().transition_to(
                 ProfileLifecycleV1::Stable,
                 vec![mismatched_report, stable_evidence("beta", 40)],
+            ),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+
+        let mut missing_report_case = stable_evidence("alpha", 30);
+        missing_report_case.report.cases.pop();
+        refresh_report_counts(&mut missing_report_case.report);
+        refresh_stable_attestation(&mut missing_report_case);
+        assert_eq!(
+            candidate().transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![missing_report_case, stable_evidence("beta", 40)],
+            ),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+
+        let mut invalid_case = stable_evidence("alpha", 30);
+        invalid_case.case_outcomes[0].verification_outcome = VerificationOutcomeV1::Diverged;
+        invalid_case.case_outcomes[0].divergence_kind =
+            Some(DivergenceMismatchKindV1::TypedFailure);
+        refresh_stable_report(&mut invalid_case);
+        assert_eq!(
+            candidate().transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![invalid_case, stable_evidence("beta", 40)],
             ),
             Err(ConformanceContractError::IndependenceEvidenceMissing)
         );
@@ -3676,6 +3746,11 @@ mod tests {
         assert_eq!(
             EvaluatorRequestV1::from_canonical_cbor(&[0x5a, 0xff, 0xff, 0xff, 0xff]),
             Err(ConformanceContractError::InvalidEncoding)
+        );
+        let oversized_value = Value::Bytes(vec![0; MAX_PROFILE_BYTES]);
+        assert_eq!(
+            encode_bounded(&oversized_value),
+            Err(ConformanceContractError::FieldOutOfBounds)
         );
     }
 
@@ -3903,7 +3978,7 @@ mod tests {
     }
 
     #[test]
-    fn public_profile_decoder_reaches_nested_invalid_field_seams() {
+    fn public_profile_decoder_reaches_top_level_invalid_field_seams() {
         let value = profile();
         for index in 0..18 {
             // `previous_profile_digest` is an optional field; CBOR null is
@@ -3953,7 +4028,6 @@ mod tests {
             let bytes = malformed_profile_bytes(&value, &[11, index], Value::Null);
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         }
-
         for expected in [
             Value::Array(vec![
                 uint(0),
@@ -3980,7 +4054,11 @@ mod tests {
             let bytes = malformed_profile_bytes(&value, &[8, 0, 8], expected);
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         }
+    }
 
+    #[test]
+    fn public_stable_profile_decoder_reaches_nested_invalid_field_seams() {
+        let value = profile();
         let candidate = value
             .transition_to(ProfileLifecycleV1::Candidate, vec![])
             .unwrap_or_else(|_| value.clone());
@@ -4013,7 +4091,10 @@ mod tests {
             let bytes = malformed_profile_bytes(&stable, &[16, 0, 5, index], Value::Null);
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         }
+    }
 
+    #[test]
+    fn public_request_decoder_reaches_nested_invalid_field_seams() {
         for index in 0..14 {
             let bytes = malformed_request_bytes(&[index], Value::Null);
             assert!(EvaluatorRequestV1::from_canonical_cbor(&bytes).is_err());
@@ -4027,7 +4108,7 @@ mod tests {
             assert!(EvaluatorRequestV1::from_canonical_cbor(&bytes).is_err());
         }
 
-        let mut invalid_caps = value;
+        let mut invalid_caps = profile();
         invalid_caps.evaluator_protocol.hard_caps.max_cases = 0;
         invalid_caps.profile_digest = invalid_caps.digest();
         assert!(invalid_caps.validate().is_err());

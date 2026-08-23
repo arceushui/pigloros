@@ -6862,7 +6862,7 @@ pub mod tests {
             Err(EvidenceError::InvalidConformanceReport)
         );
 
-        let mut mixed_profile_report = report.clone();
+        let mut mixed_profile_report = report;
         mixed_profile_report.cases[0].execution_profile_digest = [99; 32];
         mixed_profile_report.report_digest = mixed_profile_report.digest().unwrap_or([0; 32]);
         // CNR1 permits a per-case execution-profile matrix; CPF1 performs
