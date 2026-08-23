@@ -18,7 +18,7 @@ use pos_core::{
     OwnTracksIngressStore, EVENT_TYPE_CONSENT_GRANTED_V1,
 };
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     num::NonZeroUsize,
     panic::{catch_unwind, AssertUnwindSafe},
     sync::{
@@ -527,24 +527,13 @@ impl StoreExecutor {
                     #[cfg(test)]
                     observer,
                 );
-            });
-        match worker {
-            Ok(handle) => {
-                let mut join = match control.join.lock() {
-                    Ok(join) => join,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                *join = Some(handle);
-            }
-            Err(_) => {
-                set_lifecycle_state(
-                    control.state.as_ref(),
-                    LifecycleState::Unhealthy {
-                        retryable_shutdown: false,
-                    },
-                );
-            }
-        }
+            })
+            .unwrap_or_else(|error| panic!("could not start the store executor worker: {error}"));
+        let mut join = match control.join.lock() {
+            Ok(join) => join,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *join = Some(worker);
         Self { control }
     }
 
@@ -637,8 +626,6 @@ impl StoreExecutor {
                 }
                 LifecycleState::Unhealthy { .. } => return Err(StoreExecutorError::Unhealthy),
             }
-            drop(state);
-
             let global_permit = self
                 .control
                 .global_budget
@@ -673,6 +660,7 @@ impl StoreExecutor {
                 read_permit,
                 command,
             });
+            drop(state);
             match send_result {
                 Ok(()) => {
                     let mut ordinal = match self.control.next_admission_ordinal.lock() {
@@ -1002,18 +990,10 @@ fn worker_loop(
     #[cfg(test)] observer: Option<Arc<SchedulerObserver>>,
 ) {
     let worker_result = catch_unwind(AssertUnwindSafe(|| {
-        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-        else {
-            set_lifecycle_state(
-                lifecycle_state.as_ref(),
-                LifecycleState::Unhealthy {
-                    retryable_shutdown: false,
-                },
-            );
-            return;
-        };
+            .unwrap_or_else(|error| panic!("could not start the store executor runtime: {error}"));
         runtime.block_on(worker_loop_async(
             Arc::clone(lifecycle_state),
             shutdown,
@@ -1058,22 +1038,14 @@ async fn worker_loop_async(
             buckets: HashMap::new(),
         },
     };
-    let mut pending = VecDeque::new();
+    let mut pending = Vec::new();
     let mut draining = false;
     let mut disconnected = false;
     let mut reads_since_write = 0;
     loop {
         if pending.is_empty() && !disconnected {
             if draining {
-                let drain_result = receiver.try_recv();
-                match drain_result {
-                    Ok(envelope) => pending.push_back(envelope),
-                    Err(
-                        mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected,
-                    ) => {
-                        break;
-                    }
-                }
+                break;
             } else {
                 let next_received = tokio::select! {
                     biased;
@@ -1084,7 +1056,7 @@ async fn worker_loop_async(
                     }
                 };
                 if let Some(envelope) = next_received {
-                    pending.push_back(envelope);
+                    pending.push(envelope);
                 } else {
                     disconnected = true;
                     continue;
@@ -1098,12 +1070,8 @@ async fn worker_loop_async(
             if let Some(observer) = &observer {
                 observer.drain_completed(pending.len(), disconnected);
             }
-            let Some(index) = select_pending_index(&pending, reads_since_write) else {
-                continue;
-            };
-            let Some(envelope) = pending.remove(index) else {
-                continue;
-            };
+            let index = select_pending_index(&pending, reads_since_write);
+            let envelope = pending.remove(index);
             let class = envelope.class;
             #[cfg(test)]
             if let Some(observer) = &observer {
@@ -1145,11 +1113,11 @@ async fn worker_loop_async(
 
 fn drain_available(
     receiver: &mut mpsc::Receiver<CommandEnvelope>,
-    pending: &mut VecDeque<CommandEnvelope>,
+    pending: &mut Vec<CommandEnvelope>,
 ) -> bool {
     loop {
         match receiver.try_recv() {
-            Ok(envelope) => pending.push_back(envelope),
+            Ok(envelope) => pending.push(envelope),
             Err(mpsc::error::TryRecvError::Empty) => return false,
             Err(mpsc::error::TryRecvError::Disconnected) => return true,
         }
@@ -1157,9 +1125,9 @@ fn drain_available(
 }
 
 fn select_pending_index(
-    pending: &VecDeque<CommandEnvelope>,
+    pending: &[CommandEnvelope],
     reads_since_write: u8,
-) -> Option<usize> {
+) -> usize {
     let preferred = if reads_since_write < READ_BURST {
         CommandClass::Read
     } else {
@@ -1169,19 +1137,22 @@ fn select_pending_index(
         CommandClass::Read => CommandClass::Write,
         CommandClass::Write => CommandClass::Read,
     };
-    pending
+    let preferred_index = pending
         .iter()
         .enumerate()
         .filter(|(_, envelope)| envelope.class == preferred)
-        .min_by_key(|(_, envelope)| envelope.admission_ordinal)
-        .or_else(|| {
+        .min_by_key(|(_, envelope)| envelope.admission_ordinal);
+    preferred_index.map_or_else(
+        || {
             pending
                 .iter()
                 .enumerate()
                 .filter(|(_, envelope)| envelope.class == fallback)
                 .min_by_key(|(_, envelope)| envelope.admission_ordinal)
-        })
-        .map(|(index, _)| index)
+                .map_or(0, |(index, _)| index)
+        },
+        |(index, _)| index,
+    )
 }
 
 fn expire_command(command: Command) {
@@ -1524,11 +1495,7 @@ fn execute_append_consent_grant_command(
         .and_then(|events| {
             events.ok_or_else(|| CoreError::Storage("event limit reached".to_owned()))
         })
-        .and_then(|mut events| {
-            events
-                .pop()
-                .ok_or_else(|| CoreError::Storage("empty append".to_owned()))
-        });
+        .map(|mut events| events.remove(0));
     send_store_result(reply, result);
 }
 

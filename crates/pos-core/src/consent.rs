@@ -553,11 +553,33 @@ impl ConsentAuthority {
         token
     }
 
-    /// Apply a durable revocation to the matching host session.
+    /// Confirm that a durable revocation names an active host session.
     ///
     /// # Errors
     /// Returns [`ConsentError::NoConsent`] when no active session matches.
-    pub fn record_revocation(&self, revocation: &ConsentRevoked) -> Result<(), ConsentError> {
+    pub fn validate_revocation(&self, revocation: &ConsentRevoked) -> Result<(), ConsentError> {
+        let key = (
+            revocation.subject_id,
+            revocation.grantee_id,
+            revocation.grant_seq,
+        );
+        let sessions = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !sessions.contains_key(&key) {
+            return Err(ConsentError::NoConsent);
+        }
+        Ok(())
+    }
+
+    /// Apply a prevalidated durable revocation to its matching host session.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called without a preceding successful
+    /// [`Self::validate_revocation`] for the same revocation.
+    pub fn record_revocation(&self, revocation: &ConsentRevoked) {
         let key = (
             revocation.subject_id,
             revocation.grantee_id,
@@ -567,12 +589,8 @@ impl ConsentAuthority {
             .active
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(active) = sessions.get_mut(&key) else {
-            return Err(ConsentError::NoConsent);
-        };
+        let active = &mut sessions[&key];
         active.token.fence_seq = active.token.fence_seq.min(revocation.fence_seq);
-        drop(sessions);
-        Ok(())
     }
 
     /// Revalidate an exact host session at an operation or commit fence.
@@ -594,9 +612,7 @@ impl ConsentAuthority {
             .active
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(active) = sessions.get(&key) else {
-            return Err(ConsentError::NoConsent);
-        };
+        let active = &sessions[&key];
         if active.token != *token || !active.token.is_valid_at(timeline_head) {
             return Err(ConsentError::Revoked);
         }
@@ -1233,13 +1249,14 @@ mod tests {
             grant_seq: grant.grant_seq,
             fence_seq: 2,
         };
-        assert!(authority.record_revocation(&revocation).is_ok());
+        assert!(authority.validate_revocation(&revocation).is_ok());
+        authority.record_revocation(&revocation);
         assert_eq!(
             authority.validate(&token, 2, 19),
             Err(ConsentError::Revoked)
         );
         assert_eq!(
-            authority.record_revocation(&ConsentRevoked {
+            authority.validate_revocation(&ConsentRevoked {
                 grant_seq: grant.grant_seq + 1,
                 ..revocation
             }),

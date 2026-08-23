@@ -1086,7 +1086,10 @@ impl Gateway {
         timeline_id: &str,
         grant: ConsentGrantedV1,
     ) -> Result<(Event, ConsentCapabilityToken), GatewayError> {
-        let timeline = parse_timeline_id(timeline_id)?;
+        let timeline = match parse_timeline_id(timeline_id) {
+            Ok(timeline) => timeline,
+            Err(error) => return Err(error),
+        };
         let event = match self
             .store
             .append_consent_grant(timeline, grant.clone(), self.limits.max_events_per_timeline)
@@ -1096,6 +1099,13 @@ impl Gateway {
                 if message == "consent grant sequence mismatch" =>
             {
                 return Err(GatewayError::ConsentGrantSequenceMismatch)
+            }
+            Err(executor::StoreExecutorError::Store(CoreError::Storage(message)))
+                if message == "event limit reached" =>
+            {
+                return Err(GatewayError::EventLimitReached {
+                    maximum: self.limits.max_events_per_timeline,
+                })
             }
             Err(error) => return Err(error.into()),
             Ok(event) => event,
@@ -1116,24 +1126,38 @@ impl Gateway {
         timeline_id: &str,
         revocation: ConsentRevokedV1,
     ) -> Result<Event, GatewayError> {
-        let timeline = parse_timeline_id(timeline_id)?;
-        let event = self
+        let timeline = match parse_timeline_id(timeline_id) {
+            Ok(timeline) => timeline,
+            Err(error) => return Err(error),
+        };
+        if self
+            .consent_authority
+            .validate_revocation(&revocation)
+            .is_err()
+        {
+            return Err(GatewayError::Store(CoreError::Storage(
+                "consent revocation did not name an active grant".to_owned(),
+            )));
+        }
+        let payload = match revocation.encode() {
+            Ok(payload) => payload,
+            Err(error) => return Err(error.into()),
+        };
+        let event = match self
             .append_draft(
                 timeline,
                 EventDraft::new(
                     revocation.subject_id,
                     Kind::new(EVENT_TYPE_CONSENT_REVOKED_V1),
-                    revocation.encode()?,
+                    payload,
                 ),
             )
-            .await?;
-        self.consent_authority
-            .record_revocation(&revocation)
-            .map_err(|_| {
-                GatewayError::Store(CoreError::Storage(
-                    "consent revocation did not name an active grant".to_owned(),
-                ))
-            })?;
+            .await
+        {
+            Ok(event) => event,
+            Err(error) => return Err(error),
+        };
+        self.consent_authority.record_revocation(&revocation);
         Ok(event)
     }
 
@@ -2613,6 +2637,103 @@ mod tests {
             .await
             .test_ok();
         assert!(page.events.is_empty());
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn gateway_consent_grant_preserves_codec_and_event_ceiling_errors() {
+        let gateway = Gateway::with_limits(
+            open_store(StoreConfig::Memory).test_ok(),
+            GatewayLimits {
+                max_timelines: 1,
+                max_events_per_timeline: 1,
+            },
+        );
+        let timeline = gateway.create_timeline("consent-grant-errors").await.test_ok();
+        let mut invalid = consent_grant(EntityId::new(), 1);
+        invalid.modalities = 0x10;
+        let codec_error = gateway
+            .issue_consent_grant(&timeline.id().to_string(), invalid)
+            .await
+            .test_err();
+        assert!(matches!(
+            codec_error,
+            GatewayError::Store(CoreError::Storage(message))
+                if message.contains("field value is outside the V1 contract")
+        ));
+
+        gateway
+            .issue_consent_grant(&timeline.id().to_string(), consent_grant(EntityId::new(), 1))
+            .await
+            .test_ok();
+        let ceiling_error = gateway
+            .issue_consent_grant(&timeline.id().to_string(), consent_grant(EntityId::new(), 2))
+            .await
+            .test_err();
+        assert!(matches!(
+            ceiling_error,
+            GatewayError::EventLimitReached { maximum: 1 }
+        ));
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn gateway_revocation_revalidates_its_host_session_before_and_during_append() {
+        let gateway = Gateway::with_limits(
+            open_store(StoreConfig::Memory).test_ok(),
+            GatewayLimits {
+                max_timelines: 1,
+                max_events_per_timeline: 1,
+            },
+        );
+        let timeline = gateway
+            .create_timeline("consent-revocation-errors")
+            .await
+            .test_ok();
+        let unknown = ConsentRevokedV1 {
+            subject_id: EntityId::new(),
+            grantee_id: EntityId::new(),
+            grant_seq: 1,
+            fence_seq: 1,
+        };
+        let unknown_error = gateway
+            .issue_consent_revocation(&timeline.id().to_string(), unknown)
+            .await
+            .test_err();
+        assert!(matches!(
+            unknown_error,
+            GatewayError::Store(CoreError::Storage(message))
+                if message == "consent revocation did not name an active grant"
+        ));
+        assert!(gateway
+            .read_events_page(&timeline.id().to_string(), 0, 1)
+            .await
+            .test_ok()
+            .events
+            .is_empty());
+
+        let (grant_event, token) = gateway
+            .issue_consent_grant(&timeline.id().to_string(), consent_grant(EntityId::new(), 1))
+            .await
+            .test_ok();
+        let ceiling_error = gateway
+            .issue_consent_revocation(
+                &timeline.id().to_string(),
+                ConsentRevokedV1 {
+                    subject_id: token.subject_id(),
+                    grantee_id: token.grantee_id(),
+                    grant_seq: token.grant_seq(),
+                    fence_seq: grant_event.seq.as_u64().saturating_add(1),
+                },
+            )
+            .await
+            .test_err();
+        assert!(matches!(
+            ceiling_error,
+            GatewayError::EventLimitReached { maximum: 1 }
+        ));
         drop(gateway);
     }
 
