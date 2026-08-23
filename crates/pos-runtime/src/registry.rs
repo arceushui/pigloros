@@ -239,7 +239,7 @@ fn validate_recovery_evidence(
     Ok(())
 }
 
-fn reject_geographic_drafts(output: &StepOutput) -> Result<(), RuntimeError> {
+fn reject_host_owned_drafts(output: &StepOutput) -> Result<(), RuntimeError> {
     output
         .drafts
         .iter()
@@ -483,7 +483,7 @@ impl PluginRegistry {
             entry.event_cursor,
         );
         invoke_driver(driver.as_mut(), timeline, observations)
-            .and_then(|output| reject_geographic_drafts(&output).map(|()| output))
+            .and_then(|output| reject_host_owned_drafts(&output).map(|()| output))
     }
 
     fn step_anchored_transaction(
@@ -632,6 +632,14 @@ impl PluginRegistry {
     ) -> Result<(), RuntimeError> {
         self.ensure_no_pending_step()?;
         validate_recovery_evidence(timeline_segments, events)?;
+        // Consent is host control-plane history. Validate the full durable
+        // prefix above, then ensure Drivers never receive grant/revocation
+        // headers or payloads during recovery.
+        let visible_events: Vec<Event> = events
+            .iter()
+            .filter(|event| !pos_core::is_consent_event_type(&event.event_type))
+            .cloned()
+            .collect();
         let mut staged = Vec::new();
         let mut failure = None;
         for (id, entry) in &mut self.plugins {
@@ -639,7 +647,7 @@ impl PluginRegistry {
                 continue;
             };
             let evidence =
-                DriverRecoveryEvidence::from_events(timeline_segments, events, |header| {
+                DriverRecoveryEvidence::from_events(timeline_segments, &visible_events, |header| {
                     driver.needs_recovery_payload(header)
                 });
             if let Err(error) = driver.stage_restore_from_history(&evidence) {
@@ -976,7 +984,7 @@ impl PluginRegistry {
                 if let Some(driver) = entry.driver.as_mut() {
                     let observations = snapshot.view_for(driver.subscriptions());
                     let output = invoke_driver(driver.as_mut(), timeline, observations)?;
-                    reject_geographic_drafts(&output)?;
+                    reject_host_owned_drafts(&output)?;
                     entry.last_tick = Some(now_ns);
                     all_drafts.extend(output.drafts);
                 }
@@ -1055,7 +1063,7 @@ impl PluginRegistry {
             if let Some(driver) = entry.driver.as_mut() {
                 let observations = snapshot.view_for(driver.subscriptions());
                 let output = invoke_driver(driver.as_mut(), timeline, observations)?;
-                reject_geographic_drafts(&output)?;
+                reject_host_owned_drafts(&output)?;
                 all_drafts.extend(output.drafts);
             }
         }
@@ -2568,7 +2576,7 @@ mod tests {
                 .schemas
                 .iter()
                 .map(|schema| schema.event_type.as_str())
-            .collect::<Vec<_>>(),
+                .collect::<Vec<_>>(),
             vec![
                 "a.event",
                 pos_core::EVENT_TYPE_CONSENT_REVOKED_V1,

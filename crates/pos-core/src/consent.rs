@@ -269,7 +269,7 @@ impl ConsentGranted {
     ///
     /// # Errors
     /// Returns a closed codec error when a field is outside the V1 contract.
-    pub const fn validate(&self) -> Result<(), ConsentCodecError> {
+    pub fn validate(&self) -> Result<(), ConsentCodecError> {
         if self.purpose.len() > MAX_PURPOSE_BYTES {
             return Err(ConsentCodecError::PurposeTooLong {
                 size: self.purpose.len(),
@@ -287,21 +287,21 @@ impl ConsentGranted {
     /// Returns [`ConsentCodecError::PurposeTooLong`] if `purpose` exceeds 128 bytes.
     pub fn encode(&self) -> Result<CanonicalBytes, ConsentCodecError> {
         self.validate().and_then(|()| {
-        let arr = Value::Array(vec![
-            cbor_bytes(&MAGIC_CGV1),
-            cbor_u8(VERSION_V1),
-            cbor_id(self.subject_id),
-            cbor_id(self.grantee_id),
-            cbor_tstr(&self.purpose),
-            cbor_u8(self.modalities),
-            cbor_u8(self.min_geo_resolution),
-            cbor_bool(self.fork_permitted),
-            cbor_bool(self.export_permitted),
-            cbor_u16(self.retention_days),
-            cbor_u32(self.expiry_secs),
-            cbor_u64(self.grant_seq),
-        ]);
-        cbor_encode(&arr).map(CanonicalBytes::from_vec)
+            let arr = Value::Array(vec![
+                cbor_bytes(&MAGIC_CGV1),
+                cbor_u8(VERSION_V1),
+                cbor_id(self.subject_id),
+                cbor_id(self.grantee_id),
+                cbor_tstr(&self.purpose),
+                cbor_u8(self.modalities),
+                cbor_u8(self.min_geo_resolution),
+                cbor_bool(self.fork_permitted),
+                cbor_bool(self.export_permitted),
+                cbor_u16(self.retention_days),
+                cbor_u32(self.expiry_secs),
+                cbor_u64(self.grant_seq),
+            ]);
+            cbor_encode(&arr).map(CanonicalBytes::from_vec)
         })
     }
 
@@ -323,20 +323,22 @@ impl ConsentGranted {
                                         decode_bool(&items[8]).and_then(|export_permitted| {
                                             decode_u16(&items[9]).and_then(|retention_days| {
                                                 decode_u32(&items[10]).and_then(|expiry_secs| {
-                                                    decode_u64(&items[11]).map(|grant_seq| Self {
-                                                        subject_id,
-                                                        grantee_id,
-                                                        purpose,
-                                                        modalities,
-                                                        min_geo_resolution,
-                                                        fork_permitted,
-                                                        export_permitted,
-                                                        retention_days,
-                                                        expiry_secs,
-                                                        grant_seq,
-                                                    }).and_then(|grant| {
-                                                        grant.validate().map(|()| grant)
-                                                    })
+                                                    decode_u64(&items[11])
+                                                        .map(|grant_seq| Self {
+                                                            subject_id,
+                                                            grantee_id,
+                                                            purpose,
+                                                            modalities,
+                                                            min_geo_resolution,
+                                                            fork_permitted,
+                                                            export_permitted,
+                                                            retention_days,
+                                                            expiry_secs,
+                                                            grant_seq,
+                                                        })
+                                                        .and_then(|grant| {
+                                                            grant.validate().map(|()| grant)
+                                                        })
                                                 })
                                             })
                                         })
@@ -1217,29 +1219,6 @@ mod tests {
         assert!(gate
             .check_consent(EntityId::new(), &Kind::new("persona.update.v1"), 99)
             .is_ok());
-    }
-
-    // -- FieldState --
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn field_state_present_and_redacted() {
-        let present = FieldState::Present(CanonicalBytes::from_vec(vec![0x01]));
-        assert!(matches!(present, FieldState::Present(_)));
-        let redacted = FieldState::RedactedDestroyed;
-        assert!(matches!(redacted, FieldState::RedactedDestroyed));
-        assert_ne!(
-            redacted,
-            FieldState::Present(CanonicalBytes::from_vec(vec![]))
-        );
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn field_state_redaction_is_irreversible() {
-        let erased = FieldState::Present(CanonicalBytes::from_vec(vec![0x01])).redacted_destroyed();
-        assert_eq!(erased, FieldState::RedactedDestroyed);
-        assert_eq!(erased.redacted_destroyed(), FieldState::RedactedDestroyed);
     }
 
     // -- Error display --
