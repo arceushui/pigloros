@@ -289,8 +289,8 @@ fn scheduler_skips_metadata_only_plugins_and_rejects_cadence_overflow() {
     registry.register(&plugin, None, None).test_ok();
     registry.register_driver(Box::new(DefaultRecoveryDriver));
     registry.step_all_anchored(timeline, Seq::ZERO).test_ok();
-    registry.commit_step_at(Seq::ZERO, 0);
-    registry.commit_step_at(Seq::ZERO, 0);
+    registry.commit_step_at(Seq::ZERO, 0).test_ok();
+    registry.commit_step_at(Seq::ZERO, 0).test_ok();
 
     let mut cadenced = PluginRegistry::new();
     cadenced.register_driver(Box::new(CadencedDriver {
@@ -299,7 +299,7 @@ fn scheduler_skips_metadata_only_plugins_and_rejects_cadence_overflow() {
     cadenced
         .tick_cadenced_anchored(timeline, u128::MAX, Seq::ZERO)
         .test_ok();
-    cadenced.commit_step_at(Seq::ZERO, 0);
+    cadenced.commit_step_at(Seq::ZERO, 0).test_ok();
     assert!(matches!(
         cadenced.tick_cadenced_anchored(timeline, u128::MAX, Seq::ZERO),
         Err(RuntimeError::CadenceOverflow { .. })

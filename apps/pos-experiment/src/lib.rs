@@ -374,23 +374,15 @@ fn append_driver_drafts(
         return Err(error.into());
     }
     if drafts.is_empty() {
-        registry.commit_step_at(observed_through, 0);
+        registry.commit_step_at(observed_through, 0)?;
         Ok(0)
     } else {
-        match store.append(timeline_id, &drafts) {
+        let head = store.logical_head(timeline_id)?;
+        match registry.append_and_commit_step_at(store, head, 0, &drafts) {
             Ok(events) => {
-                let head = match store.logical_head(timeline_id) {
-                    Ok(head) => head,
-                    Err(error) => {
-                        registry.abort_step();
-                        return Err(error.into());
-                    }
-                };
-                registry.commit_step_at(head, 0);
                 Ok(u64::try_from(events.len()).unwrap_or(u64::MAX))
             }
             Err(error) => {
-                registry.abort_step();
                 Err(error.into())
             }
         }
@@ -1122,35 +1114,24 @@ impl ExperimentSession {
         }
         let emitted_events = if drafts.is_empty() {
             self.registry
-                .commit_step_at(self.boundary.folded_through, 0);
+                .commit_step_at(self.boundary.folded_through, 0)?;
             0
         } else {
             match lock_store(&self.store)
                 .and_then(|mut store| {
-                    store
-                        .append(self.timeline.id(), &drafts)
+                    let head = store
+                        .logical_head(self.timeline.id())
+                        .map_err(ExperimentError::from)?;
+                    self.registry
+                        .append_and_commit_step_at(store.as_mut(), head, 0, &drafts)
                         .map_err(ExperimentError::from)
                 })
                 .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
             {
                 Ok(count) => {
-                    let head = match lock_store(&self.store).and_then(|store| {
-                        store
-                            .logical_head(self.timeline.id())
-                            .map_err(ExperimentError::from)
-                    }) {
-                        Ok(head) => head,
-                        Err(error) => {
-                            self.registry.abort_step();
-                            self.health = SessionHealth::Faulted;
-                            return Err(error);
-                        }
-                    };
-                    self.registry.commit_step_at(head, 0);
                     count
                 }
                 Err(error) => {
-                    self.registry.abort_step();
                     self.health = SessionHealth::Faulted;
                     return Err(error);
                 }

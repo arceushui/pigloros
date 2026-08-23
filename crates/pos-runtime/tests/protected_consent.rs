@@ -80,7 +80,7 @@ fn protected_public_seam_checks_timeline_and_rechecks_at_commit_head() {
             fence_seq: 1,
         },
     ));
-    registry.commit_step_at(Seq::from_u64(1), 2);
+    test_ok(registry.commit_step_at(Seq::from_u64(1), 2));
 
     let wrong_timeline = TimelineId::new();
     let error =
@@ -248,13 +248,51 @@ fn protected_public_seam_revalidates_at_the_fresh_commit_fence_time() {
         &[],
     ));
     assert_eq!(drafts.len(), 1);
-    registry.commit_step_at(Seq::ZERO, 2);
+    test_ok(registry.commit_step_at(Seq::ZERO, 2));
 
     assert_eq!(
         *observed_now_secs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner),
         vec![1, 2]
+    );
+}
+
+#[test]
+fn protected_append_fence_rejects_before_store_append() {
+    use pos_store::{open_store, StoreConfig};
+
+    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let timeline = test_ok(store.create_timeline("protected-fence"));
+    let subject = EntityId::new();
+    let authority = ConsentAuthority::new();
+    let token = authority.record_grant_on_timeline(timeline.id(), &grant(subject));
+    let observed_now_secs = Arc::new(Mutex::new(Vec::new()));
+    let gate = Arc::new(CommitFenceGate {
+        token: token.clone(),
+        observed_now_secs,
+    });
+    let mut registry = PluginRegistry::new().with_consent_gate(gate);
+    registry.register_driver(Box::new(ProtectedEventDriver { entity: subject }));
+    let drafts = test_ok(registry.step_all_anchored_protected(
+        timeline.id(),
+        Seq::ZERO,
+        token,
+        1,
+        &[],
+    ));
+
+    let error = test_err(registry.append_and_commit_step_at(
+        store.as_mut(),
+        Seq::ZERO,
+        2,
+        &drafts,
+    ));
+    assert!(matches!(error, RuntimeError::Consent(ConsentError::Expired)));
+    assert_eq!(
+        test_ok(store.logical_head(timeline.id())),
+        Seq::ZERO,
+        "a rejected consent fence must not append drafts"
     );
 }
 
@@ -286,5 +324,5 @@ fn protected_cadenced_public_seam_stages_and_commits() {
     let drafts =
         test_ok(registry.tick_cadenced_anchored_protected(timeline, 0, Seq::ZERO, token, 1, &[]));
     assert_eq!(drafts.len(), 1);
-    registry.commit_step_at(Seq::ZERO, 1);
+    test_ok(registry.commit_step_at(Seq::ZERO, 1));
 }

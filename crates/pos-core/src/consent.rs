@@ -858,7 +858,17 @@ impl ConsentAuthority {
             .active
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(active) = sessions.get(&key) else {
+        Self::validate_from_sessions(&sessions, &key, token, timeline_head, now_secs)
+    }
+
+    fn validate_from_sessions(
+        sessions: &ActiveConsentSessions,
+        key: &(TimelineId, EntityId, EntityId, u64),
+        token: &ConsentCapabilityToken,
+        timeline_head: u64,
+        now_secs: u64,
+    ) -> Result<(), ConsentError> {
+        let Some(active) = sessions.get(key) else {
             return Err(ConsentError::NoConsent);
         };
         if active.token != *token || !active.token.is_valid_at(timeline_head) {
@@ -867,7 +877,6 @@ impl ConsentAuthority {
         if active.expiry_secs != 0 && now_secs >= u64::from(active.expiry_secs) {
             return Err(ConsentError::Expired);
         }
-        drop(sessions);
         Ok(())
     }
 
@@ -978,6 +987,48 @@ pub trait ConsentGate: Send + Sync {
             .map(|_| ())
     }
 
+    /// Authorize a projection read for the exact subject carried by a token.
+    /// Public operation contexts have no token and therefore cannot use this
+    /// seam. Hosts must apply it before materializing projection state.
+    ///
+    /// # Errors
+    /// Returns a consent-fence error when the token is not current at the read
+    /// boundary.
+    fn authorize_projection(
+        &self,
+        timeline_id: TimelineId,
+        subject: EntityId,
+        timeline_head: u64,
+        now_secs: u64,
+        token: &ConsentCapabilityToken,
+    ) -> Result<(), ConsentError> {
+        if token.subject_id() != subject {
+            return Err(ConsentError::NoConsent);
+        }
+        self.validate_token(timeline_id, token, timeline_head, now_secs)
+    }
+
+    /// Hold the host's consent fence while the caller performs its durable
+    /// append. Authorities that share revocation state with this gate override
+    /// this method so revocation cannot interleave between validation and the
+    /// append closure.
+    ///
+    /// # Errors
+    /// Returns the consent-fence error without invoking `append` when the
+    /// capability is no longer valid.
+    fn with_token_fence(
+        &self,
+        timeline_id: TimelineId,
+        token: &ConsentCapabilityToken,
+        timeline_head: u64,
+        now_secs: u64,
+        append: &mut dyn FnMut(),
+    ) -> Result<(), ConsentError> {
+        self.validate_token(timeline_id, token, timeline_head, now_secs)?;
+        append();
+        Ok(())
+    }
+
     /// Revalidate a previously issued capability at an operation or commit fence.
     ///
     /// # Errors
@@ -1064,6 +1115,32 @@ impl ConsentGate for ConsentAuthority {
         self.validate_on_timeline(timeline_id, token, timeline_head, now_secs)
     }
 
+    fn with_token_fence(
+        &self,
+        timeline_id: TimelineId,
+        token: &ConsentCapabilityToken,
+        timeline_head: u64,
+        now_secs: u64,
+        append: &mut dyn FnMut(),
+    ) -> Result<(), ConsentError> {
+        if token.authority_id != self.authority_id || token.timeline_id != timeline_id {
+            return Err(ConsentError::NoConsent);
+        }
+        let key = (
+            timeline_id,
+            token.subject_id,
+            token.grantee_id,
+            token.grant_seq,
+        );
+        let sessions = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::validate_from_sessions(&sessions, &key, token, timeline_head, now_secs)?;
+        append();
+        Ok(())
+    }
+
     fn authorize_event(
         &self,
         timeline_id: TimelineId,
@@ -1072,14 +1149,21 @@ impl ConsentGate for ConsentAuthority {
         timeline_head: u64,
         now_secs: u64,
     ) -> Result<(), ConsentError> {
-        if required_modality_for_event(event_type) == 0
-            && !event_type.as_str().starts_with("timeline.fork.")
-            && !event_type.as_str().starts_with("retention.")
-        {
-            return Ok(());
+        if is_consent_event_type(event_type) {
+            return Err(ConsentError::ConsentEventsForbidden);
         }
-        self.check_consent(timeline_id, subject, event_type, timeline_head, now_secs)
-            .map(|_| ())
+        if required_modality_for_event(event_type) != 0
+            || event_type.as_str().starts_with("timeline.fork.")
+            || event_type.as_str().starts_with("retention.")
+        {
+            // Public operation contexts do not carry a caller capability. A
+            // sensitive event therefore cannot borrow whichever active grant
+            // happens to match its entity; callers must use a protected API
+            // with the exact host-issued token.
+            return Err(ConsentError::NoConsent);
+        }
+        let _ = (timeline_id, subject, timeline_head, now_secs);
+        Ok(())
     }
 }
 
@@ -2057,6 +2141,45 @@ mod tests {
             )
             .is_ok());
 
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_authorization_never_borrows_a_sensitive_grant() {
+        let authority = ConsentAuthority::new();
+        let timeline = TimelineId::new();
+        let grant = sample_granted();
+        let _token = authority.record_grant_on_timeline(timeline, &grant);
+
+        assert_eq!(
+            authority.authorize_event(
+                timeline,
+                grant.subject_id,
+                &Kind::new("persona.update.v1"),
+                0,
+                0,
+            ),
+            Err(ConsentError::NoConsent)
+        );
+        assert_eq!(
+            authority.authorize_event(
+                timeline,
+                grant.subject_id,
+                &Kind::new(EVENT_TYPE_CONSENT_GRANTED_V1),
+                0,
+                0,
+            ),
+            Err(ConsentError::ConsentEventsForbidden)
+        );
+        assert!(authority
+            .authorize_event(
+                timeline,
+                grant.subject_id,
+                &Kind::new("driver.observation.v1"),
+                0,
+                0,
+            )
+            .is_ok());
     }
 
     #[test]

@@ -1079,8 +1079,8 @@ mod tests {
             .test_ok();
         assert_eq!(fixture.calls.get(), 2);
         assert_eq!(first[0].payload, retry[0].payload);
-        fixture.registry.commit_step_at(Seq::ZERO, 0);
-        fixture.registry.commit_step_at(Seq::ZERO, 0);
+        fixture.registry.commit_step_at(Seq::ZERO, 0).test_ok();
+        fixture.registry.commit_step_at(Seq::ZERO, 0).test_ok();
 
         let next = fixture
             .registry
@@ -1247,7 +1247,7 @@ mod tests {
             .registry
             .step_all_anchored(fixture.timeline, Seq::ZERO)
             .test_ok();
-        fixture.registry.commit_step_at(Seq::ZERO, 0);
+        fixture.registry.commit_step_at(Seq::ZERO, 0).test_ok();
         // committed_tick is now 1; the guard fires before verifying evidence.
         let segments = [TimelineHistorySegment::new(fixture.timeline, Seq::ZERO)];
         let err = fixture

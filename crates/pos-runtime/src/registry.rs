@@ -11,8 +11,8 @@ use pos_core::{
     clock::Seq,
     event::{Event, EventDraft, Kind},
     ids::PluginId,
-    ActionApprover, ActionRejected, ConsentAuthority, ConsentCapabilityToken, ConsentGate, Plugin,
-    ProposedAction, Reducer, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+    ActionApprover, ActionRejected, ConsentAuthority, ConsentCapabilityToken, ConsentError,
+    ConsentGate, Plugin, ProposedAction, Reducer, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
 use pos_state::ProjectionRegistry;
 
@@ -165,7 +165,7 @@ mod coverage_paths {
             event_cursors: vec![(id, Seq::ZERO)],
             operation: OperationContext::Public,
         });
-        registry.commit_step_at(Seq::ZERO, 0);
+        assert!(registry.commit_step_at(Seq::ZERO, 0).is_ok());
     }
 
     #[test]
@@ -373,7 +373,12 @@ impl PluginRegistry {
         })
     }
 
-    fn snapshot_for_tick(&self) -> ObservationSnapshot {
+    fn snapshot_for_tick(
+        &self,
+        timeline: pos_core::ids::TimelineId,
+        timeline_head: Seq,
+        operation: &OperationContext,
+    ) -> Result<ObservationSnapshot, RuntimeError> {
         let mut seen = HashSet::new();
         let mut subscriptions = Vec::new();
 
@@ -385,7 +390,41 @@ impl PluginRegistry {
             extend_unique_subscriptions(&mut subscriptions, &mut seen, entry.subscriptions());
         }
 
-        self.snapshot_for_subscriptions(subscriptions.iter())
+        self.authorize_snapshot_subscriptions(timeline, timeline_head, operation, subscriptions.iter())?;
+        Ok(self.snapshot_for_subscriptions(subscriptions.iter()))
+    }
+
+    fn authorize_snapshot_subscriptions<'a>(
+        &self,
+        timeline: pos_core::ids::TimelineId,
+        timeline_head: Seq,
+        operation: &OperationContext,
+        subscriptions: impl IntoIterator<Item = &'a ProjectionKey>,
+    ) -> Result<(), RuntimeError> {
+        let subscriptions: Vec<ProjectionKey> = subscriptions.into_iter().cloned().collect();
+        match operation {
+            OperationContext::Public if !subscriptions.is_empty() => {
+                Err(RuntimeError::Consent(ConsentError::NoConsent))
+            }
+            OperationContext::Public => Ok(()),
+            OperationContext::Protected { token, now_secs } => {
+                let gate = self
+                    .consent_gate
+                    .as_ref()
+                    .ok_or(RuntimeError::ConsentOperationUnavailable)?;
+                for key in &subscriptions {
+                    gate.authorize_projection(
+                        timeline,
+                        *key.entity_id(),
+                        timeline_head.as_u64(),
+                        *now_secs,
+                        token,
+                    )
+                    .map_err(RuntimeError::Consent)?;
+                }
+                Ok(())
+            }
+        }
     }
 
     #[must_use]
@@ -657,10 +696,17 @@ impl PluginRegistry {
         }
 
         let anchor = SnapshotAnchor::new(timeline, observed_through);
-        let snapshot =
-            ObservationSnapshot::from_anchored_subscriptions(anchor, subscriptions.iter(), |key| {
-                self.projections.state_for(key.entity_id()).cloned()
-            });
+        self.authorize_snapshot_subscriptions(
+            timeline,
+            observed_through,
+            &operation,
+            subscriptions.iter(),
+        )?;
+        let snapshot = ObservationSnapshot::from_anchored_subscriptions(
+            anchor,
+            subscriptions.iter(),
+            |key| self.projections.state_for(key.entity_id()).cloned(),
+        );
         let mut all_drafts = Vec::new();
         let mut staged_driver_ids = Vec::new();
         for id in driver_ids {
@@ -713,24 +759,7 @@ impl PluginRegistry {
         Ok(all_drafts)
     }
 
-    /// Commit the Driver and cadence state staged by an anchored step.
-    /// Commit a staged step after revalidating it at the supplied fresh time.
-    pub fn commit_step_at(&mut self, timeline_head: Seq, commit_now_secs: u64) {
-        let Some(pending) = self.pending_step.take() else {
-            return;
-        };
-        if self
-            .validate_operation(
-                pending.timeline,
-                &pending.operation,
-                timeline_head,
-                Some(commit_now_secs),
-            )
-            .is_err()
-        {
-            let _ = self.abort_drivers(&pending.driver_ids);
-            return;
-        }
+    fn commit_pending_step(&mut self, pending: PendingStep) {
         for id in &pending.driver_ids {
             if let Some(driver) = self
                 .plugins
@@ -755,6 +784,111 @@ impl PluginRegistry {
                 entry.event_cursor = cursor;
             }
         }
+    }
+
+    /// Commit a staged step after revalidating it at the supplied fresh time.
+    ///
+    /// # Errors
+    /// Returns the consent-fence error and aborts every staged Driver when the
+    /// operation is no longer authorized. Callers must not append drafts until
+    /// this fence succeeds; [`Self::append_and_commit_step_at`] combines the
+    /// fence and host append in one host-owned boundary.
+    pub fn commit_step_at(
+        &mut self,
+        timeline_head: Seq,
+        commit_now_secs: u64,
+    ) -> Result<(), RuntimeError> {
+        let Some(pending) = self.pending_step.take() else {
+            return Ok(());
+        };
+        if let Err(error) = self
+            .validate_operation(
+                pending.timeline,
+                &pending.operation,
+                timeline_head,
+                Some(commit_now_secs),
+            )
+        {
+            let _ = self.abort_drivers(&pending.driver_ids);
+            return Err(error);
+        }
+        self.commit_pending_step(pending);
+        Ok(())
+    }
+
+    /// Fence and append one staged host Tick before committing Driver state.
+    ///
+    /// The consent validation happens while the host owns both the registry's
+    /// pending step and the EventStore borrow. A rejected fence therefore
+    /// aborts the staged Drivers before any draft reaches durable storage.
+    ///
+    /// # Errors
+    /// Returns the consent or store error and aborts the staged step when the
+    /// fence or append fails.
+    pub fn append_and_commit_step_at(
+        &mut self,
+        store: &mut dyn pos_core::store::EventStore,
+        timeline_head: Seq,
+        commit_now_secs: u64,
+        drafts: &[EventDraft],
+    ) -> Result<Vec<Event>, RuntimeError> {
+        let Some(pending) = self.pending_step.as_ref() else {
+            return Err(RuntimeError::PendingDriverStep);
+        };
+        let pending_timeline = pending.timeline;
+        let operation = pending.operation.clone();
+        let events = match operation {
+            OperationContext::Protected { token, now_secs } => {
+                let gate = self
+                    .consent_gate
+                    .as_ref()
+                    .ok_or(RuntimeError::ConsentOperationUnavailable)?
+                    .clone();
+                let mut append_result = Ok(Vec::new());
+                let mut append = || {
+                    append_result = store.append(pending_timeline, drafts);
+                };
+                if let Err(error) = gate.with_token_fence(
+                    pending_timeline,
+                    &token,
+                    timeline_head.as_u64(),
+                    commit_now_secs,
+                    &mut append,
+                ) {
+                    self.abort_step();
+                    return Err(RuntimeError::Consent(error));
+                }
+                append_result?
+            }
+            OperationContext::Public => {
+                if let Err(error) = self.validate_operation(
+                    pending_timeline,
+                    &OperationContext::Public,
+                    timeline_head,
+                    Some(commit_now_secs),
+                ) {
+                    self.abort_step();
+                    return Err(error);
+                }
+                match store.append(pending_timeline, drafts) {
+                    Ok(events) => events,
+                    Err(error) => {
+                        self.abort_step();
+                        return Err(error.into());
+                    }
+                }
+            }
+        };
+        /*
+         * The pending step is consumed only after the host append succeeds.
+         * A store failure above has already aborted every staged Driver.
+         */
+        let pending = self
+            .pending_step
+            .take()
+            .expect("pending step remains until append-and-commit completes");
+        self.commit_pending_step(pending);
+        Ok(events)
     }
 
     /// Abort the Driver and cadence state staged by an anchored step.
@@ -1124,6 +1258,12 @@ impl PluginRegistry {
             }
         }
 
+        self.authorize_snapshot_subscriptions(
+            timeline,
+            Seq::ZERO,
+            &OperationContext::Public,
+            due_subscriptions.iter(),
+        )?;
         let snapshot = self.snapshot_for_subscriptions(due_subscriptions.iter());
         for (id, entry) in &mut self.plugins {
             if due_driver_ids.remove(id) {
@@ -1235,7 +1375,7 @@ impl PluginRegistry {
         self.reject_unanchored_drivers()?;
         self.validate_operation(timeline, &OperationContext::Public, Seq::ZERO, None)?;
         let mut all_drafts = Vec::new();
-        let snapshot = self.snapshot_for_tick();
+        let snapshot = self.snapshot_for_tick(timeline, Seq::ZERO, &OperationContext::Public)?;
         for entry in self.plugins.values_mut() {
             if let Some(driver) = entry.driver.as_mut() {
                 let observations = snapshot.view_for(driver.subscriptions());
@@ -1683,7 +1823,7 @@ mod tests {
         ));
         assert_eq!(state.lock().test_ok().steps, 1);
 
-        registry.commit_step_at(Seq::ZERO, 0);
+        registry.commit_step_at(Seq::ZERO, 0).test_ok();
         assert_eq!(state.lock().test_ok().commits, 1);
         assert!(!state.lock().test_ok().staged);
 
@@ -1800,7 +1940,7 @@ mod tests {
         registry
             .step_all_anchored(TimelineId::new(), Seq::ZERO)
             .test_ok();
-        registry.commit_step_at(Seq::ZERO, 0);
+        registry.commit_step_at(Seq::ZERO, 0).test_ok();
         assert!(registry
             .step_all_anchored(TimelineId::new(), Seq::ZERO)
             .is_err());
@@ -1944,7 +2084,7 @@ mod tests {
         registry
             .tick_cadenced_anchored(timeline, 0, Seq::ZERO)
             .test_ok();
-        registry.commit_step_at(Seq::ZERO, 0);
+        registry.commit_step_at(Seq::ZERO, 0).test_ok();
         assert_eq!(state.lock().test_ok().steps, 2);
 
         assert!(matches!(
@@ -1957,13 +2097,13 @@ mod tests {
             .tick_cadenced_anchored(timeline, 50, Seq::ZERO)
             .test_ok()
             .is_empty());
-        registry.commit_step_at(Seq::ZERO, 0);
+        registry.commit_step_at(Seq::ZERO, 0).test_ok();
         assert_eq!(state.lock().test_ok().steps, 2);
 
         registry
             .tick_cadenced_anchored(timeline, 100, Seq::ZERO)
             .test_ok();
-        registry.commit_step_at(Seq::ZERO, 0);
+        registry.commit_step_at(Seq::ZERO, 0).test_ok();
         assert_eq!(state.lock().test_ok().steps, 3);
     }
 
@@ -2511,16 +2651,36 @@ mod tests {
         let mut reg = PluginRegistry::new();
         reg.projections.register("counter", Box::new(CountReducer));
         reg.projections.apply_event(&event);
+        let authority = ConsentAuthority::new();
+        let grant = ConsentGranted {
+            subject_id: observed_entity,
+            grantee_id: EntityId::new(),
+            purpose: "projection-test".to_owned(),
+            modalities: 0,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        };
+        let token = authority.record_grant_on_timeline(timeline.id(), &grant);
+        reg = reg.with_consent_authority(authority);
         reg.register_driver(Box::new(ObservingDriver {
             target: ProjectionKey::new(observed_entity),
             entity: EntityId::new(),
         }));
 
-        let drafts = reg.tick_cadenced(timeline.id(), 0).test_ok();
+        let drafts = reg
+            .tick_cadenced_anchored_protected(timeline.id(), 0, Seq::ZERO, token.clone(), 0, &[])
+            .test_ok();
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].event_type.as_str(), "driver.observed");
+        reg.commit_step_at(Seq::ZERO, 0).test_ok();
 
-        let drafts = reg.step_all(timeline.id()).test_ok();
+        let drafts = reg
+            .step_all_anchored_protected(timeline.id(), Seq::ZERO, token, 0, &[])
+            .test_ok();
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].event_type.as_str(), "driver.observed");
     }
@@ -2560,11 +2720,27 @@ mod tests {
             keys: vec![key.clone(), key],
         };
         let plugin = plugin_with_caps("dup-key-plugin", &[], true, false);
-        let mut reg = PluginRegistry::new();
+        let authority = ConsentAuthority::new();
+        let grant = ConsentGranted {
+            subject_id: key.entity_id().to_owned(),
+            grantee_id: EntityId::new(),
+            purpose: "projection-dedup-test".to_owned(),
+            modalities: 0,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        };
+        let token = authority.record_grant_on_timeline(timeline.id(), &grant);
+        let mut reg = PluginRegistry::new().with_consent_authority(authority);
         reg.register(&plugin, None, Some(Box::new(driver)))
             .test_ok();
 
-        let drafts = reg.tick_cadenced(timeline.id(), 0).test_ok();
+        let drafts = reg
+            .tick_cadenced_anchored_protected(timeline.id(), 0, Seq::ZERO, token, 0, &[])
+            .test_ok();
         assert!(drafts.is_empty());
     }
 

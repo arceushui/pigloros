@@ -1239,6 +1239,7 @@ impl Gateway {
                     "consent revocation session disappeared after append".to_owned(),
                 ))
             })?;
+        self.publish_notice(timeline, &event);
         Ok(event)
     }
 
