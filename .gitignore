@@ -12,3 +12,6 @@ SQLCipher.db
 .worktrees/
 skill-observations/
 skills-lock.json
+# Historical agent plans and design records belong in Redmine or Notion.
+docs/plans/
+docs/superpowers/
