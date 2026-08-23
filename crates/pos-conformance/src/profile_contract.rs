@@ -3411,6 +3411,7 @@ mod tests {
     fn public_stable_validator_rejects_report_case_outcome_mismatch() {
         let mut value = stable_profile();
         value.stable_evidence[0].report.cases[0].replay_claim = ReplayClaimV1::StructuralOnly;
+        value.stable_evidence[0].report.replay_claim = ReplayClaimV1::StructuralOnly;
         value.stable_evidence[0].report.report_digest =
             value.stable_evidence[0].report.digest().unwrap_or([0; 32]);
         refresh_stable_attestation(&mut value.stable_evidence[0]);
