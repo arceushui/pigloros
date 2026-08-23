@@ -1191,7 +1191,7 @@ mod tests {
         crypto::Hash,
         event::{CanonicalBytes, EventDraft, Kind, SchemaVersion},
         ids::{EntityId, EventId, PluginId, TimelineId},
-        Capability, Event, Plugin, Reducer, State,
+        Capability, ConsentGranted, Event, Plugin, Reducer, State,
     };
     use pos_store::{open_store, StoreConfig};
     use std::{
@@ -2048,6 +2048,124 @@ mod tests {
     }
 
     #[test]
+    fn selected_driver_never_receives_gateway_owned_consent_events() {
+        struct EventDriver {
+            subscriptions: Vec<Kind>,
+            observed: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl Driver for EventDriver {
+            fn name(&self) -> &'static str {
+                "event-filter"
+            }
+
+            fn event_subscriptions(&self) -> &[Kind] {
+                &self.subscriptions
+            }
+
+            fn step(
+                &mut self,
+                _: TimelineId,
+                observations: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                self.observed.lock().test_ok().extend(
+                    observations
+                        .events()
+                        .iter()
+                        .map(|event| event.event_type.as_str().to_owned()),
+                );
+                Ok(StepOutput::empty())
+            }
+        }
+
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let mut registry = PluginRegistry::new();
+        let plugin_id = PluginId::new();
+        registry.plugins.insert(
+            plugin_id,
+            PluginEntry {
+                name: "event-filter".to_owned(),
+                version: "0.1.0".to_owned(),
+                driver: Some(Box::new(EventDriver {
+                    subscriptions: vec![
+                        Kind::new("ordinary.event"),
+                        Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+                    ],
+                    observed: Arc::clone(&observed),
+                })),
+                approver: None,
+                last_tick: None,
+                event_cursor: Seq::ZERO,
+            },
+        );
+
+        let ordinary = Event {
+            id: EventId::new(),
+            entity: EntityId::new(),
+            event_type: Kind::new("ordinary.event"),
+            payload: CanonicalBytes::from_static(b"ordinary"),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        };
+        let mut consent = ordinary.clone();
+        consent.event_type = Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1);
+
+        registry
+            .invoke_selected_driver(
+                plugin_id,
+                TimelineId::new(),
+                &ObservationSnapshot::default(),
+                &[ordinary, consent],
+            )
+            .test_ok();
+
+        assert_eq!(
+            observed.lock().test_ok().as_slice(),
+            ["ordinary.event".to_owned()]
+        );
+    }
+
+    #[test]
+    fn protected_operation_validation_fails_closed_and_checks_the_bound_authority() {
+        let grant = ConsentGranted {
+            subject_id: EntityId::new(),
+            grantee_id: EntityId::new(),
+            purpose: "runtime-test".to_owned(),
+            modalities: pos_core::MODALITY_LOCATION,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 1,
+            expiry_secs: 0,
+            grant_seq: 4,
+        };
+        let authority = ConsentAuthority::new();
+        let token = authority.record_grant(&grant);
+        let operation = OperationContext::Protected {
+            token: token.clone(),
+            now_secs: 1,
+        };
+
+        assert!(PluginRegistry::new()
+            .validate_operation(&operation, Seq::from_u64(3))
+            .is_err_and(|error| matches!(error, RuntimeError::ConsentOperationUnavailable)));
+
+        let bound = PluginRegistry::new().with_consent_authority(authority.clone());
+        assert!(bound
+            .validate_operation(&operation, Seq::from_u64(3))
+            .is_ok());
+        assert!(bound
+            .validate_operation(&operation, Seq::from_u64(4))
+            .is_err_and(|error| matches!(error, RuntimeError::Consent(_))));
+
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn step_all_propagates_driver_error() {
         struct FailingDriver;
@@ -2693,7 +2811,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_registry_registers_approver_and_submits_action() {
         let plugin = plugin_with_caps("approver_plugin", &["action.type"], false, false);
-        let mut reg = PluginRegistry::new();
+        let mut reg = PluginRegistry::default();
         reg.register_with_approver(
             &plugin,
             None,
