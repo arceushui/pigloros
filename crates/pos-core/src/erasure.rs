@@ -2310,6 +2310,13 @@ mod tests {
         let mut input = receipt_input(ErasureLifecycleV1::Complete, vec![acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged)], Vec::new(), Vec::new());
         input.terminal_state = terminal.state_digest();
         let receipt = ErasureReceiptV1::new(input)?;
+        assert_eq!(
+            receipt.verify_history(&TestResolver {
+                states: vec![terminal.clone()],
+                unavailable: false,
+            }),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
         let resolver = TestResolver { states: vec![submitted, authorized, frozen, dispatched, waiting, terminal], unavailable: false };
         receipt.verify_history(&resolver)?;
         assert_eq!(receipt.verify_history(&TestResolver { states: Vec::new(), unavailable: false }), Err(ErasureErrorV1::ProvenanceMissing));
@@ -3093,6 +3100,46 @@ mod tests {
             )),
             Err(ErasureErrorV1::ScopeInvalid)
         );
+    }
+
+    #[test]
+    fn public_state_owner_accessors_and_freeze_rejection_remain_exact() -> Result<(), ErasureErrorV1> {
+        let dispatched = dispatched()?;
+        let pending = vec![reference(7)];
+        let failed = vec![reference(8)];
+        let awaiting = dispatched.transition(change(
+            ErasureLifecycleV1::AwaitingAcknowledgements,
+            Some(10),
+            pending.clone(),
+            failed.clone(),
+        ))?;
+        assert_eq!(awaiting.pending_owners(), pending);
+        assert_eq!(awaiting.failed_owners(), failed);
+
+        let acknowledgement = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
+        let port = TestCoordinatorPort {
+            accepted: true,
+            targets: vec![acknowledgement.target, acknowledgement.target],
+        };
+        let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+        coordinator.submit(request()?, reference(3))?;
+        coordinator.advance(
+            reference(1),
+            change(ErasureLifecycleV1::Authorized, None, Vec::new(), Vec::new()),
+        )?;
+        assert_eq!(
+            coordinator.freeze_inventory(
+                reference(1),
+                change(
+                    ErasureLifecycleV1::AccessFrozen,
+                    Some(10),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+        Ok(())
     }
 
     #[test]
