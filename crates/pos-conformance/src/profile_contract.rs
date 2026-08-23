@@ -1771,7 +1771,7 @@ mod tests {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn case_outcome(mode: ExecutionModeV1) -> CaseOutcomeV1 {
+    fn case_outcome_record(mode: ExecutionModeV1) -> CaseOutcomeV1 {
         let fixture = &profile().fixtures[0];
         let ExpectedResultV1::CanonicalBytes {
             digest: expected_digest,
@@ -1819,8 +1819,8 @@ mod tests {
             },
             evaluator_protocol_digest: digest(13),
             case_outcomes: vec![
-                case_outcome(ExecutionModeV1::Local),
-                case_outcome(ExecutionModeV1::AirGapped),
+                case_outcome_record(ExecutionModeV1::Local),
+                case_outcome_record(ExecutionModeV1::AirGapped),
             ],
         }
     }
