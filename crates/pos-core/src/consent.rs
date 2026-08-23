@@ -668,6 +668,39 @@ impl ConsentRevocationReservation {
         }
         self.completed = true;
     }
+
+    /// Publish the durable revocation fence after its Event append succeeds.
+    ///
+    /// # Errors
+    /// Returns ConsentError::NoConsent when the reserved session has already
+    /// changed or disappeared. The reservation then rolls back on drop unless
+    /// the fence was published successfully.
+    pub fn commit_durable(mut self) -> Result<(), ConsentError> {
+        let key = (
+            self.timeline_id,
+            self.subject_id,
+            self.grantee_id,
+            self.grant_seq,
+        );
+        let mut sessions = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(active) = sessions.get_mut(&key) else {
+            return Err(ConsentError::NoConsent);
+        };
+        if active.token.fence_seq != self.pending_fence_seq {
+            return Err(ConsentError::NoConsent);
+        }
+        active.token.fence_seq = self.fence_seq;
+        self.completed = true;
+        Ok(())
+    }
+
+    /// Abort a durable revocation that was not appended.
+    pub fn abort_durable(mut self) {
+        self.rollback();
+    }
 }
 
 impl Drop for ConsentRevocationReservation {
@@ -835,41 +868,23 @@ impl ConsentAuthority {
     /// different authority or the reserved session no longer exists.
     pub fn commit_revocation(
         &self,
-        mut reservation: ConsentRevocationReservation,
+        reservation: ConsentRevocationReservation,
     ) -> Result<(), ConsentError> {
         if reservation.authority_id != self.authority_id {
             return Err(ConsentError::NoConsent);
         }
-        let key = (
-            reservation.timeline_id,
-            reservation.subject_id,
-            reservation.grantee_id,
-            reservation.grant_seq,
-        );
-        let mut sessions = self
-            .active
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(active) = sessions.get_mut(&key) else {
-            return Err(ConsentError::NoConsent);
-        };
-        if active.token.fence_seq != reservation.pending_fence_seq {
-            return Err(ConsentError::NoConsent);
-        }
-        active.token.fence_seq = reservation.fence_seq;
-        reservation.completed = true;
-        Ok(())
+        reservation.commit_durable()
     }
 
     /// Abort a failed durable revocation append and restore its prior fence.
     ///
     /// A later direct revocation or grant publication is preserved if it has
     /// already changed the session while the reservation was being resolved.
-    pub fn abort_revocation(&self, mut reservation: ConsentRevocationReservation) {
+    pub fn abort_revocation(&self, reservation: ConsentRevocationReservation) {
         if reservation.authority_id != self.authority_id {
             return;
         }
-        reservation.rollback();
+        reservation.abort_durable();
     }
 
     fn validate_revocation_with_timeline(

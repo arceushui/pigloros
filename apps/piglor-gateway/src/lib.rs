@@ -1222,36 +1222,27 @@ impl Gateway {
                 timeline,
                 revocation.clone(),
                 self.limits.max_events_per_timeline,
+                reservation,
             )
             .await
         {
             Err(executor::StoreExecutorError::Store(CoreError::Storage(message)))
                 if message == "consent revocation fence mismatch" =>
             {
-                self.consent_authority.abort_revocation(reservation);
                 return Err(GatewayError::ConsentRevocationFenceMismatch)
             }
             Err(executor::StoreExecutorError::Store(CoreError::Storage(message)))
                 if message == "event limit reached" =>
             {
-                self.consent_authority.abort_revocation(reservation);
                 return Err(GatewayError::EventLimitReached {
                     maximum: self.limits.max_events_per_timeline,
                 })
             }
             Ok(event) => event,
             Err(error) => {
-                self.consent_authority.abort_revocation(reservation);
                 return Err(error.into());
             }
         };
-        self.consent_authority
-            .commit_revocation(reservation)
-            .map_err(|_| {
-                GatewayError::Store(CoreError::Storage(
-                    "consent revocation session disappeared after append".to_owned(),
-                ))
-            })?;
         self.publish_notice(timeline, &event);
         Ok(event)
     }

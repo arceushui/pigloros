@@ -14,7 +14,8 @@ use pos_core::{
         PurgeOutcome, SeqRange,
     },
     timeline::Timeline,
-    ConsentGrantedV1, ConsentRevokedV1, CoreError, OwnTracksIngressInputV1,
+    ConsentGrantedV1, ConsentRevocationReservation, ConsentRevokedV1, CoreError,
+    OwnTracksIngressInputV1,
     OwnTracksIngressRateKeyV1, OwnTracksIngressStore, EVENT_TYPE_CONSENT_GRANTED_V1,
     EVENT_TYPE_CONSENT_REVOKED_V1,
 };
@@ -104,6 +105,7 @@ enum Command {
         timeline: TimelineId,
         revocation: ConsentRevokedV1,
         maximum: u64,
+        reservation: ConsentRevocationReservation,
         reply: oneshot::Sender<Result<Event, StoreExecutorError>>,
     },
     AppendIdentified {
@@ -978,11 +980,13 @@ impl StoreExecutor {
         timeline: TimelineId,
         revocation: ConsentRevokedV1,
         maximum: u64,
+        reservation: ConsentRevocationReservation,
     ) -> Result<Event, StoreExecutorError> {
         submit!(self, |reply| Command::AppendConsentRevocation {
             timeline,
             revocation,
             maximum,
+            reservation,
             reply,
         })
     }
@@ -1302,7 +1306,12 @@ fn expire_command(command: Command) {
         Command::AppendConsentGrant { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
-        Command::AppendConsentRevocation { reply, .. } => {
+        Command::AppendConsentRevocation {
+            reservation,
+            reply,
+            ..
+        } => {
+            reservation.abort_durable();
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
         Command::AppendIdentified { reply, .. } => {
@@ -1462,9 +1471,17 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
             timeline,
             revocation,
             maximum,
+            reservation,
             reply,
         } => {
-            execute_append_consent_revocation_command(state, timeline, &revocation, maximum, reply);
+            execute_append_consent_revocation_command(
+                state,
+                timeline,
+                &revocation,
+                maximum,
+                reservation,
+                reply,
+            );
         }
         Command::AppendIdentified {
             timeline,
@@ -1642,6 +1659,7 @@ fn execute_append_consent_revocation_command(
     timeline: TimelineId,
     revocation: &ConsentRevokedV1,
     maximum: u64,
+    reservation: ConsentRevocationReservation,
     reply: oneshot::Sender<Result<Event, StoreExecutorError>>,
 ) {
     let store = state.store.event_store();
@@ -1672,7 +1690,20 @@ fn execute_append_consent_revocation_command(
             events.ok_or_else(|| CoreError::Storage("event limit reached".to_owned()))
         })
         .map(|mut events| events.remove(0));
-    send_store_result(reply, result);
+    match result {
+        Ok(mut events) => match reservation.commit_durable() {
+            Ok(()) => drop(reply.send(Ok(events.remove(0)))),
+            Err(_) => drop(reply.send(Err(StoreExecutorError::Store(
+                CoreError::Storage(
+                    "consent revocation session disappeared after append".to_owned(),
+                ),
+            )))),
+        },
+        Err(error) => {
+            reservation.abort_durable();
+            drop(reply.send(Err(StoreExecutorError::Store(error))));
+        }
+    }
 }
 
 fn execute_append_identified_command(
@@ -1752,8 +1783,8 @@ mod tests {
             EventStore, SeqRange,
         },
         timeline::Timeline,
-        CanonicalBytes, ConsentGrantedV1, ConsentRevokedV1, CoreError, EntityId, EventId, Kind,
-        OwnTracksIngressRateKeyV1, TimelineId,
+        CanonicalBytes, ConsentAuthority, ConsentGate, ConsentGrantedV1, ConsentRevokedV1,
+        CoreError, EntityId, EventId, Kind, OwnTracksIngressRateKeyV1, TimelineId,
     };
     use pos_store::memory::MemoryStore;
     use std::{
@@ -2446,20 +2477,122 @@ mod tests {
         );
 
         let (reply, receiver) = tokio::sync::oneshot::channel();
+        let authority = pos_core::ConsentAuthority::new();
+        let timeline = TimelineId::new();
+        let grant = ConsentGrantedV1 {
+            subject_id: EntityId::new(),
+            grantee_id: EntityId::new(),
+            purpose: "expired".to_owned(),
+            modalities: pos_core::MODALITY_LOCATION,
+            min_geo_resolution: 1,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        };
+        let revocation = ConsentRevokedV1 {
+            subject_id: grant.subject_id,
+            grantee_id: grant.grantee_id,
+            grant_seq: grant.grant_seq,
+            fence_seq: 1,
+        };
+        authority.record_grant_on_timeline(timeline, &grant);
+        let reservation = authority
+            .begin_revocation_on_timeline(timeline, &revocation)
+            .test_ok();
         assert_expired(
             Command::AppendConsentRevocation {
-                timeline: TimelineId::new(),
-                revocation: ConsentRevokedV1 {
-                    subject_id: EntityId::new(),
-                    grantee_id: EntityId::new(),
-                    grant_seq: 1,
-                    fence_seq: 1,
-                },
+                timeline,
+                revocation,
                 maximum: 1,
+                reservation,
                 reply,
             },
             receiver,
         );
+    }
+
+    #[tokio::test]
+    async fn cancelled_queued_revocation_finishes_before_protected_append() {
+        let (observer, records) = super::SchedulerObserver::new(8);
+        let (gate_sender, gate_receiver) = std::sync::mpsc::channel();
+        observer.install_gate(gate_receiver);
+        let executor = super::StoreExecutor::spawn_with_observer_for_test(
+            super::ExecutorStore::Generic(Box::new(MemoryStore::new())),
+            Arc::clone(&observer),
+        );
+        let authority = ConsentAuthority::new();
+        let timeline = TimelineId::new();
+        let grant = ConsentGrantedV1 {
+            subject_id: EntityId::new(),
+            grantee_id: EntityId::new(),
+            purpose: "queued-cancellation".to_owned(),
+            modalities: pos_core::MODALITY_LOCATION,
+            min_geo_resolution: 1,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        };
+        let token = authority.record_grant_on_timeline(timeline, &grant);
+        let revocation = ConsentRevokedV1 {
+            subject_id: grant.subject_id,
+            grantee_id: grant.grantee_id,
+            grant_seq: grant.grant_seq,
+            fence_seq: 1,
+        };
+        let reservation = authority
+            .begin_revocation_on_timeline(timeline, &revocation)
+            .test_ok();
+        let task = tokio::spawn({
+            let executor = executor.clone();
+            async move {
+                executor
+                    .append_consent_revocation(timeline, revocation, 10, reservation)
+                    .await
+            }
+        });
+
+        assert!(matches!(
+            records.recv().test_ok(),
+            super::SchedulerTrace::Admitted { .. }
+        ));
+        assert!(matches!(
+            records.recv().test_ok(),
+            super::SchedulerTrace::DrainCompleted { pending: 1, .. }
+        ));
+        task.abort();
+        assert!(task.await.is_err());
+        gate_sender.send(()).test_ok();
+        assert!(matches!(
+            records.recv().test_ok(),
+            super::SchedulerTrace::Selected { .. }
+        ));
+
+        let events = executor
+            .read(
+                timeline,
+                SeqRange::all(),
+                EventReadBounds::new(1024, 1024, 16, 8),
+            )
+            .await
+            .test_ok();
+        assert_eq!(events.len(), 1);
+        let mut protected_append_count = 0;
+        assert_eq!(
+            authority.with_token_fence(
+                timeline,
+                &token,
+                1,
+                0,
+                &mut || protected_append_count += 1,
+            ),
+            Err(pos_core::ConsentError::Revoked)
+        );
+        assert_eq!(protected_append_count, 0);
+        executor.shutdown().await.test_ok();
     }
 
     #[tokio::test]
