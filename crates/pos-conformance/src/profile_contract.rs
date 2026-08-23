@@ -3260,17 +3260,17 @@ mod tests {
         reject_profile(Value::Array(wrong_bytes));
 
         let mut wrong_bool = fields.clone();
-        for fixtures in wrong_bool[8].as_array_mut() {
-            for fixture in fixtures[0].as_array_mut() {
+        if let Some(fixtures) = wrong_bool[8].as_array_mut() {
+            if let Some(fixture) = fixtures[0].as_array_mut() {
                 fixture[1] = Value::Map(Vec::new());
             }
         }
         reject_profile(Value::Array(wrong_bool));
 
         let mut wrong_typed_error = fields.clone();
-        for fixtures in wrong_typed_error[8].as_array_mut() {
-            for fixture in fixtures[0].as_array_mut() {
-                for expected in fixture[8].as_array_mut() {
+        if let Some(fixtures) = wrong_typed_error[8].as_array_mut() {
+            if let Some(fixture) = fixtures[0].as_array_mut() {
+                if let Some(expected) = fixture[8].as_array_mut() {
                     expected[0] = uint(1);
                     expected[3] = Value::Bool(true);
                 }
@@ -3294,7 +3294,7 @@ mod tests {
             .as_array()
             .cloned()
             .unwrap_or_default();
-        for identity in fields[7].as_array_mut() {
+        if let Some(identity) = fields[7].as_array_mut() {
             identity[5] = Value::Null;
         }
         let bytes = encode_value(&Value::Array(fields)).unwrap_or_default();
