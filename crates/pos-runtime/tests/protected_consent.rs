@@ -165,16 +165,38 @@ fn protected_public_seam_rejects_a_gate_that_returns_a_different_token() {
     ));
 }
 
+struct RejectingDraftGate;
+
+impl ConsentGate for RejectingDraftGate {
+    fn check_consent(
+        &self,
+        _: TimelineId,
+        _: EntityId,
+        _: &Kind,
+        _: u64,
+    ) -> Result<ConsentCapabilityToken, ConsentError> {
+        Err(ConsentError::NoConsent)
+    }
+
+    fn validate_token(
+        &self,
+        _: TimelineId,
+        _: &ConsentCapabilityToken,
+        _: u64,
+        _: u64,
+    ) -> Result<(), ConsentError> {
+        Ok(())
+    }
+}
+
 #[test]
-fn protected_public_seam_rejects_a_draft_for_an_unconsented_subject() {
+fn protected_public_seam_aborts_when_the_gate_rejects_a_draft() {
     let timeline = TimelineId::new();
     let subject = EntityId::new();
     let authority = ConsentAuthority::new();
     let token = authority.record_grant_on_timeline(timeline, &grant(subject));
-    let mut registry = PluginRegistry::new().with_consent_authority(authority);
-    registry.register_driver(Box::new(ProtectedEventDriver {
-        entity: EntityId::new(),
-    }));
+    let mut registry = PluginRegistry::new().with_consent_gate(Arc::new(RejectingDraftGate));
+    registry.register_driver(Box::new(ProtectedEventDriver { entity: subject }));
 
     let error = test_err(registry.step_all_anchored_protected(
         timeline,
