@@ -10,6 +10,8 @@ use crate::{
     RedactionStateV1, ReplayClaimV1, SafeErrorCodeV1, VerificationOutcomeV1,
 };
 use ciborium::value::Value;
+use pos_core::{CanonicalBytes, PublicKey, Signature};
+use pos_crypto::signing;
 use std::collections::BTreeSet;
 use std::io::Cursor;
 
@@ -258,6 +260,8 @@ pub struct IndependenceRequirementsV1 {
     pub technical_independence_required: bool,
     pub authorship_independence_required: bool,
     pub organizational_independence_required: bool,
+    /// Content-addressed trust-root key selected by the immutable profile.
+    pub trusted_root_digest: [u8; 32],
     pub requirements_digest: [u8; 32],
 }
 
@@ -269,6 +273,23 @@ pub struct StableImplementationEvidenceV1 {
     pub evaluator_protocol_digest: [u8; 32],
     pub report: ConformanceReportV1,
     pub case_outcomes: Vec<CaseOutcomeV1>,
+    /// Authenticated attribution for this evidence. Stable evidence is not
+    /// accepted from the implementation's self-authored metadata alone.
+    pub attestation: StableEvidenceAttestationV1,
+}
+
+/// Signature-bearing trust-root evidence for one Stable implementation.
+///
+/// The signer key is content-addressed by `trust_root_digest`; the signature
+/// covers the implementation identity, independence declaration, evaluator
+/// protocol, and every profile case outcome. A caller that accepts Stable
+/// evidence must additionally trust the referenced root through its policy
+/// snapshot; a bare declaration or reviewer string is never sufficient.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StableEvidenceAttestationV1 {
+    pub signer_public_key: [u8; 32],
+    pub signature: [u8; 64],
+    pub trust_root_digest: [u8; 32],
 }
 
 /// Immutable CPF1 public contract. It deliberately carries no aggregate pass flag.
@@ -429,6 +450,8 @@ impl EvaluatorRequestV1 {
             || self.output_capability.report_bytes_limit == 0
             || self.output_capability.report_bytes_limit > MAX_PROFILE_BYTES as u64
             || self.output_capability.diagnostic_bytes_limit > MAX_DIAGNOSTIC_BYTES
+            || self.output_capability.capability_digest
+                != self.expected_output_capability_digest()
         {
             return Err(ConformanceContractError::FieldOutOfBounds);
         }
@@ -439,6 +462,64 @@ impl EvaluatorRequestV1 {
                 Err(ConformanceContractError::FixtureDigestMismatch)
             }
         })
+    }
+
+    /// Validate this request against the selected immutable CPF1 inventory.
+    ///
+    /// A structurally valid request is not enough: the profile, fixture
+    /// bundle, execution profile, adapter, evaluator protocol, and output
+    /// capability must all be identities from the same selected profile.
+    pub fn validate_against_profile(
+        &self,
+        profile: &ConformanceProfileV1,
+    ) -> Result<(), ConformanceContractError> {
+        self.validate().and_then(|()| {
+            profile.validate()?;
+            if self.conformance_profile_digest != profile.profile_digest
+                || self.fixture_bundle_digest != fixture_bundle_digest(profile)
+                || self.trust_policy_snapshot_digest
+                    != profile.independence_requirements.trusted_root_digest
+            {
+                return Err(ConformanceContractError::FixtureDigestMismatch);
+            }
+            if !profile
+                .execution_profile_digests
+                .contains(&self.execution_profile_digest)
+            {
+                return Err(ConformanceContractError::UnknownExecutionProfile);
+            }
+            if self.evaluator_protocol_digest != profile.evaluator_protocol.protocol_digest
+                || self.evaluator_hard_caps_digest != profile.evaluator_protocol.hard_caps.digest()
+                || !profile.fixtures.iter().any(|fixture| {
+                    fixture.execution_profile_digest == self.execution_profile_digest
+                        && fixture.subject_adapter == self.subject_adapter
+                })
+            {
+                return Err(ConformanceContractError::FixtureDigestMismatch);
+            }
+            Ok(())
+        })
+    }
+
+    /// Derive the output-capability identity from all selected authorities.
+    /// Limits remain separately bounded fields; changing a limit requires a
+    /// fresh request digest but does not silently change the capability owner.
+    #[must_use]
+    pub fn expected_output_capability_digest(&self) -> [u8; 32] {
+        digest_bytes(
+            b"PiglorOS.EvaluatorOutputCapability.v1",
+            &Value::Array(vec![
+                digest(&self.conformance_profile_digest),
+                digest(&self.fixture_bundle_digest),
+                adapter(self.subject_adapter),
+                digest(&self.subject_artifact_digest),
+                encode_identity(&self.implementation),
+                digest(&self.execution_profile_digest),
+                digest(&self.trust_policy_snapshot_digest),
+                digest(&self.evaluator_protocol_digest),
+                digest(&self.evaluator_hard_caps_digest),
+            ]),
+        )
     }
 
     /// Validate this request against the selected evaluator hard caps.
@@ -796,6 +877,9 @@ fn validate_stable_implementation(
             )
         })
         .and_then(|()| {
+            validate_stable_attestation(evidence, &profile.independence_requirements)
+        })
+        .and_then(|()| {
             if profile
                 .fixtures
                 .iter()
@@ -821,6 +905,44 @@ fn validate_stable_implementation(
                 Ok(())
             }
         })
+}
+
+fn validate_stable_attestation(
+    evidence: &StableImplementationEvidenceV1,
+    requirements: &IndependenceRequirementsV1,
+) -> Result<(), ConformanceContractError> {
+    let attestation = &evidence.attestation;
+    if zero_digest(&attestation.signer_public_key)
+        || attestation.signature == [0; 64]
+        || zero_digest(&attestation.trust_root_digest)
+        || attestation.trust_root_digest != requirements.trusted_root_digest
+        || attestation.trust_root_digest
+            != digest_bytes(
+                b"PiglorOS.ConformanceTrustRoot.v1",
+                &Value::Bytes(attestation.signer_public_key.to_vec()),
+            )
+    {
+        return Err(ConformanceContractError::IndependenceEvidenceMissing);
+    }
+    let key = signing::verifying_key_from_public_key(&PublicKey::from_bytes(
+        attestation.signer_public_key,
+    ))
+    .map_err(|_| ConformanceContractError::IndependenceEvidenceMissing)?;
+    let signature = Signature::from_bytes(attestation.signature);
+    let payload = encode_value(&stable_attestation_payload(evidence))?;
+    signing::verify(&key, &CanonicalBytes::from_vec(payload), &signature)
+        .map_err(|_| ConformanceContractError::IndependenceEvidenceMissing)
+}
+
+fn stable_attestation_payload(evidence: &StableImplementationEvidenceV1) -> Value {
+    Value::Array(vec![
+        encode_identity(&evidence.implementation),
+        encode_independence(&evidence.independence),
+        digest(&evidence.evaluator_protocol_digest),
+        Value::Array(evidence.case_outcomes.iter().map(encode_case).collect()),
+        digest(&evidence.attestation.signer_public_key),
+        digest(&evidence.attestation.trust_root_digest),
+    ])
 }
 
 fn stable_case_key(case: &CaseOutcomeV1) -> (&str, ExecutionModeV1, ClaimLayerV1, [u8; 32]) {
@@ -996,7 +1118,9 @@ fn validate_independence_evidence(
 fn validate_independence_requirements(
     requirements: &IndependenceRequirementsV1,
 ) -> Result<(), ConformanceContractError> {
-    if zero_digest(&requirements.requirements_digest) {
+    if zero_digest(&requirements.trusted_root_digest)
+        || zero_digest(&requirements.requirements_digest)
+    {
         Err(ConformanceContractError::IndependenceEvidenceMissing)
     } else {
         Ok(())
@@ -1411,6 +1535,7 @@ fn encode_requirements(value: &IndependenceRequirementsV1) -> Value {
         Value::Bool(value.technical_independence_required),
         Value::Bool(value.authorship_independence_required),
         Value::Bool(value.organizational_independence_required),
+        digest(&value.trusted_root_digest),
         digest(&value.requirements_digest),
     ])
 }
@@ -1422,6 +1547,15 @@ fn encode_stable_evidence(value: &StableImplementationEvidenceV1) -> Value {
         digest(&value.evaluator_protocol_digest),
         crate::strict_codec::encode_report_value(&value.report, true),
         Value::Array(value.case_outcomes.iter().map(encode_case).collect()),
+        encode_stable_attestation(&value.attestation),
+    ])
+}
+
+fn encode_stable_attestation(value: &StableEvidenceAttestationV1) -> Value {
+    Value::Array(vec![
+        digest(&value.signer_public_key),
+        Value::Bytes(value.signature.to_vec()),
+        digest(&value.trust_root_digest),
     ])
 }
 
@@ -1623,19 +1757,20 @@ fn decode_hard_caps(value: &Value) -> Result<EvaluatorHardCapsV1, ConformanceCon
 fn decode_requirements(
     value: &Value,
 ) -> Result<IndependenceRequirementsV1, ConformanceContractError> {
-    let fields = array(value, 4)?;
+    let fields = array(value, 5)?;
     Ok(IndependenceRequirementsV1 {
         technical_independence_required: bool_value(&fields[0])?,
         authorship_independence_required: bool_value(&fields[1])?,
         organizational_independence_required: bool_value(&fields[2])?,
-        requirements_digest: digest_value(&fields[3])?,
+        trusted_root_digest: digest_value(&fields[3])?,
+        requirements_digest: digest_value(&fields[4])?,
     })
 }
 
 fn decode_stable_evidence(
     value: &Value,
 ) -> Result<StableImplementationEvidenceV1, ConformanceContractError> {
-    let fields = array(value, 5)?;
+    let fields = array(value, 6)?;
     Ok(StableImplementationEvidenceV1 {
         implementation: decode_identity(&fields[0])?,
         independence: decode_independence(&fields[1])?,
@@ -1646,6 +1781,21 @@ fn decode_stable_evidence(
             .iter()
             .map(decode_case)
             .collect::<Result<Vec<_>, _>>()?,
+        attestation: decode_stable_attestation(&fields[5])?,
+    })
+}
+
+fn decode_stable_attestation(
+    value: &Value,
+) -> Result<StableEvidenceAttestationV1, ConformanceContractError> {
+    let fields = array(value, 3)?;
+    let signature = bytes_value(&fields[1])?
+        .try_into()
+        .map_err(|_| ConformanceContractError::FieldOutOfBounds)?;
+    Ok(StableEvidenceAttestationV1 {
+        signer_public_key: digest_value(&fields[0])?,
+        signature,
+        trust_root_digest: digest_value(&fields[2])?,
     })
 }
 
@@ -2232,6 +2382,18 @@ mod tests {
         [seed; 32]
     }
 
+    fn trusted_root_signing_key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[42; 32])
+    }
+
+    fn trusted_root_digest() -> [u8; 32] {
+        let public_key = trusted_root_signing_key().verifying_key().to_bytes();
+        digest_bytes(
+            b"PiglorOS.ConformanceTrustRoot.v1",
+            &Value::Bytes(public_key.to_vec()),
+        )
+    }
+
     fn profile() -> ConformanceProfileV1 {
         let expected_bytes = b"public expected bytes".to_vec();
         let fixture = FixtureDescriptorV1 {
@@ -2312,6 +2474,7 @@ mod tests {
                 technical_independence_required: true,
                 authorship_independence_required: true,
                 organizational_independence_required: false,
+                trusted_root_digest: trusted_root_digest(),
                 requirements_digest: digest(16),
             },
             compatibility_digest: digest(17),
@@ -2473,6 +2636,7 @@ mod tests {
         evidence.report.provenance_digest = profile.provenance_digest;
         evidence.report.fixture_bundle_digest = fixture_bundle_digest(profile);
         evidence.report.report_digest = evidence.report.digest().unwrap_or([0; 32]);
+        refresh_stable_attestation(evidence);
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -2518,9 +2682,30 @@ mod tests {
                 case_outcome_record(ExecutionModeV1::Local),
                 case_outcome_record(ExecutionModeV1::AirGapped),
             ],
+            attestation: StableEvidenceAttestationV1 {
+                signer_public_key: [0; 32],
+                signature: [0; 64],
+                trust_root_digest: [0; 32],
+            },
         };
         refresh_stable_report(&mut evidence);
+        refresh_stable_attestation(&mut evidence);
         evidence
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn refresh_stable_attestation(evidence: &mut StableImplementationEvidenceV1) {
+        let signing_key = trusted_root_signing_key();
+        evidence.attestation.signer_public_key = signing_key.verifying_key().to_bytes();
+        evidence.attestation.trust_root_digest = trusted_root_digest();
+        evidence.attestation.signature = pos_crypto::signing::sign(
+            &signing_key,
+            &CanonicalBytes::from_vec(
+                encode_value(&stable_attestation_payload(evidence)).unwrap_or_default(),
+            ),
+        )
+        .as_bytes()
+        .to_owned();
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -2539,6 +2724,7 @@ mod tests {
             case.verification_outcome = VerificationOutcomeV1::InvalidManifest;
         }
         refresh_stable_report(&mut evidence);
+        refresh_stable_attestation(&mut evidence);
         evidence
     }
 
@@ -2559,9 +2745,9 @@ mod tests {
                 organization_id: Some("independent-org".to_owned()),
             },
             execution_profile_digest: digest(8),
-            trust_policy_snapshot_digest: digest(9),
+            trust_policy_snapshot_digest: trusted_root_digest(),
             output_capability: EvaluatorOutputCapabilityV1 {
-                capability_digest: digest(10),
+                capability_digest: [0; 32],
                 report_bytes_limit: 1,
                 diagnostic_bytes_limit: MAX_DIAGNOSTIC_BYTES,
             },
@@ -2569,6 +2755,9 @@ mod tests {
             evaluator_hard_caps_digest: original_hard_caps().digest(),
             request_digest: [0; 32],
         };
+        request.conformance_profile_digest = profile().profile_digest;
+        request.fixture_bundle_digest = fixture_bundle_digest(&profile());
+        request.output_capability.capability_digest = request.expected_output_capability_digest();
         request.request_digest = request.digest();
         request
     }
@@ -2826,6 +3015,26 @@ mod tests {
         let request = request();
         let protocol = profile().evaluator_protocol;
         assert_eq!(request.validate_with_protocol(&protocol), Ok(()));
+        assert_eq!(request.validate_against_profile(&profile()), Ok(()));
+
+        let mut unrelated_profile = profile();
+        unrelated_profile.fixtures[0].execution_profile_digest = digest(99);
+        unrelated_profile.execution_profile_digests = vec![digest(99)];
+        unrelated_profile.profile_digest = unrelated_profile.digest();
+        assert_eq!(
+            request.validate_against_profile(&unrelated_profile),
+            Err(ConformanceContractError::FixtureDigestMismatch)
+        );
+
+        let mut unknown_execution = request.clone();
+        unknown_execution.execution_profile_digest = digest(99);
+        unknown_execution.output_capability.capability_digest =
+            unknown_execution.expected_output_capability_digest();
+        unknown_execution.request_digest = unknown_execution.digest();
+        assert_eq!(
+            unknown_execution.validate_against_profile(&profile()),
+            Err(ConformanceContractError::UnknownExecutionProfile)
+        );
 
         let mut wrong_protocol = protocol.clone();
         wrong_protocol.protocol_digest = digest(99);
@@ -3215,7 +3424,7 @@ mod tests {
                 }
                 reject_profile(Value::Array(malformed));
             }
-            for index in 0..4 {
+            for index in 0..5 {
                 let mut malformed = fields.clone();
                 if let Value::Array(requirements) = &mut malformed[11] {
                     requirements[index] = Value::Map(Vec::new());
@@ -3356,7 +3565,14 @@ mod tests {
     fn public_profile_decoder_reaches_nested_invalid_field_seams() {
         let value = profile();
         for index in 0..18 {
-            let bytes = malformed_profile_bytes(&value, &[index], Value::Null);
+            // `previous_profile_digest` is an optional field; CBOR null is
+            // valid there, so use a wrong type for that one schema path.
+            let replacement = if index == 15 {
+                Value::Bool(true)
+            } else {
+                Value::Null
+            };
+            let bytes = malformed_profile_bytes(&value, &[index], replacement);
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         }
         for index in 0..17 {
@@ -3387,7 +3603,7 @@ mod tests {
             let bytes = malformed_profile_bytes(&value, &[10, 4, index], Value::Null);
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         }
-        for index in 0..4 {
+        for index in 0..5 {
             let bytes = malformed_profile_bytes(&value, &[11, index], Value::Null);
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         }
@@ -3417,7 +3633,7 @@ mod tests {
         let stable = candidate
             .transition_to(ProfileLifecycleV1::Stable, vec![first, second])
             .unwrap_or_else(|_| value.clone());
-        for index in 0..5 {
+        for index in 0..6 {
             let bytes = malformed_profile_bytes(&stable, &[16, 0, index], Value::Null);
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         }
@@ -3435,6 +3651,10 @@ mod tests {
             let bytes = malformed_profile_bytes(&stable, &[16, 0, 3, index], Value::Null);
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         }
+        for index in 0..3 {
+            let bytes = malformed_profile_bytes(&stable, &[16, 0, 5, index], Value::Null);
+            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+        }
 
         for index in 0..14 {
             let bytes = malformed_request_bytes(&[index], Value::Null);
@@ -3449,7 +3669,7 @@ mod tests {
             assert!(EvaluatorRequestV1::from_canonical_cbor(&bytes).is_err());
         }
 
-        let mut invalid_caps = value.clone();
+        let mut invalid_caps = value;
         invalid_caps.evaluator_protocol.hard_caps.max_cases = 0;
         invalid_caps.profile_digest = invalid_caps.digest();
         assert!(invalid_caps.validate().is_err());
