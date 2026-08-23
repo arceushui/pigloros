@@ -2584,6 +2584,7 @@ mod tests {
         );
         assert_eq!(protected_append_count, 0);
         executor.shutdown().await.test_ok().test_value();
+        drop(executor);
     }
 
     #[tokio::test]
