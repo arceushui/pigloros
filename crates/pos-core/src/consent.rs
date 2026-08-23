@@ -2636,7 +2636,9 @@ mod tests {
         let authority = ConsentAuthority::new();
         let timeline = TimelineId::new();
         let grant = sample_granted();
-        let _ = authority.record_grant_on_timeline(timeline, &grant);
+        authority
+            .record_grant_on_timeline(timeline, &grant)
+            .test_ok();
 
         let revocation = ConsentRevoked {
             subject_id: grant.subject_id,
@@ -2658,7 +2660,9 @@ mod tests {
         let reservation = authority
             .begin_revocation_on_timeline(timeline, &revocation)
             .test_ok();
-        let _ = authority.record_grant_on_timeline(timeline, &grant);
+        authority
+            .record_grant_on_timeline(timeline, &grant)
+            .test_ok();
         assert_eq!(reservation.commit_durable(), Err(ConsentError::NoConsent));
 
         let reservation = authority
