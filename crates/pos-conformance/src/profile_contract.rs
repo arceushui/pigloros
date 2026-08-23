@@ -3800,4 +3800,200 @@ mod tests {
             Err(ConformanceContractError::FieldOutOfBounds)
         );
     }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_contract_boundaries_are_individual_and_not_accidental() {
+        // The output cap is inclusive at its documented maximum.
+        let mut request_at_limit = request();
+        request_at_limit.output_capability.report_bytes_limit = MAX_PROFILE_BYTES as u64;
+        assert_eq!(request_at_limit.validate(), Ok(()));
+
+        // Each independence identity is authoritative on its own.  Keeping the
+        // other two digests distinct prevents a weakened conjunction from
+        // accepting a stable profile.
+        let identity_changes: [fn(&mut StableImplementationEvidenceV1); 3] = [
+            |e: &mut StableImplementationEvidenceV1| {
+                e.implementation.source_digest = digest(40);
+            },
+            |e: &mut StableImplementationEvidenceV1| {
+                e.implementation.build_digest = digest(41);
+            },
+            |e: &mut StableImplementationEvidenceV1| {
+                e.implementation.binary_digest = digest(42);
+            },
+        ];
+        for change in identity_changes {
+            let mut first = stable_evidence("alpha", 30);
+            let second = stable_evidence("beta", 40);
+            change(&mut first);
+            assert_eq!(
+                candidate().transition_to(ProfileLifecycleV1::Stable, vec![first, second]),
+                Err(ConformanceContractError::IndependenceEvidenceMissing)
+            );
+        }
+
+        // A case match is a conjunction of independent public identities.
+        let mut typed = profile();
+        typed.fixtures[0].expected =
+            ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ClosureIncomplete);
+        typed.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::InvalidManifest;
+        typed.fixtures[0].expected_verification_error =
+            Some(SafeErrorCodeV1::ClosureIncomplete);
+        let typed = typed
+            .transition_to(ProfileLifecycleV1::Candidate, vec![])
+            .unwrap_or_else(|_| profile());
+        let fixture = &typed.fixtures[0];
+        let expected_fixture_digest = fixture_digest(fixture);
+        let expected_provenance_digest = fixture_provenance_digest(&fixture.provenance);
+        let mut matching = stable_evidence("alpha", 30);
+        for case in &mut matching.case_outcomes {
+            case.fixture_digest = expected_fixture_digest;
+            case.expected_digest = None;
+            case.actual_digest = None;
+            case.expected_error = Some(SafeErrorCodeV1::ClosureIncomplete);
+            case.actual_error = Some(SafeErrorCodeV1::ClosureIncomplete);
+            case.replay_claim = fixture.replay_claim;
+            case.provenance_digest = expected_provenance_digest;
+            case.verification_outcome = VerificationOutcomeV1::InvalidManifest;
+        }
+        let mut accepted = matching.clone();
+        let second = {
+            let mut value = stable_evidence("beta", 40);
+            value.case_outcomes = accepted.case_outcomes.clone();
+            value
+        };
+        assert!(typed
+            .transition_to(ProfileLifecycleV1::Stable, vec![accepted.clone(), second])
+            .is_ok());
+        let case_changes: [fn(&mut CaseOutcomeV1); 3] = [
+            |case: &mut CaseOutcomeV1| case.actual_error = Some(SafeErrorCodeV1::DigestMismatch),
+            |case: &mut CaseOutcomeV1| case.fixture_digest = [0; 32],
+            |case: &mut CaseOutcomeV1| case.provenance_digest = [0; 32],
+        ];
+        for change in case_changes {
+            change(&mut accepted.case_outcomes[0]);
+            let mut second = matching.clone();
+            second.case_outcomes[0] = accepted.case_outcomes[0].clone();
+            assert_eq!(
+                typed.transition_to(ProfileLifecycleV1::Stable, vec![accepted.clone(), second]),
+                Err(ConformanceContractError::IndependenceEvidenceMissing)
+            );
+            accepted = matching.clone();
+        }
+
+        // Every hard-cap field is independently bounded.
+        let reject_cap = |change: &dyn Fn(&mut EvaluatorHardCapsV1)| {
+            let mut caps = original_hard_caps();
+            change(&mut caps);
+            assert_eq!(
+                profile_with_hard_caps(caps).validate(),
+                Err(ConformanceContractError::FieldOutOfBounds)
+            );
+        };
+        reject_cap(&|c| c.max_profile_bytes = 0);
+        reject_cap(&|c| c.max_profile_bytes = MAX_PROFILE_BYTES as u64 + 1);
+        reject_cap(&|c| c.max_cases = 0);
+        reject_cap(&|c| c.max_cases = 65_537);
+        reject_cap(&|c| c.max_bundle_members = 0);
+        reject_cap(&|c| c.max_bundle_members = 65_537);
+        reject_cap(&|c| c.max_member_path_bytes = 0);
+        reject_cap(&|c| c.max_member_path_bytes = 257);
+        reject_cap(&|c| c.max_member_bytes = 0);
+        reject_cap(&|c| c.max_member_bytes = MAX_MEMBER_BYTES + 1);
+        reject_cap(&|c| c.max_total_bundle_bytes = 0);
+        reject_cap(&|c| c.max_total_bundle_bytes = MAX_TOTAL_BUNDLE_BYTES + 1);
+        reject_cap(&|c| c.max_compression_expansion = 0);
+        reject_cap(&|c| c.max_compression_expansion = MAX_COMPRESSION_EXPANSION + 1);
+        reject_cap(&|c| c.max_structural_nesting = 0);
+        reject_cap(&|c| c.max_structural_nesting = MAX_STRUCTURAL_NESTING + 1);
+        reject_cap(&|c| c.max_coordinate_bytes = 0);
+        reject_cap(&|c| c.max_coordinate_bytes = 129);
+        reject_cap(&|c| c.max_diagnostic_bytes = MAX_DIAGNOSTIC_BYTES + 1);
+
+        // A zero in each independent fixture bound is rejected by the public
+        // profile validator.
+        for bounds in zero_bound_variants() {
+            let mut value = profile();
+            value.fixtures[0].bounds = bounds;
+            value.profile_digest = value.digest();
+            assert_eq!(
+                value.validate(),
+                Err(ConformanceContractError::FieldOutOfBounds)
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_semantic_versions_and_typed_failures_reject_each_wrong_shape() {
+        for version in [
+            "",
+            "1",
+            "1.2",
+            "1.2.3.4",
+            "1..3",
+            "1.2.",
+            "1.2.a",
+            "1.12345678901.3",
+        ] {
+            let mut value = profile();
+            value.semantic_version = version.to_owned();
+            value.profile_digest = value.digest();
+            assert_eq!(
+                value.validate(),
+                Err(ConformanceContractError::FieldOutOfBounds)
+            );
+        }
+
+        for outcome in [
+            VerificationOutcomeV1::VerifiedExact,
+            VerificationOutcomeV1::Diverged,
+        ] {
+            let mut value = profile();
+            value.fixtures[0].expected =
+                ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ClosureIncomplete);
+            value.fixtures[0].expected_verification_outcome = outcome;
+            value.fixtures[0].expected_verification_error =
+                Some(SafeErrorCodeV1::ClosureIncomplete);
+            value.profile_digest = value.digest();
+            assert_eq!(
+                value.validate(),
+                Err(ConformanceContractError::ExpectedResultMissing)
+            );
+        }
+        let mut value = profile();
+        value.fixtures[0].expected =
+            ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ClosureIncomplete);
+        value.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::InvalidManifest;
+        value.fixtures[0].expected_verification_error = Some(SafeErrorCodeV1::DigestMismatch);
+        value.profile_digest = value.digest();
+        assert_eq!(
+            value.validate(),
+            Err(ConformanceContractError::ExpectedResultMissing)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_profile_decoder_reaches_cbor_length_and_depth_guards() {
+        // A valid, multi-byte CBOR length exercises the byte-folding path.
+        let mut value = profile();
+        let bytes = vec![b'x'; 256];
+        value.fixtures[0].expected = ExpectedResultV1::CanonicalBytes {
+            digest: *blake3::hash(&bytes).as_bytes(),
+            bytes,
+        };
+        value.fixtures[0].bounds.output_bytes = 256;
+        value.fixtures[0].inputs[0].size_bytes = 256;
+        value.profile_digest = value.digest();
+        let encoded = value.to_canonical_cbor().unwrap_or_default();
+        assert_eq!(ConformanceProfileV1::from_canonical_cbor(&encoded), Ok(value));
+
+        assert!(ConformanceProfileV1::from_canonical_cbor(&[
+            0x9b_u8, 0, 0, 0, 0, 0, 0, 0, 1,
+        ])
+        .is_err());
+        assert!(ConformanceProfileV1::from_canonical_cbor(&[0x7f_u8, 0xff]).is_err());
+    }
 }
