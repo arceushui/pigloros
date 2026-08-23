@@ -1442,7 +1442,7 @@ impl AdmissionSnapshotId {
     #[must_use]
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        let value = ulid::Ulid::r#gen().to_string();
+        let value = ulid::Ulid::generate().to_string();
         Self(value)
     }
 }
