@@ -4511,3 +4511,13 @@ mod tests {
         drop(gw);
     }
 }
+
+#[cfg(test)]
+mod coverage_entrypoints {
+    use super::*;
+
+    #[test]
+    fn action_registry_entrypoint_builds_the_gateway_registry() {
+        assert_eq!(gateway_action_registry().driver_count(), 0);
+    }
+}

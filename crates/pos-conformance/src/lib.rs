@@ -221,6 +221,13 @@ mod coverage_entrypoints {
     #[test]
     fn malformed_canonical_records_reach_closed_decoder_boundaries() {
         let evidence = tests::evidence();
+        expect_err(&strict_codec::decode_evidence(&encode_value(
+            &ciborium::Value::Map(Vec::new()),
+        )));
+        expect_err(&verify_host_closure(
+            &evidence.consent_audit,
+            &evidence.authoritative_events,
+        ));
         let value = decode_value(ok(evidence.to_canonical_cbor()));
         expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
             &replace_field(value.clone(), 0, ciborium::Value::Text("wrong".to_owned())),

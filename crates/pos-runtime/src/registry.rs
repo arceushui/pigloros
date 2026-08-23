@@ -194,6 +194,67 @@ mod coverage_paths {
     }
 }
 
+#[cfg(test)]
+mod coverage_entrypoints {
+    use super::*;
+    use crate::driver::{Driver, ObservationView, StepOutput, TimelineHistorySegment};
+    use pos_core::{Capability, Plugin, PluginId, TimelineId};
+
+    struct CoveragePlugin {
+        id: PluginId,
+    }
+
+    impl Plugin for CoveragePlugin {
+        fn id(&self) -> PluginId {
+            self.id
+        }
+
+        fn name(&self) -> &'static str {
+            "coverage-registry-plugin"
+        }
+
+        fn capability(&self) -> Capability {
+            Capability {
+                has_driver: true,
+                ..Capability::default()
+            }
+        }
+    }
+
+    struct NoopDriver;
+
+    impl Driver for NoopDriver {
+        fn step(
+            &mut self,
+            _: TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            Ok(StepOutput::empty())
+        }
+
+        fn name(&self) -> &'static str {
+            "coverage-registry-driver"
+        }
+    }
+
+    #[test]
+    fn restore_and_cadence_entrypoints_update_driver_state() {
+        let mut registry = PluginRegistry::new();
+        let plugin = CoveragePlugin { id: PluginId::new() };
+        assert!(registry
+            .register(&plugin, None, Some(Box::new(NoopDriver)))
+            .is_ok());
+        let timeline = TimelineId::new();
+        assert!(registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(timeline, Seq::ZERO)],
+                &[],
+            )
+            .is_ok());
+        assert!(registry.tick_cadenced(timeline, 0).is_ok());
+    }
+}
+
 fn validate_recovery_evidence(
     timeline_segments: &[TimelineHistorySegment],
     events: &[Event],

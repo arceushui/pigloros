@@ -4593,6 +4593,77 @@ mod tests {
 #[cfg(test)]
 mod coverage_entrypoints {
     use super::*;
+    use pos_core::{Capability, Plugin, PluginId};
+    use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
+
+    struct CoveragePlugin {
+        id: PluginId,
+    }
+
+    impl Plugin for CoveragePlugin {
+        fn id(&self) -> PluginId {
+            self.id
+        }
+
+        fn name(&self) -> &'static str {
+            "coverage-failing-plugin"
+        }
+
+        fn capability(&self) -> Capability {
+            Capability {
+                owned_event_types: vec![Kind::new("coverage.failure")],
+                has_driver: true,
+                ..Capability::default()
+            }
+        }
+    }
+
+    struct FailingDriver;
+
+    impl Driver for FailingDriver {
+        fn name(&self) -> &'static str {
+            "coverage-failing-driver"
+        }
+
+        fn step(
+            &mut self,
+            _: pos_core::ids::TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            Err(RuntimeError::InvalidRecoveryEvidence {
+                reason: "coverage driver failure",
+            })
+        }
+    }
+
+    #[test]
+    fn consent_drafts_are_rejected_at_the_public_session_seam() {
+        let experiment = Experiment::new(config(
+            "coverage-consent-draft",
+            StopCondition::MaxTicks(1),
+        ));
+        let mut session = ok(experiment.start());
+        let result = session.append_events(&[EventDraft::new(
+            EntityId::new(),
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+            pos_core::CanonicalBytes::from_static(b"coverage"),
+        )]);
+        assert!(matches!(result, Err(ExperimentError::ConsentRevoked)));
+    }
+
+    #[test]
+    fn driver_runtime_errors_are_preserved_at_tick_boundary() {
+        let plugin = CoveragePlugin {
+            id: PluginId::new(),
+        };
+        let mut experiment = Experiment::new(config(
+            "coverage-driver-error",
+            StopCondition::MaxTicks(1),
+        ));
+        ok(experiment.register(&plugin, None, Some(Box::new(FailingDriver))));
+        let mut session = ok(experiment.start());
+        assert!(matches!(session.step_tick(), Err(ExperimentError::Runtime(_))));
+    }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn ok<T, E: std::fmt::Debug>(value: Result<T, E>) -> T {
