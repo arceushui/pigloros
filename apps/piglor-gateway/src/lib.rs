@@ -1157,7 +1157,9 @@ impl Gateway {
             Ok(event) => event,
             Err(error) => return Err(error),
         };
-        self.consent_authority.record_revocation(&revocation);
+        // The exact session was checked above and this authority never removes
+        // sessions, so a second absence would violate the host-only invariant.
+        drop(self.consent_authority.record_revocation(&revocation));
         Ok(event)
     }
 

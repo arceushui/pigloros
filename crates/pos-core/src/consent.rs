@@ -573,13 +573,12 @@ impl ConsentAuthority {
         Ok(())
     }
 
-    /// Apply a prevalidated durable revocation to its matching host session.
+    /// Apply a durable revocation to its matching host session.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics when called without a preceding successful
-    /// [`Self::validate_revocation`] for the same revocation.
-    pub fn record_revocation(&self, revocation: &ConsentRevoked) {
+    /// Returns [`ConsentError::NoConsent`] when no active session matches.
+    pub fn record_revocation(&self, revocation: &ConsentRevoked) -> Result<(), ConsentError> {
         let key = (
             revocation.subject_id,
             revocation.grantee_id,
@@ -589,8 +588,11 @@ impl ConsentAuthority {
             .active
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let active = &mut sessions[&key];
+        let Some(active) = sessions.get_mut(&key) else {
+            return Err(ConsentError::NoConsent);
+        };
         active.token.fence_seq = active.token.fence_seq.min(revocation.fence_seq);
+        Ok(())
     }
 
     /// Revalidate an exact host session at an operation or commit fence.
@@ -1250,7 +1252,7 @@ mod tests {
             fence_seq: 2,
         };
         assert!(authority.validate_revocation(&revocation).is_ok());
-        authority.record_revocation(&revocation);
+        assert!(authority.record_revocation(&revocation).is_ok());
         assert_eq!(
             authority.validate(&token, 2, 19),
             Err(ConsentError::Revoked)
