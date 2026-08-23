@@ -53,6 +53,55 @@ macro_rules! submit {
     }};
 }
 
+#[cfg(test)]
+mod lifecycle_coverage_tests {
+    use super::{worker_loop, worker_loop_with_runtime, ExecutorStore, LifecycleState};
+    use pos_store::memory::MemoryStore;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::{mpsc, Notify};
+
+    #[test]
+    fn worker_runtime_failure_closes_the_lifecycle_fail_closed() {
+        let lifecycle = Arc::new(Mutex::new(LifecycleState::Open));
+        let (_sender, mut receiver) = mpsc::channel(1);
+        worker_loop_with_runtime(
+            &lifecycle,
+            Arc::new(Notify::new()),
+            &mut receiver,
+            ExecutorStore::Generic(Box::new(MemoryStore::new())),
+            None,
+            None,
+            Err(std::io::Error::other("runtime construction failed")),
+        );
+        let final_state = match lifecycle.lock() {
+            Ok(state) => *state,
+            Err(poisoned) => *poisoned.into_inner(),
+        };
+        assert!(matches!(final_state, LifecycleState::Unhealthy { .. }));
+    }
+
+    #[test]
+    fn worker_shutdown_exits_after_an_empty_drain() {
+        let lifecycle = Arc::new(Mutex::new(LifecycleState::Open));
+        let shutdown = Arc::new(Notify::new());
+        shutdown.notify_one();
+        let (_sender, mut receiver) = mpsc::channel(1);
+        worker_loop(
+            &lifecycle,
+            shutdown,
+            &mut receiver,
+            ExecutorStore::Generic(Box::new(MemoryStore::new())),
+            None,
+            None,
+        );
+        let final_state = match lifecycle.lock() {
+            Ok(state) => *state,
+            Err(poisoned) => *poisoned.into_inner(),
+        };
+        assert_eq!(final_state, LifecycleState::Closed);
+    }
+}
+
 enum Command {
     #[allow(dead_code)]
     AdmitOwnTracksIngress {
@@ -1088,13 +1137,31 @@ fn worker_loop(
     owntracks_owner_key: Option<[u8; 32]>,
     #[cfg(test)] observer: Option<Arc<SchedulerObserver>>,
 ) {
+    worker_loop_with_runtime(
+        lifecycle_state,
+        shutdown,
+        receiver,
+        store,
+        owntracks_owner_key,
+        #[cfg(test)]
+        observer,
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build(),
+    );
+}
+
+fn worker_loop_with_runtime(
+    lifecycle_state: &Arc<Mutex<LifecycleState>>,
+    shutdown: Arc<Notify>,
+    receiver: &mut mpsc::Receiver<CommandEnvelope>,
+    store: ExecutorStore,
+    owntracks_owner_key: Option<[u8; 32]>,
+    #[cfg(test)] observer: Option<Arc<SchedulerObserver>>,
+    runtime: std::io::Result<tokio::runtime::Runtime>,
+) {
     let worker_result = catch_unwind(AssertUnwindSafe(|| {
-        let Some(runtime) = take_worker_runtime(
-            lifecycle_state.as_ref(),
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build(),
-        ) else {
+        let Some(runtime) = take_worker_runtime(lifecycle_state.as_ref(), runtime) else {
             return;
         };
         runtime.block_on(worker_loop_async(
