@@ -195,6 +195,47 @@ pub struct EvaluatorHardCapsV1 {
     pub max_diagnostic_bytes: u64,
 }
 
+impl EvaluatorHardCapsV1 {
+    /// Validate a report or fixture case count against the selected cap.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConformanceContractError::FieldOutOfBounds`] when either the
+    /// cap record or the requested count is outside the selected authority.
+    pub fn validate_case_count(&self, case_count: u32) -> Result<(), ConformanceContractError> {
+        validate_hard_caps(self).and_then(|()| {
+            if case_count <= self.max_cases {
+                Ok(())
+            } else {
+                Err(ConformanceContractError::FieldOutOfBounds)
+            }
+        })
+    }
+
+    /// Validate compressed and expanded bundle sizes against the ratio cap.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConformanceContractError::FieldOutOfBounds`] for an empty
+    /// input or when expansion exceeds the selected ratio.
+    pub fn validate_compression_expansion(
+        &self,
+        compressed_bytes: u64,
+        expanded_bytes: u64,
+    ) -> Result<(), ConformanceContractError> {
+        validate_hard_caps(self).and_then(|()| {
+            let maximum_expanded = compressed_bytes
+                .checked_mul(u64::from(self.max_compression_expansion))
+                .ok_or(ConformanceContractError::FieldOutOfBounds)?;
+            if compressed_bytes == 0 || expanded_bytes == 0 || expanded_bytes > maximum_expanded {
+                Err(ConformanceContractError::FieldOutOfBounds)
+            } else {
+                Ok(())
+            }
+        })
+    }
+}
+
 /// Evaluator protocol identity and report/request schema identities.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvaluatorProtocolV1 {
@@ -394,6 +435,28 @@ impl EvaluatorRequestV1 {
         })
     }
 
+    /// Validate this request against the selected evaluator hard caps.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed safe error when the request or either requested output
+    /// limit exceeds the selected report and diagnostic authorities.
+    pub fn validate_with_hard_caps(
+        &self,
+        caps: &EvaluatorHardCapsV1,
+    ) -> Result<(), ConformanceContractError> {
+        self.validate().and_then(|()| {
+            validate_hard_caps(caps)?;
+            if self.output_capability.report_bytes_limit > caps.max_profile_bytes
+                || self.output_capability.diagnostic_bytes_limit > caps.max_diagnostic_bytes
+            {
+                Err(ConformanceContractError::FieldOutOfBounds)
+            } else {
+                Ok(())
+            }
+        })
+    }
+
     /// Return exact canonical evaluator-request bytes.
     ///
     /// # Errors
@@ -454,6 +517,7 @@ fn validate_profile(profile: &ConformanceProfileV1) -> Result<(), ConformanceCon
     validate_protocol(&profile.evaluator_protocol)
         .and_then(|()| validate_independence_requirements(&profile.independence_requirements))
         .and_then(|()| validate_fixtures(profile))
+        .and_then(|()| validate_selected_caps(profile))
         .and_then(|()| validate_allowed_divergences(&profile.allowed_divergences))
         .and_then(|()| match profile.lifecycle {
             ProfileLifecycleV1::Candidate | ProfileLifecycleV1::Stable
@@ -482,6 +546,64 @@ fn validate_fixtures(profile: &ConformanceProfileV1) -> Result<(), ConformanceCo
             })
             .and_then(|()| validate_fixture_verification_outcome(fixture))
     })
+}
+
+fn validate_selected_caps(profile: &ConformanceProfileV1) -> Result<(), ConformanceContractError> {
+    let caps = &profile.evaluator_protocol.hard_caps;
+    caps.validate_case_count(u32::try_from(profile.fixtures.len()).unwrap_or(u32::MAX))?;
+    let encoded_value = encode_profile(profile, true);
+    let encoded = encode_value(&encoded_value)?;
+    if u64::try_from(encoded.len()).unwrap_or(u64::MAX) > caps.max_profile_bytes
+        || value_depth(&encoded_value) > usize::from(caps.max_structural_nesting)
+    {
+        return Err(ConformanceContractError::FieldOutOfBounds);
+    }
+
+    let mut member_count = 0_u64;
+    let mut bundle_bytes = 0_u64;
+    for fixture in &profile.fixtures {
+        for member in &fixture.inputs {
+            member_count = member_count
+                .checked_add(1)
+                .ok_or(ConformanceContractError::FieldOutOfBounds)?;
+            bundle_bytes = bundle_bytes
+                .checked_add(member.size_bytes)
+                .ok_or(ConformanceContractError::FieldOutOfBounds)?;
+            if member.member_id.len() > usize::from(caps.max_member_path_bytes)
+                || member.size_bytes > caps.max_member_bytes
+            {
+                return Err(ConformanceContractError::FieldOutOfBounds);
+            }
+        }
+        if let ExpectedResultV1::CanonicalBytes { bytes, .. } = &fixture.expected {
+            if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > caps.max_member_bytes {
+                return Err(ConformanceContractError::FieldOutOfBounds);
+            }
+        }
+    }
+    if member_count > u64::from(caps.max_bundle_members)
+        || bundle_bytes > caps.max_total_bundle_bytes
+        || profile.allowed_divergences.iter().any(|divergence| {
+            divergence.first_coordinate.len() > usize::from(caps.max_coordinate_bytes)
+        })
+        || profile.fixtures.iter().any(|fixture| {
+            matches!(
+                &fixture.expected,
+                ExpectedResultV1::AllowedDivergence { first_coordinate, .. }
+                    if first_coordinate.len() > usize::from(caps.max_coordinate_bytes)
+            )
+        })
+    {
+        return Err(ConformanceContractError::FieldOutOfBounds);
+    }
+    Ok(())
+}
+
+fn value_depth(value: &Value) -> usize {
+    match value {
+        Value::Array(values) => 1 + values.iter().map(value_depth).max().unwrap_or_default(),
+        _ => 1,
+    }
 }
 
 fn validate_fixture(
@@ -573,6 +695,8 @@ fn validate_stable_evidence(
     if first.report_digest == [0; 32]
         || second.report_digest == [0; 32]
         || first.report_digest == second.report_digest
+        || first.report_digest != stable_report_digest(first)
+        || second.report_digest != stable_report_digest(second)
     {
         return Err(ConformanceContractError::IndependenceEvidenceMissing);
     }
@@ -585,6 +709,18 @@ fn validate_stable_implementation(
     profile: &ConformanceProfileV1,
 ) -> Result<(), ConformanceContractError> {
     let mut seen = BTreeSet::new();
+    profile
+        .evaluator_protocol
+        .hard_caps
+        .validate_case_count(u32::try_from(evidence.case_outcomes.len()).unwrap_or(u32::MAX))?;
+    if evidence.case_outcomes.iter().any(|case| {
+        case.first_coordinate.as_ref().is_some_and(|coordinate| {
+            coordinate.len()
+                > usize::from(profile.evaluator_protocol.hard_caps.max_coordinate_bytes)
+        })
+    }) {
+        return Err(ConformanceContractError::FieldOutOfBounds);
+    }
     if evidence.case_outcomes.is_empty()
         || evidence
             .case_outcomes
@@ -663,6 +799,18 @@ fn stable_case_key(case: &CaseOutcomeV1) -> (&str, ExecutionModeV1, ClaimLayerV1
         case.mode,
         case.claim_layer,
         case.fixture_digest,
+    )
+}
+
+fn stable_report_digest(value: &StableImplementationEvidenceV1) -> [u8; 32] {
+    digest_bytes(
+        b"PiglorOS.StableImplementationReport.v1",
+        &Value::Array(vec![
+            encode_identity(&value.implementation),
+            encode_independence(&value.independence),
+            digest(&value.evaluator_protocol_digest),
+            Value::Array(value.case_outcomes.iter().map(encode_case).collect()),
+        ]),
     )
 }
 
@@ -2124,7 +2272,7 @@ mod tests {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn stable_evidence(implementation_id: &str, seed: u8) -> StableImplementationEvidenceV1 {
-        StableImplementationEvidenceV1 {
+        let mut evidence = StableImplementationEvidenceV1 {
             implementation: ImplementationIdentityV1 {
                 implementation_id: implementation_id.to_owned(),
                 source_digest: digest(seed),
@@ -2147,7 +2295,9 @@ mod tests {
                 case_outcome_record(ExecutionModeV1::Local),
                 case_outcome_record(ExecutionModeV1::AirGapped),
             ],
-        }
+        };
+        evidence.report_digest = stable_report_digest(&evidence);
+        evidence
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -2165,6 +2315,7 @@ mod tests {
             case.actual_error = Some(SafeErrorCodeV1::ClosureIncomplete);
             case.verification_outcome = VerificationOutcomeV1::InvalidManifest;
         }
+        evidence.report_digest = stable_report_digest(&evidence);
         evidence
     }
 
@@ -3391,7 +3542,7 @@ mod tests {
         reject(&|caps| caps.max_member_bytes = 0);
         reject(&|caps| caps.max_total_bundle_bytes = 0);
         reject(&|caps| caps.max_compression_expansion = 0);
-        accept(&|caps| caps.max_profile_bytes = 1);
+        reject(&|caps| caps.max_profile_bytes = 1);
         accept(&|caps| caps.max_cases = 1);
         accept(&|caps| caps.max_bundle_members = 1);
         accept(&|caps| caps.max_member_bytes = 1);
@@ -3426,10 +3577,127 @@ mod tests {
         reject(&|caps| caps.max_member_path_bytes = 0);
         reject(&|caps| caps.max_structural_nesting = 0);
         reject(&|caps| caps.max_coordinate_bytes = 0);
-        accept(&|caps| caps.max_member_path_bytes = 1);
-        accept(&|caps| caps.max_structural_nesting = 1);
+        reject(&|caps| caps.max_member_path_bytes = 1);
+        reject(&|caps| caps.max_structural_nesting = 1);
         accept(&|caps| caps.max_coordinate_bytes = 1);
         accept(&|caps| caps.max_diagnostic_bytes = 0);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_selected_caps_authoritatively_bound_each_resource() {
+        let mut too_many_members = profile();
+        too_many_members
+            .evaluator_protocol
+            .hard_caps
+            .max_bundle_members = 1;
+        too_many_members.fixtures[0]
+            .inputs
+            .push(FixtureInputMemberV1 {
+                member_id: "z".to_owned(),
+                size_bytes: 1,
+                digest: digest(50),
+                provenance_digest: digest(51),
+            });
+        too_many_members.profile_digest = too_many_members.digest();
+        assert_eq!(
+            too_many_members.validate(),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+
+        for (field, expected) in [
+            ("path", ConformanceContractError::FieldOutOfBounds),
+            ("member", ConformanceContractError::FieldOutOfBounds),
+            ("total", ConformanceContractError::FieldOutOfBounds),
+        ] {
+            let mut value = profile();
+            match field {
+                "path" => value.evaluator_protocol.hard_caps.max_member_path_bytes = 1,
+                "member" => value.evaluator_protocol.hard_caps.max_member_bytes = 11,
+                "total" => value.evaluator_protocol.hard_caps.max_total_bundle_bytes = 11,
+                _ => unreachable!(),
+            }
+            value.profile_digest = value.digest();
+            assert_eq!(value.validate(), Err(expected));
+        }
+
+        let mut divergence = profile();
+        let declared = AllowedDivergenceV1 {
+            classification: DivergenceMismatchKindV1::EventOrder,
+            first_coordinate: b"xy".to_vec(),
+        };
+        divergence.allowed_divergences = vec![declared.clone()];
+        divergence.fixtures[0].expected = ExpectedResultV1::AllowedDivergence {
+            classification: declared.classification,
+            first_coordinate: declared.first_coordinate.clone(),
+        };
+        divergence.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::Diverged;
+        divergence.evaluator_protocol.hard_caps.max_coordinate_bytes = 1;
+        divergence.profile_digest = divergence.digest();
+        assert_eq!(
+            divergence.validate(),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+
+        let mut limited = profile();
+        limited.evaluator_protocol.hard_caps.max_cases = 1;
+        let limited = limited
+            .transition_to(ProfileLifecycleV1::Candidate, vec![])
+            .unwrap_or_else(|_| profile());
+        assert_eq!(
+            limited.transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![stable_evidence("alpha", 30), stable_evidence("beta", 40)],
+            ),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+
+        let caps = original_hard_caps();
+        assert_eq!(caps.validate_compression_expansion(1, 1), Ok(()));
+        assert_eq!(
+            caps.validate_compression_expansion(1, 101),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+        assert_eq!(
+            caps.validate_compression_expansion(1, 0),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+        assert_eq!(
+            caps.validate_compression_expansion(u64::MAX, 1),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+        assert_eq!(
+            caps.validate_compression_expansion(0, 0),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+
+        let mut request = request();
+        let mut request_caps = original_hard_caps();
+        request.output_capability.report_bytes_limit = 2;
+        request.request_digest = request.digest();
+        request_caps.max_profile_bytes = 1;
+        assert_eq!(
+            request.validate_with_hard_caps(&request_caps),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+
+        let mut expected_bytes = profile();
+        expected_bytes.fixtures[0].inputs[0].size_bytes = 1;
+        expected_bytes.evaluator_protocol.hard_caps.max_member_bytes = 1;
+        expected_bytes.profile_digest = expected_bytes.digest();
+        assert_eq!(
+            expected_bytes.validate(),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+        request.output_capability.report_bytes_limit = 1;
+        request.output_capability.diagnostic_bytes_limit = 2;
+        request.request_digest = request.digest();
+        request_caps.max_profile_bytes = MAX_PROFILE_BYTES as u64;
+        request_caps.max_diagnostic_bytes = 1;
+        assert_eq!(
+            request.validate_with_hard_caps(&request_caps),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
     }
 
     #[test]
@@ -3509,6 +3777,8 @@ mod tests {
             value.case_outcomes[0].redaction_state = RedactionStateV1::RedactedViews;
         });
         reject_stable_change(|value| value.case_outcomes[0].provenance_digest = digest(99));
+        reject_stable_change(|value| value.report_digest = [0; 32]);
+        reject_stable_change(|value| value.report_digest = digest(99));
 
         let mut first = stable_evidence("beta", 30);
         let second = stable_evidence("alpha", 40);
@@ -3540,9 +3810,39 @@ mod tests {
         second.case_outcomes.truncate(1);
         first.case_outcomes[0].fixture_digest = fixture_digest(&candidate.fixtures[0]);
         second.case_outcomes[0].fixture_digest = fixture_digest(&candidate.fixtures[0]);
+        first.report_digest = stable_report_digest(&first);
+        second.report_digest = stable_report_digest(&second);
         assert!(candidate
             .transition_to(ProfileLifecycleV1::Stable, vec![first, second])
             .is_ok());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_stable_evidence_requires_complete_ordered_unique_case_matrix() {
+        let mut incomplete = stable_evidence("alpha", 30);
+        incomplete.case_outcomes.pop();
+        incomplete.report_digest = stable_report_digest(&incomplete);
+        assert_eq!(
+            candidate().transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![incomplete, stable_evidence("beta", 40)],
+            ),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+
+        let mut duplicate = stable_evidence("alpha", 30);
+        duplicate
+            .case_outcomes
+            .push(duplicate.case_outcomes[0].clone());
+        duplicate.report_digest = stable_report_digest(&duplicate);
+        assert_eq!(
+            candidate().transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![duplicate, stable_evidence("beta", 40)],
+            ),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
     }
 
     #[test]
@@ -3608,6 +3908,7 @@ mod tests {
                 case.actual_error = Some(SafeErrorCodeV1::ClosureIncomplete);
                 case.verification_outcome = VerificationOutcomeV1::InvalidManifest;
             }
+            first.report_digest = stable_report_digest(&first);
             first
         };
         assert!(typed_candidate
@@ -3910,10 +4211,12 @@ mod tests {
             case.provenance_digest = expected_provenance_digest;
             case.verification_outcome = VerificationOutcomeV1::InvalidManifest;
         }
+        matching.report_digest = stable_report_digest(&matching);
         let mut accepted = matching.clone();
         let second = {
             let mut value = stable_evidence("beta", 40);
             value.case_outcomes = accepted.case_outcomes.clone();
+            value.report_digest = stable_report_digest(&value);
             value
         };
         assert!(typed
@@ -3990,8 +4293,11 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn public_fixture_bounds_reject_each_zero_field() {
         for bounds in zero_bound_variants() {
+            let mut value = profile();
+            value.fixtures[0].bounds = bounds;
+            value.profile_digest = value.digest();
             assert_eq!(
-                validate_bounds(&bounds),
+                value.validate(),
                 Err(ConformanceContractError::FieldOutOfBounds)
             );
         }

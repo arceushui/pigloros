@@ -5620,9 +5620,11 @@ fn verify_conformance_report(evidence: &MoatProofEvidenceV1) -> Result<(), Evide
     let mut case_keys = BTreeSet::new();
     let mut counts = (0_u32, 0_u32, 0_u32, 0_u32, 0_u32);
     let mut weakest_redaction = RedactionStateV1::None;
+    let mut weakest_replay_claim = ReplayClaimV1::Exact;
     for case in &report.cases {
         modes.insert(case.mode);
         weakest_redaction = weakest_redaction.max(case.redaction_state);
+        weakest_replay_claim = weakest_replay_claim.max(case.replay_claim);
         if !case_keys.insert((
             case.case_id.as_str(),
             case.mode,
@@ -5639,7 +5641,10 @@ fn verify_conformance_report(evidence: &MoatProofEvidenceV1) -> Result<(), Evide
                 .is_some_and(|coordinate| coordinate.len() > 128)
             || !valid_conformance_case_result(case)
             || !valid_redacted_case(case)
-            || (case.outcome != CaseOutcomeStatusV1::Pass
+            || (matches!(
+                case.redaction_state,
+                RedactionStateV1::None | RedactionStateV1::RedactedViews
+            ) && case.outcome != CaseOutcomeStatusV1::Pass
                 && case.expected_digest == case.actual_digest
                 && case.expected_error == case.actual_error)
         {
@@ -5677,6 +5682,7 @@ fn verify_conformance_report(evidence: &MoatProofEvidenceV1) -> Result<(), Evide
             .windows(2)
             .any(|pair| pair[0] >= pair[1])
         || report.redaction_state != weakest_redaction
+        || report.replay_claim != weakest_replay_claim
         || report.cases.is_empty()
         || !modes.contains(&evidence.manifest.execution_mode)
         || report.cases.windows(2).any(|pair| {
@@ -5714,6 +5720,12 @@ fn verify_conformance_report(evidence: &MoatProofEvidenceV1) -> Result<(), Evide
 }
 
 fn valid_conformance_case_result(case: &CaseOutcomeV1) -> bool {
+    if matches!(
+        case.redaction_state,
+        RedactionStateV1::StructuralOnly | RedactionStateV1::EvidenceMissing
+    ) {
+        return true;
+    }
     let exact = case.expected_digest.is_some()
         && case.expected_digest == case.actual_digest
         && case.expected_error.is_none()
@@ -5735,15 +5747,27 @@ fn valid_conformance_case_result(case: &CaseOutcomeV1) -> bool {
 
 fn valid_redacted_case(case: &CaseOutcomeV1) -> bool {
     match case.redaction_state {
-        RedactionStateV1::None | RedactionStateV1::RedactedViews => true,
+        RedactionStateV1::None => true,
+        RedactionStateV1::RedactedViews => {
+            case.replay_claim == ReplayClaimV1::ExactAuthoritativeWithRedactedViews
+        }
         RedactionStateV1::StructuralOnly => {
-            case.expected_digest.is_none()
+            case.replay_claim == ReplayClaimV1::StructuralOnly
+                && case.expected_digest.is_none()
                 && case.actual_digest.is_none()
                 && case.expected_error.is_none()
                 && case.actual_error.is_none()
                 && case.first_coordinate.is_none()
         }
-        RedactionStateV1::EvidenceMissing => case.outcome != CaseOutcomeStatusV1::Pass,
+        RedactionStateV1::EvidenceMissing => {
+            case.replay_claim == ReplayClaimV1::UnverifiableArtifactsMissing
+                && case.outcome != CaseOutcomeStatusV1::Pass
+                && case.expected_digest.is_none()
+                && case.actual_digest.is_none()
+                && case.expected_error.is_none()
+                && case.actual_error.is_none()
+                && case.first_coordinate.is_none()
+        }
     }
 }
 
@@ -7762,9 +7786,51 @@ pub mod tests {
             let mut redacted_report = value.clone();
             redacted_report.contract.conformance_report.cases[0].redaction_state =
                 RedactionStateV1::RedactedViews;
+            redacted_report.contract.conformance_report.cases[0].replay_claim =
+                ReplayClaimV1::ExactAuthoritativeWithRedactedViews;
             redacted_report.contract.conformance_report.redaction_state =
                 RedactionStateV1::RedactedViews;
+            redacted_report.contract.conformance_report.replay_claim =
+                ReplayClaimV1::ExactAuthoritativeWithRedactedViews;
             assert_eq!(verify_evidence(&redacted_report), Ok(()));
+            let mut mismatched_redaction = redacted_report.clone();
+            mismatched_redaction.contract.conformance_report.redaction_state =
+                RedactionStateV1::StructuralOnly;
+            assert_eq!(
+                verify_evidence(&mismatched_redaction),
+                Err(EvidenceError::InvalidConformanceReport)
+            );
+
+            let mut structural_report = value.clone();
+            let structural_case = &mut structural_report.contract.conformance_report.cases[0];
+            structural_case.outcome = CaseOutcomeStatusV1::Pass;
+            structural_case.first_coordinate = None;
+            structural_case.expected_digest = None;
+            structural_case.actual_digest = None;
+            structural_case.expected_error = None;
+            structural_case.actual_error = None;
+            structural_case.replay_claim = ReplayClaimV1::StructuralOnly;
+            structural_case.redaction_state = RedactionStateV1::StructuralOnly;
+            structural_report.contract.conformance_report.redaction_state =
+                RedactionStateV1::StructuralOnly;
+            structural_report.contract.conformance_report.replay_claim =
+                ReplayClaimV1::StructuralOnly;
+            assert_eq!(verify_evidence(&structural_report), Ok(()));
+
+            let mut missing_report = structural_report.clone();
+            missing_report.contract.conformance_report.cases[0].outcome =
+                CaseOutcomeStatusV1::Fail;
+            missing_report.contract.conformance_report.redaction_state =
+                RedactionStateV1::EvidenceMissing;
+            missing_report.contract.conformance_report.replay_claim =
+                ReplayClaimV1::UnverifiableArtifactsMissing;
+            missing_report.contract.conformance_report.cases[0].redaction_state =
+                RedactionStateV1::EvidenceMissing;
+            missing_report.contract.conformance_report.cases[0].replay_claim =
+                ReplayClaimV1::UnverifiableArtifactsMissing;
+            missing_report.contract.conformance_report.passed = 0;
+            missing_report.contract.conformance_report.failed = 1;
+            assert_eq!(verify_evidence(&missing_report), Ok(()));
 
             let mut invalid_report = report_cases.clone();
             invalid_report.contract.conformance_report.passed = 0;
