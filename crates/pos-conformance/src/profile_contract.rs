@@ -18,8 +18,11 @@ pub const EVALUATOR_REQUEST_MAGIC_V1: &str = "EVR1";
 const MAX_PROFILE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EXECUTION_PROFILES: usize = 64;
 const MAX_FIXTURES: usize = 65_536;
+const MAX_FIXTURE_COUNT: u32 = 65_536;
 const MAX_STRING_BYTES: usize = 256;
+const MAX_MEMBER_PATH_BYTES: u16 = 256;
 const MAX_COORDINATE_BYTES: usize = 128;
+const MAX_COORDINATE_COUNT_BYTES: u16 = 128;
 const MAX_DIAGNOSTIC_BYTES: u64 = 1024 * 1024;
 const MAX_MEMBER_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TOTAL_BUNDLE_BYTES: u64 = 1024 * 1024 * 1024;
@@ -1742,14 +1745,14 @@ mod tests {
                 report_schema_digest: digest(15),
                 hard_caps: EvaluatorHardCapsV1 {
                     max_profile_bytes: MAX_PROFILE_BYTES as u64,
-                    max_cases: MAX_FIXTURES as u32,
-                    max_bundle_members: MAX_FIXTURES as u32,
-                    max_member_path_bytes: MAX_STRING_BYTES as u16,
+                    max_cases: MAX_FIXTURE_COUNT,
+                    max_bundle_members: MAX_FIXTURE_COUNT,
+                    max_member_path_bytes: MAX_MEMBER_PATH_BYTES,
                     max_member_bytes: MAX_MEMBER_BYTES,
                     max_total_bundle_bytes: MAX_TOTAL_BUNDLE_BYTES,
                     max_compression_expansion: MAX_COMPRESSION_EXPANSION,
                     max_structural_nesting: MAX_STRUCTURAL_NESTING,
-                    max_coordinate_bytes: MAX_COORDINATE_BYTES as u16,
+                    max_coordinate_bytes: MAX_COORDINATE_COUNT_BYTES,
                     max_diagnostic_bytes: MAX_DIAGNOSTIC_BYTES,
                 },
             },
@@ -1773,12 +1776,11 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn case_outcome_record(mode: ExecutionModeV1) -> CaseOutcomeV1 {
         let fixture = &profile().fixtures[0];
-        let ExpectedResultV1::CanonicalBytes {
-            digest: expected_digest,
-            ..
-        } = &fixture.expected
-        else {
-            unreachable!("the conformance test fixture has canonical bytes");
+        let expected_digest = match &fixture.expected {
+            ExpectedResultV1::CanonicalBytes { digest, .. } => *digest,
+            ExpectedResultV1::TypedFailure(_) | ExpectedResultV1::AllowedDivergence { .. } => {
+                [22; 32]
+            }
         };
         CaseOutcomeV1 {
             case_id: fixture.case_id.clone(),
@@ -1788,8 +1790,8 @@ mod tests {
             claim_layer: fixture.claim_layer,
             outcome: CaseOutcomeStatusV1::Pass,
             first_coordinate: None,
-            expected_digest: Some(*expected_digest),
-            actual_digest: Some(*expected_digest),
+            expected_digest: Some(expected_digest),
+            actual_digest: Some(expected_digest),
             expected_error: None,
             actual_error: None,
             replay_claim: ReplayClaimV1::Exact,
@@ -1861,16 +1863,124 @@ mod tests {
     where
         F: Fn(&Value) -> Result<T, ConformanceContractError>,
     {
-        let Value::Array(fields) = value else {
-            panic!("coverage descriptor must be an array");
-        };
-        for index in 0..fields.len() {
-            if !exclusions.contains(&index) {
-                let mut malformed = fields.clone();
-                malformed[index] = Value::Map(Vec::new());
-                assert!(decoder(&Value::Array(malformed)).is_err());
+        if let Value::Array(fields) = value {
+            for index in 0..fields.len() {
+                if !exclusions.contains(&index) {
+                    let mut malformed = fields.clone();
+                    malformed[index] = Value::Map(Vec::new());
+                    assert!(decoder(&Value::Array(malformed)).is_err());
+                }
             }
         }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn zero_bound_variants() -> [FixtureBoundsV1; 8] {
+        [
+            FixtureBoundsV1 {
+                cpu_fuel: 0,
+                memory_bytes: 1,
+                event_count: 1,
+                output_bytes: 1,
+                storage_bytes: 1,
+                execution_steps: 1,
+                simulation_time_ns: 1,
+                watchdog_ms: 1,
+            },
+            FixtureBoundsV1 {
+                cpu_fuel: 1,
+                memory_bytes: 0,
+                event_count: 1,
+                output_bytes: 1,
+                storage_bytes: 1,
+                execution_steps: 1,
+                simulation_time_ns: 1,
+                watchdog_ms: 1,
+            },
+            FixtureBoundsV1 {
+                cpu_fuel: 1,
+                memory_bytes: 1,
+                event_count: 0,
+                output_bytes: 1,
+                storage_bytes: 1,
+                execution_steps: 1,
+                simulation_time_ns: 1,
+                watchdog_ms: 1,
+            },
+            FixtureBoundsV1 {
+                cpu_fuel: 1,
+                memory_bytes: 1,
+                event_count: 1,
+                output_bytes: 0,
+                storage_bytes: 1,
+                execution_steps: 1,
+                simulation_time_ns: 1,
+                watchdog_ms: 1,
+            },
+            FixtureBoundsV1 {
+                cpu_fuel: 1,
+                memory_bytes: 1,
+                event_count: 1,
+                output_bytes: 1,
+                storage_bytes: 0,
+                execution_steps: 1,
+                simulation_time_ns: 1,
+                watchdog_ms: 1,
+            },
+            FixtureBoundsV1 {
+                cpu_fuel: 1,
+                memory_bytes: 1,
+                event_count: 1,
+                output_bytes: 1,
+                storage_bytes: 1,
+                execution_steps: 0,
+                simulation_time_ns: 1,
+                watchdog_ms: 1,
+            },
+            FixtureBoundsV1 {
+                cpu_fuel: 1,
+                memory_bytes: 1,
+                event_count: 1,
+                output_bytes: 1,
+                storage_bytes: 1,
+                execution_steps: 1,
+                simulation_time_ns: 0,
+                watchdog_ms: 1,
+            },
+            FixtureBoundsV1 {
+                cpu_fuel: 1,
+                memory_bytes: 1,
+                event_count: 1,
+                output_bytes: 1,
+                storage_bytes: 1,
+                execution_steps: 1,
+                simulation_time_ns: 1,
+                watchdog_ms: 0,
+            },
+        ]
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn narrow_decoder_errors(divergence_expected: &ExpectedResultV1) {
+        if let Value::Array(mut fields) = encode_expected(divergence_expected) {
+            fields[4] = Value::Array(vec![uint(u64::from(u8::MAX) + 1), Value::Bytes(vec![1])]);
+            assert_eq!(
+                decode_expected(&Value::Array(fields)),
+                Err(ConformanceContractError::FieldOutOfBounds)
+            );
+        }
+        assert_eq!(
+            u16_value(&uint(u64::from(u16::MAX) + 1)),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+        assert_eq!(
+            u32_value(&uint(u64::from(u32::MAX) + 1)),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+        assert!(digest_value(&Value::Bytes(vec![1])).is_err());
+        assert!(digest16_value(&Value::Bytes(vec![1])).is_err());
+        assert!(digest_list_value(&Value::Array(vec![Value::Bytes(vec![1])])).is_err());
+        assert!(strings_value(&Value::Array(vec![Value::Bytes(vec![1])])).is_err());
     }
 
     #[test]
@@ -2094,8 +2204,7 @@ mod tests {
 
     #[test]
     fn strict_decoder_rejects_trailing_unknown_and_forbidden_cbor_forms() {
-        let bytes = profile().to_canonical_cbor().unwrap_or_default();
-        let mut trailing = bytes.clone();
+        let mut trailing = profile().to_canonical_cbor().unwrap_or_default();
         trailing.push(0);
         assert_eq!(
             ConformanceProfileV1::from_canonical_cbor(&trailing),
@@ -2125,88 +2234,7 @@ mod tests {
 
     #[test]
     fn bounds_ordering_and_provenance_fail_closed() {
-        for bounds in [
-            FixtureBoundsV1 {
-                cpu_fuel: 0,
-                memory_bytes: 1,
-                event_count: 1,
-                output_bytes: 1,
-                storage_bytes: 1,
-                execution_steps: 1,
-                simulation_time_ns: 1,
-                watchdog_ms: 1,
-            },
-            FixtureBoundsV1 {
-                cpu_fuel: 1,
-                memory_bytes: 0,
-                event_count: 1,
-                output_bytes: 1,
-                storage_bytes: 1,
-                execution_steps: 1,
-                simulation_time_ns: 1,
-                watchdog_ms: 1,
-            },
-            FixtureBoundsV1 {
-                cpu_fuel: 1,
-                memory_bytes: 1,
-                event_count: 0,
-                output_bytes: 1,
-                storage_bytes: 1,
-                execution_steps: 1,
-                simulation_time_ns: 1,
-                watchdog_ms: 1,
-            },
-            FixtureBoundsV1 {
-                cpu_fuel: 1,
-                memory_bytes: 1,
-                event_count: 1,
-                output_bytes: 0,
-                storage_bytes: 1,
-                execution_steps: 1,
-                simulation_time_ns: 1,
-                watchdog_ms: 1,
-            },
-            FixtureBoundsV1 {
-                cpu_fuel: 1,
-                memory_bytes: 1,
-                event_count: 1,
-                output_bytes: 1,
-                storage_bytes: 0,
-                execution_steps: 1,
-                simulation_time_ns: 1,
-                watchdog_ms: 1,
-            },
-            FixtureBoundsV1 {
-                cpu_fuel: 1,
-                memory_bytes: 1,
-                event_count: 1,
-                output_bytes: 1,
-                storage_bytes: 1,
-                execution_steps: 0,
-                simulation_time_ns: 1,
-                watchdog_ms: 1,
-            },
-            FixtureBoundsV1 {
-                cpu_fuel: 1,
-                memory_bytes: 1,
-                event_count: 1,
-                output_bytes: 1,
-                storage_bytes: 1,
-                execution_steps: 1,
-                simulation_time_ns: 0,
-                watchdog_ms: 1,
-            },
-            FixtureBoundsV1 {
-                cpu_fuel: 1,
-                memory_bytes: 1,
-                event_count: 1,
-                output_bytes: 1,
-                storage_bytes: 1,
-                execution_steps: 1,
-                simulation_time_ns: 1,
-                watchdog_ms: 0,
-            },
-        ] {
+        for bounds in zero_bound_variants() {
             let mut value = profile();
             value.fixtures[0].bounds = bounds;
             value.profile_digest = value.digest();
@@ -2318,25 +2346,6 @@ mod tests {
         );
         reject_each_field(&encode_case(&evidence.case_outcomes[0]), &[], decode_case);
 
-        let Value::Array(mut fields) = encode_expected(&divergence_expected) else {
-            unreachable!("expected-result encoding is an array");
-        };
-        fields[4] = Value::Array(vec![uint(u64::from(u8::MAX) + 1), Value::Bytes(vec![1])]);
-        assert_eq!(
-            decode_expected(&Value::Array(fields)),
-            Err(ConformanceContractError::FieldOutOfBounds)
-        );
-        assert_eq!(
-            u16_value(&uint(u64::from(u16::MAX) + 1)),
-            Err(ConformanceContractError::FieldOutOfBounds)
-        );
-        assert_eq!(
-            u32_value(&uint(u64::from(u32::MAX) + 1)),
-            Err(ConformanceContractError::FieldOutOfBounds)
-        );
-        assert!(digest_value(&Value::Bytes(vec![1])).is_err());
-        assert!(digest16_value(&Value::Bytes(vec![1])).is_err());
-        assert!(digest_list_value(&Value::Array(vec![Value::Bytes(vec![1])])).is_err());
-        assert!(strings_value(&Value::Array(vec![Value::Bytes(vec![1])])).is_err());
+        narrow_decoder_errors(&divergence_expected);
     }
 }
