@@ -521,7 +521,6 @@ mod tests {
     use super::*;
     use crate::{event::Kind, ids::EntityId};
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
     }
@@ -538,7 +537,6 @@ mod tests {
         }
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     trait TestErrorExt<E> {
         fn test_err(self) -> E;
     }
