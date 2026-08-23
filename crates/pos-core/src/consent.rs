@@ -521,10 +521,12 @@ mod tests {
     use super::*;
     use crate::{event::Kind, ids::EntityId};
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
         #[cfg_attr(coverage_nightly, coverage(off))]
         fn test_ok(self) -> T {
@@ -536,10 +538,12 @@ mod tests {
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     trait TestErrorExt<E> {
         fn test_err(self) -> E;
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     impl<T, E: std::fmt::Debug> TestErrorExt<E> for Result<T, E> {
         #[cfg_attr(coverage_nightly, coverage(off))]
         fn test_err(self) -> E {
