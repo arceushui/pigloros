@@ -1816,7 +1816,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         &mut self,
         request: ErasureReferenceV1,
         record: &mut ErasureCoordinatorRecordV1,
-        mut input: ErasureReceiptInputV1,
+        input: ErasureReceiptInputV1,
     ) -> Result<ErasureReceiptV1, ErasureErrorV1> {
         if record.state.lifecycle() != ErasureLifecycleV1::AwaitingAcknowledgements {
             return Err(ErasureErrorV1::PolicyConflict);
