@@ -628,7 +628,7 @@ fn receipt_inventory_encoding() -> Result<Vec<u8>, ErasureErrorV1> {
 
 fn receipt_inventory_decoder_rejections(encoded: &[u8]) -> Result<(), ErasureErrorV1> {
     let mut unknown_codes =
-        public_receipt_value(&ErasureReceiptV1::from_canonical_cbor(&encoded)?)?;
+        public_receipt_value(&ErasureReceiptV1::from_canonical_cbor(encoded)?)?;
     let mut tampered_digest = unknown_codes.clone();
     let Value::Array(fields) = &mut tampered_digest else {
         return Err(ErasureErrorV1::InvalidEncoding);
@@ -652,7 +652,7 @@ fn receipt_inventory_decoder_rejections(encoded: &[u8]) -> Result<(), ErasureErr
         decode_receipt(&unknown_codes),
         Err(ErasureErrorV1::InvalidEncoding)
     );
-    let mut unknown_role = public_receipt_value(&ErasureReceiptV1::from_canonical_cbor(&encoded)?)?;
+    let mut unknown_role = public_receipt_value(&ErasureReceiptV1::from_canonical_cbor(encoded)?)?;
     let Value::Array(fields) = &mut unknown_role else {
         return Err(ErasureErrorV1::InvalidEncoding);
     };
@@ -668,7 +668,7 @@ fn receipt_inventory_decoder_rejections(encoded: &[u8]) -> Result<(), ErasureErr
         Err(ErasureErrorV1::InvalidEncoding)
     );
     let mut unordered_targets =
-        public_receipt_value(&ErasureReceiptV1::from_canonical_cbor(&encoded)?)?;
+        public_receipt_value(&ErasureReceiptV1::from_canonical_cbor(encoded)?)?;
     let Value::Array(fields) = &mut unordered_targets else {
         return Err(ErasureErrorV1::InvalidEncoding);
     };
@@ -713,7 +713,8 @@ fn receipt_inventory_decoder_rejections(encoded: &[u8]) -> Result<(), ErasureErr
 fn coordinator_and_receipt_reject_each_public_injected_or_stale_seam() -> Result<(), ErasureErrorV1>
 {
     coordinator_public_seam_rejections()?;
-    receipt_public_seam_rejections()
+    receipt_public_seam_rejections();
+    Ok(())
 }
 
 fn coordinator_public_seam_rejections() -> Result<(), ErasureErrorV1> {
@@ -768,7 +769,7 @@ fn coordinator_public_seam_rejections() -> Result<(), ErasureErrorV1> {
     Ok(())
 }
 
-fn receipt_public_seam_rejections() -> Result<(), ErasureErrorV1> {
+fn receipt_public_seam_rejections() {
     let ack = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
     let mut stale_issue = receipt_input(
         ErasureLifecycleV1::Complete,
@@ -844,7 +845,6 @@ fn receipt_public_seam_rejections() -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::InvalidEncoding)
         );
     }
-    Ok(())
 }
 #[test]
 fn coordinator_requires_host_admission_for_acknowledgements() -> Result<(), ErasureErrorV1> {
