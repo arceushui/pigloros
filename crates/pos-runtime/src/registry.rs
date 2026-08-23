@@ -2865,7 +2865,7 @@ mod tests {
         let mut store_error = PluginRegistry::new().with_consent_authority(authority.clone());
         store_error.register_driver(Box::new(EmptyDriver));
         store_error
-            .step_all_anchored_protected(timeline, Seq::ZERO, token.clone(), 0, &[])
+            .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
             .test_ok();
         let mut unknown_timeline_store = open_store(StoreConfig::Memory).test_ok();
         assert!(matches!(
