@@ -1952,6 +1952,31 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn gateway_consent_operations_reject_invalid_timeline_ids() {
+        let gateway = memory_gw();
+        let grant_error = gateway
+            .issue_consent_grant("not-a-timeline", consent_grant(EntityId::new(), 1))
+            .await
+            .test_err();
+        assert!(matches!(grant_error, GatewayError::InvalidId(_)));
+
+        let revocation_error = gateway
+            .issue_consent_revocation(
+                "not-a-timeline",
+                ConsentRevokedV1 {
+                    subject_id: EntityId::new(),
+                    grantee_id: EntityId::new(),
+                    grant_seq: 1,
+                    fence_seq: 1,
+                },
+            )
+            .await
+            .test_err();
+        assert!(matches!(revocation_error, GatewayError::InvalidId(_)));
+        drop(gateway);
+    }
+
     #[test]
     fn gateway_action_registry_exposes_the_host_action_schema() {
         let registry = gateway_action_registry();

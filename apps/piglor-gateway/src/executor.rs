@@ -536,22 +536,7 @@ impl StoreExecutor {
                     observer,
                 );
             });
-        match worker {
-            Ok(worker) => {
-                let mut join = match control.join.lock() {
-                    Ok(join) => join,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                *join = Some(worker);
-                drop(join);
-            }
-            Err(_) => set_lifecycle_state(
-                control.state.as_ref(),
-                LifecycleState::Unhealthy {
-                    retryable_shutdown: false,
-                },
-            ),
-        }
+        register_worker(control.as_ref(), worker);
         Self { control }
     }
 
@@ -1012,6 +997,43 @@ fn set_lifecycle_state(current_state: &Mutex<LifecycleState>, state: LifecycleSt
     *current = state;
 }
 
+fn register_worker(control: &ExecutorControl, worker: std::io::Result<JoinHandle<()>>) {
+    match worker {
+        Ok(worker) => {
+            let mut join = match control.join.lock() {
+                Ok(join) => join,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            *join = Some(worker);
+            drop(join);
+        }
+        Err(_) => set_lifecycle_state(
+            control.state.as_ref(),
+            LifecycleState::Unhealthy {
+                retryable_shutdown: false,
+            },
+        ),
+    }
+}
+
+fn take_worker_runtime(
+    lifecycle_state: &Mutex<LifecycleState>,
+    runtime: std::io::Result<tokio::runtime::Runtime>,
+) -> Option<tokio::runtime::Runtime> {
+    match runtime {
+        Ok(runtime) => Some(runtime),
+        Err(_) => {
+            set_lifecycle_state(
+                lifecycle_state,
+                LifecycleState::Unhealthy {
+                    retryable_shutdown: false,
+                },
+            );
+            None
+        }
+    }
+}
+
 fn worker_loop(
     lifecycle_state: &Arc<Mutex<LifecycleState>>,
     shutdown: Arc<Notify>,
@@ -1021,16 +1043,10 @@ fn worker_loop(
     #[cfg(test)] observer: Option<Arc<SchedulerObserver>>,
 ) {
     let worker_result = catch_unwind(AssertUnwindSafe(|| {
-        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        else {
-            set_lifecycle_state(
-                lifecycle_state.as_ref(),
-                LifecycleState::Unhealthy {
-                    retryable_shutdown: false,
-                },
-            );
+        let Some(runtime) = take_worker_runtime(
+            lifecycle_state.as_ref(),
+            tokio::runtime::Builder::new_current_thread().enable_all().build(),
+        ) else {
             return;
         };
         runtime.block_on(worker_loop_async(
@@ -2330,6 +2346,22 @@ mod tests {
         );
 
         let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(
+            Command::AppendConsentRevocation {
+                timeline: TimelineId::new(),
+                revocation: ConsentRevokedV1 {
+                    subject_id: EntityId::new(),
+                    grantee_id: EntityId::new(),
+                    grant_seq: 1,
+                    fence_seq: 1,
+                },
+                maximum: 1,
+                reply,
+            },
+            receiver,
+        );
+
+        let (reply, receiver) = tokio::sync::oneshot::channel();
         let draft = EventDraft::new(
             EntityId::new(),
             Kind::new("expired"),
@@ -2668,6 +2700,33 @@ mod tests {
             result.is_ok(),
             "executor_reports_unhealthy_and_closed_submission_paths failed: {result:?}"
         );
+    }
+
+    #[test]
+    fn worker_startup_fallbacks_mark_the_executor_unhealthy(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        let executor = super::StoreExecutor::from_sender_for_test(sender);
+        super::register_worker(
+            executor.control.as_ref(),
+            Err(std::io::Error::other("injected worker spawn failure")),
+        );
+        assert!(matches!(
+            executor.current_state(),
+            super::LifecycleState::Unhealthy { .. }
+        ));
+
+        *executor.control.state.lock().test_ok()? = super::LifecycleState::Open;
+        assert!(super::take_worker_runtime(
+            executor.control.state.as_ref(),
+            Err(std::io::Error::other("injected runtime failure")),
+        )
+        .is_none());
+        assert!(matches!(
+            executor.current_state(),
+            super::LifecycleState::Unhealthy { .. }
+        ));
+        Ok(())
     }
 
     async fn executor_reports_unhealthy_and_closed_submission_paths_impl(
