@@ -138,9 +138,8 @@ fn protected_public_seam_rejects_a_gate_that_returns_a_different_token() {
     let token = issuing_authority.record_grant_on_timeline(timeline, &grant(subject));
     let other_authority = ConsentAuthority::new();
     let returned = other_authority.record_grant_on_timeline(timeline, &grant(subject));
-    let mut registry = PluginRegistry::new().with_consent_gate(Arc::new(MismatchedDraftGate {
-        returned,
-    }));
+    let mut registry =
+        PluginRegistry::new().with_consent_gate(Arc::new(MismatchedDraftGate { returned }));
     registry.register_driver(Box::new(ProtectedEventDriver { entity: subject }));
 
     let error = test_err(registry.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[]));
