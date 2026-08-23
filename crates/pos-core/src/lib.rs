@@ -39,6 +39,7 @@ pub use consent::{
     is_consent_event_type, ConsentCapabilityToken, ConsentCodecError, ConsentError, ConsentGate,
     ConsentGranted, ConsentGrantedV1, ConsentRevocationFoldListener, ConsentRevoked,
     ConsentRevokedV1, FieldState, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
+    MODALITY_EXPORT, MODALITY_LOCATION, MODALITY_MODEL_FIT, MODALITY_PERSONA,
 };
 pub use crypto::{Hash, PublicKey, Signature};
 pub use entity::{Entity, EntityKind, Relationship, RelationshipKind};
