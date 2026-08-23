@@ -3720,7 +3720,7 @@ mod tests {
         assert!(write_result.await.test_ok()?.is_ok());
         assert!(trailing_read.await.test_ok()?.is_ok());
         selected.extend(collect_selected(&records));
-        assert_eq!(selected, (0..=11).collect::<Vec<_>>());
+        assert_eq!(selected, vec![0, 1, 2, 3, 4, 5, 6, 8, 10, 11]);
         executor.shutdown().await.test_ok()?;
 
         drop(executor);

@@ -1128,7 +1128,7 @@ impl ExperimentSession {
 
     fn commit_consent_revocation(&mut self, subject: &str) -> Result<TickOutcome, ExperimentError> {
         let subject_id = consent_marker_entity(subject);
-        let emitted_events = match lock_store(&self.store)
+        let emitted_events = lock_store(&self.store)
             .and_then(|mut store| {
                 store
                     .logical_head(self.timeline.id())
@@ -1160,11 +1160,8 @@ impl ExperimentSession {
             })
             .inspect_err(|_| {
                 self.health = SessionHealth::Faulted;
-            }) {
-            Ok(emitted_events) => emitted_events,
-            Err(error) => return Err(error),
-        };
-        let after = match lock_store(&self.store)
+            })?;
+        let after = lock_store(&self.store)
             .and_then(|store| {
                 capture_pending_range(
                     store.as_ref(),
@@ -1174,10 +1171,7 @@ impl ExperimentSession {
             })
             .inspect_err(|_| {
                 self.health = SessionHealth::Faulted;
-            }) {
-            Ok(after) => after,
-            Err(error) => return Err(error),
-        };
+            })?;
         let folded_events = fold_captured_range(&mut self.boundary, &mut self.registry, &after);
         self.timeline = after.timeline;
         self.total_events = self.total_events.saturating_add(folded_events);
@@ -1458,7 +1452,7 @@ impl BacktestRunner {
             )
             .map_err(ExperimentError::from)
         };
-        let inherited = match inherited
+        let inherited = inherited
             .and_then(|events| {
                 validate_captured_range(pos_core::clock::Seq::ZERO, train_head_seq, &events)
                     .map(|()| events)
@@ -1472,10 +1466,7 @@ impl BacktestRunner {
                     .restore_driver_state(&ancestry, &events)
                     .map_err(ExperimentError::from)
                     .map(|()| events)
-            }) {
-            Ok(events) => events,
-            Err(error) => return Err(error),
-        };
+            })?;
         hydrate_projections(&mut eval_registry, &inherited);
         let eval_stop = StopCondition::MaxTicks(self.config.eval_ticks);
         let (eval_ticks, eval_events, eval_chain_head) = run_experiment_on_store(
