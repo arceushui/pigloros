@@ -3813,15 +3813,9 @@ mod tests {
         // other two digests distinct prevents a weakened conjunction from
         // accepting a stable profile.
         let identity_changes: [fn(&mut StableImplementationEvidenceV1); 3] = [
-            |e: &mut StableImplementationEvidenceV1| {
-                e.implementation.source_digest = digest(40);
-            },
-            |e: &mut StableImplementationEvidenceV1| {
-                e.implementation.build_digest = digest(41);
-            },
-            |e: &mut StableImplementationEvidenceV1| {
-                e.implementation.binary_digest = digest(42);
-            },
+            |e: &mut StableImplementationEvidenceV1| e.implementation.source_digest = digest(40),
+            |e: &mut StableImplementationEvidenceV1| e.implementation.build_digest = digest(41),
+            |e: &mut StableImplementationEvidenceV1| e.implementation.binary_digest = digest(42),
         ];
         for change in identity_changes {
             let mut first = stable_evidence("alpha", 30);
@@ -3867,7 +3861,9 @@ mod tests {
             .transition_to(ProfileLifecycleV1::Stable, vec![accepted.clone(), second])
             .is_ok());
         let case_changes: [fn(&mut CaseOutcomeV1); 3] = [
-            |case: &mut CaseOutcomeV1| case.actual_error = Some(SafeErrorCodeV1::DigestMismatch),
+            |case: &mut CaseOutcomeV1| {
+                case.actual_error = Some(SafeErrorCodeV1::DigestMismatch);
+            },
             |case: &mut CaseOutcomeV1| case.fixture_digest = [0; 32],
             |case: &mut CaseOutcomeV1| case.provenance_digest = [0; 32],
         ];
