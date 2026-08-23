@@ -2623,6 +2623,7 @@ mod tests {
             .collect();
         refresh_report_counts(&mut evidence.report);
         evidence.report.report_digest = evidence.report.digest().unwrap_or([0; 32]);
+        refresh_stable_attestation(evidence);
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -3577,7 +3578,12 @@ mod tests {
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         }
         for index in 0..17 {
-            let bytes = malformed_profile_bytes(&value, &[8, 0, index], Value::Null);
+            let replacement = if index == 10 {
+                Value::Bool(true)
+            } else {
+                Value::Null
+            };
+            let bytes = malformed_profile_bytes(&value, &[8, 0, index], replacement);
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         }
         for index in 0..4 {
