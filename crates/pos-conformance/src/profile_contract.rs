@@ -294,6 +294,11 @@ impl TrustedRootPolicyV1 {
     }
 
     /// Validate the externally supplied policy and its canonical root order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConformanceContractError::IndependenceEvidenceMissing`] when
+    /// the root set is empty, invalidly ordered, or has a mismatched digest.
     pub fn validate(&self) -> Result<(), ConformanceContractError> {
         if self.trusted_root_public_keys.is_empty()
             || self.trusted_root_public_keys.len() > 64
@@ -3291,6 +3296,42 @@ mod tests {
         assert_eq!(
             ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&bytes, &policy),
             Ok(stable)
+        );
+    }
+
+    #[test]
+    fn trusted_root_policy_public_validation_covers_closed_rejection_paths() {
+        let valid = trusted_root_policy();
+        assert_eq!(valid.validate(), Ok(()));
+
+        let mut empty = valid.clone();
+        empty.trusted_root_public_keys.clear();
+        assert_eq!(
+            empty.validate(),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+
+        let mut zero = valid.clone();
+        zero.trusted_root_public_keys = vec![[0; 32]];
+        zero.trust_policy_snapshot_digest = zero.digest();
+        assert_eq!(
+            zero.validate(),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+
+        let mut unordered = valid.clone();
+        unordered.trusted_root_public_keys = vec![[2; 32], [1; 32]];
+        unordered.trust_policy_snapshot_digest = unordered.digest();
+        assert_eq!(
+            unordered.validate(),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+
+        let mut mismatched_digest = valid;
+        mismatched_digest.trust_policy_snapshot_digest = [9; 32];
+        assert_eq!(
+            mismatched_digest.validate(),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
         );
     }
 
