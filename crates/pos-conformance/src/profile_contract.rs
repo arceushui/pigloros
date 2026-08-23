@@ -958,6 +958,8 @@ fn validate_stable_evidence(
         || first.implementation.source_digest == second.implementation.source_digest
         || first.implementation.build_digest == second.implementation.build_digest
         || first.implementation.binary_digest == second.implementation.binary_digest
+        || first.implementation.public_contract_digest
+            != second.implementation.public_contract_digest
         || first.evaluator_protocol_digest != profile.evaluator_protocol.protocol_digest
         || second.evaluator_protocol_digest != profile.evaluator_protocol.protocol_digest
         || first.report.report_digest == [0; 32]
@@ -2884,7 +2886,7 @@ mod tests {
                 source_digest: digest(seed),
                 build_digest: digest(seed.saturating_add(1)),
                 binary_digest: digest(seed.saturating_add(2)),
-                public_contract_digest: digest(seed.saturating_add(3)),
+                public_contract_digest: digest(7),
                 organization_id: Some(format!("organization-{seed}")),
             },
             independence: IndependenceEvidenceV1 {
@@ -2902,7 +2904,7 @@ mod tests {
                     source_digest: digest(seed),
                     build_digest: digest(seed.saturating_add(1)),
                     binary_digest: digest(seed.saturating_add(2)),
-                    public_contract_digest: digest(seed.saturating_add(3)),
+                    public_contract_digest: digest(7),
                     organization_id: Some(format!("organization-{seed}")),
                 },
                 &IndependenceEvidenceV1 {
@@ -4914,6 +4916,17 @@ mod tests {
             candidate().transition_to(
                 ProfileLifecycleV1::Stable,
                 vec![same_binary, independent_binary],
+            ),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+
+        let mut different_contract = stable_evidence("alpha", 30);
+        different_contract.implementation.public_contract_digest = digest(55);
+        refresh_stable_report(&mut different_contract);
+        assert_eq!(
+            candidate().transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![different_contract, stable_evidence("beta", 40)],
             ),
             Err(ConformanceContractError::IndependenceEvidenceMissing)
         );
