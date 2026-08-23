@@ -2781,8 +2781,7 @@ mod tests {
             .test_err();
         assert!(matches!(
             codec_error,
-            GatewayError::Store(CoreError::Storage(message))
-                if message.contains("field value is outside the V1 contract")
+            GatewayError::ConsentCodec(ConsentCodecError::FieldOutOfBounds)
         ));
 
         gateway

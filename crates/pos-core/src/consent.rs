@@ -567,7 +567,12 @@ impl ConsentAuthority {
             grant_seq: grant.grant_seq,
             fence_seq: u64::MAX,
         };
-        let key = (timeline_id, grant.subject_id, grant.grantee_id, grant.grant_seq);
+        let key = (
+            timeline_id,
+            grant.subject_id,
+            grant.grantee_id,
+            grant.grant_seq,
+        );
         let active = ActiveConsent {
             token: token.clone(),
             expiry_secs: grant.expiry_secs,

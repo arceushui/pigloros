@@ -15,11 +15,7 @@ impl Driver for ProtectedEventDriver {
         "protected-event"
     }
 
-    fn step(
-        &mut self,
-        _: TimelineId,
-        _: ObservationView<'_>,
-    ) -> Result<StepOutput, RuntimeError> {
+    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
         Ok(StepOutput::new(vec![EventDraft::new(
             self.entity,
             Kind::new("protected.event"),
@@ -50,8 +46,7 @@ fn protected_public_seam_checks_timeline_and_rechecks_at_commit_head() {
     let authority = ConsentAuthority::new();
     let grant = grant(subject);
     let token = authority.record_grant_on_timeline(timeline, &grant);
-    let mut registry = PluginRegistry::new()
-        .with_consent_authority(authority.clone());
+    let mut registry = PluginRegistry::new().with_consent_authority(authority.clone());
     registry.register_driver(Box::new(ProtectedEventDriver { entity: subject }));
 
     let drafts = registry
@@ -76,5 +71,8 @@ fn protected_public_seam_checks_timeline_and_rechecks_at_commit_head() {
     let error = registry
         .step_all_anchored_protected(wrong_timeline, Seq::ZERO, token, 1, &[])
         .expect_err("a capability cannot cross Timeline boundaries");
-    assert!(matches!(error, RuntimeError::Consent(ConsentError::NoConsent)));
+    assert!(matches!(
+        error,
+        RuntimeError::Consent(ConsentError::NoConsent)
+    ));
 }

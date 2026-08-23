@@ -687,11 +687,7 @@ impl PluginRegistry {
             return;
         };
         if self
-            .validate_operation(
-                pending.timeline,
-                &pending.operation,
-                timeline_head,
-            )
+            .validate_operation(pending.timeline, &pending.operation, timeline_head)
             .is_err()
         {
             let _ = self.abort_drivers(&pending.driver_ids);
@@ -2255,12 +2251,15 @@ mod tests {
             .validate_operation(timeline, &operation, Seq::from_u64(3))
             .is_ok());
         authority
-            .record_revocation_on_timeline(timeline, &ConsentRevoked {
-                subject_id: grant.subject_id,
-                grantee_id: grant.grantee_id,
-                grant_seq: grant.grant_seq,
-                fence_seq: 5,
-            })
+            .record_revocation_on_timeline(
+                timeline,
+                &ConsentRevoked {
+                    subject_id: grant.subject_id,
+                    grantee_id: grant.grantee_id,
+                    grant_seq: grant.grant_seq,
+                    fence_seq: 5,
+                },
+            )
             .test_ok();
         assert!(bound
             .validate_operation(timeline, &operation, Seq::from_u64(5))

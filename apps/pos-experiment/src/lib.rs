@@ -806,9 +806,9 @@ impl Experiment {
         let ancestry = timeline_ancestry(store.as_ref(), timeline_id, folded_through)?;
         self.registry.restore_driver_state(&ancestry, &events)?;
         hydrate_projections(&mut self.registry, &events);
-        let consent_revoked = events.iter().any(|event| {
-            event.event_type.as_str() == EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE
-        });
+        let consent_revoked = events
+            .iter()
+            .any(|event| event.event_type.as_str() == EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE);
         Ok(ExperimentSession {
             config: self.config,
             registry: self.registry,
@@ -1121,8 +1121,7 @@ impl ExperimentSession {
             return Err(error.into());
         }
         let emitted_events = if drafts.is_empty() {
-            self.registry
-                .commit_step_at(self.boundary.folded_through);
+            self.registry.commit_step_at(self.boundary.folded_through);
             0
         } else {
             match lock_store(&self.store)
@@ -1134,13 +1133,11 @@ impl ExperimentSession {
                 .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
             {
                 Ok(count) => {
-                    let head = match lock_store(&self.store)
-                        .and_then(|store| {
-                            store
-                                .logical_head(self.timeline.id())
-                                .map_err(ExperimentError::from)
-                        })
-                    {
+                    let head = match lock_store(&self.store).and_then(|store| {
+                        store
+                            .logical_head(self.timeline.id())
+                            .map_err(ExperimentError::from)
+                    }) {
                         Ok(head) => head,
                         Err(error) => {
                             self.registry.abort_step();
