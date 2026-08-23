@@ -1,9 +1,10 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use pos_core::{
-    clock::Seq,
-    event::{CanonicalBytes, EventDraft, Kind},
-    ids::{EntityId, TimelineId},
+    clock::{Seq, WallTime},
+    crypto::Hash,
+    event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
+    ids::{EntityId, EventId, TimelineId},
     ConsentAuthority, ConsentCapabilityToken, ConsentError, ConsentGate, ConsentGranted,
 };
 use pos_runtime::{
@@ -464,11 +465,33 @@ fn public_registry_recovery_and_unprotected_transactions_run() {
     let mut registry = PluginRegistry::new();
     registry.register_driver(Box::new(EmptyDriver));
 
+    let event = Event {
+        id: EventId::new(),
+        entity: EntityId::new(),
+        event_type: Kind::new("public.recovery.v1"),
+        payload: CanonicalBytes::from_static(b"recovery"),
+        wall_time: WallTime::from_micros(1),
+        seq: Seq::from_u64(1),
+        causation_id: None,
+        correlation_id: None,
+        schema_version: SchemaVersion::V1,
+        signature: None,
+        payload_hash: Hash::from_bytes([0; 32]),
+    };
     test_ok(registry.restore_driver_state(
-        &[TimelineHistorySegment::new(timeline, Seq::ZERO)],
-        &[],
+        &[TimelineHistorySegment::new(timeline, Seq::from_u64(1))],
+        &[event],
     ));
     assert!(test_ok(registry.step_all_anchored(timeline, Seq::ZERO)).is_empty());
     test_ok(registry.commit_step_at(Seq::ZERO, 0));
     assert!(test_ok(registry.tick_cadenced(timeline, 0)).is_empty());
+
+    let mut projection_registry = PluginRegistry::new();
+    projection_registry.register_driver(Box::new(SubscribedDriver {
+        key: pos_runtime::ProjectionKey::new(EntityId::new()),
+    }));
+    assert!(matches!(
+        test_err(projection_registry.step_all_anchored(timeline, Seq::ZERO)),
+        RuntimeError::Consent(ConsentError::NoConsent)
+    ));
 }
