@@ -627,6 +627,12 @@ fn durable_record_scope_checks_reject_independent_closure_conflicts() -> Result<
         ErasureCoordinatorRecordV1::from_parts(frozen_parts, reference(2)),
         Err(ErasureErrorV1::ScopeInvalid)
     );
+    let mut unsorted_parts = record_parts(&valid_frozen);
+    unsorted_parts.targets.reverse();
+    assert_eq!(
+        ErasureCoordinatorRecordV1::from_parts(unsorted_parts, reference(2)),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
 
     let awaiting = record_after_acknowledgement()?;
     let mut duplicate_acknowledgements = record_parts(&awaiting);
