@@ -5695,9 +5695,9 @@ fn verify_conformance_report(evidence: &MoatProofEvidenceV1) -> Result<(), Evide
     Ok(())
 }
 
-fn validate_conformance_case(
-    case: &CaseOutcomeV1,
-    case_keys: &mut BTreeSet<(&str, ExecutionModeV1, ClaimLayerV1, [u8; 32])>,
+fn validate_conformance_case<'a>(
+    case: &'a CaseOutcomeV1,
+    case_keys: &mut BTreeSet<(&'a str, ExecutionModeV1, ClaimLayerV1, [u8; 32])>,
 ) -> Result<(), EvidenceError> {
     if !case_keys.insert((
         case.case_id.as_str(),
