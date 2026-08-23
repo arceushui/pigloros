@@ -33,9 +33,9 @@ pub fn is_consent_event_type(event_type: &Kind) -> bool {
 }
 
 // magic ASCII "CGV1" = h'43475631'
-const MAGIC_CGV1: &[u8; 4] = b"CGV1";
+const MAGIC_CGV1: [u8; 4] = *b"CGV1";
 // magic ASCII "CRV1" = h'43525631'
-const MAGIC_CRV1: &[u8; 4] = b"CRV1";
+const MAGIC_CRV1: [u8; 4] = *b"CRV1";
 const VERSION_V1: u8 = 1;
 
 /// Maximum UTF-8 bytes for the `purpose` field in `ConsentGranted`.
@@ -115,7 +115,7 @@ fn cbor_u64(v: u64) -> Value {
     Value::Integer(ciborium::value::Integer::from(v))
 }
 
-fn cbor_bool(v: bool) -> Value {
+const fn cbor_bool(v: bool) -> Value {
     Value::Bool(v)
 }
 
@@ -128,10 +128,10 @@ fn cbor_id(id: EntityId) -> Value {
     cbor_bytes(&n.to_be_bytes())
 }
 
-fn cbor_encode(value: &Value) -> Vec<u8> {
+fn cbor_encode(value: &Value) -> Result<Vec<u8>, ConsentCodecError> {
     let mut buf = Vec::new();
-    ciborium::into_writer(value, &mut buf).expect("Vec<u8> write is infallible");
-    buf
+    ciborium::into_writer(value, &mut buf).map_err(|_| ConsentCodecError::CborError)?;
+    Ok(buf)
 }
 
 fn decode_array(bytes: &[u8], expected_len: usize) -> Result<Vec<Value>, ConsentCodecError> {
@@ -141,7 +141,7 @@ fn decode_array(bytes: &[u8], expected_len: usize) -> Result<Vec<Value>, Consent
     if cursor.position() != bytes.len() as u64 {
         return Err(ConsentCodecError::TrailingBytes);
     }
-    if cbor_encode(&value) != bytes {
+    if cbor_encode(&value)? != bytes {
         return Err(ConsentCodecError::NonCanonicalEncoding);
     }
     match value {
@@ -151,7 +151,7 @@ fn decode_array(bytes: &[u8], expected_len: usize) -> Result<Vec<Value>, Consent
     }
 }
 
-fn decode_magic(val: &Value, expected: &[u8; 4]) -> Result<(), ConsentCodecError> {
+fn decode_magic(val: &Value, expected: [u8; 4]) -> Result<(), ConsentCodecError> {
     match val {
         Value::Bytes(b) if b.as_slice() == expected => Ok(()),
         _ => Err(ConsentCodecError::WrongMagic),
@@ -193,7 +193,7 @@ fn decode_u64(val: &Value) -> Result<u64, ConsentCodecError> {
     }
 }
 
-fn decode_bool(val: &Value) -> Result<bool, ConsentCodecError> {
+const fn decode_bool(val: &Value) -> Result<bool, ConsentCodecError> {
     match val {
         Value::Bool(b) => Ok(*b),
         _ => Err(ConsentCodecError::WrongFieldType),
@@ -203,7 +203,9 @@ fn decode_bool(val: &Value) -> Result<bool, ConsentCodecError> {
 fn decode_id(val: &Value) -> Result<EntityId, ConsentCodecError> {
     match val {
         Value::Bytes(b) if b.len() == 16 => {
-            let arr: [u8; 16] = b.as_slice().try_into().expect("length checked above");
+            let Ok(arr) = b.as_slice().try_into() else {
+                return Err(ConsentCodecError::WrongFieldType);
+            };
             let n = u128::from_be_bytes(arr);
             Ok(EntityId::from_ulid(ulid::Ulid::from(n)))
         }
@@ -244,7 +246,7 @@ pub struct ConsentGranted {
     pub grantee_id: EntityId,
     /// UTF-8 string, max 128 bytes.
     pub purpose: String,
-    /// Bitmask: MODALITY_LOCATION | MODALITY_PERSONA | MODALITY_MODEL_FIT | MODALITY_EXPORT.
+    /// Bitmask of the documented modality constants.
     pub modalities: u8,
     /// 0 = no floor, 1 = 0.1-degree (ADR-026 floor).
     pub min_geo_resolution: u8,
@@ -270,7 +272,7 @@ impl ConsentGranted {
             });
         }
         let arr = Value::Array(vec![
-            cbor_bytes(MAGIC_CGV1),
+            cbor_bytes(&MAGIC_CGV1),
             cbor_u8(VERSION_V1),
             cbor_id(self.subject_id),
             cbor_id(self.grantee_id),
@@ -283,7 +285,7 @@ impl ConsentGranted {
             cbor_u32(self.expiry_secs),
             cbor_u64(self.grant_seq),
         ]);
-        Ok(CanonicalBytes::from_vec(cbor_encode(&arr)))
+        Ok(CanonicalBytes::from_vec(cbor_encode(&arr)?))
     }
 
     /// Decode from canonical CBOR bytes.
@@ -356,14 +358,14 @@ impl ConsentRevoked {
     /// This function is currently infallible but returns `Result` for API consistency.
     pub fn encode(&self) -> Result<CanonicalBytes, ConsentCodecError> {
         let arr = Value::Array(vec![
-            cbor_bytes(MAGIC_CRV1),
+            cbor_bytes(&MAGIC_CRV1),
             cbor_u8(VERSION_V1),
             cbor_id(self.subject_id),
             cbor_id(self.grantee_id),
             cbor_u64(self.grant_seq),
             cbor_u64(self.fence_seq),
         ]);
-        Ok(CanonicalBytes::from_vec(cbor_encode(&arr)))
+        Ok(CanonicalBytes::from_vec(cbor_encode(&arr)?))
     }
 
     /// Decode from canonical CBOR bytes.
@@ -393,7 +395,7 @@ impl ConsentRevoked {
 
 /// Capability token issued by the Gateway on a valid `consent.granted.v1`.
 ///
-/// Callers must present this token before emitting EventDrafts or reading
+/// Callers must present this token before emitting event drafts or reading
 /// sensitive Projection fields for a human-subject entity. Per-step check:
 /// `token.fence_seq > current_timeline_head` (ADR-039 section 3).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -435,7 +437,7 @@ impl ConsentCapabilityToken {
     /// A repeated or earlier fence can only preserve or further restrict access.
     ///
     /// # Errors
-    /// Returns ConsentError::NoConsent when the revocation names another grant.
+    /// Returns the closed no-consent error when the revocation names another grant.
     pub fn invalidate_with(&mut self, revocation: &ConsentRevoked) -> Result<(), ConsentError> {
         if self.subject_id != revocation.subject_id
             || self.grantee_id != revocation.grantee_id
