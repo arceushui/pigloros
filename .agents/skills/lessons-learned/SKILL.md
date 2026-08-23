@@ -86,3 +86,67 @@ After this, ADRs can follow the flow: `Proposed → Under Review → Accepted / 
 19. **GitHub Actions workflow `name:` must be lowercase-with-hyphens.** All workflow YAML files under `.github/workflows/` must use the same naming convention: lowercase words separated by hyphens (e.g. `name: ci`, `name: cargo-deny`, `name: deploy`, `name: trunk-check`). No PascalCase (`Deploy`, `Trunk Check`), no ALLCAPS. This keeps the Actions sidebar predictable and sortable.
 
 20. **Keep ADR version scope separate from implementation scope.** The current product implementation is V1, but an ADR may legitimately document future V2/V3 evolution. Track whether a decision applies now or is deferred independently from its version label; do not rewrite valid future-version design as current behavior, and do not call current V1 work V2 merely because the ADR discusses later evolution.
+
+## Compiled lessons from task-observation history
+
+The following lessons consolidate recurring observations from project work. Keep this file as the single tracked lessons-learned document; the raw observation history remains an agent-workflow record.
+
+### Delivery and authority
+
+- Define completion by the requested end-state: committed worktree, pushed branch, passing pull-request checks, merged target branch, post-merge workflows, and tracker/release state as applicable. Local code and a green local test run are not delivery by themselves.
+- Reconcile the repository, Redmine, Notion, GitHub, roadmap, and worktree before reporting project stage. If sources disagree, name the conflict instead of silently choosing one.
+- Removing an implementation does not remove the product claim around it. Search code, README, examples, roadmap pages, and external docs after deletions.
+- Keep ADR status, implementation authorization, ticket status, evidence readiness, and product acceptance separate. An Accepted ADR records a decision; it does not start implementation.
+- Preserve the hierarchy between Wave, milestone design, ADR, implementation ticket, and subtask. Use Redmine parent/child for decomposition and blocker relations for execution order between independent tickets.
+
+### Acceptance and evidence
+
+- State acceptance criteria separately from evidence. Every claim needs an audience, boundary, pass/fail condition, authoritative artifact, schema owner, evaluator, maturity, and remaining gate.
+- Metadata, fixture IDs, digests, or screenshots do not prove behavior. Mandatory conformance cases must execute through the public boundary, and equality claims must bind to independently produced outputs.
+- Keep host evidence, evaluator validation, independent reproduction, and authorship/organizational independence as distinct fields.
+- Use the smallest deterministic fixture that proves the claim. Do not strengthen domain semantics merely because a fixture makes a stronger statement convenient.
+- Separate computational Replay from empirical/world-model validity, general world evidence from Persona calibration, and route-level security enforcement from future architecture.
+
+### Hosted CI and quality gates
+
+- Treat hosted CI as an independent environment probe. Permission, process identity, ordering, cache, target, and runner behavior can differ from a root local checkout.
+- For workflow changes, run a canary pull request, inspect every hosted job, fix failures in the isolated worktree, require a clean ruleset, merge, and verify the post-merge `main` workflows.
+- Compile documentation explicitly with rustdoc warnings denied. Compiler, test, and Clippy success do not validate rustdoc links.
+- Every test type must execute in CI, including integration tests, doctests, and ignored tests covered by policy. A test outside the workspace job is not evidence.
+- Use explicit sanitizer-compatible fuzz targets and include every manifest that can affect an isolated workspace in path filters.
+- Make informational jobs cancellation-safe. Avoid `always()` steps that hold replacement runs in a concurrency group.
+- Keep path-filtered fuzz and mutation checks advisory unless an always-emitted aggregator represents skipped work safely; do not confuse scheduled/manual ThreadSanitizer with a universal PR gate.
+
+### Coverage, lint, and interfaces
+
+- Coverage thresholds are design constraints: remove dead or uncoverable production branches instead of exempting them, and keep `coverage(off)` test-only.
+- Rust constructs and macros can create difficult LLVM regions; choose equivalent idiomatic forms deliberately when coverage evidence requires it.
+- Never suppress Clippy to hide design problems. Prefer fallible test functions, idiomatic code, and diff-level suppression guards.
+- Keep ports independent from adapter-specific types, and keep dependencies behind the correct seam. Prefer iterator-returning APIs when callers only need traversal.
+- Do not ship placeholder calculations, speculative fields, or future behavior disguised as current implementation. Defer unsupported contracts explicitly.
+
+### Product and roadmap communication
+
+- Map every objective and competitor insight to a primary Wave, supporting Wave, user-visible acceptance gate, and named evidence. Strategy is not operational until it points to proof.
+- A Living Overview explains current product truth, not agent process history. Lead with user value; put exclusions, review transcripts, and execution detail in their proper pages.
+- Use one dominant reading path with a visible current position and next step. Use diagrams for sequence and transformation, tables for exact mappings, and child pages at the moment deeper detail is useful.
+- Keep current landscape pages distinct from dated update archives and evidence reports. Separate evidence, inference, roadmap implication, and “not evidenced” claims.
+- Examples should clarify without accidentally narrowing a general product to one market. First-impression reviews should distinguish intrigue, comprehension, operational clarity, willingness to try, and willingness to trust.
+
+### Notion, diagrams, and external documentation
+
+- Treat Mermaid code as literal: do not apply rich-text escaping inside code fences, use `<br>` for label breaks, and quote labels containing special characters.
+- In Notion tables, use native Markdown links or plain text; do not place raw HTML anchors or block-level markup in cells.
+- A child-page creation can append a structural `<page>` block to its parent. Fetch the live parent, remove the generated block, reinsert it at the intended index position, and fetch parent and child after the write. Use `<mention-page>` or Markdown links for inline references.
+- After delegated or external documentation edits, fetch the canonical saved text and verify schemas, links, parent hierarchy, authority markers, vocabulary, and maturity claims. A success summary is not read-back evidence.
+
+### Execution modes and terminology
+
+- Keep Local/Connected, Air-Gapped, Deterministic, and Live Exploration separate. Deployment locality, network permission, and reproducibility are independent axes.
+- Use the project glossary exactly: **Timeline**, **Fork**, **PersonaModel**, **Society Signal**, **Brier Score**, and **Calibration Report** carry defined meanings and should not be replaced by looser synonyms.
+
+### Safe records and handoff
+
+- Shared append-only logs need collision-aware numbering: read the live file, assert the next number is unused, append, then verify count, uniqueness, and survival.
+- Stage only files changed for the task. Before destructive cleanup or external mutation, re-check ownership, current state, and exact targets at the mutation boundary.
+- Before handoff, review the diff, run required gates, request independent review for code changes, verify hosted and post-merge state, read back external records, confirm clean worktrees, and report advisory risks honestly.
