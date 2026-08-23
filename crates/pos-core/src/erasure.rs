@@ -863,7 +863,9 @@ impl ErasureReceiptV1 {
         let unresolved = !complete
             || !input.pending_owners.is_empty()
             || !input.failed_owners.is_empty();
-        if input.lifecycle == ErasureLifecycleV1::Complete && !complete {
+        if input.lifecycle == ErasureLifecycleV1::Complete
+            && (input.required_targets.is_empty() || !complete)
+        {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         if input.lifecycle == ErasureLifecycleV1::PartialFailure && !unresolved {
