@@ -269,7 +269,7 @@ impl ConsentGranted {
     ///
     /// # Errors
     /// Returns a closed codec error when a field is outside the V1 contract.
-    pub fn validate(&self) -> Result<(), ConsentCodecError> {
+    pub const fn validate(&self) -> Result<(), ConsentCodecError> {
         if self.purpose.len() > MAX_PURPOSE_BYTES {
             return Err(ConsentCodecError::PurposeTooLong {
                 size: self.purpose.len(),
