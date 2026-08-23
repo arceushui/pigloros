@@ -209,12 +209,14 @@ pub mod fixtures {
         ])
     }
 
+    #[must_use]
     pub fn encode(value: &Value) -> Vec<u8> {
         let mut bytes = Vec::new();
         ciborium::into_writer(value, &mut bytes).unwrap_or_default();
         bytes
     }
 
+    #[must_use]
     pub fn profile(lifecycle: u64, with_stable_evidence: bool) -> Vec<u8> {
         encode(&Value::Array(vec![
             text("CPF1"),
@@ -242,6 +244,7 @@ pub mod fixtures {
         ]))
     }
 
+    #[must_use]
     pub fn request() -> Vec<u8> {
         encode(&Value::Array(vec![
             text("EVR1"),
