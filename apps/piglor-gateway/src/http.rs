@@ -535,7 +535,7 @@ mod tests {
             let predictions = source.join("predictions");
             std::fs::create_dir_all(&predictions).test_ok();
             std::fs::write(
-                predictions.join("01KYJ6HAFVPNM4VFBKG5BQ4QMT.toml"),
+                predictions.join("01J3B0Y5ZK2J6MGK8D7QW3N0P9.toml"),
                 prediction,
             )
             .test_ok();
@@ -764,12 +764,15 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn configured_source_is_consistent_between_html_and_json() {
-        let dir = ledger_source_dir(
-            "http-configured",
-            Some(include_str!(
-                "../../../seed/predictions/01KYJ6HAFVPNM4VFBKG5BQ4QMT.toml"
-            )),
-        );
+        const PREDICTION: &str = "prediction_id = \"01J3B0Y5ZK2J6MGK8D7QW3N0P9\"\n\
+title = \"Configured source fixture\"\n\
+statement = \"A test prediction\"\n\
+predicted_outcome = \"Yes\"\n\
+confidence = 0.7\n\
+made_at = \"2026-07-25T12:00:00Z\"\n\
+resolve_by = \"2026-08-01\"\n\
+osf_link = \"https://osf.io/example\"\n";
+        let dir = ledger_source_dir("http-configured", Some(PREDICTION));
         let (ledger_view, _) = LedgerConfig::new(Some(dir.clone()), false)
             .load("2026-07-29")
             .test_ok();
@@ -789,15 +792,15 @@ mod tests {
             .await
             .test_ok();
         let html = String::from_utf8_lossy(&body);
-        assert!(html.contains("GitHub Copilot Dominance"));
+        assert!(html.contains("Configured source fixture"));
 
         let (status, json) = json_request(app, "GET", "/v1/ledger", None).await;
         drop(std::fs::remove_dir_all(dir));
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["domain"], "piglor.com");
         assert_eq!(json["path"], "/ledger");
-        assert_eq!(json["ledger"][0]["id"], "01KYJ6HAFVPNM4VFBKG5BQ4QMT");
-        assert_eq!(json["ledger"][0]["title"], "GitHub Copilot Dominance");
+        assert_eq!(json["ledger"][0]["id"], "01J3B0Y5ZK2J6MGK8D7QW3N0P9");
+        assert_eq!(json["ledger"][0]["title"], "Configured source fixture");
     }
 
     #[tokio::test]

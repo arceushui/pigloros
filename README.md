@@ -29,12 +29,13 @@ cargo run -p pos-cli --locked -- --help
 # Prediction Ledger CLI (ADR-017 / #58) — create and verify predictions
 mkdir -m 700 .secrets
 cargo run -p piglor-ledger --locked -- keygen --out ./.secrets/ledger.key
-cargo run -p piglor-ledger --locked -- predict --source toml:./seed/predictions \
+ledger_source="$(mktemp -d)"
+cargo run -p piglor-ledger --locked -- predict --source "toml:$ledger_source" \
   --title "My prediction" --statement "..." --predicted-outcome Yes \
   --confidence 0.7 --made-at "2026-07-28T12:00:00Z" --resolve-by 2026-12-31 \
   --osf https://osf.io/xxxxx
 
-# Docker deployment (gateway + seed predictions)
+# Docker deployment (gateway; no predictions are bundled)
 docker compose up -d
 curl http://localhost:8080/health
 curl http://localhost:8080/v1/ledger

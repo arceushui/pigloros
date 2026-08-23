@@ -1,9 +1,0 @@
-prediction_id = "01KYJ6HAFVPNM4VFBKG5BQ4QMT"
-title = "GitHub Copilot Dominance"
-statement = "By Q4 2026, GitHub Copilot will remain the most-used AI coding assistant by monthly active developers, measured by Stack Overflow survey"
-predicted_outcome = "Yes"
-confidence = 0.65
-scenario = "tech"
-made_at = "2026-07-27T10:00:00Z"
-resolve_by = "2026-12-31"
-osf_link = "https://osf.io/TODO-register-before-merge"

@@ -25,8 +25,8 @@ EOF
 
 COPY --from=builder /src/target/release/piglor-gateway /usr/local/bin/piglor-gateway
 
-COPY seed/ /ledger/
-ENV LEDGER_SOURCE=/ledger
+# The image intentionally ships without curated ledger content. Supply a
+# read-only source at runtime when a deployment needs one.
 ENV LEDGER_WRITE=0
 
 USER appuser
