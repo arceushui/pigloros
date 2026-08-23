@@ -418,6 +418,28 @@ impl CommandLifecycle {
     }
 }
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod command_lifecycle_tests {
+    use super::{CommandLifecycle, ExecutionClaim};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn first_execution_claim_is_owned_and_later_claims_expire() {
+        let lifecycle = CommandLifecycle::new();
+        let deadline = Instant::now() + Duration::from_secs(1);
+
+        assert!(matches!(
+            lifecycle.claim_for_execution(deadline),
+            ExecutionClaim::Claimed
+        ));
+        assert!(matches!(
+            lifecycle.claim_for_execution(deadline),
+            ExecutionClaim::Expired
+        ));
+    }
+}
+
 struct ExecutorControl {
     tx: mpsc::Sender<CommandEnvelope>,
     global_budget: Arc<Semaphore>,

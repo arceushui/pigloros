@@ -1278,6 +1278,21 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn host_authority_rejects_a_changed_token_even_when_the_active_token_is_unfenced() {
+        let authority = ConsentAuthority::new();
+        let grant = sample_granted();
+        let token = authority.record_grant(&grant);
+        let mut changed = token.clone();
+        changed.fence_seq = 0;
+
+        assert_eq!(
+            authority.validate(&changed, 0, 0),
+            Err(ConsentError::Revoked)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn default_authority_fails_closed_for_an_unrecorded_foreign_session() {
         let grant = sample_granted();
         let token = ConsentAuthority::new().record_grant(&grant);
