@@ -1079,7 +1079,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn revocation_must_match_every_token_identity_component() {
         let grant = sample_granted();
-        let token = ConsentCapabilityToken::from_grant(&grant);
+        let mut token = ConsentCapabilityToken::from_grant(&grant);
 
         let mut wrong_subject = sample_revoked(&grant);
         wrong_subject.subject_id = EntityId::new();
