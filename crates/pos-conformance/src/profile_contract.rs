@@ -409,7 +409,7 @@ impl ConformanceProfileV1 {
         self.validate().and_then(|()| {
             let expected = self.digest();
             if self.profile_digest == expected {
-                encode_value(&encode_profile(self, true))
+                encode_bounded(&encode_profile(self, true))
             } else {
                 Err(ConformanceContractError::FixtureDigestMismatch)
             }
@@ -422,7 +422,7 @@ impl ConformanceProfileV1 {
         policy: &TrustedRootPolicyV1,
     ) -> Result<Vec<u8>, ConformanceContractError> {
         self.validate_with_trust_policy(policy)
-            .and_then(|()| encode_value(&encode_profile(self, true)))
+            .and_then(|()| encode_bounded(&encode_profile(self, true)))
     }
 
     /// Decode exact-length canonical CPF1 bytes and validate every contract invariant.
@@ -738,7 +738,7 @@ impl EvaluatorRequestV1 {
     /// Returns a closed safe error when encoding, validation, or digest verification fails.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ConformanceContractError> {
         self.validate()
-            .and_then(|()| encode_value(&encode_request(self, true)))
+            .and_then(|()| encode_bounded(&encode_request(self, true)))
     }
 
     /// Decode and verify exact canonical evaluator-request bytes.
@@ -2133,6 +2133,15 @@ fn encode_value(value: &Value) -> Result<Vec<u8>, ConformanceContractError> {
     ciborium::into_writer(value, &mut bytes)
         .map(|()| bytes)
         .map_err(|_| ConformanceContractError::InvalidEncoding)
+}
+
+fn encode_bounded(value: &Value) -> Result<Vec<u8>, ConformanceContractError> {
+    let bytes = encode_value(value)?;
+    if bytes.len() > MAX_PROFILE_BYTES {
+        Err(ConformanceContractError::FieldOutOfBounds)
+    } else {
+        Ok(bytes)
+    }
 }
 
 fn decode_value(bytes: &[u8]) -> Result<Value, ConformanceContractError> {
