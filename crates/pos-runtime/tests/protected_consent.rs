@@ -9,15 +9,17 @@ use std::fmt::Debug;
 
 fn test_ok<T, E: Debug>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|error| {
-        std::panic::resume_unwind(Box::new(format!("unexpected success-path error: {error:?}")))
+        std::panic::resume_unwind(Box::new(format!(
+            "unexpected success-path error: {error:?}"
+        )))
     })
 }
 
 fn test_err<T: Debug, E>(result: Result<T, E>) -> E {
     match result {
-        Ok(value) => std::panic::resume_unwind(Box::new(format!(
-            "unexpected error-path value: {value:?}"
-        ))),
+        Ok(value) => {
+            std::panic::resume_unwind(Box::new(format!("unexpected error-path value: {value:?}")))
+        }
         Err(error) => error,
     }
 }
@@ -65,13 +67,8 @@ fn protected_public_seam_checks_timeline_and_rechecks_at_commit_head() {
     let mut registry = PluginRegistry::new().with_consent_authority(authority.clone());
     registry.register_driver(Box::new(ProtectedEventDriver { entity: subject }));
 
-    let drafts = test_ok(registry.step_all_anchored_protected(
-        timeline,
-        Seq::ZERO,
-        token.clone(),
-        1,
-        &[],
-    ));
+    let drafts =
+        test_ok(registry.step_all_anchored_protected(timeline, Seq::ZERO, token.clone(), 1, &[]));
     assert_eq!(drafts.len(), 1);
 
     test_ok(authority.record_revocation_on_timeline(
@@ -86,13 +83,8 @@ fn protected_public_seam_checks_timeline_and_rechecks_at_commit_head() {
     registry.commit_step_at(Seq::from_u64(1));
 
     let wrong_timeline = TimelineId::new();
-    let error = test_err(registry.step_all_anchored_protected(
-        wrong_timeline,
-        Seq::ZERO,
-        token,
-        1,
-        &[],
-    ));
+    let error =
+        test_err(registry.step_all_anchored_protected(wrong_timeline, Seq::ZERO, token, 1, &[]));
     assert!(matches!(
         error,
         RuntimeError::Consent(ConsentError::NoConsent)
