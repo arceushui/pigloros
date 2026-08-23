@@ -6890,10 +6890,13 @@ pub mod tests {
 
         let mut oversized_report = test_report();
         let template = oversized_report.cases[0].clone();
-        oversized_report.cases = (0..=65_536)
+        oversized_report.cases = (0..=65_535)
             .map(|index| {
                 let mut case = template.clone();
                 case.case_id = format!("{index:05}{}", "x".repeat(123));
+                case.outcome = CaseOutcomeStatusV1::Fail;
+                case.actual_digest = Some([99; 32]);
+                case.first_coordinate = Some(vec![b'x'; 128]);
                 case
             })
             .collect();

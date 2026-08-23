@@ -619,13 +619,6 @@ fn validate_selected_caps(profile: &ConformanceProfileV1) -> Result<(), Conforma
         || profile.allowed_divergences.iter().any(|divergence| {
             divergence.first_coordinate.len() > usize::from(caps.max_coordinate_bytes)
         })
-        || profile.fixtures.iter().any(|fixture| {
-            matches!(
-                &fixture.expected,
-                ExpectedResultV1::AllowedDivergence { first_coordinate, .. }
-                    if first_coordinate.len() > usize::from(caps.max_coordinate_bytes)
-            )
-        })
     {
         return Err(ConformanceContractError::FieldOutOfBounds);
     }
@@ -3037,6 +3030,8 @@ mod tests {
     fn public_stable_report_binding_and_hard_cap_divergence_seams_are_fail_closed() {
         let mut mismatched_report = stable_evidence("alpha", 30);
         mismatched_report.report.cases[0].outcome = CaseOutcomeStatusV1::Fail;
+        mismatched_report.report.cases[0].actual_digest = Some([99; 32]);
+        mismatched_report.report.cases[0].first_coordinate = Some(vec![1]);
         refresh_report_counts(&mut mismatched_report.report);
         assert_eq!(
             candidate().transition_to(
