@@ -136,7 +136,7 @@ mod coverage_entrypoints {
             .as_array()
             .map_or_else(Vec::new, Clone::clone);
         let mut case = cases[0].as_array().map_or_else(Vec::new, Clone::clone);
-        case[8] = coordinate;
+        case[6] = coordinate;
         cases[0] = ciborium::Value::Array(case);
         report_fields[13] = ciborium::Value::Array(cases);
         contract_fields[6] = ciborium::Value::Array(report_fields);
