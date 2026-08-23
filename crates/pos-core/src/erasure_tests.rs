@@ -424,8 +424,7 @@ fn coordinator_trait_interface_covers_each_lifecycle_operation() -> Result<(), E
 }
 
 #[test]
-fn coordinator_finalize_from_dispatched_state_admits_partial_receipt() -> Result<(), ErasureErrorV1>
-{
+fn coordinator_finalize_from_dispatched_state_rechecks_authority() -> Result<(), ErasureErrorV1> {
     let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
     let mut coordinator =
         ErasureCoordinatorStateMachineV1::new(test_port(true, vec![target]), reference(2));
@@ -468,8 +467,8 @@ fn coordinator_finalize_from_dispatched_state_admits_partial_receipt() -> Result
     input.provenance = reference(9);
     input.inventories.artifacts = vec![inventory_result(target)];
     assert_eq!(
-        coordinator.finalize(reference(1), input)?.lifecycle(),
-        ErasureLifecycleV1::PartialFailure
+        coordinator.finalize(reference(1), input),
+        Err(ErasureErrorV1::PolicyConflict)
     );
     Ok(())
 }
