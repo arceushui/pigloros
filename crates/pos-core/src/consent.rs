@@ -997,7 +997,11 @@ impl ConsentAuthority {
         Ok(())
     }
 
-    /// Rebuild Timeline-bound sessions from durable consent history.
+    /// Replay a Timeline-bound slice of durable consent history.
+    ///
+    /// Existing sessions are retained so callers may replay history
+    /// incrementally. The decoded slice is applied atomically: malformed or
+    /// unmatched history leaves the current sessions unchanged.
     ///
     /// # Errors
     /// Returns [`ConsentCodecError`] when a durable consent payload is invalid
@@ -1012,10 +1016,13 @@ impl ConsentAuthority {
                 count: events.len(),
             });
         }
-        self.active
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|(active_timeline, _, _, _), _| *active_timeline != timeline_id);
+
+        enum RestoredConsentEvent {
+            Granted(ConsentGranted),
+            Revoked(ConsentRevoked),
+        }
+
+        let mut decoded = Vec::with_capacity(events.len());
         for event in events {
             match event.event_type.as_str() {
                 EVENT_TYPE_CONSENT_GRANTED_V1 => {
@@ -1023,7 +1030,7 @@ impl ConsentAuthority {
                     if event.entity != grant.subject_id || event.seq.as_u64() != grant.grant_seq {
                         return Err(ConsentCodecError::HistoryCoordinateMismatch);
                     }
-                    let _token = self.record_grant_on_timeline(timeline_id, &grant);
+                    decoded.push(RestoredConsentEvent::Granted(grant));
                 }
                 EVENT_TYPE_CONSENT_REVOKED_V1 => {
                     let revocation = ConsentRevoked::decode(&event.payload)?;
@@ -1032,12 +1039,64 @@ impl ConsentAuthority {
                     {
                         return Err(ConsentCodecError::HistoryCoordinateMismatch);
                     }
-                    self.record_revocation_with_timeline(timeline_id, &revocation)
-                        .map_err(|_| ConsentCodecError::UnmatchedRevocation)?;
+                    decoded.push(RestoredConsentEvent::Revoked(revocation));
                 }
                 _ => {}
             }
         }
+
+        {
+            let mut sessions = self
+                .active
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut restored = sessions.clone();
+            for event in decoded {
+                match event {
+                    RestoredConsentEvent::Granted(grant) => {
+                        let token = ConsentCapabilityToken {
+                            authority_id: self.authority_id,
+                            timeline_id,
+                            subject_id: grant.subject_id,
+                            grantee_id: grant.grantee_id,
+                            modalities: grant.modalities,
+                            min_geo_resolution: grant.min_geo_resolution,
+                            fork_permitted: grant.fork_permitted,
+                            export_permitted: grant.export_permitted,
+                            retention_days: grant.retention_days,
+                            grant_seq: grant.grant_seq,
+                            fence_seq: u64::MAX,
+                        };
+                        restored.insert(
+                            (
+                                timeline_id,
+                                grant.subject_id,
+                                grant.grantee_id,
+                                grant.grant_seq,
+                            ),
+                            ActiveConsent {
+                                token,
+                                expiry_secs: grant.expiry_secs,
+                            },
+                        );
+                    }
+                    RestoredConsentEvent::Revoked(revocation) => {
+                        let key = (
+                            timeline_id,
+                            revocation.subject_id,
+                            revocation.grantee_id,
+                            revocation.grant_seq,
+                        );
+                        let Some(active) = restored.get_mut(&key) else {
+                            return Err(ConsentCodecError::UnmatchedRevocation);
+                        };
+                        active.token.fence_seq = active.token.fence_seq.min(revocation.fence_seq);
+                    }
+                }
+            }
+            *sessions = restored;
+        }
+
         Ok(())
     }
 }
@@ -2305,10 +2364,14 @@ mod tests {
         }
 
         let grant = sample_granted();
-        let revocation = sample_revoked(&grant);
-        let error = ConsentAuthority::new()
+        let timeline = TimelineId::new();
+        let authority = ConsentAuthority::new();
+        let token = authority.record_grant_on_timeline(timeline, &grant);
+        let mut revocation = sample_revoked(&grant);
+        revocation.grant_seq = revocation.grant_seq.saturating_add(1);
+        let error = authority
             .restore_from_history(
-                TimelineId::new(),
+                timeline,
                 &[event(
                     revocation.encode().test_ok(),
                     revocation.subject_id,
@@ -2317,6 +2380,9 @@ mod tests {
             )
             .test_err();
         assert_eq!(error, ConsentCodecError::UnmatchedRevocation);
+        assert!(authority
+            .validate_on_timeline(timeline, &token, 0, 0)
+            .is_ok());
     }
 
     #[test]
@@ -2355,6 +2421,46 @@ mod tests {
                 .test_err(),
             ConsentCodecError::HistoryCoordinateMismatch
         );
+
+        let authority = ConsentAuthority::new();
+        let existing_timeline = TimelineId::new();
+        let existing_grant = sample_granted();
+        let existing_token = authority
+            .record_grant_on_timeline(existing_timeline, &existing_grant);
+        assert_eq!(
+            authority
+                .restore_from_history(
+                    existing_timeline,
+                    &[event(
+                        EVENT_TYPE_CONSENT_GRANTED_V1,
+                        existing_grant.encode().test_ok(),
+                        EntityId::new(),
+                        existing_grant.grant_seq,
+                    )],
+                )
+                .test_err(),
+            ConsentCodecError::HistoryCoordinateMismatch
+        );
+        assert!(authority
+            .validate_on_timeline(existing_timeline, &existing_token, 0, 0)
+            .is_ok());
+        assert_eq!(
+            authority
+                .restore_from_history(
+                    existing_timeline,
+                    &[event(
+                        EVENT_TYPE_CONSENT_GRANTED_V1,
+                        CanonicalBytes::from_static(b"malformed"),
+                        existing_grant.subject_id,
+                        existing_grant.grant_seq,
+                    )],
+                )
+                .test_err(),
+            ConsentCodecError::CborError
+        );
+        assert!(authority
+            .validate_on_timeline(existing_timeline, &existing_token, 0, 0)
+            .is_ok());
 
         let revocation = sample_revoked(&grant);
         assert_eq!(
@@ -2669,12 +2775,6 @@ mod tests {
             authority.validate_revocation_on_timeline(TimelineId::new(), &revocation),
             Err(ConsentError::NoConsent)
         );
-
-        let reservation = authority
-            .begin_revocation_on_timeline(timeline, &revocation)
-            .test_ok();
-        authority.restore_from_history(timeline, &[]).test_ok();
-        assert_eq!(reservation.commit_durable(), Err(ConsentError::NoConsent));
     }
 
     #[test]
