@@ -12,7 +12,7 @@
 use pos_core::{
     clock::WallTime,
     crypto::Hash,
-    event::{CanonicalBytes, EventDraft, Kind},
+    event::{EventDraft, Kind},
     ids::EntityId,
     ReproManifest, Timeline,
 };
@@ -1035,7 +1035,7 @@ impl ExperimentSession {
 
     fn step_boundary(&mut self, request: StepRequest) -> Result<TickOutcome, ExperimentError> {
         if let Some(subject) = self.consent_revocation_pending.take() {
-            return self.commit_consent_revocation(subject);
+            return self.commit_consent_revocation(&subject);
         }
         if self.consent_revoked || self.complete || self.reached_stop_condition() {
             self.complete = true;
@@ -1128,28 +1128,45 @@ impl ExperimentSession {
 
     fn commit_consent_revocation(
         &mut self,
-        subject: String,
+        subject: &str,
     ) -> Result<TickOutcome, ExperimentError> {
-        let subject_id = consent_marker_entity(&subject);
+        let subject_id = consent_marker_entity(subject);
         let emitted_events = lock_store(&self.store)
             .and_then(|mut store| {
-                let fence_seq = store.logical_head(self.timeline.id())?.as_u64().saturating_add(1);
-                let revocation = pos_core::ConsentRevokedV1 {
-                    subject_id,
-                    grantee_id: subject_id,
-                    grant_seq: 0,
-                    fence_seq,
-                };
-                let draft = EventDraft::new(
-                    subject_id,
-                    Kind::new(pos_core::EVENT_TYPE_CONSENT_REVOKED_V1),
-                    revocation.encode().map_err(|error| ExperimentError::from(pos_core::CoreError::Storage(error.to_string())))?,
-                );
-                self.registry.schemas.validate(&draft)?;
                 store
-                    .append(self.timeline.id(), std::slice::from_ref(&draft))
-                    .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
+                    .logical_head(self.timeline.id())
+                    .map(|head| pos_core::ConsentRevokedV1 {
+                        subject_id,
+                        grantee_id: subject_id,
+                        grant_seq: 0,
+                        fence_seq: head.as_u64().saturating_add(1),
+                    })
                     .map_err(ExperimentError::from)
+                    .and_then(|revocation| {
+                        revocation.encode().map_err(|error| {
+                            ExperimentError::from(pos_core::CoreError::Storage(error.to_string()))
+                        })
+                    })
+                    .map(|payload| {
+                        EventDraft::new(
+                            subject_id,
+                            Kind::new(pos_core::EVENT_TYPE_CONSENT_REVOKED_V1),
+                            payload,
+                        )
+                    })
+                    .and_then(|draft| {
+                        self.registry
+                            .schemas
+                            .validate(&draft)
+                            .map_err(ExperimentError::from)
+                            .map(|()| draft)
+                    })
+                    .and_then(|draft| {
+                        store
+                            .append(self.timeline.id(), std::slice::from_ref(&draft))
+                            .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
+                            .map_err(ExperimentError::from)
+                    })
             })
             .inspect_err(|_| {
                 self.health = SessionHealth::Faulted;
