@@ -3708,13 +3708,16 @@ mod tests {
             .test_ok();
         let mut session = experiment.start().test_ok();
         let first_tick = session.step_tick();
-        assert!(matches!(
-            first_tick,
-            Ok(TickOutcome::Advanced {
-                emitted_events: 1,
-                ..
-            })
-        ), "first driver boundary must advance: {first_tick:?}");
+        assert!(
+            matches!(
+                first_tick,
+                Ok(TickOutcome::Advanced {
+                    emitted_events: 1,
+                    ..
+                })
+            ),
+            "first driver boundary must advance: {first_tick:?}"
+        );
         let timeline_id = session.timeline().id();
         session.revoke_consent_for_subject_at_boundary("subject");
         assert!(matches!(
@@ -3726,13 +3729,16 @@ mod tests {
             Err(ExperimentError::ConsentRevoked)
         ));
         let revocation_boundary = session.step_tick();
-        assert!(matches!(
-            revocation_boundary,
-            Ok(TickOutcome::Advanced {
-                emitted_events: 1,
-                ..
-            })
-        ), "host revocation boundary must commit the canonical marker: {revocation_boundary:?}");
+        assert!(
+            matches!(
+                revocation_boundary,
+                Ok(TickOutcome::Advanced {
+                    emitted_events: 1,
+                    ..
+                })
+            ),
+            "host revocation boundary must commit the canonical marker: {revocation_boundary:?}"
+        );
         assert_eq!(session.step_tick().test_ok(), TickOutcome::Stopped);
         drop(session);
 
@@ -3778,8 +3784,7 @@ mod tests {
             .source_events()
             .test_ok()
             .iter()
-            .any(|event| event.event_type.as_str()
-                == pos_core::EVENT_TYPE_CONSENT_REVOKED_V1));
+            .any(|event| event.event_type.as_str() == pos_core::EVENT_TYPE_CONSENT_REVOKED_V1));
     }
 
     #[test]
