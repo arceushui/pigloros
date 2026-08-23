@@ -30,7 +30,7 @@ fn gen_ulid() -> Ulid {
 }
 
 fn generated_or_fallback(generated: Result<Ulid, CoreError>) -> Ulid {
-    generated.unwrap_or_else(|_| Ulid::r#gen())
+    generated.unwrap_or_else(|_| Ulid::generate())
 }
 
 macro_rules! ulid_newtype {
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn id_from_ulid_round_trip() {
-        let ulid = Ulid::r#gen();
+        let ulid = Ulid::generate();
         let id = EntityId::from_ulid(ulid);
         assert_eq!(id.inner(), ulid);
     }
@@ -183,7 +183,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn id_display_is_ulid_string() {
-        let ulid = Ulid::r#gen();
+        let ulid = Ulid::generate();
         let id = EntityId::from_ulid(ulid);
         assert_eq!(id.to_string(), ulid.to_string());
     }

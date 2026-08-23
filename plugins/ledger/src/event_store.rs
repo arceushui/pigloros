@@ -127,7 +127,7 @@ impl LedgerStore for EventLedgerStore {
 
     fn register(&mut self, new: NewPrediction) -> Result<String, LedgerError> {
         new.validate()?;
-        let prediction = new.into_prediction(ulid::Ulid::r#gen().to_string());
+        let prediction = new.into_prediction(ulid::Ulid::generate().to_string());
         let payload = to_canonical(&prediction);
 
         self.append_signed(payload, Kind::new(EVENT_TYPE_PREDICTION))?;
