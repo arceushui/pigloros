@@ -35,7 +35,8 @@ use pos_plugin_world::{WorldPlugin, EVENT_TYPE_ACTION};
 use pos_runtime::PluginRegistry;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
     num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::Arc,
@@ -482,10 +483,16 @@ pub const MAX_EVENTS_PER_TIMELINE: u64 = 10_000;
 /// Default broadcast channel capacity for live event fan-out.
 pub const EVENT_BUS_CAPACITY: usize = 256;
 
-type ConsentHistoryLocks = HashMap<TimelineId, Arc<tokio::sync::Mutex<()>>>;
+const CONSENT_LOCK_STRIPES: usize = 64;
 
-fn new_consent_history_locks() -> Arc<tokio::sync::Mutex<ConsentHistoryLocks>> {
-    Arc::new(tokio::sync::Mutex::new(HashMap::new()))
+type ConsentHistoryLocks = Vec<Arc<tokio::sync::Mutex<()>>>;
+
+fn new_consent_history_locks() -> Arc<ConsentHistoryLocks> {
+    Arc::new(
+        (0..CONSENT_LOCK_STRIPES)
+            .map(|_| Arc::new(tokio::sync::Mutex::new(())))
+            .collect(),
+    )
 }
 
 /// Shared Gateway handle (bounded `StoreExecutor` + live Event bus).
@@ -874,13 +881,10 @@ impl Gateway {
         &self,
         timeline: TimelineId,
     ) -> tokio::sync::OwnedMutexGuard<()> {
-        let lock = {
-            let mut locks = self.consent_history_locks.lock().await;
-            locks
-                .entry(timeline)
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
-        };
+        let mut hasher = DefaultHasher::new();
+        timeline.hash(&mut hasher);
+        let stripe = (hasher.finish() as usize) % CONSENT_LOCK_STRIPES;
+        let lock = Arc::clone(&self.consent_history_locks[stripe]);
         lock.lock_owned().await
     }
 

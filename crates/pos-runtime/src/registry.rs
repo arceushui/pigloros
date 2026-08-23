@@ -969,6 +969,7 @@ impl PluginRegistry {
             if let Some(driver) = self
                 .plugins
                 .get_mut(&id)
+                .and_then(|entry| entry.driver.as_mut())
             {
                 let name = driver.name().to_owned();
                 if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
