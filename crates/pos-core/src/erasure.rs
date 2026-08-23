@@ -929,8 +929,7 @@ impl ErasureReceiptV1 {
         }
     }
     fn with_digest(mut self) -> Result<Self, ErasureErrorV1> {
-        receipt_core_value(&self.0)
-            .and_then(|value| encode_limited(&value, ERASURE_RECEIPT_MAX_BYTES))
+        encode_limited(&receipt_core_value(&self.0), ERASURE_RECEIPT_MAX_BYTES)
             .map(|bytes| {
                 self.0.receipt_digest = ErasureReferenceV1::from_digest(domain_digest(ERC1, &bytes));
                 self
@@ -1405,8 +1404,8 @@ fn state_provenance(
         })
     })
 }
-fn receipt_value(input: &ErasureReceiptInputV1) -> Value {
-    Value::Array(vec![
+fn receipt_fields(input: &ErasureReceiptInputV1) -> Vec<Value> {
+    vec![
         text(ERC1),
         uint(VERSION),
         digest(input.request),
@@ -1432,14 +1431,15 @@ fn receipt_value(input: &ErasureReceiptInputV1) -> Value {
         uint(input.issue_position),
         digest(input.receipt_digest),
         digest(input.signature),
-    ])
+    ]
 }
-fn receipt_core_value(input: &ErasureReceiptInputV1) -> Result<Value, ErasureErrorV1> {
-    let Value::Array(mut fields) = receipt_value(input) else {
-        return Err(ErasureErrorV1::InvalidEncoding);
-    };
+fn receipt_value(input: &ErasureReceiptInputV1) -> Value {
+    Value::Array(receipt_fields(input))
+}
+fn receipt_core_value(input: &ErasureReceiptInputV1) -> Value {
+    let mut fields = receipt_fields(input);
     fields.remove(16);
-    Ok(Value::Array(fields))
+    Value::Array(fields)
 }
 fn acknowledgement_value(ack: ErasureAcknowledgementV1) -> Value {
     Value::Array(vec![
