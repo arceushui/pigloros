@@ -2240,6 +2240,28 @@ mod tests {
         );
 
         let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(
+            Command::AppendConsentGrant {
+                timeline: TimelineId::new(),
+                grant: ConsentGrantedV1 {
+                    subject_id: EntityId::new(),
+                    grantee_id: EntityId::new(),
+                    purpose: "expired".to_owned(),
+                    modalities: pos_core::MODALITY_LOCATION,
+                    min_geo_resolution: 1,
+                    fork_permitted: false,
+                    export_permitted: false,
+                    retention_days: 0,
+                    expiry_secs: 0,
+                    grant_seq: 1,
+                },
+                maximum: 1,
+                reply,
+            },
+            receiver,
+        );
+
+        let (reply, receiver) = tokio::sync::oneshot::channel();
         let draft = EventDraft::new(
             EntityId::new(),
             Kind::new("expired"),
