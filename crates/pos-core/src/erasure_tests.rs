@@ -1666,6 +1666,17 @@ fn receipt_decoder_exercises_each_public_field_boundary() -> Result<(), ErasureE
             Err(ErasureErrorV1::InvalidEncoding)
         ));
     }
+    for (index, value) in [(4_usize, test_uint(99)), (11, test_uint(99))] {
+        let mut malformed = public_receipt_value(&receipt()?)?;
+        let Value::Array(fields) = &mut malformed else {
+            return Err(ErasureErrorV1::InvalidEncoding);
+        };
+        fields[index] = value;
+        assert_eq!(
+            decode_receipt(&malformed),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+    }
 
     let canonical = receipt()?.to_canonical_cbor()?;
     let mut trailing = canonical.clone();
