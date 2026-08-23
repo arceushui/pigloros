@@ -2844,7 +2844,7 @@ mod tests {
         )];
 
         let mut missing_gate = PluginRegistry::new().with_consent_authority(authority.clone());
-        missing_gate.register_driver(Box::new(EmptyDriver)).test_ok();
+        missing_gate.register_driver(Box::new(EmptyDriver));
         missing_gate
             .step_all_anchored_protected(timeline, Seq::ZERO, token.clone(), 0, &[])
             .test_ok();
@@ -2863,7 +2863,7 @@ mod tests {
         ));
 
         let mut store_error = PluginRegistry::new().with_consent_authority(authority.clone());
-        store_error.register_driver(Box::new(EmptyDriver)).test_ok();
+        store_error.register_driver(Box::new(EmptyDriver));
         store_error
             .step_all_anchored_protected(timeline, Seq::ZERO, token.clone(), 0, &[])
             .test_ok();
@@ -2881,7 +2881,7 @@ mod tests {
         ));
 
         let mut public_fence = PluginRegistry::new().with_consent_authority(authority);
-        public_fence.register_driver(Box::new(EmptyDriver)).test_ok();
+        public_fence.register_driver(Box::new(EmptyDriver));
         let drafts = public_fence
             .step_all_anchored(timeline, Seq::ZERO)
             .test_ok();
@@ -2937,9 +2937,7 @@ mod tests {
         };
         let _token = authority.record_grant_on_timeline(timeline, &grant);
         let mut registry = PluginRegistry::new().with_consent_authority(authority);
-        registry
-            .register_driver(Box::new(SensitiveDriver { subject }))
-            .test_ok();
+        registry.register_driver(Box::new(SensitiveDriver { subject }));
         assert!(matches!(
             registry.tick_cadenced(timeline, 0).test_err(),
             RuntimeError::Consent(ConsentError::NoConsent)
