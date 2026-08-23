@@ -1280,6 +1280,7 @@ osf_link = \"https://osf.io/example\"\n";
                     limits: crate::GatewayLimits::LOCAL_DEFAULT,
                     owntracks_enabled: false,
                     consent_authority: pos_core::ConsentAuthority::new(),
+                    consent_history_locks: crate::new_consent_history_locks(),
                     action_registry: crate::gateway_action_registry(),
                     action_principal: None,
                 },
