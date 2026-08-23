@@ -966,24 +966,23 @@ impl PluginRegistry {
             return Err(error);
         }
         for id in staged {
-            let entry = self
+            if let Some(driver) = self
                 .plugins
                 .get_mut(&id)
-                .unwrap_or_else(|| panic!("staged Driver disappeared from the registry"));
-            let driver = entry
-                .driver
-                .as_mut()
-                .unwrap_or_else(|| panic!("staged Driver entry lost its Driver"));
-            let name = driver.name().to_owned();
-            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                driver.commit_restore_from_history();
-            }))
-            .is_err()
             {
-                self.poisoned_driver = Some(name.clone());
-                return Err(RuntimeError::DriverRestorePanicked { name });
+                let name = driver.name().to_owned();
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    driver.commit_restore_from_history();
+                }))
+                .is_err()
+                {
+                    self.poisoned_driver = Some(name.clone());
+                    return Err(RuntimeError::DriverRestorePanicked { name });
+                }
             }
-            entry.event_cursor = events.last().map_or(Seq::ZERO, |event| event.seq);
+            if let Some(entry) = self.plugins.get_mut(&id) {
+                entry.event_cursor = events.last().map_or(Seq::ZERO, |event| event.seq);
+            }
         }
         Ok(())
     }
@@ -1284,15 +1283,13 @@ impl PluginRegistry {
         let snapshot = self.snapshot_for_subscriptions(due_subscriptions.iter());
         for (id, entry) in &mut self.plugins {
             if due_driver_ids.remove(id) {
-                let driver = entry
-                    .driver
-                    .as_mut()
-                    .unwrap_or_else(|| panic!("due Driver entry lost its Driver"));
-                let observations = snapshot.view_for(driver.subscriptions());
-                let output = invoke_driver(driver.as_mut(), timeline, observations)?;
-                reject_host_owned_drafts(&output)?;
-                entry.last_tick = Some(now_ns);
-                all_drafts.extend(output.drafts);
+                if let Some(driver) = entry.driver.as_mut() {
+                    let observations = snapshot.view_for(driver.subscriptions());
+                    let output = invoke_driver(driver.as_mut(), timeline, observations)?;
+                    reject_host_owned_drafts(&output)?;
+                    entry.last_tick = Some(now_ns);
+                    all_drafts.extend(output.drafts);
+                }
             }
         }
         debug_assert!(due_driver_ids.is_empty());
