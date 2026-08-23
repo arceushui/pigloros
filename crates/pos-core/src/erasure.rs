@@ -1290,6 +1290,29 @@ pub struct ErasureFreezeAdmissionV1 {
     pub provenance: ErasureReferenceV1,
 }
 
+/// Public durable fields for reconstructing an ERQ1/ERS1/ERC1 coordinator record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureCoordinatorRecordPartsV1 {
+    /// The exact authenticated request identity.
+    pub request: ErasureRequestV1,
+    /// The latest digest-linked ERS1 state.
+    pub state: ErasureStateV1,
+    /// The frozen required-target closure.
+    pub targets: Vec<ErasureRequiredTargetV1>,
+    /// Acknowledgements accepted for the frozen closure.
+    pub acknowledgements: Vec<ErasureAcknowledgementV1>,
+    /// The committed terminal receipt, if any.
+    pub receipt: Option<ErasureReceiptV1>,
+    /// Exact caller-supplied terminal input used for idempotent retries.
+    pub receipt_input: Option<ErasureReceiptInputV1>,
+    /// Authenticated authorization provenance, if present.
+    pub authorize_provenance: Option<ErasureReferenceV1>,
+    /// Host-authenticated freeze provenance, if present.
+    pub freeze_provenance: Option<ErasureReferenceV1>,
+    /// Host-authenticated dispatch provenance, if present.
+    pub dispatch_provenance: Option<ErasureReferenceV1>,
+}
+
 /// Durable ERQ1/ERS1/ERC1 coordinator record.
 ///
 /// Hosts persist this complete record (or an equivalent representation) and
@@ -1315,6 +1338,89 @@ pub struct ErasureCoordinatorRecordV1 {
 }
 
 impl ErasureCoordinatorRecordV1 {
+    /// Reconstruct a durable coordinator record from host storage.
+    ///
+    /// Hosts may persist the returned public fields in any representation and
+    /// must validate the complete record again when rehydrating it.  This
+    /// constructor is the only supported boundary for records loaded by a
+    /// [`ErasureCoordinatorPortV1`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error when the persisted record is inconsistent with
+    /// the coordinator, lifecycle, closure, provenance, or terminal receipt.
+    pub fn from_parts(
+        parts: ErasureCoordinatorRecordPartsV1,
+        coordinator: ErasureReferenceV1,
+    ) -> Result<Self, ErasureErrorV1> {
+        let record = Self {
+            request: parts.request,
+            state: parts.state,
+            targets: parts.targets,
+            acknowledgements: parts.acknowledgements,
+            receipt: parts.receipt,
+            receipt_input: parts.receipt_input,
+            authorize_provenance: parts.authorize_provenance,
+            freeze_provenance: parts.freeze_provenance,
+            dispatch_provenance: parts.dispatch_provenance,
+        };
+        record.validate(coordinator).map(|()| record)
+    }
+
+    /// Return the authenticated ERQ1 request.
+    #[must_use]
+    pub fn request(&self) -> &ErasureRequestV1 {
+        &self.request
+    }
+
+    /// Return the latest digest-linked ERS1 state.
+    #[must_use]
+    pub fn state(&self) -> &ErasureStateV1 {
+        &self.state
+    }
+
+    /// Return the frozen required-target closure.
+    #[must_use]
+    pub fn targets(&self) -> &[ErasureRequiredTargetV1] {
+        &self.targets
+    }
+
+    /// Return acknowledgements accepted for the frozen closure.
+    #[must_use]
+    pub fn acknowledgements(&self) -> &[ErasureAcknowledgementV1] {
+        &self.acknowledgements
+    }
+
+    /// Return the committed terminal receipt, if any.
+    #[must_use]
+    pub fn receipt(&self) -> Option<&ErasureReceiptV1> {
+        self.receipt.as_ref()
+    }
+
+    /// Return the exact terminal input admitted for idempotent retries.
+    #[must_use]
+    pub fn receipt_input(&self) -> Option<&ErasureReceiptInputV1> {
+        self.receipt_input.as_ref()
+    }
+
+    /// Return the authenticated authorization provenance, if present.
+    #[must_use]
+    pub const fn authorize_provenance(&self) -> Option<ErasureReferenceV1> {
+        self.authorize_provenance
+    }
+
+    /// Return the host-authenticated freeze provenance, if present.
+    #[must_use]
+    pub const fn freeze_provenance(&self) -> Option<ErasureReferenceV1> {
+        self.freeze_provenance
+    }
+
+    /// Return the host-authenticated dispatch provenance, if present.
+    #[must_use]
+    pub const fn dispatch_provenance(&self) -> Option<ErasureReferenceV1> {
+        self.dispatch_provenance
+    }
+
     fn validate(&self, coordinator: ErasureReferenceV1) -> Result<(), ErasureErrorV1> {
         if self.request.reference() != self.state.request()
             || self.state.coordinator() != coordinator

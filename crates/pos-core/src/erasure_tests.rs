@@ -356,6 +356,42 @@ fn coordinator_reloads_durable_identity_after_restart() -> Result<(), ErasureErr
 }
 
 #[test]
+fn durable_record_reconstructs_through_public_parts_api() -> Result<(), ErasureErrorV1> {
+    let request = request()?;
+    let port = test_port(true, Vec::new());
+    let restart_port = port.clone();
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+    coordinator.submit(request.clone(), reference(3))?;
+    let persisted = restart_port
+        .records
+        .borrow()
+        .first()
+        .cloned()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let reconstructed = ErasureCoordinatorRecordV1::from_parts(
+        ErasureCoordinatorRecordPartsV1 {
+            request: persisted.request().clone(),
+            state: persisted.state().clone(),
+            targets: persisted.targets().to_vec(),
+            acknowledgements: persisted.acknowledgements().to_vec(),
+            receipt: persisted.receipt().cloned(),
+            receipt_input: persisted.receipt_input().cloned(),
+            authorize_provenance: persisted.authorize_provenance(),
+            freeze_provenance: persisted.freeze_provenance(),
+            dispatch_provenance: persisted.dispatch_provenance(),
+        },
+        reference(2),
+    )?;
+    restart_port.records.replace(vec![reconstructed]);
+    let mut restarted = ErasureCoordinatorStateMachineV1::new(restart_port, reference(2));
+    assert_eq!(
+        restarted.submit(request, reference(99))?.lifecycle(),
+        ErasureLifecycleV1::Submitted
+    );
+    Ok(())
+}
+
+#[test]
 fn coordinator_trait_interface_covers_each_lifecycle_operation() -> Result<(), ErasureErrorV1> {
     let acknowledgement = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
     let port = test_port(true, vec![acknowledgement.target]);
