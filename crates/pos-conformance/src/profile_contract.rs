@@ -3057,9 +3057,10 @@ mod tests {
             first_coordinate: coordinate,
         };
         capped.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::Diverged;
+        capped.evaluator_protocol.hard_caps.max_coordinate_bytes = 128;
         capped.profile_digest = capped.digest();
         assert_eq!(
-            capped.validate_with_hard_caps(&original_hard_caps()),
+            capped.validate(),
             Err(ConformanceContractError::FieldOutOfBounds)
         );
     }
