@@ -1100,8 +1100,11 @@ async fn worker_loop_async(
     let mut disconnected = false;
     let mut reads_since_write = 0;
     loop {
-        if pending.is_empty() && !disconnected {
+        if pending.is_empty() {
             if draining {
+                break;
+            }
+            if disconnected {
                 break;
             }
             let next_received = tokio::select! {
@@ -1120,74 +1123,75 @@ async fn worker_loop_async(
             }
         }
 
-        if !pending.is_empty() {
-            disconnected |= drain_available(receiver, &mut pending);
-            #[cfg(test)]
-            if let Some(observer) = &observer {
-                observer.drain_completed(pending.len(), disconnected);
-            }
-            let index = select_pending_index(&pending, reads_since_write);
-            if !pending[index]
-                .lifecycle
-                .claim_for_execution(pending[index].deadline)
-            {
-                expire_envelope(pending.remove(index));
-                continue;
-            }
-            #[cfg(test)]
-            let admission_ordinal = pending[index].admission_ordinal;
-            let CommandEnvelope {
-                command,
-                class,
-                global_permit,
-                read_permit,
-                ..
-            } = pending.remove(index);
-            let permit_owners = (global_permit, read_permit);
-            #[cfg(test)]
-            if let Some(observer) = &observer {
-                observer.selected(admission_ordinal, class, reads_since_write);
-            }
-            match class {
-                CommandClass::Read => {
-                    reads_since_write = reads_since_write.saturating_add(1).min(READ_BURST);
-                }
-                CommandClass::Write => reads_since_write = 0,
-            }
-            let execution = catch_unwind(AssertUnwindSafe(|| execute(&mut state, command)));
-            drop(permit_owners);
-            match execution {
-                Ok(()) => {}
-                Err(payload) => {
-                    set_lifecycle_state(
-                        lifecycle_state.as_ref(),
-                        LifecycleState::Unhealthy {
-                            retryable_shutdown: false,
-                        },
-                    );
-                    std::panic::resume_unwind(payload);
-                }
-            }
+        disconnected |= matches!(
+            drain_available(receiver, &mut pending),
+            QueueDrainOutcome::Disconnected
+        );
+        #[cfg(test)]
+        if let Some(observer) = &observer {
+            observer.drain_completed(pending.len(), disconnected);
+        }
+        let index = select_pending_index(&pending, reads_since_write);
+        if !pending[index]
+            .lifecycle
+            .claim_for_execution(pending[index].deadline)
+        {
+            expire_envelope(pending.remove(index));
             continue;
         }
-
-        if draining || disconnected {
-            break;
+        #[cfg(test)]
+        let admission_ordinal = pending[index].admission_ordinal;
+        let CommandEnvelope {
+            command,
+            class,
+            global_permit,
+            read_permit,
+            ..
+        } = pending.remove(index);
+        let permit_owners = (global_permit, read_permit);
+        #[cfg(test)]
+        if let Some(observer) = &observer {
+            observer.selected(admission_ordinal, class, reads_since_write);
+        }
+        match class {
+            CommandClass::Read => {
+                reads_since_write = reads_since_write.saturating_add(1).min(READ_BURST);
+            }
+            CommandClass::Write => reads_since_write = 0,
+        }
+        let execution = catch_unwind(AssertUnwindSafe(|| execute(&mut state, command)));
+        drop(permit_owners);
+        match execution {
+            Ok(()) => {}
+            Err(payload) => {
+                set_lifecycle_state(
+                    lifecycle_state.as_ref(),
+                    LifecycleState::Unhealthy {
+                        retryable_shutdown: false,
+                    },
+                );
+                std::panic::resume_unwind(payload);
+            }
         }
     }
     drop(pending);
     drop(state);
 }
 
+enum QueueDrainOutcome {
+    Open,
+    Disconnected,
+}
+
 fn drain_available(
     receiver: &mut mpsc::Receiver<CommandEnvelope>,
     pending: &mut Vec<CommandEnvelope>,
-) -> bool {
+) -> QueueDrainOutcome {
     loop {
         match receiver.try_recv() {
             Ok(envelope) => pending.push(envelope),
-            Err(mpsc::error::TryRecvError::Empty) => return false,
-            Err(mpsc::error::TryRecvError::Disconnected) => return true,
+            Err(mpsc::error::TryRecvError::Empty) => return QueueDrainOutcome::Open,
+            Err(mpsc::error::TryRecvError::Disconnected) => return QueueDrainOutcome::Disconnected,
         }
     }
 }

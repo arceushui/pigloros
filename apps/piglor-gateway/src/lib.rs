@@ -2253,6 +2253,7 @@ mod tests {
         FailGetTimeline,
         EmptyAppend,
         FailAppend,
+        FailConsentRevocationAppend,
         FailRead,
         ReadPayloadTooLarge,
         ReadMetadataTooLarge,
@@ -2285,6 +2286,13 @@ mod tests {
         ) -> Result<Vec<Event>, CoreError> {
             if matches!(self.mode, ScriptMode::FailAppend) {
                 return Err(CoreError::Storage("append failed".into()));
+            }
+            if matches!(self.mode, ScriptMode::FailConsentRevocationAppend)
+                && drafts.iter().any(|draft| {
+                    draft.event_type == Kind::new(EVENT_TYPE_CONSENT_REVOKED_V1)
+                })
+            {
+                return Err(CoreError::Storage("revocation append failed".into()));
             }
             if matches!(self.mode, ScriptMode::EmptyAppend) {
                 return Ok(Vec::new());
@@ -2803,6 +2811,43 @@ mod tests {
         assert!(matches!(
             ceiling_error,
             GatewayError::EventLimitReached { maximum: 1 }
+        ));
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn gateway_revocation_preserves_unclassified_append_errors() {
+        let gateway = Gateway::new(Box::new(ScriptedStore {
+            mode: ScriptMode::FailConsentRevocationAppend,
+        }));
+        let timeline = gateway
+            .create_timeline("consent-revocation-append-error")
+            .await
+            .test_ok();
+        let (grant, token) = gateway
+            .issue_consent_grant(
+                &timeline.id().to_string(),
+                consent_grant(EntityId::new(), 1),
+            )
+            .await
+            .test_ok();
+        let error = gateway
+            .issue_consent_revocation(
+                &timeline.id().to_string(),
+                ConsentRevokedV1 {
+                    subject_id: token.subject_id(),
+                    grantee_id: token.grantee_id(),
+                    grant_seq: token.grant_seq(),
+                    fence_seq: grant.seq.as_u64().saturating_add(1),
+                },
+            )
+            .await
+            .test_err();
+        assert!(matches!(
+            error,
+            GatewayError::Store(CoreError::Storage(message))
+                if message == "revocation append failed"
         ));
         drop(gateway);
     }
