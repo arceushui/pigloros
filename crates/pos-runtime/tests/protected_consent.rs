@@ -100,17 +100,8 @@ fn protected_public_seam_fails_closed_without_a_bound_gate() {
     let mut registry = PluginRegistry::new();
     registry.register_driver(Box::new(ProtectedEventDriver { entity: subject }));
 
-    let error = test_err(registry.step_all_anchored_protected(
-        timeline,
-        Seq::ZERO,
-        token,
-        1,
-        &[],
-    ));
-    assert!(matches!(
-        error,
-        RuntimeError::ConsentOperationUnavailable
-    ));
+    let error = test_err(registry.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[]));
+    assert!(matches!(error, RuntimeError::ConsentOperationUnavailable));
 }
 
 struct MismatchedDraftGate {
@@ -152,13 +143,7 @@ fn protected_public_seam_rejects_a_gate_that_returns_a_different_token() {
     }));
     registry.register_driver(Box::new(ProtectedEventDriver { entity: subject }));
 
-    let error = test_err(registry.step_all_anchored_protected(
-        timeline,
-        Seq::ZERO,
-        token,
-        1,
-        &[],
-    ));
+    let error = test_err(registry.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[]));
     assert!(matches!(
         error,
         RuntimeError::Consent(ConsentError::NoConsent)
@@ -198,13 +183,7 @@ fn protected_public_seam_aborts_when_the_gate_rejects_a_draft() {
     let mut registry = PluginRegistry::new().with_consent_gate(Arc::new(RejectingDraftGate));
     registry.register_driver(Box::new(ProtectedEventDriver { entity: subject }));
 
-    let error = test_err(registry.step_all_anchored_protected(
-        timeline,
-        Seq::ZERO,
-        token,
-        1,
-        &[],
-    ));
+    let error = test_err(registry.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[]));
     assert!(matches!(
         error,
         RuntimeError::Consent(ConsentError::NoConsent)
@@ -220,14 +199,8 @@ fn protected_cadenced_public_seam_stages_and_commits() {
     let mut registry = PluginRegistry::new().with_consent_authority(authority);
     registry.register_driver(Box::new(ProtectedEventDriver { entity: subject }));
 
-    let drafts = test_ok(registry.tick_cadenced_anchored_protected(
-        timeline,
-        0,
-        Seq::ZERO,
-        token,
-        1,
-        &[],
-    ));
+    let drafts =
+        test_ok(registry.tick_cadenced_anchored_protected(timeline, 0, Seq::ZERO, token, 1, &[]));
     assert_eq!(drafts.len(), 1);
     registry.commit_step_at(Seq::ZERO);
 }

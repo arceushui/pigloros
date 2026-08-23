@@ -1675,10 +1675,7 @@ mod tests {
 
         let wrong_timeline_revocation = sample_revoked(&grant);
         assert_eq!(
-            authority.record_revocation_on_timeline(
-                TimelineId::new(),
-                &wrong_timeline_revocation,
-            ),
+            authority.record_revocation_on_timeline(TimelineId::new(), &wrong_timeline_revocation,),
             Err(ConsentError::NoConsent)
         );
 
@@ -1723,7 +1720,10 @@ mod tests {
                 timeline,
                 &[
                     event(EVENT_TYPE_CONSENT_GRANTED_V1, grant_payload),
-                    event("world.observation.v1", CanonicalBytes::from_static(b"ignored")),
+                    event(
+                        "world.observation.v1",
+                        CanonicalBytes::from_static(b"ignored"),
+                    ),
                 ],
             )
             .test_ok();
