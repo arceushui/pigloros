@@ -2330,8 +2330,9 @@ mod tests {
         input.inventories.keys = vec![inventory_result(acknowledgements[1].target)];
         input.inventories.replicas = vec![inventory_result(acknowledgements[2].target)];
         input.inventories.backups = vec![inventory_result(acknowledgements[3].target)];
-        let encoded = ErasureReceiptV1::new(input)?.to_canonical_cbor()?;
-        assert_eq!(ErasureReceiptV1::from_canonical_cbor(&encoded)?.to_canonical_cbor()?, encoded);
+        let expected = ErasureReceiptV1::new(input)?;
+        let encoded = expected.to_canonical_cbor()?;
+        assert_eq!(ErasureReceiptV1::from_canonical_cbor(&encoded)?, expected);
         let mut unknown_codes = receipt_value(&ErasureReceiptV1::from_canonical_cbor(&encoded)?.0);
         let mut tampered_digest = unknown_codes.clone();
         let Value::Array(fields) = &mut tampered_digest else { return Err(ErasureErrorV1::InvalidEncoding); };
