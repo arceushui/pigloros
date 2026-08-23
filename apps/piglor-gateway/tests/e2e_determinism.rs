@@ -1,8 +1,8 @@
-use piglor_gateway::{router, ActionPrincipal, AppState, Gateway, LedgerWriteMode};
+use piglor_gateway::{router, ActionPrincipal, AppState, Gateway, GatewayError, LedgerWriteMode};
 use piglor_ledger::LedgerView;
 use pos_core::{
-    Capability, ConsentAuthority, ConsentGranted, EntityId, Kind, Plugin, PluginId, TimelineId,
-    WallTime,
+    Capability, ConsentAuthority, ConsentGranted, ConsentRevoked, EntityId, Kind, Plugin,
+    PluginId, TimelineId, WallTime,
 };
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition, TickOutcome};
 use pos_plugin_agent::{
@@ -776,5 +776,74 @@ async fn multi_rate_human_ai_replay_is_deterministic_impl(
     assert_eq!(scenario.slow_decisions.load(Ordering::SeqCst), 2);
     assert_replay(&scenario, &live_snapshot, pinned_wall_time)?;
     scenario.guard.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn gateway_reloads_durable_consent_before_revocation(
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let database = tempfile::NamedTempFile::new().test_ok()?;
+    let path = database.path().to_str().test_ok()?.to_owned();
+    let first_gateway = Gateway::new(
+        open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok()?,
+    );
+    let timeline = first_gateway
+        .create_timeline("consent-recovery")
+        .await
+        .test_ok()?;
+    let subject_id = EntityId::new();
+    let grant = ConsentGranted {
+        subject_id,
+        grantee_id: EntityId::new(),
+        purpose: "gateway-recovery".to_owned(),
+        modalities: pos_core::MODALITY_LOCATION,
+        min_geo_resolution: 1,
+        fork_permitted: false,
+        export_permitted: false,
+        retention_days: 0,
+        expiry_secs: 0,
+        grant_seq: 1,
+    };
+    let (grant_event, token) = first_gateway
+        .issue_consent_grant(&timeline.id().to_string(), grant)
+        .await
+        .test_ok()?;
+    drop(first_gateway);
+
+    let recovered_gateway =
+        Gateway::new(open_store(StoreConfig::Sqlite { path }).test_ok()?);
+    let unknown_error = recovered_gateway
+        .issue_consent_revocation(
+            &timeline.id().to_string(),
+            ConsentRevoked {
+                subject_id: EntityId::new(),
+                grantee_id: token.grantee_id(),
+                grant_seq: token.grant_seq(),
+                fence_seq: grant_event.seq.as_u64().saturating_add(1),
+            },
+        )
+        .await;
+    assert!(matches!(
+        unknown_error,
+        Err(GatewayError::Store(pos_core::CoreError::Storage(message)))
+            if message == "consent revocation did not name an active grant"
+    ));
+
+    let revocation = recovered_gateway
+        .issue_consent_revocation(
+            &timeline.id().to_string(),
+            ConsentRevoked {
+                subject_id,
+                grantee_id: token.grantee_id(),
+                grant_seq: token.grant_seq(),
+                fence_seq: grant_event.seq.as_u64().saturating_add(1),
+            },
+        )
+        .await
+        .test_ok()?;
+    assert_eq!(
+        revocation.seq.as_u64(),
+        grant_event.seq.as_u64().saturating_add(1)
+    );
     Ok(())
 }
