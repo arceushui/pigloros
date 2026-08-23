@@ -2615,4 +2615,80 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_lifecycle_and_divergence_seams_reject_remaining_closed_cases() {
+        let candidate = profile()
+            .transition_to(ProfileLifecycleV1::Candidate, vec![])
+            .unwrap_or_else(|_| profile());
+        assert_eq!(
+            candidate.transition_to(
+                ProfileLifecycleV1::Retired,
+                vec![stable_evidence("alpha", 30)]
+            ),
+            Err(ConformanceContractError::ProfileLifecycleInvalid)
+        );
+        let stable = candidate
+            .transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![stable_evidence("alpha", 30), stable_evidence("beta", 40)],
+            )
+            .unwrap_or_else(|_| profile());
+        let stable_bytes = stable.to_canonical_cbor().unwrap_or_default();
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor(&stable_bytes),
+            Ok(stable)
+        );
+
+        let mut mismatched = stable_evidence("alpha", 30);
+        mismatched.case_outcomes[0].outcome = CaseOutcomeStatusV1::Fail;
+        assert_eq!(
+            candidate.transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![mismatched, stable_evidence("beta", 40)]
+            ),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+        let mut organization_required = profile();
+        organization_required
+            .independence_requirements
+            .organizational_independence_required = true;
+        let organization_candidate = organization_required
+            .transition_to(ProfileLifecycleV1::Candidate, vec![])
+            .unwrap_or_else(|_| profile());
+        let mut organization_evidence = stable_evidence("alpha", 30);
+        organization_evidence
+            .independence
+            .organizational_independent = false;
+        assert_eq!(
+            organization_candidate.transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![organization_evidence, stable_evidence("beta", 40)]
+            ),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+
+        let mut divergent = profile();
+        divergent.allowed_divergences = vec![
+            AllowedDivergenceV1 {
+                classification: 1,
+                first_coordinate: b"a".to_vec(),
+            },
+            AllowedDivergenceV1 {
+                classification: 2,
+                first_coordinate: b"b".to_vec(),
+            },
+        ];
+        divergent.fixtures[0].expected = ExpectedResultV1::AllowedDivergence {
+            classification: 1,
+            first_coordinate: b"a".to_vec(),
+        };
+        divergent.profile_digest = divergent.digest();
+        let bytes = divergent.to_canonical_cbor().unwrap_or_default();
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor(&bytes),
+            Ok(divergent)
+        );
+    }
 }
