@@ -551,7 +551,7 @@ impl StoreExecutor {
                     retryable_shutdown: false,
                 },
             ),
-        };
+        }
         Self { control }
     }
 
@@ -1117,15 +1117,7 @@ async fn worker_loop_async(
             }
             let _permit_owners = (&envelope.global_permit, &envelope.read_permit);
             if !envelope.lifecycle.claim_for_execution(envelope.deadline) {
-                let CommandEnvelope {
-                    command,
-                    global_permit,
-                    read_permit,
-                    ..
-                } = envelope;
-                expire_command(command);
-                drop(global_permit);
-                drop(read_permit);
+                expire_envelope(envelope);
                 continue;
             }
             match class {
@@ -1247,6 +1239,12 @@ fn expire_command(command: Command) {
         Command::PanicRead { reply } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
+    }
+}
+
+fn expire_envelope(envelope: CommandEnvelope) {
+    match envelope {
+        CommandEnvelope { command, .. } => expire_command(command),
     }
 }
 
