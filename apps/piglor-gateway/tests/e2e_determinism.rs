@@ -848,3 +848,12 @@ async fn gateway_reloads_durable_consent_before_revocation(
     drop(recovered_gateway);
     Ok(())
 }
+
+#[tokio::test]
+async fn gateway_shutdown_drains_an_empty_executor(
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let gateway = Gateway::new(open_store(StoreConfig::Memory).test_ok()?);
+    gateway.shutdown().await.test_ok()?;
+    drop(gateway);
+    Ok(())
+}
