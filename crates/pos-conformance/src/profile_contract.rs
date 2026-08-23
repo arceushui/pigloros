@@ -6,8 +6,9 @@
 
 use crate::{
     CaseOutcomeStatusV1, ClaimLayerV1, DivergenceMismatchKindV1, ExecutionModeV1,
-    ImplementationIdentityV1, IndependenceEvidenceV1, ProfileCaseOutcomeV1, RedactionStateV1,
-    ReplayClaimV1, SafeErrorCodeV1, VerificationOutcomeV1,
+    ConformanceReportV1, ImplementationIdentityV1, IndependenceEvidenceV1,
+    ProfileCaseOutcomeV1, RedactionStateV1, ReplayClaimV1, SafeErrorCodeV1,
+    VerificationOutcomeV1,
 };
 use ciborium::value::Value;
 use std::collections::BTreeSet;
@@ -196,6 +197,15 @@ pub struct EvaluatorHardCapsV1 {
 }
 
 impl EvaluatorHardCapsV1 {
+    /// Return the canonical identity of this exact hard-cap record.
+    #[must_use]
+    pub fn digest(&self) -> [u8; 32] {
+        digest_bytes(
+            b"PiglorOS.EvaluatorHardCaps.v1",
+            &encode_hard_caps(self),
+        )
+    }
+
     /// Validate a report or fixture case count against the selected cap.
     ///
     /// # Errors
@@ -261,7 +271,7 @@ pub struct StableImplementationEvidenceV1 {
     pub implementation: ImplementationIdentityV1,
     pub independence: IndependenceEvidenceV1,
     pub evaluator_protocol_digest: [u8; 32],
-    pub report_digest: [u8; 32],
+    pub report: ConformanceReportV1,
     pub case_outcomes: Vec<CaseOutcomeV1>,
 }
 
@@ -449,6 +459,38 @@ impl EvaluatorRequestV1 {
             validate_hard_caps(caps)?;
             if self.output_capability.report_bytes_limit > caps.max_profile_bytes
                 || self.output_capability.diagnostic_bytes_limit > caps.max_diagnostic_bytes
+            {
+                Err(ConformanceContractError::FieldOutOfBounds)
+            } else if self.evaluator_hard_caps_digest != caps.digest() {
+                Err(ConformanceContractError::FixtureDigestMismatch)
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    /// Validate the request against one selected, immutable evaluator
+    /// protocol. The protocol identity and the canonical hard-cap identity are
+    /// checked together so a caller cannot validate a request with unrelated
+    /// limits or a different report schema.
+    ///
+    /// # Errors
+    /// Returns a closed safe error when either selected identity or any output
+    /// limit does not match the request.
+    pub fn validate_with_protocol(
+        &self,
+        protocol: &EvaluatorProtocolV1,
+    ) -> Result<(), ConformanceContractError> {
+        self.validate().and_then(|()| {
+            validate_protocol(protocol)?;
+            if self.evaluator_protocol_digest != protocol.protocol_digest
+                || self.evaluator_hard_caps_digest != protocol.hard_caps.digest()
+            {
+                return Err(ConformanceContractError::FixtureDigestMismatch);
+            }
+            if self.output_capability.report_bytes_limit > protocol.hard_caps.max_profile_bytes
+                || self.output_capability.diagnostic_bytes_limit
+                    > protocol.hard_caps.max_diagnostic_bytes
             {
                 Err(ConformanceContractError::FieldOutOfBounds)
             } else {
@@ -689,22 +731,18 @@ fn validate_stable_evidence(
         || first.implementation.binary_digest == second.implementation.binary_digest
         || first.evaluator_protocol_digest != profile.evaluator_protocol.protocol_digest
         || second.evaluator_protocol_digest != profile.evaluator_protocol.protocol_digest
+        || first.report.report_digest == [0; 32]
+        || second.report.report_digest == [0; 32]
+        || first.report.subject_artifact_digest != second.report.subject_artifact_digest
+        || first.report.report_digest == second.report.report_digest
     {
         return Err(ConformanceContractError::IndependenceEvidenceMissing);
     }
     validate_stable_implementation(first, profile)
         .and_then(|()| validate_stable_implementation(second, profile))
         .and_then(|()| {
-            if first.report_digest == [0; 32]
-                || second.report_digest == [0; 32]
-                || first.report_digest == second.report_digest
-                || first.report_digest != stable_report_digest(first)
-                || second.report_digest != stable_report_digest(second)
-            {
-                Err(ConformanceContractError::IndependenceEvidenceMissing)
-            } else {
-                Ok(())
-            }
+            validate_report_binding(first, profile)
+                .and_then(|()| validate_report_binding(second, profile))
         })
 }
 
@@ -810,16 +848,79 @@ fn stable_case_key(case: &CaseOutcomeV1) -> (&str, ExecutionModeV1, ClaimLayerV1
     )
 }
 
-fn stable_report_digest(value: &StableImplementationEvidenceV1) -> [u8; 32] {
+fn validate_report_binding(
+    evidence: &StableImplementationEvidenceV1,
+    profile: &ConformanceProfileV1,
+) -> Result<(), ConformanceContractError> {
+    let report = &evidence.report;
+    report
+        .validate()
+        .map_err(|_| ConformanceContractError::IndependenceEvidenceMissing)?;
+    if report.implementation != evidence.implementation
+        || report.independence != evidence.independence
+        || report.evaluator_protocol_digest != profile.evaluator_protocol.protocol_digest
+        || evidence.evaluator_protocol_digest != profile.evaluator_protocol.protocol_digest
+        || report.normative_spec_digest != profile.normative_spec_digest
+        || report.limitations_digest != profile.limitations_digest
+        || report.provenance_digest != profile.provenance_digest
+        || report.fixture_bundle_digest != fixture_bundle_digest(profile)
+        || report.profile_digest != profile_authority_digest(profile)
+        || !profile
+            .execution_profile_digests
+            .contains(&report.execution_profile_digest)
+        || report.cases.len() != evidence.case_outcomes.len()
+    {
+        return Err(ConformanceContractError::IndependenceEvidenceMissing);
+    }
+    if report
+        .cases
+        .iter()
+        .zip(&evidence.case_outcomes)
+        .any(|(report_case, profile_case)| {
+            report_case.case_id != profile_case.case_id
+                || report_case.fixture_digest != profile_case.fixture_digest
+                || report_case.execution_profile_digest != profile_case.execution_profile_digest
+                || report_case.mode != profile_case.mode
+                || report_case.claim_layer != profile_case.claim_layer
+                || report_case.outcome != profile_case.outcome
+                || report_case.first_coordinate != profile_case.first_coordinate
+                || report_case.expected_digest != profile_case.expected_digest
+                || report_case.actual_digest != profile_case.actual_digest
+                || report_case.expected_error != profile_case.expected_error
+                || report_case.actual_error != profile_case.actual_error
+                || report_case.replay_claim != profile_case.replay_claim
+                || report_case.redaction_state != profile_case.redaction_state
+                || report_case.provenance_digest != profile_case.provenance_digest
+        })
+    {
+        return Err(ConformanceContractError::IndependenceEvidenceMissing);
+    }
+    if report
+        .cases
+        .iter()
+        .any(|case| case.execution_profile_digest != report.execution_profile_digest)
+    {
+        return Err(ConformanceContractError::IndependenceEvidenceMissing);
+    }
+    Ok(())
+}
+
+fn fixture_bundle_digest(profile: &ConformanceProfileV1) -> [u8; 32] {
     digest_bytes(
-        b"PiglorOS.StableImplementationReport.v1",
-        &Value::Array(vec![
-            encode_identity(&value.implementation),
-            encode_independence(&value.independence),
-            digest(&value.evaluator_protocol_digest),
-            Value::Array(value.case_outcomes.iter().map(encode_case).collect()),
-        ]),
+        b"PiglorOS.ConformanceFixtureBundle.v1",
+        &Value::Array(profile.fixtures.iter().map(encode_fixture).collect()),
     )
+}
+
+fn profile_authority_digest(profile: &ConformanceProfileV1) -> [u8; 32] {
+    // Stable evidence is an attestation over the immutable Candidate profile;
+    // including the final Stable profile digest here would create a digest
+    // cycle through the embedded report.
+    let mut authority = profile.clone();
+    authority.stable_evidence.clear();
+    authority.lifecycle = ProfileLifecycleV1::Candidate;
+    authority.profile_digest = [0; 32];
+    authority.digest()
 }
 
 fn case_matches_fixture(case: &CaseOutcomeV1, fixture: &FixtureDescriptorV1) -> bool {
@@ -1342,7 +1443,7 @@ fn encode_stable_evidence(value: &StableImplementationEvidenceV1) -> Value {
         encode_identity(&value.implementation),
         encode_independence(&value.independence),
         digest(&value.evaluator_protocol_digest),
-        digest(&value.report_digest),
+        crate::strict_codec::encode_report_value(&value.report, true),
         Value::Array(value.case_outcomes.iter().map(encode_case).collect()),
     ])
 }
@@ -1564,7 +1665,8 @@ fn decode_stable_evidence(
         implementation: decode_identity(&fields[0])?,
         independence: decode_independence(&fields[1])?,
         evaluator_protocol_digest: digest_value(&fields[2])?,
-        report_digest: digest_value(&fields[3])?,
+        report: crate::strict_codec::decode_conformance_report_value(&fields[3])
+            .map_err(|_| ConformanceContractError::InvalidEncoding)?,
         case_outcomes: array_values(&fields[4])?
             .iter()
             .map(decode_case)
@@ -2147,10 +2249,8 @@ fn optional_bytes(value: &Value) -> Result<Option<Vec<u8>>, ConformanceContractE
 #[cfg(test)]
 mod tests {
     // The public contract tests below exercise canonical CBOR, validation,
-    // lifecycle transitions, and hard-cap entrypoints. A small legacy set of
-    // private codec tests remains for malformed closed-record branches that
-    // have no public value to construct; those tests are not the contract
-    // seam for the behavior asserted by the public tests.
+    // lifecycle transitions, and hard-cap entrypoints. Closed enum mapping
+    // tests below only enumerate the representation used by those seams.
     use super::*;
 
     const MAX_FIXTURE_COUNT: u32 = 65_536;
@@ -2284,6 +2384,127 @@ mod tests {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn report_template(
+        implementation: &ImplementationIdentityV1,
+        independence: &IndependenceEvidenceV1,
+        cases: Vec<crate::CaseOutcomeV1>,
+    ) -> ConformanceReportV1 {
+        let mut report = ConformanceReportV1 {
+            report_id: [1; 16],
+            subject_artifact_digest: digest(60),
+            profile_digest: profile_authority_digest(&profile()),
+            normative_spec_digest: digest(12),
+            execution_profile_digest: digest(1),
+            fixture_bundle_digest: fixture_bundle_digest(&profile()),
+            evaluator_source_digest: digest(61),
+            evaluator_binary_digest: digest(62),
+            evaluator_protocol_digest: digest(13),
+            implementation: implementation.clone(),
+            independence: independence.clone(),
+            cases,
+            passed: 0,
+            failed: 0,
+            skipped: 0,
+            unavailable: 0,
+            not_applicable: 0,
+            replay_claim: ReplayClaimV1::Exact,
+            redaction_state: RedactionStateV1::None,
+            limitations_digest: digest(18),
+            provenance_digest: digest(19),
+            report_digest: [0; 32],
+        };
+        refresh_report_counts(&mut report);
+        report.report_digest = report.digest().unwrap_or([0; 32]);
+        report
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn refresh_report_counts(report: &mut ConformanceReportV1) {
+        report.passed = u32::try_from(
+            report
+                .cases
+                .iter()
+                .filter(|case| case.outcome == CaseOutcomeStatusV1::Pass)
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
+        report.failed = u32::try_from(
+            report
+                .cases
+                .iter()
+                .filter(|case| case.outcome == CaseOutcomeStatusV1::Fail)
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
+        report.skipped = u32::try_from(
+            report
+                .cases
+                .iter()
+                .filter(|case| case.outcome == CaseOutcomeStatusV1::Skip)
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
+        report.unavailable = u32::try_from(
+            report
+                .cases
+                .iter()
+                .filter(|case| case.outcome == CaseOutcomeStatusV1::Unavailable)
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
+        report.not_applicable = u32::try_from(
+            report
+                .cases
+                .iter()
+                .filter(|case| case.outcome == CaseOutcomeStatusV1::NotApplicable)
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn refresh_stable_report(evidence: &mut StableImplementationEvidenceV1) {
+        evidence.report.implementation = evidence.implementation.clone();
+        evidence.report.independence = evidence.independence.clone();
+        evidence.report.cases = evidence
+            .case_outcomes
+            .iter()
+            .map(|case| crate::CaseOutcomeV1 {
+                case_id: case.case_id.clone(),
+                fixture_digest: case.fixture_digest,
+                execution_profile_digest: case.execution_profile_digest,
+                mode: case.mode,
+                claim_layer: case.claim_layer,
+                outcome: case.outcome,
+                first_coordinate: case.first_coordinate.clone(),
+                expected_digest: case.expected_digest,
+                actual_digest: case.actual_digest,
+                expected_error: case.expected_error,
+                actual_error: case.actual_error,
+                replay_claim: case.replay_claim,
+                redaction_state: case.redaction_state,
+                provenance_digest: case.provenance_digest,
+            })
+            .collect();
+        refresh_report_counts(&mut evidence.report);
+        evidence.report.report_digest = evidence.report.digest().unwrap_or([0; 32]);
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn refresh_stable_report_for_profile(
+        evidence: &mut StableImplementationEvidenceV1,
+        profile: &ConformanceProfileV1,
+    ) {
+        refresh_stable_report(evidence);
+        evidence.report.profile_digest = profile_authority_digest(profile);
+        evidence.report.normative_spec_digest = profile.normative_spec_digest;
+        evidence.report.limitations_digest = profile.limitations_digest;
+        evidence.report.provenance_digest = profile.provenance_digest;
+        evidence.report.fixture_bundle_digest = fixture_bundle_digest(profile);
+        evidence.report.report_digest = evidence.report.digest().unwrap_or([0; 32]);
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn stable_evidence(implementation_id: &str, seed: u8) -> StableImplementationEvidenceV1 {
         let mut evidence = StableImplementationEvidenceV1 {
             implementation: ImplementationIdentityV1 {
@@ -2303,13 +2524,31 @@ mod tests {
                 reviewer_ids: vec![format!("reviewer-{seed}")],
             },
             evaluator_protocol_digest: digest(13),
-            report_digest: digest(seed.saturating_add(6)),
+            report: report_template(
+                &ImplementationIdentityV1 {
+                    implementation_id: implementation_id.to_owned(),
+                    source_digest: digest(seed),
+                    build_digest: digest(seed.saturating_add(1)),
+                    binary_digest: digest(seed.saturating_add(2)),
+                    public_contract_digest: digest(seed.saturating_add(3)),
+                    organization_id: Some(format!("organization-{seed}")),
+                },
+                &IndependenceEvidenceV1 {
+                    technical_independent: true,
+                    authorship_independent: true,
+                    organizational_independent: true,
+                    declaration_digest: digest(seed.saturating_add(4)),
+                    shared_code_audit_digest: digest(seed.saturating_add(5)),
+                    reviewer_ids: vec![format!("reviewer-{seed}")],
+                },
+                vec![],
+            ),
             case_outcomes: vec![
                 case_outcome_record(ExecutionModeV1::Local),
                 case_outcome_record(ExecutionModeV1::AirGapped),
             ],
         };
-        evidence.report_digest = stable_report_digest(&evidence);
+        refresh_stable_report(&mut evidence);
         evidence
     }
 
@@ -2328,7 +2567,7 @@ mod tests {
             case.actual_error = Some(SafeErrorCodeV1::ClosureIncomplete);
             case.verification_outcome = VerificationOutcomeV1::InvalidManifest;
         }
-        evidence.report_digest = stable_report_digest(&evidence);
+        refresh_stable_report(&mut evidence);
         evidence
     }
 
@@ -2355,28 +2594,12 @@ mod tests {
                 report_bytes_limit: 1,
                 diagnostic_bytes_limit: MAX_DIAGNOSTIC_BYTES,
             },
-            evaluator_protocol_digest: digest(11),
-            evaluator_hard_caps_digest: digest(12),
+            evaluator_protocol_digest: digest(13),
+            evaluator_hard_caps_digest: original_hard_caps().digest(),
             request_digest: [0; 32],
         };
         request.request_digest = request.digest();
         request
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn reject_each_field<T, F>(value: &Value, exclusions: &[usize], decoder: F)
-    where
-        F: Fn(&Value) -> Result<T, ConformanceContractError>,
-    {
-        if let Value::Array(fields) = value {
-            for index in 0..fields.len() {
-                if !exclusions.contains(&index) {
-                    let mut malformed = fields.clone();
-                    malformed[index] = Value::Map(Vec::new());
-                    assert!(decoder(&Value::Array(malformed)).is_err());
-                }
-            }
-        }
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -2463,29 +2686,6 @@ mod tests {
                 watchdog_ms: 0,
             },
         ]
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn narrow_decoder_errors(divergence_expected: &ExpectedResultV1) {
-        if let Value::Array(mut fields) = encode_expected(divergence_expected) {
-            fields[4] = Value::Array(vec![uint(u64::from(u8::MAX) + 1), Value::Bytes(vec![1])]);
-            assert_eq!(
-                decode_expected(&Value::Array(fields)),
-                Err(ConformanceContractError::InvalidEncoding)
-            );
-        }
-        assert_eq!(
-            u16_value(&uint(u64::from(u16::MAX) + 1)),
-            Err(ConformanceContractError::FieldOutOfBounds)
-        );
-        assert_eq!(
-            u32_value(&uint(u64::from(u32::MAX) + 1)),
-            Err(ConformanceContractError::FieldOutOfBounds)
-        );
-        assert!(digest_value(&Value::Bytes(vec![1])).is_err());
-        assert!(digest16_value(&Value::Bytes(vec![1])).is_err());
-        assert!(digest_list_value(&Value::Array(vec![Value::Bytes(vec![1])])).is_err());
-        assert!(strings_value(&Value::Array(vec![Value::Bytes(vec![1])])).is_err());
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -2617,6 +2817,27 @@ mod tests {
         let request = request();
         let bytes = request.to_canonical_cbor().unwrap_or_default();
         assert_eq!(EvaluatorRequestV1::from_canonical_cbor(&bytes), Ok(request));
+    }
+
+    #[test]
+    fn evaluator_request_public_validation_binds_protocol_and_caps_together() {
+        let request = request();
+        let protocol = profile().evaluator_protocol;
+        assert_eq!(request.validate_with_protocol(&protocol), Ok(()));
+
+        let mut wrong_protocol = protocol.clone();
+        wrong_protocol.protocol_digest = digest(99);
+        assert_eq!(
+            request.validate_with_protocol(&wrong_protocol),
+            Err(ConformanceContractError::FixtureDigestMismatch)
+        );
+
+        let mut wrong_caps = protocol;
+        wrong_caps.hard_caps.max_cases = 1;
+        assert_eq!(
+            request.validate_with_protocol(&wrong_caps),
+            Err(ConformanceContractError::FixtureDigestMismatch)
+        );
     }
 
     #[test]
@@ -2908,96 +3129,6 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn canonical_descriptor_decoders_reject_each_required_field() {
-        let profile = profile();
-        let fixture = &profile.fixtures[0];
-        let input = &fixture.inputs[0];
-        let request = request();
-        let evidence = stable_evidence("alpha", 30);
-        let canonical_expected = &fixture.expected;
-        let typed_expected = ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ClosureIncomplete);
-        let divergence_expected = ExpectedResultV1::AllowedDivergence {
-            classification: DivergenceMismatchKindV1::TypedFailure,
-            first_coordinate: b"timeline/7".to_vec(),
-        };
-        let divergence = AllowedDivergenceV1 {
-            classification: DivergenceMismatchKindV1::TypedFailure,
-            first_coordinate: b"timeline/7".to_vec(),
-        };
-
-        reject_each_field(&encode_profile(&profile, true), &[], decode_profile);
-        reject_each_field(&encode_fixture(fixture), &[], decode_fixture);
-        reject_each_field(&encode_input(input), &[], decode_input);
-        reject_each_field(
-            &encode_expected(canonical_expected),
-            &[3, 4],
-            decode_expected,
-        );
-        reject_each_field(
-            &encode_expected(&typed_expected),
-            &[1, 2, 4],
-            decode_expected,
-        );
-        reject_each_field(
-            &encode_expected(&divergence_expected),
-            &[1, 2, 3],
-            decode_expected,
-        );
-        reject_each_field(&encode_divergence(&divergence), &[], decode_divergence);
-        reject_each_field(&encode_bounds(&fixture.bounds), &[], decode_bounds);
-        reject_each_field(
-            &encode_capability_policy(&fixture.capability_policy),
-            &[],
-            decode_capability_policy,
-        );
-        reject_each_field(
-            &encode_fixture_provenance(&fixture.provenance),
-            &[],
-            decode_fixture_provenance,
-        );
-        reject_each_field(
-            &encode_protocol(&profile.evaluator_protocol),
-            &[],
-            decode_protocol,
-        );
-        reject_each_field(
-            &encode_hard_caps(&profile.evaluator_protocol.hard_caps),
-            &[],
-            decode_hard_caps,
-        );
-        reject_each_field(
-            &encode_requirements(&profile.independence_requirements),
-            &[],
-            decode_requirements,
-        );
-        reject_each_field(
-            &encode_stable_evidence(&evidence),
-            &[],
-            decode_stable_evidence,
-        );
-        reject_each_field(&encode_request(&request, true), &[], decode_request);
-        reject_each_field(
-            &encode_output_capability(&request.output_capability),
-            &[],
-            decode_output_capability,
-        );
-        reject_each_field(
-            &encode_identity(&request.implementation),
-            &[],
-            decode_identity,
-        );
-        reject_each_field(
-            &encode_independence(&evidence.independence),
-            &[],
-            decode_independence,
-        );
-        reject_each_field(&encode_case(&evidence.case_outcomes[0]), &[], decode_case);
-
-        narrow_decoder_errors(&divergence_expected);
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn cpf1_public_validation_rejects_each_retained_descriptor_invariant() {
         let reject = |change: &dyn Fn(&mut ConformanceProfileV1), error| {
             let mut value = profile();
@@ -3208,8 +3339,10 @@ mod tests {
             .transition_to(ProfileLifecycleV1::Candidate, vec![])
             .unwrap_or_else(|_| profile());
         let typed_fixture_digest = fixture_digest(&typed_candidate.fixtures[0]);
-        let typed_evidence = typed_failure_evidence("alpha", 30, typed_fixture_digest);
-        let typed_evidence_second = typed_failure_evidence("beta", 40, typed_fixture_digest);
+        let mut typed_evidence = typed_failure_evidence("alpha", 30, typed_fixture_digest);
+        let mut typed_evidence_second = typed_failure_evidence("beta", 40, typed_fixture_digest);
+        refresh_stable_report_for_profile(&mut typed_evidence, &typed_candidate);
+        refresh_stable_report_for_profile(&mut typed_evidence_second, &typed_candidate);
         assert!(typed_candidate
             .transition_to(
                 ProfileLifecycleV1::Stable,
@@ -3236,10 +3369,11 @@ mod tests {
             for case in &mut evidence.case_outcomes {
                 case.fixture_digest = fixture_digest(&divergent_candidate.fixtures[0]);
                 case.first_coordinate = Some(b"timeline/7".to_vec());
+                case.actual_digest = Some([99; 32]);
                 case.verification_outcome = VerificationOutcomeV1::Diverged;
                 case.divergence_kind = Some(DivergenceMismatchKindV1::TypedFailure);
             }
-            evidence.report_digest = stable_report_digest(evidence);
+            refresh_stable_report_for_profile(evidence, &divergent_candidate);
         }
         let mut wrong_divergence_kind = divergent_evidence.clone();
         wrong_divergence_kind.case_outcomes[0].divergence_kind =
@@ -3735,7 +3869,7 @@ mod tests {
             .unwrap_or_else(|_| profile());
         let mut first = stable_evidence("alpha", 30);
         first.case_outcomes[0].first_coordinate = Some(vec![b'x'; 2]);
-        first.report_digest = stable_report_digest(&first);
+        refresh_stable_report(&mut first);
         assert_eq!(
             candidate.transition_to(
                 ProfileLifecycleV1::Stable,
@@ -3822,8 +3956,34 @@ mod tests {
             value.case_outcomes[0].redaction_state = RedactionStateV1::RedactedViews;
         });
         reject_stable_change(|value| value.case_outcomes[0].provenance_digest = digest(99));
-        reject_stable_change(|value| value.report_digest = [0; 32]);
-        reject_stable_change(|value| value.report_digest = digest(99));
+        reject_stable_change(|value| value.report.report_digest = [0; 32]);
+        reject_stable_change(|value| value.report.report_digest = digest(99));
+
+        let mut mismatched_report = stable_evidence("alpha", 30);
+        mismatched_report.report.profile_digest = digest(99);
+        mismatched_report.report.report_digest = mismatched_report
+            .report
+            .digest()
+            .unwrap_or([0; 32]);
+        assert_eq!(
+            candidate().transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![mismatched_report, stable_evidence("beta", 40)],
+            ),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+        let mut report_case_mismatch = stable_evidence("alpha", 30);
+        report_case_mismatch.report.cases[0].outcome = CaseOutcomeStatusV1::Fail;
+        refresh_report_counts(&mut report_case_mismatch.report);
+        report_case_mismatch.report.report_digest =
+            report_case_mismatch.report.digest().unwrap_or([0; 32]);
+        assert_eq!(
+            candidate().transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![report_case_mismatch, stable_evidence("beta", 40)],
+            ),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
 
         let mut first = stable_evidence("beta", 30);
         let second = stable_evidence("alpha", 40);
@@ -3855,8 +4015,8 @@ mod tests {
         second.case_outcomes.truncate(1);
         first.case_outcomes[0].fixture_digest = fixture_digest(&candidate.fixtures[0]);
         second.case_outcomes[0].fixture_digest = fixture_digest(&candidate.fixtures[0]);
-        first.report_digest = stable_report_digest(&first);
-        second.report_digest = stable_report_digest(&second);
+        refresh_stable_report(&mut first);
+        refresh_stable_report(&mut second);
         assert!(candidate
             .transition_to(ProfileLifecycleV1::Stable, vec![first, second])
             .is_ok());
@@ -3867,7 +4027,7 @@ mod tests {
     fn public_stable_evidence_requires_complete_ordered_unique_case_matrix() {
         let mut incomplete = stable_evidence("alpha", 30);
         incomplete.case_outcomes.pop();
-        incomplete.report_digest = stable_report_digest(&incomplete);
+        refresh_stable_report(&mut incomplete);
         assert_eq!(
             candidate().transition_to(
                 ProfileLifecycleV1::Stable,
@@ -3880,7 +4040,7 @@ mod tests {
         duplicate
             .case_outcomes
             .push(duplicate.case_outcomes[0].clone());
-        duplicate.report_digest = stable_report_digest(&duplicate);
+        refresh_stable_report(&mut duplicate);
         assert_eq!(
             candidate().transition_to(
                 ProfileLifecycleV1::Stable,
@@ -3953,7 +4113,7 @@ mod tests {
                 case.actual_error = Some(SafeErrorCodeV1::ClosureIncomplete);
                 case.verification_outcome = VerificationOutcomeV1::InvalidManifest;
             }
-            first.report_digest = stable_report_digest(&first);
+            refresh_stable_report_for_profile(&mut first, &typed_candidate);
             first
         };
         assert!(typed_candidate
@@ -4116,8 +4276,8 @@ mod tests {
         optional_first.independence.organizational_independent = false;
         let mut optional_second = stable_evidence("beta", 40);
         optional_second.independence.organizational_independent = false;
-        optional_first.report_digest = stable_report_digest(&optional_first);
-        optional_second.report_digest = stable_report_digest(&optional_second);
+        refresh_stable_report(&mut optional_first);
+        refresh_stable_report(&mut optional_second);
         assert!(optional_candidate
             .transition_to(
                 ProfileLifecycleV1::Stable,
@@ -4156,8 +4316,8 @@ mod tests {
         first.independence.reviewer_ids = (0..32).map(|number| format!("r{number:02}")).collect();
         let mut second = stable_evidence("beta", 40);
         second.independence.reviewer_ids = (0..32).map(|number| format!("s{number:02}")).collect();
-        first.report_digest = stable_report_digest(&first);
-        second.report_digest = stable_report_digest(&second);
+        refresh_stable_report(&mut first);
+        refresh_stable_report(&mut second);
         assert!(candidate()
             .transition_to(ProfileLifecycleV1::Stable, vec![first, second])
             .is_ok());
@@ -4263,12 +4423,12 @@ mod tests {
             case.provenance_digest = expected_provenance_digest;
             case.verification_outcome = VerificationOutcomeV1::InvalidManifest;
         }
-        matching.report_digest = stable_report_digest(&matching);
+        refresh_stable_report_for_profile(&mut matching, &typed);
         let mut accepted = matching.clone();
         let second = {
             let mut value = stable_evidence("beta", 40);
             value.case_outcomes = accepted.case_outcomes.clone();
-            value.report_digest = stable_report_digest(&value);
+            refresh_stable_report_for_profile(&mut value, &typed);
             value
         };
         assert!(typed

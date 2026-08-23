@@ -1313,7 +1313,7 @@ fn build_conformance_report(
         provenance_digest: policy_digest,
         report_digest: [0; 32],
     };
-    report.report_digest = serialized_digest(&report);
+    report.report_digest = report.digest().unwrap_or([0; 32]);
     (report, subject_artifact_digest)
 }
 
