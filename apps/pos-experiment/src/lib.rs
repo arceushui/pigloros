@@ -14,7 +14,7 @@ use pos_core::{
     crypto::Hash,
     event::{EventDraft, Kind},
     ids::EntityId,
-    ConsentAuthority, ConsentCapabilityToken, ReproManifest, Timeline,
+    ConsentAuthority, ConsentCapabilityToken, ConsentGranted, ReproManifest, Timeline,
 };
 use pos_runtime::PluginRegistry;
 use pos_store::{open_store, StoreConfig};
@@ -384,9 +384,8 @@ fn append_driver_drafts(
             Ok(events) => {
                 Ok(u64::try_from(events.len()).unwrap_or(u64::MAX))
             }
-            Err(error) => {
-                Err(error.into())
-            }
+            Err(pos_runtime::RuntimeError::Store(error)) => Err(ExperimentError::Store(error)),
+            Err(error) => Err(error.into()),
         }
     }
 }
@@ -900,6 +899,13 @@ impl ExperimentSession {
         self
     }
 
+    /// Bind the host-owned consent authority used by a protected operation.
+    #[must_use]
+    pub fn with_consent_authority(mut self, authority: ConsentAuthority) -> Self {
+        self.registry = self.registry.with_consent_authority(authority);
+        self
+    }
+
     /// Advance one complete tick.
     ///
     /// Compatibility wrapper around [`Self::step_tick`]. Returns `true` when
@@ -1171,7 +1177,12 @@ impl ExperimentSession {
                             self.operation_now_secs,
                             &drafts,
                         )
-                        .map_err(ExperimentError::from)
+                        .map_err(|error| match error {
+                            pos_runtime::RuntimeError::Store(error) => {
+                                ExperimentError::Store(error)
+                            }
+                            error => ExperimentError::Runtime(error),
+                        })
                 })
                 .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
             {
@@ -1618,6 +1629,26 @@ mod tests {
         fn test_ok(self) -> T {
             self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected test value")))
         }
+    }
+
+    fn protect_session(session: ExperimentSession, subject_id: EntityId) -> ExperimentSession {
+        let authority = ConsentAuthority::new();
+        let grant = ConsentGranted {
+            subject_id,
+            grantee_id: EntityId::new(),
+            purpose: "protected-projection-test".to_owned(),
+            modalities: 0,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        };
+        let token = authority.record_grant_on_timeline(session.timeline().id(), &grant);
+        session
+            .with_consent_authority(authority)
+            .with_protected_token(token, 0)
     }
 
     trait TestErrorExt<E> {
@@ -2724,7 +2755,7 @@ mod tests {
                 ))),
             )
             .test_ok();
-        let mut session = experiment.start().test_ok();
+        let mut session = protect_session(experiment.start().test_ok(), entity);
         let timeline = session.timeline().id();
         lock_store(&session.store)
             .test_ok()
@@ -2795,7 +2826,7 @@ mod tests {
                 })),
             )
             .test_ok();
-        let mut session = experiment.start().test_ok();
+        let mut session = protect_session(experiment.start().test_ok(), entity);
         assert_eq!(
             session.step_tick().test_ok(),
             TickOutcome::Advanced {
@@ -2920,7 +2951,7 @@ mod tests {
                 ))),
             )
             .test_ok();
-        let mut resumed = recovery.resume(timeline).test_ok();
+        let mut resumed = protect_session(recovery.resume(timeline).test_ok(), entity);
         assert_eq!(resumed.total_events, 1);
         assert_eq!(projection_count(&resumed, entity).test_ok(), 1);
         assert_eq!(resumed.step_tick().test_ok(), TickOutcome::Quiescent);
@@ -3518,14 +3549,19 @@ mod tests {
                     assert_eq!(state.capture_commits, [1], "{path:?} {case:?}");
                 }
             }
-            TransactionCase::SchemaFailure
-            | TransactionCase::AppendFailure
-            | TransactionCase::PartialDriverFailure => {
+            TransactionCase::SchemaFailure | TransactionCase::PartialDriverFailure => {
                 assert!(result.is_err(), "{path:?} {case:?}");
                 assert_eq!(state.commits, 0, "{path:?} {case:?}");
                 assert_eq!(state.committed_tick, 0, "{path:?} {case:?}");
                 assert_eq!(state.aborts, 1, "{path:?} {case:?}");
                 assert!(state.capture_commits.is_empty(), "{path:?} {case:?}");
+            }
+            TransactionCase::AppendFailure => {
+                assert!(result.is_err(), "{path:?} {case:?}");
+                assert_eq!(state.commits, 0, "{path:?} {case:?}");
+                assert_eq!(state.committed_tick, 0, "{path:?} {case:?}");
+                assert_eq!(state.aborts, 1, "{path:?} {case:?}");
+                assert_eq!(state.capture_commits, [0], "{path:?} {case:?}");
             }
             TransactionCase::PostCaptureFailure => {
                 assert!(result.is_err(), "{path:?} {case:?}");
