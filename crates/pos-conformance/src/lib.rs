@@ -2129,15 +2129,15 @@ pub mod strict_codec {
     }
 
     fn validate_value(value: &Value) -> Result<(), StrictCborError> {
-        match value {
-            Value::Map(_) | Value::Tag(_, _) | Value::Float(_) => {
-                Err(StrictCborError::ForbiddenValue)
-            }
-            Value::Array(values) => values.iter().try_for_each(validate_value),
-            Value::Bytes(_) | Value::Text(_) | Value::Integer(_) | Value::Bool(_) | Value::Null => {
-                Ok(())
-            }
-            _ => Err(StrictCborError::ForbiddenValue),
+        if let Value::Array(values) = value {
+            values.iter().try_for_each(validate_value)
+        } else if matches!(
+            value,
+            Value::Bytes(_) | Value::Text(_) | Value::Integer(_) | Value::Bool(_) | Value::Null
+        ) {
+            Ok(())
+        } else {
+            Err(StrictCborError::ForbiddenValue)
         }
     }
 

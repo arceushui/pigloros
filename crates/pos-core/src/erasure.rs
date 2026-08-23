@@ -1818,6 +1818,21 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         Ok(input)
     }
 
+    fn receipt_input_matches_authority(
+        input: &ErasureReceiptInputV1,
+        normalized: &ErasureReceiptInputV1,
+    ) -> bool {
+        input.request == normalized.request
+            && input.coordinator == normalized.coordinator
+            && input.terminal_state == normalized.terminal_state
+            && input.lifecycle == normalized.lifecycle
+            && input.freeze_position == normalized.freeze_position
+            && input.required_targets == normalized.required_targets
+            && input.acknowledgements == normalized.acknowledgements
+            && input.pending_owners == normalized.pending_owners
+            && input.failed_owners == normalized.failed_owners
+    }
+
     fn finalize_record(
         &mut self,
         request: ErasureReferenceV1,
@@ -1879,7 +1894,15 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             })
             .and_then(|terminal| {
                 record.state = terminal;
-                Self::normalize_receipt_input(request, self.coordinator, record, input)
+                Self::normalize_receipt_input(request, self.coordinator, record, input.clone())
+                    .and_then(|normalized| {
+                        if !Self::receipt_input_matches_authority(&input, &normalized) {
+                            Err(ErasureErrorV1::PolicyConflict)
+                        } else {
+                            record.receipt_input = Some(input);
+                            Ok(normalized)
+                        }
+                    })
             })
             .and_then(|normalized| self.port.admit_receipt(&normalized).map(|()| normalized))
             .and_then(ErasureReceiptV1::new)

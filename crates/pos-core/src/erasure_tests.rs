@@ -16,6 +16,11 @@ use std::rc::Rc;
 struct TestCoordinatorPort {
     accepted: bool,
     acknowledgement_admitted: bool,
+    freeze_error: Option<ErasureErrorV1>,
+    dispatch_error: Option<ErasureErrorV1>,
+    receipt_error: Option<ErasureErrorV1>,
+    load_error: Option<ErasureErrorV1>,
+    commit_error: Option<ErasureErrorV1>,
     targets: Vec<ErasureRequiredTargetV1>,
     records: Rc<RefCell<Vec<ErasureCoordinatorRecordV1>>>,
 }
@@ -73,6 +78,9 @@ impl ErasureCoordinatorPortV1 for TestCoordinatorPort {
         _request: ErasureReferenceV1,
         requested: &ErasureStateTransitionV1,
     ) -> Result<ErasureFreezeAdmissionV1, ErasureErrorV1> {
+        if let Some(error) = self.freeze_error {
+            return Err(error);
+        }
         Ok(ErasureFreezeAdmissionV1 {
             freeze_position: requested.freeze_position.unwrap_or(10),
             provenance: requested.provenance,
@@ -83,6 +91,9 @@ impl ErasureCoordinatorPortV1 for TestCoordinatorPort {
         _request: ErasureReferenceV1,
         _targets: &[ErasureRequiredTargetV1],
     ) -> Result<(), ErasureErrorV1> {
+        if let Some(error) = self.dispatch_error {
+            return Err(error);
+        }
         Ok(())
     }
     fn admit_acknowledgement(
@@ -97,12 +108,18 @@ impl ErasureCoordinatorPortV1 for TestCoordinatorPort {
         }
     }
     fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
+        if let Some(error) = self.receipt_error {
+            return Err(error);
+        }
         Ok(())
     }
     fn load_record(
         &self,
         request: ErasureReferenceV1,
     ) -> Result<Option<ErasureCoordinatorRecordV1>, ErasureErrorV1> {
+        if let Some(error) = self.load_error {
+            return Err(error);
+        }
         Ok(self
             .records
             .borrow()
@@ -111,6 +128,9 @@ impl ErasureCoordinatorPortV1 for TestCoordinatorPort {
             .cloned())
     }
     fn commit_record(&mut self, record: ErasureCoordinatorRecordV1) -> Result<(), ErasureErrorV1> {
+        if let Some(error) = self.commit_error {
+            return Err(error);
+        }
         let mut records = self.records.borrow_mut();
         if let Some(existing) = records
             .iter_mut()
@@ -127,6 +147,11 @@ fn test_port(accepted: bool, targets: Vec<ErasureRequiredTargetV1>) -> TestCoord
     TestCoordinatorPort {
         accepted,
         acknowledgement_admitted: true,
+        freeze_error: None,
+        dispatch_error: None,
+        receipt_error: None,
+        load_error: None,
+        commit_error: None,
         targets,
         records: Rc::new(RefCell::new(Vec::new())),
     }
@@ -328,6 +353,156 @@ fn coordinator_reloads_durable_identity_after_restart() -> Result<(), ErasureErr
     assert_eq!(restarted.submit(request, reference(99))?, submitted);
     Ok(())
 }
+
+#[test]
+fn coordinator_exposes_unknown_and_port_failure_contracts() -> Result<(), ErasureErrorV1> {
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let mut unknown =
+        ErasureCoordinatorStateMachineV1::new(test_port(true, vec![target]), reference(2));
+    assert_eq!(
+        unknown.authorize(reference(1), reference(9)),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        unknown.freeze_inventory(
+            reference(1),
+            change(
+                ErasureLifecycleV1::AccessFrozen,
+                Some(10),
+                Vec::new(),
+                Vec::new()
+            )
+        ),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        unknown.dispatch_destruction(reference(1), reference(9)),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        unknown.acknowledge(
+            reference(1),
+            acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged)
+        ),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        unknown.finalize(
+            reference(1),
+            receipt_input(
+                ErasureLifecycleV1::Complete,
+                Vec::new(),
+                Vec::new(),
+                Vec::new()
+            )
+        ),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let mut load_failed = test_port(true, Vec::new());
+    load_failed.load_error = Some(ErasureErrorV1::KeyRegistryUnavailable);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(load_failed, reference(2));
+    assert_eq!(
+        coordinator.submit(request()?, reference(3)),
+        Err(ErasureErrorV1::KeyRegistryUnavailable)
+    );
+
+    let mut commit_failed = test_port(true, Vec::new());
+    commit_failed.commit_error = Some(ErasureErrorV1::ReceiptCommitFailed);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(commit_failed, reference(2));
+    assert_eq!(
+        coordinator.submit(request()?, reference(3)),
+        Err(ErasureErrorV1::ReceiptCommitFailed)
+    );
+
+    let mut freeze_failed = test_port(true, vec![target]);
+    freeze_failed.freeze_error = Some(ErasureErrorV1::AccessFreezeFailed);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(freeze_failed, reference(2));
+    coordinator.submit(request()?, reference(3))?;
+    coordinator.authorize(reference(1), reference(9))?;
+    assert_eq!(
+        coordinator.freeze_inventory(
+            reference(1),
+            change(
+                ErasureLifecycleV1::AccessFrozen,
+                Some(10),
+                Vec::new(),
+                Vec::new(),
+            ),
+        ),
+        Err(ErasureErrorV1::AccessFreezeFailed)
+    );
+
+    let mut dispatch_failed = test_port(true, vec![target]);
+    dispatch_failed.dispatch_error = Some(ErasureErrorV1::KeyDestructionFailed);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(dispatch_failed, reference(2));
+    coordinator.submit(request()?, reference(3))?;
+    coordinator.authorize(reference(1), reference(9))?;
+    coordinator.freeze_inventory(
+        reference(1),
+        change(
+            ErasureLifecycleV1::AccessFrozen,
+            Some(10),
+            Vec::new(),
+            Vec::new(),
+        ),
+    )?;
+    assert_eq!(
+        coordinator.dispatch_destruction(reference(1), reference(9)),
+        Err(ErasureErrorV1::KeyDestructionFailed)
+    );
+
+    let mut receipt_failed = test_port(true, vec![target]);
+    receipt_failed.receipt_error = Some(ErasureErrorV1::TrustSnapshotInvalid);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(receipt_failed, reference(2));
+    coordinator.submit(request()?, reference(3))?;
+    coordinator.authorize(reference(1), reference(9))?;
+    coordinator.freeze_inventory(
+        reference(1),
+        change(
+            ErasureLifecycleV1::AccessFrozen,
+            Some(10),
+            Vec::new(),
+            Vec::new(),
+        ),
+    )?;
+    coordinator.dispatch_destruction(reference(1), reference(9))?;
+    let dispatched = coordinator
+        .existing(reference(1))
+        .cloned()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let mut awaiting_change = change(
+        ErasureLifecycleV1::AwaitingAcknowledgements,
+        dispatched.freeze_position(),
+        Vec::new(),
+        Vec::new(),
+    );
+    awaiting_change.provenance = reference(4);
+    let awaiting = dispatched.transition(awaiting_change)?;
+    let mut terminal_change = change(
+        ErasureLifecycleV1::PartialFailure,
+        awaiting.freeze_position(),
+        vec![target.replica_id],
+        Vec::new(),
+    );
+    terminal_change.provenance = reference(4);
+    let terminal = awaiting.transition(terminal_change)?;
+    let mut input = receipt_input(
+        ErasureLifecycleV1::PartialFailure,
+        Vec::new(),
+        vec![target.replica_id],
+        Vec::new(),
+    );
+    input.terminal_state = terminal.state_digest();
+    input.required_targets = vec![target];
+    input.inventories.artifacts = vec![inventory_result(target)];
+    assert_eq!(
+        coordinator.finalize(reference(1), input),
+        Err(ErasureErrorV1::TrustSnapshotInvalid)
+    );
+    Ok(())
+}
+
 #[test]
 fn coordinator_freezes_closure_and_commits_only_derived_terminal_outcomes(
 ) -> Result<(), ErasureErrorV1> {
@@ -336,6 +511,16 @@ fn coordinator_freezes_closure_and_commits_only_derived_terminal_outcomes(
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
     coordinator.submit(request()?, reference(3))?;
     coordinator.authorize(reference(1), reference(9))?;
+    assert_eq!(
+        coordinator
+            .authorize(reference(1), reference(9))?
+            .lifecycle(),
+        ErasureLifecycleV1::Authorized
+    );
+    assert_eq!(
+        coordinator.authorize(reference(1), reference(8)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
     let frozen = coordinator.freeze_inventory(
         reference(1),
         change(
@@ -357,7 +542,28 @@ fn coordinator_freezes_closure_and_commits_only_derived_terminal_outcomes(
         )?,
         frozen
     );
+    let mut conflicting_freeze = change(
+        ErasureLifecycleV1::AccessFrozen,
+        Some(10),
+        Vec::new(),
+        Vec::new(),
+    );
+    conflicting_freeze.provenance = reference(8);
+    assert_eq!(
+        coordinator.freeze_inventory(reference(1), conflicting_freeze),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
     coordinator.dispatch_destruction(reference(1), reference(9))?;
+    assert_eq!(
+        coordinator
+            .dispatch_destruction(reference(1), reference(9))?
+            .lifecycle(),
+        ErasureLifecycleV1::DestructionDispatched
+    );
+    assert_eq!(
+        coordinator.dispatch_destruction(reference(1), reference(8)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
     assert_eq!(
         coordinator.acknowledge(reference(1), ack)?,
         coordinator.acknowledge(reference(1), ack)?
@@ -373,14 +579,34 @@ fn coordinator_freezes_closure_and_commits_only_derived_terminal_outcomes(
         coordinator.acknowledge(reference(1), conflicting),
         Err(ErasureErrorV1::PolicyConflict)
     );
-    let mut complete_input = receipt_input(
-        ErasureLifecycleV1::PartialFailure,
+    let awaiting = coordinator
+        .existing(reference(1))
+        .cloned()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let mut terminal_change = change(
+        ErasureLifecycleV1::Complete,
+        awaiting.freeze_position(),
         Vec::new(),
-        vec![reference(9)],
         Vec::new(),
     );
+    terminal_change.acknowledged_targets = vec![ack.target];
+    terminal_change.provenance = reference(4);
+    let terminal = awaiting.transition(terminal_change)?;
+    let mut complete_input = receipt_input(
+        ErasureLifecycleV1::Complete,
+        vec![ack],
+        Vec::new(),
+        Vec::new(),
+    );
+    complete_input.terminal_state = terminal.state_digest();
     complete_input.inventories.artifacts = vec![inventory_result(ack.target)];
     complete_input.replay_claim = ErasureReplayClaimV1::Exact;
+    let mut conflicting_first_finalize = complete_input.clone();
+    conflicting_first_finalize.required_targets.clear();
+    assert_eq!(
+        coordinator.finalize(reference(1), conflicting_first_finalize),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
     let committed = coordinator.finalize(reference(1), complete_input.clone())?;
     assert_eq!(committed.lifecycle(), ErasureLifecycleV1::Complete);
     assert_eq!(
@@ -427,12 +653,34 @@ fn coordinator_derives_partial_failure_for_a_missing_frozen_target() -> Result<(
         ),
     )?;
     coordinator.dispatch_destruction(reference(1), reference(9))?;
-    let mut input = receipt_input(
-        ErasureLifecycleV1::Complete,
-        Vec::new(),
+    let dispatched = coordinator
+        .existing(reference(1))
+        .cloned()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let mut awaiting_change = change(
+        ErasureLifecycleV1::AwaitingAcknowledgements,
+        dispatched.freeze_position(),
         Vec::new(),
         Vec::new(),
     );
+    awaiting_change.provenance = reference(4);
+    let awaiting = dispatched.transition(awaiting_change)?;
+    let mut terminal_change = change(
+        ErasureLifecycleV1::PartialFailure,
+        awaiting.freeze_position(),
+        vec![missing.target.replica_id],
+        Vec::new(),
+    );
+    terminal_change.provenance = reference(4);
+    let terminal = awaiting.transition(terminal_change)?;
+    let mut input = receipt_input(
+        ErasureLifecycleV1::PartialFailure,
+        Vec::new(),
+        vec![missing.target.replica_id],
+        Vec::new(),
+    );
+    input.terminal_state = terminal.state_digest();
+    input.required_targets = vec![missing.target];
     input.inventories.artifacts = vec![inventory_result(missing.target)];
     assert_eq!(
         coordinator.finalize(reference(1), input)?.lifecycle(),
@@ -627,8 +875,7 @@ fn receipt_inventory_encoding() -> Result<Vec<u8>, ErasureErrorV1> {
 }
 
 fn receipt_inventory_decoder_rejections(encoded: &[u8]) -> Result<(), ErasureErrorV1> {
-    let mut unknown_codes =
-        public_receipt_value(&ErasureReceiptV1::from_canonical_cbor(encoded)?)?;
+    let mut unknown_codes = public_receipt_value(&ErasureReceiptV1::from_canonical_cbor(encoded)?)?;
     let mut tampered_digest = unknown_codes.clone();
     let Value::Array(fields) = &mut tampered_digest else {
         return Err(ErasureErrorV1::InvalidEncoding);
@@ -920,6 +1167,36 @@ fn public_erasure_failure_seams_cover_history_ordering_and_cbor_tails() -> Resul
     }
     Ok(())
 }
+
+#[test]
+fn codec_size_and_shape_limits_return_closed_errors() {
+    assert_eq!(
+        encode_limited(&Value::Text("oversized".to_owned()), 0),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    assert_eq!(
+        array(&Value::Array(vec![Value::Null, Value::Null]), 1),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    assert_eq!(array(&Value::Null, 1), Err(ErasureErrorV1::InvalidEncoding));
+    assert_eq!(
+        decode_limited(
+            &[0x5b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+            32,
+            4,
+        ),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+    assert_eq!(
+        decode_limited(&[0xf7], 32, 4),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+    assert_eq!(
+        decode_limited(&[0xe0], 32, 4),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+}
+
 #[test]
 fn request_is_canonical_and_bounded() -> Result<(), ErasureErrorV1> {
     let first = request()?;
@@ -1332,12 +1609,15 @@ fn receipt_order_is_arrival_independent_and_completion_is_strict() -> Result<(),
         )),
         Err(ErasureErrorV1::PolicyConflict)
     );
-    assert_eq!(ErasureReceiptV1::new(receipt_input(
-        ErasureLifecycleV1::PartialFailure,
-        vec![low],
-        vec![reference(9)],
-        Vec::new()
-    )), Err(ErasureErrorV1::ScopeInvalid));
+    assert_eq!(
+        ErasureReceiptV1::new(receipt_input(
+            ErasureLifecycleV1::PartialFailure,
+            vec![low],
+            vec![reference(9)],
+            Vec::new()
+        )),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
     Ok(())
 }
 #[test]
@@ -1426,7 +1706,9 @@ fn state_wire_enum_roundtrip() -> Result<(), ErasureErrorV1> {
         Vec::new(),
         Vec::new(),
     ))?;
-    for state in [submitted, authorized, frozen, dispatched, waiting, complete, rejected] {
+    for state in [
+        submitted, authorized, frozen, dispatched, waiting, complete, rejected,
+    ] {
         let encoded = state.to_canonical_cbor()?;
         if matches!(
             state.lifecycle(),
@@ -1753,7 +2035,14 @@ fn public_receipt_history_rejects_each_terminal_and_predecessor_mismatch(
     receipt.verify_history(&resolver)?;
 
     history_terminal_mismatches(&input, &resolver, waiting.state_digest())?;
-    history_predecessor_mismatches(&input, &submitted, &authorized, &frozen, &dispatched, &terminal)?;
+    history_predecessor_mismatches(
+        &input,
+        &submitted,
+        &authorized,
+        &frozen,
+        &dispatched,
+        &terminal,
+    )?;
     Ok(())
 }
 
@@ -1768,8 +2057,7 @@ fn history_terminal_mismatches(
             0 => altered.request = reference(99),
             1 => {
                 altered.lifecycle = ErasureLifecycleV1::PartialFailure;
-                altered.acknowledgements[0].outcome =
-                    ErasureAcknowledgementOutcomeV1::Negative;
+                altered.acknowledgements[0].outcome = ErasureAcknowledgementOutcomeV1::Negative;
                 altered.failed_owners = vec![reference(41)];
             }
             2 => {

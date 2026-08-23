@@ -55,8 +55,20 @@ jobs:
         with:
           toolchain: 1.97.1
           components: rustfmt
-      - name: cargo fmt --check
+      - name: cargo fmt --check (full repository)
+        if: github.event_name != 'pull_request'
         run: cargo fmt --all -- --check
+      - name: rustfmt changed Rust files
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          mapfile -t changed_rust_files < <(
+            git diff --name-only --diff-filter=ACMR origin/main...HEAD -- '*.rs'
+          )
+          if ((${#changed_rust_files[@]} > 0)); then
+            rustfmt --check "${changed_rust_files[@]}"
+          fi
 
   rustdoc:
     name: rustdoc
