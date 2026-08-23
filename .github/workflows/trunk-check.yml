@@ -33,6 +33,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
+      - name: Hosted formatter snapshot (temporary)
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: 1.97.1
+          components: rustfmt
+
+      - name: Format erasure files for diagnostic artifact
+        run: >
+          rustfmt --edition 2024
+          crates/pos-core/src/erasure.rs
+          crates/pos-core/src/erasure_codec.rs
+          crates/pos-core/src/erasure_tests.rs
+          crates/pos-core/src/lib.rs
+
+      - name: Upload formatter snapshot
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: erasure-rustfmt-snapshot
+          path: |
+            crates/pos-core/src/erasure.rs
+            crates/pos-core/src/erasure_codec.rs
+            crates/pos-core/src/erasure_tests.rs
+            crates/pos-core/src/lib.rs
+
       - name: Trunk Check
         uses: trunk-io/trunk-action@e1234e67a86010d61ddac8d8ebf4b783e2ffd2fa # v2.0.0
         with:
