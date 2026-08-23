@@ -1212,9 +1212,7 @@ impl Gateway {
                     "consent revocation was already fenced".to_owned(),
                 )))
             }
-            Err(error) => {
-                return Err(GatewayError::Store(CoreError::Storage(error.to_string())))
-            }
+            Err(error) => return Err(GatewayError::Store(CoreError::Storage(error.to_string()))),
         };
         let event = match self
             .store

@@ -1305,11 +1305,7 @@ fn expire_command(command: Command) {
         Command::AppendConsentGrant { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
-        Command::AppendConsentRevocation {
-            reservation,
-            reply,
-            ..
-        } => {
+        Command::AppendConsentRevocation { reservation, reply, .. } => {
             reservation.abort_durable();
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
@@ -1692,11 +1688,9 @@ fn execute_append_consent_revocation_command(
     match result {
         Ok(event) => match reservation.commit_durable() {
             Ok(()) => drop(reply.send(Ok(event))),
-            Err(_) => drop(reply.send(Err(StoreExecutorError::Store(
-                CoreError::Storage(
-                    "consent revocation session disappeared after append".to_owned(),
-                ),
-            )))),
+            Err(_) => drop(reply.send(Err(StoreExecutorError::Store(CoreError::Storage(
+                "consent revocation session disappeared after append".to_owned(),
+            ))))),
         },
         Err(error) => {
             reservation.abort_durable();
@@ -2584,13 +2578,8 @@ mod tests {
         assert_eq!(events.len(), 1);
         let mut protected_append_count = 0;
         assert_eq!(
-            authority.with_token_fence(
-                timeline,
-                &token,
-                1,
-                0,
-                &mut || protected_append_count += 1,
-            ),
+            authority
+                .with_token_fence(timeline, &token, 1, 0, &mut || protected_append_count += 1,),
             Err(pos_core::ConsentError::Revoked)
         );
         assert_eq!(protected_append_count, 0);
