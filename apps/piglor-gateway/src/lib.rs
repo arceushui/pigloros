@@ -551,10 +551,12 @@ impl Plugin for GatewayActionPlugin {
     }
 }
 
+#[cfg(test)]
 fn gateway_action_registry() -> Arc<PluginRegistry> {
     gateway_action_registry_with_bodies(std::iter::empty())
 }
 
+#[cfg(test)]
 fn gateway_action_registry_with_bodies(
     bodies: impl IntoIterator<Item = EntityId>,
 ) -> Arc<PluginRegistry> {
