@@ -1369,13 +1369,13 @@ impl ErasureCoordinatorRecordV1 {
 
     /// Return the authenticated ERQ1 request.
     #[must_use]
-    pub fn request(&self) -> &ErasureRequestV1 {
+    pub const fn request(&self) -> &ErasureRequestV1 {
         &self.request
     }
 
     /// Return the latest digest-linked ERS1 state.
     #[must_use]
-    pub fn state(&self) -> &ErasureStateV1 {
+    pub const fn state(&self) -> &ErasureStateV1 {
         &self.state
     }
 
@@ -1393,13 +1393,13 @@ impl ErasureCoordinatorRecordV1 {
 
     /// Return the committed terminal receipt, if any.
     #[must_use]
-    pub fn receipt(&self) -> Option<&ErasureReceiptV1> {
+    pub const fn receipt(&self) -> Option<&ErasureReceiptV1> {
         self.receipt.as_ref()
     }
 
     /// Return the exact terminal input admitted for idempotent retries.
     #[must_use]
-    pub fn receipt_input(&self) -> Option<&ErasureReceiptInputV1> {
+    pub const fn receipt_input(&self) -> Option<&ErasureReceiptInputV1> {
         self.receipt_input.as_ref()
     }
 
