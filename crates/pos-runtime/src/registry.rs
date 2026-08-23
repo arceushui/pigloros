@@ -314,6 +314,12 @@ enum AnchoredSelection {
     Cadenced { now_ns: u128 },
 }
 
+type AnchoredSelectionResult = (
+    Vec<PluginId>,
+    Vec<(PluginId, u128)>,
+    Vec<ProjectionKey>,
+);
+
 /// The central plugin registry.
 ///
 /// Plugins register here; the registry wires their components into the
@@ -657,7 +663,7 @@ impl PluginRegistry {
     fn collect_anchored_selection(
         &self,
         selection: AnchoredSelection,
-    ) -> Result<(Vec<PluginId>, Vec<(PluginId, u128)>, Vec<ProjectionKey>), RuntimeError> {
+    ) -> Result<AnchoredSelectionResult, RuntimeError> {
         let mut driver_ids = Vec::new();
         let mut cadence_updates = Vec::new();
         let mut seen_subscriptions = HashSet::new();
@@ -837,7 +843,7 @@ impl PluginRegistry {
     /// Fence and append one staged host Tick before committing Driver state.
     ///
     /// The consent validation happens while the host owns both the registry's
-    /// pending step and the [`EventStore`] borrow. A rejected fence therefore
+    /// pending step and the [`pos_core::store::EventStore`] borrow. A rejected fence therefore
     /// aborts the staged Drivers before any draft reaches durable storage.
     ///
     /// # Errors
@@ -857,7 +863,7 @@ impl PluginRegistry {
         let operation = pending.operation.clone();
         let events = match operation {
             OperationContext::Protected { token, now_secs: _ } => {
-                let Some(gate) = self.consent_gate.as_ref().cloned() else {
+                let Some(gate) = self.consent_gate.clone() else {
                     let _ = self.abort_drivers(&pending.driver_ids);
                     return Err(RuntimeError::ConsentOperationUnavailable);
                 };
