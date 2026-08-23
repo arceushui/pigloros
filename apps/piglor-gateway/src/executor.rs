@@ -1144,25 +1144,29 @@ async fn worker_loop_async(
     let mut reads_since_write = 0;
     loop {
         if pending.is_empty() {
-            if draining {
-                break;
-            }
-            if disconnected {
-                break;
-            }
-            let next_received = tokio::select! {
-                biased;
-                envelope = receiver.recv() => envelope,
-                () = shutdown.notified() => {
-                    draining = true;
+            if draining || disconnected {
+                disconnected |= matches!(
+                    drain_available(receiver, &mut pending),
+                    QueueDrainOutcome::Disconnected
+                );
+                if pending.is_empty() {
+                    break;
+                }
+            } else {
+                let next_received = tokio::select! {
+                    biased;
+                    envelope = receiver.recv() => envelope,
+                    () = shutdown.notified() => {
+                        draining = true;
+                        continue;
+                    }
+                };
+                if let Some(envelope) = next_received {
+                    pending.push(envelope);
+                } else {
+                    disconnected = true;
                     continue;
                 }
-            };
-            if let Some(envelope) = next_received {
-                pending.push(envelope);
-            } else {
-                disconnected = true;
-                continue;
             }
         }
 
@@ -2554,15 +2558,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_drains_accepted_channel_and_pending_commands() {
-        let result = shutdown_drains_accepted_channel_and_pending_commands_impl().await;
+    async fn shutdown_drains_commands_buffered_before_shutdown() {
+        let result = shutdown_drains_commands_buffered_before_shutdown_impl().await;
         assert!(
             result.is_ok(),
-            "shutdown_drains_accepted_channel_and_pending_commands failed: {result:?}"
+            "shutdown_drains_commands_buffered_before_shutdown failed: {result:?}"
         );
     }
 
-    async fn shutdown_drains_accepted_channel_and_pending_commands_impl(
+    async fn shutdown_drains_commands_buffered_before_shutdown_impl(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
