@@ -4110,6 +4110,36 @@ mod tests {
             let bytes = malformed_profile_bytes(&value, &[8, 0, 8], expected);
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         }
+
+        let mut typed = value.clone();
+        typed.fixtures[0].expected =
+            ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ClosureIncomplete);
+        typed.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::InvalidManifest;
+        typed.fixtures[0].expected_verification_error = Some(SafeErrorCodeV1::ClosureIncomplete);
+        typed.profile_digest = typed.digest();
+        let typed_bytes = typed.to_canonical_cbor().unwrap_or_default();
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor(&typed_bytes),
+            Ok(typed)
+        );
+
+        let mut divergent = value;
+        let coordinate = b"timeline/7".to_vec();
+        divergent.allowed_divergences = vec![AllowedDivergenceV1 {
+            classification: DivergenceMismatchKindV1::TypedFailure,
+            first_coordinate: coordinate.clone(),
+        }];
+        divergent.fixtures[0].expected = ExpectedResultV1::AllowedDivergence {
+            classification: DivergenceMismatchKindV1::TypedFailure,
+            first_coordinate: coordinate,
+        };
+        divergent.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::Diverged;
+        divergent.profile_digest = divergent.digest();
+        let divergent_bytes = divergent.to_canonical_cbor().unwrap_or_default();
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor(&divergent_bytes),
+            Ok(divergent)
+        );
     }
 
     #[test]
@@ -4118,14 +4148,21 @@ mod tests {
         let value = profile();
         let candidate = value
             .transition_to(ProfileLifecycleV1::Candidate, vec![])
-            .unwrap_or_else(|_| value.clone());
+            .expect("draft profile must transition to Candidate");
         let mut first = stable_evidence("alpha", 30);
         let mut second = stable_evidence("beta", 40);
         refresh_stable_report_for_profile(&mut first, &candidate);
         refresh_stable_report_for_profile(&mut second, &candidate);
         let stable = candidate
             .transition_to(ProfileLifecycleV1::Stable, vec![first, second])
-            .unwrap_or_else(|_| value.clone());
+            .expect("candidate profile must transition to Stable");
+        let stable_bytes = stable
+            .to_canonical_cbor_with_trust_policy(&policy)
+            .expect("valid Stable profile must encode");
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&stable_bytes, &policy),
+            Ok(stable.clone())
+        );
         for index in 0..6 {
             let bytes = malformed_profile_bytes(&stable, &[16, 0, index], Value::Map(Vec::new()));
             assert!(
