@@ -1235,12 +1235,17 @@ fn lifecycle_is_monotonic_and_digest_linked() -> Result<(), ErasureErrorV1> {
         Vec::new(),
         vec![reference(7)],
     ))?;
-    let bytes = partial.to_canonical_cbor()?;
+    let partial_bytes = partial.to_canonical_cbor()?;
     assert_eq!(
-        ErasureStateV1::from_canonical_cbor(&bytes),
+        ErasureStateV1::from_canonical_cbor(&partial_bytes),
         Err(ErasureErrorV1::PolicyConflict)
     );
-    let mut tampered = bytes;
+    let authorized_bytes = authorized.to_canonical_cbor()?;
+    assert_eq!(
+        ErasureStateV1::from_canonical_cbor(&authorized_bytes)?,
+        authorized
+    );
+    let mut tampered = authorized_bytes;
     let last = tampered.len() - 1;
     tampered[last] ^= 1;
     assert_eq!(
@@ -1307,15 +1312,14 @@ fn receipt_order_is_arrival_independent_and_completion_is_strict() -> Result<(),
     let bytes = first.to_canonical_cbor()?;
     assert_eq!(bytes, second.to_canonical_cbor()?);
     assert_eq!(ErasureReceiptV1::from_canonical_cbor(&bytes)?, first);
+    let negative = acknowledgement(3, ErasureAcknowledgementOutcomeV1::Negative);
+    let negative_owner = negative.owner;
     assert_eq!(
         ErasureReceiptV1::new(receipt_input(
             ErasureLifecycleV1::Complete,
-            vec![acknowledgement(
-                3,
-                ErasureAcknowledgementOutcomeV1::Negative
-            )],
+            vec![negative],
             Vec::new(),
-            Vec::new()
+            vec![negative_owner]
         )),
         Err(ErasureErrorV1::PolicyConflict)
     );
