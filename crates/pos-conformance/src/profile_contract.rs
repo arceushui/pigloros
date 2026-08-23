@@ -1356,12 +1356,10 @@ fn decode_case(value: &Value) -> Result<CaseOutcomeV1, ConformanceContractError>
 }
 
 fn encode_value(value: &Value) -> Result<Vec<u8>, ConformanceContractError> {
-    validate_value(value).and_then(|()| {
-        let mut bytes = Vec::new();
-        ciborium::into_writer(value, &mut bytes)
-            .map(|()| bytes)
-            .map_err(|_| ConformanceContractError::InvalidEncoding)
-    })
+    let mut bytes = Vec::new();
+    ciborium::into_writer(value, &mut bytes)
+        .map(|()| bytes)
+        .map_err(|_| ConformanceContractError::InvalidEncoding)
 }
 
 fn decode_value(bytes: &[u8]) -> Result<Value, ConformanceContractError> {
@@ -1378,16 +1376,6 @@ fn decode_value(bytes: &[u8]) -> Result<Value, ConformanceContractError> {
             Err(ConformanceContractError::InvalidEncoding)
         }
     })
-}
-
-fn validate_value(value: &Value) -> Result<(), ConformanceContractError> {
-    match value {
-        Value::Array(values) => values.iter().try_for_each(validate_value),
-        Value::Bytes(_) | Value::Text(_) | Value::Integer(_) | Value::Bool(_) | Value::Null => {
-            Ok(())
-        }
-        _ => Err(ConformanceContractError::InvalidEncoding),
-    }
 }
 
 fn array(value: &Value, length: usize) -> Result<&[Value], ConformanceContractError> {
@@ -3170,5 +3158,107 @@ mod tests {
         };
         exact.profile_digest = exact.digest();
         assert!(exact.validate().is_ok());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_profile_execution_inventory_limits_are_exact() {
+        let mut at_limit = profile();
+        at_limit.execution_profile_digests = (1..=64).map(digest).collect();
+        assert!(at_limit.validate().is_ok());
+
+        let mut above_limit = at_limit;
+        above_limit.execution_profile_digests = (1..=65).map(digest).collect();
+        assert_eq!(
+            above_limit.validate(),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_profile_fixture_inventory_limits_are_exact() {
+        let template = profile().fixtures[0].clone();
+        let mut at_limit = profile();
+        at_limit.fixtures = (0..65_536)
+            .map(|number| {
+                let mut fixture = template.clone();
+                fixture.case_id = format!("case-{number:05}");
+                fixture
+            })
+            .collect();
+        assert!(at_limit.validate().is_ok());
+
+        let mut above_limit = profile();
+        above_limit.fixtures = vec![template; 65_537];
+        assert_eq!(
+            above_limit.validate(),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_optional_and_required_organizational_independence_differ() {
+        let mut optional = profile();
+        optional
+            .independence_requirements
+            .organizational_independence_required = false;
+        let optional_candidate = optional
+            .transition_to(ProfileLifecycleV1::Candidate, vec![])
+            .unwrap_or_else(|_| profile());
+        let mut optional_first = stable_evidence("alpha", 30);
+        optional_first.independence.organizational_independent = false;
+        let mut optional_second = stable_evidence("beta", 40);
+        optional_second.independence.organizational_independent = false;
+        assert!(optional_candidate
+            .transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![optional_first, optional_second],
+            )
+            .is_ok());
+
+        let mut required = profile();
+        required
+            .independence_requirements
+            .organizational_independence_required = true;
+        let required_candidate = required
+            .transition_to(ProfileLifecycleV1::Candidate, vec![])
+            .unwrap_or_else(|_| profile());
+        let mut required_first = stable_evidence("alpha", 30);
+        required_first.independence.organizational_independent = false;
+        assert_eq!(
+            required_candidate.transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![required_first, stable_evidence("beta", 40)],
+            ),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_reviewer_and_divergence_empty_boundaries_are_exact() {
+        let mut first = stable_evidence("alpha", 30);
+        first.independence.reviewer_ids = (0..32).map(|number| format!("r{number:02}")).collect();
+        let mut second = stable_evidence("beta", 40);
+        second.independence.reviewer_ids = (0..32).map(|number| format!("s{number:02}")).collect();
+        assert!(candidate()
+            .transition_to(ProfileLifecycleV1::Stable, vec![first, second])
+            .is_ok());
+
+        reject_profile_change(
+            |value| {
+                value.allowed_divergences = vec![AllowedDivergenceV1 {
+                    classification: 4,
+                    first_coordinate: b"a".to_vec(),
+                }];
+                value.fixtures[0].expected = ExpectedResultV1::AllowedDivergence {
+                    classification: 4,
+                    first_coordinate: Vec::new(),
+                };
+            },
+            ConformanceContractError::DivergenceClassificationMismatch,
+        );
     }
 }
