@@ -2148,14 +2148,6 @@ mod tests {
         };
         let authority = ConsentAuthority::new();
         let token = authority.record_grant(&grant);
-        authority
-            .record_revocation(&ConsentRevoked {
-                subject_id: grant.subject_id,
-                grantee_id: grant.grantee_id,
-                grant_seq: grant.grant_seq,
-                fence_seq: 5,
-            })
-            .test_ok();
         let operation = OperationContext::Protected {
             token: token.clone(),
             now_secs: 1,
@@ -2169,6 +2161,14 @@ mod tests {
         assert!(bound
             .validate_operation(&operation, Seq::from_u64(3))
             .is_ok());
+        authority
+            .record_revocation(&ConsentRevoked {
+                subject_id: grant.subject_id,
+                grantee_id: grant.grantee_id,
+                grant_seq: grant.grant_seq,
+                fence_seq: 5,
+            })
+            .test_ok();
         assert!(bound
             .validate_operation(&operation, Seq::from_u64(5))
             .is_err_and(|error| matches!(error, RuntimeError::Consent(_))));
