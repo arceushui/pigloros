@@ -1984,6 +1984,61 @@ mod tests {
         assert!(strings_value(&Value::Array(vec![Value::Bytes(vec![1])])).is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn reject_profile_change(
+        change: impl FnOnce(&mut ConformanceProfileV1),
+        expected: ConformanceContractError,
+    ) {
+        let mut value = profile();
+        change(&mut value);
+        value.profile_digest = value.digest();
+        assert_eq!(value.validate(), Err(expected));
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn original_hard_caps() -> EvaluatorHardCapsV1 {
+        EvaluatorHardCapsV1 {
+            max_profile_bytes: 16_777_216,
+            max_cases: 65_536,
+            max_bundle_members: 65_536,
+            max_member_path_bytes: 256,
+            max_member_bytes: 67_108_864,
+            max_total_bundle_bytes: 1_073_741_824,
+            max_compression_expansion: 100,
+            max_structural_nesting: 32,
+            max_coordinate_bytes: 128,
+            max_diagnostic_bytes: 1_048_576,
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn profile_with_hard_caps(caps: EvaluatorHardCapsV1) -> ConformanceProfileV1 {
+        let mut value = profile();
+        value.evaluator_protocol.hard_caps = caps;
+        value.profile_digest = value.digest();
+        value
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn candidate() -> ConformanceProfileV1 {
+        profile()
+            .transition_to(ProfileLifecycleV1::Candidate, vec![])
+            .unwrap_or_else(|_| profile())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn reject_stable_change(change: impl FnOnce(&mut StableImplementationEvidenceV1)) {
+        let mut first = stable_evidence("alpha", 30);
+        change(&mut first);
+        assert_eq!(
+            candidate().transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![first, stable_evidence("beta", 40)],
+            ),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+    }
+
     #[test]
     fn cpf1_round_trips_exactly_and_uses_a_self_verifying_digest() {
         let value = profile();
@@ -2690,5 +2745,434 @@ mod tests {
             ConformanceProfileV1::from_canonical_cbor(&bytes),
             Ok(divergent)
         );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_contract_digests_and_literal_ceiling_are_not_interchangeable() {
+        let value = profile();
+        assert_ne!(value.digest(), [0; 32]);
+        assert_ne!(value.digest(), [1; 32]);
+        let request = request();
+        assert_ne!(request.digest(), [0; 32]);
+        assert_ne!(request.digest(), [1; 32]);
+
+        let exact_ceiling = vec![0; 16_777_216];
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor(&exact_ceiling),
+            Err(ConformanceContractError::InvalidEncoding)
+        );
+        assert_eq!(
+            EvaluatorRequestV1::from_canonical_cbor(&exact_ceiling),
+            Err(ConformanceContractError::InvalidEncoding)
+        );
+
+        let mut exact_caps = profile();
+        exact_caps.evaluator_protocol.hard_caps = original_hard_caps();
+        exact_caps.profile_digest = exact_caps.digest();
+        assert!(exact_caps.validate().is_ok());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_profile_identity_and_order_validation_reject_each_single_change() {
+        reject_profile_change(
+            |value| value.compatibility_digest = [0; 32],
+            ConformanceContractError::FieldOutOfBounds,
+        );
+        reject_profile_change(
+            |value| value.limitations_digest = [0; 32],
+            ConformanceContractError::FieldOutOfBounds,
+        );
+        reject_profile_change(
+            |value| value.provenance_digest = [0; 32],
+            ConformanceContractError::FieldOutOfBounds,
+        );
+        reject_profile_change(
+            |value| value.execution_profile_digests = vec![digest(1), digest(1)],
+            ConformanceContractError::FieldOutOfBounds,
+        );
+        reject_profile_change(
+            |value| value.public_schema_digests.clear(),
+            ConformanceContractError::FieldOutOfBounds,
+        );
+        reject_profile_change(
+            |value| value.public_schema_digests = vec![digest(2), digest(2)],
+            ConformanceContractError::FieldOutOfBounds,
+        );
+        reject_profile_change(
+            |value| value.execution_profile_digests = vec![[0; 32]],
+            ConformanceContractError::FieldOutOfBounds,
+        );
+        reject_profile_change(
+            |value| value.public_schema_digests = vec![[0; 32]],
+            ConformanceContractError::FieldOutOfBounds,
+        );
+        reject_profile_change(
+            |value| value.fixtures[0].case_id = "".to_owned(),
+            ConformanceContractError::FieldOutOfBounds,
+        );
+        reject_profile_change(
+            |value| value.fixtures[0].public_schema_digest = [0; 32],
+            ConformanceContractError::FieldOutOfBounds,
+        );
+        reject_profile_change(
+            |value| value.fixtures[0].compatibility_digest = [0; 32],
+            ConformanceContractError::FieldOutOfBounds,
+        );
+        reject_profile_change(
+            |value| value.fixtures[0].modes = vec![ExecutionModeV1::Local, ExecutionModeV1::Local],
+            ConformanceContractError::FieldOutOfBounds,
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_request_identity_validation_rejects_each_authority_binding() {
+        let reject = |change: &dyn Fn(&mut EvaluatorRequestV1)| {
+            let mut value = request();
+            change(&mut value);
+            assert_eq!(
+                value.validate(),
+                Err(ConformanceContractError::FieldOutOfBounds)
+            );
+        };
+        reject(&|value| value.conformance_profile_digest = [0; 32]);
+        reject(&|value| value.fixture_bundle_digest = [0; 32]);
+        reject(&|value| value.subject_artifact_digest = [0; 32]);
+        reject(&|value| value.execution_profile_digest = [0; 32]);
+        reject(&|value| value.trust_policy_snapshot_digest = [0; 32]);
+        reject(&|value| value.evaluator_protocol_digest = [0; 32]);
+        reject(&|value| value.evaluator_hard_caps_digest = [0; 32]);
+        reject(&|value| value.output_capability.capability_digest = [0; 32]);
+        reject(&|value| value.output_capability.report_bytes_limit = 0);
+        reject(&|value| value.output_capability.diagnostic_bytes_limit = 1_048_577);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_fixture_members_provenance_and_divergence_reject_each_single_change() {
+        reject_profile_change(
+            |value| {
+                let input = value.fixtures[0].inputs[0].clone();
+                value.fixtures[0].inputs = vec![input.clone(), input]
+            },
+            ConformanceContractError::FieldOutOfBounds,
+        );
+        reject_profile_change(
+            |value| value.fixtures[0].inputs[0].member_id = "".to_owned(),
+            ConformanceContractError::ProvenanceMissing,
+        );
+        reject_profile_change(
+            |value| value.fixtures[0].inputs[0].digest = [0; 32],
+            ConformanceContractError::ProvenanceMissing,
+        );
+        reject_profile_change(
+            |value| value.fixtures[0].inputs[0].provenance_digest = [0; 32],
+            ConformanceContractError::ProvenanceMissing,
+        );
+        reject_profile_change(
+            |value| value.fixtures[0].provenance.notices_digest = [0; 32],
+            ConformanceContractError::ProvenanceMissing,
+        );
+        reject_profile_change(
+            |value| value.fixtures[0].provenance.source_digest = [0; 32],
+            ConformanceContractError::ProvenanceMissing,
+        );
+        reject_profile_change(
+            |value| value.fixtures[0].provenance.build_digest = [0; 32],
+            ConformanceContractError::ProvenanceMissing,
+        );
+        reject_profile_change(
+            |value| value.fixtures[0].provenance.publication_review_digest = [0; 32],
+            ConformanceContractError::ProvenanceMissing,
+        );
+        reject_profile_change(
+            |value| value.fixtures[0].provenance.limitations_digest = [0; 32],
+            ConformanceContractError::ProvenanceMissing,
+        );
+        reject_profile_change(
+            |value| {
+                value.fixtures[0].expected = ExpectedResultV1::CanonicalBytes {
+                    bytes: vec![1],
+                    digest: digest(99),
+                }
+            },
+            ConformanceContractError::FixtureDigestMismatch,
+        );
+        reject_profile_change(
+            |value| {
+                value.allowed_divergences = vec![
+                    AllowedDivergenceV1 {
+                        classification: 1,
+                        first_coordinate: b"b".to_vec(),
+                    },
+                    AllowedDivergenceV1 {
+                        classification: 1,
+                        first_coordinate: b"a".to_vec(),
+                    },
+                ]
+            },
+            ConformanceContractError::NonCanonicalOrder,
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_hard_cap_u64_boundaries_are_exact() {
+        let reject = |change: &dyn Fn(&mut EvaluatorHardCapsV1)| {
+            let mut caps = original_hard_caps();
+            change(&mut caps);
+            assert_eq!(
+                profile_with_hard_caps(caps).validate(),
+                Err(ConformanceContractError::FieldOutOfBounds)
+            );
+        };
+        let accept = |change: &dyn Fn(&mut EvaluatorHardCapsV1)| {
+            let mut caps = original_hard_caps();
+            change(&mut caps);
+            assert!(profile_with_hard_caps(caps).validate().is_ok());
+        };
+        reject(&|caps| caps.max_profile_bytes = 0);
+        reject(&|caps| caps.max_cases = 0);
+        reject(&|caps| caps.max_bundle_members = 0);
+        reject(&|caps| caps.max_member_bytes = 0);
+        reject(&|caps| caps.max_total_bundle_bytes = 0);
+        reject(&|caps| caps.max_compression_expansion = 0);
+        accept(&|caps| caps.max_profile_bytes = 1);
+        accept(&|caps| caps.max_cases = 1);
+        accept(&|caps| caps.max_bundle_members = 1);
+        accept(&|caps| caps.max_member_bytes = 1);
+        accept(&|caps| caps.max_total_bundle_bytes = 1);
+        accept(&|caps| caps.max_compression_expansion = 1);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_hard_cap_small_boundaries_are_exact() {
+        let reject = |change: &dyn Fn(&mut EvaluatorHardCapsV1)| {
+            let mut caps = original_hard_caps();
+            change(&mut caps);
+            assert_eq!(
+                profile_with_hard_caps(caps).validate(),
+                Err(ConformanceContractError::FieldOutOfBounds)
+            );
+        };
+        let accept = |change: &dyn Fn(&mut EvaluatorHardCapsV1)| {
+            let mut caps = original_hard_caps();
+            change(&mut caps);
+            assert!(profile_with_hard_caps(caps).validate().is_ok());
+        };
+        reject(&|caps| caps.max_member_path_bytes = 0);
+        reject(&|caps| caps.max_structural_nesting = 0);
+        reject(&|caps| caps.max_coordinate_bytes = 0);
+        accept(&|caps| caps.max_member_path_bytes = 1);
+        accept(&|caps| caps.max_structural_nesting = 1);
+        accept(&|caps| caps.max_coordinate_bytes = 1);
+        accept(&|caps| caps.max_diagnostic_bytes = 0);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_stable_identity_and_independence_requirements_are_individual() {
+        let reject_identity = |change: &dyn Fn(&mut ImplementationIdentityV1)| {
+            let mut first = stable_evidence("alpha", 30);
+            change(&mut first.implementation);
+            assert_eq!(
+                candidate().transition_to(
+                    ProfileLifecycleV1::Stable,
+                    vec![first, stable_evidence("beta", 40)],
+                ),
+                Err(ConformanceContractError::ProvenanceMissing)
+            );
+        };
+        reject_identity(&|identity| identity.implementation_id.clear());
+        reject_identity(&|identity| identity.organization_id = Some(String::new()));
+        reject_identity(&|identity| identity.build_digest = [0; 32]);
+        reject_identity(&|identity| identity.binary_digest = [0; 32]);
+        reject_identity(&|identity| identity.public_contract_digest = [0; 32]);
+
+        reject_stable_change(|value| value.independence.authorship_independent = false);
+        reject_stable_change(|value| value.independence.reviewer_ids.clear());
+        reject_stable_change(|value| {
+            value.independence.reviewer_ids = vec!["z".to_owned(), "a".to_owned()]
+        });
+        reject_stable_change(|value| value.independence.reviewer_ids = vec![String::new()]);
+        reject_stable_change(|value| value.independence.declaration_digest = [0; 32]);
+        reject_stable_change(|value| value.independence.shared_code_audit_digest = [0; 32]);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_stable_case_matching_rejects_each_authoritative_field_mismatch() {
+        reject_stable_change(|value| value.case_outcomes[0].case_id = "wrong".to_owned());
+        reject_stable_change(|value| {
+            value.case_outcomes[0].claim_layer = ClaimLayerV1::ReplayConformance;
+        });
+        reject_stable_change(|value| value.case_outcomes[0].execution_profile_digest = digest(99));
+        reject_stable_change(|value| value.case_outcomes[0].outcome = CaseOutcomeStatusV1::Fail);
+        reject_stable_change(|value| value.case_outcomes[0].expected_digest = Some(digest(99)));
+        reject_stable_change(|value| value.case_outcomes[0].actual_digest = Some(digest(99)));
+
+        let mut first = stable_evidence("beta", 30);
+        let second = stable_evidence("alpha", 40);
+        assert_eq!(
+            candidate().transition_to(ProfileLifecycleV1::Stable, vec![first.clone(), second]),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+        first.implementation.implementation_id = "alpha".to_owned();
+        assert_eq!(
+            candidate().transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![first, stable_evidence("alpha", 40)],
+            ),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_stable_matching_uses_the_declared_execution_mode() {
+        let mut local_only = profile();
+        local_only.fixtures[0].modes = vec![ExecutionModeV1::Local];
+        let candidate = local_only
+            .transition_to(ProfileLifecycleV1::Candidate, vec![])
+            .unwrap_or_else(|_| profile());
+        let mut first = stable_evidence("alpha", 30);
+        let mut second = stable_evidence("beta", 40);
+        first.case_outcomes.truncate(1);
+        second.case_outcomes.truncate(1);
+        assert!(candidate
+            .transition_to(ProfileLifecycleV1::Stable, vec![first, second])
+            .is_ok());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_protocol_member_and_provenance_boundaries_are_exact() {
+        reject_profile_change(
+            |value| value.evaluator_protocol.protocol_id.clear(),
+            ConformanceContractError::ProvenanceMissing,
+        );
+        reject_profile_change(
+            |value| value.evaluator_protocol.protocol_digest = [0; 32],
+            ConformanceContractError::ProvenanceMissing,
+        );
+        reject_profile_change(
+            |value| value.evaluator_protocol.report_schema_digest = [0; 32],
+            ConformanceContractError::ProvenanceMissing,
+        );
+        reject_profile_change(
+            |value| value.fixtures[0].inputs[0].member_id = "é".to_owned(),
+            ConformanceContractError::ProvenanceMissing,
+        );
+        reject_profile_change(
+            |value| value.fixtures[0].inputs[0].size_bytes = 67_108_865,
+            ConformanceContractError::ProvenanceMissing,
+        );
+
+        let mut exact_member = profile();
+        exact_member.fixtures[0].inputs[0].size_bytes = 67_108_864;
+        exact_member.profile_digest = exact_member.digest();
+        assert!(exact_member.validate().is_ok());
+
+        let mut many_reviewers = stable_evidence("alpha", 30);
+        many_reviewers.independence.reviewer_ids =
+            (0..33).map(|number| format!("r{number:02}")).collect();
+        assert_eq!(
+            candidate().transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![many_reviewers, stable_evidence("beta", 40)],
+            ),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_typed_failure_matching_requires_both_error_identities() {
+        let mut typed = profile();
+        typed.fixtures[0].expected =
+            ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ClosureIncomplete);
+        let typed_candidate = typed
+            .transition_to(ProfileLifecycleV1::Candidate, vec![])
+            .unwrap_or_else(|_| profile());
+        let reject = |mut first: StableImplementationEvidenceV1| {
+            for case in &mut first.case_outcomes {
+                case.expected_digest = None;
+                case.actual_digest = None;
+                case.expected_error = Some(SafeErrorCodeV1::ClosureIncomplete);
+                case.actual_error = Some(SafeErrorCodeV1::ClosureIncomplete);
+            }
+            first
+        };
+        let mut wrong_expected = reject(stable_evidence("alpha", 30));
+        wrong_expected.case_outcomes[0].expected_error = Some(SafeErrorCodeV1::DigestMismatch);
+        assert_eq!(
+            typed_candidate.transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![wrong_expected, reject(stable_evidence("beta", 40))],
+            ),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+        let mut wrong_actual = reject(stable_evidence("alpha", 30));
+        wrong_actual.case_outcomes[0].actual_error = Some(SafeErrorCodeV1::DigestMismatch);
+        assert_eq!(
+            typed_candidate.transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![wrong_actual, reject(stable_evidence("beta", 40))],
+            ),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_divergence_identity_and_coordinate_bounds_are_exact() {
+        let allowed = AllowedDivergenceV1 {
+            classification: 4,
+            first_coordinate: b"timeline/7".to_vec(),
+        };
+        reject_profile_change(
+            |value| {
+                value.allowed_divergences = vec![allowed.clone()];
+                value.fixtures[0].expected = ExpectedResultV1::AllowedDivergence {
+                    classification: 5,
+                    first_coordinate: b"timeline/7".to_vec(),
+                };
+            },
+            ConformanceContractError::DivergenceClassificationMismatch,
+        );
+        reject_profile_change(
+            |value| {
+                value.allowed_divergences = vec![allowed.clone()];
+                value.fixtures[0].expected = ExpectedResultV1::AllowedDivergence {
+                    classification: 4,
+                    first_coordinate: b"timeline/8".to_vec(),
+                };
+            },
+            ConformanceContractError::DivergenceClassificationMismatch,
+        );
+        reject_profile_change(
+            |value| {
+                value.allowed_divergences = vec![AllowedDivergenceV1 {
+                    classification: 4,
+                    first_coordinate: vec![b'a'; 129],
+                }];
+            },
+            ConformanceContractError::NonCanonicalOrder,
+        );
+
+        let mut exact = profile();
+        exact.allowed_divergences = vec![AllowedDivergenceV1 {
+            classification: 4,
+            first_coordinate: vec![b'a'; 128],
+        }];
+        exact.fixtures[0].expected = ExpectedResultV1::AllowedDivergence {
+            classification: 4,
+            first_coordinate: vec![b'a'; 128],
+        };
+        exact.profile_digest = exact.digest();
+        assert!(exact.validate().is_ok());
     }
 }
