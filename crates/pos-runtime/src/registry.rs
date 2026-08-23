@@ -2821,6 +2821,49 @@ mod tests {
             }
         }
 
+        struct AppendFailStore;
+
+        impl pos_core::store::EventStore for AppendFailStore {
+            fn create_timeline(
+                &mut self,
+                _: &str,
+            ) -> Result<pos_core::timeline::Timeline, CoreError> {
+                Err(CoreError::Storage("create timeline unavailable".to_owned()))
+            }
+
+            fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
+                Err(CoreError::Storage("append unavailable".to_owned()))
+            }
+
+            fn read(
+                &self,
+                _: TimelineId,
+                _: pos_core::store::SeqRange,
+            ) -> Result<Vec<Event>, CoreError> {
+                Ok(Vec::new())
+            }
+
+            fn fork(
+                &mut self,
+                _: TimelineId,
+                _: Seq,
+                _: &str,
+            ) -> Result<pos_core::timeline::Timeline, CoreError> {
+                Err(CoreError::Storage("fork unavailable".to_owned()))
+            }
+
+            fn list_timelines(&self) -> Result<Vec<pos_core::timeline::Timeline>, CoreError> {
+                Ok(Vec::new())
+            }
+
+            fn get_timeline(
+                &self,
+                _: TimelineId,
+            ) -> Result<Option<pos_core::timeline::Timeline>, CoreError> {
+                Ok(None)
+            }
+        }
+
         let timeline = TimelineId::new();
         let subject = EntityId::new();
         let authority = ConsentAuthority::new();
@@ -2867,15 +2910,10 @@ mod tests {
         store_error
             .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
             .test_ok();
-        let mut unknown_timeline_store = open_store(StoreConfig::Memory).test_ok();
+        let mut failing_store = AppendFailStore;
         assert!(matches!(
             store_error
-                .append_and_commit_step_at(
-                    unknown_timeline_store.as_mut(),
-                    Seq::ZERO,
-                    0,
-                    &append_drafts,
-                )
+                .append_and_commit_step_at(&mut failing_store, Seq::ZERO, 0, &append_drafts,)
                 .test_err(),
             RuntimeError::Store(CoreError::Storage(_))
         ));
