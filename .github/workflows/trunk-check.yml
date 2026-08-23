@@ -57,6 +57,17 @@ jobs:
             crates/pos-core/src/erasure_tests.rs
             crates/pos-core/src/lib.rs
 
+      - name: Publish formatter snapshot summary
+        run: |
+          for file in crates/pos-core/src/erasure.rs crates/pos-core/src/erasure_codec.rs crates/pos-core/src/erasure_tests.rs crates/pos-core/src/lib.rs; do
+            {
+              echo "### $file"
+              echo '```rust'
+              sed 's/```/` ` `/g' "$file"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          done
+
       - name: Trunk Check
         uses: trunk-io/trunk-action@e1234e67a86010d61ddac8d8ebf4b783e2ffd2fa # v2.0.0
         with:

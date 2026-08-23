@@ -1331,9 +1331,9 @@
         let resolver = TestResolver {
             states: vec![
                 submitted.clone(),
-                authorized,
-                frozen,
-                dispatched,
+                authorized.clone(),
+                frozen.clone(),
+                dispatched.clone(),
                 waiting.clone(),
                 terminal.clone(),
             ],
