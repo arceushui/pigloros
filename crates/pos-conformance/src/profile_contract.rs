@@ -24,6 +24,7 @@ const MAX_PROFILE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EXECUTION_PROFILES: usize = 64;
 const MAX_FIXTURES: usize = 65_536;
 const MAX_STRING_BYTES: usize = 256;
+const MAX_SEMVER_COMPONENT_BYTES: usize = 10;
 const MAX_COORDINATE_BYTES: usize = 128;
 const MAX_DIAGNOSTIC_BYTES: u64 = 1024 * 1024;
 const MAX_MEMBER_BYTES: u64 = 64 * 1024 * 1024;
@@ -1514,6 +1515,7 @@ fn semantic_version(value: &str) -> bool {
 
 fn numeric_identifier(value: &str) -> bool {
     !value.is_empty()
+        && value.len() <= MAX_SEMVER_COMPONENT_BYTES
         && (value == "0" || !value.starts_with('0'))
         && value.bytes().all(|byte| byte.is_ascii_digit())
 }
