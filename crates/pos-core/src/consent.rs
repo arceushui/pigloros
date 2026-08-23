@@ -526,6 +526,7 @@ mod tests {
     }
 
     impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn test_ok(self) -> T {
             self.unwrap_or_else(|error| {
                 std::panic::resume_unwind(Box::new(format!(
@@ -540,6 +541,7 @@ mod tests {
     }
 
     impl<T, E: std::fmt::Debug> TestErrorExt<E> for Result<T, E> {
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn test_err(self) -> E {
             match self {
                 Ok(_) => std::panic::resume_unwind(Box::new("expected consent fixture error")),
