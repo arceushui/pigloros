@@ -3481,7 +3481,7 @@ mod tests {
                 assert_eq!(state.commits, 1, "{path:?} {case:?}");
                 assert_eq!(state.committed_tick, 1, "{path:?} {case:?}");
                 assert_eq!(state.aborts, 0, "{path:?} {case:?}");
-                assert_eq!(state.capture_commits, [1], "{path:?} {case:?}");
+                assert_eq!(state.capture_commits, [0, 1], "{path:?} {case:?}");
             }
             TransactionCase::SchemaFailure
             | TransactionCase::AppendFailure
@@ -3497,7 +3497,7 @@ mod tests {
                 assert_eq!(state.commits, 1, "{path:?} {case:?}");
                 assert_eq!(state.committed_tick, 1, "{path:?} {case:?}");
                 assert_eq!(state.aborts, 0, "{path:?} {case:?}");
-                assert_eq!(state.capture_commits, [1], "{path:?} {case:?}");
+                assert_eq!(state.capture_commits, [0, 1], "{path:?} {case:?}");
             }
         }
         drop(state);
