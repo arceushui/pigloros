@@ -308,7 +308,7 @@ impl ErasureRequestV1 {
     ///
     /// Returns a closed error for malformed, unsupported, or invalid scope evidence.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
-        decode_limited(bytes, ERASURE_REQUEST_OR_STATE_MAX_BYTES)
+        decode_limited(bytes, ERASURE_REQUEST_OR_STATE_MAX_BYTES, ERASURE_MAX_REFERENCES)
             .and_then(|value| exact_array(&value, 12).and_then(request_from_fields))
     }
 }
@@ -654,7 +654,7 @@ impl ErasureStateV1 {
     ///
     /// Returns a closed error for malformed state, invalid evidence, or digest mismatch.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
-        decode_limited(bytes, ERASURE_REQUEST_OR_STATE_MAX_BYTES)
+        decode_limited(bytes, ERASURE_REQUEST_OR_STATE_MAX_BYTES, ERASURE_MAX_REFERENCES)
             .and_then(|value| exact_array(&value, 12).and_then(state_from_fields))
     }
     fn with_digest(mut self) -> Result<Self, ErasureErrorV1> {
@@ -846,6 +846,7 @@ impl ErasureReceiptV1 {
         input.failed_owners.sort_unstable();
         if has_duplicate(&input.required_targets)
             || has_duplicate_by_target(&input.acknowledgements)
+            || input.acknowledgements.iter().any(|acknowledgement| acknowledgement.owner != acknowledgement.target.replica_id)
             || invalid_owner_sets(&input.pending_owners, &input.failed_owners)
         {
             return Err(ErasureErrorV1::ScopeInvalid);
@@ -890,7 +891,7 @@ impl ErasureReceiptV1 {
     ///
     /// Returns a closed error for malformed, noncanonical, or conflicting evidence.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
-        decode_limited(bytes, ERASURE_RECEIPT_MAX_BYTES)
+        decode_limited(bytes, ERASURE_RECEIPT_MAX_BYTES, ERASURE_MAX_INVENTORY_RESULTS)
             .and_then(|value| exact_array(&value, 18).and_then(receipt_from_fields))
     }
     /// Return the terminal ERS1 digest bound into this receipt.
@@ -1146,6 +1147,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         if !record.targets.contains(&acknowledgement.target) { return Err(ErasureErrorV1::Unauthorized); }
+        if acknowledgement.owner != acknowledgement.target.replica_id { return Err(ErasureErrorV1::Unauthorized); }
         if record.acknowledgements.contains(&acknowledgement) { return Ok(record.state.clone()); }
         if record.acknowledgements.iter().any(|existing| existing.target == acknowledgement.target) { return Err(ErasureErrorV1::PolicyConflict); }
         record.acknowledgements.push(acknowledgement);
@@ -1874,11 +1876,11 @@ fn encode_limited(value: &Value, maximum: usize) -> Result<Vec<u8>, ErasureError
         }
     })
 }
-fn decode_limited(bytes: &[u8], maximum: usize) -> Result<Value, ErasureErrorV1> {
+fn decode_limited(bytes: &[u8], maximum: usize, maximum_array: usize) -> Result<Value, ErasureErrorV1> {
     if bytes.len() > maximum {
         return Err(ErasureErrorV1::ScopeInvalid);
     }
-    cbor_shape_is_bounded(bytes).and_then(|()| {
+    cbor_shape_is_bounded(bytes, maximum_array).and_then(|()| {
         let mut cursor = Cursor::new(bytes);
         match ciborium::from_reader(&mut cursor) {
             Ok(value) => {
@@ -1897,8 +1899,8 @@ fn decode_limited(bytes: &[u8], maximum: usize) -> Result<Value, ErasureErrorV1>
         }
     })
 }
-fn cbor_shape_is_bounded(bytes: &[u8]) -> Result<(), ErasureErrorV1> {
-    cbor_item_end(bytes, 0, 0).and_then(|end| {
+fn cbor_shape_is_bounded(bytes: &[u8], maximum_array: usize) -> Result<(), ErasureErrorV1> {
+    cbor_item_end(bytes, 0, 0, maximum_array).and_then(|end| {
         if end == bytes.len() {
             Ok(())
         } else {
@@ -1906,7 +1908,7 @@ fn cbor_shape_is_bounded(bytes: &[u8]) -> Result<(), ErasureErrorV1> {
         }
     })
 }
-fn cbor_item_end(bytes: &[u8], offset: usize, depth: usize) -> Result<usize, ErasureErrorV1> {
+fn cbor_item_end(bytes: &[u8], offset: usize, depth: usize, maximum_array: usize) -> Result<usize, ErasureErrorV1> {
     if depth > 16 || offset >= bytes.len() {
         return Err(ErasureErrorV1::InvalidEncoding);
     }
@@ -1918,8 +1920,8 @@ fn cbor_item_end(bytes: &[u8], offset: usize, depth: usize) -> Result<usize, Era
             Ok(length) if length <= bytes.len().saturating_sub(next) => Ok(next + length),
             _ => Err(ErasureErrorV1::InvalidEncoding),
         },
-        4 if argument <= ERASURE_MAX_INVENTORY_RESULTS as u64 => {
-            cbor_array_end(bytes, next, depth + 1, argument)
+        4 if argument <= maximum_array as u64 => {
+            cbor_array_end(bytes, next, depth + 1, argument, maximum_array)
         }
         7 if argument <= 22 => Ok(next),
         _ => Err(ErasureErrorV1::InvalidEncoding),
@@ -1930,9 +1932,10 @@ fn cbor_array_end(
     mut offset: usize,
     depth: usize,
     count: u64,
+    maximum_array: usize,
 ) -> Result<usize, ErasureErrorV1> {
     for _ in 0..count {
-        let Ok(next) = cbor_item_end(bytes, offset, depth) else {
+        let Ok(next) = cbor_item_end(bytes, offset, depth, maximum_array) else {
             return Err(ErasureErrorV1::InvalidEncoding);
         };
         offset = next;
@@ -1980,13 +1983,10 @@ fn array(value: &Value, maximum: usize) -> Result<&[Value], ErasureErrorV1> {
     }
 }
 fn exact_array(value: &Value, expected: usize) -> Result<&[Value], ErasureErrorV1> {
-    array(value, expected).and_then(|values| {
-        if values.len() == expected {
-            Ok(values)
-        } else {
-            Err(ErasureErrorV1::InvalidEncoding)
-        }
-    })
+    match value {
+        Value::Array(values) if values.len() == expected => Ok(values),
+        _ => Err(ErasureErrorV1::InvalidEncoding),
+    }
 }
 fn string(value: &Value) -> Result<&str, ErasureErrorV1> {
     match value {
@@ -2125,7 +2125,7 @@ mod tests {
                 replica_set: reference(owner + 30),
                 replica_id: reference(owner + 40),
             },
-            owner: reference(owner),
+            owner: reference(owner + 40),
             evidence: reference(owner + 20),
             outcome,
         }
