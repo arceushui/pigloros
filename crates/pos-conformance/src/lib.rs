@@ -24,7 +24,7 @@ pub use profile_contract::{
     ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1, FixtureInputMemberV1,
     FixtureProvenanceV1, IndependenceRequirementsV1, ProfileLifecycleV1,
     StableEvidenceAttestationV1, StableImplementationEvidenceV1, SubjectAdapterKindV1,
-    CONFORMANCE_PROFILE_MAGIC_V1, EVALUATOR_REQUEST_MAGIC_V1,
+    TrustedRootPolicyV1, CONFORMANCE_PROFILE_MAGIC_V1, EVALUATOR_REQUEST_MAGIC_V1,
 };
 
 /// Version of the first independent proof-evidence envelope.
@@ -1262,7 +1262,10 @@ fn matrix_digest(domain: &[u8], seed: [u8; 32], descriptor: &[u8]) -> [u8; 32] {
     *blake3::hash(&input).as_bytes()
 }
 
-/// Conformance report, with 24 logical fields represented by these grouped values.
+/// Conformance report, with 24 logical fields represented by these grouped
+/// values. `execution_profile_digest` identifies the selected report authority;
+/// each case also carries its own profile digest so one CNR can bind a CPF
+/// matrix containing multiple execution profiles.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConformanceReportV1 {
@@ -5768,9 +5771,6 @@ fn validate_conformance_report_shape(report: &ConformanceReportV1) -> Result<(),
     let mut weakest_replay_claim = ReplayClaimV1::Exact;
     for case in &report.cases {
         validate_conformance_case(case, &mut case_keys)?;
-        if case.execution_profile_digest != report.execution_profile_digest {
-            return Err(EvidenceError::InvalidConformanceReport);
-        }
         weakest_redaction = weakest_redaction.max(case.redaction_state);
         weakest_replay_claim = weakest_replay_claim.max(case.replay_claim);
         match case.outcome {
@@ -6858,21 +6858,12 @@ pub mod tests {
             Err(EvidenceError::InvalidConformanceReport)
         );
 
-        let mut mismatched_case_profile =
-            ciborium::from_reader::<Value, _>(Cursor::new(&bytes)).unwrap_or(Value::Null);
-        if let Value::Array(ref mut values) = mismatched_case_profile {
-            if let Value::Array(ref mut cases) = values[13] {
-                if let Value::Array(ref mut case_fields) = cases[0] {
-                    case_fields[2] = Value::Bytes(vec![99; 32]);
-                }
-            }
-        }
-        let mut malformed = Vec::new();
-        ciborium::into_writer(&mismatched_case_profile, &mut malformed).unwrap_or_default();
-        assert_eq!(
-            ConformanceReportV1::from_canonical_cbor(&malformed),
-            Err(EvidenceError::InvalidConformanceReport)
-        );
+        let mut mixed_profile_report = report.clone();
+        mixed_profile_report.cases[0].execution_profile_digest = [99; 32];
+        mixed_profile_report.report_digest = mixed_profile_report.digest().unwrap_or([0; 32]);
+        // CNR1 permits a per-case execution-profile matrix; CPF1 performs
+        // the authoritative fixture/profile membership check.
+        assert_eq!(mixed_profile_report.validate(), Ok(()));
 
         let mut unordered_cases =
             ciborium::from_reader::<Value, _>(Cursor::new(&bytes)).unwrap_or(Value::Null);
