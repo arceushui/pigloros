@@ -8,6 +8,7 @@
     #[derive(Clone)]
     struct TestCoordinatorPort {
         accepted: bool,
+        acknowledgement_admitted: bool,
         targets: Vec<ErasureRequiredTargetV1>,
         records: Rc<RefCell<Vec<ErasureCoordinatorRecordV1>>>,
     }
@@ -44,6 +45,17 @@
         ) -> Result<(), ErasureErrorV1> {
             Ok(())
         }
+        fn admit_acknowledgement(
+            &self,
+            _request: ErasureReferenceV1,
+            _acknowledgement: &ErasureAcknowledgementV1,
+        ) -> Result<(), ErasureErrorV1> {
+            if self.acknowledgement_admitted {
+                Ok(())
+            } else {
+                Err(ErasureErrorV1::Unauthorized)
+            }
+        }
         fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
             Ok(())
         }
@@ -68,15 +80,19 @@
                 .find(|existing| existing.request.reference() == record.request.reference())
             {
                 *existing = record;
-                Ok(())
             } else {
                 records.push(record);
-                Ok(())
             }
+            Ok(())
         }
     }
     fn test_port(accepted: bool, targets: Vec<ErasureRequiredTargetV1>) -> TestCoordinatorPort {
-        TestCoordinatorPort { accepted, targets, records: Rc::new(RefCell::new(Vec::new())) }
+        TestCoordinatorPort {
+            accepted,
+            acknowledgement_admitted: true,
+            targets,
+            records: Rc::new(RefCell::new(Vec::new())),
+        }
     }
     fn reference(value: u8) -> ErasureReferenceV1 {
         ErasureReferenceV1::from_digest([value; 32])
@@ -173,6 +189,7 @@
         ErasureReceiptInputV1 {
             request: reference(1),
             terminal_state: reference(6),
+            coordinator: reference(2),
             lifecycle,
             freeze_position: 10,
             required_targets,
@@ -474,6 +491,25 @@
         for invalid in [&[0x18, 0][..], &[0x1a, 0, 0, 0, 1][..], &[0x60, 0][..]] {
             assert_eq!(ErasureReceiptV1::from_canonical_cbor(invalid), Err(ErasureErrorV1::InvalidEncoding));
         }
+        Ok(())
+    }
+    #[test]
+    fn coordinator_requires_host_admission_for_acknowledgements() -> Result<(), ErasureErrorV1> {
+        let ack = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
+        let mut port = test_port(true, vec![ack.target]);
+        port.acknowledgement_admitted = false;
+        let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+        coordinator.submit(request()?, reference(3))?;
+        coordinator.authorize(reference(1), reference(9))?;
+        coordinator.freeze_inventory(
+            reference(1),
+            change(ErasureLifecycleV1::AccessFrozen, Some(10), Vec::new(), Vec::new()),
+        )?;
+        coordinator.dispatch_destruction(reference(1), reference(9))?;
+        assert_eq!(
+            coordinator.acknowledge(reference(1), ack),
+            Err(ErasureErrorV1::Unauthorized)
+        );
         Ok(())
     }
     #[test]
@@ -1248,16 +1284,6 @@
 
     #[test]
     fn public_receipt_history_rejects_each_terminal_and_predecessor_mismatch() -> Result<(), ErasureErrorV1> {
-        struct ReplyResolver(ErasureStateV1);
-        impl ErasureStateResolverV1 for ReplyResolver {
-            fn resolve_state(
-                &self,
-                _digest: ErasureReferenceV1,
-            ) -> Result<Option<ErasureStateV1>, ErasureErrorV1> {
-                Ok(Some(self.0.clone()))
-            }
-        }
-
         let submitted = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
         let authorized = submitted.transition(change(
             ErasureLifecycleV1::Authorized,
@@ -1334,15 +1360,28 @@
             );
         }
 
-        let mut bad_lifecycle = waiting.clone();
-        bad_lifecycle.lifecycle = ErasureLifecycleV1::PartialFailure;
-        let mut bad_freeze = waiting.clone();
-        bad_freeze.freeze_position = Some(11);
-        let mut bad_replay = waiting;
-        bad_replay.replay_claim = ErasureReplayClaimV1::IncompatibleProfile;
-        for previous in [submitted, bad_lifecycle, bad_freeze, bad_replay] {
+        struct ReplyResolver {
+            terminal: ErasureStateV1,
+            previous: ErasureStateV1,
+        }
+        impl ErasureStateResolverV1 for ReplyResolver {
+            fn resolve_state(
+                &self,
+                digest: ErasureReferenceV1,
+            ) -> Result<Option<ErasureStateV1>, ErasureErrorV1> {
+                if digest == self.terminal.state_digest() {
+                    Ok(Some(self.terminal.clone()))
+                } else {
+                    Ok(Some(self.previous.clone()))
+                }
+            }
+        }
+        for previous in [submitted, authorized, frozen, dispatched] {
             assert_eq!(
-                verify_predecessor_chain(terminal.clone(), &ReplyResolver(previous)),
+                ErasureReceiptV1::new(input.clone())?.verify_history(&ReplyResolver {
+                    terminal: terminal.clone(),
+                    previous,
+                }),
                 Err(ErasureErrorV1::ProvenanceMissing)
             );
         }
