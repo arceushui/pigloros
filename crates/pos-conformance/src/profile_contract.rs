@@ -4116,6 +4116,7 @@ mod tests {
 
     #[test]
     fn public_stable_profile_decoder_reaches_nested_invalid_field_seams() {
+        let policy = trusted_root_policy();
         let value = profile();
         let candidate = value
             .transition_to(ProfileLifecycleV1::Candidate, vec![])
@@ -4129,25 +4130,43 @@ mod tests {
             .unwrap_or_else(|_| value.clone());
         for index in 0..6 {
             let bytes = malformed_profile_bytes(&stable, &[16, 0, index], Value::Null);
-            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+            assert!(
+                ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&bytes, &policy)
+                    .is_err()
+            );
         }
         for index in 0..6 {
             let bytes = malformed_profile_bytes(&stable, &[16, 0, 0, index], Value::Null);
-            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+            assert!(
+                ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&bytes, &policy)
+                    .is_err()
+            );
             let bytes = malformed_profile_bytes(&stable, &[16, 0, 1, index], Value::Null);
-            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+            assert!(
+                ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&bytes, &policy)
+                    .is_err()
+            );
         }
         for index in 0..16 {
             let bytes = malformed_profile_bytes(&stable, &[16, 0, 4, 0, index], Value::Null);
-            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+            assert!(
+                ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&bytes, &policy)
+                    .is_err()
+            );
         }
         for index in 0..24 {
             let bytes = malformed_profile_bytes(&stable, &[16, 0, 3, index], Value::Null);
-            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+            assert!(
+                ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&bytes, &policy)
+                    .is_err()
+            );
         }
         for index in 0..3 {
             let bytes = malformed_profile_bytes(&stable, &[16, 0, 5, index], Value::Null);
-            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+            assert!(
+                ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&bytes, &policy)
+                    .is_err()
+            );
         }
     }
 
