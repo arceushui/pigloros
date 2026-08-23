@@ -3715,13 +3715,14 @@ mod tests {
             )
             .test_ok();
         let mut session = experiment.start().test_ok();
+        let first_tick = session.step_tick();
         assert!(matches!(
-            session.step_tick().test_ok(),
-            TickOutcome::Advanced {
+            first_tick,
+            Ok(TickOutcome::Advanced {
                 emitted_events: 1,
                 ..
-            }
-        ));
+            })
+        ), "first driver boundary must advance: {first_tick:?}");
         let timeline_id = session.timeline().id();
         session.revoke_consent_for_subject_at_boundary("subject");
         assert!(matches!(
@@ -3732,13 +3733,14 @@ mod tests {
             )]),
             Err(ExperimentError::ConsentRevoked)
         ));
+        let revocation_boundary = session.step_tick();
         assert!(matches!(
-            session.step_tick().test_ok(),
-            TickOutcome::Advanced {
+            revocation_boundary,
+            Ok(TickOutcome::Advanced {
                 emitted_events: 1,
                 ..
-            }
-        ));
+            })
+        ), "host revocation boundary must commit the canonical marker: {revocation_boundary:?}");
         assert_eq!(session.step_tick().test_ok(), TickOutcome::Stopped);
         drop(session);
 
@@ -3760,8 +3762,14 @@ mod tests {
                 Some(Box::new(FixedDriver::new(entity, "consent.event", 1))),
             )
             .test_ok();
-        let mut resumed = recovery.resume(timeline_id).test_ok();
-        assert_eq!(resumed.step_tick().test_ok(), TickOutcome::Stopped);
+        let resumed_result = recovery.resume(timeline_id);
+        assert!(resumed_result.is_ok(), "durable resume must accept the canonical host marker: {resumed_result:?}");
+        let mut resumed = resumed_result.test_ok();
+        let resumed_outcome = resumed.step_tick();
+        assert!(
+            matches!(resumed_outcome, Ok(TickOutcome::Stopped)),
+            "the durable revocation marker must close the resumed session: {resumed_outcome:?}"
+        );
         assert!(matches!(
             resumed.append_events(&[EventDraft::new(
                 entity,
