@@ -488,21 +488,21 @@ fn validate_fixture(
             .windows(2)
             .any(|pair| pair[0].member_id >= pair[1].member_id)
     {
-        return Err(
-            if !profile
-                .execution_profile_digests
-                .contains(&fixture.execution_profile_digest)
-            {
-                ConformanceContractError::UnknownExecutionProfile
-            } else if !profile
-                .public_schema_digests
-                .contains(&fixture.public_schema_digest)
-            {
-                ConformanceContractError::UnknownPublicSchema
-            } else {
-                ConformanceContractError::FieldOutOfBounds
-            },
-        );
+        return Err(if zero_digest(&fixture.public_schema_digest) {
+            ConformanceContractError::FieldOutOfBounds
+        } else if !profile
+            .execution_profile_digests
+            .contains(&fixture.execution_profile_digest)
+        {
+            ConformanceContractError::UnknownExecutionProfile
+        } else if !profile
+            .public_schema_digests
+            .contains(&fixture.public_schema_digest)
+        {
+            ConformanceContractError::UnknownPublicSchema
+        } else {
+            ConformanceContractError::FieldOutOfBounds
+        });
     }
     fixture
         .inputs
@@ -2113,8 +2113,8 @@ mod tests {
         for value in [
             ConformanceContractError::InvalidEncoding,
             ConformanceContractError::UnsupportedVersion,
-            ConformanceContractError::FieldOutOfBounds,
             ConformanceContractError::NonCanonicalOrder,
+            ConformanceContractError::FieldOutOfBounds,
             ConformanceContractError::FixtureDigestMismatch,
             ConformanceContractError::ExpectedResultMissing,
             ConformanceContractError::IndependenceEvidenceMissing,
@@ -2470,7 +2470,7 @@ mod tests {
                     first_coordinate: vec![],
                 }];
             },
-            ConformanceContractError::NonCanonicalOrder,
+            ConformanceContractError::FieldOutOfBounds,
         );
 
         let mut candidate = profile();
