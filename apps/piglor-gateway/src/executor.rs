@@ -1691,8 +1691,8 @@ fn execute_append_consent_revocation_command(
         })
         .map(|mut events| events.remove(0));
     match result {
-        Ok(mut events) => match reservation.commit_durable() {
-            Ok(()) => drop(reply.send(Ok(events.remove(0)))),
+        Ok(event) => match reservation.commit_durable() {
+            Ok(()) => drop(reply.send(Ok(event))),
             Err(_) => drop(reply.send(Err(StoreExecutorError::Store(
                 CoreError::Storage(
                     "consent revocation session disappeared after append".to_owned(),
