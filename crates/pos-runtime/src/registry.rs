@@ -496,7 +496,7 @@ impl PluginRegistry {
         let gate = self.consent_gate.as_ref();
         for draft in drafts {
             let gate = gate.ok_or(RuntimeError::ConsentOperationUnavailable)?;
-            let subject = protected_token.map_or(draft.entity, |token| token.subject_id());
+            let subject = protected_token.map_or(draft.entity, ConsentCapabilityToken::subject_id);
             match protected_token {
                 Some(token) => {
                     token

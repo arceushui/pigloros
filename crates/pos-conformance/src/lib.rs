@@ -627,7 +627,9 @@ pub enum PluginFailureClassV1 {
 }
 
 /// Auditable Gateway revocation or host-owned closure at a completed Tick
-/// Boundary. The experiment closure marker is never a consent revocation and
+/// Boundary.
+///
+/// The experiment closure marker is never a consent revocation and
 /// cannot rehydrate or authorize a `ConsentAuthority` session.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
