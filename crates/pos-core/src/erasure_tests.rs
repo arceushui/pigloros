@@ -1366,36 +1366,6 @@ fn receipt_public_seam_rejections() {
         ErasureReceiptV1::new(oversized),
         Err(ErasureErrorV1::ScopeInvalid)
     );
-    let mut oversized_inventory = receipt_input(
-        ErasureLifecycleV1::PartialFailure,
-        Vec::new(),
-        vec![reference(8)],
-        Vec::new(),
-    );
-    oversized_inventory.inventories.artifacts =
-        vec![inventory_result(ack.target); ERASURE_MAX_INVENTORY_RESULTS + 1];
-    assert_eq!(
-        ErasureReceiptV1::new(oversized_inventory),
-        Err(ErasureErrorV1::ScopeInvalid)
-    );
-    let second_target = acknowledgement(2, ErasureAcknowledgementOutcomeV1::Acknowledged);
-    let mut incomplete_closure = receipt_input(
-        ErasureLifecycleV1::Complete,
-        vec![ack],
-        vec![second_target.owner],
-        Vec::new(),
-    );
-    incomplete_closure
-        .required_targets
-        .push(second_target.target);
-    incomplete_closure
-        .inventories
-        .artifacts
-        .push(inventory_result(second_target.target));
-    assert_eq!(
-        ErasureReceiptV1::new(incomplete_closure),
-        Err(ErasureErrorV1::PolicyConflict)
-    );
     let mut strengthened = receipt_input(
         ErasureLifecycleV1::Complete,
         vec![ack],
@@ -1415,6 +1385,43 @@ fn receipt_public_seam_rejections() {
         );
     }
 }
+
+#[test]
+fn receipt_public_inventory_and_closure_boundaries() {
+    let ack = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
+    let mut oversized_inventory = receipt_input(
+        ErasureLifecycleV1::PartialFailure,
+        Vec::new(),
+        vec![reference(8)],
+        Vec::new(),
+    );
+    oversized_inventory.inventories.artifacts =
+        vec![inventory_result(ack.target); ERASURE_MAX_INVENTORY_RESULTS + 1];
+    assert_eq!(
+        ErasureReceiptV1::new(oversized_inventory),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
+    let second_target = acknowledgement(2, ErasureAcknowledgementOutcomeV1::Acknowledged);
+    let mut incomplete_closure = receipt_input(
+        ErasureLifecycleV1::Complete,
+        vec![ack],
+        vec![second_target.owner],
+        Vec::new(),
+    );
+    incomplete_closure
+        .required_targets
+        .push(second_target.target);
+    incomplete_closure
+        .inventories
+        .artifacts
+        .push(inventory_result(second_target.target));
+    assert_eq!(
+        ErasureReceiptV1::new(incomplete_closure),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+}
+
 #[test]
 fn coordinator_requires_host_admission_for_acknowledgements() -> Result<(), ErasureErrorV1> {
     let ack = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
