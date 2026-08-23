@@ -3833,8 +3833,7 @@ mod tests {
         typed.fixtures[0].expected =
             ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ClosureIncomplete);
         typed.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::InvalidManifest;
-        typed.fixtures[0].expected_verification_error =
-            Some(SafeErrorCodeV1::ClosureIncomplete);
+        typed.fixtures[0].expected_verification_error = Some(SafeErrorCodeV1::ClosureIncomplete);
         let typed = typed
             .transition_to(ProfileLifecycleV1::Candidate, vec![])
             .unwrap_or_else(|_| profile());
@@ -3983,12 +3982,14 @@ mod tests {
         value.fixtures[0].inputs[0].size_bytes = 256;
         value.profile_digest = value.digest();
         let encoded = value.to_canonical_cbor().unwrap_or_default();
-        assert_eq!(ConformanceProfileV1::from_canonical_cbor(&encoded), Ok(value));
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor(&encoded),
+            Ok(value)
+        );
 
-        assert!(ConformanceProfileV1::from_canonical_cbor(&[
-            0x9b_u8, 0, 0, 0, 0, 0, 0, 0, 1,
-        ])
-        .is_err());
+        assert!(
+            ConformanceProfileV1::from_canonical_cbor(&[0x9b_u8, 0, 0, 0, 0, 0, 0, 0, 1,]).is_err()
+        );
         assert!(ConformanceProfileV1::from_canonical_cbor(&[0x7f_u8, 0xff]).is_err());
     }
 }
