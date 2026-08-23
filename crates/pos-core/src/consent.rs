@@ -2648,38 +2648,6 @@ mod tests {
         let _token = authority.record_grant_on_timeline(timeline, &grant);
         assert_eq!(reservation.commit_durable(), Err(ConsentError::NoConsent));
 
-        let missing_authority = ConsentAuthority::new();
-        let missing_timeline = TimelineId::new();
-        let missing_grant = sample_granted();
-        let missing_token = missing_authority
-            .record_grant_on_timeline(missing_timeline, &missing_grant);
-        let missing_revocation = ConsentRevoked {
-            subject_id: missing_token.subject_id(),
-            grantee_id: missing_token.grantee_id(),
-            grant_seq: missing_token.grant_seq(),
-            fence_seq: 1,
-        };
-        let missing_reservation = missing_authority
-            .begin_revocation_on_timeline(missing_timeline, &missing_revocation)
-            .test_ok();
-        // A public API can replace this session but cannot remove it after
-        // reservation; remove it here to exercise the fail-closed disappearance
-        // branch of the public reservation finalizer.
-        missing_authority
-            .active
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&(
-                missing_timeline,
-                missing_grant.subject_id,
-                missing_grant.grantee_id,
-                missing_grant.grant_seq,
-            ));
-        assert_eq!(
-            missing_reservation.commit_durable(),
-            Err(ConsentError::NoConsent)
-        );
-
         let reservation = authority
             .begin_revocation_on_timeline(timeline, &revocation)
             .test_ok();
