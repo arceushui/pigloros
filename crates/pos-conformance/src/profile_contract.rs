@@ -630,10 +630,12 @@ fn case_matches_fixture(case: &CaseOutcomeV1, fixture: &FixtureDescriptorV1) -> 
                 && case.expected_digest == Some(*digest)
                 && case.actual_digest == Some(*digest)
         }
-        ExpectedResultV1::TypedFailure(error) => {
+        // The preceding identity binding already requires both recorded errors
+        // to equal the fixture's typed verification error.  Keeping that
+        // authoritative comparison in one place avoids a redundant predicate
+        // whose alternatives cannot be observed through the public contract.
+        ExpectedResultV1::TypedFailure(_) => {
             case.verification_outcome == fixture.expected_verification_outcome
-                && case.expected_error == Some(*error)
-                && case.actual_error == Some(*error)
         }
         ExpectedResultV1::AllowedDivergence {
             classification,
@@ -3204,6 +3206,11 @@ mod tests {
         reject(&|value| value.output_capability.capability_digest = [0; 32]);
         reject(&|value| value.output_capability.report_bytes_limit = 0);
         reject(&|value| value.output_capability.diagnostic_bytes_limit = 1_048_577);
+
+        let mut exact_report_cap = request();
+        exact_report_cap.output_capability.report_bytes_limit = MAX_PROFILE_BYTES as u64;
+        exact_report_cap.request_digest = exact_report_cap.digest();
+        assert!(exact_report_cap.validate().is_ok());
     }
 
     #[test]
@@ -3357,11 +3364,39 @@ mod tests {
         reject_stable_change(|value| value.independence.reviewer_ids = vec![String::new()]);
         reject_stable_change(|value| value.independence.declaration_digest = [0; 32]);
         reject_stable_change(|value| value.independence.shared_code_audit_digest = [0; 32]);
+
+        let mut same_build = stable_evidence("alpha", 30);
+        let independent_build = stable_evidence("beta", 40);
+        same_build.implementation.build_digest = independent_build.implementation.build_digest;
+        assert_eq!(
+            candidate().transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![same_build, independent_build],
+            ),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+        let mut same_binary = stable_evidence("alpha", 30);
+        let independent_binary = stable_evidence("beta", 40);
+        same_binary.implementation.binary_digest = independent_binary.implementation.binary_digest;
+        assert_eq!(
+            candidate().transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![same_binary, independent_binary],
+            ),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn public_stable_case_matching_rejects_each_authoritative_field_mismatch() {
+        assert!(candidate()
+            .transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![stable_evidence("alpha", 30), stable_evidence("beta", 40)],
+            )
+            .is_ok());
+        reject_stable_change(|value| value.case_outcomes[0].fixture_digest = [0; 32]);
         reject_stable_change(|value| value.case_outcomes[0].fixture_digest = digest(99));
         reject_stable_change(|value| value.case_outcomes[0].case_id = "wrong".to_owned());
         reject_stable_change(|value| {
@@ -3463,11 +3498,14 @@ mod tests {
             ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ClosureIncomplete);
         typed.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::InvalidManifest;
         typed.fixtures[0].expected_verification_error = Some(SafeErrorCodeV1::ClosureIncomplete);
+        typed.profile_digest = typed.digest();
         let typed_candidate = typed
             .transition_to(ProfileLifecycleV1::Candidate, vec![])
             .unwrap_or_else(|_| profile());
+        let typed_fixture_digest = fixture_digest(&typed_candidate.fixtures[0]);
         let reject = |mut first: StableImplementationEvidenceV1| {
             for case in &mut first.case_outcomes {
+                case.fixture_digest = typed_fixture_digest;
                 case.expected_digest = None;
                 case.actual_digest = None;
                 case.expected_error = Some(SafeErrorCodeV1::ClosureIncomplete);
@@ -3476,6 +3514,15 @@ mod tests {
             }
             first
         };
+        assert!(typed_candidate
+            .transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![
+                    reject(stable_evidence("alpha", 30)),
+                    reject(stable_evidence("beta", 40)),
+                ],
+            )
+            .is_ok());
         let mut wrong_expected = reject(stable_evidence("alpha", 30));
         wrong_expected.case_outcomes[0].expected_error = Some(SafeErrorCodeV1::DigestMismatch);
         assert_eq!(

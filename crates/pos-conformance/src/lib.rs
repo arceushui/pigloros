@@ -121,6 +121,28 @@ mod coverage_entrypoints {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn replace_evidence_case_coordinate(
+        evidence: ciborium::Value,
+        coordinate: ciborium::Value,
+    ) -> ciborium::Value {
+        let mut evidence_fields = evidence.as_array().map_or_else(Vec::new, Clone::clone);
+        let mut contract_fields = evidence_fields[10]
+            .as_array()
+            .map_or_else(Vec::new, Clone::clone);
+        let mut report_fields = contract_fields[6]
+            .as_array()
+            .map_or_else(Vec::new, Clone::clone);
+        let mut cases = report_fields[13].as_array().map_or_else(Vec::new, Clone::clone);
+        let mut case = cases[0].as_array().map_or_else(Vec::new, Clone::clone);
+        case[8] = coordinate;
+        cases[0] = ciborium::Value::Array(case);
+        report_fields[13] = ciborium::Value::Array(cases);
+        contract_fields[6] = ciborium::Value::Array(report_fields);
+        evidence_fields[10] = ciborium::Value::Array(contract_fields);
+        ciborium::Value::Array(evidence_fields)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn ok<T, E: std::fmt::Debug>(value: Result<T, E>) -> T {
         value.unwrap_or_else(|error| {
             std::panic::resume_unwind(Box::new(format!("unexpected coverage error: {error:?}")))
@@ -253,6 +275,29 @@ mod coverage_entrypoints {
 
         report.driver_or_plugin_id = Some("x".repeat(20_000));
         expect_err(&report.to_canonical_cbor());
+    }
+
+    #[test]
+    fn public_evidence_decoder_enforces_case_coordinate_boundary() {
+        let evidence = tests::evidence();
+        let encoded = decode_value(ok(evidence.to_canonical_cbor()));
+        let exact = replace_evidence_case_coordinate(
+            encoded.clone(),
+            ciborium::Value::Bytes(vec![b'x'; 128]),
+        );
+        assert!(MoatProofEvidenceV1::from_canonical_cbor(&encode_value(&exact)).is_ok());
+
+        let oversized = replace_evidence_case_coordinate(
+            encoded.clone(),
+            ciborium::Value::Bytes(vec![b'x'; 129]),
+        );
+        expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(&oversized)));
+
+        let wrong_type = replace_evidence_case_coordinate(
+            encoded,
+            ciborium::Value::Text("coordinate".to_owned()),
+        );
+        expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(&wrong_type)));
     }
 }
 
