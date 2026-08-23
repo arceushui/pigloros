@@ -903,7 +903,7 @@ mod tests {
             expiry_secs: 0,
             grant_seq: 1,
         };
-        let _token = authority.record_grant_on_timeline(tl.id(), &grant);
+        let token = authority.record_grant_on_timeline(tl.id(), &grant);
         let mut registry = PluginRegistry::new().with_consent_authority(authority);
         let persona = PersonaPlugin::new();
         registry
@@ -923,7 +923,7 @@ mod tests {
             .test_ok();
         for _ in 0..5 {
             let drafts = registry
-                .step_all_anchored_protected(tl.id(), Seq::ZERO, _token.clone(), 0, &[])
+                .step_all_anchored_protected(tl.id(), Seq::ZERO, token.clone(), 0, &[])
                 .test_ok();
             registry.schemas.validate_batch(&drafts).test_ok();
             store.append(tl.id(), &drafts).test_ok();
