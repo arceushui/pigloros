@@ -3253,9 +3253,9 @@ mod tests {
         let resolver = TestResolver {
             states: vec![
                 submitted.clone(),
-                authorized.clone(),
-                frozen.clone(),
-                dispatched.clone(),
+                authorized,
+                frozen,
+                dispatched,
                 waiting.clone(),
                 terminal.clone(),
             ],
@@ -3287,7 +3287,7 @@ mod tests {
         bad_lifecycle.lifecycle = ErasureLifecycleV1::PartialFailure;
         let mut bad_freeze = waiting.clone();
         bad_freeze.freeze_position = Some(11);
-        let mut bad_replay = waiting.clone();
+        let mut bad_replay = waiting;
         bad_replay.replay_claim = ErasureReplayClaimV1::IncompatibleProfile;
         for previous in [submitted, bad_lifecycle, bad_freeze, bad_replay] {
             assert_eq!(
@@ -3299,7 +3299,7 @@ mod tests {
     }
 
     #[test]
-    fn mutation_guards_cover_inventory_closure_and_cbor_preflight_boundaries() {
+    fn mutation_guards_cover_inventory_and_closure_boundaries() {
         let first = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
         let second = acknowledgement(2, ErasureAcknowledgementOutcomeV1::Acknowledged);
         let entry = inventory_result(first.target);
@@ -3369,7 +3369,10 @@ mod tests {
         assert!(!acknowledgements_match_closure(&[first.target], &[second]));
         assert_ne!(first.target, second.target);
         assert_ne!(entry, other_entry);
+    }
 
+    #[test]
+    fn mutation_guards_cover_cbor_preflight_boundaries() {
         assert_eq!(array(&Value::Array(Vec::new()), 0), Ok(&[][..]));
         assert_eq!(
             array(&Value::Array(vec![Value::Null]), 0),
