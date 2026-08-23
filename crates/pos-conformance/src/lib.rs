@@ -5702,7 +5702,11 @@ fn verify_conformance_report(evidence: &MoatProofEvidenceV1) -> Result<(), Evide
     let report = &contract.conformance_report;
     report.validate()?;
     let counterfactual = &contract.counterfactual;
-    let modes = report.cases.iter().map(|case| case.mode).collect::<BTreeSet<_>>();
+    let modes = report
+        .cases
+        .iter()
+        .map(|case| case.mode)
+        .collect::<BTreeSet<_>>();
     if !report
         .replay_claim
         .is_no_stronger_than(evidence.manifest.replay_claim)
@@ -6854,8 +6858,8 @@ pub mod tests {
             Err(EvidenceError::InvalidConformanceReport)
         );
 
-        let mut mismatched_case_profile = ciborium::from_reader::<Value, _>(Cursor::new(&bytes))
-            .unwrap_or(Value::Null);
+        let mut mismatched_case_profile =
+            ciborium::from_reader::<Value, _>(Cursor::new(&bytes)).unwrap_or(Value::Null);
         if let Value::Array(ref mut values) = mismatched_case_profile {
             if let Value::Array(ref mut cases) = values[13] {
                 if let Value::Array(ref mut case_fields) = cases[0] {
@@ -6870,8 +6874,8 @@ pub mod tests {
             Err(EvidenceError::InvalidConformanceReport)
         );
 
-        let mut unordered_cases = ciborium::from_reader::<Value, _>(Cursor::new(&bytes))
-            .unwrap_or(Value::Null);
+        let mut unordered_cases =
+            ciborium::from_reader::<Value, _>(Cursor::new(&bytes)).unwrap_or(Value::Null);
         if let Value::Array(ref mut values) = unordered_cases {
             if let Value::Array(ref mut cases) = values[13] {
                 cases.swap(0, 1);

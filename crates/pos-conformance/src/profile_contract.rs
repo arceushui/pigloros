@@ -3459,9 +3459,8 @@ mod tests {
             &fixture_profile.fixtures[0].expected,
             ExpectedResultV1::CanonicalBytes { .. }
         ) {
-            fixture_profile.fixtures[0].expected = ExpectedResultV1::TypedFailure(
-                SafeErrorCodeV1::ClosureIncomplete,
-            );
+            fixture_profile.fixtures[0].expected =
+                ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ClosureIncomplete);
             fixture_profile.fixtures[0].expected_verification_outcome =
                 VerificationOutcomeV1::InvalidManifest;
             fixture_profile.fixtures[0].expected_verification_error =
