@@ -2997,7 +2997,21 @@ mod tests {
         let timeline = store.create_timeline("t").test_ok();
         let shared_key = ProjectionKey::new(EntityId::new());
         let observed = Arc::new(Mutex::new(Vec::new()));
-        let mut reg = PluginRegistry::new();
+        let authority = ConsentAuthority::new();
+        let grant = pos_core::ConsentGranted {
+            subject_id: shared_key.entity_id().to_owned(),
+            grantee_id: EntityId::new(),
+            purpose: "projection-dedup-test".to_owned(),
+            modalities: 0,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        };
+        let token = authority.record_grant_on_timeline(timeline.id(), &grant);
+        let mut reg = PluginRegistry::new().with_consent_authority(authority);
 
         reg.register_driver(Box::new(SnapshotDriver {
             key: shared_key.clone(),
@@ -3008,10 +3022,13 @@ mod tests {
             observed: observed.clone(),
         }));
 
-        let drafts = reg.step_all(timeline.id()).test_ok();
+        let drafts = reg
+            .step_all_anchored_protected(timeline.id(), Seq::ZERO, token, 0, &[])
+            .test_ok();
         assert_eq!(drafts.len(), 0);
 
         assert_eq!(observed.lock().test_ok().as_slice(), [1, 1]);
+        reg.commit_step_at(Seq::ZERO, 0).test_ok();
     }
 
     #[test]
