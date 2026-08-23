@@ -759,8 +759,7 @@ fn validate_expected_result(
             classification,
             first_coordinate,
         } => {
-            if first_coordinate.is_empty()
-                || first_coordinate.len() > MAX_COORDINATE_BYTES
+            if first_coordinate.len() > MAX_COORDINATE_BYTES
                 || !allowed.iter().any(|value| {
                     value.classification == *classification
                         && value.first_coordinate == *first_coordinate
@@ -3225,6 +3224,12 @@ mod tests {
         let required_candidate = required
             .transition_to(ProfileLifecycleV1::Candidate, vec![])
             .unwrap_or_else(|_| profile());
+        assert!(required_candidate
+            .transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![stable_evidence("alpha", 30), stable_evidence("beta", 40)],
+            )
+            .is_ok());
         let mut required_first = stable_evidence("alpha", 30);
         required_first.independence.organizational_independent = false;
         assert_eq!(
