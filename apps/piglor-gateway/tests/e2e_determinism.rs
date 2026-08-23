@@ -845,5 +845,6 @@ async fn gateway_reloads_durable_consent_before_revocation(
         revocation.seq.as_u64(),
         grant_event.seq.as_u64().saturating_add(1)
     );
+    drop(recovered_gateway);
     Ok(())
 }
