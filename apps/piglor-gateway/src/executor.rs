@@ -386,14 +386,12 @@ impl CommandLifecycle {
     }
 
     fn start(&self) -> StartOutcome {
-        match self
-            .phase
-            .compare_exchange(
-                CommandPhase::Queued as u8,
-                CommandPhase::Started as u8,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
+        match self.phase.compare_exchange(
+            CommandPhase::Queued as u8,
+            CommandPhase::Started as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
         {
             Ok(_) => StartOutcome::Started,
             Err(_) => StartOutcome::AlreadyStarted,
