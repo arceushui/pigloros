@@ -27,6 +27,7 @@ mod coverage_entrypoints {
     #[test]
     fn builtin_reference_runner_registers_both_reference_plugins() {
         assert!(run_builtin_reference_experiment(StoreConfig::Memory, 0).is_ok());
+        assert!(run_builtin_reference_experiment(StoreConfig::Memory, 1).is_ok());
     }
 }
 

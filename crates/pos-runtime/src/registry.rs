@@ -198,28 +198,7 @@ mod coverage_paths {
 mod coverage_entrypoints {
     use super::*;
     use crate::driver::{Driver, ObservationView, StepOutput, TimelineHistorySegment};
-    use pos_core::{Capability, Plugin, PluginId, TimelineId};
-
-    struct CoveragePlugin {
-        id: PluginId,
-    }
-
-    impl Plugin for CoveragePlugin {
-        fn id(&self) -> PluginId {
-            self.id
-        }
-
-        fn name(&self) -> &'static str {
-            "coverage-registry-plugin"
-        }
-
-        fn capability(&self) -> Capability {
-            Capability {
-                has_driver: true,
-                ..Capability::default()
-            }
-        }
-    }
+    use pos_core::TimelineId;
 
     struct NoopDriver;
 
@@ -240,10 +219,7 @@ mod coverage_entrypoints {
     #[test]
     fn restore_and_cadence_entrypoints_update_driver_state() {
         let mut registry = PluginRegistry::new();
-        let plugin = CoveragePlugin { id: PluginId::new() };
-        assert!(registry
-            .register(&plugin, None, Some(Box::new(NoopDriver)))
-            .is_ok());
+        registry.register_driver(Box::new(NoopDriver));
         let timeline = TimelineId::new();
         assert!(registry
             .restore_driver_state(

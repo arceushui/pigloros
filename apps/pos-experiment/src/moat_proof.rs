@@ -2788,3 +2788,24 @@ mod run_coverage_entrypoints {
         );
     }
 }
+
+#[cfg(test)]
+mod coverage_entrypoints {
+    use super::*;
+
+    #[test]
+    fn local_and_air_gapped_runner_exercises_public_proof_path() {
+        let input = MoatProofInputV1 {
+            scenario_id: "coverage-parameterized".to_owned(),
+            ticks: 3,
+            initial_position: [0.0, 0.0],
+            initial_velocity: [1.0, 0.0],
+            agent_response_threshold: 0.5,
+            fork_velocity: [2.0, 0.0],
+            random_seed: 7,
+            resource_limit: 100,
+            network_enabled: false,
+        };
+        assert!(run_local_and_air_gapped(input).is_ok());
+    }
+}
