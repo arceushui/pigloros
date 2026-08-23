@@ -1130,14 +1130,22 @@ impl ExperimentSession {
         &mut self,
         subject: String,
     ) -> Result<TickOutcome, ExperimentError> {
-        let draft = EventDraft::new(
-            consent_marker_entity(&subject),
-            Kind::new(pos_runtime::HOST_CONSENT_REVOCATION_EVENT_TYPE),
-            CanonicalBytes::from_vec(subject.into_bytes()),
-        );
-        self.registry.schemas.validate(&draft)?;
+        let subject_id = consent_marker_entity(&subject);
         let emitted_events = lock_store(&self.store)
             .and_then(|mut store| {
+                let fence_seq = store.logical_head(self.timeline.id())?.as_u64().saturating_add(1);
+                let revocation = pos_core::ConsentRevokedV1 {
+                    subject_id,
+                    grantee_id: subject_id,
+                    grant_seq: 0,
+                    fence_seq,
+                };
+                let draft = EventDraft::new(
+                    subject_id,
+                    Kind::new(pos_core::EVENT_TYPE_CONSENT_REVOKED_V1),
+                    revocation.encode().map_err(|error| ExperimentError::from(pos_core::CoreError::Storage(error.to_string())))?,
+                );
+                self.registry.schemas.validate(&draft)?;
                 store
                     .append(self.timeline.id(), std::slice::from_ref(&draft))
                     .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
