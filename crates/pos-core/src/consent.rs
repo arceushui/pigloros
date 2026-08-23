@@ -2344,12 +2344,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn restore_from_history_rejects_coordinate_mismatches() {
-        fn event(
-            event_type: &str,
-            payload: CanonicalBytes,
-            entity: EntityId,
-            seq: u64,
-        ) -> Event {
+        fn event(event_type: &str, payload: CanonicalBytes, entity: EntityId, seq: u64) -> Event {
             Event {
                 id: EventId::new(),
                 entity,
@@ -2561,7 +2556,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn authority_policy_and_reservation_error_seams_fail_closed() {
+    fn authority_policy_and_projection_seams_fail_closed() {
         struct PermissiveGate;
 
         impl ConsentGate for PermissiveGate {
@@ -2624,29 +2619,24 @@ mod tests {
             Err(ConsentError::ConsentEventsForbidden)
         );
         assert_eq!(
-            ConsentGate::authorize_projection(
-                &authority,
-                timeline,
-                EntityId::new(),
-                0,
-                0,
-                &token,
-            ),
+            ConsentGate::authorize_projection(&authority, timeline, EntityId::new(), 0, 0, &token,),
             Err(ConsentError::NoConsent)
         );
 
         let gate = PermissiveGate;
         let mut append_count = 0;
-        ConsentGate::with_token_fence(
-            &gate,
-            timeline,
-            &token,
-            0,
-            0,
-            &mut || append_count += 1,
-        )
-        .test_ok();
+        ConsentGate::with_token_fence(&gate, timeline, &token, 0, 0, &mut || append_count += 1)
+            .test_ok();
         assert_eq!(append_count, 1);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn authority_reservation_error_seams_fail_closed() {
+        let authority = ConsentAuthority::new();
+        let timeline = TimelineId::new();
+        let grant = sample_granted();
+        let _ = authority.record_grant_on_timeline(timeline, &grant);
 
         let revocation = ConsentRevoked {
             subject_id: grant.subject_id,
@@ -2668,11 +2658,8 @@ mod tests {
         let reservation = authority
             .begin_revocation_on_timeline(timeline, &revocation)
             .test_ok();
-        authority.record_grant_on_timeline(timeline, &grant);
-        assert_eq!(
-            reservation.commit_durable(),
-            Err(ConsentError::NoConsent)
-        );
+        let _ = authority.record_grant_on_timeline(timeline, &grant);
+        assert_eq!(reservation.commit_durable(), Err(ConsentError::NoConsent));
 
         let reservation = authority
             .begin_revocation_on_timeline(timeline, &revocation)
