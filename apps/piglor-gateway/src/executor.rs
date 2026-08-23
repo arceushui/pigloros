@@ -1138,7 +1138,9 @@ async fn worker_loop_async(
         }
         let index = select_pending_index(&pending, reads_since_write);
         if matches!(
-            pending[index].lifecycle.claim_for_execution(pending[index].deadline),
+            pending[index]
+                .lifecycle
+                .claim_for_execution(pending[index].deadline),
             ExecutionClaim::Expired
         ) {
             expire_envelope(pending.remove(index));

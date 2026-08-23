@@ -2149,7 +2149,7 @@ mod tests {
         let authority = ConsentAuthority::new();
         let token = authority.record_grant(&grant);
         let operation = OperationContext::Protected {
-            token: token.clone(),
+            token,
             now_secs: 1,
         };
 
@@ -2172,7 +2172,6 @@ mod tests {
         assert!(bound
             .validate_operation(&operation, Seq::from_u64(5))
             .is_err_and(|error| matches!(error, RuntimeError::Consent(_))));
-
     }
 
     #[test]
