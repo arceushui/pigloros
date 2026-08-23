@@ -209,14 +209,14 @@ mod fixtures {
         ])
     }
 
-    pub(super) fn encode(value: Value) -> Vec<u8> {
+    fn encode(value: &Value) -> Vec<u8> {
         let mut bytes = Vec::new();
-        ciborium::into_writer(&value, &mut bytes).unwrap_or_default();
+        ciborium::into_writer(value, &mut bytes).unwrap_or_default();
         bytes
     }
 
-    pub(super) fn profile(lifecycle: u64, with_stable_evidence: bool) -> Vec<u8> {
-        encode(Value::Array(vec![
+    fn profile(lifecycle: u64, with_stable_evidence: bool) -> Vec<u8> {
+        encode(&Value::Array(vec![
             text("CPF1"),
             uint(1),
             text("pigloros.w8.external"),
@@ -242,8 +242,8 @@ mod fixtures {
         ]))
     }
 
-    pub(super) fn request() -> Vec<u8> {
-        encode(Value::Array(vec![
+    fn request() -> Vec<u8> {
+        encode(&Value::Array(vec![
             text("EVR1"),
             uint(1),
             bytes16(1),
