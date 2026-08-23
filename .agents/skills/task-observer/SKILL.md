@@ -71,8 +71,9 @@ above).
 
 ## Session Start Protocol
 
-1. If `skill-observations/log.md` or `cross-cutting-principles.md` don't
-   exist, create them (templates below / in the principles section of
+1. If `skill-observations/log.md` or
+   `skill-observations/cross-cutting-principles.md` don't exist, create them
+   (templates below / in the principles section of
    `references/skill-authoring.md`). Also create
    `skill-observations/last-review-date.txt` containing the literal value
    `never` if it doesn't exist — never write a date into it at setup; a
@@ -427,8 +428,9 @@ clarification, a factual fix) may be applied directly. Substantial changes
 (restructuring, new capabilities, changed methodology) and all new-skill
 creation: load `references/skill-authoring.md` first and follow its editing
 and staging rules. If an observation reveals a principle that applies to
-skills generally, propose it for the cross-cutting principles file (see the
-same reference).
+skills generally, propose it for the ignored
+`skill-observations/cross-cutting-principles.md` file (see the same
+reference).
 
 ## Quick Reference
 

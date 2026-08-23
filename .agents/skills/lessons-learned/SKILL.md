@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # Lessons Learned
 
-This tracked file is the canonical source of project lessons. Add durable guidance to the relevant section below; keep raw task-observation history as an audit record rather than creating a second lessons document.
+This is an internal PiglorOS skill and the canonical source of durable project lessons. Add guidance to the relevant section below; keep raw task-observation history and dated execution records outside Git.
 
 ## Commits and worktrees
 
@@ -16,7 +16,7 @@ This tracked file is the canonical source of project lessons. Add durable guidan
 
 3. **`git reset` can lose your staging.** If you `git reset HEAD .agents/` then `git add specific files`, make sure the files you're adding are the ones with actual changes. If a file was already committed, `git add` won't re-stage it.
 
-4. **Define completion by the requested end state.** A local green run is not delivery by itself. Verify the committed worktree, pushed branch, pull-request gates, merged target branch, post-merge workflows, and tracker or release state that the task requires.
+4. **Define completion by the requested end state.** A local green run is not delivery by itself. Verify the committed worktree, pushed branch, pull-request gates, merged target branch, post-merge workflows, tracker or release state, and external records that the task requires.
 
 5. **Reconcile project records before reporting status.** Compare the repository, Redmine, Notion, GitHub, roadmap, and worktrees. If they disagree, name the conflict instead of silently choosing one source.
 
@@ -38,113 +38,87 @@ This tracked file is the canonical source of project lessons. Add durable guidan
 
 ## Coverage
 
-13. **`?` operator creates uncoverable LLVM sub-regions.** Replace `?` in production hot paths with `.map()`, `.and_then()`, or `.ok().flatten()` combinators — they propagate errors without creating sub-region artifacts that LLVM can't track. Similarly, `matches!()` in assertions creates macro-internal sub-regions; use `.to_string().contains()` for type-safe pattern checks in test contracts. CI requires 99% line and region coverage; the 1% tolerance is only for source-unmappable LLVM regions after a fresh non-root run.
+13. **`?` operator creates uncoverable LLVM sub-regions.** Replace `?` in production hot paths with `.map()`, `.and_then()`, or `.ok().flatten()` combinators — they propagate errors without creating sub-region artifacts that LLVM can't track. Similarly, `matches!()` in assertions creates macro-internal sub-regions; use `.to_string().contains()` for type-safe pattern checks in test contracts. CI requires 99% line and region coverage; the 1% tolerance is only for source-unmappable regions after a fresh non-root run.
 
-14. **Coverage rule: delete, don't exempt.** If new code can't be covered by a test, remove the code — don't use `coverage(off)` on production code.
+14. **Coverage rule: delete, don't exempt.** If new code can't be covered by a test, remove the code — don't use `coverage(off)` on production code. Treat the coverage threshold as a design constraint.
 
 15. **Run all quality gates after EVERY change.** Including after code review fixes. `cargo test`, `cargo clippy`, `cargo llvm-cov`. No exceptions.
 
-16. **Treat coverage thresholds as design constraints.** Remove dead or uncoverable production branches instead of exempting them; keep `coverage(off)` test-only.
-
-17. **Choose Rust constructs deliberately when coverage evidence matters.** Equivalent macros and control-flow forms can create different LLVM regions; prefer the idiomatic form that keeps behavior clear and measurable.
+16. **Choose Rust constructs deliberately when coverage evidence matters.** Equivalent macros and control-flow forms can create different LLVM regions; prefer the idiomatic form that keeps behavior clear and measurable.
 
 ## Redmine
 
-18. **Must invoke `start-work` skill when beginning work on any Redmine ticket.** This sets the ticket to In Progress and records all work as journal notes. Never start work without it.
+17. **Must invoke `start-work` skill when beginning work on any Redmine ticket.** This sets the ticket to In Progress and records all work as journal notes. Never start work without it.
 
-19. **ADR wiki pages use Markdown, not Textile, and MUST have `ADR` as their parent page.** See the `adr-wiki` skill for full rules on hierarchy, formatting, and API usage.
+18. **ADR wiki pages use Markdown, not Textile, and MUST have `ADR` as their parent page.** See the `adr-wiki` skill for full rules for hierarchy, formatting, and API usage.
 
-20. **ADR tracker workflow is broken.** No allowed transitions from "Proposed" status. ADR issues can't be closed via API or UI. To close an ADR via API: switch it to Feature tracker (tracker_id=2), then close (status_id=5).
+19. **Follow the configured ADR transition flow.** Keep ADRs in `Proposed → Under Review → Accepted / Rejected` as configured; if a transition is unavailable, record the blocker rather than changing trackers or statuses to bypass it.
 
-21. **Close completed issues after every commit.** Use the correct status:
+20. **Close completed issues after every commit.** Use the correct status:
     - **Feature / Bug / Task** → `Resolved` (status_id=3), NOT Closed
     - **ADR** → `Accepted` (status_id=9), flow: Proposed→Under Review→Accepted
     - Only use Closed (status_id=5) for rejected or superseded issues
 
-22. **Keep authority states separate.** ADR status, implementation authorization, ticket status, evidence readiness, and product acceptance are different facts. An Accepted ADR records a decision; it does not start implementation.
+21. **Keep authority states separate.** ADR status, implementation authorization, ticket status, evidence readiness, and product acceptance are different facts. An Accepted ADR records a decision; it does not start implementation.
 
-23. **Preserve the project hierarchy.** Keep Wave, milestone design, ADR, implementation ticket, and subtask distinct. Use Redmine parent/child for decomposition and blocker relations for execution order between independent tickets.
-
-## Redmine ADR workflow setup (one-time admin fix)
-
-The ADR tracker (id=5) has zero allowed transitions from its default status "Proposed" (id=7). Until this is fixed, ADRs cannot be accepted/closed. Here's the fix:
-
-1. Go to your Redmine instance: `https://redmine.piglor.com`
-2. Navigate to **Administration** → **Workflow** → **Status transitions**
-3. Select **Tracker: ADR** and **Role: Manager** (and Developer)
-4. Click **Edit**
-5. For row "Proposed" (status 7), check these columns:
-   - **Under Review** (status 8)
-   - **Accepted** (status 9)
-   - **Rejected** (status 6)
-6. For row "Under Review" (status 8), check:
-   - **Accepted** (status 9)
-   - **Rejected** (status 6)
-7. Click **Save**
-8. Repeat for Developer role (role_id=4) if developers should manage ADRs
-
-After this, ADRs can follow the flow: `Proposed → Under Review → Accepted / Rejected`. The API will also work for these transitions.
+22. **Preserve the project hierarchy.** Keep Wave, milestone design, ADR, implementation ticket, and subtask distinct. Use Redmine parent/child for decomposition and blocker relations for execution order between independent tickets.
 
 ## Design and contracts
 
-24. **Leave-one-out for per-entity baselines.** When computing entity-specific metrics, exclude the current observation from the historical baseline. Otherwise single-observation entities get perfect scores.
+23. **Leave-one-out for per-entity baselines.** When computing entity-specific metrics, exclude the current observation from the historical baseline. Otherwise single-observation entities get perfect scores.
 
-25. **Prefer iterators over owned collections in API.** `fn plugin_names() -> impl Iterator<Item = &str>` is consistent. `fn plugin_versions() -> HashMap<String, String>` is not.
+24. **Prefer iterators over owned collections in API.** `fn plugin_names() -> impl Iterator<Item = &str>` is consistent. `fn plugin_versions() -> HashMap<String, String>` is not.
 
-26. **State acceptance criteria separately from evidence.** Every claim needs an audience, boundary, pass/fail condition, authoritative artifact, schema owner, evaluator, maturity, and remaining gate.
+25. **State acceptance criteria separately from evidence.** Every claim needs an audience, boundary, pass/fail condition, authoritative artifact, schema owner, evaluator, maturity, and remaining gate.
 
-27. **Metadata does not prove behavior.** Fixture IDs, digests, and screenshots are references, not conformance. Mandatory cases must execute through the public boundary, and equality claims must bind to independently produced outputs.
+26. **Metadata does not prove behavior.** Fixture IDs, digests, and screenshots are references, not conformance. Mandatory cases must execute through the public boundary, and equality claims must bind to independently produced outputs.
 
-28. **Keep evidence roles distinct.** Record host evidence, evaluator validation, independent reproduction, and authorship or organizational independence as separate fields.
+27. **Keep evidence roles distinct.** Record host evidence, evaluator validation, independent reproduction, and authorship or organizational independence as separate fields.
 
-29. **Use the smallest deterministic fixture that proves the claim.** Do not strengthen domain semantics merely because a fixture makes a stronger statement convenient.
+28. **Use the smallest deterministic fixture that proves the claim.** Do not strengthen domain semantics merely because a fixture makes a stronger statement convenient.
 
-30. **Separate computational Replay from empirical validity.** Keep Replay, world-model evidence, Persona calibration, and route-level security enforcement distinct from future architecture.
+29. **Separate computational Replay from empirical validity.** Keep Replay, world-model evidence, Persona calibration, and route-level security enforcement distinct from future architecture.
 
 ## Code review
 
-31. **Always request code review after completing code changes, before starting new work.** Use the `code-review` skill with the appropriate fixed point (e.g. `main..HEAD` or a prior commit). Address all findings as a separate round of fixes, then let the reviewer confirm before moving to the next task. Do not start new tickets until the current review cycle is closed.
+30. **Always request code review after completing code changes, before starting new work.** Use the `code-review` skill with the appropriate fixed point (e.g. `main..HEAD` or a prior commit). Address all findings as a separate round of fixes, then let the reviewer confirm before moving to the next task. Do not start new tickets until the current review cycle is closed.
 
 ## CI / GitHub Actions
 
-32. **Every test type must run in CI — no local-only tests.** GitHub Actions (`.github/workflows/ci.yml`) is the single source of truth for what passes. When adding any test — unit test, integration test (`tests/` directory), doctest, or `#[ignore]`d test — verify that `cargo test --workspace --locked -- --include-ignored` in the `test` job actually executes it. The `--include-ignored` flag is mandatory so `#[ignore]` cannot silently skip. If you write an integration test that lives in `tests/`, it MUST be picked up by the workspace test job; if it isn't, the test is dead and the CI green light is a lie. Before claiming a ticket is done, name the CI job/steps that run your new test.
+31. **Every test type must run in CI — no local-only tests.** GitHub Actions (`.github/workflows/ci.yml`) is the single source of truth for what passes. When adding any test — unit test, integration test (`tests/` directory), doctest, or `#[ignore]`d test — verify that `cargo test --workspace --locked -- --include-ignored` in the `test` job actually executes it. The `--include-ignored` flag is mandatory so `#[ignore]` cannot silently skip. If you write an integration test that lives in `tests/`, it MUST be picked up by the workspace test job; if it isn't, the test is dead and the CI green light is a lie. Before claiming a ticket is done, name the CI job/steps that run your new test.
 
-33. **GitHub Actions workflow `name:` must be lowercase-with-hyphens.** All workflow YAML files under `.github/workflows/` must use the same naming convention: lowercase words separated by hyphens (e.g. `name: ci`, `name: cargo-deny`, `name: deploy`, `name: trunk-check`). No PascalCase (`Deploy`, `Trunk Check`), no ALLCAPS. This keeps the Actions sidebar predictable and sortable.
+32. **GitHub Actions workflow `name:` must be lowercase-with-hyphens.** All workflow YAML files under `.github/workflows/` must use the same naming convention: lowercase words separated by hyphens (e.g. `name: ci`, `name: cargo-deny`, `name: deploy`, `name: trunk-check`). No PascalCase (`Deploy`, `Trunk Check`), no ALLCAPS. This keeps the Actions sidebar predictable and sortable.
 
-34. **Treat hosted CI as an independent environment probe.** Permission, process identity, ordering, cache, target, and runner behavior can differ from a root local checkout.
+33. **Treat hosted CI as an independent environment probe.** Permission, process identity, ordering, cache, target, and runner behavior can differ from a root local checkout.
 
-35. **Validate workflow changes through a canary pull request.** Inspect every hosted job, fix failures in the isolated worktree, require a clean ruleset, merge, and verify the post-merge `main` workflows.
+34. **Validate workflow changes through a canary pull request.** Inspect every hosted job, fix failures in the isolated worktree, require a clean ruleset, merge, and verify the post-merge `main` workflows.
 
-36. **Compile documentation explicitly with rustdoc warnings denied.** Compiler, test, and Clippy success do not validate rustdoc links.
+35. **Compile documentation explicitly with rustdoc warnings denied.** Compiler, test, and Clippy success do not validate rustdoc links.
 
-37. **Use explicit sanitizer-compatible fuzz targets.** Include every manifest that can affect an isolated workspace in path filters, and keep path-filtered fuzz or mutation checks advisory unless an always-emitted aggregator represents skipped work safely.
+36. **Use explicit sanitizer-compatible fuzz targets.** Include every manifest that can affect an isolated workspace in path filters, and keep path-filtered fuzz or mutation checks advisory unless an always-emitted aggregator represents skipped work safely.
 
-38. **Make informational jobs cancellation-safe.** Avoid `always()` steps that hold replacement runs in a concurrency group. Do not confuse scheduled or manual ThreadSanitizer with a universal pull-request gate.
+37. **Make informational jobs cancellation-safe.** Avoid `always()` steps that hold replacement runs in a concurrency group. Do not confuse scheduled or manual ThreadSanitizer with a universal pull-request gate.
 
-39. **Keep ADR version scope separate from implementation scope.** The current product implementation is V1, but an ADR may legitimately document future V2/V3 evolution. Track whether a decision applies now or is deferred independently from its version label; do not rewrite valid future-version design as current behavior.
+38. **Keep ADR version scope separate from implementation scope.** The current product implementation is V1, but an ADR may legitimately document future V2/V3 evolution. Track whether a decision applies now or is deferred independently from its version label; do not rewrite valid future-version design as current behavior.
 
-## Product and documentation
+## Documentation boundaries
 
-40. **Map objectives and competitor insight to proof.** Name the primary Wave, supporting Wave, user-visible acceptance gate, and evidence for each claim. Strategy is not operational until it points to proof.
+39. **Keep Git docs contributor-facing.** Put current usage, contribution, policy, and durable contract guidance in Git. Put dated execution logs, plans, and decision history in Redmine or Notion; link to the canonical external record rather than copying it into a dated Markdown file.
 
-41. **Keep overview pages about current product truth.** Lead with user value; put exclusions, review transcripts, and execution detail in their proper pages. Separate current landscape pages from dated updates and evidence reports, and label evidence, inference, roadmap implication, and “not evidenced” claims.
+40. **Treat external documentation as structured data.** Mermaid code is literal: do not apply rich-text escaping inside code fences, use `<br>` for label breaks, and quote labels containing special characters. In Notion tables, use native Markdown links or plain text, not raw HTML anchors or block-level markup in cells.
 
-42. **Use one dominant reading path.** Show the current position and next step; use diagrams for sequence and transformation, tables for exact mappings, and child pages when deeper detail is useful.
-
-43. **Keep examples broad enough for the product.** Examples should clarify without accidentally narrowing a general product to one market. First-impression reviews should distinguish intrigue, comprehension, operational clarity, willingness to try, and willingness to trust.
-
-44. **Treat external documentation as a schema.** Mermaid code is literal: do not apply rich-text escaping inside code fences, use `<br>` for label breaks, and quote labels containing special characters. In Notion tables, use native Markdown links or plain text, not raw HTML anchors or block-level markup in cells.
-
-45. **Verify external writes by reading back canonical content.** A child-page creation can append a structural `<page>` block to its parent; fetch the live parent, place the block at the intended index, and fetch parent and child after the write. Verify schemas, links, hierarchy, authority markers, vocabulary, and maturity claims rather than trusting a success summary.
+41. **Verify external writes by reading back canonical content.** A child-page creation can append a structural `<page>` block to its parent; fetch the live parent, place the block at the intended index, and fetch parent and child after the write. Verify schemas, links, hierarchy, authority markers, vocabulary, and maturity claims rather than trusting a success summary.
 
 ## Execution modes and terminology
 
-46. **Keep execution modes separate.** Local/Connected, Air-Gapped, Deterministic, and Live Exploration describe different combinations of deployment locality, network permission, and reproducibility.
+42. **Keep execution modes separate.** Local/Connected, Air-Gapped, Deterministic, and Live Exploration describe different combinations of deployment locality, network permission, and reproducibility.
 
-47. **Use the project glossary exactly.** **Timeline**, **Fork**, **PersonaModel**, **Society Signal**, **Brier Score**, and **Calibration Report** carry defined meanings and should not be replaced by looser synonyms.
+43. **Use the project glossary exactly.** **Timeline**, **Fork**, **PersonaModel**, **Society Signal**, **Brier Score**, and **Calibration Report** carry defined meanings and should not be replaced by looser synonyms.
 
-## Safe records and handoff
+## Safe records
 
-48. **Make append-only logs collision-aware.** Read the live file, assert the next number is unused, append, then verify count, uniqueness, and survival.
+44. **Make append-only logs collision-aware.** Read the live file, assert the next number is unused, append, then verify count, uniqueness, and survival.
 
-49. **Make handoff evidence-based.** Review the diff, run required gates, request independent review for code changes, verify hosted and post-merge state, read back external records, confirm clean worktrees, and report advisory risks honestly.
+## Pre-flight verification
+
+Before delivery, re-read this file and check every applicable rule against the diff, commands, records, and handoff. Execute each embedded command once against real data and inspect its output before relying on it. Do not report completion until the required local, hosted, and external-record checks are evidenced.
