@@ -26,7 +26,9 @@ pub(super) fn request_value(input: &ErasureRequestInputV1) -> Value {
         digest(input.provenance),
     ])
 }
-pub(super) fn request_from_fields(fields: &[Value]) -> Result<ErasureRequestV1, ErasureErrorV1> {
+pub(super) fn request_from_fields(
+    fields: &[Value],
+) -> Result<ErasureRequestV1, ErasureErrorV1> {
     header(fields, ERQ1)?;
     let (request, subject, scope, selectors) = request_identity(fields)?;
     let (requester, authorization, policy) = request_authority(fields)?;
@@ -70,7 +72,9 @@ pub(super) fn request_authority(
         bytes32(&fields[8])?,
     ))
 }
-pub(super) fn request_positions(fields: &[Value]) -> Result<(u64, u64, ErasureReferenceV1), ErasureErrorV1> {
+pub(super) fn request_positions(
+    fields: &[Value],
+) -> Result<(u64, u64, ErasureReferenceV1), ErasureErrorV1> {
     Ok((
         unsigned(&fields[9])?,
         unsigned(&fields[10])?,
@@ -226,7 +230,9 @@ pub(super) fn acknowledgement_value(ack: ErasureAcknowledgementV1) -> Value {
         uint(ack.outcome.code()),
     ])
 }
-pub(super) fn receipt_from_fields(fields: &[Value]) -> Result<ErasureReceiptV1, ErasureErrorV1> {
+pub(super) fn receipt_from_fields(
+    fields: &[Value],
+) -> Result<ErasureReceiptV1, ErasureErrorV1> {
     header(fields, ERC1)?;
     let request = bytes32(&fields[2])?;
     let terminal_state = bytes32(&fields[3])?;
@@ -319,7 +325,9 @@ pub(super) fn target_value(target: ErasureRequiredTargetV1) -> Value {
         digest(target.replica_id),
     ])
 }
-pub(super) fn target_from_value(value: &Value) -> Result<ErasureRequiredTargetV1, ErasureErrorV1> {
+pub(super) fn target_from_value(
+    value: &Value,
+) -> Result<ErasureRequiredTargetV1, ErasureErrorV1> {
     let fields = exact_array(value, 6)?;
     Ok(ErasureRequiredTargetV1 {
         artifact_class: ErasureArtifactClassV1::from_code(unsigned(&fields[0])?)?,
@@ -333,7 +341,9 @@ pub(super) fn target_from_value(value: &Value) -> Result<ErasureRequiredTargetV1
 pub(super) fn targets_value(targets: &[ErasureRequiredTargetV1]) -> Value {
     Value::Array(targets.iter().copied().map(target_value).collect())
 }
-pub(super) fn targets_from_value(value: &Value) -> Result<Vec<ErasureRequiredTargetV1>, ErasureErrorV1> {
+pub(super) fn targets_from_value(
+    value: &Value,
+) -> Result<Vec<ErasureRequiredTargetV1>, ErasureErrorV1> {
     let values = array(value, ERASURE_MAX_INVENTORY_RESULTS)?;
     let targets = values
         .iter()
@@ -354,7 +364,9 @@ pub(super) fn transition_value(transition: ErasureArtifactTransitionV1) -> Value
         digest(transition.provenance),
     ])
 }
-pub(super) fn transition_from_value(value: &Value) -> Result<ErasureArtifactTransitionV1, ErasureErrorV1> {
+pub(super) fn transition_from_value(
+    value: &Value,
+) -> Result<ErasureArtifactTransitionV1, ErasureErrorV1> {
     let fields = exact_array(value, 6)?;
     Ok(ErasureArtifactTransitionV1 {
         from: ErasureReplayClaimV1::from_code(unsigned(&fields[0])?)?,
@@ -373,7 +385,9 @@ pub(super) fn inventory_result_value(result: &ErasureInventoryResultV1) -> Value
         digest(result.retained_disclosure),
     ])
 }
-pub(super) fn inventory_result_from_value(value: &Value) -> Result<ErasureInventoryResultV1, ErasureErrorV1> {
+pub(super) fn inventory_result_from_value(
+    value: &Value,
+) -> Result<ErasureInventoryResultV1, ErasureErrorV1> {
     let fields = exact_array(value, 4)?;
     Ok(ErasureInventoryResultV1 {
         category: ErasureInventoryCategoryV1::from_code(unsigned(&fields[0])?)?,
@@ -385,7 +399,9 @@ pub(super) fn inventory_result_from_value(value: &Value) -> Result<ErasureInvent
 pub(super) fn inventory_value(inventory: &[ErasureInventoryResultV1]) -> Value {
     Value::Array(inventory.iter().map(inventory_result_value).collect())
 }
-pub(super) fn inventory_from_value(value: &Value) -> Result<Vec<ErasureInventoryResultV1>, ErasureErrorV1> {
+pub(super) fn inventory_from_value(
+    value: &Value,
+) -> Result<Vec<ErasureInventoryResultV1>, ErasureErrorV1> {
     let values = array(value, ERASURE_MAX_INVENTORY_RESULTS)?;
     let results = values
         .iter()
@@ -404,23 +420,29 @@ pub(super) fn inventories_value(inventories: &ErasureReceiptInventoriesV1) -> Va
         inventory_value(&inventories.backups),
     ])
 }
-pub(super) fn inventories_from_value(value: &Value) -> Result<ErasureReceiptInventoriesV1, ErasureErrorV1> {
+pub(super) fn inventories_from_value(
+    value: &Value,
+) -> Result<ErasureReceiptInventoriesV1, ErasureErrorV1> {
     exact_array(value, 4).and_then(|fields| {
         inventory_from_value(&fields[0]).and_then(|artifacts| {
             inventory_from_value(&fields[1]).and_then(|keys| {
                 inventory_from_value(&fields[2]).and_then(|replicas| {
-                    inventory_from_value(&fields[3]).map(|backups| ErasureReceiptInventoriesV1 {
-                        artifacts,
-                        keys,
-                        replicas,
-                        backups,
+                    inventory_from_value(&fields[3]).map(|backups| {
+                        ErasureReceiptInventoriesV1 {
+                            artifacts,
+                            keys,
+                            replicas,
+                            backups,
+                        }
                     })
                 })
             })
         })
     })
 }
-pub(super) const fn inventories_exceed_bound(inventories: &ErasureReceiptInventoriesV1) -> bool {
+pub(super) const fn inventories_exceed_bound(
+    inventories: &ErasureReceiptInventoriesV1,
+) -> bool {
     inventories.artifacts.len() > ERASURE_MAX_INVENTORY_RESULTS
         || inventories.keys.len() > ERASURE_MAX_INVENTORY_RESULTS
         || inventories.replicas.len() > ERASURE_MAX_INVENTORY_RESULTS
@@ -432,28 +454,48 @@ pub(super) fn sort_inventories(inventories: &mut ErasureReceiptInventoriesV1) {
     inventories.replicas.sort_unstable();
     inventories.backups.sort_unstable();
 }
-pub(super) fn inventories_have_duplicate_targets(inventories: &ErasureReceiptInventoriesV1) -> bool {
+pub(super) fn inventories_have_duplicate_targets(
+    inventories: &ErasureReceiptInventoriesV1,
+) -> bool {
     has_duplicate_by_inventory_target(&inventories.artifacts)
         || has_duplicate_by_inventory_target(&inventories.keys)
         || has_duplicate_by_inventory_target(&inventories.replicas)
         || has_duplicate_by_inventory_target(&inventories.backups)
 }
 pub(super) fn inventory_categories_match(inventories: &ErasureReceiptInventoriesV1) -> bool {
-    inventories.artifacts.iter().all(|entry| entry.category == ErasureInventoryCategoryV1::Artifact)
-        && inventories.keys.iter().all(|entry| entry.category == ErasureInventoryCategoryV1::Key)
-        && inventories.replicas.iter().all(|entry| entry.category == ErasureInventoryCategoryV1::Replica)
-        && inventories.backups.iter().all(|entry| entry.category == ErasureInventoryCategoryV1::Backup)
+    inventories
+        .artifacts
+        .iter()
+        .all(|entry| entry.category == ErasureInventoryCategoryV1::Artifact)
+        && inventories
+            .keys
+            .iter()
+            .all(|entry| entry.category == ErasureInventoryCategoryV1::Key)
+        && inventories
+            .replicas
+            .iter()
+            .all(|entry| entry.category == ErasureInventoryCategoryV1::Replica)
+        && inventories
+            .backups
+            .iter()
+            .all(|entry| entry.category == ErasureInventoryCategoryV1::Backup)
 }
-pub(super) fn has_duplicate_by_inventory_target(entries: &[ErasureInventoryResultV1]) -> bool {
+pub(super) fn has_duplicate_by_inventory_target(
+    entries: &[ErasureInventoryResultV1],
+) -> bool {
     entries.windows(2).any(|pair| pair[0].target == pair[1].target)
 }
-pub(super) fn inventory_transitions_preserve_or_weaken(inventories: &ErasureReceiptInventoriesV1) -> bool {
+pub(super) fn inventory_transitions_preserve_or_weaken(
+    inventories: &ErasureReceiptInventoriesV1,
+) -> bool {
     [&inventories.artifacts, &inventories.keys, &inventories.replicas, &inventories.backups]
         .into_iter()
         .flatten()
         .all(|entry| entry.transition.from.preserves_or_weakens(entry.transition.to))
 }
-pub(super) fn weakest_inventory_claim(inventories: &ErasureReceiptInventoriesV1) -> ErasureReplayClaimV1 {
+pub(super) fn weakest_inventory_claim(
+    inventories: &ErasureReceiptInventoriesV1,
+) -> ErasureReplayClaimV1 {
     [&inventories.artifacts, &inventories.keys, &inventories.replicas, &inventories.backups]
         .into_iter()
         .flatten()
@@ -476,7 +518,9 @@ pub(super) fn inventories_match_closure(
     targets.sort_unstable();
     targets == required_targets
 }
-pub(super) fn has_duplicate_by_target(acknowledgements: &[ErasureAcknowledgementV1]) -> bool {
+pub(super) fn has_duplicate_by_target(
+    acknowledgements: &[ErasureAcknowledgementV1],
+) -> bool {
     acknowledgements.windows(2).any(|pair| pair[0].target == pair[1].target)
 }
 pub(super) fn acknowledgements_match_closure(
@@ -495,7 +539,11 @@ pub(super) fn acknowledgements_are_closure_subset(
 ) -> bool {
     acknowledgements
         .iter()
-        .all(|acknowledgement| required_targets.binary_search(&acknowledgement.target).is_ok())
+        .all(|acknowledgement| {
+            required_targets
+                .binary_search(&acknowledgement.target)
+                .is_ok()
+        })
 }
 pub(super) fn references_value(references: &[ErasureReferenceV1]) -> Value {
     Value::Array(references.iter().copied().map(digest).collect())
@@ -537,7 +585,10 @@ pub(super) fn header(fields: &[Value], contract: &str) -> Result<(), ErasureErro
         }
     })
 }
-pub(super) fn invalid_owner_sets(pending: &[ErasureReferenceV1], failed: &[ErasureReferenceV1]) -> bool {
+pub(super) fn invalid_owner_sets(
+    pending: &[ErasureReferenceV1],
+    failed: &[ErasureReferenceV1],
+) -> bool {
     pending.len() > ERASURE_MAX_REFERENCES
         || failed.len() > ERASURE_MAX_REFERENCES
         || !strictly_increasing(pending)
@@ -579,7 +630,10 @@ pub(super) fn encode_canonical(value: &Value) -> Result<Vec<u8>, ErasureErrorV1>
         .map(|()| bytes)
         .map_err(|_| ErasureErrorV1::InvalidEncoding)
 }
-pub(super) fn encode_limited(value: &Value, maximum: usize) -> Result<Vec<u8>, ErasureErrorV1> {
+pub(super) fn encode_limited(
+    value: &Value,
+    maximum: usize,
+) -> Result<Vec<u8>, ErasureErrorV1> {
     encode_canonical(value).and_then(|bytes| {
         if bytes.len() <= maximum {
             Ok(bytes)
@@ -588,7 +642,11 @@ pub(super) fn encode_limited(value: &Value, maximum: usize) -> Result<Vec<u8>, E
         }
     })
 }
-pub(super) fn decode_limited(bytes: &[u8], maximum: usize, maximum_array: usize) -> Result<Value, ErasureErrorV1> {
+pub(super) fn decode_limited(
+    bytes: &[u8],
+    maximum: usize,
+    maximum_array: usize,
+) -> Result<Value, ErasureErrorV1> {
     if bytes.len() > maximum {
         return Err(ErasureErrorV1::ScopeInvalid);
     }
@@ -611,7 +669,10 @@ pub(super) fn decode_limited(bytes: &[u8], maximum: usize, maximum_array: usize)
         }
     })
 }
-pub(super) fn cbor_shape_is_bounded(bytes: &[u8], maximum_array: usize) -> Result<(), ErasureErrorV1> {
+pub(super) fn cbor_shape_is_bounded(
+    bytes: &[u8],
+    maximum_array: usize,
+) -> Result<(), ErasureErrorV1> {
     cbor_item_end(bytes, 0, 0, maximum_array).and_then(|end| {
         if end == bytes.len() {
             Ok(())
@@ -620,7 +681,12 @@ pub(super) fn cbor_shape_is_bounded(bytes: &[u8], maximum_array: usize) -> Resul
         }
     })
 }
-pub(super) fn cbor_item_end(bytes: &[u8], offset: usize, depth: usize, maximum_array: usize) -> Result<usize, ErasureErrorV1> {
+pub(super) fn cbor_item_end(
+    bytes: &[u8],
+    offset: usize,
+    depth: usize,
+    maximum_array: usize,
+) -> Result<usize, ErasureErrorV1> {
     if depth > 16 || offset >= bytes.len() {
         return Err(ErasureErrorV1::InvalidEncoding);
     }
@@ -696,7 +762,10 @@ pub(super) fn array(value: &Value, maximum: usize) -> Result<&[Value], ErasureEr
         _ => Err(ErasureErrorV1::InvalidEncoding),
     }
 }
-pub(super) fn exact_array(value: &Value, expected: usize) -> Result<&[Value], ErasureErrorV1> {
+pub(super) fn exact_array(
+    value: &Value,
+    expected: usize,
+) -> Result<&[Value], ErasureErrorV1> {
     match value {
         Value::Array(values) if values.len() == expected => Ok(values),
         _ => Err(ErasureErrorV1::InvalidEncoding),
@@ -710,7 +779,8 @@ pub(super) fn string(value: &Value) -> Result<&str, ErasureErrorV1> {
 }
 pub(super) fn unsigned(value: &Value) -> Result<u64, ErasureErrorV1> {
     match value {
-        Value::Integer(value) => u64::try_from(*value).map_err(|_| ErasureErrorV1::InvalidEncoding),
+        Value::Integer(value) => u64::try_from(*value)
+            .map_err(|_| ErasureErrorV1::InvalidEncoding),
         _ => Err(ErasureErrorV1::InvalidEncoding),
     }
 }
@@ -731,7 +801,9 @@ pub(super) fn bytes32(value: &Value) -> Result<ErasureReferenceV1, ErasureErrorV
         _ => Err(ErasureErrorV1::InvalidEncoding),
     }
 }
-pub(super) fn optional_bytes32(value: &Value) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+pub(super) fn optional_bytes32(
+    value: &Value,
+) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
     if matches!(value, Value::Null) {
         Ok(None)
     } else {

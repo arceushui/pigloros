@@ -1354,7 +1354,9 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         transition: ErasureStateTransitionV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
         let mut record = self.record(request)?;
-        if record.state.lifecycle() == ErasureLifecycleV1::AccessFrozen { return Ok(record.state); }
+        if record.state.lifecycle() == ErasureLifecycleV1::AccessFrozen {
+            return Ok(record.state);
+        }
         let freeze_is_authorized = matches!(
             (record.state.lifecycle(), transition.lifecycle),
             (ErasureLifecycleV1::Authorized, ErasureLifecycleV1::AccessFrozen)
@@ -1370,7 +1372,9 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                 return Err(ErasureErrorV1::ScopeInvalid);
             }
             targets.sort_unstable();
-            if has_duplicate(&targets) { return Err(ErasureErrorV1::ScopeInvalid); }
+            if has_duplicate(&targets) {
+                return Err(ErasureErrorV1::ScopeInvalid);
+            }
             record.state = record.state.transition(transition)?;
             record.targets = targets;
             let state = record.state.clone();
@@ -1443,7 +1447,9 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         if acknowledgement.owner != acknowledgement.target.replica_id {
             return Err(ErasureErrorV1::Unauthorized);
         }
-        if record.acknowledgements.contains(&acknowledgement) { return Ok(record.state); }
+        if record.acknowledgements.contains(&acknowledgement) {
+            return Ok(record.state);
+        }
         if record
             .acknowledgements
             .iter()
@@ -1481,7 +1487,9 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         mut input: ErasureReceiptInputV1,
     ) -> Result<ErasureReceiptV1, ErasureErrorV1> {
         let mut record = self.record(request)?;
-        if let Some(receipt) = &record.receipt { return Ok(receipt.clone()); }
+        if let Some(receipt) = &record.receipt {
+            return Ok(receipt.clone());
+        }
         if record.state.lifecycle() == ErasureLifecycleV1::DestructionDispatched {
             record.state = record.state.transition(ErasureStateTransitionV1 {
                 lifecycle: ErasureLifecycleV1::AwaitingAcknowledgements,
