@@ -18,11 +18,8 @@ pub const EVALUATOR_REQUEST_MAGIC_V1: &str = "EVR1";
 const MAX_PROFILE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EXECUTION_PROFILES: usize = 64;
 const MAX_FIXTURES: usize = 65_536;
-const MAX_FIXTURE_COUNT: u32 = 65_536;
 const MAX_STRING_BYTES: usize = 256;
-const MAX_MEMBER_PATH_BYTES: u16 = 256;
 const MAX_COORDINATE_BYTES: usize = 128;
-const MAX_COORDINATE_COUNT_BYTES: u16 = 128;
 const MAX_DIAGNOSTIC_BYTES: u64 = 1024 * 1024;
 const MAX_MEMBER_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TOTAL_BUNDLE_BYTES: u64 = 1024 * 1024 * 1024;
@@ -1676,6 +1673,10 @@ fn optional_safe_error(value: &Value) -> Result<Option<SafeErrorCodeV1>, Conform
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MAX_FIXTURE_COUNT: u32 = 65_536;
+    const MAX_MEMBER_PATH_BYTES: u16 = 256;
+    const MAX_COORDINATE_COUNT_BYTES: u16 = 128;
 
     fn digest(seed: u8) -> [u8; 32] {
         [seed; 32]
