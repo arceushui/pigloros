@@ -1442,7 +1442,7 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
             drop(reply.send(Err(StoreExecutorError::Unhealthy)));
             std::panic::resume_unwind(Box::new("test store executor read worker panic"));
         }
-    };
+    }
     CommandExecution::Completed
 }
 
