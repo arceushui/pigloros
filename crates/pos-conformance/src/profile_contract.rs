@@ -3804,11 +3804,6 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn public_contract_boundaries_are_individual_and_not_accidental() {
-        let fixture = &profile().fixtures[0];
-        assert_ne!(fixture_digest(fixture), [1; 32]);
-        assert_ne!(fixture_provenance_digest(&fixture.provenance), [0; 32]);
-        assert_ne!(fixture_provenance_digest(&fixture.provenance), [1; 32]);
-
         // The output cap is inclusive at its documented maximum.
         let mut request_at_limit = request();
         request_at_limit.output_capability.report_bytes_limit = MAX_PROFILE_BYTES as u64;
@@ -3917,11 +3912,27 @@ mod tests {
             value.fixtures[0].bounds = bounds;
             value.profile_digest = value.digest();
             assert_eq!(
-                validate_bounds(&value.fixtures[0].bounds),
+                value.validate(),
                 Err(ConformanceContractError::FieldOutOfBounds)
             );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_fixture_digests_are_not_sentinel_replacements() {
+        let fixture = &profile().fixtures[0];
+        assert_ne!(fixture_digest(fixture), [1; 32]);
+        assert_ne!(fixture_provenance_digest(&fixture.provenance), [0; 32]);
+        assert_ne!(fixture_provenance_digest(&fixture.provenance), [1; 32]);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_fixture_bounds_reject_each_zero_field() {
+        for bounds in zero_bound_variants() {
             assert_eq!(
-                value.validate(),
+                validate_bounds(&bounds),
                 Err(ConformanceContractError::FieldOutOfBounds)
             );
         }
