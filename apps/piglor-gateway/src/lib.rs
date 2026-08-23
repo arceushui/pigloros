@@ -1192,20 +1192,30 @@ impl Gateway {
             Err(error) => return Err(error),
         };
         revocation.encode()?;
-        if self
+        let reservation = match self
             .consent_authority
-            .validate_revocation_on_timeline(timeline, &revocation)
-            .is_err()
+            .begin_revocation_on_timeline(timeline, &revocation)
         {
-            self.restore_consent_history(timeline).await?;
-            self.consent_authority
-                .validate_revocation_on_timeline(timeline, &revocation)
-                .map_err(|_| {
-                    GatewayError::Store(CoreError::Storage(
-                        "consent revocation did not name an active grant".to_owned(),
-                    ))
-                })?;
-        }
+            Ok(reservation) => reservation,
+            Err(pos_core::ConsentError::NoConsent) => {
+                self.restore_consent_history(timeline).await?;
+                self.consent_authority
+                    .begin_revocation_on_timeline(timeline, &revocation)
+                    .map_err(|_| {
+                        GatewayError::Store(CoreError::Storage(
+                            "consent revocation did not name an active grant".to_owned(),
+                        ))
+                    })?
+            }
+            Err(pos_core::ConsentError::Revoked) => {
+                return Err(GatewayError::Store(CoreError::Storage(
+                    "consent revocation was already fenced".to_owned(),
+                )))
+            }
+            Err(error) => {
+                return Err(GatewayError::Store(CoreError::Storage(error.to_string())))
+            }
+        };
         let event = match self
             .store
             .append_consent_revocation(
@@ -1218,22 +1228,25 @@ impl Gateway {
             Err(executor::StoreExecutorError::Store(CoreError::Storage(message)))
                 if message == "consent revocation fence mismatch" =>
             {
+                self.consent_authority.abort_revocation(reservation);
                 return Err(GatewayError::ConsentRevocationFenceMismatch)
             }
             Err(executor::StoreExecutorError::Store(CoreError::Storage(message)))
                 if message == "event limit reached" =>
             {
+                self.consent_authority.abort_revocation(reservation);
                 return Err(GatewayError::EventLimitReached {
                     maximum: self.limits.max_events_per_timeline,
                 })
             }
             Ok(event) => event,
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                self.consent_authority.abort_revocation(reservation);
+                return Err(error.into());
+            }
         };
-        // The exact session was checked above and this authority never removes
-        // sessions, so a second absence would violate the host-only invariant.
         self.consent_authority
-            .record_revocation_on_timeline(timeline, &revocation)
+            .commit_revocation(reservation)
             .map_err(|_| {
                 GatewayError::Store(CoreError::Storage(
                     "consent revocation session disappeared after append".to_owned(),

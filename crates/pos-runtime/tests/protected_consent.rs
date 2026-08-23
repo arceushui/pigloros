@@ -45,6 +45,24 @@ impl Driver for ProtectedEventDriver {
     }
 }
 
+struct MismatchedSubjectDriver {
+    entity: EntityId,
+}
+
+impl Driver for MismatchedSubjectDriver {
+    fn name(&self) -> &'static str {
+        "mismatched-subject"
+    }
+
+    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
+        Ok(StepOutput::new(vec![EventDraft::new(
+            self.entity,
+            Kind::new("geo.position.v1"),
+            CanonicalBytes::from_static(b"protected"),
+        )]))
+    }
+}
+
 fn grant(subject_id: EntityId) -> ConsentGranted {
     ConsentGranted {
         subject_id,
@@ -168,7 +186,7 @@ fn protected_public_seam_rejects_a_draft_for_a_different_subject() {
     let authority = ConsentAuthority::new();
     let token = authority.record_grant_on_timeline(timeline, &grant(subject));
     let mut registry = PluginRegistry::new().with_consent_authority(authority);
-    registry.register_driver(Box::new(ProtectedEventDriver {
+    registry.register_driver(Box::new(MismatchedSubjectDriver {
         entity: other_subject,
     }));
 

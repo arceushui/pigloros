@@ -543,7 +543,10 @@ impl PluginRegistry {
             let subject = protected_token.map_or(draft.entity, ConsentCapabilityToken::subject_id);
             match protected_token {
                 Some(token) => {
-                    if draft.entity != token.subject_id() {
+                    let sensitive = pos_core::required_modality_for_event(&draft.event_type) != 0
+                        || draft.event_type.as_str().starts_with("timeline.fork.")
+                        || draft.event_type.as_str().starts_with("retention.");
+                    if sensitive && draft.entity != token.subject_id() {
                         return Err(RuntimeError::Consent(pos_core::ConsentError::NoConsent));
                     }
                     token

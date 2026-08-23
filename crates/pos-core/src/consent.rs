@@ -626,6 +626,24 @@ struct ActiveConsent {
 
 type ActiveConsentSessions = HashMap<(TimelineId, EntityId, EntityId, u64), ActiveConsent>;
 
+/// Host-owned reservation that serializes a durable revocation with protected
+/// appends using the same [`ConsentAuthority`] state.
+///
+/// A reservation temporarily fences its session before the host begins the
+/// durable append. The host must commit it after that append succeeds or
+/// abort it when the append fails.
+#[derive(Debug)]
+pub struct ConsentRevocationReservation {
+    authority_id: u64,
+    timeline_id: TimelineId,
+    subject_id: EntityId,
+    grantee_id: EntityId,
+    grant_seq: u64,
+    previous_fence_seq: u64,
+    pending_fence_seq: u64,
+    fence_seq: u64,
+}
+
 /// Host-owned authority that issues and invalidates consent capabilities.
 ///
 /// Its identity and active sessions are private. A capability minted by a
@@ -727,6 +745,110 @@ impl ConsentAuthority {
         revocation: &ConsentRevoked,
     ) -> Result<(), ConsentError> {
         self.validate_revocation_with_timeline(timeline_id, revocation)
+    }
+
+    /// Reserve a durable revocation and fence protected appends immediately.
+    ///
+    /// The returned reservation must be passed to
+    /// [`Self::commit_revocation`] after the Gateway has durably appended the
+    /// revocation, or to [`Self::abort_revocation`] when that append fails.
+    /// While the reservation is active, protected appends for this exact
+    /// session fail closed even though the durable Event is not yet present.
+    ///
+    /// # Errors
+    /// Returns [`ConsentError::NoConsent`] when the session is absent and
+    /// [`ConsentError::Revoked`] when another revocation already fenced it.
+    pub fn begin_revocation_on_timeline(
+        &self,
+        timeline_id: TimelineId,
+        revocation: &ConsentRevoked,
+    ) -> Result<ConsentRevocationReservation, ConsentError> {
+        let pending_fence_seq = revocation.fence_seq.saturating_sub(1);
+        let key = (
+            timeline_id,
+            revocation.subject_id,
+            revocation.grantee_id,
+            revocation.grant_seq,
+        );
+        let mut sessions = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(active) = sessions.get_mut(&key) else {
+            return Err(ConsentError::NoConsent);
+        };
+        if active.token.fence_seq <= revocation.fence_seq {
+            return Err(ConsentError::Revoked);
+        }
+        let previous_fence_seq = active.token.fence_seq;
+        active.token.fence_seq = pending_fence_seq;
+        Ok(ConsentRevocationReservation {
+            authority_id: self.authority_id,
+            timeline_id,
+            subject_id: revocation.subject_id,
+            grantee_id: revocation.grantee_id,
+            grant_seq: revocation.grant_seq,
+            previous_fence_seq,
+            pending_fence_seq,
+            fence_seq: revocation.fence_seq,
+        })
+    }
+
+    /// Publish a successfully appended revocation's durable fence.
+    ///
+    /// # Errors
+    /// Returns [`ConsentError::NoConsent`] when the reservation belongs to a
+    /// different authority or the reserved session no longer exists.
+    pub fn commit_revocation(
+        &self,
+        reservation: ConsentRevocationReservation,
+    ) -> Result<(), ConsentError> {
+        if reservation.authority_id != self.authority_id {
+            return Err(ConsentError::NoConsent);
+        }
+        let key = (
+            reservation.timeline_id,
+            reservation.subject_id,
+            reservation.grantee_id,
+            reservation.grant_seq,
+        );
+        let mut sessions = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(active) = sessions.get_mut(&key) else {
+            return Err(ConsentError::NoConsent);
+        };
+        if active.token.fence_seq != reservation.pending_fence_seq {
+            return Err(ConsentError::NoConsent);
+        }
+        active.token.fence_seq = reservation.fence_seq;
+        Ok(())
+    }
+
+    /// Abort a failed durable revocation append and restore its prior fence.
+    ///
+    /// A later direct revocation or grant publication is preserved if it has
+    /// already changed the session while the reservation was being resolved.
+    pub fn abort_revocation(&self, reservation: ConsentRevocationReservation) {
+        if reservation.authority_id != self.authority_id {
+            return;
+        }
+        let key = (
+            reservation.timeline_id,
+            reservation.subject_id,
+            reservation.grantee_id,
+            reservation.grant_seq,
+        );
+        let mut sessions = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(active) = sessions.get_mut(&key) {
+            if active.token.fence_seq == reservation.pending_fence_seq {
+                active.token.fence_seq = reservation.previous_fence_seq;
+            }
+        }
     }
 
     fn validate_revocation_with_timeline(
@@ -1992,6 +2114,48 @@ mod tests {
         assert_eq!(
             authority.record_revocation_on_timeline(timeline, &wrong_session_revocation),
             Err(ConsentError::NoConsent)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn revocation_reservation_blocks_protected_append_until_commit() {
+        let authority = ConsentAuthority::new();
+        let timeline = TimelineId::new();
+        let grant = sample_granted();
+        let token = authority.record_grant_on_timeline(timeline, &grant);
+        let revocation = ConsentRevoked {
+            subject_id: grant.subject_id,
+            grantee_id: grant.grantee_id,
+            grant_seq: grant.grant_seq,
+            fence_seq: 1,
+        };
+        let started = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let revoking_authority = authority.clone();
+        let revoking_started = started.clone();
+        let revoking_release = release.clone();
+        let handle = std::thread::spawn(move || {
+            let reservation = revoking_authority
+                .begin_revocation_on_timeline(timeline, &revocation)
+                .test_ok();
+            revoking_started.wait();
+            revoking_release.wait();
+            revoking_authority.commit_revocation(reservation).test_ok();
+        });
+
+        started.wait();
+        let mut append_count = 0;
+        let error = authority
+            .with_token_fence(timeline, &token, 0, 0, &mut || append_count += 1)
+            .test_err();
+        assert_eq!(error, ConsentError::Revoked);
+        assert_eq!(append_count, 0);
+        release.wait();
+        assert!(handle.join().is_ok());
+        assert_eq!(
+            authority.validate_on_timeline(timeline, &token, 1, 0),
+            Err(ConsentError::Revoked)
         );
     }
 
