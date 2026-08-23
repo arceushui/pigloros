@@ -155,7 +155,6 @@ mod coverage_paths {
             cadence_updates: Vec::new(),
             event_cursors: Vec::new(),
             operation: OperationContext::Public,
-            observed_through: Seq::ZERO,
         });
         registry.abort_step();
 
@@ -165,7 +164,6 @@ mod coverage_paths {
             cadence_updates: vec![(id, 1)],
             event_cursors: vec![(id, Seq::ZERO)],
             operation: OperationContext::Public,
-            observed_through: Seq::ZERO,
         });
         registry.commit_step_at(Seq::ZERO);
     }
@@ -294,7 +292,6 @@ struct PendingStep {
     cadence_updates: Vec<(PluginId, u128)>,
     event_cursors: Vec<(PluginId, Seq)>,
     operation: OperationContext,
-    observed_through: Seq,
 }
 
 /// Explicit host operation authorization for a Driver Tick or projection read.
@@ -680,7 +677,6 @@ impl PluginRegistry {
             cadence_updates,
             event_cursors,
             operation,
-            observed_through,
         });
         Ok(all_drafts)
     }
