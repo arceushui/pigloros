@@ -887,7 +887,11 @@ impl ExperimentSession {
 
     /// Bind a timeline-issued capability for protected Tick Boundaries.
     #[must_use]
-    pub fn with_protected_token(mut self, token: ConsentCapabilityToken, now_secs: u64) -> Self {
+    pub const fn with_protected_token(
+        mut self,
+        token: ConsentCapabilityToken,
+        now_secs: u64,
+    ) -> Self {
         self.operation_token = Some(token);
         self.operation_now_secs = now_secs;
         self
@@ -1100,6 +1104,45 @@ impl ExperimentSession {
         Ok(outcome)
     }
 
+    fn select_step_drafts(
+        &mut self,
+        request: StepRequest,
+        committed_events: &[pos_core::Event],
+    ) -> Result<Vec<EventDraft>, pos_runtime::RuntimeError> {
+        match (request, self.operation_token.clone()) {
+            (StepRequest::AllDrivers, Some(token)) => self.registry.step_all_anchored_protected(
+                self.timeline.id(),
+                self.boundary.folded_through,
+                token,
+                self.operation_now_secs,
+                committed_events,
+            ),
+            (StepRequest::Cadenced(now_ns), Some(token)) => self
+                .registry
+                .tick_cadenced_anchored_protected(
+                    self.timeline.id(),
+                    now_ns,
+                    self.boundary.folded_through,
+                    token,
+                    self.operation_now_secs,
+                    committed_events,
+                ),
+            (StepRequest::AllDrivers, None) => self.registry.step_all_anchored_with_events(
+                self.timeline.id(),
+                self.boundary.folded_through,
+                committed_events,
+            ),
+            (StepRequest::Cadenced(now_ns), None) => self
+                .registry
+                .tick_cadenced_anchored_with_events(
+                    self.timeline.id(),
+                    now_ns,
+                    self.boundary.folded_through,
+                    committed_events,
+                ),
+        }
+    }
+
     fn step_boundary(&mut self, request: StepRequest) -> Result<TickOutcome, ExperimentError> {
         if let Some(subject) = self.consent_revocation_pending.take() {
             return self.commit_consent_revocation(&subject);
@@ -1111,39 +1154,7 @@ impl ExperimentSession {
 
         let (mut folded_events, committed_events) = self.prepare_tick()?;
 
-        let selected = match (request, self.operation_token.clone()) {
-            (StepRequest::AllDrivers, Some(token)) => self.registry.step_all_anchored_protected(
-                self.timeline.id(),
-                self.boundary.folded_through,
-                token,
-                self.operation_now_secs,
-                &committed_events,
-            ),
-            (StepRequest::Cadenced(now_ns), Some(token)) => {
-                self.registry.tick_cadenced_anchored_protected(
-                    self.timeline.id(),
-                    now_ns,
-                    self.boundary.folded_through,
-                    token,
-                    self.operation_now_secs,
-                    &committed_events,
-                )
-            }
-            (StepRequest::AllDrivers, None) => self.registry.step_all_anchored_with_events(
-                self.timeline.id(),
-                self.boundary.folded_through,
-                &committed_events,
-            ),
-            (StepRequest::Cadenced(now_ns), None) => {
-                self.registry.tick_cadenced_anchored_with_events(
-                    self.timeline.id(),
-                    now_ns,
-                    self.boundary.folded_through,
-                    &committed_events,
-                )
-            }
-        };
-        let drafts = match selected {
+        let drafts = match self.select_step_drafts(request, &committed_events) {
             Ok(drafts) => drafts,
             Err(error) => {
                 self.registry.abort_step();
