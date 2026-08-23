@@ -1090,7 +1090,6 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         self.port.authenticate(&request).and_then(|()| {
             ErasureStateV1::submitted(request.reference(), self.coordinator, provenance).inspect(|state| {
                 self.records.push(ErasureCoordinatorRecordV1 { request, state: state.clone(), targets: Vec::new(), acknowledgements: Vec::new(), receipt: None });
-                state
             })
         })
     }
@@ -1114,7 +1113,6 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         }
         record.state.transition(transition).inspect(|state| {
             record.state = state.clone();
-            state
         })
     }
     /// Freeze the authoritative closure once; duplicate freezes return the existing state.
