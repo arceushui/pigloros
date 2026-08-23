@@ -2593,10 +2593,7 @@ mod tests {
             .await
             .test_ok()
             .test_value();
-        assert!(matches!(
-            trace,
-            super::SchedulerTrace::Selected { .. }
-        ));
+        assert!(matches!(trace, super::SchedulerTrace::Selected { .. }));
 
         let events = executor
             .read(

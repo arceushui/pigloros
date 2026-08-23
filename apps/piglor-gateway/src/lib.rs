@@ -578,9 +578,7 @@ fn gateway_action_registry_with_authority(
         Some(Box::new(WorldPlugin::new().with_bodies(bodies))),
         [Kind::new(EVENT_TYPE_ACTION)],
     );
-    if registration.is_err() {
-        return Arc::new(PluginRegistry::new());
-    }
+    registration.expect("Gateway action registration must be valid");
     if let Some(authority) = authority {
         registry = registry.with_consent_authority(authority);
     }
@@ -2592,6 +2590,15 @@ mod tests {
             gateway.create_timeline("closed").await,
             Err(GatewayError::StoreExecutorClosed)
         ));
+        assert!(matches!(
+            gateway
+                .issue_consent_grant(
+                    &TimelineId::new().to_string(),
+                    consent_grant(EntityId::new(), 1)
+                )
+                .await,
+            Err(GatewayError::StoreExecutorClosed)
+        ));
         drop(gateway);
     }
 
@@ -2738,6 +2745,15 @@ mod tests {
             ConsentRevokedV1::decode(&revocation_event.payload).test_ok(),
             revocation
         );
+        let already_fenced = gateway
+            .issue_consent_revocation(&timeline.id().to_string(), revocation)
+            .await
+            .test_err();
+        assert!(matches!(
+            already_fenced,
+            GatewayError::Store(CoreError::Storage(message))
+                if message == "consent revocation was already fenced"
+        ));
         drop(gateway);
     }
 

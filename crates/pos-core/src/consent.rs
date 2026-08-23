@@ -2343,6 +2343,65 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn restore_from_history_rejects_coordinate_mismatches() {
+        fn event(
+            event_type: &str,
+            payload: CanonicalBytes,
+            entity: EntityId,
+            seq: u64,
+        ) -> Event {
+            Event {
+                id: EventId::new(),
+                entity,
+                event_type: Kind::new(event_type),
+                payload,
+                wall_time: WallTime::from_micros(1),
+                seq: crate::clock::Seq::from_u64(seq),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: SchemaVersion::V1,
+                signature: None,
+                payload_hash: Hash::from_bytes([0; 32]),
+            }
+        }
+
+        let timeline = TimelineId::new();
+        let grant = sample_granted();
+        let grant_payload = grant.encode().test_ok();
+        assert_eq!(
+            ConsentAuthority::new()
+                .restore_from_history(
+                    timeline,
+                    &[event(
+                        EVENT_TYPE_CONSENT_GRANTED_V1,
+                        grant_payload,
+                        EntityId::new(),
+                        grant.grant_seq,
+                    )],
+                )
+                .test_err(),
+            ConsentCodecError::HistoryCoordinateMismatch
+        );
+
+        let revocation = sample_revoked(&grant);
+        assert_eq!(
+            ConsentAuthority::new()
+                .restore_from_history(
+                    timeline,
+                    &[event(
+                        EVENT_TYPE_CONSENT_REVOKED_V1,
+                        revocation.encode().test_ok(),
+                        revocation.subject_id,
+                        revocation.fence_seq + 1,
+                    )],
+                )
+                .test_err(),
+            ConsentCodecError::HistoryCoordinateMismatch
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn consent_gate_enforces_known_event_modalities() {
         let authority = ConsentAuthority::new();
         let timeline = TimelineId::new();
@@ -2498,6 +2557,140 @@ mod tests {
                 0,
             )
             .is_ok());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn authority_policy_and_reservation_error_seams_fail_closed() {
+        struct PermissiveGate;
+
+        impl ConsentGate for PermissiveGate {
+            fn check_consent(
+                &self,
+                _: TimelineId,
+                _: EntityId,
+                _: &Kind,
+                _: u64,
+                _: u64,
+            ) -> Result<ConsentCapabilityToken, ConsentError> {
+                Err(ConsentError::NoConsent)
+            }
+
+            fn validate_token(
+                &self,
+                _: TimelineId,
+                _: &ConsentCapabilityToken,
+                _: u64,
+                _: u64,
+            ) -> Result<(), ConsentError> {
+                Ok(())
+            }
+        }
+
+        let authority = ConsentAuthority::new();
+        let timeline = TimelineId::new();
+        let mut grant = sample_granted();
+        grant.modalities = MODALITY_LOCATION;
+        grant.fork_permitted = false;
+        grant.retention_days = 0;
+        let token = authority.record_grant_on_timeline(timeline, &grant);
+
+        assert_eq!(
+            token.authorize_event_type(&Kind::new("persona.update.v1")),
+            Err(ConsentError::ModalityNotGranted)
+        );
+        assert_eq!(
+            token.authorize_event_type(&Kind::new("retention.extend.v1")),
+            Err(ConsentError::RetentionNotPermitted)
+        );
+        assert_eq!(
+            authority.check_consent(
+                timeline,
+                grant.subject_id,
+                &Kind::new("timeline.fork.v1"),
+                0,
+                0,
+            ),
+            Err(ConsentError::ForkNotPermitted)
+        );
+        assert_eq!(
+            authority.check_consent(
+                timeline,
+                grant.subject_id,
+                &Kind::new("consent.revoked.v1"),
+                0,
+                0,
+            ),
+            Err(ConsentError::ConsentEventsForbidden)
+        );
+        assert_eq!(
+            ConsentGate::authorize_projection(
+                &authority,
+                timeline,
+                EntityId::new(),
+                0,
+                0,
+                &token,
+            ),
+            Err(ConsentError::NoConsent)
+        );
+
+        let gate = PermissiveGate;
+        let mut append_count = 0;
+        ConsentGate::with_token_fence(
+            &gate,
+            timeline,
+            &token,
+            0,
+            0,
+            &mut || append_count += 1,
+        )
+        .test_ok();
+        assert_eq!(append_count, 1);
+
+        let revocation = ConsentRevoked {
+            subject_id: grant.subject_id,
+            grantee_id: grant.grantee_id,
+            grant_seq: grant.grant_seq,
+            fence_seq: 1,
+        };
+        let reservation = authority
+            .begin_revocation_on_timeline(timeline, &revocation)
+            .test_ok();
+        assert_eq!(
+            authority
+                .begin_revocation_on_timeline(timeline, &revocation)
+                .test_err(),
+            ConsentError::Revoked
+        );
+        authority.abort_revocation(reservation);
+
+        let reservation = authority
+            .begin_revocation_on_timeline(timeline, &revocation)
+            .test_ok();
+        authority.record_grant_on_timeline(timeline, &grant);
+        assert_eq!(
+            reservation.commit_durable(),
+            Err(ConsentError::NoConsent)
+        );
+
+        let reservation = authority
+            .begin_revocation_on_timeline(timeline, &revocation)
+            .test_ok();
+        let other_authority = ConsentAuthority::new();
+        assert_eq!(
+            other_authority.commit_revocation(reservation),
+            Err(ConsentError::NoConsent)
+        );
+
+        let reservation = authority
+            .begin_revocation_on_timeline(timeline, &revocation)
+            .test_ok();
+        other_authority.abort_revocation(reservation);
+        assert_eq!(
+            authority.validate_revocation_on_timeline(TimelineId::new(), &revocation),
+            Err(ConsentError::NoConsent)
+        );
     }
 
     #[test]

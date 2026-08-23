@@ -63,6 +63,24 @@ impl Driver for MismatchedSubjectDriver {
     }
 }
 
+struct SubscribedDriver {
+    key: pos_runtime::ProjectionKey,
+}
+
+impl Driver for SubscribedDriver {
+    fn name(&self) -> &'static str {
+        "subscribed"
+    }
+
+    fn subscriptions(&self) -> &[pos_runtime::ProjectionKey] {
+        std::slice::from_ref(&self.key)
+    }
+
+    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
+        Ok(StepOutput::empty())
+    }
+}
+
 fn grant(subject_id: EntityId) -> ConsentGranted {
     ConsentGranted {
         subject_id,
@@ -347,6 +365,64 @@ fn protected_public_seam_aborts_when_the_gate_rejects_a_draft() {
     assert!(matches!(
         error,
         RuntimeError::Consent(ConsentError::NoConsent)
+    ));
+}
+
+#[test]
+fn ordinary_step_and_tick_enforce_projection_and_draft_boundaries() {
+    use pos_store::{open_store, StoreConfig};
+
+    let timeline = TimelineId::new();
+    let subject = EntityId::new();
+    let authority = ConsentAuthority::new();
+    let token = authority.record_grant_on_timeline(timeline, &grant(subject));
+
+    let mut step_with_projection = PluginRegistry::new().with_consent_authority(authority.clone());
+    step_with_projection.register_driver(Box::new(SubscribedDriver {
+        key: pos_runtime::ProjectionKey::new(subject),
+    }));
+    assert!(matches!(
+        test_err(step_with_projection.step_all(timeline)),
+        RuntimeError::Consent(ConsentError::NoConsent)
+    ));
+
+    let mut tick_with_projection = PluginRegistry::new().with_consent_authority(authority.clone());
+    tick_with_projection.register_driver(Box::new(SubscribedDriver {
+        key: pos_runtime::ProjectionKey::new(subject),
+    }));
+    assert!(matches!(
+        test_err(tick_with_projection.tick_cadenced(timeline, 0)),
+        RuntimeError::Consent(ConsentError::NoConsent)
+    ));
+
+    let mut protected_with_projection =
+        PluginRegistry::new().with_consent_authority(authority.clone());
+    protected_with_projection.register_driver(Box::new(SubscribedDriver {
+        key: pos_runtime::ProjectionKey::new(subject),
+    }));
+    assert!(protected_with_projection
+        .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
+        .is_ok());
+
+    let mut ordinary_step = PluginRegistry::new().with_consent_authority(authority.clone());
+    ordinary_step.register_driver(Box::new(MismatchedSubjectDriver { entity: subject }));
+    assert!(matches!(
+        test_err(ordinary_step.step_all(timeline)),
+        RuntimeError::Consent(ConsentError::NoConsent)
+    ));
+
+    let mut ordinary_tick = PluginRegistry::new().with_consent_authority(authority);
+    ordinary_tick.register_driver(Box::new(MismatchedSubjectDriver { entity: subject }));
+    assert!(matches!(
+        test_err(ordinary_tick.tick_cadenced(timeline, 0)),
+        RuntimeError::Consent(ConsentError::NoConsent)
+    ));
+
+    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let mut empty = PluginRegistry::new();
+    assert!(matches!(
+        test_err(empty.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[],)),
+        RuntimeError::PendingDriverStep
     ));
 }
 
