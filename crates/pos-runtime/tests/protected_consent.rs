@@ -6,7 +6,9 @@ use pos_core::{
     ids::{EntityId, TimelineId},
     ConsentAuthority, ConsentCapabilityToken, ConsentError, ConsentGate, ConsentGranted,
 };
-use pos_runtime::{Driver, ObservationView, PluginRegistry, RuntimeError, StepOutput};
+use pos_runtime::{
+    Driver, ObservationView, PluginRegistry, RuntimeError, StepOutput, TimelineHistorySegment,
+};
 use std::{
     fmt::Debug,
     sync::{Arc, Mutex},
@@ -67,6 +69,18 @@ impl Driver for MismatchedSubjectDriver {
 
 struct SubscribedDriver {
     key: pos_runtime::ProjectionKey,
+}
+
+struct EmptyDriver;
+
+impl Driver for EmptyDriver {
+    fn name(&self) -> &'static str {
+        "empty-public-seam"
+    }
+
+    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
+        Ok(StepOutput::empty())
+    }
 }
 
 impl Driver for SubscribedDriver {
@@ -442,4 +456,19 @@ fn protected_cadenced_public_seam_stages_and_commits() {
         test_ok(registry.tick_cadenced_anchored_protected(timeline, 0, Seq::ZERO, token, 1, &[]));
     assert_eq!(drafts.len(), 1);
     test_ok(registry.commit_step_at(Seq::ZERO, 1));
+}
+
+#[test]
+fn public_registry_recovery_and_unprotected_transactions_run() {
+    let timeline = TimelineId::new();
+    let mut registry = PluginRegistry::new();
+    registry.register_driver(Box::new(EmptyDriver));
+
+    test_ok(registry.restore_driver_state(
+        &[TimelineHistorySegment::new(timeline, Seq::ZERO)],
+        &[],
+    ));
+    assert!(test_ok(registry.step_all_anchored(timeline, Seq::ZERO)).is_empty());
+    test_ok(registry.commit_step_at(Seq::ZERO, 0));
+    assert!(test_ok(registry.tick_cadenced(timeline, 0)).is_empty());
 }
