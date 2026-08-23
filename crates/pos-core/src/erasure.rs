@@ -1070,7 +1070,7 @@ pub struct ErasureCoordinatorStateMachineV1<P> {
 impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     /// Construct a host-owned state machine.
     #[must_use]
-    pub fn new(port: P, coordinator: ErasureReferenceV1) -> Self {
+    pub const fn new(port: P, coordinator: ErasureReferenceV1) -> Self {
         Self { port, coordinator, records: Vec::new() }
     }
     /// Query an existing outcome without creating or advancing it.
@@ -1088,7 +1088,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             return if record.request == request { Ok(record.state.clone()) } else { Err(ErasureErrorV1::PolicyConflict) };
         }
         self.port.authenticate(&request).and_then(|()| {
-            ErasureStateV1::submitted(request.reference(), self.coordinator, provenance).map(|state| {
+            ErasureStateV1::submitted(request.reference(), self.coordinator, provenance).inspect(|state| {
                 self.records.push(ErasureCoordinatorRecordV1 { request, state: state.clone(), targets: Vec::new(), acknowledgements: Vec::new(), receipt: None });
                 state
             })
@@ -1112,7 +1112,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         if transition.lifecycle == ErasureLifecycleV1::AccessFrozen {
             return Err(ErasureErrorV1::PolicyConflict);
         }
-        record.state.transition(transition).map(|state| {
+        record.state.transition(transition).inspect(|state| {
             record.state = state.clone();
             state
         })
@@ -1134,7 +1134,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             if targets.is_empty() || targets.len() > ERASURE_MAX_INVENTORY_RESULTS { return Err(ErasureErrorV1::ScopeInvalid); }
             targets.sort_unstable();
             if has_duplicate(&targets) { return Err(ErasureErrorV1::ScopeInvalid); }
-            self.records[index].state.transition(transition).map(|state| { self.records[index].targets = targets; self.records[index].state = state.clone(); state })
+            self.records[index].state.transition(transition).inspect(|state| { self.records[index].targets = targets; self.records[index].state = state.clone(); })
         })
     }
     /// Persist one frozen-closure acknowledgement; an exact retry is idempotent.
@@ -1159,7 +1159,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                 failed_owners: Vec::new(),
                 replay_claim: record.state.replay_claim(),
                 provenance: record.acknowledgements.last().map_or(reference_zero(), |ack| ack.evidence),
-            }).map(|state| { record.state = state.clone(); state })
+            }).inspect(|state| { record.state = state.clone(); })
         } else {
             Ok(record.state.clone())
         }
@@ -1194,14 +1194,14 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         }).and_then(|terminal| {
             input.request = request;
             input.terminal_state = terminal.state_digest();
-            input.required_targets = record.targets.clone();
-            input.acknowledgements = record.acknowledgements.clone();
+            input.required_targets.clone_from(&record.targets);
+            input.acknowledgements.clone_from(&record.acknowledgements);
             input.lifecycle = lifecycle;
             if let Some(freeze_position) = terminal.freeze_position() {
                 input.freeze_position = freeze_position;
                 input.pending_owners = terminal.pending_owners().to_vec();
                 input.failed_owners = terminal.failed_owners().to_vec();
-                ErasureReceiptV1::new(input).map(|receipt| { record.state = terminal; record.receipt = Some(receipt.clone()); receipt })
+                ErasureReceiptV1::new(input).inspect(|receipt| { record.state = terminal; record.receipt = Some(receipt.clone()); })
             } else {
                 Err(ErasureErrorV1::PolicyConflict)
             }
