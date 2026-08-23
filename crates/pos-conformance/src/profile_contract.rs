@@ -3360,6 +3360,18 @@ mod tests {
     }
 
     #[test]
+    fn public_retirement_with_policy_skips_stable_validation() {
+        let candidate = candidate();
+        assert!(candidate
+            .transition_to_with_trust_policy(
+                ProfileLifecycleV1::Retired,
+                vec![],
+                &trusted_root_policy()
+            )
+            .is_ok());
+    }
+
+    #[test]
     fn public_stable_validator_rejects_report_shape_mismatches() {
         let mut value = stable_profile();
         value.stable_evidence[0].report.cases.pop();
@@ -3398,7 +3410,7 @@ mod tests {
     #[test]
     fn public_stable_validator_rejects_report_case_outcome_mismatch() {
         let mut value = stable_profile();
-        value.stable_evidence[0].report.cases[0].actual_digest = Some(digest(99));
+        value.stable_evidence[0].report.cases[0].replay_claim = ReplayClaimV1::StructuralOnly;
         value.stable_evidence[0].report.report_digest =
             value.stable_evidence[0].report.digest().unwrap_or([0; 32]);
         refresh_stable_attestation(&mut value.stable_evidence[0]);
