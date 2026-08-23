@@ -203,9 +203,8 @@ const fn decode_bool(val: &Value) -> Result<bool, ConsentCodecError> {
 fn decode_id(val: &Value) -> Result<EntityId, ConsentCodecError> {
     match val {
         Value::Bytes(b) if b.len() == 16 => {
-            let Ok(arr) = b.as_slice().try_into() else {
-                return Err(ConsentCodecError::WrongFieldType);
-            };
+            let mut arr = [0_u8; 16];
+            arr.copy_from_slice(b);
             let n = u128::from_be_bytes(arr);
             Ok(EntityId::from_ulid(ulid::Ulid::from(n)))
         }
@@ -527,6 +526,7 @@ mod tests {
     }
 
     impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn test_ok(self) -> T {
             self.unwrap_or_else(|error| {
                 std::panic::resume_unwind(Box::new(format!(
@@ -541,6 +541,7 @@ mod tests {
     }
 
     impl<T, E: std::fmt::Debug> TestErrorExt<E> for Result<T, E> {
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn test_err(self) -> E {
             match self {
                 Ok(_) => std::panic::resume_unwind(Box::new("expected consent fixture error")),

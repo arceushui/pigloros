@@ -1905,6 +1905,12 @@ mod tests {
     }
 
     #[test]
+    fn gateway_action_registry_exposes_the_host_action_schema() {
+        let registry = gateway_action_registry();
+        assert!(registry.schemas.contains(EVENT_TYPE_ACTION));
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_body_constructor_without_principal_is_fail_closed() {
         let body = EntityId::new();

@@ -2061,6 +2061,29 @@ mod tests {
             registry.tick_cadenced(timeline.id(), 0),
             Err(RuntimeError::ConsentDraft { .. })
         ));
+
+        struct AllowedDriver;
+        impl crate::driver::Driver for AllowedDriver {
+            fn name(&self) -> &'static str {
+                "allowed"
+            }
+
+            fn step(
+                &mut self,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                Ok(StepOutput::new(vec![EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("driver.allowed.v1"),
+                    CanonicalBytes::from_vec(Vec::new()),
+                )]))
+            }
+        }
+
+        let mut allowed = PluginRegistry::new();
+        allowed.register_driver(Box::new(AllowedDriver));
+        assert_eq!(allowed.tick_cadenced(timeline.id(), 0).test_ok().len(), 1);
     }
 
     #[test]
