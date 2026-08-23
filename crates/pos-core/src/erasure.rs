@@ -2426,7 +2426,7 @@ mod tests {
         let Value::Array(artifacts) = &mut inventories[0] else { return Err(ErasureErrorV1::InvalidEncoding); };
         artifacts.push(artifacts[0].clone());
         assert_eq!(decode_receipt(&unordered), Err(ErasureErrorV1::ScopeInvalid));
-        for malformed in [&[0x58, 1][..], &[0x81, 0x58, 2, 0][..], &[0x81, 0x1a, 0, 0, 0][..], &[0x81, 0x58, 2, 0, 0][..], &[0x81, 0x1b, 0, 0, 0, 0, 0, 0, 0, 1][..]] {
+        for malformed in [&[0x58, 1][..], &[0x81, 0x58, 2, 0][..], &[0x81, 0x1a, 0, 0, 0][..], &[0x81, 0x58, 2, 0, 0][..], &[0x81, 0x1b, 0, 0, 0, 0, 0, 0, 0, 1][..], &[0x81, 0x78, 2, 0][..], &[0x81, 0x98, 24][..], &[0x81, 0x7f, 0xff][..]] {
             assert_eq!(ErasureReceiptV1::from_canonical_cbor(malformed), Err(ErasureErrorV1::InvalidEncoding));
         }
         Ok(())
