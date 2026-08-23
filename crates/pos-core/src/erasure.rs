@@ -2307,6 +2307,9 @@ mod tests {
             acknowledgement(2, ErasureAcknowledgementOutcomeV1::Acknowledged),
             acknowledgement(3, ErasureAcknowledgementOutcomeV1::Acknowledged),
             acknowledgement(4, ErasureAcknowledgementOutcomeV1::Acknowledged),
+            acknowledgement(5, ErasureAcknowledgementOutcomeV1::Acknowledged),
+            acknowledgement(6, ErasureAcknowledgementOutcomeV1::Acknowledged),
+            acknowledgement(7, ErasureAcknowledgementOutcomeV1::Acknowledged),
         ];
         acknowledgements[1].target.artifact_class = ErasureArtifactClassV1::ReproManifest;
         acknowledgements[1].target.key_role = ErasureKeyRoleV1::Signing;
@@ -2314,13 +2317,31 @@ mod tests {
         acknowledgements[2].target.key_role = ErasureKeyRoleV1::BackupEnvelope;
         acknowledgements[3].target.artifact_class = ErasureArtifactClassV1::ConformanceReport;
         acknowledgements[3].target.key_role = ErasureKeyRoleV1::ReplicaTransport;
+        acknowledgements[4].target.artifact_class = ErasureArtifactClassV1::CalibrationReport;
+        acknowledgements[5].target.artifact_class = ErasureArtifactClassV1::Export;
+        acknowledgements[6].target.artifact_class = ErasureArtifactClassV1::ForkOrSnapshot;
         let mut input = receipt_input(ErasureLifecycleV1::Complete, acknowledgements.clone(), Vec::new(), Vec::new());
-        input.inventories.artifacts = vec![inventory_result(acknowledgements[0].target)];
+        input.inventories.artifacts = vec![
+            inventory_result(acknowledgements[0].target),
+            inventory_result(acknowledgements[4].target),
+            inventory_result(acknowledgements[5].target),
+            inventory_result(acknowledgements[6].target),
+        ];
         input.inventories.keys = vec![inventory_result(acknowledgements[1].target)];
         input.inventories.replicas = vec![inventory_result(acknowledgements[2].target)];
         input.inventories.backups = vec![inventory_result(acknowledgements[3].target)];
         let encoded = ErasureReceiptV1::new(input)?.to_canonical_cbor()?;
         assert_eq!(ErasureReceiptV1::from_canonical_cbor(&encoded)?.to_canonical_cbor()?, encoded);
+        let mut unknown_codes = receipt_value(&ErasureReceiptV1::from_canonical_cbor(&encoded)?.0);
+        let mut tampered_digest = unknown_codes.clone();
+        let Value::Array(fields) = &mut tampered_digest else { return Err(ErasureErrorV1::InvalidEncoding); };
+        fields[16] = digest(reference(99));
+        assert_eq!(decode_receipt(&tampered_digest), Err(ErasureErrorV1::ProvenanceMissing));
+        let Value::Array(fields) = &mut unknown_codes else { return Err(ErasureErrorV1::InvalidEncoding); };
+        let Value::Array(targets) = &mut fields[6] else { return Err(ErasureErrorV1::InvalidEncoding); };
+        let Value::Array(target) = &mut targets[0] else { return Err(ErasureErrorV1::InvalidEncoding); };
+        target[0] = uint(7);
+        assert_eq!(decode_receipt(&unknown_codes), Err(ErasureErrorV1::InvalidEncoding));
         for invalid in [&[0x9f, 0xff][..], &[0xbf, 0xff][..], &[0x9a, 0xff, 0xff, 0xff, 0xff][..], &[0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x00][..]] {
             assert_eq!(ErasureReceiptV1::from_canonical_cbor(invalid), Err(ErasureErrorV1::InvalidEncoding));
         }
