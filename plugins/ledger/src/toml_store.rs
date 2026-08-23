@@ -52,16 +52,21 @@ impl TomlLedgerStore {
             .filter_map(Result::ok)
             .map(|entry| entry.path())
             .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("toml"))
-            .filter_map(|path| path.file_stem().map(|stem| (path, stem.to_owned())))
             .collect();
-        paths.sort_by(|left, right| left.0.cmp(&right.0));
+        paths.sort();
         let mut items = Vec::new();
-        for (path, stem) in paths {
+        for path in paths {
             let text = std::fs::read_to_string(&path)?;
             let value = toml::from_str::<T>(&text).map_err(|e| LedgerError::Toml {
                 path: path.display().to_string(),
                 reason: e.to_string(),
             })?;
+            let Some(stem) = path.file_stem() else {
+                return Err(LedgerError::InvalidPrediction(format!(
+                    "TOML path has no filename stem: {}",
+                    path.display()
+                )));
+            };
             let stem = stem.to_string_lossy().into_owned();
             items.push((stem, value));
         }
