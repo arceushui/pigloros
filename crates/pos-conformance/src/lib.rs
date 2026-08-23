@@ -2267,7 +2267,6 @@ pub mod strict_codec {
         Ok(value)
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn validate_value(value: &Value) -> Result<(), StrictCborError> {
         if let Value::Array(values) = value {
             values.iter().try_for_each(validate_value)

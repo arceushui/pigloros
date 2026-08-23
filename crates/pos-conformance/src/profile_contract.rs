@@ -2574,6 +2574,37 @@ mod tests {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn replace_profile_path(value: &mut Value, path: &[usize], replacement: Value) {
+        if let Some(index) = path.first().copied() {
+            if path.len() == 1 {
+                if let Value::Array(fields) = value {
+                    fields[index] = replacement;
+                }
+            } else if let Value::Array(fields) = value {
+                replace_profile_path(&mut fields[index], &path[1..], replacement);
+            }
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn malformed_profile_bytes(
+        profile: &ConformanceProfileV1,
+        path: &[usize],
+        replacement: Value,
+    ) -> Vec<u8> {
+        let mut encoded = encode_profile(profile, true);
+        replace_profile_path(&mut encoded, path, replacement);
+        encode_value(&encoded).unwrap_or_default()
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn malformed_request_bytes(path: &[usize], replacement: Value) -> Vec<u8> {
+        let mut encoded = encode_request(&request(), true);
+        replace_profile_path(&mut encoded, path, replacement);
+        encode_value(&encoded).unwrap_or_default()
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn zero_bound_variants() -> [FixtureBoundsV1; 8] {
         [
             FixtureBoundsV1 {
@@ -3319,6 +3350,109 @@ mod tests {
             candidate.transition_to(ProfileLifecycleV1::Stable, vec![first, second]),
             Err(ConformanceContractError::IndependenceEvidenceMissing)
         );
+    }
+
+    #[test]
+    fn public_profile_decoder_reaches_nested_invalid_field_seams() {
+        let value = profile();
+        for index in 0..18 {
+            let bytes = malformed_profile_bytes(&value, &[index], Value::Null);
+            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+        }
+        for index in 0..17 {
+            let bytes = malformed_profile_bytes(&value, &[8, 0, index], Value::Null);
+            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+        }
+        for index in 0..4 {
+            let bytes = malformed_profile_bytes(&value, &[8, 0, 7, 0, index], Value::Null);
+            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+        }
+        for index in 0..8 {
+            let bytes = malformed_profile_bytes(&value, &[8, 0, 13, index], Value::Null);
+            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+        }
+        for index in 0..2 {
+            let bytes = malformed_profile_bytes(&value, &[8, 0, 14, index], Value::Null);
+            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+        }
+        for index in 0..7 {
+            let bytes = malformed_profile_bytes(&value, &[8, 0, 15, index], Value::Null);
+            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+        }
+        for index in 0..5 {
+            let bytes = malformed_profile_bytes(&value, &[10, index], Value::Null);
+            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+        }
+        for index in 0..10 {
+            let bytes = malformed_profile_bytes(&value, &[10, 4, index], Value::Null);
+            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+        }
+        for index in 0..4 {
+            let bytes = malformed_profile_bytes(&value, &[11, index], Value::Null);
+            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+        }
+
+        for expected in [
+            Value::Array(vec![uint(0), Value::Null, Value::Null, Value::Null, Value::Null]),
+            Value::Array(vec![uint(1), Value::Null, Value::Null, Value::Null, Value::Null]),
+            Value::Array(vec![
+                uint(2),
+                Value::Null,
+                Value::Null,
+                Value::Array(vec![Value::Null, Value::Null]),
+                Value::Null,
+            ]),
+        ] {
+            let bytes = malformed_profile_bytes(&value, &[8, 0, 8], expected);
+            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+        }
+
+        let candidate = value
+            .transition_to(ProfileLifecycleV1::Candidate, vec![])
+            .unwrap_or_else(|_| value.clone());
+        let mut first = stable_evidence("alpha", 30);
+        let mut second = stable_evidence("beta", 40);
+        refresh_stable_report_for_profile(&mut first, &candidate);
+        refresh_stable_report_for_profile(&mut second, &candidate);
+        let stable = candidate
+            .transition_to(ProfileLifecycleV1::Stable, vec![first, second])
+            .unwrap_or_else(|_| value.clone());
+        for index in 0..5 {
+            let bytes = malformed_profile_bytes(&stable, &[16, 0, index], Value::Null);
+            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+        }
+        for index in 0..6 {
+            let bytes = malformed_profile_bytes(&stable, &[16, 0, 0, index], Value::Null);
+            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+            let bytes = malformed_profile_bytes(&stable, &[16, 0, 1, index], Value::Null);
+            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+        }
+        for index in 0..16 {
+            let bytes = malformed_profile_bytes(&stable, &[16, 0, 4, 0, index], Value::Null);
+            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+        }
+        for index in 0..24 {
+            let bytes = malformed_profile_bytes(&stable, &[16, 0, 3, index], Value::Null);
+            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+        }
+
+        for index in 0..14 {
+            let bytes = malformed_request_bytes(&[index], Value::Null);
+            assert!(EvaluatorRequestV1::from_canonical_cbor(&bytes).is_err());
+        }
+        for index in 0..6 {
+            let bytes = malformed_request_bytes(&[7, index], Value::Null);
+            assert!(EvaluatorRequestV1::from_canonical_cbor(&bytes).is_err());
+        }
+        for index in 0..3 {
+            let bytes = malformed_request_bytes(&[10, index], Value::Null);
+            assert!(EvaluatorRequestV1::from_canonical_cbor(&bytes).is_err());
+        }
+
+        let mut invalid_caps = value.clone();
+        invalid_caps.evaluator_protocol.hard_caps.max_cases = 0;
+        invalid_caps.profile_digest = invalid_caps.digest();
+        assert!(invalid_caps.validate().is_err());
     }
 
     #[test]
