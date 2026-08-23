@@ -2532,12 +2532,17 @@ mod tests {
         let (observer, records) = super::SchedulerObserver::new(8);
         let (gate_sender, gate_receiver) = std::sync::mpsc::channel();
         observer.install_gate(gate_receiver);
+        let mut store = MemoryStore::new();
+        let timeline = store
+            .create_timeline("queued-cancellation")
+            .test_ok()
+            .test_value()
+            .id();
         let executor = super::StoreExecutor::spawn_with_observer_for_test(
-            super::ExecutorStore::Generic(Box::new(MemoryStore::new())),
+            super::ExecutorStore::Generic(Box::new(store)),
             Arc::clone(&observer),
         );
         let authority = ConsentAuthority::new();
-        let timeline = TimelineId::new();
         let grant = ConsentGrantedV1 {
             subject_id: EntityId::new(),
             grantee_id: EntityId::new(),
