@@ -2622,6 +2622,19 @@ mod tests {
             ConsentGate::authorize_projection(&authority, timeline, EntityId::new(), 0, 0, &token,),
             Err(ConsentError::NoConsent)
         );
+        let other_authority = ConsentAuthority::new();
+        let other_token = other_authority.record_grant_on_timeline(timeline, &grant);
+        assert_eq!(
+            ConsentGate::with_token_fence(
+                &authority,
+                timeline,
+                &other_token,
+                0,
+                0,
+                &mut || {},
+            ),
+            Err(ConsentError::NoConsent)
+        );
 
         let gate = PermissiveGate;
         let mut append_count = 0;
@@ -2660,6 +2673,35 @@ mod tests {
             .test_ok();
         let _token = authority.record_grant_on_timeline(timeline, &grant);
         assert_eq!(reservation.commit_durable(), Err(ConsentError::NoConsent));
+
+        let missing_authority = ConsentAuthority::new();
+        let missing_timeline = TimelineId::new();
+        let missing_grant = sample_granted();
+        let missing_token = missing_authority
+            .record_grant_on_timeline(missing_timeline, &missing_grant);
+        let missing_revocation = ConsentRevoked {
+            subject_id: missing_token.subject_id(),
+            grantee_id: missing_token.grantee_id(),
+            grant_seq: missing_token.grant_seq(),
+            fence_seq: 1,
+        };
+        let missing_reservation = missing_authority
+            .begin_revocation_on_timeline(missing_timeline, &missing_revocation)
+            .test_ok();
+        missing_authority
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&(
+                missing_timeline,
+                missing_grant.subject_id,
+                missing_grant.grantee_id,
+                missing_grant.grant_seq,
+            ));
+        assert_eq!(
+            missing_reservation.commit_durable(),
+            Err(ConsentError::NoConsent)
+        );
 
         let reservation = authority
             .begin_revocation_on_timeline(timeline, &revocation)

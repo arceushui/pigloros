@@ -1491,7 +1491,7 @@ mod tests {
         crypto::Hash,
         event::{CanonicalBytes, EventDraft, Kind, SchemaVersion},
         ids::{EntityId, EventId, PluginId, TimelineId},
-        Capability, ConsentGranted, ConsentRevoked, Event, Plugin, Reducer, State,
+        Capability, ConsentGranted, ConsentRevoked, CoreError, Event, Plugin, Reducer, State,
     };
     use pos_store::{open_store, StoreConfig};
     use std::{
@@ -2800,6 +2800,150 @@ mod tests {
             Some(1)
         );
         assert_eq!(view.state_for(&missing), None);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn protected_append_fences_cover_missing_gate_and_store_errors() {
+        struct EmptyDriver;
+
+        impl Driver for EmptyDriver {
+            fn name(&self) -> &'static str {
+                "empty"
+            }
+
+            fn step(
+                &mut self,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                Ok(StepOutput::empty())
+            }
+        }
+
+        let timeline = TimelineId::new();
+        let subject = EntityId::new();
+        let authority = ConsentAuthority::new();
+        let grant = ConsentGranted {
+            subject_id: subject,
+            grantee_id: EntityId::new(),
+            purpose: "append-boundary".to_owned(),
+            modalities: 0,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        };
+        let token = authority.record_grant_on_timeline(timeline, &grant);
+        let append_drafts = vec![EventDraft::new(
+            subject,
+            Kind::new("world.test"),
+            CanonicalBytes::from_static(b"append"),
+        )];
+
+        let mut missing_gate = PluginRegistry::new().with_consent_authority(authority.clone());
+        missing_gate.register_driver(Box::new(EmptyDriver)).test_ok();
+        missing_gate
+            .step_all_anchored_protected(timeline, Seq::ZERO, token.clone(), 0, &[])
+            .test_ok();
+        missing_gate.consent_gate = None;
+        let mut missing_gate_store = open_store(StoreConfig::Memory).test_ok();
+        assert!(matches!(
+            missing_gate
+                .append_and_commit_step_at(
+                    missing_gate_store.as_mut(),
+                    Seq::ZERO,
+                    0,
+                    &append_drafts,
+                )
+                .test_err(),
+            RuntimeError::ConsentOperationUnavailable
+        ));
+
+        let mut store_error = PluginRegistry::new().with_consent_authority(authority.clone());
+        store_error.register_driver(Box::new(EmptyDriver)).test_ok();
+        store_error
+            .step_all_anchored_protected(timeline, Seq::ZERO, token.clone(), 0, &[])
+            .test_ok();
+        let mut unknown_timeline_store = open_store(StoreConfig::Memory).test_ok();
+        assert!(matches!(
+            store_error
+                .append_and_commit_step_at(
+                    unknown_timeline_store.as_mut(),
+                    Seq::ZERO,
+                    0,
+                    &append_drafts,
+                )
+                .test_err(),
+            RuntimeError::Store(CoreError::Storage(_))
+        ));
+
+        let mut public_fence = PluginRegistry::new().with_consent_authority(authority);
+        public_fence.register_driver(Box::new(EmptyDriver)).test_ok();
+        let drafts = public_fence
+            .step_all_anchored(timeline, Seq::ZERO)
+            .test_ok();
+        public_fence.consent_gate = None;
+        let mut public_store = open_store(StoreConfig::Memory).test_ok();
+        assert!(matches!(
+            public_fence
+                .append_and_commit_step_at(public_store.as_mut(), Seq::ZERO, 0, &drafts)
+                .test_err(),
+            RuntimeError::ConsentOperationUnavailable
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_cadenced_tick_reaches_draft_fence_after_driver_output() {
+        struct SensitiveDriver {
+            subject: EntityId,
+        }
+
+        impl Driver for SensitiveDriver {
+            fn name(&self) -> &'static str {
+                "sensitive"
+            }
+
+            fn step(
+                &mut self,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                Ok(StepOutput::new(vec![EventDraft::new(
+                    self.subject,
+                    Kind::new("geo.position.v1"),
+                    CanonicalBytes::from_static(b"sensitive"),
+                )]))
+            }
+        }
+
+        let timeline = TimelineId::new();
+        let subject = EntityId::new();
+        let authority = ConsentAuthority::new();
+        let grant = ConsentGranted {
+            subject_id: subject,
+            grantee_id: EntityId::new(),
+            purpose: "cadenced-boundary".to_owned(),
+            modalities: pos_core::MODALITY_LOCATION,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 1,
+            expiry_secs: 0,
+            grant_seq: 1,
+        };
+        let _token = authority.record_grant_on_timeline(timeline, &grant);
+        let mut registry = PluginRegistry::new().with_consent_authority(authority);
+        registry
+            .register_driver(Box::new(SensitiveDriver { subject }))
+            .test_ok();
+        assert!(matches!(
+            registry.tick_cadenced(timeline, 0).test_err(),
+            RuntimeError::Consent(ConsentError::NoConsent)
+        ));
     }
 
     #[test]

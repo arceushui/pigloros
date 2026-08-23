@@ -1920,6 +1920,64 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn execute_consent_revocation_reports_a_lost_session_after_append(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut store = MemoryStore::new();
+        let timeline = store
+            .create_timeline("lost-revocation-session")
+            .test_ok()?
+            .id();
+        let authority = ConsentAuthority::new();
+        let grant = ConsentGrantedV1 {
+            subject_id: EntityId::new(),
+            grantee_id: EntityId::new(),
+            purpose: "lost-session".to_owned(),
+            modalities: pos_core::MODALITY_LOCATION,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 1,
+            expiry_secs: 0,
+            grant_seq: 1,
+        };
+        let _token = authority.record_grant_on_timeline(timeline, &grant);
+        let revocation = ConsentRevokedV1 {
+            subject_id: grant.subject_id,
+            grantee_id: grant.grantee_id,
+            grant_seq: grant.grant_seq,
+            fence_seq: 1,
+        };
+        let reservation = authority
+            .begin_revocation_on_timeline(timeline, &revocation)
+            .test_ok()
+            .test_value();
+        let _token = authority.record_grant_on_timeline(timeline, &grant);
+        let mut state = ExecutorState {
+            store: ExecutorStore::Generic(Box::new(store)),
+            owntracks_owner_key: None,
+            owntracks_rate_limiter: OwnTracksRateLimiter {
+                buckets: HashMap::new(),
+            },
+        };
+        let (reply, result) = tokio::sync::oneshot::channel();
+        execute_append_consent_revocation_command(
+            &mut state,
+            timeline,
+            &revocation,
+            10,
+            reservation,
+            reply,
+        );
+        assert!(matches!(
+            result.blocking_recv().test_ok()?,
+            Err(super::StoreExecutorError::Store(CoreError::Storage(message)))
+                if message == "consent revocation session disappeared after append"
+        ));
+        Ok(())
+    }
+
     struct BlockingRootCountStore {
         inner: MemoryStore,
         entered: std::sync::mpsc::Sender<()>,
@@ -3237,6 +3295,40 @@ mod tests {
         );
         assert_eq!(
             *lifecycle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            super::LifecycleState::Closed
+        );
+
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        let executor = super::StoreExecutor::from_sender_for_test(sender);
+        let join = std::sync::Arc::clone(&executor.control.join);
+        std::thread::spawn(move || {
+            let _guard = join
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::panic::resume_unwind(Box::new("poison join lock for registration test"));
+        })
+        .join()
+        .test_err()?;
+        super::register_worker(executor.control.as_ref(), Ok(std::thread::spawn(|| {})));
+        drop(executor);
+
+        let draining_lifecycle =
+            std::sync::Arc::new(std::sync::Mutex::new(super::LifecycleState::Open));
+        let draining_shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+        draining_shutdown.notify_one();
+        let (_sender, mut draining_receiver) = tokio::sync::mpsc::channel(1);
+        super::worker_loop(
+            &draining_lifecycle,
+            draining_shutdown,
+            &mut draining_receiver,
+            super::ExecutorStore::Generic(Box::new(MemoryStore::new())),
+            None,
+            None,
+        );
+        assert_eq!(
+            *draining_lifecycle
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             super::LifecycleState::Closed
