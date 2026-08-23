@@ -2078,6 +2078,24 @@ mod tests {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn typed_failure_evidence(
+        implementation_id: &str,
+        seed: u8,
+        fixture_digest: [u8; 32],
+    ) -> StableImplementationEvidenceV1 {
+        let mut evidence = stable_evidence(implementation_id, seed);
+        for case in &mut evidence.case_outcomes {
+            case.fixture_digest = fixture_digest;
+            case.expected_digest = None;
+            case.actual_digest = None;
+            case.expected_error = Some(SafeErrorCodeV1::ClosureIncomplete);
+            case.actual_error = Some(SafeErrorCodeV1::ClosureIncomplete);
+            case.verification_outcome = VerificationOutcomeV1::InvalidManifest;
+        }
+        evidence
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn request() -> EvaluatorRequestV1 {
         let mut request = EvaluatorRequestV1 {
             request_id: [1; 16],
@@ -2216,7 +2234,7 @@ mod tests {
             fields[4] = Value::Array(vec![uint(u64::from(u8::MAX) + 1), Value::Bytes(vec![1])]);
             assert_eq!(
                 decode_expected(&Value::Array(fields)),
-                Err(ConformanceContractError::FieldOutOfBounds)
+                Err(ConformanceContractError::InvalidEncoding)
             );
         }
         assert_eq!(
@@ -2263,6 +2281,13 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn profile_with_hard_caps(caps: EvaluatorHardCapsV1) -> ConformanceProfileV1 {
         let mut value = profile();
+        let bytes = vec![1];
+        value.fixtures[0].expected = ExpectedResultV1::CanonicalBytes {
+            digest: *blake3::hash(&bytes).as_bytes(),
+            bytes,
+        };
+        value.fixtures[0].bounds.output_bytes = 1;
+        value.fixtures[0].inputs[0].size_bytes = 1;
         value.evaluator_protocol.hard_caps = caps;
         value.profile_digest = value.digest();
         value
@@ -2885,22 +2910,9 @@ mod tests {
         let typed_candidate = typed
             .transition_to(ProfileLifecycleV1::Candidate, vec![])
             .unwrap_or_else(|_| profile());
-        let mut typed_evidence = stable_evidence("alpha", 30);
-        for case in &mut typed_evidence.case_outcomes {
-            case.expected_digest = None;
-            case.actual_digest = None;
-            case.expected_error = Some(SafeErrorCodeV1::ClosureIncomplete);
-            case.actual_error = Some(SafeErrorCodeV1::ClosureIncomplete);
-            case.verification_outcome = VerificationOutcomeV1::InvalidManifest;
-        }
-        let mut typed_evidence_second = stable_evidence("beta", 40);
-        for case in &mut typed_evidence_second.case_outcomes {
-            case.expected_digest = None;
-            case.actual_digest = None;
-            case.expected_error = Some(SafeErrorCodeV1::ClosureIncomplete);
-            case.actual_error = Some(SafeErrorCodeV1::ClosureIncomplete);
-            case.verification_outcome = VerificationOutcomeV1::InvalidManifest;
-        }
+        let fixture_digest = fixture_digest(&typed_candidate.fixtures[0]);
+        let typed_evidence = typed_failure_evidence("alpha", 30, fixture_digest);
+        let typed_evidence_second = typed_failure_evidence("beta", 40, fixture_digest);
         assert!(typed_candidate
             .transition_to(
                 ProfileLifecycleV1::Stable,
@@ -2925,6 +2937,7 @@ mod tests {
         let mut divergent_second = stable_evidence("beta", 40);
         for evidence in [&mut divergent_evidence, &mut divergent_second] {
             for case in &mut evidence.case_outcomes {
+                case.fixture_digest = fixture_digest(&divergent_candidate.fixtures[0]);
                 case.first_coordinate = Some(b"timeline/7".to_vec());
                 case.verification_outcome = VerificationOutcomeV1::Diverged;
                 case.divergence_kind = Some(DivergenceMismatchKindV1::TypedFailure);
@@ -2934,7 +2947,7 @@ mod tests {
         wrong_divergence_kind.case_outcomes[0].divergence_kind =
             Some(DivergenceMismatchKindV1::Artifact);
         assert_eq!(
-            divergent_candidate.clone().transition_to(
+            divergent_candidate.transition_to(
                 ProfileLifecycleV1::Stable,
                 vec![wrong_divergence_kind, divergent_second.clone()],
             ),
@@ -3316,10 +3329,10 @@ mod tests {
         reject_stable_change(|value| value.case_outcomes[0].expected_digest = Some(digest(99)));
         reject_stable_change(|value| value.case_outcomes[0].actual_digest = Some(digest(99)));
         reject_stable_change(|value| {
-            value.case_outcomes[0].replay_claim = ReplayClaimV1::StructuralOnly
+            value.case_outcomes[0].replay_claim = ReplayClaimV1::StructuralOnly;
         });
         reject_stable_change(|value| {
-            value.case_outcomes[0].redaction_state = RedactionStateV1::RedactedViews
+            value.case_outcomes[0].redaction_state = RedactionStateV1::RedactedViews;
         });
         reject_stable_change(|value| value.case_outcomes[0].provenance_digest = digest(99));
 
@@ -3351,6 +3364,8 @@ mod tests {
         let mut second = stable_evidence("beta", 40);
         first.case_outcomes.truncate(1);
         second.case_outcomes.truncate(1);
+        first.case_outcomes[0].fixture_digest = fixture_digest(&candidate.fixtures[0]);
+        second.case_outcomes[0].fixture_digest = fixture_digest(&candidate.fixtures[0]);
         assert!(candidate
             .transition_to(ProfileLifecycleV1::Stable, vec![first, second])
             .is_ok());
