@@ -535,14 +535,23 @@ impl StoreExecutor {
                     #[cfg(test)]
                     observer,
                 );
-            })
-            .unwrap_or_else(|error| panic!("could not start the store executor worker: {error}"));
-        let mut join = match control.join.lock() {
-            Ok(join) => join,
-            Err(poisoned) => poisoned.into_inner(),
+            });
+        match worker {
+            Ok(worker) => {
+                let mut join = match control.join.lock() {
+                    Ok(join) => join,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                *join = Some(worker);
+                drop(join);
+            }
+            Err(_) => set_lifecycle_state(
+                control.state.as_ref(),
+                LifecycleState::Unhealthy {
+                    retryable_shutdown: false,
+                },
+            ),
         };
-        *join = Some(worker);
-        drop(join);
         Self { control }
     }
 
@@ -1012,10 +1021,18 @@ fn worker_loop(
     #[cfg(test)] observer: Option<Arc<SchedulerObserver>>,
 ) {
     let worker_result = catch_unwind(AssertUnwindSafe(|| {
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .unwrap_or_else(|error| panic!("could not start the store executor runtime: {error}"));
+        else {
+            set_lifecycle_state(
+                lifecycle_state.as_ref(),
+                LifecycleState::Unhealthy {
+                    retryable_shutdown: false,
+                },
+            );
+            return;
+        };
         runtime.block_on(worker_loop_async(
             Arc::clone(lifecycle_state),
             shutdown,
@@ -1068,21 +1085,20 @@ async fn worker_loop_async(
         if pending.is_empty() && !disconnected {
             if draining {
                 break;
-            } else {
-                let next_received = tokio::select! {
-                    biased;
-                    envelope = receiver.recv() => envelope,
-                    () = shutdown.notified() => {
-                        draining = true;
-                        continue;
-                    }
-                };
-                if let Some(envelope) = next_received {
-                    pending.push(envelope);
-                } else {
-                    disconnected = true;
+            }
+            let next_received = tokio::select! {
+                biased;
+                envelope = receiver.recv() => envelope,
+                () = shutdown.notified() => {
+                    draining = true;
                     continue;
                 }
+            };
+            if let Some(envelope) = next_received {
+                pending.push(envelope);
+            } else {
+                disconnected = true;
+                continue;
             }
         }
 
@@ -1101,7 +1117,15 @@ async fn worker_loop_async(
             }
             let _permit_owners = (&envelope.global_permit, &envelope.read_permit);
             if !envelope.lifecycle.claim_for_execution(envelope.deadline) {
-                expire_command(envelope.command);
+                let CommandEnvelope {
+                    command,
+                    global_permit,
+                    read_permit,
+                    ..
+                } = envelope;
+                expire_command(command);
+                drop(global_permit);
+                drop(read_permit);
                 continue;
             }
             match class {
