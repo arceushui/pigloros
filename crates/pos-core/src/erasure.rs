@@ -310,8 +310,12 @@ impl ErasureRequestV1 {
     ///
     /// Returns a closed error for malformed, unsupported, or invalid scope evidence.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
-        decode_limited(bytes, ERASURE_REQUEST_OR_STATE_MAX_BYTES, ERASURE_MAX_REFERENCES)
-            .and_then(|value| exact_array(&value, 12).and_then(request_from_fields))
+        decode_limited(
+            bytes,
+            ERASURE_REQUEST_OR_STATE_MAX_BYTES,
+            ERASURE_MAX_REFERENCES,
+        )
+        .and_then(|value| exact_array(&value, 12).and_then(request_from_fields))
     }
 }
 
@@ -708,8 +712,12 @@ impl ErasureStateV1 {
     ///
     /// Returns a closed error for malformed state, invalid evidence, or digest mismatch.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
-        decode_limited(bytes, ERASURE_REQUEST_OR_STATE_MAX_BYTES, ERASURE_MAX_REFERENCES)
-            .and_then(|value| exact_array(&value, 12).and_then(state_from_fields))
+        decode_limited(
+            bytes,
+            ERASURE_REQUEST_OR_STATE_MAX_BYTES,
+            ERASURE_MAX_REFERENCES,
+        )
+        .and_then(|value| exact_array(&value, 12).and_then(state_from_fields))
     }
     fn with_digest(mut self) -> Result<Self, ErasureErrorV1> {
         self.validate()
@@ -910,9 +918,10 @@ impl ErasureReceiptV1 {
         input.failed_owners.sort_unstable();
         if has_duplicate(&input.required_targets)
             || has_duplicate_by_target(&input.acknowledgements)
-            || input.acknowledgements.iter().any(|acknowledgement| {
-                acknowledgement.owner != acknowledgement.target.replica_id
-            })
+            || input
+                .acknowledgements
+                .iter()
+                .any(|acknowledgement| acknowledgement.owner != acknowledgement.target.replica_id)
             || invalid_owner_sets(&input.pending_owners, &input.failed_owners)
         {
             return Err(ErasureErrorV1::ScopeInvalid);
@@ -926,16 +935,14 @@ impl ErasureReceiptV1 {
         // The caller's claim is descriptive input only.  ERC1 records the
         // weakest claim disclosed by the per-artifact transitions.
         input.replay_claim = weakest_inventory_claim(&input.inventories);
-        let complete = acknowledgements_match_closure(
-            &input.required_targets,
-            &input.acknowledgements,
-        ) && input
-            .acknowledgements
-            .iter()
-            .all(|ack| ack.outcome == ErasureAcknowledgementOutcomeV1::Acknowledged);
-        let unresolved = !complete
-            || !input.pending_owners.is_empty()
-            || !input.failed_owners.is_empty();
+        let complete =
+            acknowledgements_match_closure(&input.required_targets, &input.acknowledgements)
+                && input
+                    .acknowledgements
+                    .iter()
+                    .all(|ack| ack.outcome == ErasureAcknowledgementOutcomeV1::Acknowledged);
+        let unresolved =
+            !complete || !input.pending_owners.is_empty() || !input.failed_owners.is_empty();
         if input.lifecycle == ErasureLifecycleV1::Complete
             && (input.required_targets.is_empty() || !complete)
         {
@@ -963,8 +970,12 @@ impl ErasureReceiptV1 {
     ///
     /// Returns a closed error for malformed, noncanonical, or conflicting evidence.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
-        decode_limited(bytes, ERASURE_RECEIPT_MAX_BYTES, ERASURE_MAX_INVENTORY_RESULTS)
-            .and_then(|value| exact_array(&value, 19).and_then(receipt_from_fields))
+        decode_limited(
+            bytes,
+            ERASURE_RECEIPT_MAX_BYTES,
+            ERASURE_MAX_INVENTORY_RESULTS,
+        )
+        .and_then(|value| exact_array(&value, 19).and_then(receipt_from_fields))
     }
     /// Return the terminal ERS1 digest bound into this receipt.
     #[must_use]
@@ -1008,12 +1019,10 @@ impl ErasureReceiptV1 {
         }
     }
     fn with_digest(mut self) -> Result<Self, ErasureErrorV1> {
-        encode_limited(&receipt_core_value(&self.0), ERASURE_RECEIPT_MAX_BYTES)
-            .map(|bytes| {
-                self.0.receipt_digest =
-                    ErasureReferenceV1::from_digest(domain_digest(ERC1, &bytes));
-                self
-            })
+        encode_limited(&receipt_core_value(&self.0), ERASURE_RECEIPT_MAX_BYTES).map(|bytes| {
+            self.0.receipt_digest = ErasureReferenceV1::from_digest(domain_digest(ERC1, &bytes));
+            self
+        })
     }
 }
 
@@ -1044,7 +1053,9 @@ fn verify_predecessor_chain<R: ErasureStateResolverV1>(
                         previous.coordinator() == current.coordinator(),
                         previous.lifecycle().permits(current.lifecycle()),
                         freeze_is_monotonic(previous.freeze_position(), current.freeze_position()),
-                        previous.replay_claim().preserves_or_weakens(current.replay_claim()),
+                        previous
+                            .replay_claim()
+                            .preserves_or_weakens(current.replay_claim()),
                     ]
                     .into_iter()
                     .all(|valid| valid);
@@ -1122,8 +1133,7 @@ pub trait ErasureCoordinator {
         &mut self,
         request: ErasureReferenceV1,
         input: ErasureReceiptInputV1,
-    )
-        -> Result<ErasureReceiptV1, ErasureErrorV1>;
+    ) -> Result<ErasureReceiptV1, ErasureErrorV1>;
 }
 
 /// Host capability boundary used only for authentication and frozen target discovery.
@@ -1206,8 +1216,7 @@ pub trait ErasureCoordinatorPortV1 {
     /// # Errors
     ///
     /// Returns a closed storage or conflicting-identity error.
-    fn commit_record(&mut self, record: ErasureCoordinatorRecordV1)
-        -> Result<(), ErasureErrorV1>;
+    fn commit_record(&mut self, record: ErasureCoordinatorRecordV1) -> Result<(), ErasureErrorV1>;
 }
 
 /// Durable ERQ1/ERS1/ERC1 coordinator record.
@@ -1240,7 +1249,11 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     /// Construct a host-owned state machine.
     #[must_use]
     pub const fn new(port: P, coordinator: ErasureReferenceV1) -> Self {
-        Self { port, coordinator, records: Vec::new() }
+        Self {
+            port,
+            coordinator,
+            records: Vec::new(),
+        }
     }
     fn cache(&mut self, record: ErasureCoordinatorRecordV1) {
         if let Some(existing) = self
@@ -1359,7 +1372,10 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         }
         let freeze_is_authorized = matches!(
             (record.state.lifecycle(), transition.lifecycle),
-            (ErasureLifecycleV1::Authorized, ErasureLifecycleV1::AccessFrozen)
+            (
+                ErasureLifecycleV1::Authorized,
+                ErasureLifecycleV1::AccessFrozen
+            )
         );
         if !freeze_is_authorized {
             return Err(ErasureErrorV1::PolicyConflict);
@@ -1629,14 +1645,12 @@ mod codec;
 use codec::{
     acknowledgements_are_closure_subset, acknowledgements_match_closure, decode_limited,
     domain_digest, encode_canonical, encode_limited, exact_array, freeze_is_monotonic,
-    has_duplicate,
-    has_duplicate_by_target, invalid_owner_sets, inventory_categories_match,
-    inventory_transitions_preserve_or_weaken, inventories_exceed_bound,
-    inventories_have_duplicate_targets, inventories_match_closure, receipt_core_value,
-    receipt_from_fields, receipt_value, reference_zero, request_from_fields, request_value,
-    sort_inventories, state_core_value, state_from_fields, state_value, weakest_inventory_claim,
+    has_duplicate, has_duplicate_by_target, invalid_owner_sets, inventories_exceed_bound,
+    inventories_have_duplicate_targets, inventories_match_closure, inventory_categories_match,
+    inventory_transitions_preserve_or_weaken, receipt_core_value, receipt_from_fields,
+    receipt_value, reference_zero, request_from_fields, request_value, sort_inventories,
+    state_core_value, state_from_fields, state_value, weakest_inventory_claim,
 };
-
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
