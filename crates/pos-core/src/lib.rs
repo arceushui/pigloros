@@ -13,6 +13,7 @@
 pub mod clock;
 pub mod crypto;
 pub mod entity;
+pub mod erasure;
 pub mod error;
 pub mod event;
 pub mod geo_access;
@@ -35,6 +36,13 @@ pub use clock::{
 };
 pub use crypto::{Hash, PublicKey, Signature};
 pub use entity::{Entity, EntityKind, Relationship, RelationshipKind};
+pub use erasure::{
+    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1, ErasureArtifactResultV1,
+    ErasureCoordinator, ErasureErrorV1, ErasureLifecycleV1, ErasureReceiptV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, ErasureRequestV1, ErasureScopeV1, ErasureSelectorV1, ErasureStateV1,
+    ERASURE_MAX_RECEIPTS, ERASURE_MAX_SELECTORS, ERASURE_RECEIPT_MAX_BYTES,
+    ERASURE_REQUEST_OR_STATE_MAX_BYTES,
+};
 pub use error::CoreError;
 pub use event::{CanonicalBytes, Determinism, Event, EventDraft, Kind, RunMode, SchemaVersion};
 pub use geo_access::{is_geographic_event_type, GEOGRAPHIC_CELL_EVENT_TYPE, GEOGRAPHIC_EVENT_TYPE};
