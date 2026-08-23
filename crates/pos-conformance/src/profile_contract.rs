@@ -3305,7 +3305,7 @@ mod tests {
         );
 
         let mut tampered = encode_profile(&candidate_profile, true);
-        replace_profile_path(&mut tampered, &[17], digest(99));
+        replace_profile_path(&mut tampered, &[17], Value::Bytes(digest(99).to_vec()));
         let tampered_bytes = encode_value(&tampered).unwrap_or_default();
         assert_eq!(
             ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&tampered_bytes, &policy,),
@@ -3393,7 +3393,7 @@ mod tests {
         let mut protocol_profile = profile();
         protocol_profile.evaluator_protocol.protocol_digest = digest(99);
         protocol_profile.profile_digest = protocol_profile.digest();
-        let mut protocol_request = request();
+        let mut protocol_request = request.clone();
         protocol_request.conformance_profile_digest = protocol_profile.profile_digest;
         protocol_request.fixture_bundle_digest = fixture_bundle_digest(&protocol_profile);
         protocol_request.output_capability.capability_digest =
