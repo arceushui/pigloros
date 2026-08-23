@@ -2805,7 +2805,7 @@ mod tests {
             ConformanceContractError::FieldOutOfBounds,
         );
         reject_profile_change(
-            |value| value.fixtures[0].case_id = "".to_owned(),
+            |value| value.fixtures[0].case_id = String::new(),
             ConformanceContractError::FieldOutOfBounds,
         );
         reject_profile_change(
@@ -2851,12 +2851,12 @@ mod tests {
         reject_profile_change(
             |value| {
                 let input = value.fixtures[0].inputs[0].clone();
-                value.fixtures[0].inputs = vec![input.clone(), input]
+                value.fixtures[0].inputs = vec![input.clone(), input];
             },
             ConformanceContractError::FieldOutOfBounds,
         );
         reject_profile_change(
-            |value| value.fixtures[0].inputs[0].member_id = "".to_owned(),
+            |value| value.fixtures[0].inputs[0].member_id = String::new(),
             ConformanceContractError::ProvenanceMissing,
         );
         reject_profile_change(
@@ -2907,7 +2907,7 @@ mod tests {
                         classification: 1,
                         first_coordinate: b"a".to_vec(),
                     },
-                ]
+                ];
             },
             ConformanceContractError::NonCanonicalOrder,
         );
@@ -2991,7 +2991,7 @@ mod tests {
         reject_stable_change(|value| value.independence.authorship_independent = false);
         reject_stable_change(|value| value.independence.reviewer_ids.clear());
         reject_stable_change(|value| {
-            value.independence.reviewer_ids = vec!["z".to_owned(), "a".to_owned()]
+            value.independence.reviewer_ids = vec!["z".to_owned(), "a".to_owned()];
         });
         reject_stable_change(|value| value.independence.reviewer_ids = vec![String::new()]);
         reject_stable_change(|value| value.independence.declaration_digest = [0; 32]);
