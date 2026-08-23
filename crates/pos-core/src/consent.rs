@@ -1209,6 +1209,44 @@ mod tests {
         );
     }
 
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn host_authority_revalidates_its_exact_session_at_expiry_and_revocation_fences() {
+        let authority = ConsentAuthority::new();
+        let mut grant = sample_granted();
+        grant.expiry_secs = 20;
+        let token = authority.record_grant(&grant);
+
+        assert!(authority.validate(&token, 1, 19).is_ok());
+        assert_eq!(
+            authority.validate(&token, 1, 20),
+            Err(ConsentError::Expired)
+        );
+        assert_eq!(
+            ConsentAuthority::new().validate(&token, 1, 19),
+            Err(ConsentError::NoConsent)
+        );
+
+        let revocation = ConsentRevoked {
+            subject_id: grant.subject_id,
+            grantee_id: grant.grantee_id,
+            grant_seq: grant.grant_seq,
+            fence_seq: 2,
+        };
+        assert!(authority.record_revocation(&revocation).is_ok());
+        assert_eq!(
+            authority.validate(&token, 2, 19),
+            Err(ConsentError::Revoked)
+        );
+        assert_eq!(
+            authority.record_revocation(&ConsentRevoked {
+                grant_seq: grant.grant_seq + 1,
+                ..revocation
+            }),
+            Err(ConsentError::NoConsent)
+        );
+    }
+
     // -- ConsentGate --
 
     struct TestGate {
