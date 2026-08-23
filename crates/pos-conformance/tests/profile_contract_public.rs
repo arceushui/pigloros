@@ -4,7 +4,7 @@ use ciborium::value::Value;
 use pos_conformance::{ConformanceContractError, ConformanceProfileV1, EvaluatorRequestV1};
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-mod fixtures {
+pub(crate) mod fixtures {
     use super::*;
 
     fn text(value: &str) -> Value {
@@ -209,13 +209,13 @@ mod fixtures {
         ])
     }
 
-    fn encode(value: &Value) -> Vec<u8> {
+    pub(super) fn encode(value: &Value) -> Vec<u8> {
         let mut bytes = Vec::new();
         ciborium::into_writer(value, &mut bytes).unwrap_or_default();
         bytes
     }
 
-    fn profile(lifecycle: u64, with_stable_evidence: bool) -> Vec<u8> {
+    pub(super) fn profile(lifecycle: u64, with_stable_evidence: bool) -> Vec<u8> {
         encode(&Value::Array(vec![
             text("CPF1"),
             uint(1),
@@ -242,7 +242,7 @@ mod fixtures {
         ]))
     }
 
-    fn request() -> Vec<u8> {
+    pub(super) fn request() -> Vec<u8> {
         encode(&Value::Array(vec![
             text("EVR1"),
             uint(1),
