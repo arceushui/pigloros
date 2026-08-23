@@ -763,7 +763,7 @@ impl Experiment {
         self.registry.restore_driver_state(&ancestry, &events)?;
         hydrate_projections(&mut self.registry, &events);
         let consent_revoked = events.iter().any(|event| {
-            event.event_type.as_str() == pos_runtime::HOST_CONSENT_REVOCATION_EVENT_TYPE
+            event.event_type.as_str() == pos_core::EVENT_TYPE_CONSENT_REVOKED_V1
         });
         Ok(ExperimentSession {
             config: self.config,
@@ -1155,11 +1155,13 @@ impl ExperimentSession {
                         )
                     })
                     .and_then(|draft| {
-                        self.registry
-                            .schemas
-                            .validate(&draft)
-                            .map_err(ExperimentError::from)
-                            .map(|()| draft)
+                        pos_core::ConsentRevokedV1::decode(&draft.payload)
+                            .map_err(|error| {
+                                ExperimentError::from(pos_core::CoreError::Storage(
+                                    error.to_string(),
+                                ))
+                            })
+                            .map(|_| draft)
                     })
                     .and_then(|draft| {
                         store
@@ -3773,7 +3775,7 @@ mod tests {
             .test_ok()
             .iter()
             .any(|event| event.event_type.as_str()
-                == pos_runtime::HOST_CONSENT_REVOCATION_EVENT_TYPE));
+                == pos_core::EVENT_TYPE_CONSENT_REVOKED_V1));
     }
 
     #[test]

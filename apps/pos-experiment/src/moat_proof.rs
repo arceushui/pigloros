@@ -1627,7 +1627,7 @@ fn commit_consent_boundary(
     let marker = marker_events
         .last()
         .filter(|event| {
-            event.event_type.as_str() == pos_runtime::HOST_CONSENT_REVOCATION_EVENT_TYPE
+            event.event_type.as_str() == pos_core::EVENT_TYPE_CONSENT_REVOKED_V1
         })
         .ok_or(MoatProofError::ConsentMarkerMissing)?;
     let halted = marker_committed && matches!(session.step_tick()?, crate::TickOutcome::Stopped);

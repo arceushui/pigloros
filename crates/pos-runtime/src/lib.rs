@@ -32,16 +32,6 @@ pub mod registry;
 pub mod scheduler;
 pub mod schema;
 
-/// Host-owned Event emitted when a session's consent revocation becomes durable.
-///
-/// The host registers this schema without assigning ownership to a Plugin so a
-/// revocation can be recovered from a Timeline without granting a Plugin the
-/// ability to revoke consent itself.
-/// Deprecated compatibility name for the canonical Gateway-owned event.
-///
-/// New callers must use [`pos_core::EVENT_TYPE_CONSENT_REVOKED_V1`].
-pub const HOST_CONSENT_REVOCATION_EVENT_TYPE: &str = pos_core::EVENT_TYPE_CONSENT_REVOKED_V1;
-
 pub use composition::{PluginComposition, RegisteredEventSchema, RegisteredPlugin};
 pub use driver::{
     Driver, DriverRecoveryEvidence, ObservationView, ProjectionKey, RecoveryEvent,
