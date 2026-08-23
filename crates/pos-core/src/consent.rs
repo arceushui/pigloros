@@ -4,7 +4,14 @@
 //! These event types are **Gateway-only** per ADR-024 section 2 - no Plugin may
 //! propose or observe consent events directly.
 
-use std::io::Cursor;
+use std::{
+    collections::HashMap,
+    io::Cursor,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+};
 
 use ciborium::Value;
 
@@ -432,6 +439,7 @@ impl ConsentRevoked {
 /// `token.fence_seq > current_timeline_head` (ADR-039 section 3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsentCapabilityToken {
+    authority_id: u64,
     subject_id: EntityId,
     grantee_id: EntityId,
     modalities: u8,
@@ -441,21 +449,6 @@ pub struct ConsentCapabilityToken {
 }
 
 impl ConsentCapabilityToken {
-    /// Construct a new token from a consent grant.
-    ///
-    /// `fence_seq` starts at `u64::MAX` and is updated to the revocation
-    /// `fence_seq` when a matching `consent.revoked.v1` is folded.
-    #[must_use]
-    pub const fn from_grant(grant: &ConsentGranted) -> Self {
-        Self {
-            subject_id: grant.subject_id,
-            grantee_id: grant.grantee_id,
-            modalities: grant.modalities,
-            grant_seq: grant.grant_seq,
-            fence_seq: u64::MAX,
-        }
-    }
-
     /// Return `true` if this token is still valid at `timeline_head`.
     ///
     /// Valid when `fence_seq > timeline_head`.
@@ -496,6 +489,110 @@ impl ConsentCapabilityToken {
             return Err(ConsentError::NoConsent);
         }
         self.fence_seq = self.fence_seq.min(revocation.fence_seq);
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct ActiveConsent {
+    token: ConsentCapabilityToken,
+    expiry_secs: u32,
+}
+
+/// Host-owned authority that issues and invalidates consent capabilities.
+///
+/// Its identity and active sessions are private. A capability minted by a
+/// different authority therefore fails validation against this authority.
+#[derive(Clone)]
+pub struct ConsentAuthority {
+    authority_id: u64,
+    active: Arc<Mutex<HashMap<(EntityId, EntityId, u64), ActiveConsent>>>,
+}
+
+static NEXT_CONSENT_AUTHORITY_ID: AtomicU64 = AtomicU64::new(1);
+
+impl Default for ConsentAuthority {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ConsentAuthority {
+    /// Create a host-owned authority with private capability session state.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            authority_id: NEXT_CONSENT_AUTHORITY_ID.fetch_add(1, Ordering::Relaxed),
+            active: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Record one durably committed grant and mint its opaque capability.
+    #[must_use]
+    pub fn record_grant(&self, grant: &ConsentGranted) -> ConsentCapabilityToken {
+        let token = ConsentCapabilityToken {
+            authority_id: self.authority_id,
+            subject_id: grant.subject_id,
+            grantee_id: grant.grantee_id,
+            modalities: grant.modalities,
+            grant_seq: grant.grant_seq,
+            fence_seq: u64::MAX,
+        };
+        let key = (grant.subject_id, grant.grantee_id, grant.grant_seq);
+        let active = ActiveConsent {
+            token: token.clone(),
+            expiry_secs: grant.expiry_secs,
+        };
+        let mut sessions = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        sessions.insert(key, active);
+        token
+    }
+
+    /// Apply a durable revocation to the matching host session.
+    pub fn record_revocation(&self, revocation: &ConsentRevoked) -> Result<(), ConsentError> {
+        let key = (
+            revocation.subject_id,
+            revocation.grantee_id,
+            revocation.grant_seq,
+        );
+        let mut sessions = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(active) = sessions.get_mut(&key) else {
+            return Err(ConsentError::NoConsent);
+        };
+        active.token.fence_seq = active.token.fence_seq.min(revocation.fence_seq);
+        Ok(())
+    }
+
+    /// Revalidate an exact host session at an operation or commit fence.
+    pub fn validate(
+        &self,
+        token: &ConsentCapabilityToken,
+        timeline_head: u64,
+        now_secs: u64,
+    ) -> Result<(), ConsentError> {
+        if token.authority_id != self.authority_id {
+            return Err(ConsentError::NoConsent);
+        }
+        let key = (token.subject_id, token.grantee_id, token.grant_seq);
+        let sessions = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(active) = sessions.get(&key) else {
+            return Err(ConsentError::NoConsent);
+        };
+        if active.token != *token || !active.token.is_valid_at(timeline_head) {
+            return Err(ConsentError::Revoked);
+        }
+        if active.expiry_secs != 0 && now_secs >= u64::from(active.expiry_secs) {
+            return Err(ConsentError::Expired);
+        }
         Ok(())
     }
 }
@@ -1049,7 +1146,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn token_from_grant_starts_with_max_fence_seq() {
         let g = sample_granted();
-        let token = ConsentCapabilityToken::from_grant(&g);
+        let token = ConsentAuthority::new().record_grant(&g);
         assert_eq!(token.fence_seq, u64::MAX);
         assert_eq!(token.grant_seq, g.grant_seq);
         assert_eq!(token.modalities, g.modalities);
@@ -1061,7 +1158,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn token_is_valid_before_fence_seq() {
         let g = sample_granted();
-        let token = ConsentCapabilityToken::from_grant(&g);
+        let token = ConsentAuthority::new().record_grant(&g);
         assert!(token.is_valid_at(0));
         assert!(token.is_valid_at(u64::MAX - 1));
     }
@@ -1070,7 +1167,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn token_is_invalid_at_or_after_fence_seq() {
         let g = sample_granted();
-        let mut token = ConsentCapabilityToken::from_grant(&g);
+        let mut token = ConsentAuthority::new().record_grant(&g);
         token.fence_seq = 100;
         assert!(!token.is_valid_at(100));
         assert!(!token.is_valid_at(200));
@@ -1081,7 +1178,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn matching_revocation_only_tightens_a_token_fence() {
         let grant = sample_granted();
-        let mut token = ConsentCapabilityToken::from_grant(&grant);
+        let mut token = ConsentAuthority::new().record_grant(&grant);
         let revocation = sample_revoked(&grant);
         assert!(token.invalidate_with(&revocation).is_ok());
         assert!(!token.is_valid_at(revocation.fence_seq));
@@ -1097,7 +1194,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn nonmatching_revocation_is_not_applied() {
         let grant = sample_granted();
-        let mut token = ConsentCapabilityToken::from_grant(&grant);
+        let mut token = ConsentAuthority::new().record_grant(&grant);
         let mut revocation = sample_revoked(&grant);
         revocation.grant_seq += 1;
         assert_eq!(
@@ -1111,7 +1208,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn revocation_must_match_every_token_identity_component() {
         let grant = sample_granted();
-        let mut token = ConsentCapabilityToken::from_grant(&grant);
+        let mut token = ConsentAuthority::new().record_grant(&grant);
 
         let mut wrong_subject = sample_revoked(&grant);
         wrong_subject.subject_id = EntityId::new();
@@ -1153,7 +1250,7 @@ mod tests {
 
     fn test_gate(fence_seq: u64) -> TestGate {
         let g = sample_granted();
-        let mut token = ConsentCapabilityToken::from_grant(&g);
+        let mut token = ConsentAuthority::new().record_grant(&g);
         token.fence_seq = fence_seq;
         TestGate { token }
     }
@@ -1219,6 +1316,29 @@ mod tests {
         assert!(gate
             .check_consent(EntityId::new(), &Kind::new("persona.update.v1"), 99)
             .is_ok());
+    }
+
+    // -- FieldState --
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn field_state_present_and_redacted() {
+        let present = FieldState::Present(CanonicalBytes::from_vec(vec![0x01]));
+        assert!(matches!(present, FieldState::Present(_)));
+        let redacted = FieldState::RedactedDestroyed;
+        assert!(matches!(redacted, FieldState::RedactedDestroyed));
+        assert_ne!(
+            redacted,
+            FieldState::Present(CanonicalBytes::from_vec(vec![]))
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn field_state_redaction_is_irreversible() {
+        let erased = FieldState::Present(CanonicalBytes::from_vec(vec![0x01])).redacted_destroyed();
+        assert_eq!(erased, FieldState::RedactedDestroyed);
+        assert_eq!(erased.redacted_destroyed(), FieldState::RedactedDestroyed);
     }
 
     // -- Error display --
