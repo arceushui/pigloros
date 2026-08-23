@@ -1579,6 +1579,80 @@ fn decoders_refuse_unknown_closed_codes() -> Result<(), ErasureErrorV1> {
     Ok(())
 }
 #[test]
+fn public_decoders_reject_terminal_and_inventory_conflicts() -> Result<(), ErasureErrorV1> {
+    let mut invalid_category = public_receipt_value(&receipt()?)?;
+    let Value::Array(fields) = &mut invalid_category else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    let Value::Array(inventories) = &mut fields[10] else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    let Value::Array(inventory) = &mut inventories[0] else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    inventory[0] = test_uint(99);
+    assert_eq!(
+        decode_receipt(&invalid_category),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+
+    let mut mismatched_category = public_receipt_value(&receipt()?)?;
+    let Value::Array(fields) = &mut mismatched_category else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    let Value::Array(inventories) = &mut fields[10] else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    let Value::Array(inventory) = &mut inventories[0] else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    inventory[0] = test_uint(1);
+    assert_eq!(
+        decode_receipt(&mismatched_category),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
+    let waiting = dispatched()?.transition(change(
+        ErasureLifecycleV1::AwaitingAcknowledgements,
+        Some(10),
+        Vec::new(),
+        Vec::new(),
+    ))?;
+    let complete = waiting.transition(change(
+        ErasureLifecycleV1::Complete,
+        Some(10),
+        Vec::new(),
+        Vec::new(),
+    ))?;
+    let mut invalid_complete = public_state_value(&complete)?;
+    let Value::Array(fields) = &mut invalid_complete else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    fields[6] = Value::Array(vec![test_digest(reference(7))]);
+    assert_eq!(
+        decode_state(&invalid_complete),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let partial = waiting.transition(change(
+        ErasureLifecycleV1::PartialFailure,
+        Some(10),
+        vec![reference(7)],
+        Vec::new(),
+    ))?;
+    let mut invalid_partial = public_state_value(&partial)?;
+    let Value::Array(fields) = &mut invalid_partial else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    fields[6] = Value::Array(Vec::new());
+    fields[7] = Value::Array(Vec::new());
+    assert_eq!(
+        decode_state(&invalid_partial),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+#[test]
 fn request_decoder_refuses_noncanonical_and_wrong_shapes() -> Result<(), ErasureErrorV1> {
     let mut wrong_tag_type = public_request_value(&request()?)?;
     {
