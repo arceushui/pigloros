@@ -5083,12 +5083,76 @@ mod fault_injection_tests {
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         ids::{EntityId, PluginId},
+        store::EventStore,
         Capability, CoreError, Plugin,
     };
     use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
     use pos_store::{open_store, StoreConfig};
     use rusqlite::Connection;
     use std::cell::Cell;
+
+    struct FailLogicalHeadStore {
+        inner: Box<dyn EventStore>,
+        calls: Cell<u8>,
+        fail_on_call: u8,
+    }
+
+    impl EventStore for FailLogicalHeadStore {
+        fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
+            self.inner.create_timeline(name)
+        }
+
+        fn append(
+            &mut self,
+            timeline: pos_core::ids::TimelineId,
+            drafts: &[EventDraft],
+        ) -> Result<Vec<pos_core::Event>, CoreError> {
+            self.inner.append(timeline, drafts)
+        }
+
+        fn read(
+            &self,
+            timeline: pos_core::ids::TimelineId,
+            range: pos_core::store::SeqRange,
+        ) -> Result<Vec<pos_core::Event>, CoreError> {
+            self.inner.read(timeline, range)
+        }
+
+        fn fork(
+            &mut self,
+            parent: pos_core::ids::TimelineId,
+            at_seq: pos_core::clock::Seq,
+            name: &str,
+        ) -> Result<Timeline, CoreError> {
+            self.inner.fork(parent, at_seq, name)
+        }
+
+        fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+            self.inner.list_timelines()
+        }
+
+        fn get_timeline(
+            &self,
+            id: pos_core::ids::TimelineId,
+        ) -> Result<Option<Timeline>, CoreError> {
+            self.inner.get_timeline(id)
+        }
+
+        fn logical_head(
+            &self,
+            id: pos_core::ids::TimelineId,
+        ) -> Result<pos_core::clock::Seq, CoreError> {
+            let call = self.calls.get().saturating_add(1);
+            self.calls.set(call);
+            if call == self.fail_on_call {
+                Err(CoreError::Storage(
+                    "injected boundary head failure".to_owned(),
+                ))
+            } else {
+                self.inner.logical_head(id)
+            }
+        }
+    }
 
     fn running_as_root() -> bool {
         std::fs::read_to_string("/proc/self/status")

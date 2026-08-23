@@ -1609,7 +1609,8 @@ mod tests {
             EventStore, SeqRange,
         },
         timeline::Timeline,
-        CanonicalBytes, CoreError, EntityId, EventId, Kind, OwnTracksIngressRateKeyV1, TimelineId,
+        CanonicalBytes, ConsentGrantedV1, CoreError, EntityId, EventId, Kind,
+        OwnTracksIngressRateKeyV1, TimelineId,
     };
     use pos_store::memory::MemoryStore;
     use std::{
