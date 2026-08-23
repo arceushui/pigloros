@@ -29,8 +29,6 @@ pub use profile_contract::{
 
 /// Version of the first independent proof-evidence envelope.
 pub const EVIDENCE_FORMAT_V1: u32 = 1;
-/// Host-owned lifecycle marker used when a non-Gateway host closes consent.
-pub const HOST_CONSENT_CLOSED_EVENT_TYPE: &str = "experiment.lifecycle.consent-closed.v1";
 /// Magic for the portable verification/replay record envelope.
 pub const VERIFICATION_RECORD_MAGIC_V1: &str = "VRR1";
 /// Magic for the full Wave 8 evidence bundle carried alongside `VRR1`.
@@ -628,7 +626,9 @@ pub enum PluginFailureClassV1 {
     ResourceExhaustion,
 }
 
-/// Auditable consent revocation at a completed Tick Boundary.
+/// Auditable Gateway revocation or host-owned closure at a completed Tick
+/// Boundary. The experiment closure marker is never a consent revocation and
+/// cannot rehydrate or authorize a `ConsentAuthority` session.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConsentAuditV1 {
@@ -5212,7 +5212,15 @@ pub fn verify_evidence(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceErr
         &sequences,
     )?;
     verify_plugin_failures(&evidence.plugin_failures)?;
-    verify_consent_audit(&evidence.consent_audit, &evidence.authoritative_events)?;
+    match evidence.consent_audit.revocation_event_type.as_str() {
+        "consent.revoked.v1" => {
+            verify_consent_audit(&evidence.consent_audit, &evidence.authoritative_events)?;
+        }
+        "experiment.lifecycle.consent-closed.v1" => {
+            verify_host_closure(&evidence.consent_audit, &evidence.authoritative_events)?;
+        }
+        _ => return Err(EvidenceError::InvalidConsentAudit),
+    }
     verify_wave8_contract(evidence)?;
     Ok(())
 }
@@ -5340,7 +5348,7 @@ fn verify_consent_audit(
     if audit.subject.trim().is_empty()
         || !matches!(
             audit.revocation_event_type.as_str(),
-            "consent.revoked.v1" | HOST_CONSENT_CLOSED_EVENT_TYPE
+            "consent.revoked.v1"
         )
         || audit.revocation_payload_digest == [0; 32]
         || audit.effective_after_seq <= audit.requested_after_seq
@@ -5355,6 +5363,37 @@ fn verify_consent_audit(
             .iter()
             .find(|event| {
                 event.event_type == audit.revocation_event_type
+                    && event.seq == audit.revocation_event_seq
+            })
+            .is_none_or(|event| event.payload_digest != audit.revocation_payload_digest)
+    {
+        Err(EvidenceError::InvalidConsentAudit)
+    } else {
+        Ok(())
+    }
+}
+
+/// Verify an experiment-owned closure marker without treating it as a
+/// Gateway consent revocation. It is a host lifecycle proof only; it never
+/// rehydrates `ConsentAuthority` or authorizes protected work.
+fn verify_host_closure(
+    audit: &ConsentAuditV1,
+    events: &[AuthoritativeEventV1],
+) -> Result<(), EvidenceError> {
+    if audit.subject.trim().is_empty()
+        || audit.revocation_payload_digest == [0; 32]
+        || audit.effective_after_seq <= audit.requested_after_seq
+        || audit.revocation_event_seq != audit.effective_after_seq
+        || !audit.halted_at_tick_boundary
+        || events
+            .iter()
+            .filter(|event| event.event_type == "experiment.lifecycle.consent-closed.v1")
+            .count()
+            != 1
+        || events
+            .iter()
+            .find(|event| {
+                event.event_type == "experiment.lifecycle.consent-closed.v1"
                     && event.seq == audit.revocation_event_seq
             })
             .is_none_or(|event| event.payload_digest != audit.revocation_payload_digest)

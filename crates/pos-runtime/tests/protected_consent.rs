@@ -5,7 +5,7 @@ use pos_core::{
     ConsentAuthority, ConsentCapabilityToken, ConsentError, ConsentGate, ConsentGranted,
 };
 use pos_runtime::{Driver, ObservationView, PluginRegistry, RuntimeError, StepOutput};
-use std::{fmt::Debug, sync::Arc};
+use std::{fmt::Debug, sync::{Arc, Mutex}};
 
 fn test_ok<T, E: Debug>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|error| {
@@ -80,7 +80,7 @@ fn protected_public_seam_checks_timeline_and_rechecks_at_commit_head() {
             fence_seq: 1,
         },
     ));
-    registry.commit_step_at(Seq::from_u64(1));
+    registry.commit_step_at(Seq::from_u64(1), 2);
 
     let wrong_timeline = TimelineId::new();
     let error =
@@ -101,7 +101,7 @@ fn protected_public_seam_fails_closed_without_a_bound_gate() {
     registry.register_driver(Box::new(ProtectedEventDriver { entity: subject }));
 
     let error = test_err(registry.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[]));
-    assert!(matches!(error, RuntimeError::ConsentOperationUnavailable));
+    assert!(matches!(error, RuntimeError::Consent(ConsentError::NoConsent)));
 }
 
 struct MismatchedDraftGate {
@@ -114,6 +114,7 @@ impl ConsentGate for MismatchedDraftGate {
         _: TimelineId,
         _: EntityId,
         _: &Kind,
+        _: u64,
         _: u64,
     ) -> Result<ConsentCapabilityToken, ConsentError> {
         Ok(self.returned.clone())
@@ -158,6 +159,7 @@ impl ConsentGate for RejectingDraftGate {
         _: EntityId,
         _: &Kind,
         _: u64,
+        _: u64,
     ) -> Result<ConsentCapabilityToken, ConsentError> {
         Err(ConsentError::NoConsent)
     }
@@ -171,6 +173,89 @@ impl ConsentGate for RejectingDraftGate {
     ) -> Result<(), ConsentError> {
         Ok(())
     }
+}
+
+#[test]
+fn ordinary_public_seam_routes_every_draft_through_the_bound_gate() {
+    let timeline = TimelineId::new();
+    let mut registry = PluginRegistry::new().with_consent_gate(Arc::new(RejectingDraftGate));
+    registry.register_driver(Box::new(ProtectedEventDriver {
+        entity: EntityId::new(),
+    }));
+
+    let error = test_err(registry.step_all_anchored(timeline, Seq::ZERO));
+    assert!(matches!(
+        error,
+        RuntimeError::Consent(ConsentError::NoConsent)
+    ));
+}
+
+struct CommitFenceGate {
+    token: ConsentCapabilityToken,
+    observed_now_secs: Arc<Mutex<Vec<u64>>>,
+}
+
+impl ConsentGate for CommitFenceGate {
+    fn check_consent(
+        &self,
+        _: TimelineId,
+        _: EntityId,
+        _: &Kind,
+        _: u64,
+        _: u64,
+    ) -> Result<ConsentCapabilityToken, ConsentError> {
+        Ok(self.token.clone())
+    }
+
+    fn validate_token(
+        &self,
+        _: TimelineId,
+        _: &ConsentCapabilityToken,
+        _: u64,
+        now_secs: u64,
+    ) -> Result<(), ConsentError> {
+        self.observed_now_secs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(now_secs);
+        if now_secs >= 2 {
+            Err(ConsentError::Expired)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[test]
+fn protected_public_seam_revalidates_at_the_fresh_commit_fence_time() {
+    let timeline = TimelineId::new();
+    let subject = EntityId::new();
+    let authority = ConsentAuthority::new();
+    let token = authority.record_grant_on_timeline(timeline, &grant(subject));
+    let observed_now_secs = Arc::new(Mutex::new(Vec::new()));
+    let gate = Arc::new(CommitFenceGate {
+        token: token.clone(),
+        observed_now_secs: observed_now_secs.clone(),
+    });
+    let mut registry = PluginRegistry::new().with_consent_gate(gate);
+    registry.register_driver(Box::new(ProtectedEventDriver { entity: subject }));
+
+    let drafts = test_ok(registry.step_all_anchored_protected(
+        timeline,
+        Seq::ZERO,
+        token,
+        1,
+        &[],
+    ));
+    assert_eq!(drafts.len(), 1);
+    registry.commit_step_at(Seq::ZERO, 2);
+
+    assert_eq!(
+        *observed_now_secs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        vec![1, 2]
+    );
 }
 
 #[test]
@@ -201,5 +286,5 @@ fn protected_cadenced_public_seam_stages_and_commits() {
     let drafts =
         test_ok(registry.tick_cadenced_anchored_protected(timeline, 0, Seq::ZERO, token, 1, &[]));
     assert_eq!(drafts.len(), 1);
-    registry.commit_step_at(Seq::ZERO);
+    registry.commit_step_at(Seq::ZERO, 1);
 }

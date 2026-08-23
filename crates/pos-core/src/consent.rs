@@ -30,6 +30,9 @@ pub const EVENT_TYPE_CONSENT_GRANTED_V1: &str = "consent.granted.v1";
 /// Versioned event type for consent revocations (ADR-039).
 pub const EVENT_TYPE_CONSENT_REVOKED_V1: &str = "consent.revoked.v1";
 
+/// Host-owned lifecycle marker used when a non-Gateway host closes consent.
+pub const HOST_CONSENT_CLOSED_EVENT_TYPE: &str = "experiment.lifecycle.consent-closed.v1";
+
 /// Returns whether an event type is reserved to the Gateway consent host.
 #[must_use]
 pub fn is_consent_event_type(event_type: &Kind) -> bool {
@@ -53,6 +56,9 @@ pub const MODALITY_PERSONA: u8 = 0x02;
 pub const MODALITY_MODEL_FIT: u8 = 0x04;
 /// Modality bitmask: export permission.
 pub const MODALITY_EXPORT: u8 = 0x08;
+
+/// Maximum durable consent events accepted by one authority recovery pass.
+pub const MAX_CONSENT_HISTORY_EVENTS: usize = 10_000;
 
 // ---------------------------------------------------------------------------
 // Error types
@@ -79,6 +85,12 @@ pub enum ConsentCodecError {
     NonCanonicalEncoding,
     #[error("field value is outside the V1 contract")]
     FieldOutOfBounds,
+    #[error("consent revocation has no matching durable grant")]
+    UnmatchedRevocation,
+    #[error("consent history has too many events: {count} (max {MAX_CONSENT_HISTORY_EVENTS})")]
+    HistoryTooLong { count: usize },
+    #[error("consent event coordinates do not match the durable payload")]
+    HistoryCoordinateMismatch,
 }
 
 /// Errors returned by `ConsentGate::check_consent`.
@@ -90,9 +102,35 @@ pub enum ConsentError {
     Revoked,
     #[error("consent grant has expired")]
     Expired,
+    #[error("consent grant does not cover the requested event modality")]
+    ModalityNotGranted,
+    #[error("consent grant does not permit export")]
+    ExportNotPermitted,
+    #[error("consent grant does not permit Timeline forks")]
+    ForkNotPermitted,
+    #[error("consent grant does not permit the requested geographic resolution")]
+    GeoResolutionNotPermitted,
+    #[error("consent grant does not permit the requested retention period")]
+    RetentionNotPermitted,
     /// `consent.*` event types are Gateway-only per ADR-024 section 2.
     #[error("consent.* event types are Gateway-only and cannot be accessed by plugins")]
     ConsentEventsForbidden,
+}
+
+#[must_use]
+pub fn required_modality_for_event(event_type: &Kind) -> u8 {
+    let event_type = event_type.as_str();
+    if event_type.starts_with("geo.") || event_type.starts_with("location.") {
+        MODALITY_LOCATION
+    } else if event_type.starts_with("persona.") {
+        MODALITY_PERSONA
+    } else if event_type.starts_with("model.") {
+        MODALITY_MODEL_FIT
+    } else if event_type.starts_with("export.") {
+        MODALITY_EXPORT
+    } else {
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -436,7 +474,8 @@ impl ConsentRevoked {
 ///
 /// Callers must present this token before emitting event drafts or reading
 /// sensitive Projection fields for a human-subject entity. Per-step check:
-/// `token.fence_seq > current_timeline_head` (ADR-039 section 3).
+/// `token.fence_seq > current_timeline_head` and the durable grant policy is
+/// rechecked at the operation's current time (ADR-039 section 3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsentCapabilityToken {
     authority_id: u64,
@@ -444,6 +483,10 @@ pub struct ConsentCapabilityToken {
     subject_id: EntityId,
     grantee_id: EntityId,
     modalities: u8,
+    min_geo_resolution: u8,
+    fork_permitted: bool,
+    export_permitted: bool,
+    retention_days: u16,
     grant_seq: u64,
     /// `u64::MAX` until revocation; set to `consent.revoked.v1.fence_seq` on revocation.
     fence_seq: u64,
@@ -480,6 +523,86 @@ impl ConsentCapabilityToken {
     #[must_use]
     pub const fn timeline_id(&self) -> TimelineId {
         self.timeline_id
+    }
+
+    /// Return the minimum geographic resolution permitted by the grant.
+    #[must_use]
+    pub const fn min_geo_resolution(&self) -> u8 {
+        self.min_geo_resolution
+    }
+
+    /// Return whether the grant permits Timeline forks.
+    #[must_use]
+    pub const fn fork_permitted(&self) -> bool {
+        self.fork_permitted
+    }
+
+    /// Return whether the grant permits export operations.
+    #[must_use]
+    pub const fn export_permitted(&self) -> bool {
+        self.export_permitted
+    }
+
+    /// Return the durable retention period in days.
+    #[must_use]
+    pub const fn retention_days(&self) -> u16 {
+        self.retention_days
+    }
+
+    /// Enforce the durable policy attached to one event family.
+    ///
+    /// Unknown event families are public by default; sensitive families must
+    /// match both the modality bit and any policy flag they imply.
+    ///
+    /// # Errors
+    /// Returns the specific policy error when this token cannot authorize the
+    /// requested event family.
+    #[must_use]
+    pub fn authorize_event_type(&self, event_type: &Kind) -> Result<(), ConsentError> {
+        let required_modality = required_modality_for_event(event_type);
+        if required_modality != 0
+            && self.modalities & required_modality != required_modality
+        {
+            return Err(ConsentError::ModalityNotGranted);
+        }
+        if required_modality == MODALITY_EXPORT && !self.export_permitted {
+            return Err(ConsentError::ExportNotPermitted);
+        }
+        if event_type.as_str().starts_with("timeline.fork.") && !self.fork_permitted {
+            return Err(ConsentError::ForkNotPermitted);
+        }
+        if event_type.as_str().starts_with("retention.") && self.retention_days == 0 {
+            return Err(ConsentError::RetentionNotPermitted);
+        }
+        Ok(())
+    }
+
+    /// Enforce the grant's geographic-resolution floor.
+    ///
+    /// # Errors
+    /// Returns [`ConsentError::GeoResolutionNotPermitted`] when the requested
+    /// resolution is finer than the durable grant permits.
+    #[must_use]
+    pub fn authorize_geo_resolution(&self, resolution: u8) -> Result<(), ConsentError> {
+        if resolution < self.min_geo_resolution {
+            Err(ConsentError::GeoResolutionNotPermitted)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Enforce the grant's retention duration.
+    ///
+    /// # Errors
+    /// Returns [`ConsentError::RetentionNotPermitted`] when the requested
+    /// duration exceeds the durable grant.
+    #[must_use]
+    pub fn authorize_retention(&self, days: u16) -> Result<(), ConsentError> {
+        if self.retention_days == 0 || days > self.retention_days {
+            Err(ConsentError::RetentionNotPermitted)
+        } else {
+            Ok(())
+        }
     }
 
     /// Apply the matching durable revocation without mutating Timeline history.
@@ -564,6 +687,10 @@ impl ConsentAuthority {
             subject_id: grant.subject_id,
             grantee_id: grant.grantee_id,
             modalities: grant.modalities,
+            min_geo_resolution: grant.min_geo_resolution,
+            fork_permitted: grant.fork_permitted,
+            export_permitted: grant.export_permitted,
+            retention_days: grant.retention_days,
             grant_seq: grant.grant_seq,
             fence_seq: u64::MAX,
         };
@@ -750,22 +877,38 @@ impl ConsentAuthority {
     /// Rebuild Timeline-bound sessions from durable consent history.
     ///
     /// # Errors
-    /// Returns [`ConsentCodecError`] when a durable consent payload is invalid.
+    /// Returns [`ConsentCodecError`] when a durable consent payload is invalid
+    /// or a revocation has no matching grant in the same Timeline history.
     pub fn restore_from_history(
         &self,
         timeline_id: TimelineId,
         events: &[crate::event::Event],
     ) -> Result<(), ConsentCodecError> {
+        if events.len() > MAX_CONSENT_HISTORY_EVENTS {
+            return Err(ConsentCodecError::HistoryTooLong {
+                count: events.len(),
+            });
+        }
         for event in events {
             match event.event_type.as_str() {
                 EVENT_TYPE_CONSENT_GRANTED_V1 => {
                     let grant = ConsentGranted::decode(&event.payload)?;
+                    if event.entity != grant.subject_id
+                        || event.seq.as_u64() != grant.grant_seq
+                    {
+                        return Err(ConsentCodecError::HistoryCoordinateMismatch);
+                    }
                     let _token = self.record_grant_on_timeline(timeline_id, &grant);
                 }
                 EVENT_TYPE_CONSENT_REVOKED_V1 => {
                     let revocation = ConsentRevoked::decode(&event.payload)?;
-                    let _revocation =
-                        self.record_revocation_with_timeline(timeline_id, &revocation);
+                    if event.entity != revocation.subject_id
+                        || event.seq.as_u64() != revocation.fence_seq
+                    {
+                        return Err(ConsentCodecError::HistoryCoordinateMismatch);
+                    }
+                    self.record_revocation_with_timeline(timeline_id, &revocation)
+                        .map_err(|_| ConsentCodecError::UnmatchedRevocation)?;
                 }
                 _ => {}
             }
@@ -794,13 +937,17 @@ impl ConsentAuthority {
 /// Equivalent to `GeoLocationAdmissionStore` - prevents plugins from
 /// accessing sensitive event types without a valid, non-revoked consent grant.
 pub trait ConsentGate: Send + Sync {
-    /// Check whether `subject` holds an active, non-revoked consent grant
-    /// that covers `event_type` at `timeline_head`.
+    /// Check whether `subject` holds an active, non-revoked, non-expired consent grant
+    /// that covers `event_type` at `timeline_head`. Known `geo.`/`location.`,
+    /// `persona.`, `model.`, and `export.` event families also require the
+    /// corresponding modality bit in the grant.
     ///
     /// Returns [`ConsentError::ConsentEventsForbidden`] for `consent.*` event
     /// types (Gateway-only per ADR-024 section 2).
     ///
     /// Returns [`ConsentError::Revoked`] if `token.fence_seq <= timeline_head`.
+    /// Returns [`ConsentError::ModalityNotGranted`] when a known event family
+    /// is not covered by the grant's modality bitmask.
     ///
     /// # Errors
     /// Returns a [`ConsentError`] describing why consent was not granted.
@@ -810,7 +957,29 @@ pub trait ConsentGate: Send + Sync {
         subject: EntityId,
         event_type: &Kind,
         timeline_head: u64,
+        now_secs: u64,
     ) -> Result<ConsentCapabilityToken, ConsentError>;
+
+    /// Authorize one emitted Event at the current operation fence.
+    ///
+    /// Hosts call this seam for every draft, including ordinary events. A
+    /// concrete authority may classify an ordinary event as public, but the
+    /// classification is made by the host-owned gate rather than by the
+    /// registry's operation path.
+    ///
+    /// # Errors
+    /// Returns a [`ConsentError`] when the host policy rejects the event.
+    fn authorize_event(
+        &self,
+        timeline_id: TimelineId,
+        subject: EntityId,
+        event_type: &Kind,
+        timeline_head: u64,
+        now_secs: u64,
+    ) -> Result<(), ConsentError> {
+        self.check_consent(timeline_id, subject, event_type, timeline_head, now_secs)
+            .map(|_| ())
+    }
 
     /// Revalidate a previously issued capability at an operation or commit fence.
     ///
@@ -836,6 +1005,7 @@ impl ConsentGate for ConsentAuthority {
         subject: EntityId,
         event_type: &Kind,
         timeline_head: u64,
+        now_secs: u64,
     ) -> Result<ConsentCapabilityToken, ConsentError> {
         if is_consent_event_type(event_type) {
             return Err(ConsentError::ConsentEventsForbidden);
@@ -852,9 +1022,39 @@ impl ConsentGate for ConsentAuthority {
                         && active.token.subject_id == subject
                         && active.token.is_valid_at(timeline_head)
                 })
-                .map(|active| active.token.clone())
+                .map(|active| (active.token.clone(), active.expiry_secs))
         };
-        candidate.ok_or(ConsentError::NoConsent)
+        let required_modality = required_modality_for_event(event_type);
+        match candidate {
+            Some((_, expiry_secs)) if expiry_secs != 0 && now_secs >= u64::from(expiry_secs) => {
+                Err(ConsentError::Expired)
+            }
+            Some((active, _))
+                if required_modality == MODALITY_EXPORT && !active.export_permitted =>
+            {
+                Err(ConsentError::ExportNotPermitted)
+            }
+            Some((active, _))
+                if event_type.as_str().starts_with("timeline.fork.")
+                    && !active.fork_permitted =>
+            {
+                Err(ConsentError::ForkNotPermitted)
+            }
+            Some((active, _))
+                if event_type.as_str().starts_with("retention.")
+                    && active.retention_days == 0 =>
+            {
+                Err(ConsentError::RetentionNotPermitted)
+            }
+            Some((active, _))
+                if required_modality != 0
+                    && active.modalities & required_modality != required_modality =>
+            {
+                Err(ConsentError::ModalityNotGranted)
+            }
+            Some((active, _)) => Ok(active),
+            None => Err(ConsentError::NoConsent),
+        }
     }
 
     fn validate_token(
@@ -865,6 +1065,24 @@ impl ConsentGate for ConsentAuthority {
         now_secs: u64,
     ) -> Result<(), ConsentError> {
         self.validate_on_timeline(timeline_id, token, timeline_head, now_secs)
+    }
+
+    fn authorize_event(
+        &self,
+        timeline_id: TimelineId,
+        subject: EntityId,
+        event_type: &Kind,
+        timeline_head: u64,
+        now_secs: u64,
+    ) -> Result<(), ConsentError> {
+        if required_modality_for_event(event_type) == 0
+            && !event_type.as_str().starts_with("timeline.fork.")
+            && !event_type.as_str().starts_with("retention.")
+        {
+            return Ok(());
+        }
+        self.check_consent(timeline_id, subject, event_type, timeline_head, now_secs)
+            .map(|_| ())
     }
 }
 
@@ -1378,6 +1596,10 @@ mod tests {
         assert_eq!(token.modalities, g.modalities);
         assert_eq!(token.subject_id, g.subject_id);
         assert_eq!(token.grantee_id, g.grantee_id);
+        assert_eq!(token.min_geo_resolution(), g.min_geo_resolution);
+        assert_eq!(token.fork_permitted(), g.fork_permitted);
+        assert_eq!(token.export_permitted(), g.export_permitted);
+        assert_eq!(token.retention_days(), g.retention_days);
     }
 
     #[test]
@@ -1531,6 +1753,7 @@ mod tests {
             _subject: EntityId,
             event_type: &Kind,
             timeline_head: u64,
+            _now_secs: u64,
         ) -> Result<ConsentCapabilityToken, ConsentError> {
             if event_type.as_str().starts_with("consent.") {
                 return Err(ConsentError::ConsentEventsForbidden);
@@ -1565,6 +1788,7 @@ mod tests {
                 EntityId::new(),
                 &Kind::new("world.observation.v1"),
                 50,
+                0,
             )
             .is_ok());
     }
@@ -1578,6 +1802,7 @@ mod tests {
                 gate.timeline(),
                 EntityId::new(),
                 &Kind::new(EVENT_TYPE_CONSENT_GRANTED_V1),
+                0,
                 0
             )
             .test_err(),
@@ -1594,6 +1819,7 @@ mod tests {
                 gate.timeline(),
                 EntityId::new(),
                 &Kind::new(EVENT_TYPE_CONSENT_REVOKED_V1),
+                0,
                 0
             )
             .test_err(),
@@ -1610,7 +1836,8 @@ mod tests {
                 gate.timeline(),
                 EntityId::new(),
                 &Kind::new("world.observation.v1"),
-                100 // head == fence -> invalid
+                100, // head == fence -> invalid
+                0
             )
             .test_err(),
             ConsentError::Revoked
@@ -1627,6 +1854,7 @@ mod tests {
                 EntityId::new(),
                 &Kind::new("persona.update.v1"),
                 99,
+                0,
             )
             .is_ok());
     }
@@ -1645,6 +1873,7 @@ mod tests {
                 grant.subject_id,
                 &Kind::new("world.observation.v1"),
                 0,
+                0,
             )
             .is_ok());
         assert_eq!(
@@ -1652,6 +1881,7 @@ mod tests {
                 TimelineId::new(),
                 grant.subject_id,
                 &Kind::new("world.observation.v1"),
+                0,
                 0,
             ),
             Err(ConsentError::NoConsent)
@@ -1661,6 +1891,7 @@ mod tests {
                 timeline,
                 EntityId::new(),
                 &Kind::new("world.observation.v1"),
+                0,
                 0,
             ),
             Err(ConsentError::NoConsent)
@@ -1692,14 +1923,19 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn restore_from_history_rebuilds_and_revokes_timeline_sessions() {
-        fn event(event_type: &str, payload: CanonicalBytes) -> Event {
+        fn event(
+            event_type: &str,
+            payload: CanonicalBytes,
+            entity: EntityId,
+            seq: u64,
+        ) -> Event {
             Event {
                 id: EventId::new(),
-                entity: EntityId::new(),
+                entity,
                 event_type: Kind::new(event_type),
                 payload,
                 wall_time: WallTime::from_micros(1),
-                seq: crate::clock::Seq::from_u64(1),
+                seq: crate::clock::Seq::from_u64(seq),
                 causation_id: None,
                 correlation_id: None,
                 schema_version: SchemaVersion::V1,
@@ -1719,10 +1955,17 @@ mod tests {
             .restore_from_history(
                 timeline,
                 &[
-                    event(EVENT_TYPE_CONSENT_GRANTED_V1, grant_payload),
+                    event(
+                        EVENT_TYPE_CONSENT_GRANTED_V1,
+                        grant_payload,
+                        grant.subject_id,
+                        grant.grant_seq,
+                    ),
                     event(
                         "world.observation.v1",
                         CanonicalBytes::from_static(b"ignored"),
+                        EntityId::new(),
+                        1,
                     ),
                 ],
             )
@@ -1733,18 +1976,222 @@ mod tests {
                 grant.subject_id,
                 &Kind::new("world.observation.v1"),
                 0,
+                0,
             )
             .test_ok();
 
         authority
             .restore_from_history(
                 timeline,
-                &[event(EVENT_TYPE_CONSENT_REVOKED_V1, revocation_payload)],
+                &[event(
+                    EVENT_TYPE_CONSENT_REVOKED_V1,
+                    revocation_payload,
+                    revocation.subject_id,
+                    revocation.fence_seq,
+                )],
             )
             .test_ok();
         assert_eq!(
             authority.validate_on_timeline(timeline, &token, 100, 0),
             Err(ConsentError::Revoked)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn restore_from_history_rejects_an_unmatched_revocation() {
+        fn event(payload: CanonicalBytes, entity: EntityId, seq: u64) -> Event {
+            Event {
+                id: EventId::new(),
+                entity,
+                event_type: Kind::new(EVENT_TYPE_CONSENT_REVOKED_V1),
+                payload,
+                wall_time: WallTime::from_micros(1),
+                seq: crate::clock::Seq::from_u64(seq),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: SchemaVersion::V1,
+                signature: None,
+                payload_hash: Hash::from_bytes([0; 32]),
+            }
+        }
+
+        let grant = sample_granted();
+        let revocation = sample_revoked(&grant);
+        let error = ConsentAuthority::new()
+            .restore_from_history(
+                TimelineId::new(),
+                &[event(
+                    revocation.encode().test_ok(),
+                    revocation.subject_id,
+                    revocation.fence_seq,
+                )],
+            )
+            .test_err();
+        assert_eq!(error, ConsentCodecError::UnmatchedRevocation);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn consent_gate_enforces_known_event_modalities() {
+        let authority = ConsentAuthority::new();
+        let timeline = TimelineId::new();
+        let mut grant = sample_granted();
+        grant.modalities = MODALITY_LOCATION;
+        let _token = authority.record_grant_on_timeline(timeline, &grant);
+
+        assert_eq!(
+            authority.check_consent(
+                timeline,
+                grant.subject_id,
+                &Kind::new("persona.update.v1"),
+                0,
+                0,
+            ),
+            Err(ConsentError::ModalityNotGranted)
+        );
+        assert!(authority
+            .check_consent(
+                timeline,
+                grant.subject_id,
+                &Kind::new("geo.location.v1"),
+                0,
+                0,
+            )
+            .is_ok());
+
+        let export_denied_authority = ConsentAuthority::new();
+        let mut export_denied_grant = sample_granted();
+        export_denied_grant.modalities = MODALITY_EXPORT;
+        let export_denied_token =
+            export_denied_authority.record_grant_on_timeline(timeline, &export_denied_grant);
+        assert_eq!(
+            export_denied_token.authorize_event_type(&Kind::new("export.bundle.v1")),
+            Err(ConsentError::ExportNotPermitted)
+        );
+        assert_eq!(
+            export_denied_authority.check_consent(
+                timeline,
+                export_denied_grant.subject_id,
+                &Kind::new("export.bundle.v1"),
+                0,
+                0,
+            ),
+            Err(ConsentError::ExportNotPermitted)
+        );
+
+        let full_authority = ConsentAuthority::new();
+        let mut full_grant = sample_granted();
+        full_grant.modalities =
+            MODALITY_LOCATION | MODALITY_PERSONA | MODALITY_MODEL_FIT | MODALITY_EXPORT;
+        full_grant.export_permitted = true;
+        let full_token = full_authority.record_grant_on_timeline(timeline, &full_grant);
+        assert!(full_token
+            .authorize_event_type(&Kind::new("timeline.fork.v1"))
+            .is_ok());
+        assert!(full_token.authorize_geo_resolution(1).is_ok());
+        assert!(full_token.authorize_retention(30).is_ok());
+        assert!(full_authority
+            .check_consent(
+                timeline,
+                full_grant.subject_id,
+                &Kind::new("model.fit.v1"),
+                0,
+                0,
+            )
+            .is_ok());
+
+        let mut constrained_grant = sample_granted();
+        constrained_grant.fork_permitted = false;
+        constrained_grant.min_geo_resolution = 1;
+        constrained_grant.retention_days = 1;
+        let constrained_token = full_authority.record_grant_on_timeline(timeline, &constrained_grant);
+        assert_eq!(
+            constrained_token.authorize_event_type(&Kind::new("timeline.fork.v1")),
+            Err(ConsentError::ForkNotPermitted)
+        );
+        assert_eq!(
+            constrained_token.authorize_geo_resolution(0),
+            Err(ConsentError::GeoResolutionNotPermitted)
+        );
+        assert_eq!(
+            constrained_token.authorize_retention(2),
+            Err(ConsentError::RetentionNotPermitted)
+        );
+        assert_eq!(
+            full_authority.check_consent(
+                timeline,
+                constrained_grant.subject_id,
+                &Kind::new("retention.extend.v1"),
+                0,
+                0,
+            ),
+            Err(ConsentError::RetentionNotPermitted)
+        );
+        assert!(full_authority
+            .check_consent(
+                timeline,
+                full_grant.subject_id,
+                &Kind::new("export.bundle.v1"),
+                0,
+                0,
+            )
+            .is_ok());
+        assert!(full_authority
+            .check_consent(
+                timeline,
+                full_grant.subject_id,
+                &Kind::new("location.coordinate.v1"),
+                0,
+                0,
+            )
+            .is_ok());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn consent_gate_rejects_an_expired_grant_at_check_time() {
+        let authority = ConsentAuthority::new();
+        let timeline = TimelineId::new();
+        let mut grant = sample_granted();
+        grant.expiry_secs = 10;
+        let _token = authority.record_grant_on_timeline(timeline, &grant);
+
+        assert_eq!(
+            authority.check_consent(
+                timeline,
+                grant.subject_id,
+                &Kind::new("world.observation.v1"),
+                0,
+                10,
+            ),
+            Err(ConsentError::Expired)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn restore_from_history_rejects_an_oversized_history_before_decoding() {
+        let event = Event {
+            id: EventId::new(),
+            entity: EntityId::new(),
+            event_type: Kind::new("world.observation.v1"),
+            payload: CanonicalBytes::from_static(b"ignored"),
+            wall_time: WallTime::from_micros(1),
+            seq: crate::clock::Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        };
+        let events = vec![event; MAX_CONSENT_HISTORY_EVENTS + 1];
+
+        assert_eq!(
+            ConsentAuthority::new().restore_from_history(TimelineId::new(), &events),
+            Err(ConsentCodecError::HistoryTooLong {
+                count: MAX_CONSENT_HISTORY_EVENTS + 1,
+            })
         );
     }
 
@@ -1769,6 +2216,13 @@ mod tests {
         assert!(!ConsentCodecError::WrongFieldType.to_string().is_empty());
         assert!(!ConsentCodecError::TrailingBytes.to_string().is_empty());
         assert!(!ConsentCodecError::CborError.to_string().is_empty());
+        assert!(!ConsentCodecError::UnmatchedRevocation.to_string().is_empty());
+        assert!(!ConsentCodecError::HistoryTooLong { count: 10_001 }
+            .to_string()
+            .is_empty());
+        assert!(!ConsentCodecError::HistoryCoordinateMismatch
+            .to_string()
+            .is_empty());
         assert!(!format!("{}", ConsentCodecError::PurposeTooLong { size: 200 }).is_empty());
     }
 
@@ -1778,6 +2232,11 @@ mod tests {
         assert!(!ConsentError::NoConsent.to_string().is_empty());
         assert!(!ConsentError::Revoked.to_string().is_empty());
         assert!(!ConsentError::Expired.to_string().is_empty());
+        assert!(!ConsentError::ModalityNotGranted.to_string().is_empty());
+        assert!(!ConsentError::ExportNotPermitted.to_string().is_empty());
+        assert!(!ConsentError::ForkNotPermitted.to_string().is_empty());
+        assert!(!ConsentError::GeoResolutionNotPermitted.to_string().is_empty());
+        assert!(!ConsentError::RetentionNotPermitted.to_string().is_empty());
         assert!(!ConsentError::ConsentEventsForbidden.to_string().is_empty());
     }
 }

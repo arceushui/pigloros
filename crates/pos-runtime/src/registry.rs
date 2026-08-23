@@ -165,7 +165,7 @@ mod coverage_paths {
             event_cursors: vec![(id, Seq::ZERO)],
             operation: OperationContext::Public,
         });
-        registry.commit_step_at(Seq::ZERO);
+        registry.commit_step_at(Seq::ZERO, 0);
     }
 
     #[test]
@@ -422,7 +422,10 @@ impl PluginRegistry {
             run_mode,
             resource_limit: None,
             poisoned_driver: None,
-            consent_gate: None,
+            // Every live registry has a host-owned gate, even before the
+            // caller binds a durable authority. This default fails closed for
+            // protected drafts instead of exposing an unguarded public path.
+            consent_gate: Some(Arc::new(ConsentAuthority::new())),
         }
     }
 
@@ -452,18 +455,30 @@ impl PluginRegistry {
         timeline: pos_core::ids::TimelineId,
         operation: &OperationContext,
         timeline_head: Seq,
+        commit_now_secs: Option<u64>,
     ) -> Result<(), RuntimeError> {
         match operation {
-            OperationContext::Public => Ok(()),
-            OperationContext::Protected { token, now_secs } => self
+            OperationContext::Public => self
                 .consent_gate
                 .as_ref()
-                .ok_or(RuntimeError::ConsentOperationUnavailable)
-                .and_then(|authority| {
-                    authority
-                        .validate_token(timeline, token, timeline_head.as_u64(), *now_secs)
-                        .map_err(RuntimeError::Consent)
-                }),
+                .map(|_| ())
+                .ok_or(RuntimeError::ConsentOperationUnavailable),
+            OperationContext::Protected { token, now_secs } => {
+                let validation_now_secs = commit_now_secs.unwrap_or(*now_secs);
+                self.consent_gate
+                    .as_ref()
+                    .ok_or(RuntimeError::ConsentOperationUnavailable)
+                    .and_then(|authority| {
+                        authority
+                            .validate_token(
+                                timeline,
+                                token,
+                                timeline_head.as_u64(),
+                                validation_now_secs,
+                            )
+                            .map_err(RuntimeError::Consent)
+                    })
+            }
         }
     }
 
@@ -474,24 +489,41 @@ impl PluginRegistry {
         timeline_head: Seq,
         drafts: &[pos_core::event::EventDraft],
     ) -> Result<(), RuntimeError> {
-        let OperationContext::Protected { token, .. } = operation else {
-            return Ok(());
+        let (protected_token, now_secs) = match operation {
+            OperationContext::Protected { token, now_secs } => (Some(token), *now_secs),
+            OperationContext::Public => (None, timeline_head.as_u64()),
         };
-        let gate = self
-            .consent_gate
-            .as_ref()
-            .ok_or(RuntimeError::ConsentOperationUnavailable)?;
+        let gate = self.consent_gate.as_ref();
         for draft in drafts {
-            let checked = gate
-                .check_consent(
-                    timeline,
-                    token.subject_id(),
-                    &draft.event_type,
-                    timeline_head.as_u64(),
-                )
-                .map_err(RuntimeError::Consent)?;
-            if checked != *token {
-                return Err(RuntimeError::Consent(pos_core::ConsentError::NoConsent));
+            let gate = gate.ok_or(RuntimeError::ConsentOperationUnavailable)?;
+            let subject = protected_token.map_or(draft.entity, |token| token.subject_id());
+            match protected_token {
+                Some(token) => {
+                    token
+                        .authorize_event_type(&draft.event_type)
+                        .map_err(RuntimeError::Consent)?;
+                    let checked = gate
+                        .check_consent(
+                            timeline,
+                            subject,
+                            &draft.event_type,
+                            timeline_head.as_u64(),
+                            now_secs,
+                        )
+                        .map_err(RuntimeError::Consent)?;
+                    if checked != *token {
+                        return Err(RuntimeError::Consent(pos_core::ConsentError::NoConsent));
+                    }
+                }
+                None => gate
+                    .authorize_event(
+                        timeline,
+                        subject,
+                        &draft.event_type,
+                        timeline_head.as_u64(),
+                        now_secs,
+                    )
+                    .map_err(RuntimeError::Consent)?,
             }
         }
         Ok(())
@@ -581,7 +613,7 @@ impl PluginRegistry {
         operation: OperationContext,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.ensure_no_pending_step()?;
-        self.validate_operation(timeline, &operation, observed_through)?;
+        self.validate_operation(timeline, &operation, observed_through, None)?;
         let mut driver_ids = Vec::new();
         let mut cadence_updates = Vec::new();
         let mut event_cursors = Vec::new();
@@ -682,12 +714,18 @@ impl PluginRegistry {
     }
 
     /// Commit the Driver and cadence state staged by an anchored step.
-    pub fn commit_step_at(&mut self, timeline_head: Seq) {
+    /// Commit a staged step after revalidating it at the supplied fresh time.
+    pub fn commit_step_at(&mut self, timeline_head: Seq, commit_now_secs: u64) {
         let Some(pending) = self.pending_step.take() else {
             return;
         };
         if self
-            .validate_operation(pending.timeline, &pending.operation, timeline_head)
+            .validate_operation(
+                pending.timeline,
+                &pending.operation,
+                timeline_head,
+                Some(commit_now_secs),
+            )
             .is_err()
         {
             let _ = self.abort_drivers(&pending.driver_ids);
@@ -1053,6 +1091,7 @@ impl PluginRegistry {
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.ensure_no_pending_step()?;
         self.reject_unanchored_drivers()?;
+        self.validate_operation(timeline, &OperationContext::Public, Seq::ZERO, None)?;
         let mut all_drafts = Vec::new();
         let mut due_driver_ids = HashSet::new();
         let mut seen_subscriptions = HashSet::new();
@@ -1098,6 +1137,12 @@ impl PluginRegistry {
             }
         }
         debug_assert!(due_driver_ids.is_empty());
+        self.validate_protected_drafts(
+            timeline,
+            &OperationContext::Public,
+            Seq::ZERO,
+            &all_drafts,
+        )?;
         Ok(all_drafts)
     }
 
@@ -1188,6 +1233,7 @@ impl PluginRegistry {
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.ensure_no_pending_step()?;
         self.reject_unanchored_drivers()?;
+        self.validate_operation(timeline, &OperationContext::Public, Seq::ZERO, None)?;
         let mut all_drafts = Vec::new();
         let snapshot = self.snapshot_for_tick();
         for entry in self.plugins.values_mut() {
@@ -1198,6 +1244,12 @@ impl PluginRegistry {
                 all_drafts.extend(output.drafts);
             }
         }
+        self.validate_protected_drafts(
+            timeline,
+            &OperationContext::Public,
+            Seq::ZERO,
+            &all_drafts,
+        )?;
         Ok(all_drafts)
     }
 
@@ -1631,7 +1683,7 @@ mod tests {
         ));
         assert_eq!(state.lock().test_ok().steps, 1);
 
-        registry.commit_step_at(Seq::ZERO);
+        registry.commit_step_at(Seq::ZERO, 0);
         assert_eq!(state.lock().test_ok().commits, 1);
         assert!(!state.lock().test_ok().staged);
 
@@ -1748,7 +1800,7 @@ mod tests {
         registry
             .step_all_anchored(TimelineId::new(), Seq::ZERO)
             .test_ok();
-        registry.commit_step_at(Seq::ZERO);
+        registry.commit_step_at(Seq::ZERO, 0);
         assert!(registry
             .step_all_anchored(TimelineId::new(), Seq::ZERO)
             .is_err());
@@ -1892,7 +1944,7 @@ mod tests {
         registry
             .tick_cadenced_anchored(timeline, 0, Seq::ZERO)
             .test_ok();
-        registry.commit_step_at(Seq::ZERO);
+        registry.commit_step_at(Seq::ZERO, 0);
         assert_eq!(state.lock().test_ok().steps, 2);
 
         assert!(matches!(
@@ -1905,13 +1957,13 @@ mod tests {
             .tick_cadenced_anchored(timeline, 50, Seq::ZERO)
             .test_ok()
             .is_empty());
-        registry.commit_step_at(Seq::ZERO);
+        registry.commit_step_at(Seq::ZERO, 0);
         assert_eq!(state.lock().test_ok().steps, 2);
 
         registry
             .tick_cadenced_anchored(timeline, 100, Seq::ZERO)
             .test_ok();
-        registry.commit_step_at(Seq::ZERO);
+        registry.commit_step_at(Seq::ZERO, 0);
         assert_eq!(state.lock().test_ok().steps, 3);
     }
 
@@ -2242,13 +2294,15 @@ mod tests {
         let token = authority.record_grant_on_timeline(timeline, &grant);
         let operation = OperationContext::Protected { token, now_secs: 1 };
 
-        assert!(PluginRegistry::new()
-            .validate_operation(timeline, &operation, Seq::from_u64(3))
+        let mut unbound = PluginRegistry::new();
+        unbound.consent_gate = None;
+        assert!(unbound
+            .validate_operation(timeline, &operation, Seq::from_u64(3), None)
             .is_err_and(|error| matches!(error, RuntimeError::ConsentOperationUnavailable)));
 
         let bound = PluginRegistry::new().with_consent_authority(authority.clone());
         assert!(bound
-            .validate_operation(timeline, &operation, Seq::from_u64(3))
+            .validate_operation(timeline, &operation, Seq::from_u64(3), None)
             .is_ok());
         authority
             .record_revocation_on_timeline(
@@ -2262,7 +2316,7 @@ mod tests {
             )
             .test_ok();
         assert!(bound
-            .validate_operation(timeline, &operation, Seq::from_u64(5))
+            .validate_operation(timeline, &operation, Seq::from_u64(5), None)
             .is_err_and(|error| matches!(error, RuntimeError::Consent(_))));
     }
 

@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 // Experiment hosts may close their own session, but they are not a Gateway
 // consent issuer.  Keep this durable lifecycle marker outside the canonical
 // `consent.*` namespace so only Gateway APIs can create consent events.
-const EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE: &str = pos_conformance::HOST_CONSENT_CLOSED_EVENT_TYPE;
+const EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE: &str = pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE;
 
 pub mod moat_proof;
 
@@ -374,7 +374,7 @@ fn append_driver_drafts(
         return Err(error.into());
     }
     if drafts.is_empty() {
-        registry.commit_step_at(observed_through);
+        registry.commit_step_at(observed_through, 0);
         Ok(0)
     } else {
         match store.append(timeline_id, &drafts) {
@@ -386,7 +386,7 @@ fn append_driver_drafts(
                         return Err(error.into());
                     }
                 };
-                registry.commit_step_at(head);
+                registry.commit_step_at(head, 0);
                 Ok(u64::try_from(events.len()).unwrap_or(u64::MAX))
             }
             Err(error) => {
@@ -1121,7 +1121,8 @@ impl ExperimentSession {
             return Err(error.into());
         }
         let emitted_events = if drafts.is_empty() {
-            self.registry.commit_step_at(self.boundary.folded_through);
+            self.registry
+                .commit_step_at(self.boundary.folded_through, 0);
             0
         } else {
             match lock_store(&self.store)
@@ -1145,7 +1146,7 @@ impl ExperimentSession {
                             return Err(error);
                         }
                     };
-                    self.registry.commit_step_at(head);
+                    self.registry.commit_step_at(head, 0);
                     count
                 }
                 Err(error) => {
