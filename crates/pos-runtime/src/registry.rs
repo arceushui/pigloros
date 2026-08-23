@@ -969,11 +969,11 @@ impl PluginRegistry {
             let entry = self
                 .plugins
                 .get_mut(&id)
-                .unwrap_or_else(|| unreachable!("staged Driver disappeared from the registry"));
+                .unwrap_or_else(|| panic!("staged Driver disappeared from the registry"));
             let driver = entry
                 .driver
                 .as_mut()
-                .unwrap_or_else(|| unreachable!("staged Driver entry lost its Driver"));
+                .unwrap_or_else(|| panic!("staged Driver entry lost its Driver"));
             let name = driver.name().to_owned();
             if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 driver.commit_restore_from_history();
@@ -1287,7 +1287,7 @@ impl PluginRegistry {
                 let driver = entry
                     .driver
                     .as_mut()
-                    .unwrap_or_else(|| unreachable!("due Driver entry lost its Driver"));
+                    .unwrap_or_else(|| panic!("due Driver entry lost its Driver"));
                 let observations = snapshot.view_for(driver.subscriptions());
                 let output = invoke_driver(driver.as_mut(), timeline, observations)?;
                 reject_host_owned_drafts(&output)?;
