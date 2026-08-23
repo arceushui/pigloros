@@ -618,7 +618,7 @@ impl ConsentCapabilityToken {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct ActiveConsent {
     token: ConsentCapabilityToken,
     expiry_secs: u32,
@@ -634,6 +634,7 @@ type ActiveConsentSessions = HashMap<(TimelineId, EntityId, EntityId, u64), Acti
 /// abort it when the append fails.
 #[derive(Debug)]
 pub struct ConsentRevocationReservation {
+    active: Arc<Mutex<ActiveConsentSessions>>,
     authority_id: u64,
     timeline_id: TimelineId,
     subject_id: EntityId,
@@ -642,6 +643,37 @@ pub struct ConsentRevocationReservation {
     previous_fence_seq: u64,
     pending_fence_seq: u64,
     fence_seq: u64,
+    completed: bool,
+}
+
+impl ConsentRevocationReservation {
+    fn rollback(&mut self) {
+        if self.completed {
+            return;
+        }
+        let key = (
+            self.timeline_id,
+            self.subject_id,
+            self.grantee_id,
+            self.grant_seq,
+        );
+        let mut sessions = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(active) = sessions.get_mut(&key) {
+            if active.token.fence_seq == self.pending_fence_seq {
+                active.token.fence_seq = self.previous_fence_seq;
+            }
+        }
+        self.completed = true;
+    }
+}
+
+impl Drop for ConsentRevocationReservation {
+    fn drop(&mut self) {
+        self.rollback();
+    }
 }
 
 /// Host-owned authority that issues and invalidates consent capabilities.
@@ -783,6 +815,7 @@ impl ConsentAuthority {
         let previous_fence_seq = active.token.fence_seq;
         active.token.fence_seq = pending_fence_seq;
         Ok(ConsentRevocationReservation {
+            active: Arc::clone(&self.active),
             authority_id: self.authority_id,
             timeline_id,
             subject_id: revocation.subject_id,
@@ -791,6 +824,7 @@ impl ConsentAuthority {
             previous_fence_seq,
             pending_fence_seq,
             fence_seq: revocation.fence_seq,
+            completed: false,
         })
     }
 
@@ -801,7 +835,7 @@ impl ConsentAuthority {
     /// different authority or the reserved session no longer exists.
     pub fn commit_revocation(
         &self,
-        reservation: ConsentRevocationReservation,
+        mut reservation: ConsentRevocationReservation,
     ) -> Result<(), ConsentError> {
         if reservation.authority_id != self.authority_id {
             return Err(ConsentError::NoConsent);
@@ -823,6 +857,7 @@ impl ConsentAuthority {
             return Err(ConsentError::NoConsent);
         }
         active.token.fence_seq = reservation.fence_seq;
+        reservation.completed = true;
         Ok(())
     }
 
@@ -830,25 +865,11 @@ impl ConsentAuthority {
     ///
     /// A later direct revocation or grant publication is preserved if it has
     /// already changed the session while the reservation was being resolved.
-    pub fn abort_revocation(&self, reservation: ConsentRevocationReservation) {
+    pub fn abort_revocation(&self, mut reservation: ConsentRevocationReservation) {
         if reservation.authority_id != self.authority_id {
             return;
         }
-        let key = (
-            reservation.timeline_id,
-            reservation.subject_id,
-            reservation.grantee_id,
-            reservation.grant_seq,
-        );
-        let mut sessions = self
-            .active
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(active) = sessions.get_mut(&key) {
-            if active.token.fence_seq == reservation.pending_fence_seq {
-                active.token.fence_seq = reservation.previous_fence_seq;
-            }
-        }
+        reservation.rollback();
     }
 
     fn validate_revocation_with_timeline(
@@ -2157,6 +2178,48 @@ mod tests {
             authority.validate_on_timeline(timeline, &token, 1, 0),
             Err(ConsentError::Revoked)
         );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn cancelled_revocation_future_restores_the_capability_fence() {
+        use std::future::Future as _;
+
+        struct NoopWaker;
+
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let authority = ConsentAuthority::new();
+        let timeline = TimelineId::new();
+        let grant = sample_granted();
+        let token = authority.record_grant_on_timeline(timeline, &grant);
+        let revocation = ConsentRevoked {
+            subject_id: grant.subject_id,
+            grantee_id: grant.grantee_id,
+            grant_seq: grant.grant_seq,
+            fence_seq: 1,
+        };
+        let future_authority = authority.clone();
+        let mut future = Box::pin(async move {
+            let reservation = future_authority
+                .begin_revocation_on_timeline(timeline, &revocation)
+                .test_ok();
+            std::future::pending::<()>().await;
+            future_authority.commit_revocation(reservation).test_ok();
+        });
+        let waker = std::task::Waker::from(Arc::new(NoopWaker));
+        let mut context = std::task::Context::from_waker(&waker);
+        assert!(matches!(
+            future.as_mut().poll(&mut context),
+            std::task::Poll::Pending
+        ));
+        drop(future);
+
+        assert!(authority
+            .validate_on_timeline(timeline, &token, 0, 0)
+            .is_ok());
     }
 
     #[test]
