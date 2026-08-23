@@ -264,11 +264,19 @@ pub struct EvaluatorRequestV1 {
 
 impl ConformanceProfileV1 {
     /// Validate the closed CPF1 contract without reading private implementation state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed safe error when an invariant is absent or invalid.
     pub fn validate(&self) -> Result<(), ConformanceContractError> {
         validate_profile(self)
     }
 
     /// Return canonical CPF1 bytes after validating the immutable contract and digest.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed safe error when encoding, validation, or digest verification fails.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ConformanceContractError> {
         self.validate().and_then(|()| {
             let expected = self.digest();
@@ -281,6 +289,10 @@ impl ConformanceProfileV1 {
     }
 
     /// Decode exact-length canonical CPF1 bytes and validate every contract invariant.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed safe error for malformed, noncanonical, or invalid CPF1 bytes.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ConformanceContractError> {
         if bytes.len() > MAX_PROFILE_BYTES {
             return Err(ConformanceContractError::FieldOutOfBounds);
@@ -308,6 +320,10 @@ impl ConformanceProfileV1 {
     }
 
     /// Promote only along the closed lifecycle graph and never manufacture Stable evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed safe error if the transition or its independent evidence is invalid.
     pub fn transition_to(
         &self,
         target: ProfileLifecycleV1,
@@ -316,8 +332,10 @@ impl ConformanceProfileV1 {
         let permitted = matches!(
             (self.lifecycle, target),
             (ProfileLifecycleV1::Draft, ProfileLifecycleV1::Candidate)
-                | (ProfileLifecycleV1::Candidate, ProfileLifecycleV1::Stable)
-                | (ProfileLifecycleV1::Candidate, ProfileLifecycleV1::Retired)
+                | (
+                    ProfileLifecycleV1::Candidate,
+                    ProfileLifecycleV1::Stable | ProfileLifecycleV1::Retired
+                )
                 | (ProfileLifecycleV1::Stable, ProfileLifecycleV1::Retired)
         );
         if !permitted {
@@ -339,6 +357,10 @@ impl ConformanceProfileV1 {
 
 impl EvaluatorRequestV1 {
     /// Validate this public-only evaluator request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed safe error when a request identity or output cap is invalid.
     pub fn validate(&self) -> Result<(), ConformanceContractError> {
         if self.request_id == [0; 16]
             || zero_digest(&self.conformance_profile_digest)
@@ -364,12 +386,20 @@ impl EvaluatorRequestV1 {
     }
 
     /// Return exact canonical evaluator-request bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed safe error when encoding, validation, or digest verification fails.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ConformanceContractError> {
         self.validate()
             .and_then(|()| encode_value(&encode_request(self, true)))
     }
 
     /// Decode and verify exact canonical evaluator-request bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed safe error for malformed, noncanonical, or invalid request bytes.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ConformanceContractError> {
         if bytes.len() > MAX_PROFILE_BYTES {
             return Err(ConformanceContractError::FieldOutOfBounds);
@@ -620,7 +650,7 @@ fn validate_protocol(protocol: &EvaluatorProtocolV1) -> Result<(), ConformanceCo
     }
 }
 
-fn validate_hard_caps(caps: &EvaluatorHardCapsV1) -> Result<(), ConformanceContractError> {
+const fn validate_hard_caps(caps: &EvaluatorHardCapsV1) -> Result<(), ConformanceContractError> {
     if caps.max_profile_bytes == 0
         || caps.max_profile_bytes > MAX_PROFILE_BYTES as u64
         || caps.max_cases == 0
@@ -760,7 +790,7 @@ fn validate_allowed_divergences(
     }
 }
 
-fn bounded_text(value: &str, maximum: usize) -> bool {
+const fn bounded_text(value: &str, maximum: usize) -> bool {
     !value.is_empty() && value.len() <= maximum
 }
 
@@ -1393,7 +1423,7 @@ fn bytes_value(value: &Value) -> Result<Vec<u8>, ConformanceContractError> {
         _ => Err(ConformanceContractError::InvalidEncoding),
     }
 }
-fn bool_value(value: &Value) -> Result<bool, ConformanceContractError> {
+const fn bool_value(value: &Value) -> Result<bool, ConformanceContractError> {
     match value {
         Value::Bool(value) => Ok(*value),
         _ => Err(ConformanceContractError::InvalidEncoding),
