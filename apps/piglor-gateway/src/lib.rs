@@ -2288,9 +2288,9 @@ mod tests {
                 return Err(CoreError::Storage("append failed".into()));
             }
             if matches!(self.mode, ScriptMode::FailConsentRevocationAppend)
-                && drafts.iter().any(|draft| {
-                    draft.event_type == Kind::new(EVENT_TYPE_CONSENT_REVOKED_V1)
-                })
+                && drafts
+                    .iter()
+                    .any(|draft| draft.event_type == Kind::new(EVENT_TYPE_CONSENT_REVOKED_V1))
             {
                 return Err(CoreError::Storage("revocation append failed".into()));
             }
