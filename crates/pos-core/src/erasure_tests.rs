@@ -1654,6 +1654,34 @@ fn receipt_decoder_refuses_unsorted_acknowledgements() -> Result<(), ErasureErro
     Ok(())
 }
 #[test]
+fn receipt_decoder_exercises_each_public_field_boundary() -> Result<(), ErasureErrorV1> {
+    for index in [2_usize, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 18] {
+        let mut malformed = public_receipt_value(&receipt()?)?;
+        let Value::Array(fields) = &mut malformed else {
+            return Err(ErasureErrorV1::InvalidEncoding);
+        };
+        fields[index] = Value::Null;
+        assert!(matches!(
+            decode_receipt(&malformed),
+            Err(ErasureErrorV1::InvalidEncoding)
+        ));
+    }
+
+    let canonical = receipt()?.to_canonical_cbor()?;
+    let mut trailing = canonical.clone();
+    trailing.push(0);
+    assert_eq!(
+        ErasureReceiptV1::from_canonical_cbor(&trailing),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+    let noncanonical = [&[0x99, 0, 19][..], &canonical[1..]].concat();
+    assert_eq!(
+        ErasureReceiptV1::from_canonical_cbor(&noncanonical),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+    Ok(())
+}
+#[test]
 fn receipt_constructor_bounds_acknowledgements() {
     assert_eq!(
         ErasureReceiptV1::new(receipt_input(
