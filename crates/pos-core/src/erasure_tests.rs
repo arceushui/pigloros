@@ -1587,7 +1587,10 @@ fn public_decoders_reject_terminal_and_inventory_conflicts() -> Result<(), Erasu
     let Value::Array(inventories) = &mut fields[10] else {
         return Err(ErasureErrorV1::InvalidEncoding);
     };
-    let Value::Array(inventory) = &mut inventories[0] else {
+    let Value::Array(artifacts) = &mut inventories[0] else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    let Value::Array(inventory) = &mut artifacts[0] else {
         return Err(ErasureErrorV1::InvalidEncoding);
     };
     inventory[0] = test_uint(99);
@@ -1603,7 +1606,10 @@ fn public_decoders_reject_terminal_and_inventory_conflicts() -> Result<(), Erasu
     let Value::Array(inventories) = &mut fields[10] else {
         return Err(ErasureErrorV1::InvalidEncoding);
     };
-    let Value::Array(inventory) = &mut inventories[0] else {
+    let Value::Array(artifacts) = &mut inventories[0] else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    let Value::Array(inventory) = &mut artifacts[0] else {
         return Err(ErasureErrorV1::InvalidEncoding);
     };
     inventory[0] = test_uint(1);
