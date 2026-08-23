@@ -558,6 +558,13 @@ fn gateway_action_registry() -> Arc<PluginRegistry> {
 fn gateway_action_registry_with_bodies(
     bodies: impl IntoIterator<Item = EntityId>,
 ) -> Arc<PluginRegistry> {
+    gateway_action_registry_with_authority(bodies, None)
+}
+
+fn gateway_action_registry_with_authority(
+    bodies: impl IntoIterator<Item = EntityId>,
+    authority: Option<ConsentAuthority>,
+) -> Arc<PluginRegistry> {
     let mut registry = PluginRegistry::new();
     let descriptor = GatewayActionPlugin {
         id: PluginId::new(),
@@ -571,6 +578,9 @@ fn gateway_action_registry_with_bodies(
     );
     if registration.is_err() {
         return Arc::new(PluginRegistry::new());
+    }
+    if let Some(authority) = authority {
+        registry = registry.with_consent_authority(authority);
     }
     Arc::new(registry)
 }
@@ -850,6 +860,25 @@ fn checked_event_coordinates(
 }
 
 impl Gateway {
+    async fn restore_consent_history(&self, timeline: TimelineId) -> Result<(), GatewayError> {
+        let events = self
+            .store
+            .read(
+                timeline,
+                SeqRange::from_seq(Seq::from_u64(1)),
+                EventReadBounds::new(
+                    MAX_EVENT_PAYLOAD_BYTES,
+                    MAX_EVENT_TYPE_BYTES,
+                    MAX_FORK_DEPTH,
+                    usize::try_from(MAX_EVENTS_PER_TIMELINE).unwrap_or(usize::MAX),
+                ),
+            )
+            .await?;
+        self.consent_authority
+            .restore_from_history(timeline, &events)
+            .map_err(GatewayError::ConsentCodec)
+    }
+
     /// Wrap an existing store backend.
     ///
     /// Human action submission is intentionally disabled until the host supplies
@@ -857,13 +886,17 @@ impl Gateway {
     #[must_use]
     pub fn new(store: Box<dyn EventStore>) -> Self {
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        let consent_authority = ConsentAuthority::new();
         Self {
             store: executor::StoreExecutor::new(store),
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
-            consent_authority: ConsentAuthority::new(),
-            action_registry: gateway_action_registry(),
+            action_registry: gateway_action_registry_with_authority(
+                std::iter::empty(),
+                Some(consent_authority.clone()),
+            ),
+            consent_authority,
             action_principal: None,
         }
     }
@@ -875,13 +908,17 @@ impl Gateway {
         bodies: impl IntoIterator<Item = EntityId>,
     ) -> Self {
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        let consent_authority = ConsentAuthority::new();
         Self {
             store: executor::StoreExecutor::new(store),
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
-            consent_authority: ConsentAuthority::new(),
-            action_registry: gateway_action_registry_with_bodies(bodies),
+            action_registry: gateway_action_registry_with_authority(
+                bodies,
+                Some(consent_authority.clone()),
+            ),
+            consent_authority,
             action_principal: None,
         }
     }
@@ -894,13 +931,17 @@ impl Gateway {
         principal: ActionPrincipal,
     ) -> Self {
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        let consent_authority = ConsentAuthority::new();
         Self {
             store: executor::StoreExecutor::new(store),
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
-            consent_authority: ConsentAuthority::new(),
-            action_registry: gateway_action_registry_with_bodies(bodies),
+            action_registry: gateway_action_registry_with_authority(
+                bodies,
+                Some(consent_authority.clone()),
+            ),
+            consent_authority,
             action_principal: Some(principal),
         }
     }
@@ -915,13 +956,17 @@ impl Gateway {
         S: EventStore + GeoLocationAdmissionStore + 'static,
     {
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        let consent_authority = ConsentAuthority::new();
         Self {
             store: executor::StoreExecutor::new_with_geo_location_admission(store),
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
-            consent_authority: ConsentAuthority::new(),
-            action_registry: gateway_action_registry(),
+            action_registry: gateway_action_registry_with_authority(
+                std::iter::empty(),
+                Some(consent_authority.clone()),
+            ),
+            consent_authority,
             action_principal: None,
         }
     }
@@ -936,13 +981,17 @@ impl Gateway {
         owner_key: &OwnTracksOwnerKey,
     ) -> Self {
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        let consent_authority = ConsentAuthority::new();
         Self {
             store: executor::StoreExecutor::new_with_owntracks_ingress(store, owner_key.0),
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: true,
-            consent_authority: ConsentAuthority::new(),
-            action_registry: gateway_action_registry(),
+            action_registry: gateway_action_registry_with_authority(
+                std::iter::empty(),
+                Some(consent_authority.clone()),
+            ),
+            consent_authority,
             action_principal: None,
         }
     }
@@ -953,13 +1002,17 @@ impl Gateway {
         S: EventStore + GeoLocationAdmissionStore + pos_core::OwnTracksIngressStore + 'static,
     {
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        let consent_authority = ConsentAuthority::new();
         Self {
             store: executor::StoreExecutor::new_with_owntracks_ingress(store, owner_key),
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: true,
-            consent_authority: ConsentAuthority::new(),
-            action_registry: gateway_action_registry(),
+            action_registry: gateway_action_registry_with_authority(
+                std::iter::empty(),
+                Some(consent_authority.clone()),
+            ),
+            consent_authority,
             action_principal: None,
         }
     }
@@ -1092,6 +1145,7 @@ impl Gateway {
             Ok(timeline) => timeline,
             Err(error) => return Err(error),
         };
+        grant.encode()?;
         let event = match self
             .store
             .append_consent_grant(timeline, grant.clone(), self.limits.max_events_per_timeline)
@@ -1113,7 +1167,9 @@ impl Gateway {
             Ok(event) => event,
         };
         self.publish_notice(timeline, &event);
-        let token = self.consent_authority.record_grant(&grant);
+        let token = self
+            .consent_authority
+            .record_grant_on_timeline(timeline, &grant);
         Ok((event, token))
     }
 
@@ -1133,14 +1189,20 @@ impl Gateway {
             Ok(timeline) => timeline,
             Err(error) => return Err(error),
         };
+        revocation.encode()?;
         if self
             .consent_authority
-            .validate_revocation(&revocation)
+            .validate_revocation_on_timeline(timeline, &revocation)
             .is_err()
         {
-            return Err(GatewayError::Store(CoreError::Storage(
-                "consent revocation did not name an active grant".to_owned(),
-            )));
+            self.restore_consent_history(timeline).await?;
+            self.consent_authority
+                .validate_revocation_on_timeline(timeline, &revocation)
+                .map_err(|_| {
+                    GatewayError::Store(CoreError::Storage(
+                        "consent revocation did not name an active grant".to_owned(),
+                    ))
+                })?;
         }
         let event = match self
             .store
@@ -1168,7 +1230,13 @@ impl Gateway {
         };
         // The exact session was checked above and this authority never removes
         // sessions, so a second absence would violate the host-only invariant.
-        drop(self.consent_authority.record_revocation(&revocation));
+        self.consent_authority
+            .record_revocation_on_timeline(timeline, &revocation)
+            .map_err(|_| {
+                GatewayError::Store(CoreError::Storage(
+                    "consent revocation session disappeared after append".to_owned(),
+                ))
+            })?;
         Ok(event)
     }
 

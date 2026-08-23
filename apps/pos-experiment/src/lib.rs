@@ -20,6 +20,11 @@ use pos_runtime::PluginRegistry;
 use pos_store::{open_store, StoreConfig};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+// Experiment hosts may close their own session, but they are not a Gateway
+// consent issuer.  Keep this durable lifecycle marker outside the canonical
+// `consent.*` namespace so only Gateway APIs can create consent events.
+const EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE: &str = "experiment.lifecycle.consent-closed.v1";
+
 pub mod moat_proof;
 
 // ---------------------------------------------------------------------------
@@ -369,12 +374,19 @@ fn append_driver_drafts(
         return Err(error.into());
     }
     if drafts.is_empty() {
-        registry.commit_step();
+        registry.commit_step_at(observed_through);
         Ok(0)
     } else {
         match store.append(timeline_id, &drafts) {
             Ok(events) => {
-                registry.commit_step();
+                let head = match store.logical_head(timeline_id) {
+                    Ok(head) => head,
+                    Err(error) => {
+                        registry.abort_step();
+                        return Err(error.into());
+                    }
+                };
+                registry.commit_step_at(head);
                 Ok(u64::try_from(events.len()).unwrap_or(u64::MAX))
             }
             Err(error) => {
@@ -794,9 +806,9 @@ impl Experiment {
         let ancestry = timeline_ancestry(store.as_ref(), timeline_id, folded_through)?;
         self.registry.restore_driver_state(&ancestry, &events)?;
         hydrate_projections(&mut self.registry, &events);
-        let consent_revoked = events
-            .iter()
-            .any(|event| event.event_type.as_str() == pos_core::EVENT_TYPE_CONSENT_REVOKED_V1);
+        let consent_revoked = events.iter().any(|event| {
+            event.event_type.as_str() == EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE
+        });
         Ok(ExperimentSession {
             config: self.config,
             registry: self.registry,
@@ -966,6 +978,12 @@ impl ExperimentSession {
         if self.consent_revoked || self.consent_revocation_pending.is_some() {
             return Err(ExperimentError::ConsentRevoked);
         }
+        if drafts
+            .iter()
+            .any(|draft| pos_core::is_consent_event_type(&draft.event_type))
+        {
+            return Err(ExperimentError::ConsentRevoked);
+        }
         self.registry.schemas.validate_batch(drafts)?;
         if drafts.is_empty() {
             return Ok(0);
@@ -1013,7 +1031,7 @@ impl ExperimentSession {
     /// Revoke the default session subject's consent at the next Tick Boundary.
     ///
     /// The current completed boundary remains readable. The next step commits
-    /// only the host-owned revocation marker; a following step returns
+    /// only the experiment-owned lifecycle marker; a following step returns
     /// [`TickOutcome::Stopped`] without invoking or committing any Driver.
     pub fn revoke_consent_at_boundary(&mut self) {
         self.revoke_consent_for_subject_at_boundary("session");
@@ -1022,7 +1040,7 @@ impl ExperimentSession {
     /// Schedule a durable, subject-scoped consent revocation.
     ///
     /// The request immediately closes external append authority. The host
-    /// persists a host-owned revocation marker as the next atomic boundary;
+    /// persists an experiment-owned lifecycle marker as the next atomic boundary;
     /// Drivers are not invoked for that boundary. Recovery derives the closed
     /// state from that marker rather than from process memory.
     pub fn revoke_consent_for_subject_at_boundary(&mut self, subject: impl Into<String>) {
@@ -1103,7 +1121,8 @@ impl ExperimentSession {
             return Err(error.into());
         }
         let emitted_events = if drafts.is_empty() {
-            self.registry.commit_step();
+            self.registry
+                .commit_step_at(self.boundary.folded_through);
             0
         } else {
             match lock_store(&self.store)
@@ -1115,7 +1134,17 @@ impl ExperimentSession {
                 .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
             {
                 Ok(count) => {
-                    self.registry.commit_step();
+                    let head = match lock_store(&self.store)
+                        .and_then(|store| store.logical_head(self.timeline.id()))
+                    {
+                        Ok(head) => head,
+                        Err(error) => {
+                            self.registry.abort_step();
+                            self.health = SessionHealth::Faulted;
+                            return Err(error);
+                        }
+                    };
+                    self.registry.commit_step_at(head);
                     count
                 }
                 Err(error) => {
@@ -1164,23 +1193,11 @@ impl ExperimentSession {
             .and_then(|mut store| {
                 store
                     .logical_head(self.timeline.id())
-                    .map(|head| pos_core::ConsentRevokedV1 {
-                        subject_id,
-                        grantee_id: subject_id,
-                        grant_seq: 0,
-                        fence_seq: head.as_u64().saturating_add(1),
-                    })
-                    .map_err(ExperimentError::from)
-                    .and_then(|revocation| {
-                        revocation.encode().map_err(|error| {
-                            ExperimentError::from(pos_core::CoreError::Storage(error.to_string()))
-                        })
-                    })
-                    .map(|payload| {
+                    .map(|_head| {
                         EventDraft::new(
                             subject_id,
-                            Kind::new(pos_core::EVENT_TYPE_CONSENT_REVOKED_V1),
-                            payload,
+                            Kind::new(EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE),
+                            pos_core::event::CanonicalBytes::from_static(b"closed"),
                         )
                     })
                     .and_then(|draft| {
@@ -3761,7 +3778,7 @@ mod tests {
                     ..
                 })
             ),
-            "host revocation boundary must commit the canonical marker: {revocation_boundary:?}"
+            "host revocation boundary must commit the experiment lifecycle marker: {revocation_boundary:?}"
         );
         assert_eq!(session.step_tick().test_ok(), TickOutcome::Stopped);
         drop(session);
@@ -3788,7 +3805,7 @@ mod tests {
         let resume_error = resumed_result.as_ref().err().map(ToString::to_string);
         assert!(
             resumed_result.is_ok(),
-            "durable resume must accept the canonical host marker: {resume_error:?}"
+            "durable resume must accept the experiment lifecycle marker: {resume_error:?}"
         );
         let mut resumed = resumed_result.test_ok();
         let resumed_outcome = resumed.step_tick();
@@ -3808,7 +3825,7 @@ mod tests {
             .source_events()
             .test_ok()
             .iter()
-            .any(|event| event.event_type.as_str() == pos_core::EVENT_TYPE_CONSENT_REVOKED_V1));
+            .any(|event| event.event_type.as_str() == EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE));
     }
 
     #[test]

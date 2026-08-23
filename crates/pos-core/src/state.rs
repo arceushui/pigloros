@@ -61,7 +61,9 @@ impl StateRegistry {
         // generic StateRegistry must never hand it to a plugin reducer, even
         // when a caller bypasses ProjectionRegistry and uses this low-level
         // seam directly.
-        if is_geographic_event_type(&event.event_type) {
+        if is_geographic_event_type(&event.event_type)
+            || crate::is_consent_event_type(&event.event_type)
+        {
             return;
         }
         let state = self

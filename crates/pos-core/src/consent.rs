@@ -17,7 +17,7 @@ use ciborium::Value;
 
 use crate::{
     event::{CanonicalBytes, Kind},
-    ids::EntityId,
+    ids::{EntityId, TimelineId},
 };
 
 // ---------------------------------------------------------------------------
@@ -440,6 +440,7 @@ impl ConsentRevoked {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsentCapabilityToken {
     authority_id: u64,
+    timeline_id: TimelineId,
     subject_id: EntityId,
     grantee_id: EntityId,
     modalities: u8,
@@ -475,6 +476,12 @@ impl ConsentCapabilityToken {
         self.grant_seq
     }
 
+    /// Return the Timeline bound to this host-issued capability.
+    #[must_use]
+    pub const fn timeline_id(&self) -> TimelineId {
+        self.timeline_id
+    }
+
     /// Apply the matching durable revocation without mutating Timeline history.
     ///
     /// A repeated or earlier fence can only preserve or further restrict access.
@@ -499,7 +506,7 @@ struct ActiveConsent {
     expiry_secs: u32,
 }
 
-type ActiveConsentSessions = HashMap<(EntityId, EntityId, u64), ActiveConsent>;
+type ActiveConsentSessions = HashMap<(TimelineId, EntityId, EntityId, u64), ActiveConsent>;
 
 /// Host-owned authority that issues and invalidates consent capabilities.
 ///
@@ -531,16 +538,36 @@ impl ConsentAuthority {
 
     /// Record one durably committed grant and mint its opaque capability.
     #[must_use]
+    #[cfg(test)]
     pub fn record_grant(&self, grant: &ConsentGranted) -> ConsentCapabilityToken {
+        self.record_grant_on_timeline(TimelineId::new(), grant)
+    }
+
+    /// Record a durably committed grant bound to one Timeline.
+    #[must_use]
+    pub fn record_grant_on_timeline(
+        &self,
+        timeline_id: TimelineId,
+        grant: &ConsentGranted,
+    ) -> ConsentCapabilityToken {
+        self.record_grant_with_timeline(timeline_id, grant)
+    }
+
+    fn record_grant_with_timeline(
+        &self,
+        timeline_id: TimelineId,
+        grant: &ConsentGranted,
+    ) -> ConsentCapabilityToken {
         let token = ConsentCapabilityToken {
             authority_id: self.authority_id,
+            timeline_id,
             subject_id: grant.subject_id,
             grantee_id: grant.grantee_id,
             modalities: grant.modalities,
             grant_seq: grant.grant_seq,
             fence_seq: u64::MAX,
         };
-        let key = (grant.subject_id, grant.grantee_id, grant.grant_seq);
+        let key = (timeline_id, grant.subject_id, grant.grantee_id, grant.grant_seq);
         let active = ActiveConsent {
             token: token.clone(),
             expiry_secs: grant.expiry_secs,
@@ -557,8 +584,28 @@ impl ConsentAuthority {
     ///
     /// # Errors
     /// Returns [`ConsentError::NoConsent`] when no active session matches.
+    #[cfg(test)]
     pub fn validate_revocation(&self, revocation: &ConsentRevoked) -> Result<(), ConsentError> {
+        let timeline_id = self.find_timeline_for(revocation)?;
+        self.validate_revocation_on_timeline(timeline_id, revocation)
+    }
+
+    /// Confirm that a durable revocation names an active session on a Timeline.
+    pub fn validate_revocation_on_timeline(
+        &self,
+        timeline_id: TimelineId,
+        revocation: &ConsentRevoked,
+    ) -> Result<(), ConsentError> {
+        self.validate_revocation_with_timeline(timeline_id, revocation)
+    }
+
+    fn validate_revocation_with_timeline(
+        &self,
+        timeline_id: TimelineId,
+        revocation: &ConsentRevoked,
+    ) -> Result<(), ConsentError> {
         let key = (
+            timeline_id,
             revocation.subject_id,
             revocation.grantee_id,
             revocation.grant_seq,
@@ -581,8 +628,28 @@ impl ConsentAuthority {
     /// # Errors
     ///
     /// Returns [`ConsentError::NoConsent`] when no active session matches.
+    #[cfg(test)]
     pub fn record_revocation(&self, revocation: &ConsentRevoked) -> Result<(), ConsentError> {
+        let timeline_id = self.find_timeline_for(revocation)?;
+        self.record_revocation_on_timeline(timeline_id, revocation)
+    }
+
+    /// Apply a durable revocation to its matching Timeline-bound session.
+    pub fn record_revocation_on_timeline(
+        &self,
+        timeline_id: TimelineId,
+        revocation: &ConsentRevoked,
+    ) -> Result<(), ConsentError> {
+        self.record_revocation_with_timeline(timeline_id, revocation)
+    }
+
+    fn record_revocation_with_timeline(
+        &self,
+        timeline_id: TimelineId,
+        revocation: &ConsentRevoked,
+    ) -> Result<(), ConsentError> {
         let key = (
+            timeline_id,
             revocation.subject_id,
             revocation.grantee_id,
             revocation.grant_seq,
@@ -608,8 +675,30 @@ impl ConsentAuthority {
     /// # Errors
     /// Returns a closed consent error when the authority, session, fence, or
     /// expiry does not admit this operation.
+    #[cfg(test)]
     pub fn validate(
         &self,
+        token: &ConsentCapabilityToken,
+        timeline_head: u64,
+        now_secs: u64,
+    ) -> Result<(), ConsentError> {
+        self.validate_on_timeline(token.timeline_id, token, timeline_head, now_secs)
+    }
+
+    /// Revalidate an exact host session against its bound Timeline.
+    pub fn validate_on_timeline(
+        &self,
+        timeline_id: TimelineId,
+        token: &ConsentCapabilityToken,
+        timeline_head: u64,
+        now_secs: u64,
+    ) -> Result<(), ConsentError> {
+        self.validate_with_timeline(timeline_id, token, timeline_head, now_secs)
+    }
+
+    fn validate_with_timeline(
+        &self,
+        timeline_id: TimelineId,
         token: &ConsentCapabilityToken,
         timeline_head: u64,
         now_secs: u64,
@@ -617,12 +706,22 @@ impl ConsentAuthority {
         if token.authority_id != self.authority_id {
             return Err(ConsentError::NoConsent);
         }
-        let key = (token.subject_id, token.grantee_id, token.grant_seq);
+        if token.timeline_id != timeline_id {
+            return Err(ConsentError::NoConsent);
+        }
+        let key = (
+            timeline_id,
+            token.subject_id,
+            token.grantee_id,
+            token.grant_seq,
+        );
         let sessions = self
             .active
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let active = &sessions[&key];
+        let Some(active) = sessions.get(&key) else {
+            return Err(ConsentError::NoConsent);
+        };
         if active.token != *token || !active.token.is_valid_at(timeline_head) {
             return Err(ConsentError::Revoked);
         }
@@ -631,6 +730,46 @@ impl ConsentAuthority {
         }
         drop(sessions);
         Ok(())
+    }
+
+    /// Rebuild Timeline-bound sessions from durable consent history.
+    ///
+    /// # Errors
+    /// Returns [`ConsentCodecError`] when a durable consent payload is invalid.
+    pub fn restore_from_history(
+        &self,
+        timeline_id: TimelineId,
+        events: &[crate::event::Event],
+    ) -> Result<(), ConsentCodecError> {
+        for event in events {
+            match event.event_type.as_str() {
+                EVENT_TYPE_CONSENT_GRANTED_V1 => {
+                    let grant = ConsentGranted::decode(&event.payload)?;
+                    self.record_grant_on_timeline(timeline_id, &grant);
+                }
+                EVENT_TYPE_CONSENT_REVOKED_V1 => {
+                    let revocation = ConsentRevoked::decode(&event.payload)?;
+                    let _ = self.record_revocation_with_timeline(timeline_id, &revocation);
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn find_timeline_for(&self, revocation: &ConsentRevoked) -> Result<TimelineId, ConsentError> {
+        self.active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
+            .find(|(_, subject_id, grantee_id, grant_seq)| {
+                *subject_id == revocation.subject_id
+                    && *grantee_id == revocation.grantee_id
+                    && *grant_seq == revocation.grant_seq
+            })
+            .map(|(timeline_id, _, _, _)| *timeline_id)
+            .ok_or(ConsentError::NoConsent)
     }
 }
 
@@ -651,10 +790,64 @@ pub trait ConsentGate: Send + Sync {
     /// Returns a [`ConsentError`] describing why consent was not granted.
     fn check_consent(
         &self,
+        timeline_id: TimelineId,
         subject: EntityId,
         event_type: &Kind,
         timeline_head: u64,
     ) -> Result<ConsentCapabilityToken, ConsentError>;
+
+    /// Revalidate a previously issued capability at an operation or commit fence.
+    ///
+    /// # Errors
+    /// Returns [`ConsentError::NoConsent`] unless the gate implements this
+    /// protected-token validation seam.
+    fn validate_token(
+        &self,
+        timeline_id: TimelineId,
+        token: &ConsentCapabilityToken,
+        timeline_head: u64,
+        now_secs: u64,
+    ) -> Result<(), ConsentError> {
+        let _ = (timeline_id, token, timeline_head, now_secs);
+        Err(ConsentError::NoConsent)
+    }
+}
+
+impl ConsentGate for ConsentAuthority {
+    fn check_consent(
+        &self,
+        timeline_id: TimelineId,
+        subject: EntityId,
+        event_type: &Kind,
+        timeline_head: u64,
+    ) -> Result<ConsentCapabilityToken, ConsentError> {
+        if is_consent_event_type(event_type) {
+            return Err(ConsentError::ConsentEventsForbidden);
+        }
+        let sessions = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let candidates = sessions.values().filter(|active| {
+            active.token.timeline_id == timeline_id && active.token.subject_id == subject
+        });
+        for active in candidates {
+            if active.token.is_valid_at(timeline_head) {
+                return Ok(active.token.clone());
+            }
+        }
+        Err(ConsentError::NoConsent)
+    }
+
+    fn validate_token(
+        &self,
+        timeline_id: TimelineId,
+        token: &ConsentCapabilityToken,
+        timeline_head: u64,
+        now_secs: u64,
+    ) -> Result<(), ConsentError> {
+        self.validate_on_timeline(timeline_id, token, timeline_head, now_secs)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1311,6 +1504,7 @@ mod tests {
     impl ConsentGate for TestGate {
         fn check_consent(
             &self,
+            _timeline_id: TimelineId,
             _subject: EntityId,
             event_type: &Kind,
             timeline_head: u64,
@@ -1332,12 +1526,23 @@ mod tests {
         TestGate { token }
     }
 
+    impl TestGate {
+        fn timeline(&self) -> TimelineId {
+            self.token.timeline_id()
+        }
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn consent_gate_allows_non_consent_event_within_fence() {
         let gate = test_gate(u64::MAX);
         assert!(gate
-            .check_consent(EntityId::new(), &Kind::new("world.observation.v1"), 50)
+            .check_consent(
+                gate.timeline(),
+                EntityId::new(),
+                &Kind::new("world.observation.v1"),
+                50,
+            )
             .is_ok());
     }
 
@@ -1347,6 +1552,7 @@ mod tests {
         let gate = test_gate(u64::MAX);
         assert_eq!(
             gate.check_consent(
+                gate.timeline(),
                 EntityId::new(),
                 &Kind::new(EVENT_TYPE_CONSENT_GRANTED_V1),
                 0
@@ -1362,6 +1568,7 @@ mod tests {
         let gate = test_gate(u64::MAX);
         assert_eq!(
             gate.check_consent(
+                gate.timeline(),
                 EntityId::new(),
                 &Kind::new(EVENT_TYPE_CONSENT_REVOKED_V1),
                 0
@@ -1377,6 +1584,7 @@ mod tests {
         let gate = test_gate(100);
         assert_eq!(
             gate.check_consent(
+                gate.timeline(),
                 EntityId::new(),
                 &Kind::new("world.observation.v1"),
                 100 // head == fence -> invalid
@@ -1391,7 +1599,12 @@ mod tests {
     fn consent_gate_allows_just_before_fence() {
         let gate = test_gate(100);
         assert!(gate
-            .check_consent(EntityId::new(), &Kind::new("persona.update.v1"), 99)
+            .check_consent(
+                gate.timeline(),
+                EntityId::new(),
+                &Kind::new("persona.update.v1"),
+                99,
+            )
             .is_ok());
     }
 
