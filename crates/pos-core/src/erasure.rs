@@ -2273,6 +2273,22 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn coordinator_rejects_premature_finalize_and_preserves_awaiting_acknowledgements() -> Result<(), ErasureErrorV1> {
+        let first = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
+        let mut second = acknowledgement(2, ErasureAcknowledgementOutcomeV1::Acknowledged);
+        second.owner = second.target.replica_id;
+        let port = TestCoordinatorPort { accepted: true, targets: vec![first.target, second.target] };
+        let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+        coordinator.submit(request()?, reference(3))?;
+        coordinator.advance(reference(1), change(ErasureLifecycleV1::Authorized, None, Vec::new(), Vec::new()))?;
+        coordinator.freeze_inventory(reference(1), change(ErasureLifecycleV1::AccessFrozen, Some(10), Vec::new(), Vec::new()))?;
+        assert_eq!(coordinator.finalize(reference(1), receipt_input(ErasureLifecycleV1::Complete, vec![first], Vec::new(), Vec::new())), Err(ErasureErrorV1::PolicyConflict));
+        coordinator.advance(reference(1), change(ErasureLifecycleV1::DestructionDispatched, Some(10), Vec::new(), Vec::new()))?;
+        coordinator.acknowledge(reference(1), first)?;
+        assert_eq!(coordinator.acknowledge(reference(1), second)?.lifecycle(), ErasureLifecycleV1::AwaitingAcknowledgements);
+        Ok(())
+    }
+    #[test]
     fn coordinator_rejects_unauthenticated_submission_and_unsupported_version() -> Result<(), ErasureErrorV1> {
         let port = TestCoordinatorPort { accepted: false, targets: Vec::new() };
         let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
