@@ -5965,7 +5965,7 @@ mod tests {
     #[test]
     fn public_decoders_reject_each_nested_field_shape() {
         fn reject_fields(
-            value: Value,
+            value: &Value,
             field_count: usize,
             optional_fields: &[usize],
             decode: impl Fn(&Value) -> Result<(), ConformanceContractError>,
@@ -5986,14 +5986,14 @@ mod tests {
         }
 
         let fixture = profile().fixtures[0].clone();
-        reject_fields(encode_fixture(&fixture), 17, &[10], |value| {
+        reject_fields(&encode_fixture(&fixture), 17, &[10], |value| {
             decode_fixture(value).map(|_| ())
         });
-        reject_fields(encode_input(&fixture.inputs[0]), 4, &[], |value| {
+        reject_fields(&encode_input(&fixture.inputs[0]), 4, &[], |value| {
             decode_input(value).map(|_| ())
         });
         reject_fields(
-            encode_divergence(&AllowedDivergenceV1 {
+            &encode_divergence(&AllowedDivergenceV1 {
                 classification: DivergenceMismatchKindV1::TypedFailure,
                 first_coordinate: vec![1],
             }),
@@ -6005,60 +6005,60 @@ mod tests {
             decode_bounds(value).map(|_| ())
         });
         reject_fields(
-            encode_capability_policy(&fixture.capability_policy),
+            &encode_capability_policy(&fixture.capability_policy),
             2,
             &[],
             |value| decode_capability_policy(value).map(|_| ()),
         );
         reject_fields(
-            encode_fixture_provenance(&fixture.provenance),
+            &encode_fixture_provenance(&fixture.provenance),
             6,
             &[],
             |value| decode_fixture_provenance(value).map(|_| ()),
         );
         reject_fields(
-            encode_protocol(&profile().evaluator_protocol),
+            &encode_protocol(&profile().evaluator_protocol),
             5,
             &[],
             |value| decode_protocol(value).map(|_| ()),
         );
         reject_fields(
-            encode_hard_caps(&profile().evaluator_protocol.hard_caps),
+            &encode_hard_caps(&profile().evaluator_protocol.hard_caps),
             10,
             &[],
             |value| decode_hard_caps(value).map(|_| ()),
         );
         reject_fields(
-            encode_requirements(&profile().independence_requirements),
+            &encode_requirements(&profile().independence_requirements),
             5,
             &[],
             |value| decode_requirements(value).map(|_| ()),
         );
         reject_fields(
-            encode_stable_attestation(&stable_evidence("alpha", 30).attestation),
+            &encode_stable_attestation(&stable_evidence("alpha", 30).attestation),
             3,
             &[],
             |value| decode_stable_attestation(value).map(|_| ()),
         );
         reject_fields(
-            encode_identity(&stable_evidence("alpha", 30).implementation),
+            &encode_identity(&stable_evidence("alpha", 30).implementation),
             6,
             &[5],
             |value| decode_identity(value).map(|_| ()),
         );
         reject_fields(
-            encode_independence(&stable_evidence("alpha", 30).independence),
+            &encode_independence(&stable_evidence("alpha", 30).independence),
             6,
             &[],
             |value| decode_independence(value).map(|_| ()),
         );
         reject_fields(
-            encode_case(&case_outcome_record(ExecutionModeV1::Local)),
+            &encode_case(&case_outcome_record(ExecutionModeV1::Local)),
             16,
             &[7, 8, 9, 10, 11, 12],
             |value| decode_case(value).map(|_| ()),
         );
-        reject_fields(encode_request(&request(), true), 14, &[], |value| {
+        reject_fields(&encode_request(&request(), true), 14, &[], |value| {
             decode_request(value).map(|_| ())
         });
     }
