@@ -2,11 +2,12 @@
 
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use pos_core::{CanonicalBytes, CoreError, PublicKey, Signature};
-use rand_core::OsRng;
+use rand::{rand_core::UnwrapErr, rngs::SysRng};
 
 /// Generate a new Ed25519 signing key pair.
 pub fn generate_keypair() -> (SigningKey, VerifyingKey) {
-    let signing_key = SigningKey::generate(&mut OsRng);
+    let mut csprng = UnwrapErr(SysRng);
+    let signing_key = SigningKey::generate(&mut csprng);
     let verifying_key = signing_key.verifying_key();
     (signing_key, verifying_key)
 }
