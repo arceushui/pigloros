@@ -4,7 +4,7 @@ use ciborium::value::Value;
 use pos_conformance::{ConformanceContractError, ConformanceProfileV1, EvaluatorRequestV1};
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-pub(crate) mod fixtures {
+pub mod fixtures {
     use super::*;
 
     fn text(value: &str) -> Value {
