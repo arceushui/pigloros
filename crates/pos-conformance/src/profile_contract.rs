@@ -1770,6 +1770,109 @@ mod tests {
         profile
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn case_outcome(mode: ExecutionModeV1) -> CaseOutcomeV1 {
+        let fixture = &profile().fixtures[0];
+        let ExpectedResultV1::CanonicalBytes {
+            digest: expected_digest,
+            ..
+        } = &fixture.expected
+        else {
+            unreachable!("the conformance test fixture has canonical bytes");
+        };
+        CaseOutcomeV1 {
+            case_id: fixture.case_id.clone(),
+            fixture_digest: digest(20),
+            execution_profile_digest: fixture.execution_profile_digest,
+            mode,
+            claim_layer: fixture.claim_layer,
+            outcome: CaseOutcomeStatusV1::Pass,
+            first_coordinate: None,
+            expected_digest: Some(*expected_digest),
+            actual_digest: Some(*expected_digest),
+            expected_error: None,
+            actual_error: None,
+            replay_claim: ReplayClaimV1::Exact,
+            redaction_state: RedactionStateV1::None,
+            provenance_digest: digest(21),
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn stable_evidence(implementation_id: &str, seed: u8) -> StableImplementationEvidenceV1 {
+        StableImplementationEvidenceV1 {
+            implementation: ImplementationIdentityV1 {
+                implementation_id: implementation_id.to_owned(),
+                source_digest: digest(seed),
+                build_digest: digest(seed.saturating_add(1)),
+                binary_digest: digest(seed.saturating_add(2)),
+                public_contract_digest: digest(seed.saturating_add(3)),
+                organization_id: Some(format!("organization-{seed}")),
+            },
+            independence: IndependenceEvidenceV1 {
+                technical_independent: true,
+                authorship_independent: true,
+                organizational_independent: true,
+                declaration_digest: digest(seed.saturating_add(4)),
+                shared_code_audit_digest: digest(seed.saturating_add(5)),
+                reviewer_ids: vec![format!("reviewer-{seed}")],
+            },
+            evaluator_protocol_digest: digest(13),
+            case_outcomes: vec![
+                case_outcome(ExecutionModeV1::Local),
+                case_outcome(ExecutionModeV1::AirGapped),
+            ],
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn request() -> EvaluatorRequestV1 {
+        let mut request = EvaluatorRequestV1 {
+            request_id: [1; 16],
+            conformance_profile_digest: digest(1),
+            fixture_bundle_digest: digest(2),
+            subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
+            subject_artifact_digest: digest(3),
+            implementation: ImplementationIdentityV1 {
+                implementation_id: "independent-impl".to_owned(),
+                source_digest: digest(4),
+                build_digest: digest(5),
+                binary_digest: digest(6),
+                public_contract_digest: digest(7),
+                organization_id: Some("independent-org".to_owned()),
+            },
+            execution_profile_digest: digest(8),
+            trust_policy_snapshot_digest: digest(9),
+            output_capability: EvaluatorOutputCapabilityV1 {
+                capability_digest: digest(10),
+                report_bytes_limit: 1,
+                diagnostic_bytes_limit: MAX_DIAGNOSTIC_BYTES,
+            },
+            evaluator_protocol_digest: digest(11),
+            evaluator_hard_caps_digest: digest(12),
+            request_digest: [0; 32],
+        };
+        request.request_digest = request.digest();
+        request
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn reject_each_field<T, F>(value: &Value, exclusions: &[usize], decoder: F)
+    where
+        F: Fn(&Value) -> Result<T, ConformanceContractError>,
+    {
+        let Value::Array(fields) = value else {
+            panic!("coverage descriptor must be an array");
+        };
+        for index in 0..fields.len() {
+            if !exclusions.contains(&index) {
+                let mut malformed = fields.clone();
+                malformed[index] = Value::Map(Vec::new());
+                assert!(decoder(&Value::Array(malformed)).is_err());
+            }
+        }
+    }
+
     #[test]
     fn cpf1_round_trips_exactly_and_uses_a_self_verifying_digest() {
         let value = profile();
@@ -1811,35 +1914,57 @@ mod tests {
     }
 
     #[test]
+    fn stable_requires_two_independent_implementations_and_all_mandatory_cases() {
+        let candidate = profile()
+            .transition_to(ProfileLifecycleV1::Candidate, vec![])
+            .unwrap_or_else(|_| profile());
+        let stable = candidate.transition_to(
+            ProfileLifecycleV1::Stable,
+            vec![stable_evidence("alpha", 30), stable_evidence("beta", 40)],
+        );
+        assert!(stable.is_ok());
+
+        let mut incomplete = stable_evidence("alpha", 30);
+        incomplete.case_outcomes.pop();
+        assert_eq!(
+            candidate.transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![incomplete, stable_evidence("beta", 40)],
+            ),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+    }
+
+    #[test]
     fn evaluator_request_round_trips_with_all_identity_bindings() {
-        let mut request = EvaluatorRequestV1 {
-            request_id: [1; 16],
-            conformance_profile_digest: digest(1),
-            fixture_bundle_digest: digest(2),
-            subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
-            subject_artifact_digest: digest(3),
-            implementation: ImplementationIdentityV1 {
-                implementation_id: "independent-impl".to_owned(),
-                source_digest: digest(4),
-                build_digest: digest(5),
-                binary_digest: digest(6),
-                public_contract_digest: digest(7),
-                organization_id: None,
-            },
-            execution_profile_digest: digest(8),
-            trust_policy_snapshot_digest: digest(9),
-            output_capability: EvaluatorOutputCapabilityV1 {
-                capability_digest: digest(10),
-                report_bytes_limit: 1,
-                diagnostic_bytes_limit: MAX_DIAGNOSTIC_BYTES,
-            },
-            evaluator_protocol_digest: digest(11),
-            evaluator_hard_caps_digest: digest(12),
-            request_digest: [0; 32],
-        };
-        request.request_digest = request.digest();
+        let request = request();
         let bytes = request.to_canonical_cbor().unwrap_or_default();
         assert_eq!(EvaluatorRequestV1::from_canonical_cbor(&bytes), Ok(request));
+    }
+
+    #[test]
+    fn closed_errors_are_safe_and_output_limits_fail_closed() {
+        for value in [
+            ConformanceContractError::InvalidEncoding,
+            ConformanceContractError::UnsupportedVersion,
+            ConformanceContractError::FieldOutOfBounds,
+            ConformanceContractError::NonCanonicalOrder,
+            ConformanceContractError::FixtureDigestMismatch,
+            ConformanceContractError::ExpectedResultMissing,
+            ConformanceContractError::IndependenceEvidenceMissing,
+            ConformanceContractError::DivergenceClassificationMismatch,
+            ConformanceContractError::ProfileLifecycleInvalid,
+            ConformanceContractError::ProvenanceMissing,
+            ConformanceContractError::UnknownExecutionProfile,
+        ] {
+            assert!(!value.to_string().is_empty());
+        }
+        let mut invalid = request();
+        invalid.output_capability.diagnostic_bytes_limit = MAX_DIAGNOSTIC_BYTES + 1;
+        assert_eq!(
+            invalid.validate(),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
     }
 
     #[test]
@@ -2104,5 +2229,114 @@ mod tests {
             missing_provenance.validate(),
             Err(ConformanceContractError::ProvenanceMissing)
         );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn canonical_descriptor_decoders_reject_each_required_field() {
+        let profile = profile();
+        let fixture = &profile.fixtures[0];
+        let input = &fixture.inputs[0];
+        let request = request();
+        let evidence = stable_evidence("alpha", 30);
+        let canonical_expected = &fixture.expected;
+        let typed_expected = ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ClosureIncomplete);
+        let divergence_expected = ExpectedResultV1::AllowedDivergence {
+            classification: 4,
+            first_coordinate: b"timeline/7".to_vec(),
+        };
+        let divergence = AllowedDivergenceV1 {
+            classification: 4,
+            first_coordinate: b"timeline/7".to_vec(),
+        };
+
+        reject_each_field(&encode_profile(&profile, true), &[], decode_profile);
+        reject_each_field(&encode_fixture(fixture), &[], decode_fixture);
+        reject_each_field(&encode_input(input), &[], decode_input);
+        reject_each_field(
+            &encode_expected(canonical_expected),
+            &[3, 4],
+            decode_expected,
+        );
+        reject_each_field(
+            &encode_expected(&typed_expected),
+            &[1, 2, 4],
+            decode_expected,
+        );
+        reject_each_field(
+            &encode_expected(&divergence_expected),
+            &[1, 2, 3],
+            decode_expected,
+        );
+        reject_each_field(&encode_divergence(&divergence), &[], decode_divergence);
+        reject_each_field(&encode_bounds(&fixture.bounds), &[], decode_bounds);
+        reject_each_field(
+            &encode_capability_policy(&fixture.capability_policy),
+            &[],
+            decode_capability_policy,
+        );
+        reject_each_field(
+            &encode_fixture_provenance(&fixture.provenance),
+            &[],
+            decode_fixture_provenance,
+        );
+        reject_each_field(
+            &encode_protocol(&profile.evaluator_protocol),
+            &[],
+            decode_protocol,
+        );
+        reject_each_field(
+            &encode_hard_caps(&profile.evaluator_protocol.hard_caps),
+            &[],
+            decode_hard_caps,
+        );
+        reject_each_field(
+            &encode_requirements(&profile.independence_requirements),
+            &[],
+            decode_requirements,
+        );
+        reject_each_field(
+            &encode_stable_evidence(&evidence),
+            &[],
+            decode_stable_evidence,
+        );
+        reject_each_field(&encode_request(&request, true), &[], decode_request);
+        reject_each_field(
+            &encode_output_capability(&request.output_capability),
+            &[],
+            decode_output_capability,
+        );
+        reject_each_field(
+            &encode_identity(&request.implementation),
+            &[],
+            decode_identity,
+        );
+        reject_each_field(
+            &encode_independence(&evidence.independence),
+            &[],
+            decode_independence,
+        );
+        reject_each_field(&encode_case(&evidence.case_outcomes[0]), &[], decode_case);
+
+        let Value::Array(mut fields) = encode_expected(&divergence_expected) else {
+            unreachable!("expected-result encoding is an array");
+        };
+        fields[4] = Value::Array(vec![uint(u64::from(u8::MAX) + 1), Value::Bytes(vec![1])]);
+        assert_eq!(
+            decode_expected(&Value::Array(fields)),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+        assert_eq!(
+            u16_value(&uint(u64::from(u16::MAX) + 1)),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+        assert_eq!(
+            u32_value(&uint(u64::from(u32::MAX) + 1)),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+        assert!(digest_value(&Value::Bytes(vec![1])).is_err());
+        assert!(digest16_value(&Value::Bytes(vec![1])).is_err());
+        assert!(digest_list_value(&Value::Array(vec![Value::Bytes(vec![1])])).is_err());
+        assert!(strings_value(&Value::Array(vec![Value::Bytes(vec![1])])).is_err());
     }
 }
