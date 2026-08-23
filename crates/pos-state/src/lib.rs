@@ -440,6 +440,7 @@ mod tests {
             payload: CanonicalBytes::from_static(b"host-only"),
             seq: pos_core::clock::Seq::from_u64(1),
             wall_time: WallTime::now(),
+            causation_id: None,
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
