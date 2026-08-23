@@ -3094,4 +3094,92 @@ mod tests {
             Err(ErasureErrorV1::ScopeInvalid)
         );
     }
+
+    #[test]
+    fn mutation_guards_cover_inventory_closure_and_cbor_preflight_boundaries() {
+        let first = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
+        let second = acknowledgement(2, ErasureAcknowledgementOutcomeV1::Acknowledged);
+        let entry = inventory_result(first.target);
+        let other_entry = inventory_result(second.target);
+
+        let inventories = ErasureReceiptInventoriesV1 {
+            artifacts: vec![entry.clone(); ERASURE_MAX_INVENTORY_RESULTS],
+            keys: Vec::new(),
+            replicas: Vec::new(),
+            backups: Vec::new(),
+        };
+        assert!(!inventories_exceed_bound(&inventories));
+        for field in 0..4 {
+            let mut oversized = ErasureReceiptInventoriesV1 {
+                artifacts: Vec::new(),
+                keys: Vec::new(),
+                replicas: Vec::new(),
+                backups: Vec::new(),
+            };
+            let entries = vec![entry.clone(); ERASURE_MAX_INVENTORY_RESULTS + 1];
+            match field {
+                0 => oversized.artifacts = entries,
+                1 => oversized.keys = entries,
+                2 => oversized.replicas = entries,
+                _ => oversized.backups = entries,
+            }
+            assert!(inventories_exceed_bound(&oversized));
+        }
+
+        for field in 0..4 {
+            let mut duplicated = ErasureReceiptInventoriesV1 {
+                artifacts: Vec::new(),
+                keys: Vec::new(),
+                replicas: Vec::new(),
+                backups: Vec::new(),
+            };
+            let entries = vec![entry.clone(), entry.clone()];
+            match field {
+                0 => duplicated.artifacts = entries,
+                1 => duplicated.keys = entries,
+                2 => duplicated.replicas = entries,
+                _ => duplicated.backups = entries,
+            }
+            assert!(inventories_have_duplicate_targets(&duplicated));
+        }
+        assert!(has_duplicate_by_inventory_target(&[
+            entry.clone(),
+            entry.clone(),
+        ]));
+        assert!(has_duplicate_by_target(&[first, first]));
+        assert!(acknowledgements_are_closure_subset(&[first.target], &[first]));
+        assert!(!acknowledgements_are_closure_subset(&[first.target], &[second]));
+        assert!(!acknowledgements_match_closure(&[first.target], &[second]));
+        assert_ne!(first.target, second.target);
+        assert_ne!(entry, other_entry);
+
+        assert_eq!(array(&Value::Array(Vec::new()), 0), Ok(&[][..]));
+        assert_eq!(
+            array(&Value::Array(vec![Value::Null]), 0),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+        assert_eq!(array(&Value::Null, 0), Err(ErasureErrorV1::InvalidEncoding));
+        assert_eq!(cbor_shape_is_bounded(&[0x80], 0), Ok(()));
+        assert_eq!(
+            cbor_shape_is_bounded(&[0x81, 0x00], 0),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            cbor_item_end(&[0x58, 1], 0, 0, 1),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(cbor_item_end(&[0x58, 1, 0], 0, 0, 1), Ok(3));
+        assert_eq!(
+            cbor_item_end(&[0x81, 0x18, 0], 0, 0, 1),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(cbor_argument(&[0x19, 1, 0], 1, 25), Ok((256, 3)));
+        assert_eq!(cbor_argument(&[0x1a, 0, 1, 0, 0], 1, 26), Ok((65_536, 5)));
+        assert_eq!(
+            cbor_argument(&[0x1b, 0, 0, 0, 1, 0, 0, 0, 0], 1, 27),
+            Ok((4_294_967_296, 9))
+        );
+        assert_eq!(cbor_argument_bytes(&[0, 24], 0, 2, 24), Ok((24, 2)));
+        assert_eq!(cbor_argument_bytes(&[0, 23], 0, 2, 24), Err(ErasureErrorV1::InvalidEncoding));
+    }
 }
