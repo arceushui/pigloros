@@ -1020,9 +1020,8 @@ fn take_worker_runtime(
     lifecycle_state: &Mutex<LifecycleState>,
     runtime: std::io::Result<tokio::runtime::Runtime>,
 ) -> Option<tokio::runtime::Runtime> {
-    match runtime {
-        Ok(runtime) => Some(runtime),
-        Err(_) => {
+    runtime.map_or_else(
+        |_| {
             set_lifecycle_state(
                 lifecycle_state,
                 LifecycleState::Unhealthy {
@@ -1030,8 +1029,9 @@ fn take_worker_runtime(
                 },
             );
             None
-        }
-    }
+        },
+        Some,
+    )
 }
 
 fn worker_loop(
@@ -1692,7 +1692,7 @@ mod tests {
             EventStore, SeqRange,
         },
         timeline::Timeline,
-        CanonicalBytes, ConsentGrantedV1, CoreError, EntityId, EventId, Kind,
+        CanonicalBytes, ConsentGrantedV1, ConsentRevokedV1, CoreError, EntityId, EventId, Kind,
         OwnTracksIngressRateKeyV1, TimelineId,
     };
     use pos_store::memory::MemoryStore;
