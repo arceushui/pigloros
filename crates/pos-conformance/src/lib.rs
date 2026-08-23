@@ -29,6 +29,8 @@ pub use profile_contract::{
 
 /// Version of the first independent proof-evidence envelope.
 pub const EVIDENCE_FORMAT_V1: u32 = 1;
+/// Host-owned lifecycle marker used when a non-Gateway host closes consent.
+pub const HOST_CONSENT_CLOSED_EVENT_TYPE: &str = "experiment.lifecycle.consent-closed.v1";
 /// Magic for the portable verification/replay record envelope.
 pub const VERIFICATION_RECORD_MAGIC_V1: &str = "VRR1";
 /// Magic for the full Wave 8 evidence bundle carried alongside `VRR1`.
@@ -5336,7 +5338,10 @@ fn verify_consent_audit(
     events: &[AuthoritativeEventV1],
 ) -> Result<(), EvidenceError> {
     if audit.subject.trim().is_empty()
-        || audit.revocation_event_type != "consent.revoked.v1"
+        || !matches!(
+            audit.revocation_event_type.as_str(),
+            "consent.revoked.v1" | HOST_CONSENT_CLOSED_EVENT_TYPE
+        )
         || audit.revocation_payload_digest == [0; 32]
         || audit.effective_after_seq <= audit.requested_after_seq
         || audit.revocation_event_seq != audit.effective_after_seq

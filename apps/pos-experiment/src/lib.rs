@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 // Experiment hosts may close their own session, but they are not a Gateway
 // consent issuer.  Keep this durable lifecycle marker outside the canonical
 // `consent.*` namespace so only Gateway APIs can create consent events.
-const EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE: &str = "experiment.lifecycle.consent-closed.v1";
+const EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE: &str = pos_conformance::HOST_CONSENT_CLOSED_EVENT_TYPE;
 
 pub mod moat_proof;
 
