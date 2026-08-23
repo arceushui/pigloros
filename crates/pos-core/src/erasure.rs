@@ -2041,6 +2041,25 @@ mod tests {
         accepted: bool,
         targets: Vec<ErasureRequiredTargetV1>,
     }
+    struct TestResolver {
+        states: Vec<ErasureStateV1>,
+        unavailable: bool,
+    }
+    impl ErasureStateResolverV1 for TestResolver {
+        fn resolve_state(
+            &self,
+            digest: ErasureReferenceV1,
+        ) -> Result<Option<ErasureStateV1>, ErasureErrorV1> {
+            if self.unavailable {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            Ok(self
+                .states
+                .iter()
+                .find(|state| state.state_digest() == digest)
+                .cloned())
+        }
+    }
     impl ErasureCoordinatorPortV1 for TestCoordinatorPort {
         fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
             if self.accepted { Ok(()) } else { Err(ErasureErrorV1::Unauthorized) }
@@ -2262,6 +2281,49 @@ mod tests {
         let Value::Array(fields) = &mut value else { return Err(ErasureErrorV1::InvalidEncoding); };
         fields[1] = uint(2);
         assert_eq!(decode_receipt(&value), Err(ErasureErrorV1::UnsupportedVersion));
+        Ok(())
+    }
+    #[test]
+    fn receipt_history_requires_a_resolved_monotonic_terminal_chain() -> Result<(), ErasureErrorV1> {
+        let submitted = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
+        let authorized = submitted.transition(change(ErasureLifecycleV1::Authorized, None, Vec::new(), Vec::new()))?;
+        let frozen = authorized.transition(change(ErasureLifecycleV1::AccessFrozen, Some(10), Vec::new(), Vec::new()))?;
+        let dispatched = frozen.transition(change(ErasureLifecycleV1::DestructionDispatched, Some(10), Vec::new(), Vec::new()))?;
+        let waiting = dispatched.transition(change(ErasureLifecycleV1::AwaitingAcknowledgements, Some(10), Vec::new(), Vec::new()))?;
+        let terminal = waiting.transition(change(ErasureLifecycleV1::Complete, Some(10), Vec::new(), Vec::new()))?;
+        let mut input = receipt_input(ErasureLifecycleV1::Complete, vec![acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged)], Vec::new(), Vec::new());
+        input.terminal_state = terminal.state_digest();
+        let receipt = ErasureReceiptV1::new(input)?;
+        let resolver = TestResolver { states: vec![submitted, authorized, frozen, dispatched, waiting, terminal], unavailable: false };
+        receipt.verify_history(&resolver)?;
+        assert_eq!(receipt.verify_history(&TestResolver { states: Vec::new(), unavailable: false }), Err(ErasureErrorV1::ProvenanceMissing));
+        assert_eq!(receipt.verify_history(&TestResolver { states: Vec::new(), unavailable: true }), Err(ErasureErrorV1::ProvenanceMissing));
+        Ok(())
+    }
+    #[test]
+    fn receipt_inventory_codes_and_strict_decoder_paths_are_publicly_exercised() -> Result<(), ErasureErrorV1> {
+        let mut acknowledgements = vec![
+            acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged),
+            acknowledgement(2, ErasureAcknowledgementOutcomeV1::Acknowledged),
+            acknowledgement(3, ErasureAcknowledgementOutcomeV1::Acknowledged),
+            acknowledgement(4, ErasureAcknowledgementOutcomeV1::Acknowledged),
+        ];
+        acknowledgements[1].target.artifact_class = ErasureArtifactClassV1::ReproManifest;
+        acknowledgements[1].target.key_role = ErasureKeyRoleV1::Signing;
+        acknowledgements[2].target.artifact_class = ErasureArtifactClassV1::CausalTrace;
+        acknowledgements[2].target.key_role = ErasureKeyRoleV1::BackupEnvelope;
+        acknowledgements[3].target.artifact_class = ErasureArtifactClassV1::ConformanceReport;
+        acknowledgements[3].target.key_role = ErasureKeyRoleV1::ReplicaTransport;
+        let mut input = receipt_input(ErasureLifecycleV1::Complete, acknowledgements.clone(), Vec::new(), Vec::new());
+        input.inventories.artifacts = vec![inventory_result(acknowledgements[0].target)];
+        input.inventories.keys = vec![inventory_result(acknowledgements[1].target)];
+        input.inventories.replicas = vec![inventory_result(acknowledgements[2].target)];
+        input.inventories.backups = vec![inventory_result(acknowledgements[3].target)];
+        let encoded = ErasureReceiptV1::new(input)?.to_canonical_cbor()?;
+        assert_eq!(ErasureReceiptV1::from_canonical_cbor(&encoded)?.to_canonical_cbor()?, encoded);
+        for invalid in [&[0x9f, 0xff][..], &[0xbf, 0xff][..], &[0x9a, 0xff, 0xff, 0xff, 0xff][..], &[0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x00][..]] {
+            assert_eq!(ErasureReceiptV1::from_canonical_cbor(invalid), Err(ErasureErrorV1::InvalidEncoding));
+        }
         Ok(())
     }
     #[test]
