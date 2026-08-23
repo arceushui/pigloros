@@ -447,7 +447,9 @@
         let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
         coordinator.submit(request()?, reference(3))?;
         assert_eq!(coordinator.authorize(reference(1), reference(9))?.lifecycle(), ErasureLifecycleV1::Authorized);
-        assert_eq!(coordinator.freeze_inventory(reference(1), change(ErasureLifecycleV1::AccessFrozen, Some(10), Vec::new(), Vec::new())), Ok(ErasureStateV1::submitted(reference(1), reference(2), reference(3))?));
+        let frozen = coordinator.freeze_inventory(reference(1), change(ErasureLifecycleV1::AccessFrozen, Some(10), Vec::new(), Vec::new()))?;
+        assert_eq!(frozen.lifecycle(), ErasureLifecycleV1::AccessFrozen);
+        assert_eq!(coordinator.freeze_inventory(reference(1), change(ErasureLifecycleV1::AccessFrozen, Some(10), Vec::new(), Vec::new()))?, frozen);
         assert_eq!(coordinator.freeze_inventory(reference(1), change(ErasureLifecycleV1::AccessFrozen, Some(10), Vec::new(), Vec::new())), Err(ErasureErrorV1::PolicyConflict));
         assert_eq!(coordinator.acknowledge(reference(1), ack), Err(ErasureErrorV1::PolicyConflict));
         assert_eq!(coordinator.finalize(reference(1), receipt_input(ErasureLifecycleV1::Complete, vec![ack], Vec::new(), Vec::new())), Err(ErasureErrorV1::PolicyConflict));
@@ -1325,7 +1327,7 @@
                     altered.freeze_position = 11;
                     altered.issue_position = 11;
                 }
-                _ => altered.replay_claim = ErasureReplayClaimV1::Exact,
+                _ => altered.terminal_state = waiting.state_digest(),
             }
             assert_eq!(
                 ErasureReceiptV1::new(altered)?.verify_history(&resolver),

@@ -1399,6 +1399,19 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     pub fn finalize(&mut self, request: ErasureReferenceV1, mut input: ErasureReceiptInputV1) -> Result<ErasureReceiptV1, ErasureErrorV1> {
         let mut record = self.record(request)?;
         if let Some(receipt) = &record.receipt { return Ok(receipt.clone()); }
+        if record.state.lifecycle() == ErasureLifecycleV1::DestructionDispatched {
+            record.state = record.state.transition(ErasureStateTransitionV1 {
+                lifecycle: ErasureLifecycleV1::AwaitingAcknowledgements,
+                freeze_position: record.state.freeze_position(),
+                pending_owners: Vec::new(),
+                failed_owners: Vec::new(),
+                acknowledged_targets: Vec::new(),
+                replay_claim: record.state.replay_claim(),
+                provenance: input.provenance,
+            })?;
+            self.commit(record)?;
+            record = self.record(request)?;
+        }
         if record.state.lifecycle() != ErasureLifecycleV1::AwaitingAcknowledgements {
             return Err(ErasureErrorV1::PolicyConflict);
         }
