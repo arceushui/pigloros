@@ -6890,7 +6890,7 @@ pub mod tests {
 
         let mut oversized_report = test_report();
         let template = oversized_report.cases[0].clone();
-        oversized_report.cases = (0..=65_535)
+        oversized_report.cases = (0..=65_536)
             .map(|index| {
                 let mut case = template.clone();
                 case.case_id = format!("{index:05}");
