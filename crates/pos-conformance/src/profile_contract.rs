@@ -3804,6 +3804,11 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn public_contract_boundaries_are_individual_and_not_accidental() {
+        let fixture = &profile().fixtures[0];
+        assert_ne!(fixture_digest(fixture), [1; 32]);
+        assert_ne!(fixture_provenance_digest(&fixture.provenance), [0; 32]);
+        assert_ne!(fixture_provenance_digest(&fixture.provenance), [1; 32]);
+
         // The output cap is inclusive at its documented maximum.
         let mut request_at_limit = request();
         request_at_limit.output_capability.report_bytes_limit = MAX_PROFILE_BYTES as u64;
@@ -3912,6 +3917,10 @@ mod tests {
             value.fixtures[0].bounds = bounds;
             value.profile_digest = value.digest();
             assert_eq!(
+                validate_bounds(&value.fixtures[0].bounds),
+                Err(ConformanceContractError::FieldOutOfBounds)
+            );
+            assert_eq!(
                 value.validate(),
                 Err(ConformanceContractError::FieldOutOfBounds)
             );
@@ -3939,6 +3948,10 @@ mod tests {
                 Err(ConformanceContractError::FieldOutOfBounds)
             );
         }
+        let mut ten_digit_component = profile();
+        ten_digit_component.semantic_version = "1234567890.0.0".to_owned();
+        ten_digit_component.profile_digest = ten_digit_component.digest();
+        assert_eq!(ten_digit_component.validate(), Ok(()));
 
         for outcome in [
             VerificationOutcomeV1::VerifiedExact,
@@ -3991,5 +4004,13 @@ mod tests {
             ConformanceProfileV1::from_canonical_cbor(&[0x9b_u8, 0, 0, 0, 0, 0, 0, 0, 1,]).is_err()
         );
         assert!(ConformanceProfileV1::from_canonical_cbor(&[0x7f_u8, 0xff]).is_err());
+
+        let mut exact_depth = vec![0x81; usize::from(MAX_STRUCTURAL_NESTING)];
+        exact_depth.push(0xf6);
+        assert_eq!(preflight_cbor(&exact_depth), Ok(()));
+
+        let mut exact_fixture_count = vec![0x9a, 0, 1, 0, 0];
+        exact_fixture_count.extend(std::iter::repeat_n(0xf6, MAX_FIXTURES));
+        assert_eq!(preflight_cbor(&exact_fixture_count), Ok(()));
     }
 }
