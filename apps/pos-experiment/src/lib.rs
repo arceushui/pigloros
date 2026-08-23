@@ -5408,7 +5408,8 @@ mod fault_injection_tests {
         .test_ok();
         {
             let mut store = lock_store(&session.store).test_ok();
-            let inner = std::mem::replace(&mut *store, Box::new(pos_store::memory::MemoryStore::new()));
+            let inner =
+                std::mem::replace(&mut *store, Box::new(pos_store::memory::MemoryStore::new()));
             *store = Box::new(FailFirstLogicalHeadStore {
                 inner,
                 failed: std::cell::Cell::new(false),
