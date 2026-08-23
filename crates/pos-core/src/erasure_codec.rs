@@ -27,22 +27,28 @@ pub(super) fn request_value(input: &ErasureRequestInputV1) -> Value {
     ])
 }
 pub(super) fn request_from_fields(fields: &[Value]) -> Result<ErasureRequestV1, ErasureErrorV1> {
-    header(fields, ERQ1)?;
-    let (request, subject, scope, selectors) = request_identity(fields)?;
-    let (requester, authorization, policy) = request_authority(fields)?;
-    let (request_position, horizon_position, provenance) = request_positions(fields)?;
-    ErasureRequestV1::new(ErasureRequestInputV1 {
-        request,
-        subject,
-        scope,
-        selectors,
-        requester,
-        authorization,
-        policy,
-        request_position,
-        horizon_position,
-        provenance,
-    })
+    header(fields, ERQ1)
+        .and_then(|()| request_identity(fields))
+        .and_then(|(request, subject, scope, selectors)| {
+            request_authority(fields).and_then(|(requester, authorization, policy)| {
+                request_positions(fields).and_then(
+                    |(request_position, horizon_position, provenance)| {
+                        ErasureRequestV1::new(ErasureRequestInputV1 {
+                            request,
+                            subject,
+                            scope,
+                            selectors,
+                            requester,
+                            authorization,
+                            policy,
+                            request_position,
+                            horizon_position,
+                            provenance,
+                        })
+                    },
+                )
+            })
+        })
 }
 pub(super) fn request_identity(
     fields: &[Value],
@@ -55,27 +61,34 @@ pub(super) fn request_identity(
     ),
     ErasureErrorV1,
 > {
-    let request = bytes32(&fields[2])?;
-    let subject = bytes32(&fields[3])?;
-    let scope = ErasureScopeV1::from_code(unsigned(&fields[4])?)?;
-    let selectors = references_from_value(&fields[5], true)?;
-    Ok((request, subject, scope, selectors))
+    bytes32(&fields[2]).and_then(|request| {
+        bytes32(&fields[3]).and_then(|subject| {
+            unsigned(&fields[4])
+                .and_then(ErasureScopeV1::from_code)
+                .and_then(|scope| {
+                    references_from_value(&fields[5], true)
+                        .map(|selectors| (request, subject, scope, selectors))
+                })
+        })
+    })
 }
 pub(super) fn request_authority(
     fields: &[Value],
 ) -> Result<(ErasureReferenceV1, ErasureReferenceV1, ErasureReferenceV1), ErasureErrorV1> {
-    let requester = bytes32(&fields[6])?;
-    let authorization = bytes32(&fields[7])?;
-    let policy = bytes32(&fields[8])?;
-    Ok((requester, authorization, policy))
+    bytes32(&fields[6]).and_then(|requester| {
+        bytes32(&fields[7]).and_then(|authorization| {
+            bytes32(&fields[8]).map(|policy| (requester, authorization, policy))
+        })
+    })
 }
 pub(super) fn request_positions(
     fields: &[Value],
 ) -> Result<(u64, u64, ErasureReferenceV1), ErasureErrorV1> {
-    let request_position = unsigned(&fields[9])?;
-    let horizon_position = unsigned(&fields[10])?;
-    let provenance = bytes32(&fields[11])?;
-    Ok((request_position, horizon_position, provenance))
+    unsigned(&fields[9]).and_then(|request_position| {
+        unsigned(&fields[10]).and_then(|horizon_position| {
+            bytes32(&fields[11]).map(|provenance| (request_position, horizon_position, provenance))
+        })
+    })
 }
 pub(super) fn state_core_value(state: &ErasureStateV1) -> Value {
     Value::Array(vec![
@@ -109,28 +122,36 @@ pub(super) fn state_value(state: &ErasureStateV1) -> Value {
     ])
 }
 pub(super) fn state_from_fields(fields: &[Value]) -> Result<ErasureStateV1, ErasureErrorV1> {
-    header(fields, ERS1)?;
-    let (request, lifecycle, freeze_position, coordinator) = state_identity(fields)?;
-    let (pending_owners, failed_owners, replay_claim) = state_owners(fields)?;
-    let (previous_state, provenance, state_digest) = state_provenance(fields)?;
-    let state = ErasureStateV1 {
-        request,
-        lifecycle,
-        freeze_position,
-        coordinator,
-        pending_owners,
-        failed_owners,
-        replay_claim,
-        previous_state,
-        provenance,
-        state_digest,
-    };
-    state.validate()?;
-    let expected = state.clone().with_digest()?;
-    if expected.state_digest != state.state_digest {
-        return Err(ErasureErrorV1::ProvenanceMissing);
-    }
-    Ok(state)
+    header(fields, ERS1)
+        .and_then(|()| state_identity(fields))
+        .and_then(|(request, lifecycle, freeze_position, coordinator)| {
+            state_owners(fields).and_then(|(pending_owners, failed_owners, replay_claim)| {
+                state_provenance(fields).and_then(|(previous_state, provenance, state_digest)| {
+                    let state = ErasureStateV1 {
+                        request,
+                        lifecycle,
+                        freeze_position,
+                        coordinator,
+                        pending_owners,
+                        failed_owners,
+                        replay_claim,
+                        previous_state,
+                        provenance,
+                        state_digest,
+                    };
+                    state
+                        .validate()
+                        .and_then(|()| state.clone().with_digest())
+                        .and_then(|expected| {
+                            if expected.state_digest == state.state_digest {
+                                Ok(state)
+                            } else {
+                                Err(ErasureErrorV1::ProvenanceMissing)
+                            }
+                        })
+                })
+            })
+        })
 }
 pub(super) fn state_identity(
     fields: &[Value],
@@ -143,11 +164,16 @@ pub(super) fn state_identity(
     ),
     ErasureErrorV1,
 > {
-    let request = bytes32(&fields[2])?;
-    let lifecycle = ErasureLifecycleV1::from_code(unsigned(&fields[3])?)?;
-    let freeze_position = optional_unsigned(&fields[4])?;
-    let coordinator = bytes32(&fields[5])?;
-    Ok((request, lifecycle, freeze_position, coordinator))
+    bytes32(&fields[2]).and_then(|request| {
+        unsigned(&fields[3])
+            .and_then(ErasureLifecycleV1::from_code)
+            .and_then(|lifecycle| {
+                optional_unsigned(&fields[4]).and_then(|freeze_position| {
+                    bytes32(&fields[5])
+                        .map(|coordinator| (request, lifecycle, freeze_position, coordinator))
+                })
+            })
+    })
 }
 pub(super) fn state_owners(
     fields: &[Value],
@@ -282,20 +308,26 @@ pub(super) fn receipt_proof(
     ),
     ErasureErrorV1,
 > {
-    let policy = bytes32(&fields[0])?;
-    let trust = bytes32(&fields[1])?;
-    let provenance = bytes32(&fields[2])?;
-    let issue_position = unsigned(&fields[3])?;
-    let receipt_digest = bytes32(&fields[4])?;
-    let signature = bytes32(&fields[5])?;
-    Ok((
-        policy,
-        trust,
-        provenance,
-        issue_position,
-        receipt_digest,
-        signature,
-    ))
+    bytes32(&fields[0]).and_then(|policy| {
+        bytes32(&fields[1]).and_then(|trust| {
+            bytes32(&fields[2]).and_then(|provenance| {
+                unsigned(&fields[3]).and_then(|issue_position| {
+                    bytes32(&fields[4]).and_then(|receipt_digest| {
+                        bytes32(&fields[5]).map(|signature| {
+                            (
+                                policy,
+                                trust,
+                                provenance,
+                                issue_position,
+                                receipt_digest,
+                                signature,
+                            )
+                        })
+                    })
+                })
+            })
+        })
+    })
 }
 pub(super) fn acknowledgements_from_value(
     value: &Value,
