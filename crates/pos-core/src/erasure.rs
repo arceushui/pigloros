@@ -2348,6 +2348,11 @@ mod tests {
         let Value::Array(target) = &mut targets[0] else { return Err(ErasureErrorV1::InvalidEncoding); };
         target[2] = uint(4);
         assert_eq!(decode_receipt(&unknown_role), Err(ErasureErrorV1::InvalidEncoding));
+        let mut unordered_targets = receipt_value(&ErasureReceiptV1::from_canonical_cbor(&encoded)?.0);
+        let Value::Array(fields) = &mut unordered_targets else { return Err(ErasureErrorV1::InvalidEncoding); };
+        let Value::Array(targets) = &mut fields[6] else { return Err(ErasureErrorV1::InvalidEncoding); };
+        targets.swap(0, 1);
+        assert_eq!(decode_receipt(&unordered_targets), Err(ErasureErrorV1::ScopeInvalid));
         let mut trailing = encoded.clone();
         trailing.push(0);
         assert_eq!(ErasureReceiptV1::from_canonical_cbor(&trailing), Err(ErasureErrorV1::InvalidEncoding));
