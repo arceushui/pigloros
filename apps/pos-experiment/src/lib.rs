@@ -1155,15 +1155,6 @@ impl ExperimentSession {
                         )
                     })
                     .and_then(|draft| {
-                        pos_core::ConsentRevokedV1::decode(&draft.payload)
-                            .map_err(|error| {
-                                ExperimentError::from(pos_core::CoreError::Storage(
-                                    error.to_string(),
-                                ))
-                            })
-                            .map(|_| draft)
-                    })
-                    .and_then(|draft| {
                         store
                             .append(self.timeline.id(), std::slice::from_ref(&draft))
                             .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
@@ -3694,6 +3685,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn consent_revocation_is_durable_across_resume() {
         let database = tempfile::NamedTempFile::new().test_ok();
         let path = database.path().to_str().test_ok().to_owned();
