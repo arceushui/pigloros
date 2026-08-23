@@ -1137,6 +1137,12 @@ fn worker_loop(
     owntracks_owner_key: Option<[u8; 32]>,
     #[cfg(test)] observer: Option<Arc<SchedulerObserver>>,
 ) {
+    let runtime = catch_unwind(AssertUnwindSafe(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+    }))
+    .unwrap_or_else(|_| Err(std::io::Error::other("runtime construction panicked")));
     worker_loop_with_runtime(
         lifecycle_state,
         shutdown,
@@ -1145,9 +1151,7 @@ fn worker_loop(
         owntracks_owner_key,
         #[cfg(test)]
         observer,
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build(),
+        runtime,
     );
 }
 
