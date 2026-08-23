@@ -130,25 +130,30 @@ fn cbor_id(id: EntityId) -> Value {
 
 fn cbor_encode(value: &Value) -> Result<Vec<u8>, ConsentCodecError> {
     let mut buf = Vec::new();
-    ciborium::into_writer(value, &mut buf).map_err(|_| ConsentCodecError::CborError)?;
-    Ok(buf)
+    ciborium::into_writer(value, &mut buf)
+        .map_err(|_| ConsentCodecError::CborError)
+        .map(|()| buf)
 }
 
 fn decode_array(bytes: &[u8], expected_len: usize) -> Result<Vec<Value>, ConsentCodecError> {
     let mut cursor = Cursor::new(bytes);
-    let value: Value =
-        ciborium::from_reader(&mut cursor).map_err(|_| ConsentCodecError::CborError)?;
-    if cursor.position() != bytes.len() as u64 {
-        return Err(ConsentCodecError::TrailingBytes);
-    }
-    if cbor_encode(&value)? != bytes {
-        return Err(ConsentCodecError::NonCanonicalEncoding);
-    }
-    match value {
-        Value::Array(items) if items.len() == expected_len => Ok(items),
-        Value::Array(_) => Err(ConsentCodecError::WrongArrayLength),
-        _ => Err(ConsentCodecError::CborError),
-    }
+    ciborium::from_reader(&mut cursor)
+        .map_err(|_| ConsentCodecError::CborError)
+        .and_then(|value| {
+            if cursor.position() != bytes.len() as u64 {
+                return Err(ConsentCodecError::TrailingBytes);
+            }
+            cbor_encode(&value).and_then(|canonical| {
+                if canonical != bytes {
+                    return Err(ConsentCodecError::NonCanonicalEncoding);
+                }
+                match value {
+                    Value::Array(items) if items.len() == expected_len => Ok(items),
+                    Value::Array(_) => Err(ConsentCodecError::WrongArrayLength),
+                    _ => Err(ConsentCodecError::CborError),
+                }
+            })
+        })
 }
 
 fn decode_magic(val: &Value, expected: [u8; 4]) -> Result<(), ConsentCodecError> {
@@ -284,7 +289,7 @@ impl ConsentGranted {
             cbor_u32(self.expiry_secs),
             cbor_u64(self.grant_seq),
         ]);
-        Ok(CanonicalBytes::from_vec(cbor_encode(&arr)?))
+        cbor_encode(&arr).map(CanonicalBytes::from_vec)
     }
 
     /// Decode from canonical CBOR bytes.
@@ -292,37 +297,43 @@ impl ConsentGranted {
     /// # Errors
     /// Returns a [`ConsentCodecError`] on any malformed input.
     pub fn decode(bytes: &CanonicalBytes) -> Result<Self, ConsentCodecError> {
-        let items = decode_array(bytes.as_slice(), 12)?;
-        let ((), (), subject_id, grantee_id, purpose, modalities, min_geo_resolution) = (
-            decode_magic(&items[0], MAGIC_CGV1)?,
-            decode_version(&items[1])?,
-            decode_id(&items[2])?,
-            decode_id(&items[3])?,
-            decode_tstr_max(&items[4], MAX_PURPOSE_BYTES)?,
-            decode_u8(&items[5])?,
-            decode_u8(&items[6])?,
-        );
-        if modalities & !0x0F != 0 || min_geo_resolution > 1 {
-            return Err(ConsentCodecError::FieldOutOfBounds);
-        }
-        let (fork_permitted, export_permitted, retention_days, expiry_secs, grant_seq) = (
-            decode_bool(&items[7])?,
-            decode_bool(&items[8])?,
-            decode_u16(&items[9])?,
-            decode_u32(&items[10])?,
-            decode_u64(&items[11])?,
-        );
-        Ok(Self {
-            subject_id,
-            grantee_id,
-            purpose,
-            modalities,
-            min_geo_resolution,
-            fork_permitted,
-            export_permitted,
-            retention_days,
-            expiry_secs,
-            grant_seq,
+        decode_array(bytes.as_slice(), 12).and_then(|items| {
+            decode_magic(&items[0], MAGIC_CGV1)
+                .and_then(|()| decode_version(&items[1]))
+                .and_then(|()| decode_id(&items[2]))
+                .and_then(|subject_id| {
+                    decode_id(&items[3]).and_then(|grantee_id| {
+                        decode_tstr_max(&items[4], MAX_PURPOSE_BYTES).and_then(|purpose| {
+                            decode_u8(&items[5]).and_then(|modalities| {
+                                decode_u8(&items[6]).and_then(|min_geo_resolution| {
+                                    if modalities & !0x0F != 0 || min_geo_resolution > 1 {
+                                        return Err(ConsentCodecError::FieldOutOfBounds);
+                                    }
+                                    decode_bool(&items[7]).and_then(|fork_permitted| {
+                                        decode_bool(&items[8]).and_then(|export_permitted| {
+                                            decode_u16(&items[9]).and_then(|retention_days| {
+                                                decode_u32(&items[10]).and_then(|expiry_secs| {
+                                                    decode_u64(&items[11]).map(|grant_seq| Self {
+                                                        subject_id,
+                                                        grantee_id,
+                                                        purpose,
+                                                        modalities,
+                                                        min_geo_resolution,
+                                                        fork_permitted,
+                                                        export_permitted,
+                                                        retention_days,
+                                                        expiry_secs,
+                                                        grant_seq,
+                                                    })
+                                                })
+                                            })
+                                        })
+                                    })
+                                })
+                            })
+                        })
+                    })
+                })
         })
     }
 }
@@ -368,7 +379,7 @@ impl ConsentRevoked {
             cbor_u64(self.grant_seq),
             cbor_u64(self.fence_seq),
         ]);
-        Ok(CanonicalBytes::from_vec(cbor_encode(&arr)?))
+        cbor_encode(&arr).map(CanonicalBytes::from_vec)
     }
 
     /// Decode from canonical CBOR bytes.
@@ -376,20 +387,22 @@ impl ConsentRevoked {
     /// # Errors
     /// Returns a [`ConsentCodecError`] on any malformed input.
     pub fn decode(bytes: &CanonicalBytes) -> Result<Self, ConsentCodecError> {
-        let items = decode_array(bytes.as_slice(), 6)?;
-        let ((), (), subject_id, grantee_id, grant_seq, fence_seq) = (
-            decode_magic(&items[0], MAGIC_CRV1)?,
-            decode_version(&items[1])?,
-            decode_id(&items[2])?,
-            decode_id(&items[3])?,
-            decode_u64(&items[4])?,
-            decode_u64(&items[5])?,
-        );
-        Ok(Self {
-            subject_id,
-            grantee_id,
-            grant_seq,
-            fence_seq,
+        decode_array(bytes.as_slice(), 6).and_then(|items| {
+            decode_magic(&items[0], MAGIC_CRV1)
+                .and_then(|()| decode_version(&items[1]))
+                .and_then(|()| decode_id(&items[2]))
+                .and_then(|subject_id| {
+                    decode_id(&items[3]).and_then(|grantee_id| {
+                        decode_u64(&items[4]).and_then(|grant_seq| {
+                            decode_u64(&items[5]).map(|fence_seq| Self {
+                                subject_id,
+                                grantee_id,
+                                grant_seq,
+                                fence_seq,
+                            })
+                        })
+                    })
+                })
         })
     }
 }
