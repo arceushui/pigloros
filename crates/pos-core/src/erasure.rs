@@ -2342,7 +2342,18 @@ mod tests {
         let Value::Array(target) = &mut targets[0] else { return Err(ErasureErrorV1::InvalidEncoding); };
         target[0] = uint(7);
         assert_eq!(decode_receipt(&unknown_codes), Err(ErasureErrorV1::InvalidEncoding));
-        for invalid in [&[0x9f, 0xff][..], &[0xbf, 0xff][..], &[0x9a, 0xff, 0xff, 0xff, 0xff][..], &[0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x00][..]] {
+        let mut unknown_role = receipt_value(&ErasureReceiptV1::from_canonical_cbor(&encoded)?.0);
+        let Value::Array(fields) = &mut unknown_role else { return Err(ErasureErrorV1::InvalidEncoding); };
+        let Value::Array(targets) = &mut fields[6] else { return Err(ErasureErrorV1::InvalidEncoding); };
+        let Value::Array(target) = &mut targets[0] else { return Err(ErasureErrorV1::InvalidEncoding); };
+        target[2] = uint(4);
+        assert_eq!(decode_receipt(&unknown_role), Err(ErasureErrorV1::InvalidEncoding));
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        assert_eq!(ErasureReceiptV1::from_canonical_cbor(&trailing), Err(ErasureErrorV1::InvalidEncoding));
+        let noncanonical = [&[0x98, 18][..], &encoded[1..]].concat();
+        assert_eq!(ErasureReceiptV1::from_canonical_cbor(&noncanonical), Err(ErasureErrorV1::InvalidEncoding));
+        for invalid in [&[0x9f, 0xff][..], &[0xbf, 0xff][..], &[0x19, 0, 1][..], &[0x1b, 0, 0, 0, 0, 0, 0, 0, 1][..], &[0x9a, 0xff, 0xff, 0xff, 0xff][..], &[0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x00][..]] {
             assert_eq!(ErasureReceiptV1::from_canonical_cbor(invalid), Err(ErasureErrorV1::InvalidEncoding));
         }
         Ok(())
