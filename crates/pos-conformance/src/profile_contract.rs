@@ -794,7 +794,7 @@ const fn bounded_text(value: &str, maximum: usize) -> bool {
     !value.is_empty() && value.len() <= maximum
 }
 
-fn bounded_ascii(value: &str, maximum: usize) -> bool {
+const fn bounded_ascii(value: &str, maximum: usize) -> bool {
     bounded_text(value, maximum) && value.is_ascii()
 }
 
