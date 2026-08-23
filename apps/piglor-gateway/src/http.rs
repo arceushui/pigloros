@@ -772,10 +772,7 @@ confidence = 0.7\n\
 made_at = \"2026-07-25T12:00:00Z\"\n\
 resolve_by = \"2026-08-01\"\n\
 osf_link = \"https://osf.io/example\"\n";
-        let dir = ledger_source_dir(
-            "http-configured",
-            Some(PREDICTION),
-        );
+        let dir = ledger_source_dir("http-configured", Some(PREDICTION));
         let (ledger_view, _) = LedgerConfig::new(Some(dir.clone()), false)
             .load("2026-07-29")
             .test_ok();
