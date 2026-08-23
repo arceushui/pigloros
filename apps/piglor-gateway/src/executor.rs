@@ -1357,7 +1357,7 @@ fn execute(state: &mut ExecutorState, command: Command) {
             grant,
             maximum,
             reply,
-        } => execute_append_consent_grant_command(state, timeline, grant, maximum, reply),
+        } => execute_append_consent_grant_command(state, timeline, &grant, maximum, reply),
         Command::AppendIdentified {
             timeline,
             identity,
@@ -1493,7 +1493,7 @@ fn execute_append_command(
 fn execute_append_consent_grant_command(
     state: &mut ExecutorState,
     timeline: TimelineId,
-    grant: ConsentGrantedV1,
+    grant: &ConsentGrantedV1,
     maximum: u64,
     reply: oneshot::Sender<Result<Event, StoreExecutorError>>,
 ) {

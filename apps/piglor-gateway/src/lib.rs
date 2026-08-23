@@ -29,7 +29,7 @@ use pos_core::{
     timeline::Timeline,
     ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
     ConsentGrantedV1, ConsentRevokedV1, CoreError, Plugin, ProposedAction,
-    EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
+    EVENT_TYPE_CONSENT_REVOKED_V1,
 };
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
 use pos_plugin_world::{WorldPlugin, EVENT_TYPE_ACTION};
