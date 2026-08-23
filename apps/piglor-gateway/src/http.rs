@@ -355,7 +355,9 @@ impl IntoResponse for GatewayError {
             Self::InvalidId(_)
             | Self::UnsupportedAction(_)
             | Self::InvalidPageLimit { .. }
-            | Self::InvalidEventsQuery(_) => StatusCode::BAD_REQUEST,
+            | Self::InvalidEventsQuery(_)
+            | Self::ConsentCodec(_)
+            | Self::ConsentGrantSequenceMismatch => StatusCode::BAD_REQUEST,
             Self::ActionRejected(ar) => match ar {
                 ActionRejected::UnknownEventType => StatusCode::BAD_REQUEST,
                 ActionRejected::CapabilityNotGranted => StatusCode::FORBIDDEN,

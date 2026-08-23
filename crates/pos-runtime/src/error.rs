@@ -45,6 +45,12 @@ pub enum RuntimeError {
     #[error("driver emitted core-owned geographic event type '{event_type}'")]
     GeographicDraft { event_type: String },
 
+    #[error("plugin '{name}' cannot claim Gateway-owned consent event type '{event_type}'")]
+    ReservedConsentEventType { name: String, event_type: String },
+
+    #[error("driver emitted Gateway-owned consent event type '{event_type}'")]
+    ConsentDraft { event_type: String },
+
     #[error(
         "driver '{driver}' cadence overflow: previous={previous_ns}ns, interval={interval_ns}ns"
     )]

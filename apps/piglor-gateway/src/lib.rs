@@ -27,7 +27,9 @@ use pos_core::{
         EventReadBounds, EventStore, PurgeOutcome, SeqRange,
     },
     timeline::Timeline,
-    ActionRejected, Capability, CoreError, Plugin, ProposedAction,
+    ActionRejected, Capability, ConsentCapabilityToken, ConsentCodecError, ConsentGrantedV1,
+    ConsentRevokedV1, CoreError, Plugin, ProposedAction, EVENT_TYPE_CONSENT_GRANTED_V1,
+    EVENT_TYPE_CONSENT_REVOKED_V1,
 };
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
 use pos_plugin_world::{WorldPlugin, EVENT_TYPE_ACTION};
@@ -692,6 +694,12 @@ pub enum GatewayError {
     /// Human action submission requires an authenticated action principal.
     #[error("human action authorization is unavailable")]
     ActionAuthorizationUnavailable,
+    /// Consent payload did not meet its closed V1 contract.
+    #[error(transparent)]
+    ConsentCodec(#[from] ConsentCodecError),
+    /// A host grant must bind the sequence it is about to commit.
+    #[error("consent grant sequence does not match the current Timeline position")]
+    ConsentGrantSequenceMismatch,
 }
 
 /// An existing, owner-only `OwnTracks` activation key loaded from disk.
@@ -1058,6 +1066,60 @@ impl Gateway {
             });
         }
         Ok(self.store.create(name.to_owned()).await?)
+    }
+
+    /// Append one Gateway-owned consent grant and issue its enforcement token.
+    ///
+    /// No Plugin or HTTP action route can construct this event type.
+    pub async fn issue_consent_grant(
+        &self,
+        timeline_id: &str,
+        grant: ConsentGrantedV1,
+    ) -> Result<(Event, ConsentCapabilityToken), GatewayError> {
+        let timeline = parse_timeline_id(timeline_id)?;
+        let expected = self
+            .store
+            .timeline(timeline)
+            .await?
+            .ok_or(GatewayError::ResourceUnavailable)?
+            .head
+            .as_u64()
+            .saturating_add(1);
+        if grant.grant_seq != expected {
+            return Err(GatewayError::ConsentGrantSequenceMismatch);
+        }
+        let token = ConsentCapabilityToken::from_grant(&grant);
+        let event = self
+            .append_draft(
+                timeline,
+                EventDraft::new(
+                    grant.subject_id,
+                    Kind::new(EVENT_TYPE_CONSENT_GRANTED_V1),
+                    grant.encode()?,
+                ),
+            )
+            .await?;
+        Ok((event, token))
+    }
+
+    /// Append one Gateway-owned consent revocation at its durable fence.
+    ///
+    /// The caller supplies the exact event sequence selected by the host.
+    pub async fn issue_consent_revocation(
+        &self,
+        timeline_id: &str,
+        revocation: ConsentRevokedV1,
+    ) -> Result<Event, GatewayError> {
+        let timeline = parse_timeline_id(timeline_id)?;
+        self.append_draft(
+            timeline,
+            EventDraft::new(
+                revocation.subject_id,
+                Kind::new(EVENT_TYPE_CONSENT_REVOKED_V1),
+                revocation.encode()?,
+            ),
+        )
+        .await
     }
 
     /// Poll one bounded page of Timeline events, starting at `from_seq` (inclusive).

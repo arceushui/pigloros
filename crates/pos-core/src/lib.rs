@@ -11,6 +11,7 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 pub mod clock;
+pub mod consent;
 pub mod crypto;
 pub mod entity;
 pub mod erasure;
@@ -33,6 +34,11 @@ pub mod world_transform;
 // Re-export commonly used types at the crate root.
 pub use clock::{
     AdmissionClock, FixedAdmissionClock, Seq, SimDuration, SimTime, SystemAdmissionClock, WallTime,
+};
+pub use consent::{
+    is_consent_event_type, ConsentCapabilityToken, ConsentCodecError, ConsentError, ConsentGate,
+    ConsentGranted, ConsentGrantedV1, ConsentRevocationFoldListener, ConsentRevoked,
+    ConsentRevokedV1, FieldState, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
 };
 pub use crypto::{Hash, PublicKey, Signature};
 pub use entity::{Entity, EntityKind, Relationship, RelationshipKind};

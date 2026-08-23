@@ -14,7 +14,10 @@
 
 use std::collections::HashMap;
 
-use pos_core::{EntityId, Event, Reducer, Relationship, State, StateRegistry};
+use pos_core::{
+    ConsentRevocationFoldListener, ConsentRevoked, EntityId, Event, Reducer, Relationship, State,
+    StateRegistry, EVENT_TYPE_CONSENT_REVOKED_V1,
+};
 
 // ---------------------------------------------------------------------------
 // EntityStateProjection
@@ -105,6 +108,12 @@ impl ProjectionRegistry {
 
     /// Apply a single event to every registered reducer.
     pub fn apply_event(&mut self, event: &Event) {
+        if event.event_type.as_str() == EVENT_TYPE_CONSENT_REVOKED_V1 {
+            if let Ok(revocation) = ConsentRevoked::decode(&event.payload) {
+                self.on_consent_revoked(revocation.subject_id, revocation.fence_seq);
+            }
+            return;
+        }
         if pos_core::is_geographic_event_type(&event.event_type) {
             return;
         }
@@ -217,6 +226,14 @@ impl ProjectionRegistry {
             }
         }
         None
+    }
+}
+
+impl ConsentRevocationFoldListener for ProjectionRegistry {
+    fn on_consent_revoked(&mut self, subject_id: EntityId, _fence_seq: u64) {
+        for (_, slot) in &mut self.slots {
+            slot.registry.remove(&subject_id);
+        }
     }
 }
 

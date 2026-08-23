@@ -70,6 +70,11 @@ impl StateRegistry {
             .or_insert_with(|| reducer.initial());
         reducer.apply(state, event);
     }
+
+    /// Forget cached projection state for one subject without touching Timeline history.
+    pub fn remove(&mut self, id: &EntityId) {
+        self.states.remove(id);
+    }
 }
 
 #[cfg(test)]

@@ -243,11 +243,20 @@ fn reject_geographic_drafts(output: &StepOutput) -> Result<(), RuntimeError> {
     output
         .drafts
         .iter()
-        .find(|draft| pos_core::is_geographic_event_type(&draft.event_type))
+        .find(|draft| {
+            pos_core::is_geographic_event_type(&draft.event_type)
+                || pos_core::is_consent_event_type(&draft.event_type)
+        })
         .map_or(Ok(()), |draft| {
-            Err(RuntimeError::GeographicDraft {
-                event_type: draft.event_type.as_str().to_owned(),
-            })
+            if pos_core::is_consent_event_type(&draft.event_type) {
+                Err(RuntimeError::ConsentDraft {
+                    event_type: draft.event_type.as_str().to_owned(),
+                })
+            } else {
+                Err(RuntimeError::GeographicDraft {
+                    event_type: draft.event_type.as_str().to_owned(),
+                })
+            }
         })
 }
 
@@ -718,6 +727,16 @@ impl PluginRegistry {
             .find(|kind| pos_core::is_geographic_event_type(kind))
         {
             return Err(RuntimeError::ReservedGeographicEventType {
+                name,
+                event_type: kind.as_str().to_owned(),
+            });
+        }
+        if let Some(kind) = cap
+            .owned_event_types
+            .iter()
+            .find(|kind| pos_core::is_consent_event_type(kind))
+        {
+            return Err(RuntimeError::ReservedConsentEventType {
                 name,
                 event_type: kind.as_str().to_owned(),
             });
