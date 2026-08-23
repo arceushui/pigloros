@@ -2500,7 +2500,8 @@ mod tests {
         authority.record_grant_on_timeline(timeline, &grant);
         let reservation = authority
             .begin_revocation_on_timeline(timeline, &revocation)
-            .test_ok();
+            .test_ok()
+            .test_value();
         assert_expired(
             Command::AppendConsentRevocation {
                 timeline,
@@ -2545,7 +2546,8 @@ mod tests {
         };
         let reservation = authority
             .begin_revocation_on_timeline(timeline, &revocation)
-            .test_ok();
+            .test_ok()
+            .test_value();
         let task = tokio::spawn({
             let executor = executor.clone();
             async move {
