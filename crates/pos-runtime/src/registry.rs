@@ -643,19 +643,19 @@ impl PluginRegistry {
             .and_then(|output| reject_host_owned_drafts(&output).map(|()| output))
     }
 
-    fn step_anchored_transaction(
-        &mut self,
-        timeline: pos_core::ids::TimelineId,
-        observed_through: Seq,
+    fn collect_anchored_selection(
+        &self,
         selection: AnchoredSelection,
-        committed_events: &[Event],
-        operation: OperationContext,
-    ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
-        self.ensure_no_pending_step()?;
-        self.validate_operation(timeline, &operation, observed_through, None)?;
+    ) -> Result<
+        (
+            Vec<PluginId>,
+            Vec<(PluginId, u128)>,
+            Vec<ProjectionKey>,
+        ),
+        RuntimeError,
+    > {
         let mut driver_ids = Vec::new();
         let mut cadence_updates = Vec::new();
-        let mut event_cursors = Vec::new();
         let mut seen_subscriptions = HashSet::new();
         let mut subscriptions = Vec::new();
 
@@ -694,6 +694,23 @@ impl PluginRegistry {
                 );
             }
         }
+
+        Ok((driver_ids, cadence_updates, subscriptions))
+    }
+
+    fn step_anchored_transaction(
+        &mut self,
+        timeline: pos_core::ids::TimelineId,
+        observed_through: Seq,
+        selection: AnchoredSelection,
+        committed_events: &[Event],
+        operation: OperationContext,
+    ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
+        self.ensure_no_pending_step()?;
+        self.validate_operation(timeline, &operation, observed_through, None)?;
+        let (driver_ids, cadence_updates, subscriptions) =
+            self.collect_anchored_selection(selection)?;
+        let mut event_cursors = Vec::new();
 
         let anchor = SnapshotAnchor::new(timeline, observed_through);
         self.authorize_snapshot_subscriptions(
@@ -819,7 +836,7 @@ impl PluginRegistry {
     /// Fence and append one staged host Tick before committing Driver state.
     ///
     /// The consent validation happens while the host owns both the registry's
-    /// pending step and the EventStore borrow. A rejected fence therefore
+    /// pending step and the [`EventStore`] borrow. A rejected fence therefore
     /// aborts the staged Drivers before any draft reaches durable storage.
     ///
     /// # Errors
@@ -832,18 +849,17 @@ impl PluginRegistry {
         commit_now_secs: u64,
         drafts: &[EventDraft],
     ) -> Result<Vec<Event>, RuntimeError> {
-        let Some(pending) = self.pending_step.as_ref() else {
+        let Some(pending) = self.pending_step.take() else {
             return Err(RuntimeError::PendingDriverStep);
         };
         let pending_timeline = pending.timeline;
         let operation = pending.operation.clone();
         let events = match operation {
             OperationContext::Protected { token, now_secs: _ } => {
-                let gate = self
-                    .consent_gate
-                    .as_ref()
-                    .ok_or(RuntimeError::ConsentOperationUnavailable)?
-                    .clone();
+                let Some(gate) = self.consent_gate.as_ref().cloned() else {
+                    let _ = self.abort_drivers(&pending.driver_ids);
+                    return Err(RuntimeError::ConsentOperationUnavailable);
+                };
                 let mut append_result = Ok(Vec::new());
                 let mut append = || {
                     append_result = store.append(pending_timeline, drafts);
@@ -855,10 +871,16 @@ impl PluginRegistry {
                     commit_now_secs,
                     &mut append,
                 ) {
-                    self.abort_step();
+                    let _ = self.abort_drivers(&pending.driver_ids);
                     return Err(RuntimeError::Consent(error));
                 }
-                append_result?
+                match append_result {
+                    Ok(events) => events,
+                    Err(error) => {
+                        let _ = self.abort_drivers(&pending.driver_ids);
+                        return Err(error.into());
+                    }
+                }
             }
             OperationContext::Public => {
                 if let Err(error) = self.validate_operation(
@@ -867,26 +889,18 @@ impl PluginRegistry {
                     timeline_head,
                     Some(commit_now_secs),
                 ) {
-                    self.abort_step();
+                    let _ = self.abort_drivers(&pending.driver_ids);
                     return Err(error);
                 }
                 match store.append(pending_timeline, drafts) {
                     Ok(events) => events,
                     Err(error) => {
-                        self.abort_step();
+                        let _ = self.abort_drivers(&pending.driver_ids);
                         return Err(error.into());
                     }
                 }
             }
         };
-        /*
-         * The pending step is consumed only after the host append succeeds.
-         * A store failure above has already aborted every staged Driver.
-         */
-        let pending = self
-            .pending_step
-            .take()
-            .expect("pending step remains until append-and-commit completes");
         self.commit_pending_step(pending);
         Ok(events)
     }
@@ -2716,13 +2730,14 @@ mod tests {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let timeline = store.create_timeline("t").test_ok();
         let key = ProjectionKey::new(EntityId::new());
+        let subject_id = key.entity_id().to_owned();
         let driver = DuplicateKeyDriver {
             keys: vec![key.clone(), key],
         };
         let plugin = plugin_with_caps("dup-key-plugin", &[], true, false);
         let authority = ConsentAuthority::new();
         let grant = ConsentGranted {
-            subject_id: key.entity_id().to_owned(),
+            subject_id,
             grantee_id: EntityId::new(),
             purpose: "projection-dedup-test".to_owned(),
             modalities: 0,
