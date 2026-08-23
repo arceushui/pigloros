@@ -2403,13 +2403,14 @@ mod tests {
     fn public_erasure_failure_seams_cover_history_ordering_and_cbor_tails() -> Result<(), ErasureErrorV1> {
         let receipt = receipt()?;
         assert_eq!(receipt.verify_history(&TestResolver { states: Vec::new(), unavailable: false }), Err(ErasureErrorV1::ProvenanceMissing));
+        assert_eq!(receipt.verify_history(&TestResolver { states: Vec::new(), unavailable: true }), Err(ErasureErrorV1::ProvenanceMissing));
         let mut unordered = receipt_value(&receipt.0);
         let Value::Array(fields) = &mut unordered else { return Err(ErasureErrorV1::InvalidEncoding); };
         let Value::Array(inventories) = &mut fields[10] else { return Err(ErasureErrorV1::InvalidEncoding); };
         let Value::Array(artifacts) = &mut inventories[0] else { return Err(ErasureErrorV1::InvalidEncoding); };
         artifacts.push(artifacts[0].clone());
         assert_eq!(decode_receipt(&unordered), Err(ErasureErrorV1::ScopeInvalid));
-        for malformed in [&[0x58, 1][..], &[0x81, 0x58, 2, 0][..], &[0x81, 0x1a, 0, 0, 0][..]] {
+        for malformed in [&[0x58, 1][..], &[0x81, 0x58, 2, 0][..], &[0x81, 0x1a, 0, 0, 0][..], &[0x81, 0x58, 2, 0, 0][..], &[0x81, 0x1b, 0, 0, 0, 0, 0, 0, 0, 1][..]] {
             assert_eq!(ErasureReceiptV1::from_canonical_cbor(malformed), Err(ErasureErrorV1::InvalidEncoding));
         }
         Ok(())
