@@ -1624,12 +1624,14 @@ fn public_decoders_reject_terminal_and_inventory_conflicts() -> Result<(), Erasu
         Vec::new(),
         Vec::new(),
     ))?;
-    let complete = waiting.transition(change(
+    let mut complete_change = change(
         ErasureLifecycleV1::Complete,
         Some(10),
         Vec::new(),
         Vec::new(),
-    ))?;
+    );
+    complete_change.acknowledged_targets = vec![reference(7)];
+    let complete = waiting.transition(complete_change)?;
     let mut invalid_complete = public_state_value(&complete)?;
     let Value::Array(fields) = &mut invalid_complete else {
         return Err(ErasureErrorV1::InvalidEncoding);
