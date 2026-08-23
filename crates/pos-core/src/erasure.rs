@@ -5,7 +5,6 @@
 //! adapters and follow-up tickets named by ADR-060.
 
 use std::cmp::Ordering;
-use std::io::Cursor;
 
 use ciborium::value::Value;
 
@@ -1510,8 +1509,8 @@ use codec::{
     has_duplicate_by_target, invalid_owner_sets, inventory_categories_match,
     inventory_transitions_preserve_or_weaken, inventories_exceed_bound,
     inventories_have_duplicate_targets, inventories_match_closure, receipt_core_value,
-    receipt_value, reference_zero, request_value, sort_inventories, state_core_value, state_value,
-    weakest_inventory_claim,
+    receipt_from_fields, receipt_value, reference_zero, request_from_fields, request_value,
+    sort_inventories, state_core_value, state_from_fields, state_value, weakest_inventory_claim,
 };
 
 
