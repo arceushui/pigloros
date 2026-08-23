@@ -2040,12 +2040,13 @@ mod tests {
         }
     }
 
-    struct FailFirstLogicalHeadStore {
+    struct FailLogicalHeadStore {
         inner: Box<dyn EventStore>,
-        failed: std::cell::Cell<bool>,
+        calls: std::cell::Cell<u8>,
+        fail_on_call: u8,
     }
 
-    impl EventStore for FailFirstLogicalHeadStore {
+    impl EventStore for FailLogicalHeadStore {
         #[cfg_attr(coverage_nightly, coverage(off))]
         fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
             self.inner.create_timeline(name)
@@ -2097,12 +2098,14 @@ mod tests {
             &self,
             id: pos_core::ids::TimelineId,
         ) -> Result<pos_core::clock::Seq, CoreError> {
-            if self.failed.replace(true) {
-                self.inner.logical_head(id)
-            } else {
+            let call = self.calls.get().saturating_add(1);
+            self.calls.set(call);
+            if call == self.fail_on_call {
                 Err(CoreError::Storage(
-                    "injected first-boundary head failure".to_owned(),
+                    "injected boundary head failure".to_owned(),
                 ))
+            } else {
+                self.inner.logical_head(id)
             }
         }
     }
@@ -2611,16 +2614,17 @@ mod tests {
             let mut store = lock_store(&session.store).test_ok();
             let inner =
                 std::mem::replace(&mut *store, Box::new(pos_store::memory::MemoryStore::new()));
-            *store = Box::new(FailFirstLogicalHeadStore {
+            *store = Box::new(FailLogicalHeadStore {
                 inner,
-                failed: std::cell::Cell::new(false),
+                calls: std::cell::Cell::new(0),
+                fail_on_call: 1,
             });
         }
 
         assert!(matches!(
             session.step_cadenced(0),
             Err(ExperimentError::Store(CoreError::Storage(message)))
-                if message == "injected first-boundary head failure"
+                if message == "injected boundary head failure"
         ));
         assert_eq!(session.ticks, 0);
         assert_eq!(session.step_tick().test_ok(), TickOutcome::Quiescent);
@@ -5410,9 +5414,35 @@ mod fault_injection_tests {
             let mut store = lock_store(&session.store).test_ok();
             let inner =
                 std::mem::replace(&mut *store, Box::new(pos_store::memory::MemoryStore::new()));
-            *store = Box::new(FailFirstLogicalHeadStore {
+            *store = Box::new(FailLogicalHeadStore {
                 inner,
-                failed: std::cell::Cell::new(false),
+                calls: std::cell::Cell::new(0),
+                fail_on_call: 1,
+            });
+        }
+        session.revoke_consent_at_boundary();
+        assert!(matches!(session.step_tick(), Err(ExperimentError::Store(_))));
+        assert!(matches!(session.step_tick(), Err(ExperimentError::SessionFaulted)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn revocation_boundary_faults_closed_when_post_append_capture_fails() {
+        let mut session = Experiment::new(ExperimentConfig {
+            name: "revocation-capture-fault".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        })
+        .start()
+        .test_ok();
+        {
+            let mut store = lock_store(&session.store).test_ok();
+            let inner =
+                std::mem::replace(&mut *store, Box::new(pos_store::memory::MemoryStore::new()));
+            *store = Box::new(FailLogicalHeadStore {
+                inner,
+                calls: std::cell::Cell::new(0),
+                fail_on_call: 2,
             });
         }
         session.revoke_consent_at_boundary();
