@@ -5928,4 +5928,37 @@ mod tests {
         exact_fixture_count.extend(std::iter::repeat_n(0xf6, MAX_FIXTURES));
         assert_eq!(preflight_cbor(&exact_fixture_count), Ok(()));
     }
+
+    #[test]
+    fn public_decoders_reject_wrong_top_level_shapes() {
+        let invalid = Value::Null;
+        assert!(decode_profile(&invalid).is_err());
+        assert!(decode_fixture(&invalid).is_err());
+        assert!(decode_input(&invalid).is_err());
+        assert!(decode_expected(&invalid).is_err());
+        assert!(decode_divergence(&invalid).is_err());
+        assert!(decode_bounds(&invalid).is_err());
+        assert!(decode_capability_policy(&invalid).is_err());
+        assert!(decode_fixture_provenance(&invalid).is_err());
+        assert!(decode_protocol(&invalid).is_err());
+        assert!(decode_hard_caps(&invalid).is_err());
+        assert!(decode_requirements(&invalid).is_err());
+        assert!(decode_stable_evidence(&invalid).is_err());
+        assert!(decode_stable_attestation(&invalid).is_err());
+        assert!(decode_request(&invalid).is_err());
+        assert!(decode_output_capability(&invalid).is_err());
+        assert!(decode_identity(&invalid).is_err());
+        assert!(decode_independence(&invalid).is_err());
+        assert!(decode_case(&invalid).is_err());
+        assert!(decode_lifecycle(&invalid).is_err());
+        assert!(decode_adapter(&invalid).is_err());
+        assert!(decode_mode(&invalid).is_err());
+        assert!(decode_claim_layer(&invalid).is_err());
+        assert!(decode_case_outcome(&invalid).is_err());
+        assert!(decode_verification_outcome(&invalid).is_err());
+        assert!(decode_divergence_mismatch(&invalid).is_err());
+        assert!(decode_replay_claim(&invalid).is_err());
+        assert!(decode_redaction(&invalid).is_err());
+        assert!(decode_safe_error(&invalid).is_err());
+    }
 }
