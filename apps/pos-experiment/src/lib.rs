@@ -5398,6 +5398,29 @@ mod fault_injection_tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn revocation_boundary_faults_closed_when_its_fence_head_cannot_be_read() {
+        let mut session = Experiment::new(ExperimentConfig {
+            name: "revocation-fence-fault".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        })
+        .start()
+        .test_ok();
+        {
+            let mut store = lock_store(&session.store).test_ok();
+            let inner = std::mem::replace(&mut *store, Box::new(pos_store::memory::MemoryStore::new()));
+            *store = Box::new(FailFirstLogicalHeadStore {
+                inner,
+                failed: std::cell::Cell::new(false),
+            });
+        }
+        session.revoke_consent_at_boundary();
+        assert!(matches!(session.step_tick(), Err(ExperimentError::Store(_))));
+        assert!(matches!(session.step_tick(), Err(ExperimentError::SessionFaulted)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn live_session_faults_when_post_append_capture_fails() {
         let dir = tempfile::tempdir().test_ok();
         let path = dir.path().join("session-post-capture.db");
