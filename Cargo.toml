@@ -60,7 +60,7 @@ indexmap = "2"
 num-traits = "0.2"
 
 # SQLite
-rusqlite = { version = "0.36", features = ["bundled", "hooks", "functions"] }
+rusqlite = { version = "0.40", features = ["bundled", "hooks", "functions"] }
 
 # Testing
 proptest = "1"
