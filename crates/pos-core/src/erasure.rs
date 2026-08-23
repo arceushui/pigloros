@@ -631,6 +631,11 @@ impl ErasureStateV1 {
     pub const fn coordinator(&self) -> ErasureReferenceV1 {
         self.coordinator
     }
+    /// Return the provenance committed for this state transition.
+    #[must_use]
+    pub const fn provenance(&self) -> ErasureReferenceV1 {
+        self.provenance
+    }
     /// Return the frozen Tick Boundary, if access has been frozen.
     #[must_use]
     pub const fn freeze_position(&self) -> Option<u64> {
@@ -929,6 +934,11 @@ impl ErasureReceiptV1 {
         if !acknowledgements_are_closure_subset(&input.required_targets, &input.acknowledgements) {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
+        let (derived_pending, derived_failed) =
+            derived_outcome_owners(&input.required_targets, &input.acknowledgements);
+        if input.pending_owners != derived_pending || input.failed_owners != derived_failed {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
         if !inventories_match_closure(&input.required_targets, &input.inventories) {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
@@ -992,6 +1002,16 @@ impl ErasureReceiptV1 {
     pub const fn receipt_digest(&self) -> ErasureReferenceV1 {
         self.0.receipt_digest
     }
+    /// Return the frozen required-target closure.
+    #[must_use]
+    pub fn required_targets(&self) -> &[ErasureRequiredTargetV1] {
+        &self.0.required_targets
+    }
+    /// Return the canonical acknowledgement closure.
+    #[must_use]
+    pub fn acknowledgements(&self) -> &[ErasureAcknowledgementV1] {
+        &self.0.acknowledgements
+    }
     /// Verify terminal binding and the bounded ERS1 predecessor chain via a host resolver.
     ///
     /// # Errors
@@ -1024,6 +1044,34 @@ impl ErasureReceiptV1 {
             self
         })
     }
+}
+
+fn derived_outcome_owners(
+    required_targets: &[ErasureRequiredTargetV1],
+    acknowledgements: &[ErasureAcknowledgementV1],
+) -> (Vec<ErasureReferenceV1>, Vec<ErasureReferenceV1>) {
+    let mut pending = required_targets
+        .iter()
+        .filter(|target| {
+            !acknowledgements
+                .iter()
+                .any(|acknowledgement| acknowledgement.target == **target)
+        })
+        .map(|target| target.replica_id)
+        .collect::<Vec<_>>();
+    let mut failed = acknowledgements
+        .iter()
+        .filter(|acknowledgement| {
+            acknowledgement.outcome != ErasureAcknowledgementOutcomeV1::Acknowledged
+        })
+        .map(|acknowledgement| acknowledgement.owner)
+        .collect::<Vec<_>>();
+    pending.sort_unstable();
+    pending.dedup();
+    failed.sort_unstable();
+    failed.dedup();
+    pending.retain(|owner| failed.binary_search(owner).is_err());
+    (pending, failed)
 }
 
 /// Host-owned ERS1 lookup used to validate a receipt's predecessor chain.
@@ -1153,6 +1201,20 @@ pub trait ErasureCoordinatorPortV1 {
         &self,
         request: ErasureReferenceV1,
     ) -> Result<Vec<ErasureRequiredTargetV1>, ErasureErrorV1>;
+    /// Authenticate and perform the freeze-boundary operation.
+    ///
+    /// The returned position and provenance are host-owned evidence.  The
+    /// caller's transition values are treated as a request, never as proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error when the host cannot authenticate or perform the
+    /// freeze boundary.
+    fn admit_freeze(
+        &self,
+        request: ErasureReferenceV1,
+        requested: &ErasureStateTransitionV1,
+    ) -> Result<ErasureFreezeAdmissionV1, ErasureErrorV1>;
     /// Dispatch idempotent destruction commands for a frozen closure.
     ///
     /// The host must deduplicate by `(request, target)` and retain that
@@ -1219,6 +1281,15 @@ pub trait ErasureCoordinatorPortV1 {
     fn commit_record(&mut self, record: ErasureCoordinatorRecordV1) -> Result<(), ErasureErrorV1>;
 }
 
+/// Host-authenticated evidence for the access-freeze boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ErasureFreezeAdmissionV1 {
+    /// Authoritative Tick Boundary position.
+    pub freeze_position: u64,
+    /// Host-authenticated provenance for the freeze transition.
+    pub provenance: ErasureReferenceV1,
+}
+
 /// Durable ERQ1/ERS1/ERC1 coordinator record.
 ///
 /// Hosts persist this complete record (or an equivalent representation) and
@@ -1227,15 +1298,117 @@ pub trait ErasureCoordinatorPortV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ErasureCoordinatorRecordV1 {
     /// The exact authenticated request identity.
-    pub request: ErasureRequestV1,
+    request: ErasureRequestV1,
     /// The latest digest-linked ERS1 state.
-    pub state: ErasureStateV1,
+    state: ErasureStateV1,
     /// The frozen required-target closure.
-    pub targets: Vec<ErasureRequiredTargetV1>,
+    targets: Vec<ErasureRequiredTargetV1>,
     /// Acknowledgements accepted for the frozen closure.
-    pub acknowledgements: Vec<ErasureAcknowledgementV1>,
+    acknowledgements: Vec<ErasureAcknowledgementV1>,
     /// The committed terminal receipt, if any.
-    pub receipt: Option<ErasureReceiptV1>,
+    receipt: Option<ErasureReceiptV1>,
+    authorize_provenance: Option<ErasureReferenceV1>,
+    freeze_provenance: Option<ErasureReferenceV1>,
+    dispatch_provenance: Option<ErasureReferenceV1>,
+}
+
+impl ErasureCoordinatorRecordV1 {
+    fn validate(&self, coordinator: ErasureReferenceV1) -> Result<(), ErasureErrorV1> {
+        if self.request.reference() != self.state.request()
+            || self.state.coordinator() != coordinator
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        if has_duplicate(&self.targets)
+            || !self.targets.windows(2).all(|pair| pair[0] < pair[1])
+            || has_duplicate_by_target(&self.acknowledgements)
+            || self
+                .acknowledgements
+                .iter()
+                .any(|ack| ack.owner != ack.target.replica_id)
+            || !acknowledgements_are_closure_subset(&self.targets, &self.acknowledgements)
+        {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        let lifecycle = self.state.lifecycle();
+        if matches!(
+            lifecycle,
+            ErasureLifecycleV1::Submitted
+                | ErasureLifecycleV1::Authorized
+                | ErasureLifecycleV1::Rejected
+        ) && (!self.targets.is_empty()
+            || !self.acknowledgements.is_empty()
+            || self.receipt.is_some())
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        if lifecycle == ErasureLifecycleV1::AccessFrozen
+            && (self.targets.is_empty()
+                || !self.acknowledgements.is_empty()
+                || self.receipt.is_some())
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        if matches!(
+            lifecycle,
+            ErasureLifecycleV1::DestructionDispatched
+                | ErasureLifecycleV1::AwaitingAcknowledgements
+        ) && (self.targets.is_empty() || self.receipt.is_some())
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        let operation_provenance_count = [
+            self.authorize_provenance,
+            self.freeze_provenance,
+            self.dispatch_provenance,
+        ]
+        .into_iter()
+        .filter(Option::is_some)
+        .count();
+        let expected_operation_count = match lifecycle {
+            ErasureLifecycleV1::Submitted | ErasureLifecycleV1::Rejected => 0,
+            ErasureLifecycleV1::Authorized => 1,
+            ErasureLifecycleV1::AccessFrozen => 2,
+            ErasureLifecycleV1::DestructionDispatched
+            | ErasureLifecycleV1::AwaitingAcknowledgements
+            | ErasureLifecycleV1::Complete
+            | ErasureLifecycleV1::PartialFailure => 3,
+        };
+        if operation_provenance_count != expected_operation_count {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        if lifecycle.is_terminal() {
+            let Some(receipt) = self.receipt.as_ref() else {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            };
+            let mut acknowledgements = self.acknowledgements.clone();
+            acknowledgements.sort_unstable();
+            if receipt.terminal_state() != self.state.state_digest()
+                || receipt.lifecycle() != lifecycle
+                || receipt.coordinator() != coordinator
+                || receipt.0.request != self.request.reference()
+                || receipt.required_targets() != self.targets.as_slice()
+                || receipt.acknowledgements() != acknowledgements.as_slice()
+            {
+                return Err(ErasureErrorV1::PolicyConflict);
+            }
+            let complete = acknowledgements_match_closure(&self.targets, &self.acknowledgements)
+                && self
+                    .acknowledgements
+                    .iter()
+                    .all(|ack| ack.outcome == ErasureAcknowledgementOutcomeV1::Acknowledged);
+            if (lifecycle == ErasureLifecycleV1::Complete) != complete {
+                return Err(ErasureErrorV1::PolicyConflict);
+            }
+            let (pending, failed) = derived_outcome_owners(&self.targets, &self.acknowledgements);
+            if self.state.pending_owners() != pending.as_slice()
+                || self.state.failed_owners() != failed.as_slice()
+            {
+                return Err(ErasureErrorV1::PolicyConflict);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Core-owned, idempotent ERQ1/ERS1/ERC1 state machine; adapters cannot bypass it.
@@ -1270,15 +1443,20 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         &mut self,
         request: ErasureReferenceV1,
     ) -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
-        self.port
-            .load_record(request)?
-            .ok_or(ErasureErrorV1::ProvenanceMissing)
-            .inspect(|record| self.cache(record.clone()))
+        match self.port.load_record(request) {
+            Ok(Some(record)) => record.validate(self.coordinator).map(|()| {
+                self.cache(record.clone());
+                record
+            }),
+            Ok(None) => Err(ErasureErrorV1::ProvenanceMissing),
+            Err(error) => Err(error),
+        }
     }
     fn commit(&mut self, record: ErasureCoordinatorRecordV1) -> Result<(), ErasureErrorV1> {
-        self.port.commit_record(record.clone())?;
-        self.cache(record);
-        Ok(())
+        record
+            .validate(self.coordinator)
+            .and_then(|()| self.port.commit_record(record.clone()))
+            .map(|()| self.cache(record))
     }
     /// Query an existing outcome without creating or advancing it.
     #[must_use]
@@ -1298,26 +1476,34 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         request: ErasureRequestV1,
         provenance: ErasureReferenceV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
-        if let Some(record) = self.port.load_record(request.reference())? {
-            return if record.request.eq(&request) {
-                self.cache(record.clone());
-                Ok(record.state)
-            } else {
-                Err(ErasureErrorV1::PolicyConflict)
-            };
+        match self.port.load_record(request.reference()) {
+            Ok(Some(record)) => record.validate(self.coordinator).and_then(|()| {
+                if record.request.eq(&request) {
+                    let state = record.state.clone();
+                    self.cache(record);
+                    Ok(state)
+                } else {
+                    Err(ErasureErrorV1::PolicyConflict)
+                }
+            }),
+            Ok(None) => self.port.authenticate(&request).and_then(|()| {
+                ErasureStateV1::submitted(request.reference(), self.coordinator, provenance)
+                    .and_then(|state| {
+                        let record = ErasureCoordinatorRecordV1 {
+                            request,
+                            state: state.clone(),
+                            targets: Vec::new(),
+                            acknowledgements: Vec::new(),
+                            receipt: None,
+                            authorize_provenance: None,
+                            freeze_provenance: None,
+                            dispatch_provenance: None,
+                        };
+                        self.commit(record).map(|()| state)
+                    })
+            }),
+            Err(error) => Err(error),
         }
-        self.port.authenticate(&request)?;
-        let state = ErasureStateV1::submitted(request.reference(), self.coordinator, provenance)?;
-        let record = ErasureCoordinatorRecordV1 {
-            request,
-            state: state.clone(),
-            targets: Vec::new(),
-            acknowledgements: Vec::new(),
-            receipt: None,
-        };
-        self.port.commit_record(record.clone())?;
-        self.cache(record);
-        Ok(state)
     }
     /// Authorize a submitted ERQ1; an exact lifecycle retry is a query.
     ///
@@ -1330,33 +1516,42 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         request: ErasureReferenceV1,
         provenance: ErasureReferenceV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
-        let mut record = self.record(request)?;
-        if record.state.lifecycle() != ErasureLifecycleV1::Submitted {
-            return if record.state.lifecycle() == ErasureLifecycleV1::Authorized
-                || record.state.lifecycle().is_terminal()
-                || record.state.lifecycle() == ErasureLifecycleV1::AccessFrozen
-                || record.state.lifecycle() == ErasureLifecycleV1::DestructionDispatched
-                || record.state.lifecycle() == ErasureLifecycleV1::AwaitingAcknowledgements
-            {
-                Ok(record.state)
-            } else {
-                Err(ErasureErrorV1::PolicyConflict)
-            };
-        }
-        record.state = record.state.transition(ErasureStateTransitionV1 {
-            lifecycle: ErasureLifecycleV1::Authorized,
-            freeze_position: None,
-            pending_owners: Vec::new(),
-            failed_owners: Vec::new(),
-            acknowledged_targets: Vec::new(),
-            replay_claim: record.state.replay_claim(),
-            provenance,
-        })?;
-        let state = record.state.clone();
-        self.commit(record)?;
-        Ok(state)
+        self.record(request).and_then(|mut record| {
+            if record.state.lifecycle() != ErasureLifecycleV1::Submitted {
+                return if record.authorize_provenance == Some(provenance)
+                    && (record.state.lifecycle() == ErasureLifecycleV1::Authorized
+                        || record.state.lifecycle().is_terminal()
+                        || record.state.lifecycle() == ErasureLifecycleV1::AccessFrozen
+                        || record.state.lifecycle() == ErasureLifecycleV1::DestructionDispatched
+                        || record.state.lifecycle() == ErasureLifecycleV1::AwaitingAcknowledgements)
+                {
+                    Ok(record.state)
+                } else {
+                    Err(ErasureErrorV1::PolicyConflict)
+                };
+            }
+            let replay_claim = record.state.replay_claim();
+            record
+                .state
+                .transition(ErasureStateTransitionV1 {
+                    lifecycle: ErasureLifecycleV1::Authorized,
+                    freeze_position: None,
+                    pending_owners: Vec::new(),
+                    failed_owners: Vec::new(),
+                    acknowledged_targets: Vec::new(),
+                    replay_claim,
+                    provenance,
+                })
+                .and_then(|state| {
+                    record.state = state;
+                    record.authorize_provenance = Some(provenance);
+                    let state = record.state.clone();
+                    self.commit(record).map(|()| state)
+                })
+        })
     }
-    /// Freeze the authoritative closure once; duplicate freezes return the existing state.
+    /// Freeze the authoritative closure once; duplicate freezes before dispatch
+    /// return the existing state. Later lifecycle retries use their own edges.
     ///
     /// # Errors
     ///
@@ -1366,35 +1561,54 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         request: ErasureReferenceV1,
         transition: ErasureStateTransitionV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
-        let mut record = self.record(request)?;
-        if record.state.lifecycle() == ErasureLifecycleV1::AccessFrozen {
-            return Ok(record.state);
-        }
-        let freeze_is_authorized = matches!(
-            (record.state.lifecycle(), transition.lifecycle),
-            (
-                ErasureLifecycleV1::Authorized,
-                ErasureLifecycleV1::AccessFrozen
-            )
-        );
-        if !freeze_is_authorized {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        self.port.required_targets(request).and_then(|mut targets| {
-            if targets.is_empty() {
-                return Err(ErasureErrorV1::ScopeInvalid);
+        self.record(request).and_then(|mut record| {
+            if let Some(freeze_provenance) = record.freeze_provenance {
+                return if freeze_provenance == transition.provenance {
+                    Ok(record.state)
+                } else {
+                    Err(ErasureErrorV1::PolicyConflict)
+                };
             }
-            if targets.len() > ERASURE_MAX_INVENTORY_RESULTS {
-                return Err(ErasureErrorV1::ScopeInvalid);
+            let freeze_is_authorized = matches!(
+                (record.state.lifecycle(), transition.lifecycle),
+                (
+                    ErasureLifecycleV1::Authorized,
+                    ErasureLifecycleV1::AccessFrozen
+                )
+            );
+            if !freeze_is_authorized {
+                return Err(ErasureErrorV1::PolicyConflict);
             }
-            targets.sort_unstable();
-            if has_duplicate(&targets) {
-                return Err(ErasureErrorV1::ScopeInvalid);
-            }
-            record.state = record.state.transition(transition)?;
-            record.targets = targets;
-            let state = record.state.clone();
-            self.commit(record).map(|()| state)
+            self.port.required_targets(request).and_then(|mut targets| {
+                if targets.is_empty() || targets.len() > ERASURE_MAX_INVENTORY_RESULTS {
+                    return Err(ErasureErrorV1::ScopeInvalid);
+                }
+                targets.sort_unstable();
+                if has_duplicate(&targets) {
+                    return Err(ErasureErrorV1::ScopeInvalid);
+                }
+                self.port
+                    .admit_freeze(request, &transition)
+                    .and_then(|admission| {
+                        let replay_claim = record.state.replay_claim();
+                        record.state.transition(ErasureStateTransitionV1 {
+                            lifecycle: ErasureLifecycleV1::AccessFrozen,
+                            freeze_position: Some(admission.freeze_position),
+                            pending_owners: Vec::new(),
+                            failed_owners: Vec::new(),
+                            acknowledged_targets: Vec::new(),
+                            replay_claim,
+                            provenance: admission.provenance,
+                        })
+                    })
+                    .and_then(|state| {
+                        record.state = state;
+                        record.freeze_provenance = Some(transition.provenance);
+                        record.targets = targets;
+                        let state = record.state.clone();
+                        self.commit(record).map(|()| state)
+                    })
+            })
         })
     }
     /// Dispatch the frozen closure through the host-owned idempotent port.
@@ -1412,32 +1626,45 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         request: ErasureReferenceV1,
         provenance: ErasureReferenceV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
-        let mut record = self.record(request)?;
-        if matches!(
-            record.state.lifecycle(),
-            ErasureLifecycleV1::DestructionDispatched
-                | ErasureLifecycleV1::AwaitingAcknowledgements
-                | ErasureLifecycleV1::Complete
-                | ErasureLifecycleV1::PartialFailure
-        ) {
-            return Ok(record.state);
-        }
-        if record.state.lifecycle() != ErasureLifecycleV1::AccessFrozen {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        self.port.dispatch_destruction(request, &record.targets)?;
-        record.state = record.state.transition(ErasureStateTransitionV1 {
-            lifecycle: ErasureLifecycleV1::DestructionDispatched,
-            freeze_position: record.state.freeze_position(),
-            pending_owners: Vec::new(),
-            failed_owners: Vec::new(),
-            acknowledged_targets: Vec::new(),
-            replay_claim: record.state.replay_claim(),
-            provenance,
-        })?;
-        let state = record.state.clone();
-        self.commit(record)?;
-        Ok(state)
+        self.record(request).and_then(|mut record| {
+            if matches!(
+                record.state.lifecycle(),
+                ErasureLifecycleV1::DestructionDispatched
+                    | ErasureLifecycleV1::AwaitingAcknowledgements
+                    | ErasureLifecycleV1::Complete
+                    | ErasureLifecycleV1::PartialFailure
+            ) {
+                return if record.dispatch_provenance == Some(provenance) {
+                    Ok(record.state)
+                } else {
+                    Err(ErasureErrorV1::PolicyConflict)
+                };
+            }
+            if record.state.lifecycle() != ErasureLifecycleV1::AccessFrozen {
+                return Err(ErasureErrorV1::PolicyConflict);
+            }
+            self.port
+                .dispatch_destruction(request, &record.targets)
+                .and_then(|()| {
+                    let freeze_position = record.state.freeze_position();
+                    let replay_claim = record.state.replay_claim();
+                    record.state.transition(ErasureStateTransitionV1 {
+                        lifecycle: ErasureLifecycleV1::DestructionDispatched,
+                        freeze_position,
+                        pending_owners: Vec::new(),
+                        failed_owners: Vec::new(),
+                        acknowledged_targets: Vec::new(),
+                        replay_claim,
+                        provenance,
+                    })
+                })
+                .and_then(|state| {
+                    record.state = state;
+                    record.dispatch_provenance = Some(provenance);
+                    let state = record.state.clone();
+                    self.commit(record).map(|()| state)
+                })
+        })
     }
     /// Persist one frozen-closure acknowledgement; an exact retry is idempotent.
     ///
@@ -1449,48 +1676,64 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         request: ErasureReferenceV1,
         acknowledgement: ErasureAcknowledgementV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
-        let mut record = self.record(request)?;
-        if !matches!(
-            record.state.lifecycle(),
-            ErasureLifecycleV1::DestructionDispatched
-                | ErasureLifecycleV1::AwaitingAcknowledgements
-        ) {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if !record.targets.contains(&acknowledgement.target) {
-            return Err(ErasureErrorV1::Unauthorized);
-        }
-        if acknowledgement.owner != acknowledgement.target.replica_id {
-            return Err(ErasureErrorV1::Unauthorized);
-        }
-        if record.acknowledgements.contains(&acknowledgement) {
-            return Ok(record.state);
-        }
-        if record
-            .acknowledgements
-            .iter()
-            .any(|existing| existing.target == acknowledgement.target)
-        {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        self.port.admit_acknowledgement(request, &acknowledgement)?;
-        record.acknowledgements.push(acknowledgement);
-        if record.state.lifecycle() == ErasureLifecycleV1::DestructionDispatched {
-            record.state = record.state.transition(ErasureStateTransitionV1 {
-                lifecycle: ErasureLifecycleV1::AwaitingAcknowledgements,
-                freeze_position: record.state.freeze_position(),
-                pending_owners: Vec::new(),
-                failed_owners: Vec::new(),
-                acknowledged_targets: Vec::new(),
-                replay_claim: record.state.replay_claim(),
-                provenance: record
-                    .acknowledgements
-                    .last()
-                    .map_or(reference_zero(), |ack| ack.evidence),
-            })?;
-        }
-        let state = record.state.clone();
-        self.commit(record).map(|()| state)
+        self.record(request).and_then(|mut record| {
+            if record.acknowledgements.contains(&acknowledgement) {
+                return Ok(record.state);
+            }
+            if !matches!(
+                record.state.lifecycle(),
+                ErasureLifecycleV1::DestructionDispatched
+                    | ErasureLifecycleV1::AwaitingAcknowledgements
+            ) {
+                return Err(ErasureErrorV1::PolicyConflict);
+            }
+            if !record.targets.contains(&acknowledgement.target)
+                || acknowledgement.owner != acknowledgement.target.replica_id
+            {
+                return Err(ErasureErrorV1::Unauthorized);
+            }
+            if record
+                .acknowledgements
+                .iter()
+                .any(|existing| existing.target == acknowledgement.target)
+            {
+                return Err(ErasureErrorV1::PolicyConflict);
+            }
+            self.port
+                .admit_acknowledgement(request, &acknowledgement)
+                .and_then(|()| {
+                    record.acknowledgements.push(acknowledgement);
+                    record.acknowledgements.sort_unstable();
+                    if record.state.lifecycle() == ErasureLifecycleV1::DestructionDispatched {
+                        let freeze_position = record.state.freeze_position();
+                        let replay_claim = record.state.replay_claim();
+                        let provenance = record
+                            .acknowledgements
+                            .last()
+                            .map_or(reference_zero(), |ack| ack.evidence);
+                        record
+                            .state
+                            .transition(ErasureStateTransitionV1 {
+                                lifecycle: ErasureLifecycleV1::AwaitingAcknowledgements,
+                                freeze_position,
+                                pending_owners: Vec::new(),
+                                failed_owners: Vec::new(),
+                                acknowledged_targets: Vec::new(),
+                                replay_claim,
+                                provenance,
+                            })
+                            .map(|state| {
+                                record.state = state;
+                            })
+                    } else {
+                        Ok(())
+                    }
+                })
+                .and_then(|()| {
+                    let state = record.state.clone();
+                    self.commit(record).map(|()| state)
+                })
+        })
     }
     /// Commit a receipt only when its closure and acknowledgement evidence match this record.
     ///
@@ -1500,25 +1743,81 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     pub fn finalize(
         &mut self,
         request: ErasureReferenceV1,
+        input: ErasureReceiptInputV1,
+    ) -> Result<ErasureReceiptV1, ErasureErrorV1> {
+        self.record(request).and_then(|mut record| {
+            if let Some(stored) = record.receipt.clone() {
+                return Self::normalize_receipt_input(request, self.coordinator, &record, input)
+                    .and_then(|candidate| ErasureReceiptV1::new(candidate))
+                    .map_or_else(
+                        |_| Err(ErasureErrorV1::PolicyConflict),
+                        |candidate| {
+                            if candidate.receipt_digest() == stored.receipt_digest() {
+                                Ok(stored)
+                            } else {
+                                Err(ErasureErrorV1::PolicyConflict)
+                            }
+                        },
+                    );
+            }
+            if record.state.lifecycle() == ErasureLifecycleV1::DestructionDispatched {
+                let freeze_position = record.state.freeze_position();
+                let replay_claim = record.state.replay_claim();
+                let provenance = input.provenance;
+                let awaiting = record.state.transition(ErasureStateTransitionV1 {
+                    lifecycle: ErasureLifecycleV1::AwaitingAcknowledgements,
+                    freeze_position,
+                    pending_owners: Vec::new(),
+                    failed_owners: Vec::new(),
+                    acknowledged_targets: Vec::new(),
+                    replay_claim,
+                    provenance,
+                });
+                return awaiting
+                    .and_then(|state| {
+                        record.state = state;
+                        self.commit(record)
+                    })
+                    .and_then(|()| self.record(request))
+                    .and_then(|loaded| {
+                        let mut loaded = loaded;
+                        Self::finalize_record(self, request, &mut loaded, input)
+                    });
+            }
+            Self::finalize_record(self, request, &mut record, input)
+        })
+    }
+
+    fn normalize_receipt_input(
+        request: ErasureReferenceV1,
+        coordinator: ErasureReferenceV1,
+        record: &ErasureCoordinatorRecordV1,
+        mut input: ErasureReceiptInputV1,
+    ) -> Result<ErasureReceiptInputV1, ErasureErrorV1> {
+        let Some(freeze_position) = record.state.freeze_position() else {
+            return Err(ErasureErrorV1::PolicyConflict);
+        };
+        if !record.state.lifecycle().is_terminal() {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        input.request = request;
+        input.coordinator = coordinator;
+        input.terminal_state = record.state.state_digest();
+        input.lifecycle = record.state.lifecycle();
+        input.freeze_position = freeze_position;
+        input.required_targets = record.targets.clone();
+        input.acknowledgements = record.acknowledgements.clone();
+        input.pending_owners = record.state.pending_owners().to_vec();
+        input.failed_owners = record.state.failed_owners().to_vec();
+        Ok(input)
+    }
+
+    fn finalize_record(
+        &mut self,
+        request: ErasureReferenceV1,
+        record: &mut ErasureCoordinatorRecordV1,
         mut input: ErasureReceiptInputV1,
     ) -> Result<ErasureReceiptV1, ErasureErrorV1> {
-        let mut record = self.record(request)?;
-        if let Some(receipt) = &record.receipt {
-            return Ok(receipt.clone());
-        }
-        if record.state.lifecycle() == ErasureLifecycleV1::DestructionDispatched {
-            record.state = record.state.transition(ErasureStateTransitionV1 {
-                lifecycle: ErasureLifecycleV1::AwaitingAcknowledgements,
-                freeze_position: record.state.freeze_position(),
-                pending_owners: Vec::new(),
-                failed_owners: Vec::new(),
-                acknowledged_targets: Vec::new(),
-                replay_claim: record.state.replay_claim(),
-                provenance: input.provenance,
-            })?;
-            self.commit(record)?;
-            record = self.record(request)?;
-        }
         if record.state.lifecycle() != ErasureLifecycleV1::AwaitingAcknowledgements {
             return Err(ErasureErrorV1::PolicyConflict);
         }
@@ -1555,11 +1854,12 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         failed_owners.dedup();
         pending_owners.retain(|owner| failed_owners.binary_search(owner).is_err());
         let replay_claim = weakest_inventory_claim(&input.inventories);
+        let freeze_position = record.state.freeze_position();
         record
             .state
             .transition(ErasureStateTransitionV1 {
                 lifecycle,
-                freeze_position: record.state.freeze_position(),
+                freeze_position,
                 pending_owners,
                 failed_owners,
                 acknowledged_targets: if complete {
@@ -1571,25 +1871,16 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                 provenance: input.provenance,
             })
             .and_then(|terminal| {
-                input.request = request;
-                input.coordinator = self.coordinator;
-                input.terminal_state = terminal.state_digest();
-                input.required_targets.clone_from(&record.targets);
-                input.acknowledgements.clone_from(&record.acknowledgements);
-                input.lifecycle = lifecycle;
-                if let Some(freeze_position) = terminal.freeze_position() {
-                    input.freeze_position = freeze_position;
-                    input.pending_owners = terminal.pending_owners().to_vec();
-                    input.failed_owners = terminal.failed_owners().to_vec();
-                    self.port.admit_receipt(&input)?;
-                    let receipt = ErasureReceiptV1::new(input)?;
-                    record.state = terminal;
-                    record.receipt = Some(receipt.clone());
-                    self.commit(record).map(|()| receipt)
-                } else {
-                    Err(ErasureErrorV1::PolicyConflict)
-                }
+                record.state = terminal;
+                Self::normalize_receipt_input(request, self.coordinator, record, input)
             })
+            .and_then(|normalized| self.port.admit_receipt(&normalized).map(|()| normalized))
+            .and_then(ErasureReceiptV1::new)
+            .map(|receipt| {
+                record.receipt = Some(receipt.clone());
+                receipt
+            })
+            .and_then(|receipt| self.commit(record.clone()).map(|()| receipt))
     }
 }
 
