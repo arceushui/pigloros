@@ -745,7 +745,7 @@ impl ConsentAuthority {
             match event.event_type.as_str() {
                 EVENT_TYPE_CONSENT_GRANTED_V1 => {
                     let grant = ConsentGranted::decode(&event.payload)?;
-                    self.record_grant_on_timeline(timeline_id, &grant);
+                    let _ = self.record_grant_on_timeline(timeline_id, &grant);
                 }
                 EVENT_TYPE_CONSENT_REVOKED_V1 => {
                     let revocation = ConsentRevoked::decode(&event.payload)?;

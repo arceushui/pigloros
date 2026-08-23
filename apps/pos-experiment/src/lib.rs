@@ -1135,7 +1135,11 @@ impl ExperimentSession {
             {
                 Ok(count) => {
                     let head = match lock_store(&self.store)
-                        .and_then(|store| store.logical_head(self.timeline.id()))
+                        .and_then(|store| {
+                            store
+                                .logical_head(self.timeline.id())
+                                .map_err(ExperimentError::from)
+                        })
                     {
                         Ok(head) => head,
                         Err(error) => {
@@ -1191,21 +1195,14 @@ impl ExperimentSession {
         let subject_id = consent_marker_entity(subject);
         let emitted_events = lock_store(&self.store)
             .and_then(|mut store| {
-                store
-                    .logical_head(self.timeline.id())
-                    .map(|_head| {
-                        EventDraft::new(
-                            subject_id,
-                            Kind::new(EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE),
-                            pos_core::event::CanonicalBytes::from_static(b"closed"),
-                        )
-                    })
-                    .and_then(|draft| {
-                        store
-                            .append(self.timeline.id(), std::slice::from_ref(&draft))
-                            .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
-                            .map_err(ExperimentError::from)
-                    })
+                let _head = store.logical_head(self.timeline.id())?;
+                let draft = EventDraft::new(
+                    subject_id,
+                    Kind::new(EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE),
+                    pos_core::event::CanonicalBytes::from_static(b"closed"),
+                );
+                let events = store.append(self.timeline.id(), std::slice::from_ref(&draft))?;
+                Ok(u64::try_from(events.len()).unwrap_or(u64::MAX))
             })
             .inspect_err(|_| {
                 self.health = SessionHealth::Faulted;
