@@ -3600,6 +3600,12 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn public_selected_caps_authoritatively_bound_each_resource() {
+        assert_selected_caps_bound_inventory_and_members();
+        assert_selected_caps_bound_compression_and_requests();
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn assert_selected_caps_bound_inventory_and_members() {
         let mut too_many_members = profile();
         too_many_members
             .evaluator_protocol
@@ -3619,20 +3625,20 @@ mod tests {
             Err(ConformanceContractError::FieldOutOfBounds)
         );
 
-        for (field, expected) in [
-            ("path", ConformanceContractError::FieldOutOfBounds),
-            ("member", ConformanceContractError::FieldOutOfBounds),
-            ("total", ConformanceContractError::FieldOutOfBounds),
-        ] {
+        for field in ["path", "member", "total"] {
             let mut value = profile();
-            match field {
-                "path" => value.evaluator_protocol.hard_caps.max_member_path_bytes = 1,
-                "member" => value.evaluator_protocol.hard_caps.max_member_bytes = 11,
-                "total" => value.evaluator_protocol.hard_caps.max_total_bundle_bytes = 11,
-                _ => unreachable!(),
+            if field == "path" {
+                value.evaluator_protocol.hard_caps.max_member_path_bytes = 1;
+            } else if field == "member" {
+                value.evaluator_protocol.hard_caps.max_member_bytes = 11;
+            } else {
+                value.evaluator_protocol.hard_caps.max_total_bundle_bytes = 11;
             }
             value.profile_digest = value.digest();
-            assert_eq!(value.validate(), Err(expected));
+            assert_eq!(
+                value.validate(),
+                Err(ConformanceContractError::FieldOutOfBounds)
+            );
         }
 
         let mut divergence = profile();
@@ -3643,7 +3649,7 @@ mod tests {
         divergence.allowed_divergences = vec![declared.clone()];
         divergence.fixtures[0].expected = ExpectedResultV1::AllowedDivergence {
             classification: declared.classification,
-            first_coordinate: declared.first_coordinate.clone(),
+            first_coordinate: declared.first_coordinate,
         };
         divergence.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::Diverged;
         divergence.evaluator_protocol.hard_caps.max_coordinate_bytes = 1;
@@ -3665,7 +3671,10 @@ mod tests {
             ),
             Err(ConformanceContractError::FieldOutOfBounds)
         );
+    }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn assert_selected_caps_bound_compression_and_requests() {
         let caps = original_hard_caps();
         assert_eq!(caps.validate_compression_expansion(1, 1), Ok(()));
         assert_eq!(
@@ -3694,6 +3703,8 @@ mod tests {
             request.validate_with_hard_caps(&request_caps),
             Err(ConformanceContractError::FieldOutOfBounds)
         );
+        request_caps = original_hard_caps();
+        assert_eq!(request.validate_with_hard_caps(&request_caps), Ok(()));
 
         let mut expected_bytes = profile();
         expected_bytes.fixtures[0].inputs[0].size_bytes = 1;
@@ -3710,6 +3721,26 @@ mod tests {
         request_caps.max_diagnostic_bytes = 1;
         assert_eq!(
             request.validate_with_hard_caps(&request_caps),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_stable_case_coordinates_obey_selected_cap() {
+        let mut limited = profile();
+        limited.evaluator_protocol.hard_caps.max_coordinate_bytes = 1;
+        let candidate = limited
+            .transition_to(ProfileLifecycleV1::Candidate, vec![])
+            .unwrap_or_else(|_| profile());
+        let mut first = stable_evidence("alpha", 30);
+        first.case_outcomes[0].first_coordinate = Some(vec![b'x'; 2]);
+        first.report_digest = stable_report_digest(&first);
+        assert_eq!(
+            candidate.transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![first, stable_evidence("beta", 40)],
+            ),
             Err(ConformanceContractError::FieldOutOfBounds)
         );
     }
@@ -4259,7 +4290,12 @@ mod tests {
             accepted = matching.clone();
         }
 
-        // Every hard-cap field is independently bounded.
+        assert_public_hard_cap_boundaries_are_fail_closed();
+        assert_public_fixture_boundaries_are_fail_closed();
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn assert_public_hard_cap_boundaries_are_fail_closed() {
         let reject_cap = |change: &dyn Fn(&mut EvaluatorHardCapsV1)| {
             let mut caps = original_hard_caps();
             change(&mut caps);
@@ -4287,9 +4323,10 @@ mod tests {
         reject_cap(&|c| c.max_coordinate_bytes = 0);
         reject_cap(&|c| c.max_coordinate_bytes = 129);
         reject_cap(&|c| c.max_diagnostic_bytes = MAX_DIAGNOSTIC_BYTES + 1);
+    }
 
-        // A zero in each independent fixture bound is rejected by the public
-        // profile validator.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn assert_public_fixture_boundaries_are_fail_closed() {
         for bounds in zero_bound_variants() {
             let mut value = profile();
             value.fixtures[0].bounds = bounds;
