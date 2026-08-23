@@ -11,7 +11,7 @@ use pos_core::{
     clock::Seq,
     event::{Event, EventDraft, Kind},
     ids::PluginId,
-    ActionApprover, ActionRejected, ConsentAuthority, ConsentCapabilityToken, ConsentError, Plugin,
+    ActionApprover, ActionRejected, ConsentAuthority, ConsentCapabilityToken, Plugin,
     ProposedAction, Reducer, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
 use pos_state::ProjectionRegistry;

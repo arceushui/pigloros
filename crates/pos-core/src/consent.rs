@@ -276,7 +276,7 @@ impl ConsentGranted {
     ///
     /// # Errors
     /// Returns a closed codec error when a field is outside the V1 contract.
-    pub fn validate(&self) -> Result<(), ConsentCodecError> {
+    pub const fn validate(&self) -> Result<(), ConsentCodecError> {
         if self.purpose.len() > MAX_PURPOSE_BYTES {
             return Err(ConsentCodecError::PurposeTooLong {
                 size: self.purpose.len(),
@@ -499,6 +499,8 @@ struct ActiveConsent {
     expiry_secs: u32,
 }
 
+type ActiveConsentSessions = HashMap<(EntityId, EntityId, u64), ActiveConsent>;
+
 /// Host-owned authority that issues and invalidates consent capabilities.
 ///
 /// Its identity and active sessions are private. A capability minted by a
@@ -506,7 +508,7 @@ struct ActiveConsent {
 #[derive(Clone)]
 pub struct ConsentAuthority {
     authority_id: u64,
-    active: Arc<Mutex<HashMap<(EntityId, EntityId, u64), ActiveConsent>>>,
+    active: Arc<Mutex<ActiveConsentSessions>>,
 }
 
 static NEXT_CONSENT_AUTHORITY_ID: AtomicU64 = AtomicU64::new(1);
@@ -552,6 +554,9 @@ impl ConsentAuthority {
     }
 
     /// Apply a durable revocation to the matching host session.
+    ///
+    /// # Errors
+    /// Returns [`ConsentError::NoConsent`] when no active session matches.
     pub fn record_revocation(&self, revocation: &ConsentRevoked) -> Result<(), ConsentError> {
         let key = (
             revocation.subject_id,
@@ -566,10 +571,15 @@ impl ConsentAuthority {
             return Err(ConsentError::NoConsent);
         };
         active.token.fence_seq = active.token.fence_seq.min(revocation.fence_seq);
+        drop(sessions);
         Ok(())
     }
 
     /// Revalidate an exact host session at an operation or commit fence.
+    ///
+    /// # Errors
+    /// Returns a closed consent error when the authority, session, fence, or
+    /// expiry does not admit this operation.
     pub fn validate(
         &self,
         token: &ConsentCapabilityToken,
@@ -593,6 +603,7 @@ impl ConsentAuthority {
         if active.expiry_secs != 0 && now_secs >= u64::from(active.expiry_secs) {
             return Err(ConsentError::Expired);
         }
+        drop(sessions);
         Ok(())
     }
 }
