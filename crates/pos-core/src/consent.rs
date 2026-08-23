@@ -739,13 +739,6 @@ impl ConsentAuthority {
         }
     }
 
-    /// Record one durably committed grant and mint its opaque capability.
-    #[must_use]
-    #[cfg(test)]
-    pub fn record_grant(&self, grant: &ConsentGranted) -> ConsentCapabilityToken {
-        self.record_grant_on_timeline(TimelineId::new(), grant)
-    }
-
     /// Record a durably committed grant bound to one Timeline.
     #[must_use]
     pub fn record_grant_on_timeline(
@@ -790,16 +783,6 @@ impl ConsentAuthority {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         sessions.insert(key, active);
         token
-    }
-
-    /// Confirm that a durable revocation names an active host session.
-    ///
-    /// # Errors
-    /// Returns [`ConsentError::NoConsent`] when no active session matches.
-    #[cfg(test)]
-    pub fn validate_revocation(&self, revocation: &ConsentRevoked) -> Result<(), ConsentError> {
-        let timeline_id = self.find_timeline_for(revocation)?;
-        self.validate_revocation_on_timeline(timeline_id, revocation)
     }
 
     /// Confirm that a durable revocation names an active session on a Timeline.
@@ -915,17 +898,6 @@ impl ConsentAuthority {
         Ok(())
     }
 
-    /// Apply a durable revocation to its matching host session.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConsentError::NoConsent`] when no active session matches.
-    #[cfg(test)]
-    pub fn record_revocation(&self, revocation: &ConsentRevoked) -> Result<(), ConsentError> {
-        let timeline_id = self.find_timeline_for(revocation)?;
-        self.record_revocation_on_timeline(timeline_id, revocation)
-    }
-
     /// Apply a durable revocation to its matching Timeline-bound session.
     ///
     /// # Errors
@@ -963,21 +935,6 @@ impl ConsentAuthority {
             }
         }
         Ok(())
-    }
-
-    /// Revalidate an exact host session at an operation or commit fence.
-    ///
-    /// # Errors
-    /// Returns a closed consent error when the authority, session, fence, or
-    /// expiry does not admit this operation.
-    #[cfg(test)]
-    pub fn validate(
-        &self,
-        token: &ConsentCapabilityToken,
-        timeline_head: u64,
-        now_secs: u64,
-    ) -> Result<(), ConsentError> {
-        self.validate_on_timeline(token.timeline_id, token, timeline_head, now_secs)
     }
 
     /// Revalidate an exact host session against its bound Timeline.
@@ -1078,21 +1035,6 @@ impl ConsentAuthority {
             }
         }
         Ok(())
-    }
-
-    #[cfg(test)]
-    fn find_timeline_for(&self, revocation: &ConsentRevoked) -> Result<TimelineId, ConsentError> {
-        self.active
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .keys()
-            .find(|(_, subject_id, grantee_id, grant_seq)| {
-                *subject_id == revocation.subject_id
-                    && *grantee_id == revocation.grantee_id
-                    && *grant_seq == revocation.grant_seq
-            })
-            .map(|(timeline_id, _, _, _)| *timeline_id)
-            .ok_or(ConsentError::NoConsent)
     }
 }
 
@@ -1401,6 +1343,15 @@ mod tests {
             grant_seq: grant.grant_seq,
             fence_seq: 100,
         }
+    }
+
+    fn record_test_grant(
+        authority: &ConsentAuthority,
+        grant: &ConsentGranted,
+    ) -> (TimelineId, ConsentCapabilityToken) {
+        let timeline = TimelineId::new();
+        let token = authority.record_grant_on_timeline(timeline, grant);
+        (timeline, token)
     }
 
     #[test]
@@ -1827,8 +1778,10 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn token_from_grant_starts_with_max_fence_seq() {
         let g = sample_granted();
-        let token = ConsentAuthority::new().record_grant(&g);
-        assert_eq!(token.fence_seq, u64::MAX);
+        let authority = ConsentAuthority::new();
+        let (_, token) = record_test_grant(&authority, &g);
+        assert!(token.is_valid_at(u64::MAX - 1));
+        assert!(!token.is_valid_at(u64::MAX));
         assert_eq!(token.grant_seq, g.grant_seq);
         assert_eq!(token.modalities, g.modalities);
         assert_eq!(token.subject_id, g.subject_id);
@@ -1843,7 +1796,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn token_is_valid_before_fence_seq() {
         let g = sample_granted();
-        let token = ConsentAuthority::new().record_grant(&g);
+        let authority = ConsentAuthority::new();
+        let (_, token) = record_test_grant(&authority, &g);
         assert!(token.is_valid_at(0));
         assert!(token.is_valid_at(u64::MAX - 1));
     }
@@ -1852,8 +1806,11 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn token_is_invalid_at_or_after_fence_seq() {
         let g = sample_granted();
-        let mut token = ConsentAuthority::new().record_grant(&g);
-        token.fence_seq = 100;
+        let authority = ConsentAuthority::new();
+        let (_, mut token) = record_test_grant(&authority, &g);
+        let mut revocation = sample_revoked(&g);
+        revocation.fence_seq = 100;
+        token.invalidate_with(&revocation).test_ok();
         assert!(!token.is_valid_at(100));
         assert!(!token.is_valid_at(200));
         assert!(token.is_valid_at(99));
@@ -1863,7 +1820,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn matching_revocation_only_tightens_a_token_fence() {
         let grant = sample_granted();
-        let mut token = ConsentAuthority::new().record_grant(&grant);
+        let authority = ConsentAuthority::new();
+        let (_, mut token) = record_test_grant(&authority, &grant);
         let revocation = sample_revoked(&grant);
         assert!(token.invalidate_with(&revocation).is_ok());
         assert!(!token.is_valid_at(revocation.fence_seq));
@@ -1879,7 +1837,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn nonmatching_revocation_is_not_applied() {
         let grant = sample_granted();
-        let mut token = ConsentAuthority::new().record_grant(&grant);
+        let authority = ConsentAuthority::new();
+        let (_, mut token) = record_test_grant(&authority, &grant);
         let mut revocation = sample_revoked(&grant);
         revocation.grant_seq += 1;
         assert_eq!(
@@ -1893,7 +1852,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn revocation_must_match_every_token_identity_component() {
         let grant = sample_granted();
-        let mut token = ConsentAuthority::new().record_grant(&grant);
+        let authority = ConsentAuthority::new();
+        let (_, mut token) = record_test_grant(&authority, &grant);
 
         let mut wrong_subject = sample_revoked(&grant);
         wrong_subject.subject_id = EntityId::new();
@@ -1916,17 +1876,19 @@ mod tests {
         let authority = ConsentAuthority::new();
         let mut grant = sample_granted();
         grant.expiry_secs = 20;
-        let token = authority.record_grant(&grant);
+        let (timeline, token) = record_test_grant(&authority, &grant);
 
         assert_eq!(token.grant_seq(), grant.grant_seq);
 
-        assert!(authority.validate(&token, 1, 19).is_ok());
+        assert!(authority
+            .validate_on_timeline(timeline, &token, 1, 19)
+            .is_ok());
         assert_eq!(
-            authority.validate(&token, 1, 20),
+            authority.validate_on_timeline(timeline, &token, 1, 20),
             Err(ConsentError::Expired)
         );
         assert_eq!(
-            ConsentAuthority::new().validate(&token, 1, 19),
+            ConsentAuthority::new().validate_on_timeline(timeline, &token, 1, 19),
             Err(ConsentError::NoConsent)
         );
 
@@ -1936,17 +1898,24 @@ mod tests {
             grant_seq: grant.grant_seq,
             fence_seq: 2,
         };
-        assert!(authority.validate_revocation(&revocation).is_ok());
-        assert!(authority.record_revocation(&revocation).is_ok());
+        assert!(authority
+            .validate_revocation_on_timeline(timeline, &revocation)
+            .is_ok());
+        assert!(authority
+            .record_revocation_on_timeline(timeline, &revocation)
+            .is_ok());
         assert_eq!(
-            authority.validate(&token, 2, 19),
+            authority.validate_on_timeline(timeline, &token, 2, 19),
             Err(ConsentError::Revoked)
         );
         assert_eq!(
-            authority.validate_revocation(&ConsentRevoked {
-                grant_seq: grant.grant_seq + 1,
-                ..revocation
-            }),
+            authority.validate_revocation_on_timeline(
+                timeline,
+                &ConsentRevoked {
+                    grant_seq: grant.grant_seq + 1,
+                    ..revocation
+                },
+            ),
             Err(ConsentError::NoConsent)
         );
     }
@@ -1956,12 +1925,15 @@ mod tests {
     fn host_authority_rejects_a_changed_token_even_when_the_active_token_is_unfenced() {
         let authority = ConsentAuthority::new();
         let grant = sample_granted();
-        let token = authority.record_grant(&grant);
-        let mut changed = token;
-        changed.fence_seq = 0;
+        let (timeline, token) = record_test_grant(&authority, &grant);
+        let mut revocation = sample_revoked(&grant);
+        revocation.fence_seq = 0;
+        authority
+            .record_revocation_on_timeline(timeline, &revocation)
+            .test_ok();
 
         assert_eq!(
-            authority.validate(&changed, 0, 0),
+            authority.validate_on_timeline(timeline, &token, 0, 0),
             Err(ConsentError::Revoked)
         );
     }
@@ -1970,9 +1942,10 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn default_authority_fails_closed_for_an_unrecorded_foreign_session() {
         let grant = sample_granted();
-        let token = ConsentAuthority::new().record_grant(&grant);
+        let authority = ConsentAuthority::new();
+        let (timeline, token) = record_test_grant(&authority, &grant);
         assert_eq!(
-            ConsentAuthority::default().validate(&token, 0, 0),
+            ConsentAuthority::default().validate_on_timeline(timeline, &token, 0, 0),
             Err(ConsentError::NoConsent)
         );
     }
@@ -1981,6 +1954,7 @@ mod tests {
 
     struct TestGate {
         token: ConsentCapabilityToken,
+        fence_seq: u64,
     }
 
     impl ConsentGate for TestGate {
@@ -1995,7 +1969,7 @@ mod tests {
             if event_type.as_str().starts_with("consent.") {
                 return Err(ConsentError::ConsentEventsForbidden);
             }
-            if !self.token.is_valid_at(timeline_head) {
+            if self.fence_seq <= timeline_head {
                 return Err(ConsentError::Revoked);
             }
             Ok(self.token.clone())
@@ -2004,9 +1978,9 @@ mod tests {
 
     fn test_gate(fence_seq: u64) -> TestGate {
         let g = sample_granted();
-        let mut token = ConsentAuthority::new().record_grant(&g);
-        token.fence_seq = fence_seq;
-        TestGate { token }
+        let authority = ConsentAuthority::new();
+        let (_, token) = record_test_grant(&authority, &g);
+        TestGate { token, fence_seq }
     }
 
     impl TestGate {
@@ -2688,6 +2662,9 @@ mod tests {
         let missing_reservation = missing_authority
             .begin_revocation_on_timeline(missing_timeline, &missing_revocation)
             .test_ok();
+        // A public API can replace this session but cannot remove it after
+        // reservation; remove it here to exercise the fail-closed disappearance
+        // branch of the public reservation finalizer.
         missing_authority
             .active
             .lock()
