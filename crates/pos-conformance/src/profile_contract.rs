@@ -5,10 +5,9 @@
 //! evaluator identity, independence evidence, and lifecycle claim.
 
 use crate::{
-    CaseOutcomeStatusV1, ClaimLayerV1, DivergenceMismatchKindV1, ExecutionModeV1,
-    ConformanceReportV1, ImplementationIdentityV1, IndependenceEvidenceV1,
-    ProfileCaseOutcomeV1, RedactionStateV1, ReplayClaimV1, SafeErrorCodeV1,
-    VerificationOutcomeV1,
+    CaseOutcomeStatusV1, ClaimLayerV1, ConformanceReportV1, DivergenceMismatchKindV1,
+    ExecutionModeV1, ImplementationIdentityV1, IndependenceEvidenceV1, ProfileCaseOutcomeV1,
+    RedactionStateV1, ReplayClaimV1, SafeErrorCodeV1, VerificationOutcomeV1,
 };
 use ciborium::value::Value;
 use std::collections::BTreeSet;
@@ -200,10 +199,7 @@ impl EvaluatorHardCapsV1 {
     /// Return the canonical identity of this exact hard-cap record.
     #[must_use]
     pub fn digest(&self) -> [u8; 32] {
-        digest_bytes(
-            b"PiglorOS.EvaluatorHardCaps.v1",
-            &encode_hard_caps(self),
-        )
+        digest_bytes(b"PiglorOS.EvaluatorHardCaps.v1", &encode_hard_caps(self))
     }
 
     /// Validate a report or fixture case count against the selected cap.
@@ -3961,10 +3957,8 @@ mod tests {
 
         let mut mismatched_report = stable_evidence("alpha", 30);
         mismatched_report.report.profile_digest = digest(99);
-        mismatched_report.report.report_digest = mismatched_report
-            .report
-            .digest()
-            .unwrap_or([0; 32]);
+        mismatched_report.report.report_digest =
+            mismatched_report.report.digest().unwrap_or([0; 32]);
         assert_eq!(
             candidate().transition_to(
                 ProfileLifecycleV1::Stable,
@@ -4015,8 +4009,8 @@ mod tests {
         second.case_outcomes.truncate(1);
         first.case_outcomes[0].fixture_digest = fixture_digest(&candidate.fixtures[0]);
         second.case_outcomes[0].fixture_digest = fixture_digest(&candidate.fixtures[0]);
-        refresh_stable_report(&mut first);
-        refresh_stable_report(&mut second);
+        refresh_stable_report_for_profile(&mut first, &candidate);
+        refresh_stable_report_for_profile(&mut second, &candidate);
         assert!(candidate
             .transition_to(ProfileLifecycleV1::Stable, vec![first, second])
             .is_ok());
@@ -4292,10 +4286,14 @@ mod tests {
         let required_candidate = required
             .transition_to(ProfileLifecycleV1::Candidate, vec![])
             .unwrap_or_else(|_| profile());
+        let mut required_stable_first = stable_evidence("alpha", 30);
+        let mut required_stable_second = stable_evidence("beta", 40);
+        refresh_stable_report_for_profile(&mut required_stable_first, &required_candidate);
+        refresh_stable_report_for_profile(&mut required_stable_second, &required_candidate);
         assert!(required_candidate
             .transition_to(
                 ProfileLifecycleV1::Stable,
-                vec![stable_evidence("alpha", 30), stable_evidence("beta", 40)],
+                vec![required_stable_first, required_stable_second],
             )
             .is_ok());
         let mut required_first = stable_evidence("alpha", 30);

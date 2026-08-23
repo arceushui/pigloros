@@ -3723,10 +3723,7 @@ pub mod strict_codec {
         Ok(domain_digest(b"PiglorOS.ConformanceReport.v1", &bytes))
     }
 
-    pub(crate) fn encode_report_value(
-        report: &ConformanceReportV1,
-        include_digest: bool,
-    ) -> Value {
+    pub(crate) fn encode_report_value(report: &ConformanceReportV1, include_digest: bool) -> Value {
         let mut fields = vec![
             text(CONFORMANCE_REPORT_MAGIC_V1),
             uint(1),
@@ -4322,7 +4319,10 @@ pub mod strict_codec {
                 case_with_all_optionals.expected_error = Some(SafeErrorCodeV1::DigestMismatch);
                 case_with_all_optionals.actual_error = Some(SafeErrorCodeV1::ResourceLimitExceeded);
                 consume(decode_case(&encode_case(&case_with_all_optionals)));
-                consume(decode_report(&encode_report_value(&contract.conformance_report, true)));
+                consume(decode_report(&encode_report_value(
+                    &contract.conformance_report,
+                    true,
+                )));
                 let report_value_all_fields =
                     encode_report_value(&contract.conformance_report, true);
                 reject_each_field(&report_value_all_fields, decode_report);
@@ -6888,8 +6888,8 @@ pub mod tests {
         );
 
         for index in 0..23 {
-            let mut fields = ciborium::from_reader::<Value, _>(Cursor::new(&bytes))
-                .unwrap_or(Value::Null);
+            let mut fields =
+                ciborium::from_reader::<Value, _>(Cursor::new(&bytes)).unwrap_or(Value::Null);
             if let Value::Array(ref mut values) = fields {
                 values[index] = Value::Null;
             }
@@ -6901,8 +6901,8 @@ pub mod tests {
             );
         }
 
-        let mut tampered_digest = ciborium::from_reader::<Value, _>(Cursor::new(&bytes))
-            .unwrap_or(Value::Null);
+        let mut tampered_digest =
+            ciborium::from_reader::<Value, _>(Cursor::new(&bytes)).unwrap_or(Value::Null);
         if let Value::Array(ref mut values) = tampered_digest {
             values[22] = Value::Bytes(vec![0; 32]);
         }
