@@ -114,7 +114,7 @@ impl LedgerStore for TomlLedgerStore {
 
     fn register(&mut self, new: NewPrediction) -> Result<String, LedgerError> {
         new.validate()?;
-        let prediction = new.into_prediction(ulid::Ulid::r#gen().to_string());
+        let prediction = new.into_prediction(ulid::Ulid::generate().to_string());
         std::fs::create_dir_all(self.predictions_dir())?;
         let path = self
             .predictions_dir()

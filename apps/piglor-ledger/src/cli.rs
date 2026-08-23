@@ -510,7 +510,7 @@ mod tests {
     #[test]
     fn keygen_accepts_relative_path_in_private_directory() -> Result<(), Box<dyn std::error::Error>>
     {
-        let key_path = PathBuf::from(format!(".keygen-relative-{}.key", ulid::Ulid::r#gen()));
+        let key_path = PathBuf::from(format!(".keygen-relative-{}.key", ulid::Ulid::generate()));
 
         run_keygen(&key_path).test_ok()?;
 
