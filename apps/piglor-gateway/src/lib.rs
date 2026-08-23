@@ -484,6 +484,7 @@ pub const MAX_EVENTS_PER_TIMELINE: u64 = 10_000;
 pub const EVENT_BUS_CAPACITY: usize = 256;
 
 const CONSENT_LOCK_STRIPES: usize = 64;
+const CONSENT_LOCK_STRIPES_U64: u64 = 64;
 
 type ConsentHistoryLocks = Vec<Arc<tokio::sync::Mutex<()>>>;
 
@@ -883,7 +884,8 @@ impl Gateway {
     ) -> tokio::sync::OwnedMutexGuard<()> {
         let mut hasher = DefaultHasher::new();
         timeline.hash(&mut hasher);
-        let stripe = (hasher.finish() as usize) % CONSENT_LOCK_STRIPES;
+        let stripe = usize::try_from(hasher.finish() % CONSENT_LOCK_STRIPES_U64)
+            .unwrap_or_default();
         let lock = Arc::clone(&self.consent_history_locks[stripe]);
         lock.lock_owned().await
     }
