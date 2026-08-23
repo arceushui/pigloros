@@ -414,7 +414,7 @@ impl ConsentCapabilityToken {
     /// `fence_seq` starts at `u64::MAX` and is updated to the revocation
     /// `fence_seq` when a matching `consent.revoked.v1` is folded.
     #[must_use]
-    pub fn from_grant(grant: &ConsentGranted) -> Self {
+    pub const fn from_grant(grant: &ConsentGranted) -> Self {
         Self {
             subject_id: grant.subject_id,
             grantee_id: grant.grantee_id,
@@ -428,7 +428,7 @@ impl ConsentCapabilityToken {
     ///
     /// Valid when `fence_seq > timeline_head`.
     #[must_use]
-    pub fn is_valid_at(&self, timeline_head: u64) -> bool {
+    pub const fn is_valid_at(&self, timeline_head: u64) -> bool {
         self.fence_seq > timeline_head
     }
 
