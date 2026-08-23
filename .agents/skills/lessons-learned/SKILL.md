@@ -121,4 +121,4 @@ This is an internal PiglorOS skill and the canonical source of durable project l
 
 ## Pre-flight verification
 
-Before delivery, re-read this file and check every applicable rule against the diff, commands, records, and handoff. Execute each embedded command once against real data and inspect its output before relying on it. Do not report completion until the required local, hosted, and external-record checks are evidenced.
+Before delivery, re-read this file and check every applicable rule against the diff, commands, records, and handoff. Execute each read-only or explicitly authorized embedded command once against real data and inspect its output before relying on it; for destructive examples, validate the syntax and exact target without running them unless the task authorizes that mutation. Do not report completion until the required local, hosted, and external-record checks are evidenced.
