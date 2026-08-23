@@ -838,7 +838,7 @@ impl PluginRegistry {
         let pending_timeline = pending.timeline;
         let operation = pending.operation.clone();
         let events = match operation {
-            OperationContext::Protected { token, now_secs } => {
+            OperationContext::Protected { token, now_secs: _ } => {
                 let gate = self
                     .consent_gate
                     .as_ref()
