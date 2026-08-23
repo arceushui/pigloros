@@ -6817,7 +6817,10 @@ pub mod tests {
     fn public_cnr1_codec_validates_shape_and_fields_zero_through_twenty_two() {
         let report = test_report();
         let bytes = report.to_canonical_cbor().unwrap_or_default();
-        assert_eq!(ConformanceReportV1::from_canonical_cbor(&bytes), Ok(report));
+        assert_eq!(
+            ConformanceReportV1::from_canonical_cbor(&bytes),
+            Ok(report.clone())
+        );
 
         let mut trailing = bytes.clone();
         trailing.push(0);

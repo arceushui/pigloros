@@ -3214,8 +3214,8 @@ mod tests {
 
     #[test]
     fn stable_validation_requires_external_root_membership_and_policy_identity() {
-        let candidate = candidate();
-        let stable = candidate
+        let candidate_profile = candidate();
+        let stable = candidate_profile
             .transition_to(
                 ProfileLifecycleV1::Stable,
                 vec![stable_evidence("alpha", 30), stable_evidence("beta", 40)],
