@@ -954,6 +954,8 @@ fn validate_stable_evidence(
     }
     let first = &profile.stable_evidence[0];
     let second = &profile.stable_evidence[1];
+    validate_identity(&first.implementation)?;
+    validate_identity(&second.implementation)?;
     if first.implementation.implementation_id >= second.implementation.implementation_id
         || first.implementation.source_digest == second.implementation.source_digest
         || first.implementation.build_digest == second.implementation.build_digest
@@ -1493,22 +1495,16 @@ fn semantic_version(value: &str) -> bool {
     if value.is_empty() || value.len() > MAX_STRING_BYTES {
         return false;
     }
-    let (core_and_prerelease, build) = value.split_once('+').map_or((value, ""), |parts| {
-        if parts.1.is_empty() {
-            (parts.0, "")
-        } else {
-            (parts.0, parts.1)
-        }
-    });
-    if value.ends_with('+') {
-        return false;
-    }
-    let (core, prerelease) = core_and_prerelease
-        .split_once('-')
-        .map_or((core_and_prerelease, ""), |parts| (parts.0, parts.1));
-    if core_and_prerelease.ends_with('-') {
-        return false;
-    }
+    let (core_and_prerelease, build) = match value.split_once('+') {
+        Some((core, build)) if !build.is_empty() => (core, build),
+        Some(_) => return false,
+        None => (value, ""),
+    };
+    let (core, prerelease) = match core_and_prerelease.split_once('-') {
+        Some((core, prerelease)) if !prerelease.is_empty() => (core, prerelease),
+        Some(_) => return false,
+        None => (core_and_prerelease, ""),
+    };
     let core_parts = core.split('.').collect::<Vec<_>>();
     core_parts.len() == 3
         && core_parts.iter().all(|part| numeric_identifier(part))
