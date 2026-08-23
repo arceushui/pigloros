@@ -1889,6 +1889,21 @@ mod tests {
         Gateway::new(open_store(StoreConfig::Memory).test_ok())
     }
 
+    fn consent_grant(subject_id: EntityId, grant_seq: u64) -> ConsentGrantedV1 {
+        ConsentGrantedV1 {
+            subject_id,
+            grantee_id: EntityId::new(),
+            purpose: "contract-test".to_owned(),
+            modalities: pos_core::MODALITY_LOCATION,
+            min_geo_resolution: 1,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq,
+        }
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_body_constructor_without_principal_is_fail_closed() {
@@ -2517,6 +2532,69 @@ mod tests {
         assert_eq!(page.events[0].id, event.id);
         assert_eq!(page.next_from_seq, None);
         drop(gw);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn gateway_issues_only_canonical_consent_events_at_the_bound_sequence() {
+        let gateway = memory_gw();
+        let timeline = gateway.create_timeline("consent-host").await.test_ok();
+        let grant = consent_grant(EntityId::new(), 1);
+
+        let (grant_event, token) = gateway
+            .issue_consent_grant(&timeline.id().to_string(), grant.clone())
+            .await
+            .test_ok();
+        assert_eq!(
+            grant_event.event_type.as_str(),
+            EVENT_TYPE_CONSENT_GRANTED_V1
+        );
+        assert_eq!(
+            ConsentGrantedV1::decode(&grant_event.payload).test_ok(),
+            grant
+        );
+        assert_eq!(token.grant_seq, 1);
+
+        let revocation = ConsentRevokedV1 {
+            subject_id: token.subject_id,
+            grantee_id: token.grantee_id,
+            grant_seq: token.grant_seq,
+            fence_seq: 2,
+        };
+        let revocation_event = gateway
+            .issue_consent_revocation(&timeline.id().to_string(), revocation.clone())
+            .await
+            .test_ok();
+        assert_eq!(
+            revocation_event.event_type.as_str(),
+            EVENT_TYPE_CONSENT_REVOKED_V1
+        );
+        assert_eq!(
+            ConsentRevokedV1::decode(&revocation_event.payload).test_ok(),
+            revocation
+        );
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn gateway_rejects_a_consent_grant_with_a_stale_sequence_before_append() {
+        let gateway = memory_gw();
+        let timeline = gateway.create_timeline("consent-sequence").await.test_ok();
+        let error = gateway
+            .issue_consent_grant(
+                &timeline.id().to_string(),
+                consent_grant(EntityId::new(), 0),
+            )
+            .await
+            .test_err();
+        assert!(matches!(error, GatewayError::ConsentGrantSequenceMismatch));
+        let page = gateway
+            .read_events_page(&timeline.id().to_string(), 0, 1)
+            .await
+            .test_ok();
+        assert!(page.events.is_empty());
+        drop(gateway);
     }
 
     #[tokio::test]

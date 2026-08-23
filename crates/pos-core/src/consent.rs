@@ -573,6 +573,19 @@ mod tests {
         }
     }
 
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn only_exact_gateway_consent_event_types_are_reserved() {
+        assert!(is_consent_event_type(&Kind::new(
+            EVENT_TYPE_CONSENT_GRANTED_V1
+        )));
+        assert!(is_consent_event_type(&Kind::new(
+            EVENT_TYPE_CONSENT_REVOKED_V1
+        )));
+        assert!(!is_consent_event_type(&Kind::new("consent.granted.v2")));
+        assert!(!is_consent_event_type(&Kind::new("world.observation.v1")));
+    }
+
     // -- ConsentGranted --
 
     #[test]
@@ -649,6 +662,19 @@ mod tests {
             ConsentGranted::decode(&CanonicalBytes::from_vec(bytes)),
             Err(ConsentCodecError::TrailingBytes)
         ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn consent_granted_non_canonical_array_encoding_is_rejected() {
+        let grant = sample_granted();
+        let canonical = grant.encode().test_ok();
+        let mut non_canonical = vec![0x98, 12];
+        non_canonical.extend_from_slice(&canonical.as_slice()[1..]);
+        assert_eq!(
+            ConsentGranted::decode(&CanonicalBytes::from_vec(non_canonical)).test_err(),
+            ConsentCodecError::NonCanonicalEncoding
+        );
     }
 
     #[test]
@@ -822,6 +848,35 @@ mod tests {
             ConsentGranted::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::WrongFieldType)
         ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn consent_granted_decoding_rejects_overlong_purpose_and_unknown_bounds() {
+        let grant = sample_granted();
+        let bytes = grant.encode().test_ok().as_slice().to_vec();
+        let mut cursor = std::io::Cursor::new(bytes.as_slice());
+        let mut value: Value = ciborium::from_reader(&mut cursor).test_ok();
+        if let Value::Array(items) = &mut value {
+            items[4] = Value::Text("x".repeat(MAX_PURPOSE_BYTES + 1));
+        }
+        let mut overlong = Vec::new();
+        ciborium::into_writer(&value, &mut overlong).test_ok();
+        assert!(matches!(
+            ConsentGranted::decode(&CanonicalBytes::from_vec(overlong)),
+            Err(ConsentCodecError::PurposeTooLong { .. })
+        ));
+
+        let mut value: Value = ciborium::from_reader(&mut std::io::Cursor::new(bytes)).test_ok();
+        if let Value::Array(items) = &mut value {
+            items[5] = Value::Integer(0x10_u8.into());
+        }
+        let mut out_of_bounds = Vec::new();
+        ciborium::into_writer(&value, &mut out_of_bounds).test_ok();
+        assert_eq!(
+            ConsentGranted::decode(&CanonicalBytes::from_vec(out_of_bounds)).test_err(),
+            ConsentCodecError::FieldOutOfBounds
+        );
     }
 
     // -- ConsentRevoked --
@@ -1078,6 +1133,14 @@ mod tests {
             redacted,
             FieldState::Present(CanonicalBytes::from_vec(vec![]))
         );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn field_state_redaction_is_irreversible() {
+        let erased = FieldState::Present(CanonicalBytes::from_vec(vec![0x01])).redacted_destroyed();
+        assert_eq!(erased, FieldState::RedactedDestroyed);
+        assert_eq!(erased.redacted_destroyed(), FieldState::RedactedDestroyed);
     }
 
     // -- Error display --

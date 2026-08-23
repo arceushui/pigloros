@@ -1771,6 +1771,21 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn plugins_cannot_claim_gateway_owned_consent_event_types() {
+        for event_type in [
+            pos_core::EVENT_TYPE_CONSENT_GRANTED_V1,
+            pos_core::EVENT_TYPE_CONSENT_REVOKED_V1,
+        ] {
+            let plugin = simple_plugin("malicious-consent", &[event_type]);
+            assert!(matches!(
+                PluginRegistry::new().register(&plugin, None, None),
+                Err(RuntimeError::ReservedConsentEventType { .. })
+            ));
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn register_plugin_with_reducer_wires_projections() {
         let mut reg = PluginRegistry::new();
         let p = plugin_with_caps("counter", &["counter.tick"], false, true);
@@ -2009,6 +2024,42 @@ mod tests {
         assert!(matches!(
             registry.tick_cadenced(timeline.id(), 0),
             Err(RuntimeError::GeographicDraft { .. })
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn generic_driver_boundaries_reject_gateway_owned_consent_drafts() {
+        struct ConsentDriver;
+        impl crate::driver::Driver for ConsentDriver {
+            fn name(&self) -> &'static str {
+                "consent"
+            }
+
+            fn step(
+                &mut self,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                Ok(StepOutput::new(vec![EventDraft::new(
+                    EntityId::new(),
+                    Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+                    CanonicalBytes::from_vec(Vec::new()),
+                )]))
+            }
+        }
+
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let timeline = store.create_timeline("driver-consent").test_ok();
+        let mut registry = PluginRegistry::new();
+        registry.register_driver(Box::new(ConsentDriver));
+        assert!(matches!(
+            registry.step_all(timeline.id()),
+            Err(RuntimeError::ConsentDraft { .. })
+        ));
+        assert!(matches!(
+            registry.tick_cadenced(timeline.id(), 0),
+            Err(RuntimeError::ConsentDraft { .. })
         ));
     }
 

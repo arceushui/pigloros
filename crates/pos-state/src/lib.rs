@@ -396,6 +396,34 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn valid_consent_revocation_evicts_each_subject_projection_cache() {
+        let mut registry = ProjectionRegistry::new();
+        registry.register("a", Box::new(EntityStateProjection));
+        registry.register("b", Box::new(EntityStateProjection));
+        let subject = EntityId::new();
+        let other = EntityId::new();
+        registry.apply_event(&make_event(subject));
+        registry.apply_event(&make_event(other));
+
+        let revocation = ConsentRevoked {
+            subject_id: subject,
+            grantee_id: EntityId::new(),
+            grant_seq: 1,
+            fence_seq: 2,
+        };
+        let mut event = make_event_typed(subject, EVENT_TYPE_CONSENT_REVOKED_V1);
+        event.payload = revocation.encode().unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("invalid revocation fixture: {error:?}")))
+        });
+        registry.apply_event(&event);
+
+        assert!(registry.state_for(&subject).is_none());
+        assert!(registry.state_for_reducer("b", &subject).is_none());
+        assert!(registry.state_for(&other).is_some());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_state_for_returns_first_reducers_view() {
         let mut registry = ProjectionRegistry::new();
         registry.register("first", Box::new(EntityStateProjection));
