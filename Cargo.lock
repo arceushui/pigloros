@@ -4143,7 +4143,7 @@ dependencies = [
  "pos-state",
  "pos-store",
  "pos-time",
- "rand 0.9.5",
+ "rand 0.10.2",
  "rusqlite",
  "serde",
  "serde_json",
