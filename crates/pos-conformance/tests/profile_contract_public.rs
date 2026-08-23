@@ -211,7 +211,7 @@ mod fixtures {
 
     pub(super) fn encode(value: Value) -> Vec<u8> {
         let mut bytes = Vec::new();
-        ciborium::into_writer(value, &mut bytes).unwrap_or_default();
+        ciborium::into_writer(&value, &mut bytes).unwrap_or_default();
         bytes
     }
 
