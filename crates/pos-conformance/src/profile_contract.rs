@@ -10,6 +10,7 @@ use crate::{
     ProfileCaseOutcomeV1, SafeErrorCodeV1, VerificationOutcomeV1,
 };
 use ciborium::value::Value;
+use std::collections::BTreeSet;
 use std::io::Cursor;
 
 /// Magic for the first immutable conformance-profile record.
@@ -219,6 +220,7 @@ pub struct StableImplementationEvidenceV1 {
     pub implementation: ImplementationIdentityV1,
     pub independence: IndependenceEvidenceV1,
     pub evaluator_protocol_digest: [u8; 32],
+    pub report_digest: [u8; 32],
     pub case_outcomes: Vec<CaseOutcomeV1>,
 }
 
@@ -568,6 +570,12 @@ fn validate_stable_evidence(
     {
         return Err(ConformanceContractError::IndependenceEvidenceMissing);
     }
+    if first.report_digest == [0; 32]
+        || second.report_digest == [0; 32]
+        || first.report_digest == second.report_digest
+    {
+        return Err(ConformanceContractError::IndependenceEvidenceMissing);
+    }
     validate_stable_implementation(first, profile)
         .and_then(|()| validate_stable_implementation(second, profile))
 }
@@ -576,6 +584,44 @@ fn validate_stable_implementation(
     evidence: &StableImplementationEvidenceV1,
     profile: &ConformanceProfileV1,
 ) -> Result<(), ConformanceContractError> {
+    let mut seen = BTreeSet::new();
+    if evidence.case_outcomes.is_empty()
+        || evidence
+            .case_outcomes
+            .windows(2)
+            .any(|pair| stable_case_key(&pair[0]) >= stable_case_key(&pair[1]))
+        || evidence.case_outcomes.iter().any(|case| {
+            !seen.insert(stable_case_key(case))
+                || !profile.fixtures.iter().any(|fixture| {
+                    fixture.case_id == case.case_id
+                        && fixture.claim_layer == case.claim_layer
+                        && fixture.modes.contains(&case.mode)
+                        && fixture_digest(fixture) == case.fixture_digest
+                })
+        })
+    {
+        return Err(ConformanceContractError::IndependenceEvidenceMissing);
+    }
+    let required = profile
+        .fixtures
+        .iter()
+        .filter(|fixture| fixture.mandatory)
+        .flat_map(|fixture| {
+            fixture.modes.iter().filter_map(move |mode| {
+                matches!(mode, ExecutionModeV1::Local | ExecutionModeV1::AirGapped).then(|| {
+                    (
+                        fixture.case_id.as_str(),
+                        *mode,
+                        fixture.claim_layer,
+                        fixture_digest(fixture),
+                    )
+                })
+            })
+        })
+        .collect::<BTreeSet<_>>();
+    if !required.iter().all(|key| seen.contains(key)) {
+        return Err(ConformanceContractError::IndependenceEvidenceMissing);
+    }
     validate_identity(&evidence.implementation)
         .and_then(|()| {
             validate_independence_evidence(
@@ -609,6 +655,10 @@ fn validate_stable_implementation(
                 Ok(())
             }
         })
+}
+
+fn stable_case_key(case: &CaseOutcomeV1) -> (&str, ExecutionModeV1, ClaimLayerV1, [u8; 32]) {
+    (&case.case_id, case.mode, case.claim_layer, case.fixture_digest)
 }
 
 fn case_matches_fixture(case: &CaseOutcomeV1, fixture: &FixtureDescriptorV1) -> bool {
@@ -1131,6 +1181,7 @@ fn encode_stable_evidence(value: &StableImplementationEvidenceV1) -> Value {
         encode_identity(&value.implementation),
         encode_independence(&value.independence),
         digest(&value.evaluator_protocol_digest),
+        digest(&value.report_digest),
         Value::Array(value.case_outcomes.iter().map(encode_case).collect()),
     ])
 }
@@ -1347,12 +1398,13 @@ fn decode_requirements(
 fn decode_stable_evidence(
     value: &Value,
 ) -> Result<StableImplementationEvidenceV1, ConformanceContractError> {
-    let fields = array(value, 4)?;
+    let fields = array(value, 5)?;
     Ok(StableImplementationEvidenceV1 {
         implementation: decode_identity(&fields[0])?,
         independence: decode_independence(&fields[1])?,
         evaluator_protocol_digest: digest_value(&fields[2])?,
-        case_outcomes: array_values(&fields[3])?
+        report_digest: digest_value(&fields[3])?,
+        case_outcomes: array_values(&fields[4])?
             .iter()
             .map(decode_case)
             .collect::<Result<Vec<_>, _>>()?,
@@ -2085,6 +2137,7 @@ mod tests {
                 reviewer_ids: vec![format!("reviewer-{seed}")],
             },
             evaluator_protocol_digest: digest(13),
+            report_digest: digest(seed.saturating_add(6)),
             case_outcomes: vec![
                 case_outcome_record(ExecutionModeV1::Local),
                 case_outcome_record(ExecutionModeV1::AirGapped),
