@@ -1896,11 +1896,11 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                 record.state = terminal;
                 Self::normalize_receipt_input(request, self.coordinator, record, input.clone())
                     .and_then(|normalized| {
-                        if !Self::receipt_input_matches_authority(&input, &normalized) {
-                            Err(ErasureErrorV1::PolicyConflict)
-                        } else {
+                        if Self::receipt_input_matches_authority(&input, &normalized) {
                             record.receipt_input = Some(input);
                             Ok(normalized)
+                        } else {
+                            Err(ErasureErrorV1::PolicyConflict)
                         }
                     })
             })

@@ -67,7 +67,7 @@ jobs:
             git diff --name-only --diff-filter=ACMR origin/main...HEAD -- '*.rs'
           )
           if ((${#changed_rust_files[@]} > 0)); then
-            rustfmt --check "${changed_rust_files[@]}"
+           rustfmt --edition 2021 --check "${changed_rust_files[@]}"
           fi
 
   rustdoc:

@@ -571,9 +571,15 @@ fn coordinator_exposes_unknown_and_port_failure_contracts() -> Result<(), Erasur
         Err(ErasureErrorV1::KeyDestructionFailed)
     );
 
-    let mut receipt_failed = test_port(true, vec![target]);
-    receipt_failed.receipt_error = Some(ErasureErrorV1::TrustSnapshotInvalid);
-    let mut coordinator = ErasureCoordinatorStateMachineV1::new(receipt_failed, reference(2));
+    Ok(())
+}
+
+#[test]
+fn coordinator_rejects_receipt_admission_after_terminal_derivation() -> Result<(), ErasureErrorV1> {
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let mut port = test_port(true, vec![target]);
+    port.receipt_error = Some(ErasureErrorV1::TrustSnapshotInvalid);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
     coordinator.submit(request()?, reference(3))?;
     coordinator.authorize(reference(1), reference(9))?;
     coordinator.freeze_inventory(
@@ -693,6 +699,29 @@ fn coordinator_freezes_closure_and_commits_only_derived_terminal_outcomes(
         coordinator.acknowledge(reference(1), conflicting),
         Err(ErasureErrorV1::PolicyConflict)
     );
+    Ok(())
+}
+
+#[test]
+fn coordinator_rejects_conflicting_first_finalize_and_retries() -> Result<(), ErasureErrorV1> {
+    let ack = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        test_port(true, vec![ack.target]),
+        reference(2),
+    );
+    coordinator.submit(request()?, reference(3))?;
+    coordinator.authorize(reference(1), reference(9))?;
+    coordinator.freeze_inventory(
+        reference(1),
+        change(
+            ErasureLifecycleV1::AccessFrozen,
+            Some(10),
+            Vec::new(),
+            Vec::new(),
+        ),
+    )?;
+    coordinator.dispatch_destruction(reference(1), reference(9))?;
+    coordinator.acknowledge(reference(1), ack)?;
     let awaiting = coordinator
         .existing(reference(1))
         .cloned()
