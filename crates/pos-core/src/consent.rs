@@ -557,7 +557,6 @@ impl ConsentCapabilityToken {
     /// # Errors
     /// Returns the specific policy error when this token cannot authorize the
     /// requested event family.
-    #[must_use]
     pub fn authorize_event_type(&self, event_type: &Kind) -> Result<(), ConsentError> {
         let required_modality = required_modality_for_event(event_type);
         if required_modality != 0
@@ -582,8 +581,7 @@ impl ConsentCapabilityToken {
     /// # Errors
     /// Returns [`ConsentError::GeoResolutionNotPermitted`] when the requested
     /// resolution is finer than the durable grant permits.
-    #[must_use]
-    pub fn authorize_geo_resolution(&self, resolution: u8) -> Result<(), ConsentError> {
+    pub const fn authorize_geo_resolution(&self, resolution: u8) -> Result<(), ConsentError> {
         if resolution < self.min_geo_resolution {
             Err(ConsentError::GeoResolutionNotPermitted)
         } else {
@@ -596,8 +594,7 @@ impl ConsentCapabilityToken {
     /// # Errors
     /// Returns [`ConsentError::RetentionNotPermitted`] when the requested
     /// duration exceeds the durable grant.
-    #[must_use]
-    pub fn authorize_retention(&self, days: u16) -> Result<(), ConsentError> {
+    pub const fn authorize_retention(&self, days: u16) -> Result<(), ConsentError> {
         if self.retention_days == 0 || days > self.retention_days {
             Err(ConsentError::RetentionNotPermitted)
         } else {
@@ -2060,19 +2057,24 @@ mod tests {
             )
             .is_ok());
 
-        let export_denied_authority = ConsentAuthority::new();
-        let mut export_denied_grant = sample_granted();
-        export_denied_grant.modalities = MODALITY_EXPORT;
-        let export_denied_token =
-            export_denied_authority.record_grant_on_timeline(timeline, &export_denied_grant);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn consent_token_enforces_durable_policy_flags() {
+        let timeline = TimelineId::new();
+        let authority = ConsentAuthority::new();
+        let mut denied_grant = sample_granted();
+        denied_grant.modalities = MODALITY_EXPORT;
+        let denied_token = authority.record_grant_on_timeline(timeline, &denied_grant);
         assert_eq!(
-            export_denied_token.authorize_event_type(&Kind::new("export.bundle.v1")),
+            denied_token.authorize_event_type(&Kind::new("export.bundle.v1")),
             Err(ConsentError::ExportNotPermitted)
         );
         assert_eq!(
-            export_denied_authority.check_consent(
+            authority.check_consent(
                 timeline,
-                export_denied_grant.subject_id,
+                denied_grant.subject_id,
                 &Kind::new("export.bundle.v1"),
                 0,
                 0,
@@ -2080,22 +2082,30 @@ mod tests {
             Err(ConsentError::ExportNotPermitted)
         );
 
-        let full_authority = ConsentAuthority::new();
         let mut full_grant = sample_granted();
         full_grant.modalities =
             MODALITY_LOCATION | MODALITY_PERSONA | MODALITY_MODEL_FIT | MODALITY_EXPORT;
         full_grant.export_permitted = true;
-        let full_token = full_authority.record_grant_on_timeline(timeline, &full_grant);
+        let full_token = authority.record_grant_on_timeline(timeline, &full_grant);
         assert!(full_token
             .authorize_event_type(&Kind::new("timeline.fork.v1"))
             .is_ok());
         assert!(full_token.authorize_geo_resolution(1).is_ok());
         assert!(full_token.authorize_retention(30).is_ok());
-        assert!(full_authority
+        assert!(authority
             .check_consent(
                 timeline,
                 full_grant.subject_id,
                 &Kind::new("model.fit.v1"),
+                0,
+                0,
+            )
+            .is_ok());
+        assert!(authority
+            .check_consent(
+                timeline,
+                full_grant.subject_id,
+                &Kind::new("export.bundle.v1"),
                 0,
                 0,
             )
@@ -2105,7 +2115,7 @@ mod tests {
         constrained_grant.fork_permitted = false;
         constrained_grant.min_geo_resolution = 1;
         constrained_grant.retention_days = 1;
-        let constrained_token = full_authority.record_grant_on_timeline(timeline, &constrained_grant);
+        let constrained_token = authority.record_grant_on_timeline(timeline, &constrained_grant);
         assert_eq!(
             constrained_token.authorize_event_type(&Kind::new("timeline.fork.v1")),
             Err(ConsentError::ForkNotPermitted)
@@ -2119,7 +2129,7 @@ mod tests {
             Err(ConsentError::RetentionNotPermitted)
         );
         assert_eq!(
-            full_authority.check_consent(
+            authority.check_consent(
                 timeline,
                 constrained_grant.subject_id,
                 &Kind::new("retention.extend.v1"),
@@ -2128,16 +2138,7 @@ mod tests {
             ),
             Err(ConsentError::RetentionNotPermitted)
         );
-        assert!(full_authority
-            .check_consent(
-                timeline,
-                full_grant.subject_id,
-                &Kind::new("export.bundle.v1"),
-                0,
-                0,
-            )
-            .is_ok());
-        assert!(full_authority
+        assert!(authority
             .check_consent(
                 timeline,
                 full_grant.subject_id,
