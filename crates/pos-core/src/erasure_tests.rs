@@ -345,6 +345,120 @@ fn record_parts(record: &ErasureCoordinatorRecordV1) -> ErasureCoordinatorRecord
         dispatch_provenance: record.dispatch_provenance(),
     }
 }
+
+fn record_after_freeze(
+    targets: Vec<ErasureRequiredTargetV1>,
+) -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
+    let port = test_port(true, targets);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+    coordinator.submit(request()?, reference(3))?;
+    coordinator.authorize(reference(1), reference(9))?;
+    coordinator.freeze_inventory(
+        reference(1),
+        change(
+            ErasureLifecycleV1::AccessFrozen,
+            Some(10),
+            Vec::new(),
+            Vec::new(),
+        ),
+    )?;
+    coordinator
+        .port
+        .records
+        .borrow()
+        .first()
+        .cloned()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)
+}
+
+fn record_after_submit() -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
+    let port = test_port(true, Vec::new());
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+    coordinator.submit(request()?, reference(3))?;
+    coordinator
+        .port
+        .records
+        .borrow()
+        .first()
+        .cloned()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)
+}
+
+fn record_after_acknowledgement() -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
+    let ack = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
+    let port = test_port(true, vec![ack.target]);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+    coordinator.submit(request()?, reference(3))?;
+    coordinator.authorize(reference(1), reference(9))?;
+    coordinator.freeze_inventory(
+        reference(1),
+        change(
+            ErasureLifecycleV1::AccessFrozen,
+            Some(10),
+            Vec::new(),
+            Vec::new(),
+        ),
+    )?;
+    coordinator.dispatch_destruction(reference(1), reference(9))?;
+    coordinator.acknowledge(reference(1), ack)?;
+    coordinator
+        .port
+        .records
+        .borrow()
+        .first()
+        .cloned()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)
+}
+
+fn complete_record() -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
+    let ack = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
+    let port = test_port(true, vec![ack.target]);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+    coordinator.submit(request()?, reference(3))?;
+    coordinator.authorize(reference(1), reference(9))?;
+    coordinator.freeze_inventory(
+        reference(1),
+        change(
+            ErasureLifecycleV1::AccessFrozen,
+            Some(10),
+            Vec::new(),
+            Vec::new(),
+        ),
+    )?;
+    coordinator.dispatch_destruction(reference(1), reference(9))?;
+    coordinator.acknowledge(reference(1), ack)?;
+    let awaiting = coordinator
+        .existing(reference(1))
+        .cloned()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let terminal = awaiting.transition({
+        let mut transition = change(
+            ErasureLifecycleV1::Complete,
+            awaiting.freeze_position(),
+            Vec::new(),
+            Vec::new(),
+        );
+        transition.acknowledged_targets = vec![ack.target];
+        transition.provenance = reference(4);
+        transition
+    })?;
+    let mut input = receipt_input(
+        ErasureLifecycleV1::Complete,
+        vec![ack],
+        Vec::new(),
+        Vec::new(),
+    );
+    input.terminal_state = terminal.state_digest();
+    input.inventories.artifacts = vec![inventory_result(ack.target)];
+    coordinator.finalize(reference(1), input)?;
+    coordinator
+        .port
+        .records
+        .borrow()
+        .first()
+        .cloned()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)
+}
 #[test]
 fn coordinator_public_retries_reject_injection_and_query_existing() -> Result<(), ErasureErrorV1> {
     let acknowledgement = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
@@ -471,6 +585,149 @@ fn durable_record_parts_reject_inconsistent_public_inputs() -> Result<(), Erasur
     invalid_dispatched.state = dispatched;
     assert_eq!(
         ErasureCoordinatorRecordV1::from_parts(invalid_dispatched, reference(2)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[test]
+fn durable_record_scope_checks_reject_independent_closure_conflicts() -> Result<(), ErasureErrorV1>
+{
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let valid_frozen = record_after_freeze(vec![
+        target,
+        acknowledgement(2, ErasureAcknowledgementOutcomeV1::Acknowledged).target,
+    ])?;
+    let mut frozen_parts = record_parts(&valid_frozen);
+    frozen_parts.targets = vec![target, target];
+    assert_eq!(
+        ErasureCoordinatorRecordV1::from_parts(frozen_parts, reference(2)),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
+    let awaiting = record_after_acknowledgement()?;
+    let mut duplicate_acknowledgements = record_parts(&awaiting);
+    duplicate_acknowledgements.acknowledgements.push(
+        duplicate_acknowledgements
+            .acknowledgements
+            .first()
+            .copied()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?,
+    );
+    assert_eq!(
+        ErasureCoordinatorRecordV1::from_parts(duplicate_acknowledgements, reference(2)),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
+    let foreign = acknowledgement(2, ErasureAcknowledgementOutcomeV1::Acknowledged);
+    let mut outside_closure = record_parts(&awaiting);
+    outside_closure.acknowledgements = vec![foreign];
+    assert_eq!(
+        ErasureCoordinatorRecordV1::from_parts(outside_closure, reference(2)),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    Ok(())
+}
+
+#[test]
+fn durable_record_lifecycle_checks_reject_independent_receipt_fields() -> Result<(), ErasureErrorV1>
+{
+    let submitted = record_after_submit()?;
+    let mut submitted_receipt = record_parts(&submitted);
+    submitted_receipt.receipt = Some(receipt()?);
+    assert_eq!(
+        ErasureCoordinatorRecordV1::from_parts(submitted_receipt, reference(2)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    let mut submitted_input = record_parts(&submitted);
+    submitted_input.receipt_input = Some(receipt_input(
+        ErasureLifecycleV1::Complete,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    ));
+    assert_eq!(
+        ErasureCoordinatorRecordV1::from_parts(submitted_input, reference(2)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let frozen = record_after_freeze(vec![
+        acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target,
+    ])?;
+    let mut frozen_receipt = record_parts(&frozen);
+    frozen_receipt.receipt = Some(receipt()?);
+    assert_eq!(
+        ErasureCoordinatorRecordV1::from_parts(frozen_receipt, reference(2)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    let mut frozen_input = record_parts(&frozen);
+    frozen_input.receipt_input = Some(receipt_input(
+        ErasureLifecycleV1::Complete,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    ));
+    assert_eq!(
+        ErasureCoordinatorRecordV1::from_parts(frozen_input, reference(2)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let dispatched = record_after_acknowledgement()?;
+    let mut dispatched_receipt = record_parts(&dispatched);
+    dispatched_receipt.receipt = Some(receipt()?);
+    assert_eq!(
+        ErasureCoordinatorRecordV1::from_parts(dispatched_receipt, reference(2)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    let mut dispatched_input = record_parts(&dispatched);
+    dispatched_input.receipt_input = Some(receipt_input(
+        ErasureLifecycleV1::Complete,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    ));
+    assert_eq!(
+        ErasureCoordinatorRecordV1::from_parts(dispatched_input, reference(2)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[test]
+fn durable_terminal_record_checks_reject_independent_receipt_mismatches(
+) -> Result<(), ErasureErrorV1> {
+    let record = complete_record()?;
+    for mismatch in 0..6 {
+        let mut parts = record_parts(&record);
+        let receipt = parts
+            .receipt
+            .as_mut()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        match mismatch {
+            0 => receipt.0.terminal_state = reference(99),
+            1 => receipt.0.lifecycle = ErasureLifecycleV1::PartialFailure,
+            2 => receipt.0.coordinator = reference(99),
+            3 => receipt.0.request = reference(99),
+            4 => receipt.0.required_targets.clear(),
+            5 => receipt.0.acknowledgements.clear(),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            ErasureCoordinatorRecordV1::from_parts(parts, reference(2)),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+    }
+
+    let mut altered_state = record_parts(&record);
+    altered_state.state.pending_owners = vec![reference(99)];
+    altered_state
+        .receipt
+        .as_mut()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .0
+        .terminal_state = altered_state.state.state_digest();
+    assert_eq!(
+        ErasureCoordinatorRecordV1::from_parts(altered_state, reference(2)),
         Err(ErasureErrorV1::PolicyConflict)
     );
     Ok(())
@@ -2424,8 +2681,17 @@ fn public_state_owner_accessors_and_freeze_rejection_remain_exact() -> Result<()
 
 #[test]
 fn public_freeze_rejects_a_required_target_closure_over_the_bound() -> Result<(), ErasureErrorV1> {
-    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
-    let port = test_port(true, vec![target; ERASURE_MAX_INVENTORY_RESULTS + 1]);
+    let targets = (0..=ERASURE_MAX_INVENTORY_RESULTS)
+        .map(|index| ErasureRequiredTargetV1 {
+            artifact_class: ErasureArtifactClassV1::TimelineReplay,
+            artifact_digest: indexed_reference(index),
+            key_role: ErasureKeyRoleV1::DataEncryption,
+            key_digest: indexed_reference(index + 1),
+            replica_set: reference(30),
+            replica_id: indexed_reference(index + 2),
+        })
+        .collect();
+    let port = test_port(true, targets);
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
     coordinator.submit(request()?, reference(3))?;
     coordinator.authorize(reference(1), reference(9))?;
