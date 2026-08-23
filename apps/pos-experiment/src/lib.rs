@@ -3763,7 +3763,11 @@ mod tests {
             )
             .test_ok();
         let resumed_result = recovery.resume(timeline_id);
-        assert!(resumed_result.is_ok(), "durable resume must accept the canonical host marker: {resumed_result:?}");
+        let resume_error = resumed_result.as_ref().err().map(ToString::to_string);
+        assert!(
+            resumed_result.is_ok(),
+            "durable resume must accept the canonical host marker: {resume_error:?}"
+        );
         let mut resumed = resumed_result.test_ok();
         let resumed_outcome = resumed.step_tick();
         assert!(
