@@ -55,7 +55,7 @@ pub const MODALITY_EXPORT: u8 = 0x08;
 // ---------------------------------------------------------------------------
 
 /// Errors returned by consent CBOR codec operations.
-#[derive(Debug, PartialEq, thiserror::Error)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ConsentCodecError {
     #[error("wrong magic bytes")]
     WrongMagic,
@@ -78,7 +78,7 @@ pub enum ConsentCodecError {
 }
 
 /// Errors returned by `ConsentGate::check_consent`.
-#[derive(Debug, PartialEq, thiserror::Error)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ConsentError {
     #[error("no active consent grant for this subject and event type")]
     NoConsent,
@@ -238,7 +238,7 @@ fn decode_tstr_max(val: &Value, max: usize) -> Result<String, ConsentCodecError>
 ///
 /// `expiry_secs`: 0 = no expiry. `retention_days`: 0 = session-only.
 /// `grant_seq`: Timeline.seq at the time this event was appended.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsentGranted {
     pub subject_id: EntityId,
     pub grantee_id: EntityId,
@@ -334,7 +334,7 @@ impl ConsentGranted {
 ///
 /// `fence_seq`: Timeline.seq at revocation. Sessions with
 /// `logical_head >= fence_seq` must terminate immediately.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsentRevoked {
     pub subject_id: EntityId,
     pub grantee_id: EntityId,
@@ -396,7 +396,7 @@ impl ConsentRevoked {
 /// Callers must present this token before emitting EventDrafts or reading
 /// sensitive Projection fields for a human-subject entity. Per-step check:
 /// `token.fence_seq > current_timeline_head` (ADR-039 section 3).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsentCapabilityToken {
     pub subject_id: EntityId,
     pub grantee_id: EntityId,
@@ -493,7 +493,7 @@ pub trait ConsentRevocationFoldListener: Send + Sync {
 /// When a subject's data key is destroyed on revocation, Replay returns
 /// `FieldState::RedactedDestroyed` for encrypted fields - not an error,
 /// not null - so Replay remains deterministic.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldState {
     /// The field is present and decryptable.
     Present(CanonicalBytes),
