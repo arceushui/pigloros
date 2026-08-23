@@ -3233,6 +3233,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn public_seams_cover_closed_helper_errors() {
         let reject_profile = |value: Value| {
             let bytes = encode_value(&value).unwrap_or_default();
@@ -3262,7 +3263,7 @@ mod tests {
         let mut wrong_bool = fields.clone();
         if let Some(fixtures) = wrong_bool[8].as_array_mut() {
             if let Some(fixture) = fixtures[0].as_array_mut() {
-                fixture[1] = Value::Map(Vec::new());
+                fixture[1] = Value::Null;
             }
         }
         reject_profile(Value::Array(wrong_bool));
