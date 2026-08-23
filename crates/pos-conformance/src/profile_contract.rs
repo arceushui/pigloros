@@ -613,11 +613,6 @@ fn validate_selected_caps(profile: &ConformanceProfileV1) -> Result<(), Conforma
                 return Err(ConformanceContractError::FieldOutOfBounds);
             }
         }
-        if let ExpectedResultV1::CanonicalBytes { bytes, .. } = &fixture.expected {
-            if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > caps.max_member_bytes {
-                return Err(ConformanceContractError::FieldOutOfBounds);
-            }
-        }
     }
     if member_count > u64::from(caps.max_bundle_members)
         || bundle_bytes > caps.max_total_bundle_bytes
@@ -2828,11 +2823,29 @@ mod tests {
             Err(ConformanceContractError::FixtureDigestMismatch)
         );
 
-        let mut wrong_caps = protocol;
+        let mut wrong_caps = protocol.clone();
         wrong_caps.hard_caps.max_cases = 1;
         assert_eq!(
             request.validate_with_protocol(&wrong_caps),
             Err(ConformanceContractError::FixtureDigestMismatch)
+        );
+
+        let mut wrong_caps = original_hard_caps();
+        wrong_caps.max_cases = wrong_caps.max_cases.saturating_sub(1);
+        assert_eq!(
+            request.validate_with_hard_caps(&wrong_caps),
+            Err(ConformanceContractError::FixtureDigestMismatch)
+        );
+
+        let mut capped_request = request;
+        let mut capped_protocol = protocol;
+        capped_protocol.hard_caps.max_profile_bytes = 1;
+        capped_request.output_capability.report_bytes_limit = 2;
+        capped_request.evaluator_hard_caps_digest = capped_protocol.hard_caps.digest();
+        capped_request.request_digest = capped_request.digest();
+        assert_eq!(
+            capped_request.validate_with_protocol(&capped_protocol),
+            Err(ConformanceContractError::FieldOutOfBounds)
         );
     }
 
@@ -3410,6 +3423,94 @@ mod tests {
                 Err(ConformanceContractError::UnsupportedVersion)
             );
         }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_profile_and_request_codecs_reject_malformed_fields() {
+        let reject_profile = |value: Value| {
+            let bytes = encode_value(&value).unwrap_or_default();
+            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+        };
+        let reject_request = |value: Value| {
+            let bytes = encode_value(&value).unwrap_or_default();
+            assert!(EvaluatorRequestV1::from_canonical_cbor(&bytes).is_err());
+        };
+
+        let profile_value = encode_profile(&profile(), true);
+        if let Value::Array(fields) = &profile_value {
+            for index in 0..fields.len() {
+                let mut malformed = fields.clone();
+                malformed[index] = Value::Map(Vec::new());
+                reject_profile(Value::Array(malformed));
+            }
+        }
+        let request_value = encode_request(&request(), true);
+        if let Value::Array(fields) = &request_value {
+            for index in 0..fields.len() {
+                let mut malformed = fields.clone();
+                malformed[index] = Value::Map(Vec::new());
+                reject_request(Value::Array(malformed));
+            }
+        }
+
+        let mut fixture_profile = profile();
+        if matches!(
+            &fixture_profile.fixtures[0].expected,
+            ExpectedResultV1::CanonicalBytes { .. }
+        ) {
+            fixture_profile.fixtures[0].expected = ExpectedResultV1::TypedFailure(
+                SafeErrorCodeV1::ClosureIncomplete,
+            );
+            fixture_profile.fixtures[0].expected_verification_outcome =
+                VerificationOutcomeV1::InvalidManifest;
+            fixture_profile.fixtures[0].expected_verification_error =
+                Some(SafeErrorCodeV1::ClosureIncomplete);
+            fixture_profile.profile_digest = fixture_profile.digest();
+            let bytes = fixture_profile.to_canonical_cbor().unwrap_or_default();
+            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_ok());
+
+            fixture_profile.fixtures[0].expected = ExpectedResultV1::AllowedDivergence {
+                classification: DivergenceMismatchKindV1::TypedFailure,
+                first_coordinate: b"timeline/7".to_vec(),
+            };
+            fixture_profile.allowed_divergences = vec![AllowedDivergenceV1 {
+                classification: DivergenceMismatchKindV1::TypedFailure,
+                first_coordinate: b"timeline/7".to_vec(),
+            }];
+            fixture_profile.fixtures[0].expected_verification_outcome =
+                VerificationOutcomeV1::Diverged;
+            fixture_profile.fixtures[0].expected_verification_error = None;
+            fixture_profile.profile_digest = fixture_profile.digest();
+            let bytes = fixture_profile.to_canonical_cbor().unwrap_or_default();
+            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_ok());
+        }
+
+        let mut malformed = encode_profile(&profile(), true);
+        if let Value::Array(fields) = &mut malformed {
+            if let Value::Array(fixtures) = &mut fields[8] {
+                if let Value::Array(fixture) = &mut fixtures[0] {
+                    fixture[8] = Value::Array(vec![
+                        Value::Integer(99_u64.into()),
+                        Value::Null,
+                        Value::Null,
+                        Value::Null,
+                        Value::Null,
+                    ]);
+                }
+            }
+        }
+        reject_profile(malformed);
+
+        let canonical = profile().to_canonical_cbor().unwrap_or_default();
+        let mut trailing = canonical.clone();
+        trailing.push(0);
+        assert!(ConformanceProfileV1::from_canonical_cbor(&trailing).is_err());
+        let mut noncanonical = canonical;
+        if let Some(index) = noncanonical.iter().position(|byte| *byte == 1) {
+            noncanonical.splice(index..=index, [0x18, 1]);
+        }
+        assert!(ConformanceProfileV1::from_canonical_cbor(&noncanonical).is_err());
     }
 
     #[test]

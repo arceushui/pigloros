@@ -5702,79 +5702,14 @@ fn verify_conformance_report(evidence: &MoatProofEvidenceV1) -> Result<(), Evide
     let report = &contract.conformance_report;
     report.validate()?;
     let counterfactual = &contract.counterfactual;
-    let mut modes = BTreeSet::new();
-    let mut case_keys = BTreeSet::new();
-    let mut counts = (0_u32, 0_u32, 0_u32, 0_u32, 0_u32);
-    let mut weakest_redaction = RedactionStateV1::None;
-    let mut weakest_replay_claim = ReplayClaimV1::Exact;
-    for case in &report.cases {
-        modes.insert(case.mode);
-        weakest_redaction = weakest_redaction.max(case.redaction_state);
-        weakest_replay_claim = weakest_replay_claim.max(case.replay_claim);
-        validate_conformance_case(case, &mut case_keys)?;
-        match case.outcome {
-            CaseOutcomeStatusV1::Pass => counts.0 = counts.0.saturating_add(1),
-            CaseOutcomeStatusV1::Fail => counts.1 = counts.1.saturating_add(1),
-            CaseOutcomeStatusV1::Skip => counts.2 = counts.2.saturating_add(1),
-            CaseOutcomeStatusV1::Unavailable => counts.3 = counts.3.saturating_add(1),
-            CaseOutcomeStatusV1::NotApplicable => counts.4 = counts.4.saturating_add(1),
-        }
-    }
-    if report.report_digest == [0; 32]
-        || report.profile_digest == [0; 32]
-        || report.normative_spec_digest == [0; 32]
-        || report.execution_profile_digest == [0; 32]
-        || report.fixture_bundle_digest == [0; 32]
-        || report.evaluator_source_digest == [0; 32]
-        || report.evaluator_binary_digest == [0; 32]
-        || report.evaluator_protocol_digest == [0; 32]
-        || report.limitations_digest == [0; 32]
-        || report.provenance_digest == [0; 32]
-        || !report
-            .replay_claim
-            .is_no_stronger_than(evidence.manifest.replay_claim)
+    let modes = report.cases.iter().map(|case| case.mode).collect::<BTreeSet<_>>();
+    if !report
+        .replay_claim
+        .is_no_stronger_than(evidence.manifest.replay_claim)
         || !counterfactual
             .replay_claim
             .is_no_stronger_than(evidence.manifest.replay_claim)
-        || report.implementation.implementation_id.trim().is_empty()
-        || report.independence.reviewer_ids.is_empty()
-        || report
-            .independence
-            .reviewer_ids
-            .windows(2)
-            .any(|pair| pair[0] >= pair[1])
-        || report.redaction_state != weakest_redaction
-        || report.replay_claim != weakest_replay_claim
-        || report.cases.is_empty()
         || !modes.contains(&evidence.manifest.execution_mode)
-        || report.cases.windows(2).any(|pair| {
-            (
-                pair[0].case_id.as_str(),
-                pair[0].mode,
-                pair[0].claim_layer,
-                pair[0].fixture_digest,
-            ) >= (
-                pair[1].case_id.as_str(),
-                pair[1].mode,
-                pair[1].claim_layer,
-                pair[1].fixture_digest,
-            )
-        })
-        || counts
-            != (
-                report.passed,
-                report.failed,
-                report.skipped,
-                report.unavailable,
-                report.not_applicable,
-            )
-        || counts
-            .0
-            .saturating_add(counts.1)
-            .saturating_add(counts.2)
-            .saturating_add(counts.3)
-            .saturating_add(counts.4) as usize
-            != report.cases.len()
     {
         return Err(EvidenceError::InvalidConformanceReport);
     }
@@ -6910,6 +6845,57 @@ pub mod tests {
         ciborium::into_writer(&tampered_digest, &mut malformed).unwrap_or_default();
         assert_eq!(
             ConformanceReportV1::from_canonical_cbor(&malformed),
+            Err(EvidenceError::InvalidConformanceReport)
+        );
+
+        let oversized = vec![0; 16 * 1024 * 1024 + 1];
+        assert_eq!(
+            ConformanceReportV1::from_canonical_cbor(&oversized),
+            Err(EvidenceError::InvalidConformanceReport)
+        );
+
+        let mut mismatched_case_profile = ciborium::from_reader::<Value, _>(Cursor::new(&bytes))
+            .unwrap_or(Value::Null);
+        if let Value::Array(ref mut values) = mismatched_case_profile {
+            if let Value::Array(ref mut cases) = values[13] {
+                if let Value::Array(ref mut case_fields) = cases[0] {
+                    case_fields[2] = Value::Bytes(vec![99; 32]);
+                }
+            }
+        }
+        let mut malformed = Vec::new();
+        ciborium::into_writer(&mismatched_case_profile, &mut malformed).unwrap_or_default();
+        assert_eq!(
+            ConformanceReportV1::from_canonical_cbor(&malformed),
+            Err(EvidenceError::InvalidConformanceReport)
+        );
+
+        let mut unordered_cases = ciborium::from_reader::<Value, _>(Cursor::new(&bytes))
+            .unwrap_or(Value::Null);
+        if let Value::Array(ref mut values) = unordered_cases {
+            if let Value::Array(ref mut cases) = values[13] {
+                cases.swap(0, 1);
+            }
+        }
+        let mut malformed = Vec::new();
+        ciborium::into_writer(&unordered_cases, &mut malformed).unwrap_or_default();
+        assert_eq!(
+            ConformanceReportV1::from_canonical_cbor(&malformed),
+            Err(EvidenceError::InvalidConformanceReport)
+        );
+
+        let mut oversized_report = test_report();
+        let template = oversized_report.cases[0].clone();
+        oversized_report.cases = (0..=65_535)
+            .map(|index| {
+                let mut case = template.clone();
+                case.case_id = format!("{index:05}");
+                case
+            })
+            .collect();
+        refresh_test_report(&mut oversized_report);
+        assert_eq!(
+            oversized_report.to_canonical_cbor(),
             Err(EvidenceError::InvalidConformanceReport)
         );
     }
