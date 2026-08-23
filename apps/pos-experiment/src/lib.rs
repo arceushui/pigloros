@@ -1987,10 +1987,11 @@ mod tests {
         ) -> Result<pos_core::clock::Seq, CoreError> {
             let state = self.state.lock().test_ok();
             if state.steps > 0 {
+                let post_step_capture = !state.append_calls.is_empty();
                 let commits = state.commits;
                 drop(state);
                 self.state.lock().test_ok().capture_commits.push(commits);
-                if self.fail_post_step_capture {
+                if self.fail_post_step_capture && post_step_capture {
                     return Err(CoreError::Storage(
                         "injected post-step capture failure".to_owned(),
                     ));
@@ -3555,7 +3556,7 @@ mod tests {
                 assert_eq!(state.commits, 0, "{path:?} {case:?}");
                 assert_eq!(state.committed_tick, 0, "{path:?} {case:?}");
                 assert_eq!(state.aborts, 1, "{path:?} {case:?}");
-                assert_eq!(state.capture_commits, [0], "{path:?} {case:?}");
+                assert_eq!(state.capture_commits, [0, 1], "{path:?} {case:?}");
             }
             TransactionCase::PostCaptureFailure => {
                 assert!(result.is_err(), "{path:?} {case:?}");
