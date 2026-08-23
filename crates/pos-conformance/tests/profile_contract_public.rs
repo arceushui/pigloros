@@ -1,7 +1,7 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use ciborium::value::Value;
-use pos_conformance::{ConformanceProfileV1, EvaluatorRequestV1};
+use pos_conformance::{ConformanceContractError, ConformanceProfileV1, EvaluatorRequestV1};
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod fixtures {
@@ -238,7 +238,7 @@ mod fixtures {
             } else {
                 Value::Array(vec![])
             },
-            bytes(20),
+            Value::Bytes(vec![1]),
         ]))
     }
 
@@ -257,14 +257,23 @@ mod fixtures {
             Value::Array(vec![bytes(6), uint(1), uint(1)]),
             bytes(13),
             bytes(14),
-            bytes(15),
+            Value::Bytes(vec![1]),
         ]))
     }
 }
 
 #[test]
-fn exported_profile_and_request_decoders_cover_nested_public_shapes() {
-    assert!(ConformanceProfileV1::from_canonical_cbor(&fixtures::profile(0, false)).is_err());
-    assert!(ConformanceProfileV1::from_canonical_cbor(&fixtures::profile(2, true)).is_err());
-    assert!(EvaluatorRequestV1::from_canonical_cbor(&fixtures::request()).is_err());
+fn exported_decoders_reject_terminal_digest_after_nested_decode() {
+    assert_eq!(
+        ConformanceProfileV1::from_canonical_cbor(&fixtures::profile(0, false)),
+        Err(ConformanceContractError::FieldOutOfBounds)
+    );
+    assert_eq!(
+        ConformanceProfileV1::from_canonical_cbor(&fixtures::profile(2, true)),
+        Err(ConformanceContractError::FieldOutOfBounds)
+    );
+    assert_eq!(
+        EvaluatorRequestV1::from_canonical_cbor(&fixtures::request()),
+        Err(ConformanceContractError::FieldOutOfBounds)
+    );
 }
