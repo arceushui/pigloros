@@ -2592,4 +2592,27 @@ mod tests {
             )
             .is_ok());
     }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_decoders_reject_wrong_closed_record_identities() {
+        let value = profile();
+        if let Value::Array(mut fields) = encode_profile(&value, true) {
+            fields[0] = text("CPF9");
+            let bytes = encode_value(&Value::Array(fields)).unwrap_or_default();
+            assert_eq!(
+                ConformanceProfileV1::from_canonical_cbor(&bytes),
+                Err(ConformanceContractError::UnsupportedVersion)
+            );
+        }
+        let request = request();
+        if let Value::Array(mut fields) = encode_request(&request, true) {
+            fields[0] = text("EVR9");
+            let bytes = encode_value(&Value::Array(fields)).unwrap_or_default();
+            assert_eq!(
+                EvaluatorRequestV1::from_canonical_cbor(&bytes),
+                Err(ConformanceContractError::UnsupportedVersion)
+            );
+        }
+    }
 }
