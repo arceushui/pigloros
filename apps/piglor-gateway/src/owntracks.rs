@@ -8,7 +8,7 @@ use pos_core::{
     OwnTracksEnrollmentStatusV1, OwnTracksEnrollmentStore, TimelineId,
 };
 use pos_store::open_owntracks_enrollment_store;
-use rand::Rng;
+use rand::RngExt;
 use serde::Deserialize;
 use std::path::Path;
 use thiserror::Error;
