@@ -293,21 +293,25 @@ impl ConsentGranted {
     /// Returns a [`ConsentCodecError`] on any malformed input.
     pub fn decode(bytes: &CanonicalBytes) -> Result<Self, ConsentCodecError> {
         let items = decode_array(bytes.as_slice(), 12)?;
-        decode_magic(&items[0], MAGIC_CGV1)?;
-        decode_version(&items[1])?;
-        let subject_id = decode_id(&items[2])?;
-        let grantee_id = decode_id(&items[3])?;
-        let purpose = decode_tstr_max(&items[4], MAX_PURPOSE_BYTES)?;
-        let modalities = decode_u8(&items[5])?;
-        let min_geo_resolution = decode_u8(&items[6])?;
+        let ((), (), subject_id, grantee_id, purpose, modalities, min_geo_resolution) = (
+            decode_magic(&items[0], MAGIC_CGV1)?,
+            decode_version(&items[1])?,
+            decode_id(&items[2])?,
+            decode_id(&items[3])?,
+            decode_tstr_max(&items[4], MAX_PURPOSE_BYTES)?,
+            decode_u8(&items[5])?,
+            decode_u8(&items[6])?,
+        );
         if modalities & !0x0F != 0 || min_geo_resolution > 1 {
             return Err(ConsentCodecError::FieldOutOfBounds);
         }
-        let fork_permitted = decode_bool(&items[7])?;
-        let export_permitted = decode_bool(&items[8])?;
-        let retention_days = decode_u16(&items[9])?;
-        let expiry_secs = decode_u32(&items[10])?;
-        let grant_seq = decode_u64(&items[11])?;
+        let (fork_permitted, export_permitted, retention_days, expiry_secs, grant_seq) = (
+            decode_bool(&items[7])?,
+            decode_bool(&items[8])?,
+            decode_u16(&items[9])?,
+            decode_u32(&items[10])?,
+            decode_u64(&items[11])?,
+        );
         Ok(Self {
             subject_id,
             grantee_id,
@@ -373,12 +377,14 @@ impl ConsentRevoked {
     /// Returns a [`ConsentCodecError`] on any malformed input.
     pub fn decode(bytes: &CanonicalBytes) -> Result<Self, ConsentCodecError> {
         let items = decode_array(bytes.as_slice(), 6)?;
-        decode_magic(&items[0], MAGIC_CRV1)?;
-        decode_version(&items[1])?;
-        let subject_id = decode_id(&items[2])?;
-        let grantee_id = decode_id(&items[3])?;
-        let grant_seq = decode_u64(&items[4])?;
-        let fence_seq = decode_u64(&items[5])?;
+        let ((), (), subject_id, grantee_id, grant_seq, fence_seq) = (
+            decode_magic(&items[0], MAGIC_CRV1)?,
+            decode_version(&items[1])?,
+            decode_id(&items[2])?,
+            decode_id(&items[3])?,
+            decode_u64(&items[4])?,
+            decode_u64(&items[5])?,
+        );
         Ok(Self {
             subject_id,
             grantee_id,
