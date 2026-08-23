@@ -527,7 +527,10 @@ impl ConformanceProfileV1 {
         let mut next = self.clone();
         next.lifecycle = target;
         next.stable_evidence = stable_evidence;
-        next.profile_digest = [0; 32];
+        // The selected CPF identity excludes Stable evidence, so it can be
+        // computed before structural Stable validation and used by the report
+        // binding checks below.
+        next.profile_digest = next.digest();
         if target == ProfileLifecycleV1::Stable {
             // This constructor performs only structural checks. The returned
             // Stable value is not publishable or validatable without the
@@ -536,7 +539,6 @@ impl ConformanceProfileV1 {
         } else if !next.stable_evidence.is_empty() {
             return Err(ConformanceContractError::ProfileLifecycleInvalid);
         }
-        next.profile_digest = next.digest();
         if target == ProfileLifecycleV1::Stable {
             Ok(next)
         } else {
@@ -1489,15 +1491,41 @@ fn semantic_version(value: &str) -> bool {
     if value.is_empty() || value.len() > MAX_STRING_BYTES {
         return false;
     }
-    let (core, prerelease_and_build) = value.split_once('-').map_or((value, ""), |parts| parts);
-    let (core, build) = core.split_once('+').map_or((core, ""), |parts| parts);
-    let prerelease = prerelease_and_build
-        .split_once('+')
-        .map_or((prerelease_and_build, ""), |parts| parts);
+    let (core, prerelease_and_build) = value.split_once('-').map_or((value, None), |parts| {
+        if parts.1.is_empty() {
+            (parts.0, Some(""))
+        } else {
+            (parts.0, Some(parts.1))
+        }
+    });
+    if prerelease_and_build == Some("") {
+        return false;
+    }
+    let (core, build) = core.split_once('+').map_or((core, None), |parts| {
+        if parts.1.is_empty() {
+            (parts.0, Some(""))
+        } else {
+            (parts.0, Some(parts.1))
+        }
+    });
+    if build == Some("") {
+        return false;
+    }
+    let (prerelease, prerelease_build) = prerelease_and_build
+        .map(|value| {
+            value
+                .split_once('+')
+                .map_or((value, None), |parts| (parts.0, Some(parts.1)))
+        })
+        .unwrap_or(("", None));
+    if prerelease_build == Some("") {
+        return false;
+    }
+    let build = build.or(prerelease_build).unwrap_or("");
     let core_parts = core.split('.').collect::<Vec<_>>();
     core_parts.len() == 3
         && core_parts.iter().all(|part| numeric_identifier(part))
-        && valid_identifiers(prerelease.0, true)
+        && valid_identifiers(prerelease, true)
         && valid_identifiers(build, false)
 }
 
