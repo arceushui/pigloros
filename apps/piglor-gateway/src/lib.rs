@@ -2662,7 +2662,10 @@ mod tests {
                 max_events_per_timeline: 1,
             },
         );
-        let timeline = gateway.create_timeline("consent-grant-errors").await.test_ok();
+        let timeline = gateway
+            .create_timeline("consent-grant-errors")
+            .await
+            .test_ok();
         let mut invalid = consent_grant(EntityId::new(), 1);
         invalid.modalities = 0x10;
         let codec_error = gateway
@@ -2676,11 +2679,17 @@ mod tests {
         ));
 
         gateway
-            .issue_consent_grant(&timeline.id().to_string(), consent_grant(EntityId::new(), 1))
+            .issue_consent_grant(
+                &timeline.id().to_string(),
+                consent_grant(EntityId::new(), 1),
+            )
             .await
             .test_ok();
         let ceiling_error = gateway
-            .issue_consent_grant(&timeline.id().to_string(), consent_grant(EntityId::new(), 2))
+            .issue_consent_grant(
+                &timeline.id().to_string(),
+                consent_grant(EntityId::new(), 2),
+            )
             .await
             .test_err();
         assert!(matches!(
@@ -2727,7 +2736,10 @@ mod tests {
             .is_empty());
 
         let (grant_event, token) = gateway
-            .issue_consent_grant(&timeline.id().to_string(), consent_grant(EntityId::new(), 1))
+            .issue_consent_grant(
+                &timeline.id().to_string(),
+                consent_grant(EntityId::new(), 1),
+            )
             .await
             .test_ok();
         let fence_error = gateway

@@ -1173,10 +1173,7 @@ fn drain_available(
     }
 }
 
-fn select_pending_index(
-    pending: &[CommandEnvelope],
-    reads_since_write: u8,
-) -> usize {
+fn select_pending_index(pending: &[CommandEnvelope], reads_since_write: u8) -> usize {
     let preferred = if reads_since_write < READ_BURST {
         CommandClass::Read
     } else {
@@ -1390,7 +1387,9 @@ fn execute(state: &mut ExecutorState, command: Command) {
             revocation,
             maximum,
             reply,
-        } => execute_append_consent_revocation_command(state, timeline, &revocation, maximum, reply),
+        } => {
+            execute_append_consent_revocation_command(state, timeline, &revocation, maximum, reply)
+        }
         Command::AppendIdentified {
             timeline,
             identity,

@@ -1446,11 +1446,12 @@ impl BacktestRunner {
         let inherited = if train_head_seq == pos_core::clock::Seq::ZERO {
             Ok(Vec::new())
         } else {
-            store.read(
-                eval_tl_id,
-                pos_store::SeqRange::bounded(pos_core::clock::Seq::from_u64(1), train_head_seq),
-            )
-            .map_err(ExperimentError::from)
+            store
+                .read(
+                    eval_tl_id,
+                    pos_store::SeqRange::bounded(pos_core::clock::Seq::from_u64(1), train_head_seq),
+                )
+                .map_err(ExperimentError::from)
         };
         let inherited = inherited
             .and_then(|events| {
