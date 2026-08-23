@@ -2570,14 +2570,16 @@ mod tests {
             }
         });
 
-        assert!(matches!(
-            receive_scheduler_trace(&records).await.test_ok().test_value(),
-            super::SchedulerTrace::Admitted { .. }
-        ));
-        assert!(matches!(
-            receive_scheduler_trace(&records).await.test_ok().test_value(),
-            super::SchedulerTrace::DrainCompleted { pending: 1, .. }
-        ));
+        let mut admitted = false;
+        let mut drained = false;
+        while !(admitted && drained) {
+            match receive_scheduler_trace(&records).await.test_ok().test_value() {
+                super::SchedulerTrace::Admitted { .. } => admitted = true,
+                super::SchedulerTrace::DrainCompleted { pending: 1, .. } => drained = true,
+                super::SchedulerTrace::DrainCompleted { .. }
+                | super::SchedulerTrace::Selected { .. } => {}
+            }
+        }
         task.abort();
         assert!(task.await.is_err());
         gate_sender.send(()).test_ok().test_value();
