@@ -2853,13 +2853,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn cpf1_public_seams_cover_remaining_identity_order_and_stable_result_variants() {
-        let mut wrong_digest = profile();
-        wrong_digest.profile_digest = digest(99);
-        let bytes = encode_value(&encode_profile(&wrong_digest, true)).unwrap_or_default();
-        assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor(&bytes),
-            Err(ConformanceContractError::FixtureDigestMismatch)
-        );
+        assert_rejects_mutated_profile_digest();
 
         let candidate = profile()
             .transition_to(ProfileLifecycleV1::Candidate, vec![])
@@ -2902,6 +2896,22 @@ mod tests {
             Err(ConformanceContractError::FieldOutOfBounds)
         );
 
+        assert_stable_typed_and_divergent_result_variants();
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn assert_rejects_mutated_profile_digest() {
+        let mut wrong_digest = profile();
+        wrong_digest.profile_digest = digest(99);
+        let bytes = encode_value(&encode_profile(&wrong_digest, true)).unwrap_or_default();
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor(&bytes),
+            Err(ConformanceContractError::FixtureDigestMismatch)
+        );
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn assert_stable_typed_and_divergent_result_variants() {
         let mut typed = profile();
         typed.fixtures[0].expected =
             ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ClosureIncomplete);
