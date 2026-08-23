@@ -1247,6 +1247,17 @@ mod tests {
         );
     }
 
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn default_authority_fails_closed_for_an_unrecorded_foreign_session() {
+        let grant = sample_granted();
+        let token = ConsentAuthority::new().record_grant(&grant);
+        assert_eq!(
+            ConsentAuthority::default().validate(&token, 0, 0),
+            Err(ConsentError::NoConsent)
+        );
+    }
+
     // -- ConsentGate --
 
     struct TestGate {
