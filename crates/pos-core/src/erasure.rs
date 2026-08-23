@@ -2561,7 +2561,7 @@ mod tests {
 
         assert_eq!(
             decode_request(&Value::Array(vec![Value::Null; 13])),
-            Err(ErasureErrorV1::ScopeInvalid)
+            Err(ErasureErrorV1::InvalidEncoding)
         );
         assert_eq!(
             decode_request(&Value::Null),
