@@ -168,6 +168,19 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn state_registry_remove_forgets_existing_subject_state() {
+        let reducer = CountReducer;
+        let entity = EntityId::new();
+        let mut registry = StateRegistry::new();
+        registry.apply(&reducer, &make_event(entity));
+
+        registry.remove(&entity);
+
+        assert!(registry.get(&entity).is_none());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn state_json_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let mut s = State::new();
         s.set("name", serde_json::Value::String("alice".into()));

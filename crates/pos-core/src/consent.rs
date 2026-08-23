@@ -661,6 +661,16 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn consent_granted_accepts_a_purpose_at_the_documented_byte_limit() {
+        let mut grant = sample_granted();
+        grant.purpose = "x".repeat(MAX_PURPOSE_BYTES);
+
+        let encoded = grant.encode().test_ok();
+        assert_eq!(ConsentGranted::decode(&encoded).test_ok(), grant);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn consent_granted_wrong_magic_rejected() {
         let g = sample_granted();
         let mut bytes = g.encode().test_ok().as_slice().to_vec();
@@ -899,6 +909,24 @@ mod tests {
         );
     }
 
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn consent_granted_decoding_rejects_an_excessive_geo_resolution() {
+        let grant = sample_granted();
+        let bytes = grant.encode().test_ok().as_slice().to_vec();
+        let mut value: Value = ciborium::from_reader(&mut std::io::Cursor::new(bytes)).test_ok();
+        if let Value::Array(items) = &mut value {
+            items[6] = Value::Integer(2_u8.into());
+        }
+        let mut encoded = Vec::new();
+        ciborium::into_writer(&value, &mut encoded).test_ok();
+
+        assert_eq!(
+            ConsentGranted::decode(&CanonicalBytes::from_vec(encoded)).test_err(),
+            ConsentCodecError::FieldOutOfBounds
+        );
+    }
+
     // -- ConsentRevoked --
 
     #[test]
@@ -1045,6 +1073,27 @@ mod tests {
             Err(ConsentError::NoConsent)
         );
         assert!(token.is_valid_at(u64::MAX - 1));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn revocation_must_match_every_token_identity_component() {
+        let grant = sample_granted();
+        let token = ConsentCapabilityToken::from_grant(&grant);
+
+        let mut wrong_subject = sample_revoked(&grant);
+        wrong_subject.subject_id = EntityId::new();
+        assert_eq!(
+            token.clone().invalidate_with(&wrong_subject),
+            Err(ConsentError::NoConsent)
+        );
+
+        let mut wrong_grantee = sample_revoked(&grant);
+        wrong_grantee.grantee_id = EntityId::new();
+        assert_eq!(
+            token.invalidate_with(&wrong_grantee),
+            Err(ConsentError::NoConsent)
+        );
     }
 
     // -- ConsentGate --
