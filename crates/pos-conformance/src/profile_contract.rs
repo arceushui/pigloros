@@ -1493,37 +1493,22 @@ fn semantic_version(value: &str) -> bool {
     if value.is_empty() || value.len() > MAX_STRING_BYTES {
         return false;
     }
-    let (core, prerelease_and_build) = value.split_once('-').map_or((value, None), |parts| {
+    let (core_and_prerelease, build) = value.split_once('+').map_or((value, ""), |parts| {
         if parts.1.is_empty() {
-            (parts.0, Some(""))
+            (parts.0, "")
         } else {
-            (parts.0, Some(parts.1))
+            (parts.0, parts.1)
         }
     });
-    if prerelease_and_build == Some("") {
+    if value.ends_with('+') {
         return false;
     }
-    let (core, build) = core.split_once('+').map_or((core, None), |parts| {
-        if parts.1.is_empty() {
-            (parts.0, Some(""))
-        } else {
-            (parts.0, Some(parts.1))
-        }
-    });
-    if build == Some("") {
+    let (core, prerelease) = core_and_prerelease
+        .split_once('-')
+        .map_or((core_and_prerelease, ""), |parts| (parts.0, parts.1));
+    if core_and_prerelease.ends_with('-') {
         return false;
     }
-    let (prerelease, prerelease_build) = prerelease_and_build
-        .map(|value| {
-            value
-                .split_once('+')
-                .map_or((value, None), |parts| (parts.0, Some(parts.1)))
-        })
-        .unwrap_or(("", None));
-    if prerelease_build == Some("") {
-        return false;
-    }
-    let build = build.or(prerelease_build).unwrap_or("");
     let core_parts = core.split('.').collect::<Vec<_>>();
     core_parts.len() == 3
         && core_parts.iter().all(|part| numeric_identifier(part))
