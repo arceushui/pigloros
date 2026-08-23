@@ -8,6 +8,7 @@ fn test_text(value: &str) -> Value {
     Value::Text(value.to_owned())
 }
 use super::*;
+use crate::erasure::codec::array;
 use ciborium::value::Value;
 use std::cell::RefCell;
 use std::rc::Rc;
