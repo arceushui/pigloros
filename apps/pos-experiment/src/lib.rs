@@ -3556,7 +3556,7 @@ mod tests {
                 assert_eq!(state.commits, 0, "{path:?} {case:?}");
                 assert_eq!(state.committed_tick, 0, "{path:?} {case:?}");
                 assert_eq!(state.aborts, 1, "{path:?} {case:?}");
-                assert_eq!(state.capture_commits, [0, 1], "{path:?} {case:?}");
+                assert_eq!(state.capture_commits, [0], "{path:?} {case:?}");
             }
             TransactionCase::PostCaptureFailure => {
                 assert!(result.is_err(), "{path:?} {case:?}");

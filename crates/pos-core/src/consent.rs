@@ -559,9 +559,7 @@ impl ConsentCapabilityToken {
     /// requested event family.
     pub fn authorize_event_type(&self, event_type: &Kind) -> Result<(), ConsentError> {
         let required_modality = required_modality_for_event(event_type);
-        if required_modality != 0
-            && self.modalities & required_modality != required_modality
-        {
+        if required_modality != 0 && self.modalities & required_modality != required_modality {
             return Err(ConsentError::ModalityNotGranted);
         }
         if required_modality == MODALITY_EXPORT && !self.export_permitted {
@@ -899,9 +897,7 @@ impl ConsentAuthority {
             match event.event_type.as_str() {
                 EVENT_TYPE_CONSENT_GRANTED_V1 => {
                     let grant = ConsentGranted::decode(&event.payload)?;
-                    if event.entity != grant.subject_id
-                        || event.seq.as_u64() != grant.grant_seq
-                    {
+                    if event.entity != grant.subject_id || event.seq.as_u64() != grant.grant_seq {
                         return Err(ConsentCodecError::HistoryCoordinateMismatch);
                     }
                     let _token = self.record_grant_on_timeline(timeline_id, &grant);
@@ -1083,14 +1079,12 @@ impl ConsentGate for ConsentAuthority {
                 Err(ConsentError::ExportNotPermitted)
             }
             Some((active, _))
-                if event_type.as_str().starts_with("timeline.fork.")
-                    && !active.fork_permitted =>
+                if event_type.as_str().starts_with("timeline.fork.") && !active.fork_permitted =>
             {
                 Err(ConsentError::ForkNotPermitted)
             }
             Some((active, _))
-                if event_type.as_str().starts_with("retention.")
-                    && active.retention_days == 0 =>
+                if event_type.as_str().starts_with("retention.") && active.retention_days == 0 =>
             {
                 Err(ConsentError::RetentionNotPermitted)
             }
@@ -2004,12 +1998,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn restore_from_history_rebuilds_and_revokes_timeline_sessions() {
-        fn event(
-            event_type: &str,
-            payload: CanonicalBytes,
-            entity: EntityId,
-            seq: u64,
-        ) -> Event {
+        fn event(event_type: &str, payload: CanonicalBytes, entity: EntityId, seq: u64) -> Event {
             Event {
                 id: EventId::new(),
                 entity,
@@ -2140,7 +2129,6 @@ mod tests {
                 0,
             )
             .is_ok());
-
     }
 
     #[test]
@@ -2340,7 +2328,9 @@ mod tests {
         assert!(!ConsentCodecError::WrongFieldType.to_string().is_empty());
         assert!(!ConsentCodecError::TrailingBytes.to_string().is_empty());
         assert!(!ConsentCodecError::CborError.to_string().is_empty());
-        assert!(!ConsentCodecError::UnmatchedRevocation.to_string().is_empty());
+        assert!(!ConsentCodecError::UnmatchedRevocation
+            .to_string()
+            .is_empty());
         assert!(!ConsentCodecError::HistoryTooLong { count: 10_001 }
             .to_string()
             .is_empty());
@@ -2359,7 +2349,9 @@ mod tests {
         assert!(!ConsentError::ModalityNotGranted.to_string().is_empty());
         assert!(!ConsentError::ExportNotPermitted.to_string().is_empty());
         assert!(!ConsentError::ForkNotPermitted.to_string().is_empty());
-        assert!(!ConsentError::GeoResolutionNotPermitted.to_string().is_empty());
+        assert!(!ConsentError::GeoResolutionNotPermitted
+            .to_string()
+            .is_empty());
         assert!(!ConsentError::RetentionNotPermitted.to_string().is_empty());
         assert!(!ConsentError::ConsentEventsForbidden.to_string().is_empty());
     }
