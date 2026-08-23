@@ -929,10 +929,10 @@ impl ErasureReceiptV1 {
         let complete = acknowledgements_match_closure(
             &input.required_targets,
             &input.acknowledgements,
-        )
-            && input.acknowledgements.iter().all(|ack| {
-            ack.outcome == ErasureAcknowledgementOutcomeV1::Acknowledged
-        });
+        ) && input
+            .acknowledgements
+            .iter()
+            .all(|ack| ack.outcome == ErasureAcknowledgementOutcomeV1::Acknowledged);
         let unresolved = !complete
             || !input.pending_owners.is_empty()
             || !input.failed_owners.is_empty();
@@ -1539,34 +1539,41 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         failed_owners.dedup();
         pending_owners.retain(|owner| failed_owners.binary_search(owner).is_err());
         let replay_claim = weakest_inventory_claim(&input.inventories);
-        record.state.transition(ErasureStateTransitionV1 {
-            lifecycle,
-            freeze_position: record.state.freeze_position(),
-            pending_owners,
-            failed_owners,
-            acknowledged_targets: if complete { record.targets.clone() } else { Vec::new() },
-            replay_claim,
-            provenance: input.provenance,
-        }).and_then(|terminal| {
-            input.request = request;
-            input.coordinator = self.coordinator;
-            input.terminal_state = terminal.state_digest();
-            input.required_targets.clone_from(&record.targets);
-            input.acknowledgements.clone_from(&record.acknowledgements);
-            input.lifecycle = lifecycle;
-            if let Some(freeze_position) = terminal.freeze_position() {
-                input.freeze_position = freeze_position;
-                input.pending_owners = terminal.pending_owners().to_vec();
-                input.failed_owners = terminal.failed_owners().to_vec();
-                self.port.admit_receipt(&input)?;
-                let receipt = ErasureReceiptV1::new(input)?;
-                record.state = terminal;
-                record.receipt = Some(receipt.clone());
-                self.commit(record).map(|()| receipt)
-            } else {
-                Err(ErasureErrorV1::PolicyConflict)
-            }
-        })
+        record
+            .state
+            .transition(ErasureStateTransitionV1 {
+                lifecycle,
+                freeze_position: record.state.freeze_position(),
+                pending_owners,
+                failed_owners,
+                acknowledged_targets: if complete {
+                    record.targets.clone()
+                } else {
+                    Vec::new()
+                },
+                replay_claim,
+                provenance: input.provenance,
+            })
+            .and_then(|terminal| {
+                input.request = request;
+                input.coordinator = self.coordinator;
+                input.terminal_state = terminal.state_digest();
+                input.required_targets.clone_from(&record.targets);
+                input.acknowledgements.clone_from(&record.acknowledgements);
+                input.lifecycle = lifecycle;
+                if let Some(freeze_position) = terminal.freeze_position() {
+                    input.freeze_position = freeze_position;
+                    input.pending_owners = terminal.pending_owners().to_vec();
+                    input.failed_owners = terminal.failed_owners().to_vec();
+                    self.port.admit_receipt(&input)?;
+                    let receipt = ErasureReceiptV1::new(input)?;
+                    record.state = terminal;
+                    record.receipt = Some(receipt.clone());
+                    self.commit(record).map(|()| receipt)
+                } else {
+                    Err(ErasureErrorV1::PolicyConflict)
+                }
+            })
     }
 }
 

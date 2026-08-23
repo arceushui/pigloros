@@ -423,21 +423,12 @@ pub(super) fn inventories_value(inventories: &ErasureReceiptInventoriesV1) -> Va
 pub(super) fn inventories_from_value(
     value: &Value,
 ) -> Result<ErasureReceiptInventoriesV1, ErasureErrorV1> {
-    exact_array(value, 4).and_then(|fields| {
-        inventory_from_value(&fields[0]).and_then(|artifacts| {
-            inventory_from_value(&fields[1]).and_then(|keys| {
-                inventory_from_value(&fields[2]).and_then(|replicas| {
-                    inventory_from_value(&fields[3]).map(|backups| {
-                        ErasureReceiptInventoriesV1 {
-                            artifacts,
-                            keys,
-                            replicas,
-                            backups,
-                        }
-                    })
-                })
-            })
-        })
+    let fields = exact_array(value, 4)?;
+    Ok(ErasureReceiptInventoriesV1 {
+        artifacts: inventory_from_value(&fields[0])?,
+        keys: inventory_from_value(&fields[1])?,
+        replicas: inventory_from_value(&fields[2])?,
+        backups: inventory_from_value(&fields[3])?,
     })
 }
 pub(super) const fn inventories_exceed_bound(

@@ -1,8 +1,12 @@
-    fn test_uint(value: u64) -> Value { Value::Integer(value.into()) }
+    fn test_uint(value: u64) -> Value {
+        Value::Integer(value.into())
+    }
     fn test_digest(reference: ErasureReferenceV1) -> Value {
         Value::Bytes(reference.digest().to_vec())
     }
-    fn test_text(value: &str) -> Value { Value::Text(value.to_owned()) }
+    fn test_text(value: &str) -> Value {
+        Value::Text(value.to_owned())
+    }
     use super::*;
     use ciborium::value::Value;
     use std::cell::RefCell;
