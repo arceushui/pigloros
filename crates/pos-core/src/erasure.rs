@@ -1137,7 +1137,12 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         self.port.required_targets(request).and_then(|mut targets| {
-            if targets.is_empty() || targets.len() > ERASURE_MAX_INVENTORY_RESULTS { return Err(ErasureErrorV1::ScopeInvalid); }
+            if targets.is_empty() {
+                return Err(ErasureErrorV1::ScopeInvalid);
+            }
+            if targets.len() > ERASURE_MAX_INVENTORY_RESULTS {
+                return Err(ErasureErrorV1::ScopeInvalid);
+            }
             targets.sort_unstable();
             if has_duplicate(&targets) { return Err(ErasureErrorV1::ScopeInvalid); }
             self.records[index].state.transition(transition).inspect(|state| { self.records[index].targets = targets; self.records[index].state = state.clone(); })
@@ -1931,7 +1936,7 @@ fn cbor_item_end(bytes: &[u8], offset: usize, depth: usize, maximum_array: usize
             _ => Err(ErasureErrorV1::InvalidEncoding),
         },
         4 if argument <= maximum_array as u64 => {
-            cbor_array_end(bytes, next, depth + 1, argument, maximum_array)
+            cbor_array_end(bytes, next, depth.saturating_add(1), argument, maximum_array)
         }
         7 if argument <= 22 => Ok(next),
         _ => Err(ErasureErrorV1::InvalidEncoding),
