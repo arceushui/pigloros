@@ -2802,6 +2802,46 @@ mod tests {
         assert_eq!(view.state_for(&missing), None);
     }
 
+    struct AppendFailStore;
+
+    impl pos_core::store::EventStore for AppendFailStore {
+        fn create_timeline(&mut self, _: &str) -> Result<pos_core::timeline::Timeline, CoreError> {
+            Err(CoreError::Storage("create timeline unavailable".to_owned()))
+        }
+
+        fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
+            Err(CoreError::Storage("append unavailable".to_owned()))
+        }
+
+        fn read(
+            &self,
+            _: TimelineId,
+            _: pos_core::store::SeqRange,
+        ) -> Result<Vec<Event>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        fn fork(
+            &mut self,
+            _: TimelineId,
+            _: Seq,
+            _: &str,
+        ) -> Result<pos_core::timeline::Timeline, CoreError> {
+            Err(CoreError::Storage("fork unavailable".to_owned()))
+        }
+
+        fn list_timelines(&self) -> Result<Vec<pos_core::timeline::Timeline>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        fn get_timeline(
+            &self,
+            _: TimelineId,
+        ) -> Result<Option<pos_core::timeline::Timeline>, CoreError> {
+            Ok(None)
+        }
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn protected_append_fences_cover_missing_gate_and_store_errors() {
@@ -2818,49 +2858,6 @@ mod tests {
                 _: ObservationView<'_>,
             ) -> Result<StepOutput, RuntimeError> {
                 Ok(StepOutput::empty())
-            }
-        }
-
-        struct AppendFailStore;
-
-        impl pos_core::store::EventStore for AppendFailStore {
-            fn create_timeline(
-                &mut self,
-                _: &str,
-            ) -> Result<pos_core::timeline::Timeline, CoreError> {
-                Err(CoreError::Storage("create timeline unavailable".to_owned()))
-            }
-
-            fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
-                Err(CoreError::Storage("append unavailable".to_owned()))
-            }
-
-            fn read(
-                &self,
-                _: TimelineId,
-                _: pos_core::store::SeqRange,
-            ) -> Result<Vec<Event>, CoreError> {
-                Ok(Vec::new())
-            }
-
-            fn fork(
-                &mut self,
-                _: TimelineId,
-                _: Seq,
-                _: &str,
-            ) -> Result<pos_core::timeline::Timeline, CoreError> {
-                Err(CoreError::Storage("fork unavailable".to_owned()))
-            }
-
-            fn list_timelines(&self) -> Result<Vec<pos_core::timeline::Timeline>, CoreError> {
-                Ok(Vec::new())
-            }
-
-            fn get_timeline(
-                &self,
-                _: TimelineId,
-            ) -> Result<Option<pos_core::timeline::Timeline>, CoreError> {
-                Ok(None)
             }
         }
 
