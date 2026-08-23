@@ -73,7 +73,9 @@ mod lifecycle_coverage_tests {
             None,
             Err(std::io::Error::other("runtime construction failed")),
         );
-        let final_state = *lifecycle.lock().expect("lifecycle remains unpoisoned");
+        let final_state = *lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(matches!(final_state, LifecycleState::Unhealthy { .. }));
     }
 
@@ -92,7 +94,9 @@ mod lifecycle_coverage_tests {
             None,
             None,
         );
-        let final_state = *lifecycle.lock().expect("lifecycle remains unpoisoned");
+        let final_state = *lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(final_state, LifecycleState::Closed);
     }
 }
