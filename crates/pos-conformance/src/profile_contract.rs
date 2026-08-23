@@ -546,6 +546,9 @@ fn validate_stable_evidence(
     let first = &profile.stable_evidence[0];
     let second = &profile.stable_evidence[1];
     if first.implementation.implementation_id >= second.implementation.implementation_id
+        || first.implementation.source_digest == second.implementation.source_digest
+        || first.implementation.build_digest == second.implementation.build_digest
+        || first.implementation.binary_digest == second.implementation.binary_digest
         || first.evaluator_protocol_digest != profile.evaluator_protocol.protocol_digest
         || second.evaluator_protocol_digest != profile.evaluator_protocol.protocol_digest
     {
@@ -596,9 +599,13 @@ fn validate_stable_implementation(
 
 fn case_matches_fixture(case: &CaseOutcomeV1, fixture: &FixtureDescriptorV1) -> bool {
     if case.case_id != fixture.case_id
+        || case.fixture_digest != fixture_digest(fixture)
         || case.claim_layer != fixture.claim_layer
         || case.execution_profile_digest != fixture.execution_profile_digest
         || case.outcome != CaseOutcomeStatusV1::Pass
+        || case.replay_claim != fixture.replay_claim
+        || case.redaction_state != fixture.redaction_state
+        || case.provenance_digest != fixture_provenance_digest(&fixture.provenance)
     {
         return false;
     }
@@ -617,6 +624,17 @@ fn case_matches_fixture(case: &CaseOutcomeV1, fixture: &FixtureDescriptorV1) -> 
             .as_ref()
             .is_some_and(|coordinate| coordinate.as_bytes() == first_coordinate),
     }
+}
+
+fn fixture_digest(fixture: &FixtureDescriptorV1) -> [u8; 32] {
+    digest_bytes(b"PiglorOS.ConformanceFixture.v1", &encode_fixture(fixture))
+}
+
+fn fixture_provenance_digest(provenance: &FixtureProvenanceV1) -> [u8; 32] {
+    digest_bytes(
+        b"PiglorOS.ConformanceFixtureProvenance.v1",
+        &encode_fixture_provenance(provenance),
+    )
 }
 
 fn validate_identity(identity: &ImplementationIdentityV1) -> Result<(), ConformanceContractError> {
@@ -1399,6 +1417,7 @@ fn encode_value(value: &Value) -> Result<Vec<u8>, ConformanceContractError> {
 }
 
 fn decode_value(bytes: &[u8]) -> Result<Value, ConformanceContractError> {
+    preflight_cbor(bytes)?;
     let mut cursor = Cursor::new(bytes);
     let value = ciborium::from_reader(&mut cursor)
         .map_err(|_| ConformanceContractError::InvalidEncoding)?;
@@ -1412,6 +1431,77 @@ fn decode_value(bytes: &[u8]) -> Result<Value, ConformanceContractError> {
             Err(ConformanceContractError::InvalidEncoding)
         }
     })
+}
+
+fn preflight_cbor(bytes: &[u8]) -> Result<(), ConformanceContractError> {
+    fn read_length(
+        bytes: &[u8],
+        index: &mut usize,
+        additional: u8,
+    ) -> Result<u64, ConformanceContractError> {
+        let width = match additional {
+            value @ 0..=23 => return Ok(u64::from(value)),
+            24 => 1,
+            25 => 2,
+            26 => 4,
+            27 => 8,
+            _ => return Err(ConformanceContractError::InvalidEncoding),
+        };
+        let end = index
+            .checked_add(width)
+            .ok_or(ConformanceContractError::FieldOutOfBounds)?;
+        let value = bytes
+            .get(*index..end)
+            .ok_or(ConformanceContractError::InvalidEncoding)?;
+        *index = end;
+        Ok(value
+            .iter()
+            .fold(0_u64, |total, byte| total << 8 | u64::from(*byte)))
+    }
+    fn item(bytes: &[u8], index: &mut usize, depth: u8) -> Result<(), ConformanceContractError> {
+        if depth > MAX_STRUCTURAL_NESTING {
+            return Err(ConformanceContractError::FieldOutOfBounds);
+        }
+        let initial = *bytes
+            .get(*index)
+            .ok_or(ConformanceContractError::InvalidEncoding)?;
+        *index += 1;
+        let major = initial >> 5;
+        let length = read_length(bytes, index, initial & 0x1f)?;
+        match major {
+            0 | 1 => Ok(()),
+            7 if matches!(initial & 0x1f, 20..=22) => Ok(()),
+            2 | 3 => {
+                let count = usize::try_from(length)
+                    .map_err(|_| ConformanceContractError::FieldOutOfBounds)?;
+                let end = index
+                    .checked_add(count)
+                    .ok_or(ConformanceContractError::FieldOutOfBounds)?;
+                if end > bytes.len() {
+                    return Err(ConformanceContractError::InvalidEncoding);
+                }
+                *index = end;
+                Ok(())
+            }
+            4 => {
+                if length > MAX_FIXTURES as u64 {
+                    return Err(ConformanceContractError::FieldOutOfBounds);
+                }
+                for _ in 0..length {
+                    item(bytes, index, depth.saturating_add(1))?;
+                }
+                Ok(())
+            }
+            _ => Err(ConformanceContractError::InvalidEncoding),
+        }
+    }
+    let mut index = 0;
+    item(bytes, &mut index, 0)?;
+    if index == bytes.len() {
+        Ok(())
+    } else {
+        Err(ConformanceContractError::InvalidEncoding)
+    }
 }
 
 fn array(value: &Value, length: usize) -> Result<&[Value], ConformanceContractError> {
@@ -1809,7 +1899,7 @@ mod tests {
         };
         CaseOutcomeV1 {
             case_id: fixture.case_id.clone(),
-            fixture_digest: digest(20),
+            fixture_digest: fixture_digest(fixture),
             execution_profile_digest: fixture.execution_profile_digest,
             mode,
             claim_layer: fixture.claim_layer,
@@ -1821,7 +1911,7 @@ mod tests {
             actual_error: None,
             replay_claim: ReplayClaimV1::Exact,
             redaction_state: RedactionStateV1::None,
-            provenance_digest: digest(21),
+            provenance_digest: fixture_provenance_digest(&fixture.provenance),
         }
     }
 
@@ -2309,6 +2399,16 @@ mod tests {
             ConformanceProfileV1::from_canonical_cbor(&[
                 0x9f, 0x64, b'C', b'P', b'F', b'1', 0x01, 0xff
             ]),
+            Err(ConformanceContractError::InvalidEncoding)
+        );
+        let mut too_deep = vec![0x81; usize::from(MAX_STRUCTURAL_NESTING) + 2];
+        too_deep.push(0xf6);
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor(&too_deep),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+        assert_eq!(
+            EvaluatorRequestV1::from_canonical_cbor(&[0x5a, 0xff, 0xff, 0xff, 0xff]),
             Err(ConformanceContractError::InvalidEncoding)
         );
     }
@@ -3030,6 +3130,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn public_stable_case_matching_rejects_each_authoritative_field_mismatch() {
+        reject_stable_change(|value| value.case_outcomes[0].fixture_digest = digest(99));
         reject_stable_change(|value| value.case_outcomes[0].case_id = "wrong".to_owned());
         reject_stable_change(|value| {
             value.case_outcomes[0].claim_layer = ClaimLayerV1::ReplayConformance;
@@ -3038,6 +3139,13 @@ mod tests {
         reject_stable_change(|value| value.case_outcomes[0].outcome = CaseOutcomeStatusV1::Fail);
         reject_stable_change(|value| value.case_outcomes[0].expected_digest = Some(digest(99)));
         reject_stable_change(|value| value.case_outcomes[0].actual_digest = Some(digest(99)));
+        reject_stable_change(|value| {
+            value.case_outcomes[0].replay_claim = ReplayClaimV1::StructuralOnly
+        });
+        reject_stable_change(|value| {
+            value.case_outcomes[0].redaction_state = RedactionStateV1::RedactedViews
+        });
+        reject_stable_change(|value| value.case_outcomes[0].provenance_digest = digest(99));
 
         let mut first = stable_evidence("beta", 30);
         let second = stable_evidence("alpha", 40);
