@@ -51,6 +51,8 @@ pub enum ConformanceContractError {
     ProvenanceMissing,
     /// A fixture references an execution profile outside the CPF1 inventory.
     UnknownExecutionProfile,
+    /// A fixture references a public schema outside the CPF1 inventory.
+    UnknownPublicSchema,
 }
 
 impl std::fmt::Display for ConformanceContractError {
@@ -60,13 +62,14 @@ impl std::fmt::Display for ConformanceContractError {
             Self::UnsupportedVersion => "unsupported conformance contract version",
             Self::FieldOutOfBounds => "conformance contract field is out of bounds",
             Self::NonCanonicalOrder => "conformance contract records are not canonically ordered",
-            Self::FixtureDigestMismatch => "fixture content does not match its expected digest",
+            Self::FixtureDigestMismatch => "content does not match its expected digest",
             Self::ExpectedResultMissing => "fixture has no immutable expected result",
             Self::IndependenceEvidenceMissing => "independent implementation evidence is missing",
             Self::DivergenceClassificationMismatch => "divergence is not classified by the profile",
             Self::ProfileLifecycleInvalid => "profile lifecycle transition is invalid",
             Self::ProvenanceMissing => "required conformance provenance is missing",
             Self::UnknownExecutionProfile => "fixture references an unknown execution profile",
+            Self::UnknownPublicSchema => "fixture references an unknown public schema",
         })
     }
 }
@@ -475,6 +478,9 @@ fn validate_fixture(
         || !profile
             .execution_profile_digests
             .contains(&fixture.execution_profile_digest)
+        || !profile
+            .public_schema_digests
+            .contains(&fixture.public_schema_digest)
         || fixture.modes.is_empty()
         || !strictly_ordered(&fixture.modes)
         || fixture
@@ -483,13 +489,18 @@ fn validate_fixture(
             .any(|pair| pair[0].member_id >= pair[1].member_id)
     {
         return Err(
-            if profile
+            if !profile
                 .execution_profile_digests
                 .contains(&fixture.execution_profile_digest)
             {
-                ConformanceContractError::FieldOutOfBounds
-            } else {
                 ConformanceContractError::UnknownExecutionProfile
+            } else if !profile
+                .public_schema_digests
+                .contains(&fixture.public_schema_digest)
+            {
+                ConformanceContractError::UnknownPublicSchema
+            } else {
+                ConformanceContractError::FieldOutOfBounds
             },
         );
     }
@@ -759,12 +770,12 @@ fn validate_expected_result(
             classification,
             first_coordinate,
         } => {
-            if first_coordinate.len() > MAX_COORDINATE_BYTES
-                || !allowed.iter().any(|value| {
-                    value.classification == *classification
-                        && value.first_coordinate == *first_coordinate
-                })
-            {
+            if first_coordinate.len() > MAX_COORDINATE_BYTES {
+                Err(ConformanceContractError::FieldOutOfBounds)
+            } else if !allowed.iter().any(|value| {
+                value.classification == *classification
+                    && value.first_coordinate == *first_coordinate
+            }) {
                 Err(ConformanceContractError::DivergenceClassificationMismatch)
             } else {
                 Ok(())
@@ -776,12 +787,14 @@ fn validate_expected_result(
 fn validate_allowed_divergences(
     values: &[AllowedDivergenceV1],
 ) -> Result<(), ConformanceContractError> {
+    if values.iter().any(|value| {
+        value.first_coordinate.is_empty() || value.first_coordinate.len() > MAX_COORDINATE_BYTES
+    }) {
+        return Err(ConformanceContractError::FieldOutOfBounds);
+    }
     if values
         .windows(2)
         .any(|pair| divergence_key(&pair[0]) >= divergence_key(&pair[1]))
-        || values.iter().any(|value| {
-            value.first_coordinate.is_empty() || value.first_coordinate.len() > MAX_COORDINATE_BYTES
-        })
     {
         Err(ConformanceContractError::NonCanonicalOrder)
     } else {
@@ -1133,7 +1146,7 @@ fn decode_expected(value: &Value) -> Result<ExpectedResultV1, ConformanceContrac
                 first_coordinate: bytes_value(&divergence[1])?,
             })
         }
-        _ => Err(ConformanceContractError::ExpectedResultMissing),
+        _ => Err(ConformanceContractError::InvalidEncoding),
     }
 }
 
@@ -2109,6 +2122,7 @@ mod tests {
             ConformanceContractError::ProfileLifecycleInvalid,
             ConformanceContractError::ProvenanceMissing,
             ConformanceContractError::UnknownExecutionProfile,
+            ConformanceContractError::UnknownPublicSchema,
         ] {
             assert!(!value.to_string().is_empty());
         }
@@ -2800,6 +2814,10 @@ mod tests {
             ConformanceContractError::FieldOutOfBounds,
         );
         reject_profile_change(
+            |value| value.fixtures[0].public_schema_digest = digest(99),
+            ConformanceContractError::UnknownPublicSchema,
+        );
+        reject_profile_change(
             |value| value.fixtures[0].compatibility_digest = [0; 32],
             ConformanceContractError::FieldOutOfBounds,
         );
@@ -3143,7 +3161,7 @@ mod tests {
                     first_coordinate: vec![b'a'; 129],
                 }];
             },
-            ConformanceContractError::NonCanonicalOrder,
+            ConformanceContractError::FieldOutOfBounds,
         );
 
         let mut exact = profile();
