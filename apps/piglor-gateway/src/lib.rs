@@ -35,6 +35,7 @@ use pos_plugin_world::{WorldPlugin, EVENT_TYPE_ACTION};
 use pos_runtime::PluginRegistry;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::Arc,
@@ -481,6 +482,12 @@ pub const MAX_EVENTS_PER_TIMELINE: u64 = 10_000;
 /// Default broadcast channel capacity for live event fan-out.
 pub const EVENT_BUS_CAPACITY: usize = 256;
 
+type ConsentHistoryLocks = HashMap<TimelineId, Arc<tokio::sync::Mutex<()>>>;
+
+fn new_consent_history_locks() -> Arc<tokio::sync::Mutex<ConsentHistoryLocks>> {
+    Arc::new(tokio::sync::Mutex::new(HashMap::new()))
+}
+
 /// Shared Gateway handle (bounded `StoreExecutor` + live Event bus).
 ///
 /// The supported local-first write boundary permits Gateway and experiment-host
@@ -494,6 +501,7 @@ pub struct Gateway {
     limits: GatewayLimits,
     owntracks_enabled: bool,
     consent_authority: ConsentAuthority,
+    consent_history_locks: Arc<tokio::sync::Mutex<ConsentHistoryLocks>>,
     action_registry: Arc<PluginRegistry>,
     action_principal: Option<ActionPrincipal>,
 }
@@ -862,7 +870,24 @@ fn checked_event_coordinates(
 }
 
 impl Gateway {
-    async fn restore_consent_history(&self, timeline: TimelineId) -> Result<(), GatewayError> {
+    async fn lock_consent_timeline(
+        &self,
+        timeline: TimelineId,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.consent_history_locks.lock().await;
+            locks
+                .entry(timeline)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        lock.lock_owned().await
+    }
+
+    async fn restore_consent_history_locked(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<(), GatewayError> {
         let events = self
             .store
             .read(
@@ -899,6 +924,7 @@ impl Gateway {
                 Some(consent_authority.clone()),
             ),
             consent_authority,
+            consent_history_locks: new_consent_history_locks(),
             action_principal: None,
         }
     }
@@ -921,6 +947,7 @@ impl Gateway {
                 Some(consent_authority.clone()),
             ),
             consent_authority,
+            consent_history_locks: new_consent_history_locks(),
             action_principal: None,
         }
     }
@@ -944,6 +971,7 @@ impl Gateway {
                 Some(consent_authority.clone()),
             ),
             consent_authority,
+            consent_history_locks: new_consent_history_locks(),
             action_principal: Some(principal),
         }
     }
@@ -969,6 +997,7 @@ impl Gateway {
                 Some(consent_authority.clone()),
             ),
             consent_authority,
+            consent_history_locks: new_consent_history_locks(),
             action_principal: None,
         }
     }
@@ -994,6 +1023,7 @@ impl Gateway {
                 Some(consent_authority.clone()),
             ),
             consent_authority,
+            consent_history_locks: new_consent_history_locks(),
             action_principal: None,
         }
     }
@@ -1015,6 +1045,7 @@ impl Gateway {
                 Some(consent_authority.clone()),
             ),
             consent_authority,
+            consent_history_locks: new_consent_history_locks(),
             action_principal: None,
         }
     }
@@ -1148,6 +1179,7 @@ impl Gateway {
             Err(error) => return Err(error),
         };
         grant.encode()?;
+        let _consent_timeline_guard = self.lock_consent_timeline(timeline).await;
         let event = match self
             .store
             .append_consent_grant(timeline, grant.clone(), self.limits.max_events_per_timeline)
@@ -1192,13 +1224,14 @@ impl Gateway {
             Err(error) => return Err(error),
         };
         revocation.encode()?;
+        let _consent_timeline_guard = self.lock_consent_timeline(timeline).await;
         let reservation = match self
             .consent_authority
             .begin_revocation_on_timeline(timeline, &revocation)
         {
             Ok(reservation) => reservation,
             Err(pos_core::ConsentError::NoConsent) => {
-                self.restore_consent_history(timeline).await?;
+                self.restore_consent_history_locked(timeline).await?;
                 self.consent_authority
                     .begin_revocation_on_timeline(timeline, &revocation)
                     .map_err(|_| {
@@ -1696,6 +1729,7 @@ impl Gateway {
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
             consent_authority: ConsentAuthority::new(),
+            consent_history_locks: new_consent_history_locks(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         }
@@ -1709,6 +1743,7 @@ impl Gateway {
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
             consent_authority: ConsentAuthority::new(),
+            consent_history_locks: new_consent_history_locks(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         }
@@ -1722,6 +1757,7 @@ impl Gateway {
             limits,
             owntracks_enabled: false,
             consent_authority: ConsentAuthority::new(),
+            consent_history_locks: new_consent_history_locks(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         }
@@ -2237,6 +2273,7 @@ mod tests {
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
             consent_authority: ConsentAuthority::new(),
+            consent_history_locks: new_consent_history_locks(),
             action_registry: gateway_action_registry_with_bodies([body]),
             action_principal: Some(ActionPrincipal::new(
                 actor,
@@ -2906,6 +2943,29 @@ mod tests {
             ceiling_error,
             GatewayError::EventLimitReached { maximum: 1 }
         ));
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn consent_history_lock_is_shared_by_gateway_clones() {
+        let gateway = memory_gw();
+        let timeline = gateway.create_timeline("consent-lock").await.test_ok().id();
+        let guard = gateway.lock_consent_timeline(timeline).await;
+        let clone = gateway.clone();
+        let grant_task = tokio::spawn(async move {
+            clone
+                .issue_consent_grant(
+                    &timeline.to_string(),
+                    consent_grant(EntityId::new(), 1),
+                )
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        assert!(!grant_task.is_finished());
+        drop(guard);
+        let (event, _) = grant_task.await.test_ok().test_ok();
+        assert_eq!(event.event_type.as_str(), EVENT_TYPE_CONSENT_GRANTED_V1);
         drop(gateway);
     }
 
@@ -4073,6 +4133,7 @@ mod tests {
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
             consent_authority: ConsentAuthority::new(),
+            consent_history_locks: new_consent_history_locks(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         };
@@ -4089,6 +4150,7 @@ mod tests {
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
             consent_authority: ConsentAuthority::new(),
+            consent_history_locks: new_consent_history_locks(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         };
@@ -4111,6 +4173,7 @@ mod tests {
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
             consent_authority: ConsentAuthority::new(),
+            consent_history_locks: new_consent_history_locks(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         };
@@ -4134,6 +4197,7 @@ mod tests {
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
             consent_authority: ConsentAuthority::new(),
+            consent_history_locks: new_consent_history_locks(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         };
@@ -4156,6 +4220,7 @@ mod tests {
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
             consent_authority: ConsentAuthority::new(),
+            consent_history_locks: new_consent_history_locks(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         };
@@ -4179,6 +4244,7 @@ mod tests {
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
             consent_authority: ConsentAuthority::new(),
+            consent_history_locks: new_consent_history_locks(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         };
@@ -4236,6 +4302,7 @@ mod tests {
                 limits: GatewayLimits::LOCAL_DEFAULT,
                 owntracks_enabled: false,
                 consent_authority: ConsentAuthority::new(),
+                consent_history_locks: new_consent_history_locks(),
                 action_registry: gateway_action_registry(),
                 action_principal: None,
             };
