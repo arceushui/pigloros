@@ -1045,7 +1045,9 @@ fn worker_loop(
     let worker_result = catch_unwind(AssertUnwindSafe(|| {
         let Some(runtime) = take_worker_runtime(
             lifecycle_state.as_ref(),
-            tokio::runtime::Builder::new_current_thread().enable_all().build(),
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build(),
         ) else {
             return;
         };
