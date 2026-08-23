@@ -1282,7 +1282,7 @@ mod tests {
         let authority = ConsentAuthority::new();
         let grant = sample_granted();
         let token = authority.record_grant(&grant);
-        let mut changed = token.clone();
+        let mut changed = token;
         changed.fence_seq = 0;
 
         assert_eq!(
