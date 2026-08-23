@@ -3186,6 +3186,16 @@ mod tests {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn stable_profile() -> ConformanceProfileV1 {
+        candidate()
+            .transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![stable_evidence("alpha", 30), stable_evidence("beta", 40)],
+            )
+            .unwrap_or_else(|_| profile())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reject_stable_change(change: impl FnOnce(&mut StableImplementationEvidenceV1)) {
         let mut first = stable_evidence("alpha", 30);
         change(&mut first);
@@ -3317,6 +3327,54 @@ mod tests {
         assert_eq!(
             invalid_candidate.validate_with_trust_policy(&policy),
             Err(ConformanceContractError::FixtureDigestMismatch)
+        );
+    }
+
+    #[test]
+    fn public_stable_transition_with_policy_validates_the_published_profile() {
+        let policy = trusted_root_policy();
+        let stable = candidate()
+            .transition_to_with_trust_policy(
+                ProfileLifecycleV1::Stable,
+                vec![stable_evidence("alpha", 30), stable_evidence("beta", 40)],
+                &policy,
+            )
+            .unwrap_or_else(|_| profile());
+        assert_eq!(stable.validate_with_trust_policy(&policy), Ok(()));
+    }
+
+    #[test]
+    fn public_stable_validator_rejects_report_shape_mismatches() {
+        let mut value = stable_profile();
+        value.stable_evidence[0].report.cases.pop();
+        refresh_report_counts(&mut value.stable_evidence[0].report);
+        refresh_stable_attestation(&mut value.stable_evidence[0]);
+        assert_eq!(
+            value.validate_with_trust_policy(&trusted_root_policy()),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+
+        let mut value = stable_profile();
+        value.stable_evidence[0].report.cases[0].outcome = CaseOutcomeStatusV1::Fail;
+        refresh_report_counts(&mut value.stable_evidence[0].report);
+        refresh_stable_attestation(&mut value.stable_evidence[0]);
+        assert_eq!(
+            value.validate_with_trust_policy(&trusted_root_policy()),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+    }
+
+    #[test]
+    fn public_stable_validator_rejects_case_outcome_mismatch() {
+        let mut value = stable_profile();
+        value.stable_evidence[0].case_outcomes[0].verification_outcome =
+            VerificationOutcomeV1::Diverged;
+        value.stable_evidence[0].case_outcomes[0].divergence_kind =
+            Some(DivergenceMismatchKindV1::TypedFailure);
+        refresh_stable_report(&mut value.stable_evidence[0]);
+        assert_eq!(
+            value.validate_with_trust_policy(&trusted_root_policy()),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
         );
     }
 
