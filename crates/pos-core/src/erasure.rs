@@ -2381,6 +2381,9 @@ mod tests {
         let mut invented_ack = receipt_input(ErasureLifecycleV1::Complete, vec![ack], Vec::new(), Vec::new());
         invented_ack.acknowledgements[0].target = acknowledgement(2, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
         assert_eq!(ErasureReceiptV1::new(invented_ack), Err(ErasureErrorV1::ScopeInvalid));
+        let mut mismatched_owner = receipt_input(ErasureLifecycleV1::Complete, vec![ack], Vec::new(), Vec::new());
+        mismatched_owner.acknowledgements[0].owner = reference(99);
+        assert_eq!(ErasureReceiptV1::new(mismatched_owner), Err(ErasureErrorV1::ScopeInvalid));
         let mut missing_inventory = receipt_input(ErasureLifecycleV1::Complete, vec![ack], Vec::new(), Vec::new());
         missing_inventory.inventories.artifacts.clear();
         assert_eq!(ErasureReceiptV1::new(missing_inventory), Err(ErasureErrorV1::ScopeInvalid));
