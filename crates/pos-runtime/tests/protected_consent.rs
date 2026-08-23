@@ -83,7 +83,11 @@ fn protected_public_seam_checks_timeline_and_rechecks_at_commit_head() {
             fence_seq: 1,
         },
     ));
-    test_ok(registry.commit_step_at(Seq::from_u64(1), 2));
+    let error = test_err(registry.commit_step_at(Seq::from_u64(1), 2));
+    assert!(matches!(
+        error,
+        RuntimeError::Consent(ConsentError::NoConsent)
+    ));
 
     let wrong_timeline = TimelineId::new();
     let error =
@@ -248,7 +252,11 @@ fn protected_public_seam_revalidates_at_the_fresh_commit_fence_time() {
 
     let drafts = test_ok(registry.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[]));
     assert_eq!(drafts.len(), 1);
-    test_ok(registry.commit_step_at(Seq::ZERO, 2));
+    let error = test_err(registry.commit_step_at(Seq::ZERO, 2));
+    assert!(matches!(
+        error,
+        RuntimeError::Consent(ConsentError::Expired)
+    ));
 
     assert_eq!(
         *observed_now_secs
