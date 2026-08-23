@@ -2390,7 +2390,7 @@ mod tests {
         reject(
             &|value| {
                 value.fixtures[0].capability_policy.capability_ids =
-                    vec!["x".to_owned(), "x".to_owned()]
+                    vec!["x".to_owned(), "x".to_owned()];
             },
             ConformanceContractError::NonCanonicalOrder,
         );
@@ -2412,7 +2412,7 @@ mod tests {
                 value.allowed_divergences = vec![AllowedDivergenceV1 {
                     classification: 1,
                     first_coordinate: vec![],
-                }]
+                }];
             },
             ConformanceContractError::NonCanonicalOrder,
         );
