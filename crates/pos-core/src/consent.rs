@@ -520,6 +520,33 @@ mod tests {
     use super::*;
     use crate::{event::Kind, ids::EntityId};
 
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected consent fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    trait TestErrorExt<E> {
+        fn test_err(self) -> E;
+    }
+
+    impl<T, E: std::fmt::Debug> TestErrorExt<E> for Result<T, E> {
+        fn test_err(self) -> E {
+            match self {
+                Ok(_) => std::panic::resume_unwind(Box::new("expected consent fixture error")),
+                Err(error) => error,
+            }
+        }
+    }
+
     fn sample_granted() -> ConsentGranted {
         ConsentGranted {
             subject_id: EntityId::new(),
@@ -550,8 +577,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn consent_granted_round_trip() {
         let g = sample_granted();
-        let bytes = g.encode().unwrap();
-        let d = ConsentGranted::decode(&bytes).unwrap();
+        let bytes = g.encode().test_ok();
+        let d = ConsentGranted::decode(&bytes).test_ok();
         assert_eq!(d.subject_id, g.subject_id);
         assert_eq!(d.grantee_id, g.grantee_id);
         assert_eq!(d.purpose, g.purpose);
@@ -570,8 +597,8 @@ mod tests {
         let mut g = sample_granted();
         g.modalities = MODALITY_LOCATION | MODALITY_PERSONA | MODALITY_MODEL_FIT | MODALITY_EXPORT;
         g.export_permitted = true;
-        let bytes = g.encode().unwrap();
-        let d = ConsentGranted::decode(&bytes).unwrap();
+        let bytes = g.encode().test_ok();
+        let d = ConsentGranted::decode(&bytes).test_ok();
         assert_eq!(d.modalities, 0x0F);
         assert!(d.export_permitted);
     }
@@ -581,8 +608,8 @@ mod tests {
     fn consent_granted_non_zero_expiry() {
         let mut g = sample_granted();
         g.expiry_secs = 86_400;
-        let bytes = g.encode().unwrap();
-        let d = ConsentGranted::decode(&bytes).unwrap();
+        let bytes = g.encode().test_ok();
+        let d = ConsentGranted::decode(&bytes).test_ok();
         assert_eq!(d.expiry_secs, 86_400);
     }
 
@@ -601,7 +628,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn consent_granted_wrong_magic_rejected() {
         let g = sample_granted();
-        let mut bytes = g.encode().unwrap().as_slice().to_vec();
+        let mut bytes = g.encode().test_ok().as_slice().to_vec();
         // byte[2] is the first payload byte of the magic bstr
         bytes[2] = b'X';
         assert!(matches!(
@@ -614,7 +641,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn consent_granted_trailing_bytes_rejected() {
         let g = sample_granted();
-        let mut bytes = g.encode().unwrap().as_slice().to_vec();
+        let mut bytes = g.encode().test_ok().as_slice().to_vec();
         bytes.push(0x00);
         assert!(matches!(
             ConsentGranted::decode(&CanonicalBytes::from_vec(bytes)),
@@ -626,14 +653,14 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn consent_granted_wrong_version_rejected() {
         let g = sample_granted();
-        let bytes = g.encode().unwrap().as_slice().to_vec();
+        let bytes = g.encode().test_ok().as_slice().to_vec();
         let mut cursor = std::io::Cursor::new(bytes.as_slice());
-        let mut val: Value = ciborium::from_reader(&mut cursor).unwrap();
+        let mut val: Value = ciborium::from_reader(&mut cursor).test_ok();
         if let Value::Array(ref mut items) = val {
             items[1] = Value::Integer(99_i64.into());
         }
         let mut buf = Vec::new();
-        ciborium::into_writer(&val, &mut buf).unwrap();
+        ciborium::into_writer(&val, &mut buf).test_ok();
         assert!(matches!(
             ConsentGranted::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::WrongVersion)
@@ -648,7 +675,7 @@ mod tests {
             Value::Integer(1.into()),
         ]);
         let mut buf = Vec::new();
-        ciborium::into_writer(&truncated, &mut buf).unwrap();
+        ciborium::into_writer(&truncated, &mut buf).test_ok();
         assert!(matches!(
             ConsentGranted::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::WrongArrayLength)
@@ -660,7 +687,7 @@ mod tests {
     fn consent_granted_root_non_array_rejected() {
         let scalar = Value::Integer(42.into());
         let mut buf = Vec::new();
-        ciborium::into_writer(&scalar, &mut buf).unwrap();
+        ciborium::into_writer(&scalar, &mut buf).test_ok();
         assert!(matches!(
             ConsentGranted::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::CborError)
@@ -671,14 +698,14 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn consent_granted_wrong_field_type_for_subject_id() {
         let g = sample_granted();
-        let bytes = g.encode().unwrap().as_slice().to_vec();
+        let bytes = g.encode().test_ok().as_slice().to_vec();
         let mut cursor = std::io::Cursor::new(bytes.as_slice());
-        let mut val: Value = ciborium::from_reader(&mut cursor).unwrap();
+        let mut val: Value = ciborium::from_reader(&mut cursor).test_ok();
         if let Value::Array(ref mut items) = val {
             items[2] = Value::Integer(42.into());
         }
         let mut buf = Vec::new();
-        ciborium::into_writer(&val, &mut buf).unwrap();
+        ciborium::into_writer(&val, &mut buf).test_ok();
         assert!(matches!(
             ConsentGranted::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::WrongFieldType)
@@ -690,14 +717,14 @@ mod tests {
     fn consent_granted_wrong_length_bytes_for_subject_id() {
         // decode_id rejects bstr that is not exactly 16 bytes
         let g = sample_granted();
-        let bytes = g.encode().unwrap().as_slice().to_vec();
+        let bytes = g.encode().test_ok().as_slice().to_vec();
         let mut cursor = std::io::Cursor::new(bytes.as_slice());
-        let mut val: Value = ciborium::from_reader(&mut cursor).unwrap();
+        let mut val: Value = ciborium::from_reader(&mut cursor).test_ok();
         if let Value::Array(ref mut items) = val {
             items[2] = Value::Bytes(vec![0u8; 15]); // wrong length (15 not 16)
         }
         let mut buf = Vec::new();
-        ciborium::into_writer(&val, &mut buf).unwrap();
+        ciborium::into_writer(&val, &mut buf).test_ok();
         assert!(matches!(
             ConsentGranted::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::WrongFieldType)
@@ -708,14 +735,14 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn consent_granted_wrong_field_type_for_fork_permitted() {
         let g = sample_granted();
-        let bytes = g.encode().unwrap().as_slice().to_vec();
+        let bytes = g.encode().test_ok().as_slice().to_vec();
         let mut cursor = std::io::Cursor::new(bytes.as_slice());
-        let mut val: Value = ciborium::from_reader(&mut cursor).unwrap();
+        let mut val: Value = ciborium::from_reader(&mut cursor).test_ok();
         if let Value::Array(ref mut items) = val {
             items[7] = Value::Integer(1.into()); // integer not bool
         }
         let mut buf = Vec::new();
-        ciborium::into_writer(&val, &mut buf).unwrap();
+        ciborium::into_writer(&val, &mut buf).test_ok();
         assert!(matches!(
             ConsentGranted::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::WrongFieldType)
@@ -726,14 +753,14 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn consent_granted_wrong_field_type_for_retention_days() {
         let g = sample_granted();
-        let bytes = g.encode().unwrap().as_slice().to_vec();
+        let bytes = g.encode().test_ok().as_slice().to_vec();
         let mut cursor = std::io::Cursor::new(bytes.as_slice());
-        let mut val: Value = ciborium::from_reader(&mut cursor).unwrap();
+        let mut val: Value = ciborium::from_reader(&mut cursor).test_ok();
         if let Value::Array(ref mut items) = val {
             items[9] = Value::Text("not_u16".to_owned());
         }
         let mut buf = Vec::new();
-        ciborium::into_writer(&val, &mut buf).unwrap();
+        ciborium::into_writer(&val, &mut buf).test_ok();
         assert!(matches!(
             ConsentGranted::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::WrongFieldType)
@@ -744,14 +771,14 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn consent_granted_wrong_field_type_for_expiry_secs() {
         let g = sample_granted();
-        let bytes = g.encode().unwrap().as_slice().to_vec();
+        let bytes = g.encode().test_ok().as_slice().to_vec();
         let mut cursor = std::io::Cursor::new(bytes.as_slice());
-        let mut val: Value = ciborium::from_reader(&mut cursor).unwrap();
+        let mut val: Value = ciborium::from_reader(&mut cursor).test_ok();
         if let Value::Array(ref mut items) = val {
             items[10] = Value::Text("not_u32".to_owned());
         }
         let mut buf = Vec::new();
-        ciborium::into_writer(&val, &mut buf).unwrap();
+        ciborium::into_writer(&val, &mut buf).test_ok();
         assert!(matches!(
             ConsentGranted::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::WrongFieldType)
@@ -762,15 +789,15 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn consent_granted_wrong_field_type_for_modalities() {
         let g = sample_granted();
-        let bytes = g.encode().unwrap().as_slice().to_vec();
+        let bytes = g.encode().test_ok().as_slice().to_vec();
         let mut cursor = std::io::Cursor::new(bytes.as_slice());
-        let mut val: Value = ciborium::from_reader(&mut cursor).unwrap();
+        let mut val: Value = ciborium::from_reader(&mut cursor).test_ok();
         if let Value::Array(ref mut items) = val {
             // modalities is at index 5; put a text value there
             items[5] = Value::Text("not_a_u8".to_owned());
         }
         let mut buf = Vec::new();
-        ciborium::into_writer(&val, &mut buf).unwrap();
+        ciborium::into_writer(&val, &mut buf).test_ok();
         assert!(matches!(
             ConsentGranted::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::WrongFieldType)
@@ -781,14 +808,14 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn consent_granted_purpose_wrong_type_rejected() {
         let g = sample_granted();
-        let bytes = g.encode().unwrap().as_slice().to_vec();
+        let bytes = g.encode().test_ok().as_slice().to_vec();
         let mut cursor = std::io::Cursor::new(bytes.as_slice());
-        let mut val: Value = ciborium::from_reader(&mut cursor).unwrap();
+        let mut val: Value = ciborium::from_reader(&mut cursor).test_ok();
         if let Value::Array(ref mut items) = val {
             items[4] = Value::Integer(99.into()); // purpose should be tstr
         }
         let mut buf = Vec::new();
-        ciborium::into_writer(&val, &mut buf).unwrap();
+        ciborium::into_writer(&val, &mut buf).test_ok();
         assert!(matches!(
             ConsentGranted::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::WrongFieldType)
@@ -802,8 +829,8 @@ mod tests {
     fn consent_revoked_round_trip() {
         let g = sample_granted();
         let r = sample_revoked(&g);
-        let bytes = r.encode().unwrap();
-        let d = ConsentRevoked::decode(&bytes).unwrap();
+        let bytes = r.encode().test_ok();
+        let d = ConsentRevoked::decode(&bytes).test_ok();
         assert_eq!(d.subject_id, r.subject_id);
         assert_eq!(d.grantee_id, r.grantee_id);
         assert_eq!(d.grant_seq, r.grant_seq);
@@ -815,7 +842,7 @@ mod tests {
     fn consent_revoked_wrong_magic_rejected() {
         let g = sample_granted();
         let r = sample_revoked(&g);
-        let mut bytes = r.encode().unwrap().as_slice().to_vec();
+        let mut bytes = r.encode().test_ok().as_slice().to_vec();
         bytes[2] = b'X';
         assert!(matches!(
             ConsentRevoked::decode(&CanonicalBytes::from_vec(bytes)),
@@ -828,7 +855,7 @@ mod tests {
     fn consent_revoked_trailing_bytes_rejected() {
         let g = sample_granted();
         let r = sample_revoked(&g);
-        let mut bytes = r.encode().unwrap().as_slice().to_vec();
+        let mut bytes = r.encode().test_ok().as_slice().to_vec();
         bytes.push(0xFF);
         assert!(matches!(
             ConsentRevoked::decode(&CanonicalBytes::from_vec(bytes)),
@@ -841,7 +868,7 @@ mod tests {
     fn consent_revoked_wrong_array_length_rejected() {
         let truncated = Value::Array(vec![Value::Bytes(b"CRV1".to_vec())]);
         let mut buf = Vec::new();
-        ciborium::into_writer(&truncated, &mut buf).unwrap();
+        ciborium::into_writer(&truncated, &mut buf).test_ok();
         assert!(matches!(
             ConsentRevoked::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::WrongArrayLength)
@@ -853,7 +880,7 @@ mod tests {
     fn consent_revoked_root_non_array_rejected() {
         let scalar = Value::Bool(false);
         let mut buf = Vec::new();
-        ciborium::into_writer(&scalar, &mut buf).unwrap();
+        ciborium::into_writer(&scalar, &mut buf).test_ok();
         assert!(matches!(
             ConsentRevoked::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::CborError)
@@ -865,14 +892,14 @@ mod tests {
     fn consent_revoked_wrong_field_type_for_fence_seq() {
         let g = sample_granted();
         let r = sample_revoked(&g);
-        let bytes = r.encode().unwrap().as_slice().to_vec();
+        let bytes = r.encode().test_ok().as_slice().to_vec();
         let mut cursor = std::io::Cursor::new(bytes.as_slice());
-        let mut val: Value = ciborium::from_reader(&mut cursor).unwrap();
+        let mut val: Value = ciborium::from_reader(&mut cursor).test_ok();
         if let Value::Array(ref mut items) = val {
             items[5] = Value::Text("not_a_u64".to_owned());
         }
         let mut buf = Vec::new();
-        ciborium::into_writer(&val, &mut buf).unwrap();
+        ciborium::into_writer(&val, &mut buf).test_ok();
         assert!(matches!(
             ConsentRevoked::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::WrongFieldType)
@@ -992,7 +1019,7 @@ mod tests {
                 &Kind::new(EVENT_TYPE_CONSENT_GRANTED_V1),
                 0
             )
-            .unwrap_err(),
+            .test_err(),
             ConsentError::ConsentEventsForbidden
         );
     }
@@ -1007,7 +1034,7 @@ mod tests {
                 &Kind::new(EVENT_TYPE_CONSENT_REVOKED_V1),
                 0
             )
-            .unwrap_err(),
+            .test_err(),
             ConsentError::ConsentEventsForbidden
         );
     }
@@ -1022,7 +1049,7 @@ mod tests {
                 &Kind::new("world.observation.v1"),
                 100 // head == fence -> invalid
             )
-            .unwrap_err(),
+            .test_err(),
             ConsentError::Revoked
         );
     }
