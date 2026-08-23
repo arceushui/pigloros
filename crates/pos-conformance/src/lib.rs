@@ -3492,7 +3492,14 @@ pub mod strict_codec {
             first_coordinate: if matches!(fields[8], Value::Null) {
                 None
             } else {
-                Some(bytes(&fields[8], "case_coordinate")?)
+                match &fields[8] {
+                    Value::Bytes(bytes) if bytes.len() <= 128 => Some(bytes.clone()),
+                    _ => {
+                        return Err(StrictCborError::InvalidField {
+                            field: "case_coordinate".to_owned(),
+                        });
+                    }
+                }
             },
             expected_digest: if matches!(fields[9], Value::Null) {
                 None

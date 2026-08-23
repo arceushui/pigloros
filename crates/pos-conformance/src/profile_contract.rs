@@ -923,7 +923,7 @@ fn fixture_key(value: &FixtureDescriptorV1) -> (&str, ClaimLayerV1, [u8; 32]) {
     )
 }
 
-fn divergence_key(value: &AllowedDivergenceV1) -> (u8, &[u8]) {
+fn divergence_key(value: &AllowedDivergenceV1) -> (DivergenceMismatchKindV1, &[u8]) {
     (value.classification, &value.first_coordinate)
 }
 
