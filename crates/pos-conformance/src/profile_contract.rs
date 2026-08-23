@@ -474,6 +474,9 @@ impl EvaluatorRequestV1 {
     ) -> Result<(), ConformanceContractError> {
         self.validate().and_then(|()| {
             profile.validate()?;
+            if profile.profile_digest != profile.digest() {
+                return Err(ConformanceContractError::FixtureDigestMismatch);
+            }
             if self.conformance_profile_digest != profile.profile_digest
                 || self.fixture_bundle_digest != fixture_bundle_digest(profile)
                 || self.trust_policy_snapshot_digest
@@ -936,6 +939,7 @@ fn stable_attestation_payload(evidence: &StableImplementationEvidenceV1) -> Valu
         encode_identity(&evidence.implementation),
         encode_independence(&evidence.independence),
         digest(&evidence.evaluator_protocol_digest),
+        digest(&evidence.report.report_digest),
         Value::Array(evidence.case_outcomes.iter().map(encode_case).collect()),
         digest(&evidence.attestation.signer_public_key),
         digest(&evidence.attestation.trust_root_digest),
