@@ -379,7 +379,7 @@ impl CommandLifecycle {
         }
     }
 
-    fn start(&self) -> bool {
+    fn start(&self) -> Option<()> {
         self.phase
             .compare_exchange(
                 CommandPhase::Queued as u8,
@@ -387,11 +387,12 @@ impl CommandLifecycle {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
-            .is_ok()
+            .ok()
+            .map(|_| ())
     }
 
     fn claim_for_execution(&self, deadline: Instant) -> ExecutionClaim {
-        if !self.start() {
+        if self.start().is_none() {
             return ExecutionClaim::Expired;
         }
         if Instant::now() >= deadline {
