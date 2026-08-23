@@ -861,9 +861,7 @@ fn validate_fixture_verification_outcome(
             Ok(())
         }
         (ExpectedResultV1::TypedFailure(error), outcome, Some(expected_error)) => {
-            if *error != expected_error {
-                Err(ConformanceContractError::ExpectedResultMissing)
-            } else {
+            if *error == expected_error {
                 match outcome {
                     VerificationOutcomeV1::VerifiedExact | VerificationOutcomeV1::Diverged => {
                         Err(ConformanceContractError::ExpectedResultMissing)
@@ -873,6 +871,8 @@ fn validate_fixture_verification_outcome(
                     | VerificationOutcomeV1::IncompatibleProfile
                     | VerificationOutcomeV1::ResourceLimitExceeded => Ok(()),
                 }
+            } else {
+                Err(ConformanceContractError::ExpectedResultMissing)
             }
         }
         _ => Err(ConformanceContractError::ExpectedResultMissing),
@@ -3343,7 +3343,7 @@ mod tests {
             caps.max_bundle_members = MAX_FIXTURES as u32 + 1;
         });
         reject(&|caps| {
-            caps.max_member_path_bytes = MAX_STRING_BYTES as u32 + 1;
+            caps.max_member_path_bytes = MAX_STRING_BYTES as u16 + 1;
         });
         reject(&|caps| caps.max_member_bytes = MAX_MEMBER_BYTES + 1);
     }

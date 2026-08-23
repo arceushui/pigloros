@@ -283,16 +283,12 @@ mod coverage_entrypoints {
     fn public_evidence_decoder_enforces_case_coordinate_boundary() {
         let evidence = tests::evidence();
         let encoded = decode_value(ok(evidence.to_canonical_cbor()));
-        let exact = replace_evidence_case_coordinate(
-            &encoded,
-            ciborium::Value::Bytes(vec![b'x'; 128]),
-        );
+        let exact =
+            replace_evidence_case_coordinate(&encoded, ciborium::Value::Bytes(vec![b'x'; 128]));
         assert!(MoatProofEvidenceV1::from_canonical_cbor(&encode_value(&exact)).is_ok());
 
-        let oversized = replace_evidence_case_coordinate(
-            &encoded,
-            ciborium::Value::Bytes(vec![b'x'; 129]),
-        );
+        let oversized =
+            replace_evidence_case_coordinate(&encoded, ciborium::Value::Bytes(vec![b'x'; 129]));
         expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
             &oversized,
         )));
