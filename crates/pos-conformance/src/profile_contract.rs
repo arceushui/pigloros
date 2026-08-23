@@ -1536,9 +1536,7 @@ fn decode_expected(value: &Value) -> Result<ExpectedResultV1, ConformanceContrac
             bytes: bytes_value(&fields[1])?,
             digest: digest_value(&fields[2])?,
         }),
-        1 => Ok(ExpectedResultV1::TypedFailure(decode_safe_error(
-            &fields[3],
-        )?)),
+        1 => decode_safe_error(&fields[3]).map(ExpectedResultV1::TypedFailure),
         2 => {
             let divergence = array(&fields[4], 2)?;
             Ok(ExpectedResultV1::AllowedDivergence {
@@ -1786,12 +1784,8 @@ fn encode_value(value: &Value) -> Result<Vec<u8>, ConformanceContractError> {
 
 fn decode_value(bytes: &[u8]) -> Result<Value, ConformanceContractError> {
     preflight_cbor(bytes)?;
-    let mut cursor = Cursor::new(bytes);
-    let value = ciborium::from_reader(&mut cursor)
+    let value = ciborium::from_reader(Cursor::new(bytes))
         .map_err(|_| ConformanceContractError::InvalidEncoding)?;
-    if cursor.position() != u64::try_from(bytes.len()).unwrap_or(u64::MAX) {
-        return Err(ConformanceContractError::InvalidEncoding);
-    }
     encode_value(&value).and_then(|canonical| {
         if canonical == bytes {
             Ok(value)
@@ -3245,47 +3239,58 @@ mod tests {
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         };
 
-        let profile_value = encode_profile(&profile(), true);
-        if let Value::Array(fields) = profile_value {
-            let mut wrong_array = fields.clone();
-            wrong_array[8] = Value::Map(Vec::new());
-            reject_profile(Value::Array(wrong_array));
+        let fields = match encode_profile(&profile(), true) {
+            Value::Array(fields) => fields,
+            _ => unreachable!(),
+        };
+        let mut wrong_array = fields.clone();
+        wrong_array[8] = Value::Bool(true);
+        reject_profile(Value::Array(wrong_array));
 
-            let mut wrong_text = fields.clone();
-            wrong_text[2] = Value::Map(Vec::new());
-            reject_profile(Value::Array(wrong_text));
+        let mut wrong_text = fields.clone();
+        wrong_text[2] = Value::Bool(true);
+        reject_profile(Value::Array(wrong_text));
 
-            let mut wrong_uint = fields.clone();
-            wrong_uint[1] = Value::Map(Vec::new());
-            reject_profile(Value::Array(wrong_uint));
+        let mut wrong_uint = fields.clone();
+        wrong_uint[1] = Value::Bool(true);
+        reject_profile(Value::Array(wrong_uint));
 
-            let mut wrong_bytes = fields.clone();
-            wrong_bytes[5] = Value::Map(Vec::new());
-            reject_profile(Value::Array(wrong_bytes));
+        let mut wrong_bytes = fields.clone();
+        wrong_bytes[5] = Value::Bool(true);
+        reject_profile(Value::Array(wrong_bytes));
 
-            let mut wrong_bool = fields.clone();
-            if let Value::Array(fixtures) = &mut wrong_bool[8] {
-                if let Value::Array(fixture) = &mut fixtures[0] {
-                    fixture[1] = Value::Map(Vec::new());
-                }
-            }
-            reject_profile(Value::Array(wrong_bool));
+        let mut wrong_bool = fields.clone();
+        let fixtures = match &mut wrong_bool[8] {
+            Value::Array(fixtures) => fixtures,
+            _ => unreachable!(),
+        };
+        let fixture = match &mut fixtures[0] {
+            Value::Array(fixture) => fixture,
+            _ => unreachable!(),
+        };
+        fixture[1] = Value::Map(Vec::new());
+        reject_profile(Value::Array(wrong_bool));
 
-            let mut wrong_typed_error = fields.clone();
-            if let Value::Array(fixtures) = &mut wrong_typed_error[8] {
-                if let Value::Array(fixture) = &mut fixtures[0] {
-                    if let Value::Array(expected) = &mut fixture[8] {
-                        expected[0] = uint(1);
-                        expected[3] = Value::Map(Vec::new());
-                    }
-                }
-            }
-            reject_profile(Value::Array(wrong_typed_error));
+        let mut wrong_typed_error = fields.clone();
+        let fixtures = match &mut wrong_typed_error[8] {
+            Value::Array(fixtures) => fixtures,
+            _ => unreachable!(),
+        };
+        let fixture = match &mut fixtures[0] {
+            Value::Array(fixture) => fixture,
+            _ => unreachable!(),
+        };
+        let expected = match &mut fixture[8] {
+            Value::Array(expected) => expected,
+            _ => unreachable!(),
+        };
+        expected[0] = uint(1);
+        expected[3] = Value::Bool(true);
+        reject_profile(Value::Array(wrong_typed_error));
 
-            let mut trailing = encode_value(&Value::Array(fields)).unwrap_or_default();
-            trailing.push(0);
-            assert!(ConformanceProfileV1::from_canonical_cbor(&trailing).is_err());
-        }
+        let mut trailing = encode_value(&Value::Array(fields)).unwrap_or_default();
+        trailing.push(0);
+        assert!(ConformanceProfileV1::from_canonical_cbor(&trailing).is_err());
 
         let mut invalid_bounds = profile();
         invalid_bounds.fixtures[0].bounds.cpu_fuel = 0;
@@ -3295,14 +3300,17 @@ mod tests {
             Err(ConformanceContractError::FieldOutOfBounds)
         );
 
-        let request_value = encode_request(&request(), true);
-        if let Value::Array(mut fields) = request_value {
-            if let Value::Array(identity) = &mut fields[7] {
-                identity[5] = Value::Null;
-            }
-            let bytes = encode_value(&Value::Array(fields)).unwrap_or_default();
-            assert!(EvaluatorRequestV1::from_canonical_cbor(&bytes).is_err());
-        }
+        let mut fields = match encode_request(&request(), true) {
+            Value::Array(fields) => fields,
+            _ => unreachable!(),
+        };
+        let identity = match &mut fields[7] {
+            Value::Array(identity) => identity,
+            _ => unreachable!(),
+        };
+        identity[5] = Value::Null;
+        let bytes = encode_value(&Value::Array(fields)).unwrap_or_default();
+        assert!(EvaluatorRequestV1::from_canonical_cbor(&bytes).is_err());
 
         let candidate = profile()
             .transition_to(ProfileLifecycleV1::Candidate, vec![])
