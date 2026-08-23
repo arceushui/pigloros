@@ -1191,7 +1191,7 @@ mod tests {
         crypto::Hash,
         event::{CanonicalBytes, EventDraft, Kind, SchemaVersion},
         ids::{EntityId, EventId, PluginId, TimelineId},
-        Capability, ConsentGranted, Event, Plugin, Reducer, State,
+        Capability, ConsentGranted, ConsentRevoked, Event, Plugin, Reducer, State,
     };
     use pos_store::{open_store, StoreConfig};
     use std::{
@@ -2148,6 +2148,14 @@ mod tests {
         };
         let authority = ConsentAuthority::new();
         let token = authority.record_grant(&grant);
+        authority
+            .record_revocation(&ConsentRevoked {
+                subject_id: grant.subject_id,
+                grantee_id: grant.grantee_id,
+                grant_seq: grant.grant_seq,
+                fence_seq: 5,
+            })
+            .test_ok();
         let operation = OperationContext::Protected {
             token: token.clone(),
             now_secs: 1,
