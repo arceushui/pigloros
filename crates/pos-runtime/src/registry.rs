@@ -1793,9 +1793,10 @@ mod tests {
             fail: false,
         }));
 
-        registry
-            .tick_cadenced_anchored(timeline, 0, Seq::ZERO)
-            .test_ok();
+        assert!(registry
+            .tick_cadenced_anchored_with_events(timeline, 0, Seq::ZERO, &[])
+            .test_ok()
+            .is_empty());
         registry.abort_step();
         registry
             .tick_cadenced_anchored(timeline, 0, Seq::ZERO)
