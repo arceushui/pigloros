@@ -666,13 +666,14 @@ impl ConsentRevocationReservation {
                 active.token.fence_seq = self.previous_fence_seq;
             }
         }
+        drop(sessions);
         self.completed = true;
     }
 
     /// Publish the durable revocation fence after its Event append succeeds.
     ///
     /// # Errors
-    /// Returns ConsentError::NoConsent when the reserved session has already
+    /// Returns [`ConsentError::NoConsent`] when the reserved session has already
     /// changed or disappeared. The reservation then rolls back on drop unless
     /// the fence was published successfully.
     pub fn commit_durable(mut self) -> Result<(), ConsentError> {
@@ -693,6 +694,7 @@ impl ConsentRevocationReservation {
             return Err(ConsentError::NoConsent);
         }
         active.token.fence_seq = self.fence_seq;
+        drop(sessions);
         self.completed = true;
         Ok(())
     }
@@ -847,7 +849,7 @@ impl ConsentAuthority {
         }
         let previous_fence_seq = active.token.fence_seq;
         active.token.fence_seq = pending_fence_seq;
-        Ok(ConsentRevocationReservation {
+        let reservation = ConsentRevocationReservation {
             active: Arc::clone(&self.active),
             authority_id: self.authority_id,
             timeline_id,
@@ -858,7 +860,9 @@ impl ConsentAuthority {
             pending_fence_seq,
             fence_seq: revocation.fence_seq,
             completed: false,
-        })
+        };
+        drop(sessions);
+        Ok(reservation)
     }
 
     /// Publish a successfully appended revocation's durable fence.
@@ -2200,12 +2204,6 @@ mod tests {
     fn cancelled_revocation_future_restores_the_capability_fence() {
         use std::future::Future as _;
 
-        struct NoopWaker;
-
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-
         let authority = ConsentAuthority::new();
         let timeline = TimelineId::new();
         let grant = sample_granted();
@@ -2224,8 +2222,8 @@ mod tests {
             std::future::pending::<()>().await;
             future_authority.commit_revocation(reservation).test_ok();
         });
-        let waker = std::task::Waker::from(Arc::new(NoopWaker));
-        let mut context = std::task::Context::from_waker(&waker);
+        let waker = std::task::Waker::noop();
+        let mut context = std::task::Context::from_waker(waker);
         assert!(matches!(
             future.as_mut().poll(&mut context),
             std::task::Poll::Pending

@@ -14,7 +14,7 @@ use pos_core::{
     crypto::Hash,
     event::{EventDraft, Kind},
     ids::EntityId,
-    ConsentAuthority, ConsentCapabilityToken, ConsentGranted, ReproManifest, Timeline,
+    ConsentAuthority, ConsentCapabilityToken, ReproManifest, Timeline,
 };
 use pos_runtime::PluginRegistry;
 use pos_store::{open_store, StoreConfig};
@@ -1660,8 +1660,8 @@ mod tests {
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         ids::{EntityId, PluginId},
-        ActionApprover, ActionRejected, Capability, CoreError, Event, EventStore, Plugin,
-        ProposedAction, Reducer, State,
+        ActionApprover, ActionRejected, Capability, ConsentGranted, CoreError, Event, EventStore,
+        Plugin, ProposedAction, Reducer, State,
     };
     use pos_runtime::{Driver, ObservationView, ProjectionKey, RuntimeError, StepOutput};
     use pos_store::StoreConfig;

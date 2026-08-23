@@ -313,25 +313,11 @@ fn scheduler_skips_metadata_only_plugins_and_rejects_cadence_overflow() {
         subscriptions: vec![key],
     }));
     cadenced
-        .tick_cadenced_anchored_protected(
-            timeline,
-            u128::MAX,
-            Seq::ZERO,
-            token.clone(),
-            0,
-            &[],
-        )
+        .tick_cadenced_anchored_protected(timeline, u128::MAX, Seq::ZERO, token.clone(), 0, &[])
         .test_ok();
     cadenced.commit_step_at(Seq::ZERO, 0).test_ok();
     assert!(matches!(
-        cadenced.tick_cadenced_anchored_protected(
-            timeline,
-            u128::MAX,
-            Seq::ZERO,
-            token,
-            0,
-            &[],
-        ),
+        cadenced.tick_cadenced_anchored_protected(timeline, u128::MAX, Seq::ZERO, token, 0, &[]),
         Err(RuntimeError::CadenceOverflow { .. })
     ));
 }

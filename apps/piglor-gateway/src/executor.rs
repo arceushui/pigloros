@@ -15,9 +15,8 @@ use pos_core::{
     },
     timeline::Timeline,
     ConsentGrantedV1, ConsentRevocationReservation, ConsentRevokedV1, CoreError,
-    OwnTracksIngressInputV1,
-    OwnTracksIngressRateKeyV1, OwnTracksIngressStore, EVENT_TYPE_CONSENT_GRANTED_V1,
-    EVENT_TYPE_CONSENT_REVOKED_V1,
+    OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1, OwnTracksIngressStore,
+    EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
 };
 use std::{
     collections::HashMap,
@@ -2497,7 +2496,7 @@ mod tests {
             grant_seq: grant.grant_seq,
             fence_seq: 1,
         };
-        authority.record_grant_on_timeline(timeline, &grant);
+        let _token = authority.record_grant_on_timeline(timeline, &grant);
         let reservation = authority
             .begin_revocation_on_timeline(timeline, &revocation)
             .test_ok()
