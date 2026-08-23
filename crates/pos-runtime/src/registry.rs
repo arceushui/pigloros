@@ -2148,10 +2148,7 @@ mod tests {
         };
         let authority = ConsentAuthority::new();
         let token = authority.record_grant(&grant);
-        let operation = OperationContext::Protected {
-            token,
-            now_secs: 1,
-        };
+        let operation = OperationContext::Protected { token, now_secs: 1 };
 
         assert!(PluginRegistry::new()
             .validate_operation(&operation, Seq::from_u64(3))
