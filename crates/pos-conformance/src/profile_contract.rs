@@ -4110,8 +4110,11 @@ mod tests {
             let bytes = malformed_profile_bytes(&value, &[8, 0, 8], expected);
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         }
+    }
 
-        let mut typed = value.clone();
+    #[test]
+    fn public_profile_decoder_round_trips_expected_variants() {
+        let mut typed = profile();
         typed.fixtures[0].expected =
             ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ClosureIncomplete);
         typed.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::InvalidManifest;
@@ -4123,7 +4126,7 @@ mod tests {
             Ok(typed)
         );
 
-        let mut divergent = value;
+        let mut divergent = profile();
         let coordinate = b"timeline/7".to_vec();
         divergent.allowed_divergences = vec![AllowedDivergenceV1 {
             classification: DivergenceMismatchKindV1::TypedFailure,
@@ -4146,19 +4149,20 @@ mod tests {
     fn public_stable_profile_decoder_reaches_nested_invalid_field_seams() {
         let policy = trusted_root_policy();
         let value = profile();
-        let candidate = value
-            .transition_to(ProfileLifecycleV1::Candidate, vec![])
-            .expect("draft profile must transition to Candidate");
+        let candidate_result = value.transition_to(ProfileLifecycleV1::Candidate, vec![]);
+        assert!(candidate_result.is_ok());
+        let candidate = candidate_result.unwrap_or_else(|_| value.clone());
         let mut first = stable_evidence("alpha", 30);
         let mut second = stable_evidence("beta", 40);
         refresh_stable_report_for_profile(&mut first, &candidate);
         refresh_stable_report_for_profile(&mut second, &candidate);
-        let stable = candidate
-            .transition_to(ProfileLifecycleV1::Stable, vec![first, second])
-            .expect("candidate profile must transition to Stable");
-        let stable_bytes = stable
-            .to_canonical_cbor_with_trust_policy(&policy)
-            .expect("valid Stable profile must encode");
+        let stable_result =
+            candidate.transition_to(ProfileLifecycleV1::Stable, vec![first, second]);
+        assert!(stable_result.is_ok());
+        let stable = stable_result.unwrap_or_else(|_| value.clone());
+        let stable_bytes_result = stable.to_canonical_cbor_with_trust_policy(&policy);
+        assert!(stable_bytes_result.is_ok());
+        let stable_bytes = stable_bytes_result.unwrap_or_default();
         assert_eq!(
             ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&stable_bytes, &policy),
             Ok(stable.clone())
