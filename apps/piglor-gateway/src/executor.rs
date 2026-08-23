@@ -1752,21 +1752,17 @@ mod tests {
     }
 
     async fn receive_scheduler_trace(
-        records: &std::sync::mpsc::Receiver<super::SchedulerTrace>,
+        records: Arc<Mutex<std::sync::mpsc::Receiver<super::SchedulerTrace>>>,
     ) -> Result<super::SchedulerTrace, String> {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                match records.try_recv() {
-                    Ok(record) => return Ok(record),
-                    Err(std::sync::mpsc::TryRecvError::Empty) => tokio::task::yield_now().await,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        return Err("scheduler trace channel disconnected".to_owned());
-                    }
-                }
-            }
+        tokio::task::spawn_blocking(move || {
+            records
+                .lock()
+                .map_err(|_| "scheduler trace receiver poisoned".to_owned())?
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|error| format!("scheduler trace receive failed: {error}"))
         })
         .await
-        .map_err(|_| "scheduler trace timed out".to_owned())?
+        .map_err(|error| format!("scheduler trace task failed: {error}"))?
     }
 
     trait TestOptionExt<T> {
@@ -2530,6 +2526,7 @@ mod tests {
     #[tokio::test]
     async fn cancelled_queued_revocation_finishes_before_protected_append() {
         let (observer, records) = super::SchedulerObserver::new(8);
+        let records = Arc::new(Mutex::new(records));
         let (gate_sender, gate_receiver) = std::sync::mpsc::channel();
         observer.install_gate(gate_receiver);
         let mut store = MemoryStore::new();
@@ -2578,7 +2575,11 @@ mod tests {
         let mut admitted = false;
         let mut drained = false;
         while !(admitted && drained) {
-            match receive_scheduler_trace(&records).await.test_ok().test_value() {
+            let trace = receive_scheduler_trace(Arc::clone(&records))
+                .await
+                .test_ok()
+                .test_value();
+            match trace {
                 super::SchedulerTrace::Admitted { .. } => admitted = true,
                 super::SchedulerTrace::DrainCompleted { pending: 1, .. } => drained = true,
                 super::SchedulerTrace::DrainCompleted { .. }
@@ -2588,8 +2589,12 @@ mod tests {
         task.abort();
         assert!(task.await.is_err());
         gate_sender.send(()).test_ok().test_value();
+        let trace = receive_scheduler_trace(Arc::clone(&records))
+            .await
+            .test_ok()
+            .test_value();
         assert!(matches!(
-            receive_scheduler_trace(&records).await.test_ok().test_value(),
+            trace,
             super::SchedulerTrace::Selected { .. }
         ));
 
