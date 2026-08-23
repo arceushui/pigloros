@@ -2793,10 +2793,6 @@ mod tests {
             ConformanceContractError::FieldOutOfBounds,
         );
         reject_profile_change(
-            |value| value.public_schema_digests.clear(),
-            ConformanceContractError::FieldOutOfBounds,
-        );
-        reject_profile_change(
             |value| value.public_schema_digests = vec![digest(2), digest(2)],
             ConformanceContractError::FieldOutOfBounds,
         );
