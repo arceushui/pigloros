@@ -518,6 +518,38 @@ fn hydrate_projections(registry: &mut PluginRegistry, events: &[pos_core::Event]
     registry.projections.fold_events(events);
 }
 
+fn restore_inherited_eval_events(
+    store: &dyn pos_core::store::EventStore,
+    eval_timeline: pos_core::ids::TimelineId,
+    train_head: pos_core::clock::Seq,
+    registry: &mut PluginRegistry,
+) -> Result<Vec<pos_core::Event>, ExperimentError> {
+    let inherited = if train_head == pos_core::clock::Seq::ZERO {
+        Ok(Vec::new())
+    } else {
+        store
+            .read(
+                eval_timeline,
+                pos_store::SeqRange::bounded(pos_core::clock::Seq::from_u64(1), train_head),
+            )
+            .map_err(ExperimentError::from)
+    };
+    inherited
+        .and_then(|events| {
+            validate_captured_range(pos_core::clock::Seq::ZERO, train_head, &events)
+                .map(|()| events)
+        })
+        .and_then(|events| {
+            timeline_ancestry(store, eval_timeline, train_head).map(|ancestry| (events, ancestry))
+        })
+        .and_then(|(events, ancestry)| {
+            registry
+                .restore_driver_state(&ancestry, &events)
+                .map_err(ExperimentError::from)
+                .map(|()| events)
+        })
+}
+
 /// Run the tick loop on the given store and timeline.
 ///
 /// Returns `(ticks, total_events, chain_head_hash)`.
@@ -1443,31 +1475,8 @@ impl BacktestRunner {
 
         // --- Eval phase (same store, forked timeline) ---
         let mut eval_registry = (self.registry_factory)();
-        let inherited = if train_head_seq == pos_core::clock::Seq::ZERO {
-            Ok(Vec::new())
-        } else {
-            store
-                .read(
-                    eval_tl_id,
-                    pos_store::SeqRange::bounded(pos_core::clock::Seq::from_u64(1), train_head_seq),
-                )
-                .map_err(ExperimentError::from)
-        };
-        let inherited = inherited
-            .and_then(|events| {
-                validate_captured_range(pos_core::clock::Seq::ZERO, train_head_seq, &events)
-                    .map(|()| events)
-            })
-            .and_then(|events| {
-                timeline_ancestry(store, eval_tl_id, train_head_seq)
-                    .map(|ancestry| (events, ancestry))
-            })
-            .and_then(|(events, ancestry)| {
-                eval_registry
-                    .restore_driver_state(&ancestry, &events)
-                    .map_err(ExperimentError::from)
-                    .map(|()| events)
-            })?;
+        let inherited =
+            restore_inherited_eval_events(store, eval_tl_id, train_head_seq, &mut eval_registry)?;
         hydrate_projections(&mut eval_registry, &inherited);
         let eval_stop = StopCondition::MaxTicks(self.config.eval_ticks);
         let (eval_ticks, eval_events, eval_chain_head) = run_experiment_on_store(
