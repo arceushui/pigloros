@@ -686,7 +686,7 @@ fn receipt_inventory_decoder_rejections(encoded: &[u8]) -> Result<(), ErasureErr
         decode_receipt(&unordered_targets),
         Err(ErasureErrorV1::ScopeInvalid)
     );
-    let mut trailing = encoded.clone();
+    let mut trailing = encoded.to_vec();
     trailing.push(0);
     assert_eq!(
         ErasureReceiptV1::from_canonical_cbor(&trailing),
@@ -1781,7 +1781,7 @@ fn history_terminal_mismatches(
             _ => altered.terminal_state = waiting,
         }
         assert_eq!(
-            ErasureReceiptV1::new(altered)?.verify_history(&resolver),
+            ErasureReceiptV1::new(altered)?.verify_history(resolver),
             Err(ErasureErrorV1::PolicyConflict)
         );
     }

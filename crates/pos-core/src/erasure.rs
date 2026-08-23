@@ -1363,7 +1363,7 @@ impl ErasureCoordinatorRecordV1 {
             self.dispatch_provenance,
         ]
         .into_iter()
-        .filter(Option::is_some)
+        .flatten()
         .count();
         let expected_operation_count = match lifecycle {
             ErasureLifecycleV1::Submitted | ErasureLifecycleV1::Rejected => 0,
@@ -1561,16 +1561,17 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         request: ErasureReferenceV1,
         transition: ErasureStateTransitionV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
+        let requested_transition = transition;
         self.record(request).and_then(|mut record| {
             if let Some(freeze_provenance) = record.freeze_provenance {
-                return if freeze_provenance == transition.provenance {
+                return if freeze_provenance == requested_transition.provenance {
                     Ok(record.state)
                 } else {
                     Err(ErasureErrorV1::PolicyConflict)
                 };
             }
             let freeze_is_authorized = matches!(
-                (record.state.lifecycle(), transition.lifecycle),
+                (record.state.lifecycle(), requested_transition.lifecycle),
                 (
                     ErasureLifecycleV1::Authorized,
                     ErasureLifecycleV1::AccessFrozen
@@ -1588,7 +1589,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     return Err(ErasureErrorV1::ScopeInvalid);
                 }
                 self.port
-                    .admit_freeze(request, &transition)
+                    .admit_freeze(request, &requested_transition)
                     .and_then(|admission| {
                         let replay_claim = record.state.replay_claim();
                         record.state.transition(ErasureStateTransitionV1 {
@@ -1603,7 +1604,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     })
                     .and_then(|state| {
                         record.state = state;
-                        record.freeze_provenance = Some(transition.provenance);
+                        record.freeze_provenance = Some(requested_transition.provenance);
                         record.targets = targets;
                         let state = record.state.clone();
                         self.commit(record).map(|()| state)
@@ -1748,7 +1749,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         self.record(request).and_then(|mut record| {
             if let Some(stored) = record.receipt.clone() {
                 return Self::normalize_receipt_input(request, self.coordinator, &record, input)
-                    .and_then(|candidate| ErasureReceiptV1::new(candidate))
+                    .and_then(ErasureReceiptV1::new)
                     .map_or_else(
                         |_| Err(ErasureErrorV1::PolicyConflict),
                         |candidate| {
@@ -1805,8 +1806,8 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         input.terminal_state = record.state.state_digest();
         input.lifecycle = record.state.lifecycle();
         input.freeze_position = freeze_position;
-        input.required_targets = record.targets.clone();
-        input.acknowledgements = record.acknowledgements.clone();
+        input.required_targets.clone_from(&record.targets);
+        input.acknowledgements.clone_from(&record.acknowledgements);
         input.pending_owners = record.state.pending_owners().to_vec();
         input.failed_owners = record.state.failed_owners().to_vec();
         Ok(input)
@@ -1876,9 +1877,8 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             })
             .and_then(|normalized| self.port.admit_receipt(&normalized).map(|()| normalized))
             .and_then(ErasureReceiptV1::new)
-            .map(|receipt| {
+            .inspect(|receipt| {
                 record.receipt = Some(receipt.clone());
-                receipt
             })
             .and_then(|receipt| self.commit(record.clone()).map(|()| receipt))
     }
