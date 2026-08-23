@@ -3304,7 +3304,7 @@ mod tests {
             Err(ConformanceContractError::FieldOutOfBounds)
         );
 
-        let mut tampered = encode_profile(&stable, true);
+        let mut tampered = encode_profile(&candidate_profile, true);
         replace_profile_path(&mut tampered, &[17], digest(99));
         let tampered_bytes = encode_value(&tampered).unwrap_or_default();
         assert_eq!(
