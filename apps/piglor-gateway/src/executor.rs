@@ -55,10 +55,14 @@ macro_rules! submit {
 
 #[cfg(test)]
 mod lifecycle_coverage_tests {
-    use super::{worker_loop, worker_loop_with_runtime, ExecutorStore, LifecycleState};
+    use super::{
+        worker_loop, worker_loop_with_runtime, Command, CommandClass, CommandEnvelope,
+        CommandLifecycle, ExecutorStore, LifecycleState,
+    };
     use pos_store::memory::MemoryStore;
     use std::sync::{Arc, Mutex};
-    use tokio::sync::{mpsc, Notify};
+    use std::time::{Duration, Instant};
+    use tokio::sync::{mpsc, Notify, Semaphore};
 
     #[test]
     fn worker_runtime_failure_closes_the_lifecycle_fail_closed() {
@@ -72,6 +76,7 @@ mod lifecycle_coverage_tests {
             None,
             None,
             Err(std::io::Error::other("runtime construction failed")),
+            false,
         );
         let final_state = *lifecycle
             .lock()
@@ -93,6 +98,49 @@ mod lifecycle_coverage_tests {
             ExecutorStore::Generic(Box::new(MemoryStore::new())),
             None,
             None,
+        );
+        let final_state = *lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(final_state, LifecycleState::Closed);
+    }
+
+    #[test]
+    fn worker_draining_processes_already_queued_work() {
+        let lifecycle = Arc::new(Mutex::new(LifecycleState::Open));
+        let (sender, mut receiver) = mpsc::channel(1);
+        let (reply, _result) = tokio::sync::oneshot::channel();
+        let global_permit = Arc::new(Semaphore::new(1))
+            .try_acquire_owned()
+            .unwrap_or_else(|_| std::panic::resume_unwind(Box::new("permit unavailable")));
+        sender
+            .try_send(CommandEnvelope {
+                deadline: Instant::now() + Duration::from_secs(1),
+                lifecycle: Arc::new(CommandLifecycle::new()),
+                class: CommandClass::Write,
+                admission_ordinal: 0,
+                global_permit,
+                read_permit: None,
+                command: Command::Create {
+                    name: "draining-queued-work".to_owned(),
+                    reply,
+                },
+            })
+            .unwrap_or_else(|_| std::panic::resume_unwind(Box::new("queue unavailable")));
+        drop(sender);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap_or_else(|_| std::panic::resume_unwind(Box::new("runtime unavailable")));
+        worker_loop_with_runtime(
+            &lifecycle,
+            Arc::new(Notify::new()),
+            &mut receiver,
+            ExecutorStore::Generic(Box::new(MemoryStore::new())),
+            None,
+            None,
+            Ok(runtime),
+            true,
         );
         let final_state = *lifecycle
             .lock()
@@ -1151,6 +1199,8 @@ fn worker_loop(
         #[cfg(test)]
         observer,
         runtime,
+        #[cfg(test)]
+        false,
     );
 }
 
@@ -1162,6 +1212,7 @@ fn worker_loop_with_runtime(
     owntracks_owner_key: Option<[u8; 32]>,
     #[cfg(test)] observer: Option<Arc<SchedulerObserver>>,
     runtime: std::io::Result<tokio::runtime::Runtime>,
+    #[cfg(test)] start_draining: bool,
 ) {
     let worker_result = catch_unwind(AssertUnwindSafe(|| {
         let Some(runtime) = take_worker_runtime(lifecycle_state.as_ref(), runtime) else {
@@ -1175,6 +1226,8 @@ fn worker_loop_with_runtime(
             owntracks_owner_key,
             #[cfg(test)]
             observer,
+            #[cfg(test)]
+            start_draining,
         ));
     }));
     match worker_result {
@@ -1203,6 +1256,7 @@ async fn worker_loop_async(
     store: ExecutorStore,
     owntracks_owner_key: Option<[u8; 32]>,
     #[cfg(test)] observer: Option<Arc<SchedulerObserver>>,
+    #[cfg(test)] start_draining: bool,
 ) {
     let mut state = ExecutorState {
         store,
@@ -1212,6 +1266,9 @@ async fn worker_loop_async(
         },
     };
     let mut pending = Vec::new();
+    #[cfg(test)]
+    let mut draining = start_draining;
+    #[cfg(not(test))]
     let mut draining = false;
     let mut disconnected = false;
     let mut reads_since_write = 0;
