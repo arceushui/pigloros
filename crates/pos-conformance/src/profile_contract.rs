@@ -297,10 +297,7 @@ impl TrustedRootPolicyV1 {
     pub fn validate(&self) -> Result<(), ConformanceContractError> {
         if self.trusted_root_public_keys.is_empty()
             || self.trusted_root_public_keys.len() > 64
-            || self
-                .trusted_root_public_keys
-                .iter()
-                .any(|key| zero_digest(key))
+            || self.trusted_root_public_keys.iter().any(zero_digest)
             || !strictly_ordered(&self.trusted_root_public_keys)
             || self.trust_policy_snapshot_digest != self.digest()
         {
@@ -417,6 +414,10 @@ impl ConformanceProfileV1 {
     }
 
     /// Validate and encode a Stable profile using an externally supplied root policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed safe error when the policy, profile, or encoded contract is invalid.
     pub fn to_canonical_cbor_with_trust_policy(
         &self,
         policy: &TrustedRootPolicyV1,
@@ -448,6 +449,10 @@ impl ConformanceProfileV1 {
     }
 
     /// Decode and validate a Stable profile against an external root policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed safe error for malformed, noncanonical, or policy-incompatible CPF1 bytes.
     pub fn from_canonical_cbor_with_trust_policy(
         bytes: &[u8],
         policy: &TrustedRootPolicyV1,
@@ -469,6 +474,10 @@ impl ConformanceProfileV1 {
     }
 
     /// Validate a profile, requiring a trusted-root policy for Stable profiles.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed safe error when the policy, profile, or profile digest is invalid.
     pub fn validate_with_trust_policy(
         &self,
         policy: &TrustedRootPolicyV1,
@@ -549,6 +558,10 @@ impl ConformanceProfileV1 {
 
     /// Promote a profile to Stable only after validating evidence against an
     /// externally supplied trusted-root policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed safe error when the lifecycle transition, evidence, policy, or digest is invalid.
     pub fn transition_to_with_trust_policy(
         &self,
         target: ProfileLifecycleV1,
@@ -600,6 +613,10 @@ impl EvaluatorRequestV1 {
     /// A structurally valid request is not enough: the profile, fixture
     /// bundle, execution profile, adapter, evaluator protocol, and output
     /// capability must all be identities from the same selected profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed safe error when the request or any selected profile identity is invalid.
     pub fn validate_against_profile(
         &self,
         profile: &ConformanceProfileV1,
@@ -611,6 +628,10 @@ impl EvaluatorRequestV1 {
     }
 
     /// Validate this request against a Stable CPF and its external trust policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed safe error when the request, profile, policy, or selected identity is invalid.
     pub fn validate_against_profile_with_trust_policy(
         &self,
         profile: &ConformanceProfileV1,

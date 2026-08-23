@@ -1262,8 +1262,9 @@ fn matrix_digest(domain: &[u8], seed: [u8; 32], descriptor: &[u8]) -> [u8; 32] {
     *blake3::hash(&input).as_bytes()
 }
 
-/// Conformance report, with 24 logical fields represented by these grouped
-/// values. `execution_profile_digest` identifies the selected report authority;
+/// Conformance report, with 24 logical fields represented by grouped values.
+///
+/// `execution_profile_digest` identifies the selected report authority;
 /// each case also carries its own profile digest so one CNR can bind a CPF
 /// matrix containing multiple execution profiles.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
