@@ -11217,6 +11217,7 @@ mod key_registry_coverage {
             .ok_or_else(|| CoreError::Storage("seed append returned no event".to_owned()))
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn sqlite_key_registry_failure_paths(
         registry: &KeyRegistryStateV1,
         identity: KeyIdentityV1,
@@ -11280,6 +11281,7 @@ mod key_registry_coverage {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn sqlite_key_registry_public_paths_are_instrumented() -> Result<(), Box<dyn std::error::Error>>
     {
         let (registry, identity, material_digest) = registered_state()?;

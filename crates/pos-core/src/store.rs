@@ -3627,6 +3627,7 @@ mod key_registry_coverage {
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn registered_state(
     ) -> Result<(KeyRegistryStateV1, KeyIdentityV1, Hash), Box<dyn std::error::Error>> {
         let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
@@ -3640,6 +3641,7 @@ mod key_registry_coverage {
         Ok((registry, identity, material_digest))
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn event_at(seq: Seq) -> Event {
         Event {
             id: EventId::new(),
@@ -3658,6 +3660,7 @@ mod key_registry_coverage {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn default_key_registry_methods_are_instrumented() -> Result<(), CoreError> {
         let mut store = MinimalStore::new();
         assert!(store.load_key_registry()?.is_none());
@@ -3688,6 +3691,7 @@ mod key_registry_coverage {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn authorized_key_registry_methods_are_instrumented() -> Result<(), Box<dyn std::error::Error>>
     {
         let (registry, identity, material_digest) = registered_state()?;
