@@ -22,6 +22,7 @@ pub mod geo_admission;
 pub mod geo_cell_admission;
 pub mod hasher;
 pub mod ids;
+pub mod key_registry;
 pub mod manifest;
 pub mod owntracks_enrollment;
 pub mod owntracks_ingress;
@@ -72,6 +73,12 @@ pub use geo_cell_admission::{
 };
 pub use hasher::Hasher;
 pub use ids::{CorrelationId, EntityId, EventId, PluginId, RelationshipId, TimelineId};
+pub use key_registry::{
+    KeyDestructionOutcomeV1, KeyDestructionPortV1, KeyDestructionRequestV1, KeyIdentityV1,
+    KeyRecordV1, KeyRegistrationOutcomeV1, KeyRegistrationV1, KeyRegistryErrorV1,
+    KeyRegistryPortV1, KeyRegistryStateV1, KeyRoleV1, KeyTombstoneV1,
+    LegacySubjectDataSignatureDispositionV1,
+};
 pub use manifest::{AdapterRecord, ReproManifest};
 pub use owntracks_enrollment::{
     OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStateV1, OwnTracksEnrollmentStatusV1,

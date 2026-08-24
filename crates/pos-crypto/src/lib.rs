@@ -7,4 +7,5 @@
 
 pub mod canonical;
 pub mod chain;
+pub mod key_roles;
 pub mod signing;
