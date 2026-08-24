@@ -6326,7 +6326,7 @@ mod coverage_entrypoints {
         drop(store);
         ok(rusqlite::Connection::open(path).and_then(|connection| {
             connection
-                .execute("UPDATE events SET payload = X'FF'", [])
+                .execute("UPDATE events SET event_type = X'FF'", [])
                 .map(|_| ())
         }));
         let mut reopened = ok(open_store(StoreConfig::Sqlite {
