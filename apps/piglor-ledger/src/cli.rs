@@ -71,7 +71,7 @@ fn ledger_signing_registry(
     // The fixed role/epoch and generated key material are valid by construction.
     // If that invariant ever changes, the empty registry fails authorization
     // in EventLedgerStore rather than allowing an unsigned operation.
-    let _ = registry
+    let _registration_result = registry
         .register_key(KeyRegistrationV1::new(
             identity,
             key_material_digest(&signing_key.to_bytes()),
@@ -79,22 +79,6 @@ fn ledger_signing_registry(
         ))
         .is_ok();
     (Arc::new(Mutex::new(registry)), identity)
-}
-
-#[cfg(test)]
-fn ledger_signing_registry_for(
-    signing_key: &ed25519_dalek::SigningKey,
-    identity: KeyIdentityV1,
-) -> Result<(Arc<Mutex<KeyRegistryStateV1>>, KeyIdentityV1), CliError> {
-    let mut registry = KeyRegistryStateV1::new();
-    registry
-        .register_key(KeyRegistrationV1::new(
-            identity,
-            key_material_digest(&signing_key.to_bytes()),
-            Some(public_key_from_verifying_key(&signing_key.verifying_key())),
-        ))
-        .map_err(|error| CliError::BadSource(format!("ledger signing registration: {error}")))?;
-    Ok((Arc::new(Mutex::new(registry)), identity))
 }
 
 /// Open the source as a `Box<dyn LedgerStore>`. Store tier requires
@@ -1873,7 +1857,14 @@ mod tests {
     {
         let (signing_key, _) = pos_crypto::signing::generate_keypair();
         let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 0);
-        let error = ledger_signing_registry_for(&signing_key, identity).test_err()?;
+        let mut registry = KeyRegistryStateV1::new();
+        let error = registry
+            .register_key(KeyRegistrationV1::new(
+                identity,
+                key_material_digest(&signing_key.to_bytes()),
+                Some(public_key_from_verifying_key(&signing_key.verifying_key())),
+            ))
+            .test_err()?;
         assert!(error.to_string().contains("key epoch zero"), "{error}");
         Ok(())
     }
