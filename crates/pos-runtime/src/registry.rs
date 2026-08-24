@@ -664,7 +664,6 @@ impl PluginRegistry {
         };
         if events.iter().any(|event| {
             pos_core::is_consent_event_type(&event.event_type)
-                || event.event_type.as_str() == pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE
                 || pos_core::is_geographic_event_type(&event.event_type)
                 || pos_core::required_modality_for_event(&event.event_type) != 0
                 || event.event_type.as_str().starts_with("timeline.fork.")
