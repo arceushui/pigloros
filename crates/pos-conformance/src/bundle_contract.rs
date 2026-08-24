@@ -652,7 +652,6 @@ fn preflight_archive(bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
                 }
                 Ok(())
             }
-            5 | 6 => Err(BundleContractErrorV1::ArchiveEncodingInvalid),
             7 => match initial & 0x1f {
                 20..=22 => Ok(()),
                 _ => Err(BundleContractErrorV1::ArchiveEncodingInvalid),
@@ -1495,6 +1494,7 @@ mod tests {
         profile.limitations_digest = limitations_digest;
         profile.provenance_digest = provenance_digest;
         for fixture in &mut profile.fixtures {
+            fixture.public_schema_digest = schema_digest;
             fixture.provenance.notices_digest = notice_digest;
             fixture.provenance.sbom_digest = sbom_digest;
             fixture.provenance.source_digest = provenance_digest;
