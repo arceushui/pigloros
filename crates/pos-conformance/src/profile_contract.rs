@@ -5440,7 +5440,7 @@ mod tests {
         divergent.actual_digest = Some(digest(21));
         divergent.verification_outcome = VerificationOutcomeV1::Diverged;
         divergent.divergence_kind = Some(DivergenceMismatchKindV1::TypedFailure);
-        divergent.first_coordinate = Some(coordinate.clone());
+        divergent.first_coordinate = Some(coordinate);
         assert!(case_matches_fixture(&divergent, &divergent_fixture));
         let mut changed = divergent.clone();
         changed.divergence_kind = Some(DivergenceMismatchKindV1::CanonicalBytes);
@@ -5450,11 +5450,10 @@ mod tests {
         assert!(!case_matches_fixture(&changed, &divergent_fixture));
     }
 
-    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn independence_and_stable_report_bindings_reject_each_mismatch() {
+    fn independence_evidence_rejects_each_mismatch() {
         let requirements = profile().independence_requirements;
-        let mut evidence = stable_evidence("alpha", 30);
+        let evidence = stable_evidence("alpha", 30);
         assert_eq!(
             validate_independence_evidence(&evidence.independence, &requirements),
             Ok(())
@@ -5518,7 +5517,11 @@ mod tests {
             validate_independence_evidence(&invalid, &requirements),
             Err(ConformanceContractError::IndependenceEvidenceMissing)
         );
+    }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn stable_report_binding_rejects_each_mismatch() {
+        let mut evidence = stable_evidence("alpha", 30);
         let profile_value = candidate();
         refresh_stable_report_for_profile(&mut evidence, &profile_value);
         assert_eq!(validate_report_binding(&evidence, &profile_value), Ok(()));
@@ -5552,7 +5555,13 @@ mod tests {
         reject_report(&|value| value.report.cases[0].claim_layer = ClaimLayerV1::MetricConformance);
         reject_report(&|value| value.report.cases[0].mode = ExecutionModeV1::Fork);
         reject_report(&|value| value.report.cases[0].replay_claim = ReplayClaimV1::StructuralOnly);
+    }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn stable_case_binding_rejects_each_mismatch() {
+        let profile_value = candidate();
+        let mut evidence = stable_evidence("alpha", 30);
+        refresh_stable_report_for_profile(&mut evidence, &profile_value);
         let reject_case = |change: &dyn Fn(&mut CaseOutcomeV1)| {
             let mut changed = evidence.clone();
             change(&mut changed.case_outcomes[0]);
@@ -5574,6 +5583,14 @@ mod tests {
         reject_case(&|case| case.replay_claim = ReplayClaimV1::StructuralOnly);
         reject_case(&|case| case.redaction_state = RedactionStateV1::StructuralOnly);
         reject_case(&|case| case.provenance_digest = digest(99));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn independence_and_stable_report_bindings_reject_each_mismatch() {
+        independence_evidence_rejects_each_mismatch();
+        stable_report_binding_rejects_each_mismatch();
+        stable_case_binding_rejects_each_mismatch();
     }
 
     #[test]
