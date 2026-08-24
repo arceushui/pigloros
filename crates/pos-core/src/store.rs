@@ -1407,6 +1407,78 @@ mod tests {
         }
     }
 
+    struct RegistryStore {
+        registry: Option<crate::KeyRegistryStateV1>,
+        timeline: Option<Timeline>,
+        appended: bool,
+    }
+
+    impl RegistryStore {
+        fn new(registry: crate::KeyRegistryStateV1) -> Self {
+            Self {
+                registry: Some(registry),
+                timeline: Some(Timeline::new(TimelineMeta::root("registry"))),
+                appended: false,
+            }
+        }
+    }
+
+    impl EventStore for RegistryStore {
+        fn create_timeline(&mut self, _name: &str) -> Result<Timeline, CoreError> {
+            Ok(Timeline::new(TimelineMeta::root("registry-created")))
+        }
+
+        fn append(
+            &mut self,
+            _timeline: TimelineId,
+            _drafts: &[EventDraft],
+        ) -> Result<Vec<Event>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        fn read(&self, _timeline: TimelineId, _range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        fn fork(
+            &mut self,
+            _parent: TimelineId,
+            _at_seq: Seq,
+            _name: &str,
+        ) -> Result<Timeline, CoreError> {
+            Ok(Timeline::new(TimelineMeta::root("registry-fork")))
+        }
+
+        fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+            Ok(self.timeline.clone().into_iter().collect())
+        }
+
+        fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+            Ok(self.timeline.clone().filter(|timeline| timeline.id() == id))
+        }
+
+        fn load_key_registry(&self) -> Result<Option<crate::KeyRegistryStateV1>, CoreError> {
+            Ok(self.registry.clone())
+        }
+
+        fn save_key_registry(
+            &mut self,
+            registry: &crate::KeyRegistryStateV1,
+        ) -> Result<(), CoreError> {
+            self.registry = Some(registry.clone());
+            Ok(())
+        }
+
+        fn append_committed(
+            &mut self,
+            _timeline: TimelineId,
+            _events: &[Event],
+        ) -> Result<(), CoreError> {
+            self.appended = true;
+            Ok(())
+        }
+    }
+
     #[test]
     fn default_key_registry_methods_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
         let mut store = TrivialStore::new();
@@ -1436,6 +1508,93 @@ mod tests {
             ))
             .test_err()?;
         assert!(error.to_string().contains("unavailable"));
+        Ok(())
+    }
+
+    #[test]
+    fn default_key_registry_methods_cover_authorized_paths(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let identity = crate::KeyIdentityV1::new(crate::KeyRoleV1::TimelineIntegritySigning, 1);
+        let material_digest = crate::Hash::from_bytes([1; 32]);
+        let mut registry = crate::KeyRegistryStateV1::new();
+        registry.register_key(crate::KeyRegistrationV1::new(
+            identity,
+            material_digest,
+            Some(crate::PublicKey::from_bytes([2; 32])),
+        ))?;
+
+        let mut store = RegistryStore::new(registry.clone());
+        let timeline = store.timeline.as_ref().map(Timeline::id).test_ok()?;
+        let mut create_event = |_registry: &crate::KeyRegistryStateV1, seq: Seq| {
+            Ok(Event {
+                id: EventId::new(),
+                entity: EntityId::new(),
+                event_type: Kind::new("registry.test"),
+                payload: CanonicalBytes::from_static(b"payload"),
+                wall_time: WallTime::from_micros(1),
+                seq,
+                causation_id: None,
+                correlation_id: None,
+                schema_version: SchemaVersion::V1,
+                signature: None,
+                signature_identity: None,
+                payload_hash: Hash::from_bytes([0; 32]),
+            })
+        };
+        store.append_signed_authorized(timeline, &registry, &mut create_event)?;
+        assert!(store.appended);
+
+        let mut mismatch_callback = |_registry: &crate::KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        let mismatch = store.append_signed_authorized(
+            timeline,
+            &crate::KeyRegistryStateV1::new(),
+            &mut mismatch_callback,
+        );
+        assert!(mismatch
+            .test_err()?
+            .to_string()
+            .contains("changed during signing"));
+
+        let mut missing_timeline = RegistryStore::new(registry.clone());
+        missing_timeline.timeline = None;
+        let mut missing_callback = |_registry: &crate::KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        assert_eq!(
+            missing_timeline
+                .append_signed_authorized(timeline, &registry, &mut missing_callback)
+                .test_err()?,
+            CoreError::TimelineNotFound(timeline)
+        );
+
+        let mut callback_error = |_registry: &crate::KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback failed".to_owned()))
+        };
+        assert!(store
+            .append_signed_authorized(timeline, &registry, &mut callback_error)
+            .test_err()?
+            .to_string()
+            .contains("callback failed"));
+
+        let request = crate::KeyDestructionRequestV1::new(
+            identity,
+            material_digest,
+            crate::Hash::from_bytes([3; 32]),
+        );
+        let (outcome, destroyed) = store.destroy_key_registry(request)?;
+        assert!(matches!(
+            outcome,
+            crate::KeyDestructionOutcomeV1::Destroyed(_)
+        ));
+        assert_eq!(
+            destroyed
+                .key_record(identity)
+                .and_then(|record| record.private_material_digest),
+            None
+        );
+        assert!(store.registry.is_some());
         Ok(())
     }
 
