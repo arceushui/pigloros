@@ -388,6 +388,24 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn projection_registry_retain_subject_filters_every_reducer() {
+        let mut registry = ProjectionRegistry::new();
+        registry.register("a", Box::new(EntityStateProjection));
+        registry.register("b", Box::new(EntityStateProjection));
+        let subject = EntityId::new();
+        let unrelated = EntityId::new();
+        registry.fold_events(&[make_event(subject), make_event(unrelated)]);
+
+        registry.retain_subject(&subject);
+
+        for name in ["a", "b"] {
+            assert!(registry.state_for_reducer(name, &subject).is_some());
+            assert!(registry.state_for_reducer(name, &unrelated).is_none());
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_fold_events() {
         let mut registry = ProjectionRegistry::new();
         registry.register("main", Box::new(EntityStateProjection));
