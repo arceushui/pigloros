@@ -314,9 +314,7 @@ impl ConformanceBundleV1 {
                 return Err(BundleContractErrorV1::SecretMaterialDetected);
             }
         }
-        if total_bytes > MAX_TOTAL_BUNDLE_BYTES {
-            return Err(BundleContractErrorV1::MemberOutOfBounds);
-        }
+        validate_total_bytes(total_bytes)?;
         validate_expected_results(&profile, &self.manifest, &self.members)
     }
 
@@ -339,6 +337,14 @@ impl ConformanceBundleV1 {
         canonical::encode(&manifest_value(&self.manifest))
             .map(|bytes| bytes.as_slice().to_vec())
             .map_err(|_| BundleContractErrorV1::EncodingFailed)
+    }
+}
+
+fn validate_total_bytes(total_bytes: u64) -> Result<(), BundleContractErrorV1> {
+    if total_bytes > MAX_TOTAL_BUNDLE_BYTES {
+        Err(BundleContractErrorV1::MemberOutOfBounds)
+    } else {
+        Ok(())
     }
 }
 
@@ -575,11 +581,94 @@ mod tests {
     use crate::{
         CapabilityPolicyV1, EvaluatorHardCapsV1, EvaluatorProtocolV1, FixtureBoundsV1,
         FixtureDescriptorV1, FixtureInputMemberV1, FixtureProvenanceV1, IndependenceRequirementsV1,
-        RedactionStateV1, ReplayClaimV1, SubjectAdapterKindV1, VerificationOutcomeV1,
+        RedactionStateV1, ReplayClaimV1, SafeErrorCodeV1, SubjectAdapterKindV1,
+        VerificationOutcomeV1,
     };
 
     fn digest(seed: u8) -> [u8; 32] {
         [seed; 32]
+    }
+
+    fn profile_fixture(index: usize, claim_layer: ClaimLayerV1) -> FixtureDescriptorV1 {
+        let expected_bytes = format!("expected-result-{index}").into_bytes();
+        FixtureDescriptorV1 {
+            case_id: format!("case-{index:02}"),
+            mandatory: true,
+            claim_layer,
+            execution_profile_digest: digest(1),
+            public_schema_digest: digest(2),
+            modes: vec![ExecutionModeV1::Local, ExecutionModeV1::AirGapped],
+            subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
+            inputs: vec![FixtureInputMemberV1 {
+                member_id: format!("input-{index:02}.json"),
+                size_bytes: 1,
+                digest: digest(3),
+                provenance_digest: digest(4),
+            }],
+            expected: ExpectedResultV1::CanonicalBytes {
+                digest: *blake3::hash(&expected_bytes).as_bytes(),
+                bytes: expected_bytes,
+            },
+            expected_verification_outcome: VerificationOutcomeV1::VerifiedExact,
+            expected_verification_error: None,
+            replay_claim: ReplayClaimV1::Exact,
+            redaction_state: RedactionStateV1::None,
+            bounds: FixtureBoundsV1 {
+                cpu_fuel: 1,
+                memory_bytes: 1,
+                event_count: 1,
+                output_bytes: 1024,
+                storage_bytes: 1,
+                execution_steps: 1,
+                simulation_time_ns: 1,
+                watchdog_ms: 1,
+            },
+            capability_policy: CapabilityPolicyV1 {
+                network_allowed: false,
+                capability_ids: vec!["read-public-bundle".to_owned()],
+            },
+            provenance: FixtureProvenanceV1 {
+                licence_id: "MIT".to_owned(),
+                notices_digest: digest(5),
+                sbom_digest: digest(6),
+                source_digest: digest(7),
+                build_digest: digest(8),
+                publication_review_digest: digest(9),
+                limitations_digest: digest(10),
+            },
+            compatibility_digest: digest(11),
+        }
+    }
+
+    fn evaluator_protocol() -> EvaluatorProtocolV1 {
+        EvaluatorProtocolV1 {
+            protocol_id: "pigloros.evaluator.v1".to_owned(),
+            protocol_digest: digest(13),
+            request_schema_digest: digest(14),
+            report_schema_digest: digest(15),
+            hard_caps: EvaluatorHardCapsV1 {
+                max_profile_bytes: 16 * 1024 * 1024,
+                max_cases: 65_536,
+                max_bundle_members: 65_536,
+                max_member_path_bytes: 256,
+                max_member_bytes: 64 * 1024 * 1024,
+                max_total_bundle_bytes: 1024 * 1024 * 1024,
+                max_compression_expansion: 100,
+                max_structural_nesting: 32,
+                max_coordinate_bytes: 128,
+                max_diagnostic_bytes: 1024 * 1024,
+            },
+        }
+    }
+
+    fn independence_requirements() -> IndependenceRequirementsV1 {
+        IndependenceRequirementsV1 {
+            technical_independence_required: true,
+            authorship_independence_required: true,
+            organizational_independence_required: false,
+            trust_policy_snapshot_digest: digest(16),
+            requirements_digest: digest(17),
+        }
     }
 
     fn profile() -> ConformanceProfileV1 {
@@ -595,56 +684,7 @@ mod tests {
         let fixtures = claim_layers
             .into_iter()
             .enumerate()
-            .map(|(index, claim_layer)| {
-                let expected_bytes = format!("expected-result-{index}").into_bytes();
-                FixtureDescriptorV1 {
-                    case_id: format!("case-{index:02}"),
-                    mandatory: true,
-                    claim_layer,
-                    execution_profile_digest: digest(1),
-                    public_schema_digest: digest(2),
-                    modes: vec![ExecutionModeV1::Local, ExecutionModeV1::AirGapped],
-                    subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
-                    inputs: vec![FixtureInputMemberV1 {
-                        member_id: format!("input-{index:02}.json"),
-                        size_bytes: 1,
-                        digest: digest(3),
-                        provenance_digest: digest(4),
-                    }],
-                    expected: ExpectedResultV1::CanonicalBytes {
-                        digest: *blake3::hash(&expected_bytes).as_bytes(),
-                        bytes: expected_bytes,
-                    },
-                    expected_verification_outcome: VerificationOutcomeV1::VerifiedExact,
-                    expected_verification_error: None,
-                    replay_claim: ReplayClaimV1::Exact,
-                    redaction_state: RedactionStateV1::None,
-                    bounds: FixtureBoundsV1 {
-                        cpu_fuel: 1,
-                        memory_bytes: 1,
-                        event_count: 1,
-                        output_bytes: 1024,
-                        storage_bytes: 1,
-                        execution_steps: 1,
-                        simulation_time_ns: 1,
-                        watchdog_ms: 1,
-                    },
-                    capability_policy: CapabilityPolicyV1 {
-                        network_allowed: false,
-                        capability_ids: vec!["read-public-bundle".to_owned()],
-                    },
-                    provenance: FixtureProvenanceV1 {
-                        licence_id: "MIT".to_owned(),
-                        notices_digest: digest(5),
-                        sbom_digest: digest(6),
-                        source_digest: digest(7),
-                        build_digest: digest(8),
-                        publication_review_digest: digest(9),
-                        limitations_digest: digest(10),
-                    },
-                    compatibility_digest: digest(11),
-                }
-            })
+            .map(|(index, claim_layer)| profile_fixture(index, claim_layer))
             .collect();
         let mut profile = ConformanceProfileV1 {
             profile_id: "pigloros.w8.conformance-bundle".to_owned(),
@@ -655,31 +695,8 @@ mod tests {
             public_schema_digests: vec![digest(2)],
             fixtures,
             allowed_divergences: Vec::new(),
-            evaluator_protocol: EvaluatorProtocolV1 {
-                protocol_id: "pigloros.evaluator.v1".to_owned(),
-                protocol_digest: digest(13),
-                request_schema_digest: digest(14),
-                report_schema_digest: digest(15),
-                hard_caps: EvaluatorHardCapsV1 {
-                    max_profile_bytes: 16 * 1024 * 1024,
-                    max_cases: 65_536,
-                    max_bundle_members: 65_536,
-                    max_member_path_bytes: 256,
-                    max_member_bytes: 64 * 1024 * 1024,
-                    max_total_bundle_bytes: 1024 * 1024 * 1024,
-                    max_compression_expansion: 100,
-                    max_structural_nesting: 32,
-                    max_coordinate_bytes: 128,
-                    max_diagnostic_bytes: 1024 * 1024,
-                },
-            },
-            independence_requirements: IndependenceRequirementsV1 {
-                technical_independence_required: true,
-                authorship_independence_required: true,
-                organizational_independence_required: false,
-                trust_policy_snapshot_digest: digest(16),
-                requirements_digest: digest(17),
-            },
+            evaluator_protocol: evaluator_protocol(),
+            independence_requirements: independence_requirements(),
             compatibility_digest: digest(18),
             limitations_digest: digest(19),
             provenance_digest: digest(20),
@@ -751,6 +768,15 @@ mod tests {
     }
 
     #[test]
+    fn total_bundle_size_limit_is_closed() {
+        assert_eq!(validate_total_bytes(MAX_TOTAL_BUNDLE_BYTES), Ok(()));
+        assert_eq!(
+            validate_total_bytes(MAX_TOTAL_BUNDLE_BYTES + 1),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+    }
+
+    #[test]
     fn manifest_encoding_is_deterministic() -> Result<(), BundleContractErrorV1> {
         let manifest = BundleManifestV1 {
             magic: CONFORMANCE_BUNDLE_MAGIC_V1.to_owned(),
@@ -804,7 +830,7 @@ mod tests {
         };
         pair.validate()?;
 
-        let mut changed_profile = profile.clone();
+        let mut changed_profile = profile;
         if let ExpectedResultV1::CanonicalBytes { bytes, digest } =
             &mut changed_profile.fixtures[0].expected
         {
@@ -829,7 +855,7 @@ mod tests {
         let profile = profile();
         let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
 
-        let mut stable_profile = profile.clone();
+        let mut stable_profile = profile;
         stable_profile.lifecycle = ProfileLifecycleV1::Stable;
         assert_eq!(
             ConformanceBundleV1::materialize(
@@ -845,6 +871,13 @@ mod tests {
         invalid_magic.manifest.magic = "invalid".to_owned();
         assert_eq!(
             invalid_magic.validate(),
+            Err(BundleContractErrorV1::LifecycleInvalid)
+        );
+
+        let mut invalid_lifecycle = bundle.clone();
+        invalid_lifecycle.manifest.lifecycle = ProfileLifecycleV1::Stable;
+        assert_eq!(
+            invalid_lifecycle.validate(),
             Err(BundleContractErrorV1::LifecycleInvalid)
         );
 
@@ -936,6 +969,16 @@ mod tests {
             validate_expected_results(&profile, &missing_expected, &bundle.members),
             Err(BundleContractErrorV1::MemberMissing)
         );
+
+        let mut noncanonical_expected = profile.clone();
+        noncanonical_expected.fixtures[0].expected =
+            ExpectedResultV1::TypedFailure(SafeErrorCodeV1::InvalidEncoding);
+        assert!(validate_expected_results(
+            &noncanonical_expected,
+            &bundle.manifest,
+            &bundle.members
+        )
+        .is_ok());
         Ok(())
     }
 
