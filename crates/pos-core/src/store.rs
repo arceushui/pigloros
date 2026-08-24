@@ -3560,9 +3560,15 @@ mod key_registry_coverage {
         registry: KeyRegistryStateV1,
         timeline: Option<Timeline>,
         committed: bool,
-        load_error: bool,
-        timeline_error: bool,
-        save_error: bool,
+        failure: PersistedFailure,
+    }
+
+    #[derive(Clone, Copy)]
+    enum PersistedFailure {
+        None,
+        Load,
+        Timeline,
+        Save,
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -3572,9 +3578,7 @@ mod key_registry_coverage {
                 registry,
                 timeline: Some(Timeline::new(TimelineMeta::root("persisted-key-registry"))),
                 committed: false,
-                load_error: false,
-                timeline_error: false,
-                save_error: false,
+                failure: PersistedFailure::None,
             }
         }
     }
@@ -3611,21 +3615,21 @@ mod key_registry_coverage {
         }
 
         fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
-            if self.timeline_error {
+            if matches!(self.failure, PersistedFailure::Timeline) {
                 return Err(CoreError::Storage("timeline lookup failed".to_owned()));
             }
             Ok(self.timeline.clone().filter(|timeline| timeline.id() == id))
         }
 
         fn load_key_registry(&self) -> Result<Option<KeyRegistryStateV1>, CoreError> {
-            if self.load_error {
+            if matches!(self.failure, PersistedFailure::Load) {
                 return Err(CoreError::Storage("registry lookup failed".to_owned()));
             }
             Ok(Some(self.registry.clone()))
         }
 
         fn save_key_registry(&mut self, registry: &KeyRegistryStateV1) -> Result<(), CoreError> {
-            if self.save_error {
+            if matches!(self.failure, PersistedFailure::Save) {
                 return Err(CoreError::Storage("registry persistence failed".to_owned()));
             }
             self.registry = registry.clone();
@@ -3732,9 +3736,9 @@ mod key_registry_coverage {
         identity: KeyIdentityV1,
         material_digest: Hash,
         timeline: TimelineId,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) {
         let mut load_failure = PersistedStore::new(registry.clone());
-        load_failure.load_error = true;
+        load_failure.failure = PersistedFailure::Load;
         let mut load_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
             Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
         };
@@ -3749,7 +3753,7 @@ mod key_registry_coverage {
         ));
 
         let mut timeline_failure = PersistedStore::new(registry.clone());
-        timeline_failure.timeline_error = true;
+        timeline_failure.failure = PersistedFailure::Timeline;
         let mut timeline_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
             Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
         };
@@ -3797,7 +3801,7 @@ mod key_registry_coverage {
         ));
 
         let mut load_destroy_failure = PersistedStore::new(registry.clone());
-        load_destroy_failure.load_error = true;
+        load_destroy_failure.failure = PersistedFailure::Load;
         assert!(matches!(
             authorized_destroy_key_registry(
                 &mut load_destroy_failure,
@@ -3811,7 +3815,7 @@ mod key_registry_coverage {
         ));
 
         let mut save_failure = PersistedStore::new(registry.clone());
-        save_failure.save_error = true;
+        save_failure.failure = PersistedFailure::Save;
         assert!(matches!(
             authorized_destroy_key_registry(
                 &mut save_failure,
@@ -3823,7 +3827,6 @@ mod key_registry_coverage {
             ),
             Err(CoreError::Storage(_))
         ));
-        Ok(())
     }
 
     #[test]
@@ -3888,13 +3891,7 @@ mod key_registry_coverage {
             ),
             Err(CoreError::Storage(_))
         ));
-        authorized_registry_error_paths(
-            &mut store,
-            &registry,
-            identity,
-            material_digest,
-            timeline,
-        )?;
+        authorized_registry_error_paths(&mut store, &registry, identity, material_digest, timeline);
 
         let request = crate::KeyDestructionRequestV1::new(
             identity,
