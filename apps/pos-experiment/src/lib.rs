@@ -6592,16 +6592,14 @@ mod coverage_entrypoints {
         let mut session = ok(experiment.start());
         let timeline_id = session.timeline().id();
         let mut store = ok(lock_store(&session.store));
-        store
-            .append(
-                timeline_id,
-                &[EventDraft::new(
-                    EntityId::new(),
-                    Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
-                    pos_core::CanonicalBytes::from_static(b"protected"),
-                )],
-            )
-            .test_ok();
+        ok(store.append(
+            timeline_id,
+            &[EventDraft::new(
+                EntityId::new(),
+                Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+                pos_core::CanonicalBytes::from_static(b"protected"),
+            )],
+        ));
         drop(store);
 
         assert!(session.fork("coverage-session-protected-child").is_err());
