@@ -61,10 +61,13 @@ fn reject_protected_history(
     let events = if head == pos_core::clock::Seq::ZERO {
         Vec::new()
     } else {
-        store.read(
+        match store.read(
             timeline,
             pos_store::SeqRange::bounded(pos_core::clock::Seq::from_u64(1), head),
-        )?
+        ) {
+            Ok(events) => events,
+            Err(error) => return Err(error.into()),
+        }
     };
     reject_protected_events(&events)
 }
@@ -183,24 +186,27 @@ impl RunResult {
             .consent_gate
             .as_ref()
             .ok_or(pos_runtime::RuntimeError::ConsentOperationUnavailable)?;
-        let timeline_head = self
-            .store_config
-            .clone()
-            .ok_or(ExperimentError::MissingStoreRecoveryRecipe)
-            .and_then(|config| {
-                let store = open_store(config)?;
-                store
-                    .logical_head(self.timeline_id)
-                    .map_err(ExperimentError::from)
-            })?;
-        gate.authorize_projection(
+        let store_config = match self.store_config.clone() {
+            Some(config) => config,
+            None => return Err(ExperimentError::MissingStoreRecoveryRecipe),
+        };
+        let store = match open_store(store_config) {
+            Ok(store) => store,
+            Err(error) => return Err(error.into()),
+        };
+        let timeline_head = match store.logical_head(self.timeline_id) {
+            Ok(head) => head,
+            Err(error) => return Err(error.into()),
+        };
+        if let Err(error) = gate.authorize_projection(
             self.timeline_id,
             subject,
             timeline_head.as_u64(),
             now_secs,
             token,
-        )
-        .map_err(pos_runtime::RuntimeError::Consent)?;
+        ) {
+            return Err(map_runtime_error(pos_runtime::RuntimeError::Consent(error)));
+        }
         Ok(self
             .projections
             .state_for_reducer(reducer, &subject)
@@ -247,14 +253,15 @@ impl RunResult {
                 let mut append = || {
                     fork_result = Some(store.fork(timeline.id(), current_head, name));
                 };
-                gate.with_token_fence(
+                if let Err(error) = gate.with_token_fence(
                     self.timeline_id,
                     token,
                     current_head.as_u64(),
                     current_now_secs(),
                     &mut append,
-                )
-                .map_err(pos_runtime::RuntimeError::Consent)?;
+                ) {
+                    return Err(map_runtime_error(pos_runtime::RuntimeError::Consent(error)));
+                }
             }
             (Some(_), None) | (None, Some(_)) => {
                 return Err(pos_runtime::RuntimeError::ConsentOperationUnavailable.into());
@@ -264,8 +271,15 @@ impl RunResult {
                 fork_result = Some(store.fork(timeline.id(), current_head, name));
             }
         }
-        let forked =
-            fork_result.ok_or(pos_runtime::RuntimeError::ConsentOperationUnavailable)??;
+        let forked = match fork_result {
+            Some(result) => match result {
+                Ok(timeline) => timeline,
+                Err(error) => return Err(error.into()),
+            },
+            None => {
+                return Err(pos_runtime::RuntimeError::ConsentOperationUnavailable.into());
+            }
+        };
         Ok(forked)
     }
 
@@ -574,10 +588,15 @@ fn append_driver_drafts(
         return Err(error.into());
     }
     if drafts.is_empty() {
-        registry.commit_step_at(observed_through, 0)?;
+        if let Err(error) = registry.commit_step_at(observed_through, 0) {
+            return Err(error.into());
+        }
         Ok(0)
     } else {
-        let head = store.logical_head(timeline_id)?;
+        let head = match store.logical_head(timeline_id) {
+            Ok(head) => head,
+            Err(error) => return Err(error.into()),
+        };
         registry
             .append_and_commit_step_at(store, head, 0, &drafts)
             .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
@@ -1040,7 +1059,9 @@ impl Experiment {
                     || gate.fence_timeline_at(timeline_id, marker.seq.as_u64()),
                     |subject| gate.fence_subject_at(timeline_id, subject, marker.seq.as_u64()),
                 );
-                result.map_err(pos_runtime::RuntimeError::Consent)?;
+                if let Err(error) = result {
+                    return Err(map_runtime_error(pos_runtime::RuntimeError::Consent(error)));
+                }
             }
         }
         Ok(ExperimentSession {
@@ -1141,23 +1162,27 @@ impl Experiment {
             )
             .into());
         }
-        let gate = self
-            .registry
-            .clone_consent_gate()
-            .ok_or(pos_runtime::RuntimeError::ConsentOperationUnavailable)?;
+        let gate = match self.registry.clone_consent_gate() {
+            Some(gate) => gate,
+            None => return Err(pos_runtime::RuntimeError::ConsentOperationUnavailable.into()),
+        };
         let mut fork_result = None;
         let mut append = || {
             fork_result = Some(store.fork(timeline.id(), current_head, name));
         };
-        gate.with_token_fence(
+        if let Err(error) = gate.with_token_fence(
             timeline.id(),
             token,
             current_head.as_u64(),
             now_secs,
             &mut append,
-        )
-        .map_err(pos_runtime::RuntimeError::Consent)?;
-        Ok(fork_result.ok_or(pos_runtime::RuntimeError::ConsentOperationUnavailable)??)
+        ) {
+            return Err(map_runtime_error(pos_runtime::RuntimeError::Consent(error)));
+        }
+        match fork_result {
+            Some(result) => result.map_err(ExperimentError::from),
+            None => Err(pos_runtime::RuntimeError::ConsentOperationUnavailable.into()),
+        }
     }
 }
 
@@ -5676,17 +5701,13 @@ mod tests {
             .is_none());
 
         session.revoke_consent_for_subject_at_boundary(subject);
-        let revocation_boundary = session.step_tick();
-        assert!(
-            matches!(
-                revocation_boundary,
-                Ok(TickOutcome::Advanced {
-                    emitted_events: 1,
-                    ..
-                })
-            ),
-            "revocation boundary outcome: {revocation_boundary:?}"
-        );
+        assert!(matches!(
+            session.step_tick(),
+            Ok(TickOutcome::Advanced {
+                emitted_events: 1,
+                ..
+            })
+        ));
         drop(session);
 
         let resumed_plugin = TestPlugin {
@@ -5704,21 +5725,14 @@ mod tests {
         resumed_experiment
             .register(&resumed_plugin, None, None)
             .test_ok();
-        let resumed_result = resumed_experiment
+        let resumed = resumed_experiment
             .with_consent_authority(authority)
-            .resume(timeline_id);
-        assert!(
-            resumed_result.is_ok(),
-            "resume error: {:?}",
-            resumed_result.as_ref().err()
-        );
-        let resumed = resumed_result.test_ok();
-        let projection =
-            resumed.projection_state_for_reducer("missing", subject, &token, current_now_secs());
-        assert!(
-            matches!(projection, Err(ExperimentError::ConsentRevoked)),
-            "projection result: {projection:?}"
-        );
+            .resume(timeline_id)
+            .test_ok();
+        assert!(matches!(
+            resumed.projection_state_for_reducer("missing", subject, &token, current_now_secs()),
+            Err(ExperimentError::ConsentRevoked)
+        ));
     }
 
     #[test]
@@ -6225,6 +6239,126 @@ mod coverage_entrypoints {
             pos_core::ids::TimelineId::new(),
             pos_core::clock::Seq::ZERO,
         ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_result_and_branch_error_boundaries_are_explicit() {
+        let subject = EntityId::new();
+        let authority = ConsentAuthority::new();
+        let timeline = TimelineId::new();
+        let grant = ConsentGranted {
+            subject_id: subject,
+            grantee_id: EntityId::new(),
+            purpose: "coverage-result-errors".to_owned(),
+            modalities: 0,
+            min_geo_resolution: 0,
+            fork_permitted: true,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        };
+        let token = authority.record_grant_on_timeline(timeline, &grant);
+        let invalid_store_result = RunResult {
+            timeline_id: timeline,
+            ticks: 0,
+            total_events: 0,
+            timeline_head: 0,
+            manifest: ReproManifest::new(timeline, Hash::zero(), WallTime::from_micros(0)),
+            projections: pos_state::ProjectionRegistry::new(),
+            consent_gate: Some(Arc::new(authority.clone())),
+            protected_token: Some(token.clone()),
+            store_config: Some(StoreConfig::Sqlite {
+                path: "/dev/null/coverage-result-errors".to_owned(),
+            }),
+        };
+        expect_err(
+            &invalid_store_result.projection_state_for_reducer("missing", subject, &token, 0),
+        );
+
+        let database = ok(tempfile::NamedTempFile::new());
+        let store_config = StoreConfig::Sqlite {
+            path: ok(database
+                .path()
+                .to_str()
+                .ok_or("coverage result path is not utf8"))
+            .to_owned(),
+        };
+        let durable_timeline = {
+            let mut store = ok(open_store(store_config.clone()));
+            ok(store.create_timeline("coverage-result-errors")).id()
+        };
+        let durable_token = authority.record_grant_on_timeline(durable_timeline, &grant);
+        let result = RunResult {
+            timeline_id: durable_timeline,
+            ticks: 0,
+            total_events: 0,
+            timeline_head: 0,
+            manifest: ReproManifest::new(durable_timeline, Hash::zero(), WallTime::from_micros(0)),
+            projections: pos_state::ProjectionRegistry::new(),
+            consent_gate: Some(Arc::new(authority.clone())),
+            protected_token: Some(durable_token.clone()),
+            store_config: Some(store_config),
+        };
+        expect_err(&result.projection_state_for_reducer(
+            "missing",
+            EntityId::new(),
+            &durable_token,
+            0,
+        ));
+        authority.fence_timeline_at(durable_timeline, 1).test_ok();
+        expect_err(&result.branch("coverage-revoked-branch"));
+
+        let mut read_fault_store = CaptureFaultStore {
+            base: pos_store::memory::MemoryStore::new(),
+            fault: CaptureFault::Read,
+            head_calls: std::cell::Cell::new(0),
+        };
+        let read_fault_timeline = read_fault_store
+            .create_timeline("coverage-read-fault")
+            .test_ok();
+        read_fault_store
+            .append(
+                read_fault_timeline.id(),
+                &[EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("coverage.read.fault"),
+                    CanonicalBytes::from_static(b"coverage"),
+                )],
+            )
+            .test_ok();
+        assert!(
+            Experiment::new(config("coverage-read-fault", StopCondition::MaxTicks(1),))
+                .branch("coverage-read-fault-child", &mut read_fault_store)
+                .is_err()
+        );
+
+        let mut head_fault_store = CaptureFaultStore {
+            base: pos_store::memory::MemoryStore::new(),
+            fault: CaptureFault::LogicalHead,
+            head_calls: std::cell::Cell::new(0),
+        };
+        let head_fault_timeline = head_fault_store
+            .create_timeline("coverage-head-fault")
+            .test_ok();
+        let entity = EntityId::new();
+        let plugin = make_plugin("coverage-head-fault", &["coverage.head.fault"]);
+        let mut registry = PluginRegistry::new();
+        registry
+            .register(
+                &plugin,
+                None,
+                Some(Box::new(FixedDriver::new(entity, "coverage.head.fault", 1))),
+            )
+            .test_ok();
+        assert!(append_driver_drafts(
+            &mut head_fault_store,
+            head_fault_timeline.id(),
+            &mut registry,
+            pos_core::clock::Seq::ZERO,
+        )
+        .is_err());
     }
 
     #[test]

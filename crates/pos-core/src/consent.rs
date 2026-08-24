@@ -1034,7 +1034,10 @@ impl ConsentAuthority {
                     decoded.push(RestoredConsentEvent::Granted(grant));
                 }
                 EVENT_TYPE_CONSENT_REVOKED_V1 => {
-                    let revocation = ConsentRevoked::decode(&event.payload)?;
+                    let revocation = match ConsentRevoked::decode(&event.payload) {
+                        Ok(revocation) => revocation,
+                        Err(error) => return Err(error),
+                    };
                     if event.entity != revocation.subject_id
                         || event.seq.as_u64() != revocation.fence_seq
                     {
@@ -2505,6 +2508,20 @@ mod tests {
         assert_eq!(
             authority.validate_on_timeline(timeline, &token, 100, 0),
             Err(ConsentError::Revoked)
+        );
+        assert_eq!(
+            ConsentAuthority::new()
+                .restore_from_history(
+                    timeline,
+                    &[event(
+                        EVENT_TYPE_CONSENT_REVOKED_V1,
+                        revocation.subject_id,
+                        CanonicalBytes::from_static(b"malformed"),
+                        revocation.fence_seq,
+                    )],
+                )
+                .test_err(),
+            ConsentCodecError::CborError
         );
     }
 

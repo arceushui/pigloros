@@ -748,10 +748,10 @@ impl PluginRegistry {
             }
             OperationContext::Public => Ok(()),
             OperationContext::Protected { token, now_secs } => {
-                let gate = self
-                    .consent_gate
-                    .as_ref()
-                    .ok_or(RuntimeError::ConsentOperationUnavailable)?;
+                let gate = match self.consent_gate.as_ref() {
+                    Some(gate) => gate,
+                    None => return Err(RuntimeError::ConsentOperationUnavailable),
+                };
                 for key in &subscriptions {
                     gate.authorize_projection(
                         timeline,
@@ -977,7 +977,10 @@ impl PluginRegistry {
         };
         let gate = self.consent_gate.as_ref();
         for draft in drafts {
-            let gate = gate.ok_or(RuntimeError::ConsentOperationUnavailable)?;
+            let gate = match gate {
+                Some(gate) => gate,
+                None => return Err(RuntimeError::ConsentOperationUnavailable),
+            };
             let subject = protected_token.map_or(draft.entity, ConsentCapabilityToken::subject_id);
             match protected_token {
                 Some(token) => {
@@ -3008,6 +3011,52 @@ mod tests {
         assert!(bound
             .validate_operation(timeline, &operation, Seq::from_u64(5), None)
             .is_err_and(|error| matches!(error, RuntimeError::Consent(_))));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn missing_consent_gate_rejects_snapshot_and_draft_authorization() {
+        let timeline = TimelineId::new();
+        let key = ProjectionKey::new(EntityId::new());
+        let authority = ConsentAuthority::new();
+        let grant = ConsentGranted {
+            subject_id: key.entity_id().to_owned(),
+            grantee_id: EntityId::new(),
+            purpose: "missing-gate-coverage".to_owned(),
+            modalities: 0,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        };
+        let token = authority.record_grant_on_timeline(timeline, &grant);
+        let registry = PluginRegistry::new().without_consent_gate();
+        let operation = OperationContext::Protected { token, now_secs: 0 };
+        assert!(matches!(
+            registry.authorize_snapshot_subscriptions(
+                timeline,
+                Seq::ZERO,
+                &operation,
+                std::slice::from_ref(&key),
+            ),
+            Err(RuntimeError::ConsentOperationUnavailable)
+        ));
+        let draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new("missing-gate.event"),
+            CanonicalBytes::from_static(b"coverage"),
+        );
+        assert!(matches!(
+            registry.validate_protected_drafts(
+                timeline,
+                &OperationContext::Public,
+                Seq::ZERO,
+                std::slice::from_ref(&draft),
+            ),
+            Err(RuntimeError::ConsentOperationUnavailable)
+        ));
     }
 
     #[test]
