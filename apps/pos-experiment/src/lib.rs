@@ -5499,6 +5499,269 @@ mod tests {
         assert_eq!(result.manifest.head_hash, expected);
         assert_ne!(result.manifest.head_hash, Hash::zero());
     }
+
+    #[test]
+    fn durable_result_branch_and_export_use_the_bound_capability() {
+        let database = tempfile::NamedTempFile::new().test_ok();
+        let store_config = StoreConfig::Sqlite {
+            path: database.path().to_str().test_ok().to_owned(),
+        };
+        let mut store = open_store(store_config.clone()).test_ok();
+        let timeline = store.create_timeline("unit-result-boundary").test_ok();
+        let authority = ConsentAuthority::new();
+        let token = authority.record_grant_on_timeline(
+            timeline.id(),
+            &ConsentGranted {
+                subject_id: EntityId::new(),
+                grantee_id: EntityId::new(),
+                purpose: "unit-result-boundary".to_owned(),
+                modalities: 0,
+                min_geo_resolution: 0,
+                fork_permitted: true,
+                export_permitted: true,
+                retention_days: 0,
+                expiry_secs: 0,
+                grant_seq: 1,
+            },
+        );
+        let result = RunResult {
+            timeline_id: timeline.id(),
+            ticks: 0,
+            total_events: 0,
+            timeline_head: 0,
+            manifest: ReproManifest::new(timeline.id(), Hash::zero(), WallTime::from_micros(0)),
+            projections: pos_state::ProjectionRegistry::new(),
+            consent_gate: Some(Arc::new(authority)),
+            protected_token: Some(token),
+            store_config: Some(store_config),
+        };
+
+        let child = result.branch("unit-result-child").test_ok();
+        assert_eq!(child.meta.name.as_deref(), Some("unit-result-child"));
+        let manifest = result
+            .into_reproduction_manifest(ReproductionRecipe::new(
+                "unit-result-host",
+                1,
+                serde_json::json!({"source": "unit"}),
+            ))
+            .test_ok();
+        assert_eq!(manifest.recipe.host_id, "unit-result-host");
+    }
+
+    #[test]
+    fn unit_token_branch_and_session_projection_use_durable_boundaries() {
+        let experiment = Experiment::new(ExperimentConfig {
+            name: "unit-token-branch".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        });
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let timeline = store.create_timeline("unit-token-branch").test_ok();
+        let authority = ConsentAuthority::new();
+        let token = authority.record_grant_on_timeline(
+            timeline.id(),
+            &ConsentGranted {
+                subject_id: EntityId::new(),
+                grantee_id: EntityId::new(),
+                purpose: "unit-token-branch".to_owned(),
+                modalities: 0,
+                min_geo_resolution: 0,
+                fork_permitted: true,
+                export_permitted: false,
+                retention_days: 0,
+                expiry_secs: 0,
+                grant_seq: 1,
+            },
+        );
+        let gated = experiment.with_consent_authority(authority);
+        let child = gated
+            .branch_with_token("unit-token-child", store.as_mut(), &token, 0)
+            .test_ok();
+        assert_eq!(child.meta.name.as_deref(), Some("unit-token-child"));
+
+        let mut session = Experiment::new(ExperimentConfig {
+            name: "unit-session-projection".to_owned(),
+            stop: StopCondition::MaxTicks(2),
+            store_config: StoreConfig::Memory,
+        })
+        .start()
+        .test_ok();
+        let subject = EntityId::new();
+        let authority = ConsentAuthority::new();
+        let token = authority.record_grant_on_timeline(
+            session.timeline().id(),
+            &ConsentGranted {
+                subject_id: subject,
+                grantee_id: EntityId::new(),
+                purpose: "unit-session-projection".to_owned(),
+                modalities: 0,
+                min_geo_resolution: 0,
+                fork_permitted: false,
+                export_permitted: false,
+                retention_days: 0,
+                expiry_secs: 0,
+                grant_seq: 1,
+            },
+        );
+        session = session
+            .with_consent_authority(authority)
+            .with_protected_token(token.clone(), 0);
+        assert!(session
+            .projection_state_for_reducer("missing", subject, &token, current_now_secs())
+            .test_ok()
+            .is_none());
+    }
+
+    #[test]
+    fn durable_session_append_empty_boundary_and_subject_recovery_are_public() {
+        let database = tempfile::NamedTempFile::new().test_ok();
+        let store_config = StoreConfig::Sqlite {
+            path: database.path().to_str().test_ok().to_owned(),
+        };
+        let plugin = make_plugin("unit-session-events", &["unit.session.event"]);
+        let plugin_id = plugin.id;
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "unit-session-events".to_owned(),
+            stop: StopCondition::MaxTicks(2),
+            store_config: store_config.clone(),
+        });
+        experiment.register(&plugin, None, None).test_ok();
+        let session = experiment.start().test_ok();
+        let timeline_id = session.timeline().id();
+        let subject = EntityId::new();
+        let authority = ConsentAuthority::new();
+        let token = authority.record_grant_on_timeline(
+            timeline_id,
+            &ConsentGranted {
+                subject_id: subject,
+                grantee_id: EntityId::new(),
+                purpose: "unit-session-events".to_owned(),
+                modalities: 0,
+                min_geo_resolution: 0,
+                fork_permitted: false,
+                export_permitted: false,
+                retention_days: 0,
+                expiry_secs: 0,
+                grant_seq: 1,
+            },
+        );
+        let mut session = session
+            .with_consent_authority(authority.clone())
+            .with_protected_token(token.clone(), 0);
+        assert_eq!(session.append_events(&[]).test_ok(), 0);
+        assert_eq!(
+            session
+                .append_events(&[EventDraft::new(
+                    subject,
+                    Kind::new("unit.session.event"),
+                    CanonicalBytes::from_static(b"unit"),
+                )])
+                .test_ok(),
+            1
+        );
+        assert_eq!(session.source_events().test_ok().len(), 1);
+        assert!(session
+            .projection_state_for_reducer("missing", subject, &token, current_now_secs())
+            .test_ok()
+            .is_none());
+
+        session.revoke_consent_for_subject_at_boundary(subject);
+        assert!(matches!(
+            session.step_tick(),
+            Ok(TickOutcome::Advanced {
+                emitted_events: 1,
+                ..
+            })
+        ));
+        drop(session);
+
+        let resumed_plugin = TestPlugin {
+            id: plugin_id,
+            name: "unit-session-events",
+            event_types: vec![Kind::new("unit.session.event")],
+            has_reducer: false,
+        };
+        let mut resumed_experiment = Experiment::new(ExperimentConfig {
+            name: "unit-session-events".to_owned(),
+            stop: StopCondition::MaxTicks(2),
+            store_config,
+        });
+        resumed_experiment
+            .register(&resumed_plugin, None, None)
+            .test_ok();
+        let resumed = resumed_experiment
+            .with_consent_authority(authority)
+            .resume(timeline_id)
+            .test_ok();
+        assert!(matches!(
+            resumed.projection_state_for_reducer("missing", subject, &token, current_now_secs()),
+            Err(ExperimentError::ConsentRevoked)
+        ));
+    }
+
+    #[test]
+    fn protected_session_fork_hydrates_through_the_unit_seam() {
+        let authority = ConsentAuthority::new();
+        let experiment = Experiment::new(ExperimentConfig {
+            name: "unit-protected-fork".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        })
+        .with_consent_authority(authority.clone())
+        .with_fork_registry_factory(|| Ok(PluginRegistry::new()));
+        let session = experiment.start().test_ok();
+        let token = authority.record_grant_on_timeline(
+            session.timeline().id(),
+            &ConsentGranted {
+                subject_id: EntityId::new(),
+                grantee_id: EntityId::new(),
+                purpose: "unit-protected-fork".to_owned(),
+                modalities: 0,
+                min_geo_resolution: 0,
+                fork_permitted: true,
+                export_permitted: false,
+                retention_days: 0,
+                expiry_secs: 0,
+                grant_seq: 1,
+            },
+        );
+        let mut session = session.with_protected_token(token, 0);
+        let child = session.fork("unit-protected-child").test_ok();
+        assert_eq!(
+            child.timeline().meta.name.as_deref(),
+            Some("unit-protected-child")
+        );
+    }
+
+    #[test]
+    fn nonempty_backtest_builds_durable_run_results_in_the_unit_seam() {
+        let entity = EntityId::new();
+        let runner = BacktestRunner::new(
+            BacktestConfig {
+                experiment_name: "unit-backtest".to_owned(),
+                train_ticks: 1,
+                eval_ticks: 1,
+                store_config: StoreConfig::Memory,
+            },
+            move || {
+                let plugin = make_plugin("unit-backtest-plugin", &["unit.backtest.event"]);
+                let mut registry = PluginRegistry::new();
+                registry
+                    .register(
+                        &plugin,
+                        None,
+                        Some(Box::new(FixedDriver::new(entity, "unit.backtest.event", 1))),
+                    )
+                    .test_ok();
+                registry
+            },
+        );
+        let result = runner.run().test_ok();
+        assert_eq!(result.train_events, 1);
+        assert_eq!(result.eval_events, 1);
+        assert_eq!(result.train_result.timeline_head, 1);
+        assert_eq!(result.eval_result.timeline_head, 2);
+    }
 }
 
 #[cfg(test)]
