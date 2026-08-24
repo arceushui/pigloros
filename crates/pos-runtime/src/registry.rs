@@ -369,6 +369,7 @@ mod coverage_entrypoints {
             committed: std::sync::Arc::clone(&committed),
         }));
         let timeline = TimelineId::new();
+        assert!(registry.step_all(timeline).is_ok());
         let restore_event = event("coverage.restore.commit", 1);
         assert!(registry
             .restore_driver_state(
