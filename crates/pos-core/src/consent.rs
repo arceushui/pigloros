@@ -3006,6 +3006,38 @@ mod tests {
         );
     }
 
+    struct FenceGate;
+
+    impl ConsentGate for FenceGate {
+        fn check_consent(
+            &self,
+            _: TimelineId,
+            _: EntityId,
+            _: &Kind,
+            _: u64,
+            _: u64,
+        ) -> Result<ConsentCapabilityToken, ConsentError> {
+            Err(ConsentError::NoConsent)
+        }
+
+        fn fence_timeline_at(
+            &self,
+            _: TimelineId,
+            _: u64,
+        ) -> Result<(), ConsentError> {
+            Ok(())
+        }
+
+        fn fence_subject_at(
+            &self,
+            _: TimelineId,
+            _: EntityId,
+            _: u64,
+        ) -> Result<(), ConsentError> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn default_gate_control_seams_fail_closed_before_append() {
         struct DefaultGate;
@@ -3070,38 +3102,6 @@ mod tests {
             Err(ConsentError::NoConsent)
         );
         assert!(!appended.get());
-
-        struct FenceGate;
-
-        impl ConsentGate for FenceGate {
-            fn check_consent(
-                &self,
-                _: TimelineId,
-                _: EntityId,
-                _: &Kind,
-                _: u64,
-                _: u64,
-            ) -> Result<ConsentCapabilityToken, ConsentError> {
-                Err(ConsentError::NoConsent)
-            }
-
-            fn fence_timeline_at(
-                &self,
-                _: TimelineId,
-                _: u64,
-            ) -> Result<(), ConsentError> {
-                Ok(())
-            }
-
-            fn fence_subject_at(
-                &self,
-                _: TimelineId,
-                _: EntityId,
-                _: u64,
-            ) -> Result<(), ConsentError> {
-                Ok(())
-            }
-        }
 
         let fence_gate = FenceGate;
         assert!(fence_gate
