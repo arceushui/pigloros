@@ -6971,7 +6971,7 @@ pub mod tests {
         invalid_result.expected_digest = None;
         invalid_result.actual_digest = None;
         assert!(!valid_conformance_case_result(&invalid_result));
-        assert_case_rejects(invalid_result.clone());
+        assert_case_rejects(invalid_result);
 
         let mut mismatched_digest = valid.clone();
         mismatched_digest.actual_digest = Some([15; 32]);
@@ -6990,6 +6990,18 @@ pub mod tests {
         coordinate_without_match.first_coordinate = Some(vec![1]);
         assert!(!valid_conformance_case_result(&coordinate_without_match));
         assert_case_rejects(coordinate_without_match);
+    }
+
+    #[test]
+    fn public_report_redaction_predicates_are_fail_closed() {
+        let valid = test_report().cases[0].clone();
+        let assert_case_rejects = |case: CaseOutcomeV1| {
+            let mut keys = BTreeSet::new();
+            assert_eq!(
+                validate_conformance_case(&case, &mut keys),
+                Err(EvidenceError::InvalidConformanceReport)
+            );
+        };
 
         for state in [
             RedactionStateV1::StructuralOnly,
@@ -7002,7 +7014,7 @@ pub mod tests {
             assert_case_rejects(wrong_replay);
         }
 
-        let mut structural = valid.clone();
+        let mut structural = valid;
         structural.redaction_state = RedactionStateV1::StructuralOnly;
         structural.replay_claim = ReplayClaimV1::StructuralOnly;
         structural.expected_digest = None;
@@ -7016,7 +7028,7 @@ pub mod tests {
             |case: &mut CaseOutcomeV1| case.expected_digest = Some([1; 32]),
             |case: &mut CaseOutcomeV1| case.actual_digest = Some([1; 32]),
             |case: &mut CaseOutcomeV1| {
-                case.expected_error = Some(SafeErrorCodeV1::ClosureIncomplete)
+                case.expected_error = Some(SafeErrorCodeV1::ClosureIncomplete);
             },
             |case: &mut CaseOutcomeV1| case.actual_error = Some(SafeErrorCodeV1::ClosureIncomplete),
             |case: &mut CaseOutcomeV1| case.first_coordinate = Some(vec![1]),
@@ -7033,7 +7045,7 @@ pub mod tests {
         evidence_missing.replay_claim = ReplayClaimV1::UnverifiableArtifactsMissing;
         evidence_missing.outcome = CaseOutcomeStatusV1::Fail;
         assert!(valid_redacted_case(&evidence_missing));
-        let mut missing_pass = evidence_missing.clone();
+        let mut missing_pass = evidence_missing;
         missing_pass.outcome = CaseOutcomeStatusV1::Pass;
         assert!(!valid_redacted_case(&missing_pass));
         assert_case_rejects(missing_pass);

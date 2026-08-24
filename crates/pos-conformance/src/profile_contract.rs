@@ -4936,7 +4936,7 @@ mod tests {
         reject_against_profile(|value| value.evaluator_protocol_digest = [99; 32]);
         reject_against_profile(|value| value.evaluator_hard_caps_digest = [99; 32]);
         reject_against_profile(|value| {
-            value.subject_adapter = SubjectAdapterKindV1::PublicGatewayProtocol
+            value.subject_adapter = SubjectAdapterKindV1::PublicGatewayProtocol;
         });
 
         let mut invalid_profile = profile();
@@ -4991,7 +4991,7 @@ mod tests {
         at_profile_limit.profile_digest = at_profile_limit.digest();
         assert!(at_profile_limit.validate().is_ok());
 
-        let mut below = at_profile_limit.clone();
+        let mut below = at_profile_limit;
         below.evaluator_protocol.hard_caps.max_profile_bytes = below
             .evaluator_protocol
             .hard_caps
