@@ -81,7 +81,7 @@ impl Debug for RunResult {
             .field("total_events", &self.total_events)
             .field("manifest", &self.manifest)
             .field("store_config", &self.store_config)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
