@@ -341,6 +341,7 @@ impl ConformanceBundleV1 {
 
     fn manifest_bytes(&self) -> Result<Vec<u8>, BundleContractErrorV1> {
         canonical::encode(&manifest_value(&self.manifest))
+            .map(|bytes| bytes.as_slice().to_vec())
             .map_err(|_| BundleContractErrorV1::EncodingFailed)
     }
 }
