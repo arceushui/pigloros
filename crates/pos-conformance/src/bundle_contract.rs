@@ -1272,8 +1272,7 @@ mod tests {
     fn mandatory_fixture_matching_requires_case_and_layer() -> Result<(), Box<dyn std::error::Error>>
     {
         let mut profile = profile();
-        let mut same_layer = profile.fixtures[0].clone();
-        same_layer.case_id = "case-support".to_owned();
+        let same_layer = profile_fixture(7, profile.fixtures[0].claim_layer);
         profile.fixtures.push(same_layer);
         profile.profile_digest = profile.digest();
         let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
