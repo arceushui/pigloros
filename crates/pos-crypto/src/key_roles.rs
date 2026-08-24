@@ -80,6 +80,7 @@ fn role_bound_message(role: KeyRoleV1, epoch: u64, payload: &CanonicalBytes) -> 
 mod tests {
     use super::*;
     use crate::signing::{generate_keypair, public_key_from_verifying_key};
+    use ed25519_dalek::Signer;
 
     fn payload(bytes: &[u8]) -> CanonicalBytes {
         CanonicalBytes::from_vec(bytes.to_vec())
@@ -148,6 +149,26 @@ mod tests {
             &signature
         )
         .is_err());
+
+        let invalid_identity_signature = Signature::from_bytes(
+            signing_key
+                .sign(&role_bound_message(
+                    KeyRoleV1::SubjectDataEncryption,
+                    0,
+                    &value,
+                ))
+                .to_bytes(),
+        );
+        assert_eq!(
+            verify_for_role(
+                &verifying_key,
+                KeyRoleV1::SubjectDataEncryption,
+                0,
+                &value,
+                &invalid_identity_signature,
+            ),
+            Err(pos_core::CoreError::SignatureVerificationFailed)
+        );
         assert_eq!(
             public_key_from_verifying_key(&verifying_key).as_bytes(),
             verifying_key.as_bytes()

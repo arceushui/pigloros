@@ -43,14 +43,6 @@ impl LegacySubjectDataSignatureDispositionV1 {
     pub const fn current() -> Self {
         Self::VerifyOnlyNoReplayUpgrade
     }
-
-    /// Legacy evidence never authorizes a stronger replay claim.
-    #[must_use]
-    pub const fn permits_replay_claim_upgrade(self) -> bool {
-        match self {
-            Self::VerifyOnlyNoReplayUpgrade => false,
-        }
-    }
 }
 
 impl KeyRoleV1 {
@@ -539,7 +531,6 @@ mod tests {
             disposition,
             LegacySubjectDataSignatureDispositionV1::VerifyOnlyNoReplayUpgrade
         );
-        assert!(!disposition.permits_replay_claim_upgrade());
     }
 
     #[test]
@@ -727,6 +718,10 @@ mod tests {
             KeyDestructionRequestV1::new(DATA, digest(20), digest(21)),
         )?;
         assert!(matches!(outcome, KeyDestructionOutcomeV1::Destroyed(_)));
+        assert_eq!(
+            KeyRegistryPortV1::tombstone(&registry, DATA),
+            Some(outcome.tombstone())
+        );
         Ok(())
     }
 }
