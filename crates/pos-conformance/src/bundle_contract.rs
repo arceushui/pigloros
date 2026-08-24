@@ -1936,6 +1936,10 @@ mod tests {
         assert_eq!(decode_lifecycle(2), Ok(ProfileLifecycleV1::Stable));
         assert_eq!(decode_lifecycle(3), Ok(ProfileLifecycleV1::Retired));
         assert_eq!(
+            decode_lifecycle(4),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
             decode_claim_layer(7),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
         );
@@ -1994,12 +1998,30 @@ mod tests {
             Err(BundleContractErrorV1::MemberOutOfBounds)
         );
         let mut member_cap = profile();
+        member_cap.evaluator_protocol.hard_caps.max_profile_bytes = u64::MAX;
+        member_cap
+            .evaluator_protocol
+            .hard_caps
+            .max_structural_nesting = u8::MAX;
+        member_cap
+            .evaluator_protocol
+            .hard_caps
+            .max_member_path_bytes = u16::MAX;
+        member_cap.evaluator_protocol.hard_caps.max_bundle_members = u32::MAX;
         member_cap.evaluator_protocol.hard_caps.max_member_bytes = 0;
         assert_eq!(
             validate_selected_bundle_caps(&member_cap, &bundle),
             Err(BundleContractErrorV1::MemberOutOfBounds)
         );
         let mut total_cap = profile();
+        total_cap.evaluator_protocol.hard_caps.max_profile_bytes = u64::MAX;
+        total_cap
+            .evaluator_protocol
+            .hard_caps
+            .max_structural_nesting = u8::MAX;
+        total_cap.evaluator_protocol.hard_caps.max_member_path_bytes = u16::MAX;
+        total_cap.evaluator_protocol.hard_caps.max_member_bytes = u64::MAX;
+        total_cap.evaluator_protocol.hard_caps.max_bundle_members = u32::MAX;
         total_cap
             .evaluator_protocol
             .hard_caps
