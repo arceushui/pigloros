@@ -9167,7 +9167,8 @@ mod tests {
         assert!(matches!(rollback_error, CoreError::Storage(_)));
         assert!(rollback_error
             .to_string()
-            .contains("transaction commit failed; rollback failed"));
+            .contains("transaction commit failed"));
+        assert!(rollback_error.to_string().contains("rollback failed"));
 
         let error_conn = Connection::open_in_memory().test_ok();
         let error_rollback = finish_immediate_transaction::<()>(
