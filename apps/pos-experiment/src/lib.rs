@@ -5483,7 +5483,7 @@ mod tests {
 mod coverage_entrypoints {
     use super::*;
     use pos_core::store::EventStore;
-    use pos_core::{Capability, Plugin, PluginId};
+    use pos_core::{Capability, ConsentGranted, Plugin, PluginId};
     use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 
     struct CoveragePlugin {
