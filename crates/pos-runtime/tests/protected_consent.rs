@@ -54,6 +54,24 @@ struct MismatchedSubjectDriver {
     entity: EntityId,
 }
 
+struct MismatchedRetentionDriver {
+    entity: EntityId,
+}
+
+impl Driver for MismatchedRetentionDriver {
+    fn name(&self) -> &'static str {
+        "mismatched-retention-subject"
+    }
+
+    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
+        Ok(StepOutput::new(vec![EventDraft::new(
+            self.entity,
+            Kind::new("retention.extend.v1"),
+            CanonicalBytes::from_static(b"protected"),
+        )]))
+    }
+}
+
 impl Driver for MismatchedSubjectDriver {
     fn name(&self) -> &'static str {
         "mismatched-subject"
@@ -245,6 +263,24 @@ fn protected_public_seam_rejects_a_draft_for_a_different_subject() {
     let mut registry = PluginRegistry::new().with_consent_authority(authority);
     registry.register_driver(Box::new(MismatchedSubjectDriver {
         entity: other_subject,
+    }));
+
+    let error = test_err(registry.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[]));
+    assert!(matches!(
+        error,
+        RuntimeError::Consent(ConsentError::NoConsent)
+    ));
+}
+
+#[test]
+fn protected_public_seam_rejects_a_retention_draft_for_a_different_subject() {
+    let timeline = TimelineId::new();
+    let subject = EntityId::new();
+    let authority = ConsentAuthority::new();
+    let token = authority.record_grant_on_timeline(timeline, &grant(subject));
+    let mut registry = PluginRegistry::new().with_consent_authority(authority);
+    registry.register_driver(Box::new(MismatchedRetentionDriver {
+        entity: EntityId::new(),
     }));
 
     let error = test_err(registry.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[]));

@@ -1859,6 +1859,31 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn token_policy_accessors_and_success_boundaries_preserve_grant() {
+        let timeline = TimelineId::new();
+        let authority = ConsentAuthority::new();
+        let mut grant = sample_granted();
+        grant.modalities = MODALITY_PERSONA;
+        grant.min_geo_resolution = 0;
+        grant.fork_permitted = false;
+        grant.export_permitted = true;
+        grant.retention_days = 7;
+        let token = authority.record_grant_on_timeline(timeline, &grant);
+
+        assert_eq!(token.min_geo_resolution(), 0);
+        assert!(!token.fork_permitted());
+        assert!(token.export_permitted());
+        assert_eq!(token.retention_days(), 7);
+        assert!(token
+            .authorize_event_type(&Kind::new("persona.update.v1"))
+            .is_ok());
+        assert!(token
+            .authorize_event_type(&Kind::new("retention.extend.v1"))
+            .is_ok());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn token_is_valid_before_fence_seq() {
         let g = sample_granted();
         let authority = ConsentAuthority::new();
