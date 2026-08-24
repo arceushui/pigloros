@@ -1274,16 +1274,8 @@ async fn worker_loop_async(
     let mut reads_since_write = 0;
     loop {
         if pending.is_empty() {
-            if match (draining, disconnected) {
-                (false, false) => false,
-                (true, _) | (false, true) => true,
-            } {
-                if matches!(
-                    drain_available(receiver, &mut pending),
-                    QueueDrainOutcome::Disconnected
-                ) {
-                    disconnected = true;
-                }
+            if worker_is_draining(draining, disconnected) {
+                drain_and_mark_disconnected(receiver, &mut pending, &mut disconnected);
                 if pending.is_empty() {
                     break;
                 }
@@ -1305,12 +1297,7 @@ async fn worker_loop_async(
             }
         }
 
-        if matches!(
-            drain_available(receiver, &mut pending),
-            QueueDrainOutcome::Disconnected
-        ) {
-            disconnected = true;
-        }
+        drain_and_mark_disconnected(receiver, &mut pending, &mut disconnected);
         #[cfg(test)]
         if let Some(observer) = &observer {
             observer.drain_completed(pending.len(), disconnected);
@@ -1362,6 +1349,26 @@ async fn worker_loop_async(
     }
     drop(pending);
     drop(state);
+}
+
+fn worker_is_draining(draining: bool, disconnected: bool) -> bool {
+    match (draining, disconnected) {
+        (false, false) => false,
+        (true, _) | (false, true) => true,
+    }
+}
+
+fn drain_and_mark_disconnected(
+    receiver: &mut mpsc::Receiver<CommandEnvelope>,
+    pending: &mut Vec<CommandEnvelope>,
+    disconnected: &mut bool,
+) {
+    if matches!(
+        drain_available(receiver, pending),
+        QueueDrainOutcome::Disconnected
+    ) {
+        *disconnected = true;
+    }
 }
 
 enum QueueDrainOutcome {
@@ -1442,7 +1449,7 @@ fn expire_command(command: Command) {
         Command::AppendConsentRevocation {
             reservation, reply, ..
         } => {
-            reservation.abort_durable();
+            let _ = reservation.abort_durable();
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
         Command::AppendIdentified { reply, .. } => {
@@ -1829,7 +1836,7 @@ fn execute_append_consent_revocation_command(
             ))))),
         },
         Err(error) => {
-            reservation.abort_durable();
+            let _ = reservation.abort_durable();
             drop(reply.send(Err(StoreExecutorError::Store(error))));
         }
     }
