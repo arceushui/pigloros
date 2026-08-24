@@ -97,16 +97,31 @@ mod coverage_tests {
         }
     }
 
-    use super::{Gateway, OwnTracksOwnerKey};
+    use super::{Gateway, GatewayError, OwnTracksOwnerKey};
     use pos_core::{
         geo_admission::{
             GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1,
         },
-        CanonicalBytes, EntityId, EventDraft, EventStore, Kind, OwnTracksEnrollmentRequestV1,
-        OwnTracksEnrollmentStore, Seq,
+        CanonicalBytes, ConsentError, ConsentGrantedV1, EntityId, EventDraft, EventStore, Kind,
+        OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore, Seq,
     };
     use pos_store::{memory::MemoryStore, open_store, StoreConfig};
     use std::path::Path;
+
+    fn consent_grant(subject_id: EntityId, grant_seq: u64) -> ConsentGrantedV1 {
+        ConsentGrantedV1 {
+            subject_id,
+            grantee_id: EntityId::new(),
+            purpose: "coverage-contract".to_owned(),
+            modalities: pos_core::MODALITY_LOCATION,
+            min_geo_resolution: 1,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq,
+        }
+    }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]

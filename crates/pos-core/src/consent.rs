@@ -430,6 +430,10 @@ impl ConsentRevoked {
     /// A revocation is a durable Timeline event, so its fence coordinate must
     /// not use the zero sentinel. The host's append fence separately verifies
     /// that the coordinate is the next committed sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConsentCodecError::FieldOutOfBounds`] when `fence_seq` is zero.
     pub const fn validate(&self) -> Result<(), ConsentCodecError> {
         if self.fence_seq == 0 {
             Err(ConsentCodecError::FieldOutOfBounds)
