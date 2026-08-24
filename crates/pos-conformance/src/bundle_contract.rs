@@ -1414,20 +1414,20 @@ mod tests {
             Err(BundleContractErrorV1::MemberMissing)
         );
 
-        let mut profile = profile();
-        let mut same_case_and_layer = profile_fixture(7, profile.fixtures[0].claim_layer);
-        same_case_and_layer.case_id = profile.fixtures[0].case_id.clone();
+        let mut execution_profile = profile();
+        let mut same_case_and_layer = profile_fixture(7, execution_profile.fixtures[0].claim_layer);
+        same_case_and_layer.case_id = execution_profile.fixtures[0].case_id.clone();
         same_case_and_layer.execution_profile_digest = digest(99);
-        profile.execution_profile_digests.push(digest(99));
-        profile.fixtures.push(same_case_and_layer);
-        profile.profile_digest = profile.digest();
-        let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
+        execution_profile.execution_profile_digests.push(digest(99));
+        execution_profile.fixtures.push(same_case_and_layer);
+        execution_profile.profile_digest = execution_profile.digest();
+        let bundle = signed_bundle(&execution_profile, BundleModeV1::Local)?;
         let mut manifest = bundle.manifest.clone();
         manifest
             .expected_results
             .retain(|expected| expected.execution_profile_digest != digest(99));
         assert_eq!(
-            validate_expected_results(&profile, &manifest, &bundle.members),
+            validate_expected_results(&execution_profile, &manifest, &bundle.members),
             Err(BundleContractErrorV1::MemberMissing)
         );
         Ok(())
