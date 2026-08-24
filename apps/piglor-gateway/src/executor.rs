@@ -1351,7 +1351,7 @@ async fn worker_loop_async(
     drop(state);
 }
 
-fn worker_is_draining(draining: bool, disconnected: bool) -> bool {
+const fn worker_is_draining(draining: bool, disconnected: bool) -> bool {
     match (draining, disconnected) {
         (false, false) => false,
         (true, _) | (false, true) => true,
@@ -1449,7 +1449,7 @@ fn expire_command(command: Command) {
         Command::AppendConsentRevocation {
             reservation, reply, ..
         } => {
-            let _ = reservation.abort_durable();
+            let _was_pending = reservation.abort_durable();
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
         Command::AppendIdentified { reply, .. } => {
@@ -1836,7 +1836,7 @@ fn execute_append_consent_revocation_command(
             ))))),
         },
         Err(error) => {
-            let _ = reservation.abort_durable();
+            let _was_pending = reservation.abort_durable();
             drop(reply.send(Err(StoreExecutorError::Store(error))));
         }
     }
