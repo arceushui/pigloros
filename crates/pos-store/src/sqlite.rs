@@ -11251,66 +11251,82 @@ mod key_registry_coverage {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn sqlite_key_registry_failure_paths(
-        registry: &KeyRegistryStateV1,
-        identity: KeyIdentityV1,
-        material_digest: Hash,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut missing_registry = SqliteStore::open_in_memory()?;
-        let missing_timeline = missing_registry.create_timeline("missing-registry")?;
-        let mut missing_registry_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
-            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+    mod sqlite_key_registry_failure_paths {
+        use super::{
+            sqlite_append_signed_authorized, sqlite_destroy_key_registry, sqlite_load_key_registry,
+            CoreError, Event, Hash, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1,
+            Seq, SqliteStore, TimelineId, FAIL_BEGIN_IMMEDIATE,
         };
-        assert!(matches!(
-            sqlite_append_signed_authorized(
-                &mut missing_registry,
-                missing_timeline.id(),
-                registry,
-                &mut missing_registry_callback,
-            ),
-            Err(CoreError::Storage(_))
-        ));
-        assert!(matches!(
-            sqlite_destroy_key_registry(
-                &mut missing_registry,
-                KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([2; 32]),)
-            ),
-            Err(CoreError::Storage(_))
-        ));
 
-        let mut begin_failure = SqliteStore::open_in_memory()?;
-        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
-        let mut begin_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
-            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
-        };
-        assert!(matches!(
-            sqlite_append_signed_authorized(
-                &mut begin_failure,
-                TimelineId::new(),
-                registry,
-                &mut begin_callback,
-            ),
-            Err(CoreError::Storage(_))
-        ));
-        assert!(matches!(
-            sqlite_destroy_key_registry(
-                &mut begin_failure,
-                KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([2; 32]),)
-            ),
-            Err(CoreError::Storage(_))
-        ));
-        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
+        pub(super) fn run(
+            registry: &KeyRegistryStateV1,
+            identity: KeyIdentityV1,
+            material_digest: Hash,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let mut missing_registry = SqliteStore::open_in_memory()?;
+            let missing_timeline = missing_registry.create_timeline("missing-registry")?;
+            let mut missing_registry_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+                Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+            };
+            assert!(matches!(
+                sqlite_append_signed_authorized(
+                    &mut missing_registry,
+                    missing_timeline.id(),
+                    registry,
+                    &mut missing_registry_callback,
+                ),
+                Err(CoreError::Storage(_))
+            ));
+            assert!(matches!(
+                sqlite_destroy_key_registry(
+                    &mut missing_registry,
+                    KeyDestructionRequestV1::new(
+                        identity,
+                        material_digest,
+                        Hash::from_bytes([2; 32]),
+                    )
+                ),
+                Err(CoreError::Storage(_))
+            ));
 
-        let malformed = SqliteStore::open_in_memory()?;
-        malformed.conn.execute(
-            "INSERT INTO key_registry (singleton, state_cbor) VALUES (1, X'01')",
-            [],
-        )?;
-        assert!(matches!(
-            sqlite_load_key_registry(&malformed),
-            Err(CoreError::Serialization(_))
-        ));
-        Ok(())
+            let mut begin_failure = SqliteStore::open_in_memory()?;
+            FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
+            let mut begin_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+                Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+            };
+            assert!(matches!(
+                sqlite_append_signed_authorized(
+                    &mut begin_failure,
+                    TimelineId::new(),
+                    registry,
+                    &mut begin_callback,
+                ),
+                Err(CoreError::Storage(_))
+            ));
+            assert!(matches!(
+                sqlite_destroy_key_registry(
+                    &mut begin_failure,
+                    KeyDestructionRequestV1::new(
+                        identity,
+                        material_digest,
+                        Hash::from_bytes([2; 32]),
+                    )
+                ),
+                Err(CoreError::Storage(_))
+            ));
+            FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
+
+            let malformed = SqliteStore::open_in_memory()?;
+            malformed.conn.execute(
+                "INSERT INTO key_registry (singleton, state_cbor) VALUES (1, X'01')",
+                [],
+            )?;
+            assert!(matches!(
+                sqlite_load_key_registry(&malformed),
+                Err(CoreError::Serialization(_))
+            ));
+            Ok(())
+        }
     }
 
     #[test]
@@ -11385,7 +11401,7 @@ mod key_registry_coverage {
             KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([2; 32]));
         let (_, destroyed) = sqlite_destroy_key_registry(&mut store, valid_request)?;
         assert!(destroyed.key_record(identity).is_some());
-        sqlite_key_registry_failure_paths(&registry, identity, material_digest)?;
+        sqlite_key_registry_failure_paths::run(&registry, identity, material_digest)?;
         Ok(())
     }
 }
