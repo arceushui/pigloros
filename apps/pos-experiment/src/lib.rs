@@ -564,10 +564,6 @@ impl FoldedEventCount {
     const fn saturating_add(self, other: Self) -> Self {
         Self(self.0.saturating_add(other.0))
     }
-
-    const fn get(self) -> u64 {
-        self.0
-    }
 }
 
 fn fold_captured_range(
@@ -632,7 +628,7 @@ fn advance_tick(
         TickAdvance::Quiescent
     } else {
         TickAdvance::Advanced {
-            folded_events: folded_events.get(),
+            folded_events: folded_events.0,
         }
     };
     Ok((outcome, after.timeline))
@@ -1587,9 +1583,8 @@ impl ExperimentSession {
                 return Err(error);
             }
         };
-        folded_events = folded_events.saturating_add(
-            fold_captured_range(&mut self.boundary, &mut self.registry, &after).get(),
-        );
+        folded_events = folded_events
+            .saturating_add(fold_captured_range(&mut self.boundary, &mut self.registry, &after).0);
         self.timeline = after.timeline;
         self.total_events = self.total_events.saturating_add(folded_events);
         self.ticks = self.ticks.saturating_add(1);
@@ -1668,7 +1663,7 @@ impl ExperimentSession {
             })?;
         let folded_events = fold_captured_range(&mut self.boundary, &mut self.registry, &after);
         self.timeline = after.timeline;
-        self.total_events = self.total_events.saturating_add(folded_events.get());
+        self.total_events = self.total_events.saturating_add(folded_events.0);
         self.ticks = self.ticks.saturating_add(1);
         if let Some(subject) = subject {
             self.revoked_subjects.insert(subject);
@@ -1677,7 +1672,7 @@ impl ExperimentSession {
             self.complete = true;
         }
         Ok(TickOutcome::Advanced {
-            folded_events: folded_events.get(),
+            folded_events: folded_events.0,
             emitted_events,
         })
     }
@@ -1699,7 +1694,7 @@ impl ExperimentSession {
         })?;
         committed_events.extend(before.events.iter().cloned());
         let folded_events = fold_captured_range(&mut self.boundary, &mut self.registry, &before);
-        Ok((folded_events.get(), committed_events))
+        Ok((folded_events.0, committed_events))
     }
 
     fn hydrate_fork_registry(
@@ -2748,10 +2743,52 @@ mod tests {
         };
 
         assert_eq!(
-            fold_captured_range(&mut boundary, &mut registry, &captured).get(),
+            fold_captured_range(&mut boundary, &mut registry, &captured).0,
             0
         );
         assert_eq!(boundary.folded_through, pos_core::clock::Seq::from_u64(3));
+    }
+
+    #[test]
+    fn advance_tick_distinguishes_empty_and_folded_ranges() {
+        let mut empty_store = pos_store::memory::MemoryStore::new();
+        let empty_timeline = empty_store.create_timeline("empty-range").test_ok();
+        let empty = advance_tick(
+            &mut empty_store,
+            empty_timeline.id(),
+            &mut PluginRegistry::new(),
+            &mut TickBoundaryCoordinator {
+                folded_through: pos_core::clock::Seq::ZERO,
+            },
+        )
+        .test_ok();
+        assert!(matches!(empty.0, TickAdvance::Quiescent));
+
+        let mut folded_store = pos_store::memory::MemoryStore::new();
+        let folded_timeline = folded_store.create_timeline("folded-range").test_ok();
+        folded_store
+            .append(
+                folded_timeline.id(),
+                &[EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("folded.event"),
+                    CanonicalBytes::from_static(b"folded"),
+                )],
+            )
+            .test_ok();
+        let folded = advance_tick(
+            &mut folded_store,
+            folded_timeline.id(),
+            &mut PluginRegistry::new(),
+            &mut TickBoundaryCoordinator {
+                folded_through: pos_core::clock::Seq::ZERO,
+            },
+        )
+        .test_ok();
+        match folded.0 {
+            TickAdvance::Advanced { folded_events } => assert_eq!(folded_events, 1),
+            TickAdvance::Quiescent => panic!("a pending event must advance the tick"),
+        }
     }
 
     #[test]
