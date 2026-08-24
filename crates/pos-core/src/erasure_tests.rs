@@ -9,7 +9,8 @@ fn test_text(value: &str) -> Value {
 }
 use super::*;
 use crate::erasure::codec::{
-    array, cbor_argument, cbor_argument_bytes, has_duplicate_by_inventory_target,
+    array, cbor_argument, cbor_argument_bytes, cbor_item_end, cbor_shape_is_bounded,
+    has_duplicate_by_inventory_target,
 };
 use ciborium::value::Value;
 use std::cell::RefCell;
