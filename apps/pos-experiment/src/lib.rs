@@ -5671,13 +5671,17 @@ mod tests {
             .is_none());
 
         session.revoke_consent_for_subject_at_boundary(subject);
-        assert!(matches!(
-            session.step_tick(),
-            Ok(TickOutcome::Advanced {
-                emitted_events: 1,
-                ..
-            })
-        ));
+        let revocation_boundary = session.step_tick();
+        assert!(
+            matches!(
+                revocation_boundary,
+                Ok(TickOutcome::Advanced {
+                    emitted_events: 1,
+                    ..
+                })
+            ),
+            "revocation boundary outcome: {revocation_boundary:?}"
+        );
         drop(session);
 
         let resumed_plugin = TestPlugin {
@@ -5694,14 +5698,17 @@ mod tests {
         resumed_experiment
             .register(&resumed_plugin, None, None)
             .test_ok();
-        let resumed = resumed_experiment
+        let resumed_result = resumed_experiment
             .with_consent_authority(authority)
-            .resume(timeline_id)
-            .test_ok();
-        assert!(matches!(
-            resumed.projection_state_for_reducer("missing", subject, &token, current_now_secs()),
-            Err(ExperimentError::ConsentRevoked)
-        ));
+            .resume(timeline_id);
+        assert!(resumed_result.is_ok(), "resume result: {resumed_result:?}");
+        let resumed = resumed_result.test_ok();
+        let projection =
+            resumed.projection_state_for_reducer("missing", subject, &token, current_now_secs());
+        assert!(
+            matches!(projection, Err(ExperimentError::ConsentRevoked)),
+            "projection result: {projection:?}"
+        );
     }
 
     #[test]
