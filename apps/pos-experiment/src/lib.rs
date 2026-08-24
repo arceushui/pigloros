@@ -2874,12 +2874,9 @@ mod tests {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn projection_count(
-        session: &ExperimentSession,
-        entity: EntityId,
-    ) -> Result<u64, ExperimentError> {
+    fn projection_count(session: &ExperimentSession, entity: EntityId) -> u64 {
         let _ = entity;
-        Ok(session.total_events)
+        session.total_events
     }
 
     fn new_cadence_session(
@@ -2919,7 +2916,7 @@ mod tests {
         expected_steps: usize,
     ) -> (u64, u64, u64) {
         assert_eq!(
-            projection_count(session, entity).test_ok(),
+            projection_count(session, entity),
             u64::try_from(expected_steps).test_ok()
         );
         (
@@ -3595,10 +3592,10 @@ mod tests {
             .test_ok();
         let mut resumed = protect_session(recovery.resume(timeline).test_ok(), entity);
         assert_eq!(resumed.total_events, 1);
-        assert_eq!(projection_count(&resumed, entity).test_ok(), 1);
+        assert_eq!(projection_count(&resumed, entity), 1);
         assert_eq!(resumed.step_tick().test_ok(), TickOutcome::Quiescent);
         assert_eq!(*seen_counts.lock().test_ok(), vec![1]);
-        assert_eq!(projection_count(&resumed, entity).test_ok(), 1);
+        assert_eq!(projection_count(&resumed, entity), 1);
     }
 
     #[test]
@@ -4424,9 +4421,14 @@ mod tests {
         assert_eq!(result.total_events, 3);
     }
 
-    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn consent_revocation_is_durable_across_resume() {
+    fn create_durable_revocation_fixture() -> (
+        tempfile::NamedTempFile,
+        StoreConfig,
+        TimelineId,
+        EntityId,
+        PluginId,
+    ) {
         let database = tempfile::NamedTempFile::new().test_ok();
         let path = database.path().to_str().test_ok().to_owned();
         let entity = EntityId::new();
@@ -4481,6 +4483,15 @@ mod tests {
         );
         assert_eq!(session.step_tick().test_ok(), TickOutcome::Stopped);
         drop(session);
+
+        (database, store_config, timeline_id, entity, plugin_id)
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn consent_revocation_is_durable_across_resume() {
+        let (_database, store_config, timeline_id, entity, plugin_id) =
+            create_durable_revocation_fixture();
 
         let resumed_plugin = TestPlugin {
             id: plugin_id,

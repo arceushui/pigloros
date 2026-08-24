@@ -2910,11 +2910,14 @@ mod tests {
             .issue_consent_revocation(&timeline.id().to_string(), unknown)
             .await
             .test_err();
-        assert!(matches!(
-            unknown_error,
-            GatewayError::Store(CoreError::Storage(message))
-                if message == "consent revocation did not name an active grant"
-        ));
+        assert!(
+            matches!(
+                &unknown_error,
+                GatewayError::Store(CoreError::Storage(message))
+                    if message == "consent revocation did not name an active grant"
+            ),
+            "unexpected unknown revocation error: {unknown_error:?}"
+        );
         assert!(gateway
             .read_events_page(&timeline.id().to_string(), 0, 1)
             .await
@@ -2941,10 +2944,10 @@ mod tests {
             )
             .await
             .test_err();
-        assert!(matches!(
-            fence_error,
-            GatewayError::ConsentRevocationFenceMismatch
-        ));
+        assert!(
+            matches!(&fence_error, GatewayError::ConsentRevocationFenceMismatch),
+            "unexpected fence revocation error: {fence_error:?}"
+        );
         let page = gateway
             .read_events_page(&timeline.id().to_string(), 0, 2)
             .await
@@ -2962,10 +2965,13 @@ mod tests {
             )
             .await
             .test_err();
-        assert!(matches!(
-            ceiling_error,
-            GatewayError::EventLimitReached { maximum: 1 }
-        ));
+        assert!(
+            matches!(
+                &ceiling_error,
+                GatewayError::EventLimitReached { maximum: 1 }
+            ),
+            "unexpected ceiling revocation error: {ceiling_error:?}"
+        );
         drop(gateway);
     }
 
