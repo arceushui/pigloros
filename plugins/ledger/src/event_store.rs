@@ -124,6 +124,7 @@ impl EventLedgerStore {
             .destroy_key_registry(request)
             .map_err(LedgerError::from)?;
         *registry = next;
+        drop(registry);
         Ok(outcome)
     }
 
@@ -179,9 +180,10 @@ impl EventLedgerStore {
     }
 }
 
-/// Load and fold a ledger view from an event store without requiring signing
-/// credentials. Read-only consumers must not construct a signing adapter or
-/// mutate the store's durable key registry just to inspect existing events.
+/// Load and fold a ledger view from an event store.
+///
+/// Read-only consumers must not construct a signing adapter or mutate the
+/// store's durable key registry just to inspect existing events.
 ///
 /// # Errors
 ///
@@ -306,6 +308,19 @@ mod tests {
         Ok((Arc::new(Mutex::new(registry)), identity))
     }
 
+    fn poisoned_registry() -> Arc<Mutex<KeyRegistryStateV1>> {
+        let registry = Arc::new(Mutex::new(KeyRegistryStateV1::new()));
+        let worker_registry = Arc::clone(&registry);
+        let _ = std::thread::spawn(move || {
+            let Ok(_guard) = worker_registry.lock() else {
+                return;
+            };
+            panic!("poison registry for constructor test");
+        })
+        .join();
+        registry
+    }
+
     #[test]
     fn constructor_rejects_a_registry_without_active_authority(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -323,6 +338,49 @@ mod tests {
         .err()
         .ok_or("expected registry authorization error")?;
         assert!(matches!(error, LedgerError::Store(_)));
+        Ok(())
+    }
+
+    #[test]
+    fn constructor_reports_a_poisoned_external_registry() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (signing_key, _) = pos_crypto::signing::generate_keypair();
+        let (persisted, identity) = registry_for(&signing_key)?;
+        let persisted_state = persisted
+            .lock()
+            .map_err(|_| "registry lock poisoned")?
+            .clone();
+        let mut memory = MemoryStore::new();
+        memory.save_key_registry(&persisted_state)?;
+        let persisted_error = EventLedgerStore::new(
+            Box::new(memory),
+            pos_core::ids::TimelineId::new(),
+            EntityId::new(),
+            signing_key.clone(),
+            poisoned_registry(),
+            identity,
+            Box::new(Blake3Hasher),
+        )
+        .err()
+        .ok_or("expected poisoned persisted registry error")?;
+        assert!(persisted_error
+            .to_string()
+            .contains("registry is unavailable"));
+
+        let missing_error = EventLedgerStore::new(
+            Box::new(MemoryStore::new()),
+            pos_core::ids::TimelineId::new(),
+            EntityId::new(),
+            signing_key,
+            poisoned_registry(),
+            identity,
+            Box::new(Blake3Hasher),
+        )
+        .err()
+        .ok_or("expected poisoned initial registry error")?;
+        assert!(missing_error
+            .to_string()
+            .contains("registry is unavailable"));
         Ok(())
     }
 
@@ -448,6 +506,33 @@ mod tests {
             .register(crate::contract::sample_new_prediction("2026-08-01"))
             .err()
             .ok_or("stale adapter unexpectedly appended after destruction")?;
+        assert!(error.to_string().contains("changed during signing"));
+        Ok(())
+    }
+
+    #[test]
+    fn memory_store_rechecks_the_durable_registry_before_authorized_append(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (signing_key, _) = pos_crypto::signing::generate_keypair();
+        let (persisted, _) = registry_for(&signing_key)?;
+        let persisted = persisted
+            .lock()
+            .map_err(|_| "registry lock poisoned")?
+            .clone();
+        let mut store = MemoryStore::new();
+        store.save_key_registry(&persisted)?;
+        let expected = KeyRegistryStateV1::new();
+        let mut create_event = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        let error = store
+            .append_signed_authorized(
+                pos_core::ids::TimelineId::new(),
+                &expected,
+                &mut create_event,
+            )
+            .err()
+            .ok_or("expected registry mismatch")?;
         assert!(error.to_string().contains("changed during signing"));
         Ok(())
     }

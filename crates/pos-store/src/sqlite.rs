@@ -839,33 +839,8 @@ impl SqliteStore {
             let ph_arr: [u8; 32] = ph_bytes
                 .try_into()
                 .map_err(|_| CoreError::Serialization("bad hash".to_owned()))?;
-            let signature = match sig_bytes {
-                None => None,
-                Some(bytes) => {
-                    let arr: [u8; 64] = bytes
-                        .try_into()
-                        .map_err(|_| CoreError::Serialization("bad signature length".to_owned()))?;
-                    Some(pos_core::Signature::from_bytes(arr))
-                }
-            };
-            let signature_identity = match (signature_role, signature_epoch) {
-                (None, None) => None,
-                (Some(role), Some(epoch)) => Some(KeyIdentityV1::new(
-                    KeyRoleV1::from_code(
-                        u8::try_from(role).map_err(|_| {
-                            CoreError::Serialization("bad signature role".to_owned())
-                        })?,
-                    )
-                    .map_err(|_| CoreError::Serialization("bad signature role".to_owned()))?,
-                    u64::try_from(epoch)
-                        .map_err(|_| CoreError::Serialization("bad signature epoch".to_owned()))?,
-                )),
-                _ => {
-                    return Err(CoreError::Serialization(
-                        "signature identity is incomplete".to_owned(),
-                    ));
-                }
-            };
+            let signature = decode_signature(sig_bytes)?;
+            let signature_identity = decode_signature_identity(signature_role, signature_epoch)?;
             events.push(Event {
                 id: parse_event_id(&event_id)?,
                 entity: parse_entity_id(&entity_id)?,
@@ -3906,6 +3881,38 @@ fn parse_mode(s: &str) -> TimelineMode {
         "historical" => TimelineMode::Historical,
         "future" => TimelineMode::Future,
         _ => TimelineMode::Live,
+    }
+}
+
+fn decode_signature(bytes: Option<Vec<u8>>) -> Result<Option<pos_core::Signature>, CoreError> {
+    bytes
+        .map(|bytes| {
+            bytes
+                .try_into()
+                .map(pos_core::Signature::from_bytes)
+                .map_err(|_| CoreError::Serialization("bad signature length".to_owned()))
+        })
+        .transpose()
+}
+
+fn decode_signature_identity(
+    role: Option<i64>,
+    epoch: Option<i64>,
+) -> Result<Option<KeyIdentityV1>, CoreError> {
+    match (role, epoch) {
+        (None, None) => Ok(None),
+        (Some(role), Some(epoch)) => Ok(Some(KeyIdentityV1::new(
+            KeyRoleV1::from_code(
+                u8::try_from(role)
+                    .map_err(|_| CoreError::Serialization("bad signature role".to_owned()))?,
+            )
+            .map_err(|_| CoreError::Serialization("bad signature role".to_owned()))?,
+            u64::try_from(epoch)
+                .map_err(|_| CoreError::Serialization("bad signature epoch".to_owned()))?,
+        ))),
+        _ => Err(CoreError::Serialization(
+            "signature identity is incomplete".to_owned(),
+        )),
     }
 }
 
@@ -8930,6 +8937,58 @@ mod tests {
     }
 
     #[test]
+    fn read_rejects_malformed_signature_identity() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("signature-identity").test_ok();
+        store
+            .append(timeline.id(), &[make_draft(EntityId::new(), b"identity")])
+            .test_ok();
+        store
+            .conn
+            .execute(
+                "UPDATE events SET signature_role = -1, signature_epoch = 1
+                 WHERE timeline_id = ?1",
+                params![timeline.id().to_string()],
+            )
+            .test_ok();
+        assert!(matches!(
+            store.read(timeline.id(), SeqRange::all()),
+            Err(CoreError::Serialization(_))
+        ));
+        store
+            .conn
+            .execute(
+                "UPDATE events SET signature_role = NULL, signature_epoch = 1
+                 WHERE timeline_id = ?1",
+                params![timeline.id().to_string()],
+            )
+            .test_ok();
+        assert!(matches!(
+            store.read(timeline.id(), SeqRange::all()),
+            Err(CoreError::Serialization(_))
+        ));
+    }
+
+    #[test]
+    fn registry_storage_errors_are_reported_by_sqlite_port() {
+        let mut store = new_store();
+        store.conn.execute("DROP TABLE key_registry", []).test_ok();
+        assert!(matches!(
+            store.load_key_registry(),
+            Err(CoreError::Storage(_))
+        ));
+
+        let timeline = store.create_timeline("missing-registry").test_ok();
+        let mut create_event = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        let error = store
+            .append_signed_authorized(timeline.id(), &KeyRegistryStateV1::new(), &mut create_event)
+            .test_err();
+        assert!(error.to_string().contains("durable key registry"));
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn read_rejects_bad_signature_blob_length() {
         let mut store = new_store();
@@ -9072,6 +9131,25 @@ mod tests {
             .import_committed(TimelineMeta::root("x"), &[])
             .test_err();
         assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    fn registry_transaction_reports_commit_and_rollback_failures() {
+        let conn = Connection::open_in_memory().test_ok();
+        conn.execute_batch("BEGIN").test_ok();
+        conn.commit_hook(Some(|| true)).test_ok();
+        let commit_error = finish_immediate_transaction(&conn, Ok(())).test_err();
+        assert!(commit_error
+            .to_string()
+            .contains("transaction commit failed"));
+        conn.commit_hook::<fn() -> bool>(None).test_ok();
+
+        let rollback_error = finish_immediate_transaction(
+            &conn,
+            Err(CoreError::Storage("operation failed".to_owned())),
+        )
+        .test_err();
+        assert!(rollback_error.to_string().contains("rollback failed"));
     }
 
     #[test]

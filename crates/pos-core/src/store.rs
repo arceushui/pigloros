@@ -1408,6 +1408,17 @@ mod tests {
     }
 
     #[test]
+    fn default_key_registry_methods_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = TrivialStore::new();
+        assert!(store.load_key_registry()?.is_none());
+        let error = store
+            .save_key_registry(&crate::KeyRegistryStateV1::new())
+            .test_err()?;
+        assert!(error.to_string().contains("unsupported"));
+        Ok(())
+    }
+
+    #[test]
     fn append_or_duplicate_defaults_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
         let mut store = TrivialStore::new();
         let identity = AppendIdentity::new(
