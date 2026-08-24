@@ -151,10 +151,6 @@ impl RunResult {
             .cloned())
     }
 
-    fn projections_for_host(&self) -> &pos_state::ProjectionRegistry {
-        &self.projections
-    }
-
     /// Reopen the store and branch from this result's timeline at its head.
     ///
     /// # Errors
