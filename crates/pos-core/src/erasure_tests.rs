@@ -1750,6 +1750,10 @@ fn codec_predicates_and_cbor_argument_widths_are_closed_at_the_public_boundary()
         std::iter::repeat_n(inventory_result(target), ERASURE_MAX_INVENTORY_RESULTS).collect();
     assert!(!inventories_exceed_bound(&inventories));
     inventories.backups.clear();
+    inventories.artifacts.push(inventory);
+    inventories.keys.push(inventory);
+    inventories.replicas.push(inventory);
+    inventories.backups.push(inventory);
 
     for inventory in [
         &mut inventories.artifacts,
