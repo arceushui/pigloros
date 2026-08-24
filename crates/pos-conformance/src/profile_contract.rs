@@ -5300,7 +5300,7 @@ mod tests {
             Err(ConformanceContractError::IndependenceEvidenceMissing)
         );
 
-        let profile_value = profile();
+        let profile_value = candidate();
         refresh_stable_report_for_profile(&mut evidence, &profile_value);
         assert_eq!(validate_report_binding(&evidence, &profile_value), Ok(()));
         let reject_report = |change: &dyn Fn(&mut StableImplementationEvidenceV1)| {
