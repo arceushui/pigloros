@@ -1591,14 +1591,14 @@ impl ExperimentSession {
             fold_captured_range(&mut self.boundary, &mut self.registry, &after).get(),
         );
         self.timeline = after.timeline;
-        self.total_events = self.total_events.saturating_add(folded_events.get());
+        self.total_events = self.total_events.saturating_add(folded_events);
         self.ticks = self.ticks.saturating_add(1);
 
-        if folded_events.is_zero() && emitted_events == 0 {
+        if folded_events == 0 && emitted_events == 0 {
             Ok(TickOutcome::Quiescent)
         } else {
             Ok(TickOutcome::Advanced {
-                folded_events: folded_events.get(),
+                folded_events,
                 emitted_events,
             })
         }
@@ -6591,7 +6591,7 @@ mod coverage_entrypoints {
         .with_fork_registry_factory(|| Ok(PluginRegistry::new()));
         let mut session = ok(experiment.start());
         let timeline_id = session.timeline().id();
-        let mut store = lock_store(&session.store).test_ok();
+        let mut store = ok(lock_store(&session.store));
         store
             .append(
                 timeline_id,

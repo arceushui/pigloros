@@ -705,6 +705,7 @@ impl ConsentRevocationReservation {
     }
 
     /// Abort a durable revocation that was not appended.
+    #[must_use]
     pub fn abort_durable(mut self) -> bool {
         let was_pending = !self.completed;
         self.rollback();
@@ -878,6 +879,7 @@ impl ConsentAuthority {
     ///
     /// A later direct revocation or grant publication is preserved if it has
     /// already changed the session while the reservation was being resolved.
+    #[must_use]
     pub fn abort_revocation(&self, reservation: ConsentRevocationReservation) -> bool {
         if reservation.authority_id != self.authority_id {
             drop(reservation);
