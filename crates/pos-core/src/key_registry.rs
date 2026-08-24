@@ -543,37 +543,37 @@ mod tests {
     }
 
     #[test]
-    fn registration_rejects_cross_role_material_reuse() {
+    fn registration_rejects_cross_role_material_reuse() -> Result<(), KeyRegistryErrorV1> {
         let mut registry = KeyRegistryStateV1::new();
-        registry
-            .register_key(KeyRegistrationV1::new(DATA, digest(1), None))
-            .expect("data key registers");
+        registry.register_key(KeyRegistrationV1::new(DATA, digest(1), None))?;
         assert_eq!(
             registry.register_key(signing_registration(ATTRIBUTION, 1)),
             Err(KeyRegistryErrorV1::MaterialReuse)
         );
+        Ok(())
     }
 
     #[test]
-    fn destruction_is_irreversible_idempotent_and_keeps_public_key() {
+    fn destruction_is_irreversible_idempotent_and_keeps_public_key(
+    ) -> Result<(), KeyRegistryErrorV1> {
         let mut registry = KeyRegistryStateV1::new();
-        registry
-            .register_key(signing_registration(ATTRIBUTION, 2))
-            .expect("signing key registers");
+        registry.register_key(signing_registration(ATTRIBUTION, 2))?;
         let request = KeyDestructionRequestV1::new(ATTRIBUTION, digest(2), digest(3));
-        let first = registry.destroy_key(request).expect("first destruction");
-        let second = registry.destroy_key(request).expect("retry destruction");
+        let first = registry.destroy_key(request)?;
+        let second = registry.destroy_key(request)?;
         assert!(matches!(first, KeyDestructionOutcomeV1::Destroyed(_)));
         assert!(matches!(
             second,
             KeyDestructionOutcomeV1::AlreadyDestroyed(_)
         ));
         assert_eq!(first.tombstone(), second.tombstone());
-        let record = registry.key_record(ATTRIBUTION).expect("retained record");
-        assert_eq!(record.private_material_digest, None);
         assert_eq!(
-            record.public_verification_key,
-            Some(PublicKey::from_bytes([2; 32]))
+            registry.key_record(ATTRIBUTION),
+            Some(KeyRecordV1 {
+                identity: ATTRIBUTION,
+                private_material_digest: None,
+                public_verification_key: Some(PublicKey::from_bytes([2; 32])),
+            })
         );
         assert_eq!(
             registry.active_key(KeyRoleV1::SubjectAttributionSigning),
@@ -583,42 +583,35 @@ mod tests {
             registry.register_key(signing_registration(ATTRIBUTION, 2)),
             Err(KeyRegistryErrorV1::Destroyed)
         );
+        Ok(())
     }
 
     #[test]
-    fn data_destruction_does_not_remove_other_role_verification_material() {
+    fn data_destruction_does_not_remove_other_role_verification_material(
+    ) -> Result<(), KeyRegistryErrorV1> {
         let mut registry = KeyRegistryStateV1::new();
-        registry
-            .register_key(KeyRegistrationV1::new(DATA, digest(4), None))
-            .expect("data key registers");
-        registry
-            .register_key(signing_registration(ATTRIBUTION, 5))
-            .expect("signing key registers");
-        registry
-            .destroy_key(KeyDestructionRequestV1::new(DATA, digest(4), digest(6)))
-            .expect("data key destruction");
+        registry.register_key(KeyRegistrationV1::new(DATA, digest(4), None))?;
+        registry.register_key(signing_registration(ATTRIBUTION, 5))?;
+        registry.destroy_key(KeyDestructionRequestV1::new(DATA, digest(4), digest(6)))?;
+        let signing_record = registry
+            .key_record(ATTRIBUTION)
+            .ok_or(KeyRegistryErrorV1::NotFound)?;
         assert_eq!(
-            registry
-                .key_record(ATTRIBUTION)
-                .expect("signing record")
-                .public_verification_key,
+            signing_record.public_verification_key,
             Some(PublicKey::from_bytes([5; 32]))
         );
+        Ok(())
     }
 
     #[test]
-    fn stale_epoch_and_wrong_digest_are_rejected() {
+    fn stale_epoch_and_wrong_digest_are_rejected() -> Result<(), KeyRegistryErrorV1> {
         let mut registry = KeyRegistryStateV1::new();
-        registry
-            .register_key(KeyRegistrationV1::new(DATA, digest(7), None))
-            .expect("first data key");
-        registry
-            .register_key(KeyRegistrationV1::new(
-                KeyIdentityV1::new(DATA.role, 2),
-                digest(8),
-                None,
-            ))
-            .expect("rotation");
+        registry.register_key(KeyRegistrationV1::new(DATA, digest(7), None))?;
+        registry.register_key(KeyRegistrationV1::new(
+            KeyIdentityV1::new(DATA.role, 2),
+            digest(8),
+            None,
+        ))?;
         assert!(matches!(
             registry.register_key(KeyRegistrationV1::new(DATA, digest(9), None)),
             Err(KeyRegistryErrorV1::StaleEpoch { .. })
@@ -631,6 +624,7 @@ mod tests {
             )),
             Err(KeyRegistryErrorV1::MaterialDigestMismatch)
         );
+        Ok(())
     }
 
     #[test]
@@ -682,18 +676,14 @@ mod tests {
     }
 
     #[test]
-    fn missing_keys_and_destroyed_material_are_not_reusable() {
+    fn missing_keys_and_destroyed_material_are_not_reusable() -> Result<(), KeyRegistryErrorV1> {
         let mut registry = KeyRegistryStateV1::new();
         assert_eq!(
             registry.destroy_key(KeyDestructionRequestV1::new(DATA, digest(16), digest(17),)),
             Err(KeyRegistryErrorV1::NotFound)
         );
-        registry
-            .register_key(KeyRegistrationV1::new(DATA, digest(18), None))
-            .expect("data key registers");
-        registry
-            .destroy_key(KeyDestructionRequestV1::new(DATA, digest(18), digest(19)))
-            .expect("data key destroys");
+        registry.register_key(KeyRegistrationV1::new(DATA, digest(18), None))?;
+        registry.destroy_key(KeyDestructionRequestV1::new(DATA, digest(18), digest(19)))?;
         assert_eq!(
             registry.register_key(KeyRegistrationV1::new(
                 KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 2),
@@ -704,10 +694,11 @@ mod tests {
         );
         assert!(registry.key_record(DATA).is_some());
         assert!(registry.tombstone(DATA).is_some());
+        Ok(())
     }
 
     #[test]
-    fn ports_expose_the_same_irreversible_contract() {
+    fn ports_expose_the_same_irreversible_contract() -> Result<(), KeyRegistryErrorV1> {
         let mut registry = KeyRegistryStateV1::new();
         let registration = KeyRegistrationV1::new(DATA, digest(20), None);
         assert_eq!(
@@ -734,8 +725,8 @@ mod tests {
         let outcome = KeyDestructionPortV1::destroy_key(
             &mut registry,
             KeyDestructionRequestV1::new(DATA, digest(20), digest(21)),
-        )
-        .expect("port destruction");
+        )?;
         assert!(matches!(outcome, KeyDestructionOutcomeV1::Destroyed(_)));
+        Ok(())
     }
 }
