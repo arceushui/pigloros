@@ -822,10 +822,18 @@ fn public_branch_guards_reject_protected_history_and_invalid_capabilities() {
 #[test]
 fn protected_result_export_and_faulted_projection_fail_closed() {
     let authority = ConsentAuthority::new();
+    let directory = tempfile::tempdir().test_ok();
+    let store_config = StoreConfig::Sqlite {
+        path: directory
+            .path()
+            .join("protected-result-export.sqlite")
+            .to_string_lossy()
+            .into_owned(),
+    };
     let experiment = Experiment::new(ExperimentConfig {
         name: "protected-result-export".to_owned(),
         stop: StopCondition::MaxTicks(1),
-        store_config: StoreConfig::Memory,
+        store_config: store_config.clone(),
     })
     .with_consent_authority(authority.clone());
     let session = experiment.start().test_ok();
