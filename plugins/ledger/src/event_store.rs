@@ -62,25 +62,20 @@ impl EventLedgerStore {
         signing_identity: KeyIdentityV1,
         hasher: Box<dyn Hasher>,
     ) -> Result<Self, LedgerError> {
-        if let Some(persisted_registry) = store.load_key_registry().map_err(LedgerError::from)? {
-            *key_registry.lock().map_err(|_| {
-                LedgerError::Store("ledger signing registry is unavailable".to_owned())
-            })? = persisted_registry;
+        let persisted_registry = store.load_key_registry().map_err(LedgerError::from)?;
+        let mut registry = key_registry
+            .lock()
+            .map_err(|_| LedgerError::Store("ledger signing registry is unavailable".to_owned()))?;
+        if let Some(persisted_registry) = persisted_registry {
+            *registry = persisted_registry;
         } else {
-            let initial_registry = key_registry
-                .lock()
-                .map_err(|_| {
-                    LedgerError::Store("ledger signing registry is unavailable".to_owned())
-                })?
-                .clone();
+            let initial_registry = registry.clone();
             store
                 .save_key_registry(&initial_registry)
                 .map_err(LedgerError::from)?;
         }
         let public_verification_key = public_key_from_verifying_key(&signing_key.verifying_key());
-        key_registry
-            .lock()
-            .map_err(|_| LedgerError::Store("ledger signing registry is unavailable".to_owned()))?
+        registry
             .with_signing_authorization(
                 signing_identity,
                 key_material_digest(&signing_key.to_bytes()),
@@ -129,6 +124,7 @@ impl EventLedgerStore {
     }
 
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn head_seq(&self) -> Result<Seq, LedgerError> {
         self.store
             .get_timeline(self.timeline_id)

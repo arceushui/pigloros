@@ -65,9 +65,17 @@ fn load_signing_key(path: &Path) -> Result<ed25519_dalek::SigningKey, CliError> 
 
 fn ledger_signing_registry(
     signing_key: &ed25519_dalek::SigningKey,
-) -> Result<(Arc<Mutex<KeyRegistryStateV1>>, KeyIdentityV1), CliError> {
+) -> (Arc<Mutex<KeyRegistryStateV1>>, KeyIdentityV1) {
     let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
-    ledger_signing_registry_for(signing_key, identity)
+    let mut registry = KeyRegistryStateV1::new();
+    registry
+        .register_key(KeyRegistrationV1::new(
+            identity,
+            key_material_digest(&signing_key.to_bytes()),
+            Some(public_key_from_verifying_key(&signing_key.verifying_key())),
+        ))
+        .expect("the fixed ledger signing identity is valid");
+    (Arc::new(Mutex::new(registry)), identity)
 }
 
 fn ledger_signing_registry_for(
@@ -99,7 +107,7 @@ pub fn open_store(source: &Source, key: Option<&Path>) -> Result<Box<dyn LedgerS
                 CliError::BadSource("store: source requires --key <path>".to_owned())
             })?;
             let signing_key = load_signing_key(key_path)?;
-            let (registry, identity) = ledger_signing_registry(&signing_key)?;
+            let (registry, identity) = ledger_signing_registry(&signing_key);
             let mut event_store = pos_store::open_store(StoreConfig::Sqlite {
                 path: db.to_string_lossy().into_owned(),
             })
@@ -325,7 +333,8 @@ fn cmd_export(args: &[String]) -> Result<(), CliError> {
     let out_path = flag(args, "--out").map(PathBuf::from);
     let pubkey = flag(args, "--pubkey").map(str::to_owned);
     let export = crate::export::build(&source, &today, pubkey)?;
-    let json = serde_json::to_string_pretty(&export)?;
+    let json = serde_json::to_string_pretty(&export)
+        .expect("the closed export manifest types are serializable");
     if let Some(path) = out_path {
         std::fs::write(&path, &json)?;
         output_stdout!("wrote {} ({} bytes)", path.display(), json.len());
@@ -353,7 +362,7 @@ fn cmd_build(args: &[String]) -> Result<(), CliError> {
             .map_err(|e| CliError::BadSource(e.to_string()))?;
             let timeline_id = find_or_create_ledger_timeline(&mut *store)?;
             let sk = load_signing_key(key_path)?;
-            let (registry, identity) = ledger_signing_registry(&sk)?;
+            let (registry, identity) = ledger_signing_registry(&sk);
             let ledger_store = EventLedgerStore::new(
                 store,
                 timeline_id,
@@ -2400,6 +2409,75 @@ mod tests {
         assert!(site.join("ledger/index.html").is_file());
         assert!(site.join("ledger/ledger.json").is_file());
         assert!(site.join("index.html").is_file());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod coverage_entrypoints {
+    use super::*;
+    use pos_core::store::EventStore;
+    use tempfile::TempDir;
+
+    #[test]
+    fn export_serialization_entrypoint_is_covered() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let source = temp.path().join("ledger");
+        std::fs::create_dir_all(&source)?;
+        cmd_export(&[
+            "--source".to_owned(),
+            format!("toml:{}", source.display()),
+            "--today".to_owned(),
+            "2026-07-25".to_owned(),
+        ])?;
+        Ok(())
+    }
+
+    #[test]
+    fn build_store_missing_key_entrypoint_is_covered() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let database = temp.path().join("ledger.db");
+        let missing_key = temp.path().join("missing.key");
+        let error = cmd_build(&[
+            "--source".to_owned(),
+            format!("store:{}", database.display()),
+            "--site".to_owned(),
+            temp.path().join("site").display().to_string(),
+            "--key".to_owned(),
+            missing_key.display().to_string(),
+            "--today".to_owned(),
+            "2026-07-25".to_owned(),
+        ])
+        .expect_err("missing signing key must be rejected");
+        assert!(error.to_string().contains("invalid --key"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn build_store_rejects_persisted_registry_without_authority(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let database = temp.path().join("ledger.db");
+        let key_path = temp.path().join("signing.key");
+        let (signing_key, _) = generate_keypair();
+        std::fs::write(&key_path, hex_encode(&signing_key.to_bytes()))?;
+        let mut raw = pos_store::sqlite::SqliteStore::open(database.to_string_lossy().as_ref())?;
+        raw.create_timeline("ledger")?;
+        raw.save_key_registry(&KeyRegistryStateV1::new())?;
+        drop(raw);
+
+        let error = cmd_build(&[
+            "--source".to_owned(),
+            format!("store:{}", database.display()),
+            "--site".to_owned(),
+            temp.path().join("site").display().to_string(),
+            "--key".to_owned(),
+            key_path.display().to_string(),
+            "--today".to_owned(),
+            "2026-07-25".to_owned(),
+        ])
+        .expect_err("a registry without the signing authority must be rejected");
+        assert!(error.to_string().contains("authorization"), "{error}");
         Ok(())
     }
 }
