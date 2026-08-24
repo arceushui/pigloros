@@ -828,6 +828,18 @@ impl PluginRegistry {
         self
     }
 
+    /// Remove the host-owned consent gate so protected operations fail closed.
+    ///
+    /// This is useful for hosts that are not authorized to perform protected
+    /// work. It never enables an unguarded path: protected validation returns
+    /// [`RuntimeError::ConsentOperationUnavailable`] while public operations
+    /// remain available.
+    #[must_use]
+    pub fn without_consent_gate(mut self) -> Self {
+        self.consent_gate = None;
+        self
+    }
+
     /// Return the host-bound consent gate for a capability-scoped read.
     #[must_use]
     pub fn clone_consent_gate(&self) -> Option<Arc<dyn ConsentGate>> {

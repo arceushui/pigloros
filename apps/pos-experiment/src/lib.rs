@@ -5771,7 +5771,7 @@ mod coverage_entrypoints {
             stop: StopCondition::MaxTicks(1),
             store_config: config,
         });
-        experiment.registry.consent_gate = None;
+        experiment.registry = experiment.registry.without_consent_gate();
         assert!(matches!(
             experiment.resume(timeline),
             Err(ExperimentError::Runtime(
@@ -5836,7 +5836,7 @@ mod coverage_entrypoints {
             "coverage-missing-gate-revocation",
             StopCondition::MaxTicks(1),
         ));
-        experiment.registry.consent_gate = None;
+        experiment.registry = experiment.registry.without_consent_gate();
         let mut session = ok(experiment.start());
         session.revoke_consent_at_boundary();
         assert!(matches!(
