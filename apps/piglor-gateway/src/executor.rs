@@ -1304,7 +1304,7 @@ async fn worker_loop_async(
             QueueDrainOutcome::Open => disconnected,
         };
         #[cfg(test)]
-        for observer in &observer {
+        if let Some(observer) = &observer {
             observer.drain_completed(pending.len(), disconnected);
         }
         let index = select_pending_index(&pending, reads_since_write);
@@ -1328,7 +1328,7 @@ async fn worker_loop_async(
         } = pending.remove(index);
         let permit_owners = (global_permit, read_permit);
         #[cfg(test)]
-        for observer in &observer {
+        if let Some(observer) = &observer {
             observer.selected(admission_ordinal, class, reads_since_write);
         }
         reads_since_write = match class {
