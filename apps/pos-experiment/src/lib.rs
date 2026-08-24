@@ -6309,7 +6309,11 @@ mod coverage_entrypoints {
         ));
         authority.fence_timeline_at(durable_timeline, 1).test_ok();
         expect_err(&result.branch("coverage-revoked-branch"));
+    }
 
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_branch_propagates_protected_history_read_failure() {
         let mut read_fault_store = CaptureFaultStore {
             base: pos_store::memory::MemoryStore::new(),
             fault: CaptureFault::Read,
@@ -6333,7 +6337,11 @@ mod coverage_entrypoints {
                 .branch("coverage-read-fault-child", &mut read_fault_store)
                 .is_err()
         );
+    }
 
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_driver_drafts_propagates_head_failure() {
         let mut head_fault_store = CaptureFaultStore {
             base: pos_store::memory::MemoryStore::new(),
             fault: CaptureFault::LogicalHead,
