@@ -1794,6 +1794,19 @@ mod tests {
         profile
     }
 
+    fn wide_profile() -> ConformanceProfileV1 {
+        let mut profile = profile();
+        let caps = &mut profile.evaluator_protocol.hard_caps;
+        caps.max_profile_bytes = u64::MAX;
+        caps.max_cases = u32::MAX;
+        caps.max_bundle_members = u32::MAX;
+        caps.max_member_path_bytes = u16::MAX;
+        caps.max_member_bytes = u64::MAX;
+        caps.max_total_bundle_bytes = u64::MAX;
+        caps.max_structural_nesting = u8::MAX;
+        profile
+    }
+
     fn profile_for_claim_layer(index: usize, claim_layer: ClaimLayerV1) -> ConformanceProfileV1 {
         let mut profile = profile();
         profile.profile_id = format!("pigloros.w8.{}.1.0.0", claim_layer_code(claim_layer));
@@ -2200,6 +2213,124 @@ mod tests {
     }
 
     #[test]
+    fn archive_preflight_supported_items_and_boundaries_are_explicit(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for value in [
+            Value::Integer(0_u64.into()),
+            Value::Integer((-1_i8).into()),
+            Value::Bytes(vec![1]),
+            Value::Text("path".to_owned()),
+            Value::Array(vec![Value::Null]),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Null,
+        ] {
+            assert_eq!(preflight_archive(&encode_archive_value(&value)?), Ok(()));
+        }
+
+        let exact_path = Value::Text("a".repeat(MAX_MEMBER_PATH_BYTES));
+        assert_eq!(
+            preflight_archive(&encode_archive_value(&exact_path)?),
+            Ok(())
+        );
+        let oversized_path = Value::Text("a".repeat(MAX_MEMBER_PATH_BYTES + 1));
+        assert_eq!(
+            preflight_archive(&encode_archive_value(&oversized_path)?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+
+        let exact_array = Value::Array(vec![Value::Null; MAX_MEMBERS]);
+        assert_eq!(
+            preflight_archive(&encode_archive_value(&exact_array)?),
+            Ok(())
+        );
+        let oversized_array = Value::Array(vec![Value::Null; MAX_MEMBERS + 1]);
+        assert_eq!(
+            preflight_archive(&encode_archive_value(&oversized_array)?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn archive_preflight_caps_report_member_statistics() -> Result<(), Box<dyn std::error::Error>> {
+        let value = Value::Array(vec![
+            Value::Text(CONFORMANCE_BUNDLE_MAGIC_V1.to_owned()),
+            Value::Integer((-1_i8).into()),
+            Value::Array(vec![Value::Null]),
+            Value::Array(vec![Value::Array(vec![
+                Value::Text("profile".to_owned()),
+                Value::Bytes(vec![1, 2, 3]),
+                Value::Integer(BundleMemberRoleV1::Profile.code().into()),
+            ])]),
+            Value::Bool(true),
+            Value::Null,
+        ]);
+        let bytes = encode_archive_value(&value)?;
+        assert_eq!(preflight_archive(&bytes), Ok(()));
+        let preflight = preflight_archive_caps(&bytes)?;
+        assert_eq!(preflight.profile_bytes, Some(&[1, 2, 3][..]));
+        assert_eq!(preflight.member_count, 1);
+        assert_eq!(preflight.total_member_bytes, 3);
+        assert_eq!(preflight.largest_member_bytes, 3);
+        assert_eq!(preflight.largest_member_path_bytes, 7);
+        assert!(preflight.maximum_depth >= 4);
+        Ok(())
+    }
+
+    #[test]
+    fn preflight_archive_caps_check_each_limit_independently(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile_bytes = [1_u8];
+        for limit in 0..7 {
+            let mut profile = wide_profile();
+            let mut preflight = ArchivePreflight {
+                profile_bytes: Some(&profile_bytes),
+                member_count: 1,
+                total_member_bytes: 1,
+                largest_member_bytes: 1,
+                largest_member_path_bytes: 1,
+                maximum_depth: 1,
+            };
+            let encoded_len = 1;
+            match limit {
+                0 => {
+                    profile.evaluator_protocol.hard_caps.max_total_bundle_bytes = 0;
+                    preflight.total_member_bytes = 0;
+                }
+                1 => profile.evaluator_protocol.hard_caps.max_profile_bytes = 0,
+                2 => profile.evaluator_protocol.hard_caps.max_structural_nesting = 0,
+                3 => profile.evaluator_protocol.hard_caps.max_bundle_members = 0,
+                4 => profile.evaluator_protocol.hard_caps.max_member_path_bytes = 0,
+                5 => profile.evaluator_protocol.hard_caps.max_member_bytes = 0,
+                _ => {
+                    profile.evaluator_protocol.hard_caps.max_total_bundle_bytes = 1;
+                    preflight.total_member_bytes = 2;
+                }
+            }
+            assert_eq!(
+                validate_preflight_archive_caps(&profile, &preflight, encoded_len),
+                Err(BundleContractErrorV1::MemberOutOfBounds)
+            );
+        }
+
+        let exact = wide_profile();
+        let preflight = ArchivePreflight {
+            profile_bytes: Some(&profile_bytes),
+            member_count: 1,
+            total_member_bytes: 1,
+            largest_member_bytes: 1,
+            largest_member_path_bytes: 1,
+            maximum_depth: 1,
+        };
+        assert_eq!(
+            validate_preflight_archive_caps(&exact, &preflight, 1),
+            Ok(())
+        );
+        Ok(())
+    }
+
+    #[test]
     fn archive_decoder_rejects_invalid_fields_and_cap_overflows(
     ) -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(
@@ -2275,6 +2406,36 @@ mod tests {
         let value = bundle_value(&bundle);
         assert_eq!(
             validate_archive_caps(&bundle, &value, usize::MAX),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn archive_array_decoder_boundaries_are_inclusive() {
+        let one = Value::Array(vec![Value::Null]);
+        assert_eq!(archive_array_exact(&one, 1), Ok(&[Value::Null][..]));
+        assert_eq!(
+            archive_array_exact(&one, 0),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(archive_array_bounded(&one, 1), Ok(&[Value::Null][..]));
+        assert_eq!(
+            archive_array_bounded(&one, 0),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+    }
+
+    #[test]
+    fn decoded_archive_caps_accept_exact_depth_and_reject_overflow(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = signed_bundle(&profile(), BundleModeV1::Local)?;
+        let exact_depth = (0..usize::from(MAX_STRUCTURAL_NESTING - 1))
+            .fold(Value::Null, |value, _| Value::Array(vec![value]));
+        assert_eq!(validate_archive_caps(&bundle, &exact_depth, 1), Ok(()));
+        let over_depth = Value::Array(vec![exact_depth]);
+        assert_eq!(
+            validate_archive_caps(&bundle, &over_depth, 1),
             Err(BundleContractErrorV1::MemberOutOfBounds)
         );
         Ok(())
@@ -2364,6 +2525,99 @@ mod tests {
             Value::Tag(1, Box::new(Value::Array(vec![Value::Null]))),
         )]);
         assert_eq!(value_depth(&nested), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn selected_bundle_caps_check_each_limit_independently(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = signed_bundle(&profile(), BundleModeV1::Local)?;
+        let profile_member_bytes = bundle
+            .members
+            .iter()
+            .find(|member| member.role == BundleMemberRoleV1::Profile)
+            .map(|member| member.bytes.len() as u64)
+            .ok_or("missing profile member")?;
+        let manifest_depth = value_depth(&manifest_value(&bundle.manifest));
+        let member_count = bundle.members.len() as u32;
+        let largest_path = bundle
+            .members
+            .iter()
+            .map(|member| member.path.len())
+            .max()
+            .ok_or("missing bundle members")? as u16;
+        let largest_member = bundle
+            .members
+            .iter()
+            .map(|member| member.bytes.len() as u64)
+            .max()
+            .ok_or("missing member bytes")?;
+        let total_bytes = bundle
+            .members
+            .iter()
+            .map(|member| member.bytes.len() as u64)
+            .sum::<u64>();
+
+        for limit in 0..7 {
+            let mut profile = wide_profile();
+            match limit {
+                0 => profile.evaluator_protocol.hard_caps.max_profile_bytes = 0,
+                1 => profile.evaluator_protocol.hard_caps.max_structural_nesting = 0,
+                2 => profile.evaluator_protocol.hard_caps.max_bundle_members = 0,
+                3 => profile.evaluator_protocol.hard_caps.max_member_path_bytes = 0,
+                4 => profile.evaluator_protocol.hard_caps.max_member_bytes = 0,
+                5 => profile.evaluator_protocol.hard_caps.max_total_bundle_bytes = 0,
+                _ => profile.evaluator_protocol.hard_caps.max_cases = 0,
+            }
+            assert_eq!(
+                validate_selected_bundle_caps(&profile, &bundle),
+                Err(BundleContractErrorV1::MemberOutOfBounds)
+            );
+        }
+
+        let mut exact_profile = wide_profile();
+        exact_profile.evaluator_protocol.hard_caps.max_profile_bytes = profile_member_bytes;
+        assert_eq!(
+            validate_selected_bundle_caps(&exact_profile, &bundle),
+            Ok(())
+        );
+        exact_profile
+            .evaluator_protocol
+            .hard_caps
+            .max_structural_nesting = u8::try_from(manifest_depth)?;
+        assert_eq!(
+            validate_selected_bundle_caps(&exact_profile, &bundle),
+            Ok(())
+        );
+        exact_profile
+            .evaluator_protocol
+            .hard_caps
+            .max_bundle_members = member_count;
+        assert_eq!(
+            validate_selected_bundle_caps(&exact_profile, &bundle),
+            Ok(())
+        );
+        exact_profile
+            .evaluator_protocol
+            .hard_caps
+            .max_member_path_bytes = largest_path;
+        assert_eq!(
+            validate_selected_bundle_caps(&exact_profile, &bundle),
+            Ok(())
+        );
+        exact_profile.evaluator_protocol.hard_caps.max_member_bytes = largest_member;
+        assert_eq!(
+            validate_selected_bundle_caps(&exact_profile, &bundle),
+            Ok(())
+        );
+        exact_profile
+            .evaluator_protocol
+            .hard_caps
+            .max_total_bundle_bytes = total_bytes;
+        assert_eq!(
+            validate_selected_bundle_caps(&exact_profile, &bundle),
+            Ok(())
+        );
         Ok(())
     }
 
@@ -2934,6 +3188,59 @@ mod tests {
         assert_eq!(
             undeclared_expected.validate(),
             Err(BundleContractErrorV1::UndeclaredMember)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fixture_input_guards_are_independent() -> Result<(), Box<dyn std::error::Error>> {
+        let profile = profile_for_claim_layer(0, ClaimLayerV1::ArtifactIntegrity);
+        let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
+        let input_index = bundle
+            .members
+            .iter()
+            .position(|member| member.path.starts_with(INPUT_MEMBER_PREFIX))
+            .ok_or("missing fixture input member")?;
+
+        let mut wrong_size = profile.clone();
+        wrong_size.fixtures[0].inputs[0].size_bytes += 1;
+        assert_eq!(
+            validate_fixture_inputs(&wrong_size, &bundle.members),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let mut wrong_declared_digest = profile.clone();
+        wrong_declared_digest.fixtures[0].inputs[0].digest = digest(99);
+        assert_eq!(
+            validate_fixture_inputs(&wrong_declared_digest, &bundle.members),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let mut wrong_content_digest = profile.clone();
+        wrong_content_digest.fixtures[0].inputs[0].digest = digest(99);
+        let mut wrong_content_member = bundle.members.clone();
+        wrong_content_member[input_index].digest = digest(99);
+        assert_eq!(
+            validate_fixture_inputs(&wrong_content_digest, &wrong_content_member),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let mut empty_profile = profile.clone();
+        empty_profile.fixtures[0].inputs[0].size_bytes = 0;
+        empty_profile.fixtures[0].inputs[0].digest = *blake3::hash(b"").as_bytes();
+        let mut empty_member = bundle.members.clone();
+        empty_member[input_index].bytes.clear();
+        empty_member[input_index].digest = *blake3::hash(b"").as_bytes();
+        assert_eq!(
+            validate_fixture_inputs(&empty_profile, &empty_member),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let mut marked_expected = bundle.members;
+        marked_expected[input_index].expected_result = true;
+        assert_eq!(
+            validate_fixture_inputs(&profile, &marked_expected),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
         );
         Ok(())
     }
