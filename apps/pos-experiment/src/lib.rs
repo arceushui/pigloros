@@ -2644,6 +2644,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn session_submit_action_appends_the_approved_event() {
+        let plugin = CompositionPlugin(CompositionPluginSpec {
+            id: PluginId::new(),
+            name: "submit-plugin",
+            version: "1",
+            event_type: "submit.event",
+        });
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "submit-action".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        });
+        experiment
+            .register_with_approver(
+                &plugin,
+                None,
+                None,
+                Some(Box::new(AcceptingApprover)),
+                [Kind::new("submit.event")],
+            )
+            .test_ok();
+        let mut session = experiment.start().test_ok();
+        let proposal = ProposedAction::new(
+            Kind::new("submit.event"),
+            EntityId::new(),
+            CanonicalBytes::from_static(b"approved"),
+            Kind::new("submit.action"),
+        );
+
+        assert_eq!(session.submit_action(&proposal).test_ok(), 1);
+        assert_eq!(session.source_events().test_ok().len(), 1);
+    }
+
+    #[test]
+    fn session_without_drivers_commits_a_quiescent_tick() {
+        let mut session = Experiment::new(config("empty-tick", StopCondition::MaxTicks(1)))
+            .start()
+            .test_ok();
+
+        assert!(matches!(session.step_tick(), Ok(TickOutcome::Quiescent)));
+    }
+
     fn assert_incompatible_fork(mut session: ExperimentSession) {
         let error = session.fork("incompatible-child").err().test_ok();
         assert_eq!(
