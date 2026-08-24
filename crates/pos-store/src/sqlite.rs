@@ -9109,6 +9109,84 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_registry_transaction_and_callback_failures_are_reported() {
+        let mut persisted = KeyRegistryStateV1::new();
+        persisted
+            .register_key(KeyRegistrationV1::new(
+                KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1),
+                Hash::from_bytes([3; 32]),
+                Some(pos_core::PublicKey::from_bytes([4; 32])),
+            ))
+            .test_ok();
+
+        let mut locked = new_store();
+        locked.conn.execute_batch("BEGIN IMMEDIATE").test_ok();
+        let mut locked_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        assert!(matches!(
+            locked.append_signed_authorized(TimelineId::new(), &persisted, &mut locked_callback,),
+            Err(CoreError::Storage(_))
+        ));
+        assert!(matches!(
+            locked.destroy_key_registry(KeyDestructionRequestV1::new(
+                KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1),
+                Hash::from_bytes([3; 32]),
+                Hash::from_bytes([2; 32]),
+            )),
+            Err(CoreError::Storage(_))
+        ));
+        locked.conn.execute_batch("ROLLBACK").test_ok();
+
+        let mut callback_failure = new_store();
+        callback_failure.save_key_registry(&persisted).test_ok();
+        let timeline = callback_failure
+            .create_timeline("callback-failure")
+            .test_ok();
+        let mut callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback failed".to_owned()))
+        };
+        assert!(callback_failure
+            .append_signed_authorized(timeline.id(), &persisted, &mut callback)
+            .test_err()
+            .to_string()
+            .contains("callback failed"));
+
+        let mut invalid_destruction = new_store();
+        invalid_destruction.save_key_registry(&persisted).test_ok();
+        let invalid_request = KeyDestructionRequestV1::new(
+            KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1),
+            Hash::from_bytes([9; 32]),
+            Hash::from_bytes([2; 32]),
+        );
+        assert!(invalid_destruction
+            .destroy_key_registry(invalid_request)
+            .test_err()
+            .to_string()
+            .contains("ledger key destruction"));
+
+        let mut save_failure = new_store();
+        save_failure.save_key_registry(&persisted).test_ok();
+        save_failure
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER reject_key_registry_update BEFORE UPDATE ON key_registry
+                 BEGIN SELECT RAISE(ABORT, 'reject registry update'); END",
+            )
+            .test_ok();
+        let valid_request = KeyDestructionRequestV1::new(
+            KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1),
+            Hash::from_bytes([3; 32]),
+            Hash::from_bytes([2; 32]),
+        );
+        assert!(save_failure
+            .destroy_key_registry(valid_request)
+            .test_err()
+            .to_string()
+            .contains("reject registry update"));
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn read_rejects_bad_signature_blob_length() {
         let mut store = new_store();
