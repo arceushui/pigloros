@@ -2978,6 +2978,29 @@ mod tests {
                 .test_err(),
             RuntimeError::ConsentOperationUnavailable
         ));
+
+        let mut public_replacement = PluginRegistry::new();
+        public_replacement.register_driver(Box::new(EmptyDriver));
+        public_replacement
+            .step_all_anchored(timeline, Seq::ZERO)
+            .test_ok();
+        let forged = vec![EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+            CanonicalBytes::from_static(b"forged"),
+        )];
+        let mut public_replacement_store = open_store(StoreConfig::Memory).test_ok();
+        assert!(matches!(
+            public_replacement
+                .append_and_commit_step_at(
+                    public_replacement_store.as_mut(),
+                    Seq::ZERO,
+                    0,
+                    &forged,
+                )
+                .test_err(),
+            RuntimeError::ConsentDraft { .. }
+        ));
     }
 
     #[test]
