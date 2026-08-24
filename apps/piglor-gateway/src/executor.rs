@@ -1274,18 +1274,11 @@ async fn worker_loop_async(
     let mut reads_since_write = 0;
     loop {
         if pending.is_empty() {
-            let should_drain = draining || disconnected;
-            debug_assert_eq!(worker_is_draining(draining, disconnected), should_drain);
-            if should_drain {
-                if matches!(
-                    drain_available(receiver, &mut pending),
-                    QueueDrainOutcome::Disconnected
-                ) {
-                    disconnected = true;
-                }
-                if receiver.is_closed() {
-                    disconnected = true;
-                }
+            if matches!((draining, disconnected), (true, _) | (false, true)) {
+                disconnected = match drain_available(receiver, &mut pending) {
+                    QueueDrainOutcome::Disconnected => true,
+                    QueueDrainOutcome::Open => disconnected,
+                };
                 if pending.is_empty() {
                     break;
                 }
@@ -1307,19 +1300,14 @@ async fn worker_loop_async(
             }
         }
 
-        if matches!(
-            drain_available(receiver, &mut pending),
-            QueueDrainOutcome::Disconnected
-        ) {
-            disconnected = true;
-        }
-        if receiver.is_closed() {
-            disconnected = true;
-        }
+        disconnected = match drain_available(receiver, &mut pending) {
+            QueueDrainOutcome::Disconnected => true,
+            QueueDrainOutcome::Open => disconnected,
+        };
         #[cfg(test)]
-        if let Some(observer) = &observer {
-            observer.drain_completed(pending.len(), disconnected);
-        }
+        let _ignored = observer
+            .as_ref()
+            .map_or((), |o| o.drain_completed(pending.len(), disconnected));
         let index = select_pending_index(&pending, reads_since_write);
         if matches!(
             pending[index]
@@ -1341,38 +1329,24 @@ async fn worker_loop_async(
         } = pending.remove(index);
         let permit_owners = (global_permit, read_permit);
         #[cfg(test)]
-        if let Some(observer) = &observer {
-            observer.selected(admission_ordinal, class, reads_since_write);
-        }
-        match class {
-            CommandClass::Read => {
-                reads_since_write = reads_since_write.saturating_add(1).min(READ_BURST);
-            }
-            CommandClass::Write => reads_since_write = 0,
-        }
+        let _ignored = observer.as_ref().map_or((), |o| {
+            o.selected(admission_ordinal, class, reads_since_write)
+        });
+        reads_since_write = match class {
+            CommandClass::Read => reads_since_write.saturating_add(1).min(READ_BURST),
+            CommandClass::Write => 0,
+        };
         let execution = catch_unwind(AssertUnwindSafe(|| execute(&mut state, command)));
         drop(permit_owners);
-        match execution {
-            Ok(CommandExecution::Completed) => {}
-            Err(payload) => {
-                set_lifecycle_state(
-                    lifecycle_state.as_ref(),
-                    LifecycleState::Unhealthy {
-                        retryable_shutdown: false,
-                    },
-                );
-                std::panic::resume_unwind(payload);
-            }
+        if let Err(payload) = execution {
+            set_lifecycle_state(
+                lifecycle_state.as_ref(),
+                LifecycleState::Unhealthy {
+                    retryable_shutdown: false,
+                },
+            );
+            std::panic::resume_unwind(payload);
         }
-    }
-    drop(pending);
-    drop(state);
-}
-
-const fn worker_is_draining(draining: bool, disconnected: bool) -> bool {
-    match (draining, disconnected) {
-        (false, false) => false,
-        (true, _) | (false, true) => true,
     }
 }
 
@@ -3485,14 +3459,6 @@ mod tests {
     }
 
     #[test]
-    fn worker_is_draining_requires_shutdown_or_disconnect() {
-        assert!(!super::worker_is_draining(false, false));
-        assert!(super::worker_is_draining(true, false));
-        assert!(super::worker_is_draining(false, true));
-        assert!(super::worker_is_draining(true, true));
-    }
-
-    #[test]
     fn drain_available_observes_closed_receiver() {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
         drop(sender);
@@ -3502,6 +3468,7 @@ mod tests {
             super::QueueDrainOutcome::Disconnected
         ));
         assert!(pending.is_empty());
+        drop(pending);
     }
 
     #[tokio::test]
