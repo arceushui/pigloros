@@ -61,13 +61,12 @@ impl TomlLedgerStore {
                 path: path.display().to_string(),
                 reason: e.to_string(),
             })?;
-            let Some(stem) = path.file_stem() else {
-                return Err(LedgerError::InvalidPrediction(format!(
-                    "TOML path has no filename stem: {}",
-                    path.display()
-                )));
-            };
-            let stem = stem.to_string_lossy().into_owned();
+            // The extension filter above guarantees a filename stem.
+            let stem = path
+                .file_stem()
+                .expect("a filtered TOML path always has a filename stem")
+                .to_string_lossy()
+                .into_owned();
             items.push((stem, value));
         }
         Ok(items)
