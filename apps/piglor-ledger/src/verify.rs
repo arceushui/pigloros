@@ -200,13 +200,28 @@ fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, Cli
                 },
             });
         };
-        if let Err(error) = verify_for_role(
-            &vk,
-            KeyRoleV1::TimelineIntegritySigning,
-            1,
-            &event.payload,
-            sig,
-        ) {
+        let Some(identity) = event.signature_identity else {
+            return Ok(VerifyReport {
+                tier: "store".to_owned(),
+                n,
+                outcome: VerifyOutcome::Mismatch {
+                    which: format!("seq={}", event.seq.as_u64()),
+                    reason: "event signature identity is missing".to_owned(),
+                },
+            });
+        };
+        if identity.role != KeyRoleV1::TimelineIntegritySigning {
+            return Ok(VerifyReport {
+                tier: "store".to_owned(),
+                n,
+                outcome: VerifyOutcome::Mismatch {
+                    which: format!("seq={}", event.seq.as_u64()),
+                    reason: "event signature role is not TimelineIntegritySigning".to_owned(),
+                },
+            });
+        }
+        if let Err(error) = verify_for_role(&vk, identity.role, identity.epoch, &event.payload, sig)
+        {
             return Ok(VerifyReport {
                 tier: "store".to_owned(),
                 n,
@@ -868,6 +883,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None, // unsigned
+            signature_identity: None,
             payload_hash,
         };
         store.append_committed(tl.id(), &[event]).test_ok()?;
@@ -923,6 +939,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash,
         };
         store.append_committed(tl.id(), &[event]).test_ok()?;

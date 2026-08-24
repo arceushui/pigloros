@@ -145,6 +145,8 @@ pub struct Event {
     pub correlation_id: Option<CorrelationId>,
     pub schema_version: SchemaVersion,
     pub signature: Option<Signature>,
+    /// Role and epoch domain used for the signature, when present.
+    pub signature_identity: Option<crate::KeyIdentityV1>,
     pub payload_hash: Hash,
 }
 
@@ -207,6 +209,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
         }
     }
@@ -346,6 +349,7 @@ mod tests {
             correlation_id: Some(CorrelationId::new()),
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::from_bytes([255u8; 32]),
         };
         let s = serde_json::to_string(&e)?;

@@ -18,7 +18,8 @@ pub fn generate_keypair() -> (SigningKey, VerifyingKey) {
 /// This is a legacy compatibility primitive for pre-#183 data and tests. New
 /// application writes must use `key_roles::sign_for_registered_role`; callers
 /// must not treat this function as revocable or role-authorized signing.
-pub fn sign_legacy_unbound(signing_key: &SigningKey, payload: &CanonicalBytes) -> Signature {
+#[cfg(test)]
+fn sign_legacy_unbound(signing_key: &SigningKey, payload: &CanonicalBytes) -> Signature {
     let sig = signing_key.sign(payload.as_slice());
     Signature::from_bytes(sig.to_bytes())
 }
@@ -214,10 +215,12 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: Some(sig),
+            signature_identity: None,
             payload_hash: Hash::zero(),
         };
         let unsigned = Event {
             signature: None,
+            signature_identity: None,
             ..signed.clone()
         };
         assert!(verify_events(&vk, &[unsigned, signed.clone()]).is_ok());
@@ -249,6 +252,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::zero(),
         };
         assert!(verify_events_all_signed(&vk, std::slice::from_ref(&unsigned)).is_err());

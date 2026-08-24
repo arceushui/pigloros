@@ -6,10 +6,14 @@
 //! binary in `src/main.rs` is just `run(&env::args().collect())`.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-use pos_core::ids::TimelineId;
+use pos_core::{ids::TimelineId, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1};
 use pos_crypto::chain::Blake3Hasher;
-use pos_crypto::signing::generate_keypair;
+use pos_crypto::{
+    key_roles::key_material_digest,
+    signing::{generate_keypair, public_key_from_verifying_key},
+};
 use pos_plugin_ledger::{
     EventLedgerStore, LedgerStore, LedgerView, NewPrediction, TomlLedgerStore,
 };
@@ -59,6 +63,21 @@ fn load_signing_key(path: &Path) -> Result<ed25519_dalek::SigningKey, CliError> 
     Ok(ed25519_dalek::SigningKey::from_bytes(&arr))
 }
 
+pub(crate) fn ledger_signing_registry(
+    signing_key: &ed25519_dalek::SigningKey,
+) -> Result<(Arc<Mutex<KeyRegistryStateV1>>, KeyIdentityV1), CliError> {
+    let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+    let mut registry = KeyRegistryStateV1::new();
+    registry
+        .register_key(KeyRegistrationV1::new(
+            identity,
+            key_material_digest(&signing_key.to_bytes()),
+            Some(public_key_from_verifying_key(&signing_key.verifying_key())),
+        ))
+        .map_err(|error| CliError::BadSource(format!("ledger signing registration: {error}")))?;
+    Ok((Arc::new(Mutex::new(registry)), identity))
+}
+
 /// Open the source as a `Box<dyn LedgerStore>`. Store tier requires
 /// `--key` pointing at a hex-encoded Ed25519 secret key (ADR-017 Decision 5b).
 ///
@@ -73,6 +92,7 @@ pub fn open_store(source: &Source, key: Option<&Path>) -> Result<Box<dyn LedgerS
                 CliError::BadSource("store: source requires --key <path>".to_owned())
             })?;
             let signing_key = load_signing_key(key_path)?;
+            let (registry, identity) = ledger_signing_registry(&signing_key)?;
             let mut event_store = pos_store::open_store(StoreConfig::Sqlite {
                 path: db.to_string_lossy().into_owned(),
             })
@@ -84,6 +104,8 @@ pub fn open_store(source: &Source, key: Option<&Path>) -> Result<Box<dyn LedgerS
                     timeline_id,
                     crate::well_known_entity(),
                     signing_key,
+                    registry,
+                    identity,
                     Box::new(Blake3Hasher),
                 )
                 .map_err(|error| CliError::BadSource(error.to_string()))?,
@@ -320,11 +342,14 @@ fn cmd_build(args: &[String]) -> Result<(), CliError> {
             .map_err(|e| CliError::BadSource(e.to_string()))?;
             let timeline_id = find_or_create_ledger_timeline(&mut *store)?;
             let (sk, _) = pos_crypto::signing::generate_keypair();
+            let (registry, identity) = ledger_signing_registry(&sk)?;
             let ledger_store = EventLedgerStore::new(
                 store,
                 timeline_id,
                 crate::well_known_entity(),
                 sk,
+                registry,
+                identity,
                 Box::new(Blake3Hasher),
             )
             .map_err(|error| CliError::BadSource(error.to_string()))?;

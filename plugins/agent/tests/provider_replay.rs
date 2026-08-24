@@ -338,6 +338,7 @@ fn event(seq: u64, entity: EntityId, event_type: &str, payload: Vec<u8>) -> Even
         correlation_id: None,
         schema_version: SchemaVersion::V1,
         signature: None,
+        signature_identity: None,
         payload_hash: Hash::from_bytes([u8::try_from(seq).unwrap_or(0xff); 32]),
     }
 }

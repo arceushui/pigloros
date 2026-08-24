@@ -1011,6 +1011,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn import_with_verified_signatures_accepts_valid_and_rejects_bad() {
+        use ed25519_dalek::Signer;
         use pos_core::{
             clock::{Seq, WallTime},
             event::{Event, SchemaVersion},
@@ -1018,14 +1019,12 @@ mod tests {
             store::TimelineExport,
             timeline::{Timeline, TimelineMeta},
         };
-        use pos_crypto::signing::{
-            generate_keypair, public_key_from_verifying_key, sign_legacy_unbound,
-        };
+        use pos_crypto::signing::{generate_keypair, public_key_from_verifying_key};
 
         let (sk, vk) = generate_keypair();
         let pk = public_key_from_verifying_key(&vk);
         let payload = CanonicalBytes::from_vec(b"signed".to_vec());
-        let sig = sign_legacy_unbound(&sk, &payload);
+        let sig = pos_core::Signature::from_bytes(sk.sign(payload.as_slice()).to_bytes());
         let entity = EntityId::new();
         let event = Event {
             id: EventId::new(),
@@ -1038,6 +1037,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: Some(sig),
+            signature_identity: None,
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
         let export = TimelineExport {
@@ -1107,6 +1107,7 @@ mod tests {
                 correlation_id: None,
                 schema_version: SchemaVersion::V1,
                 signature: None,
+                signature_identity: None,
                 payload_hash: pos_crypto::chain::hash_payload(&payload),
             }],
             parent_fork_hash: None,

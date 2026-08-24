@@ -21,6 +21,7 @@ rusqlite = { workspace = true, optional = true }
 [dev-dependencies]
 blake3 = { workspace = true }
 ciborium = { workspace = true }
+ed25519-dalek = { workspace = true }
 tempfile = "3"
 
 [lints]

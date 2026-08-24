@@ -1,4 +1,5 @@
 use ed25519_dalek::SigningKey;
+use std::sync::{Arc, Mutex};
 
 use pos_core::{
     clock::{Seq, WallTime},
@@ -6,7 +7,7 @@ use pos_core::{
     hasher::Hasher,
     ids::{EntityId, EventId},
     store::{EventStore, SeqRange},
-    CoreError, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1,
+    CoreError, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1,
 };
 use pos_crypto::{
     key_roles::{key_material_digest, sign_for_registered_role},
@@ -36,30 +37,44 @@ pub struct EventLedgerStore {
     timeline_id: pos_core::ids::TimelineId,
     entity: EntityId,
     signing_key: SigningKey,
-    key_registry: KeyRegistryStateV1,
+    key_registry: Arc<Mutex<KeyRegistryStateV1>>,
     signing_identity: KeyIdentityV1,
     hasher: Box<dyn Hasher>,
 }
 
 impl EventLedgerStore {
-    #[must_use]
+    /// Construct a ledger adapter from an externally owned signing registry.
+    ///
+    /// The caller remains responsible for registry persistence, rotation, and
+    /// destruction. This adapter never registers or restores signing
+    /// authority on its own.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LedgerError::Store`] when the supplied registry does not
+    /// authorize the signing identity for the supplied key.
     pub fn new(
         store: Box<dyn EventStore>,
         timeline_id: pos_core::ids::TimelineId,
         entity: EntityId,
         signing_key: SigningKey,
+        key_registry: Arc<Mutex<KeyRegistryStateV1>>,
+        signing_identity: KeyIdentityV1,
         hasher: Box<dyn Hasher>,
     ) -> Result<Self, LedgerError> {
-        let signing_identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
         let public_verification_key = public_key_from_verifying_key(&signing_key.verifying_key());
-        let mut key_registry = KeyRegistryStateV1::new();
         key_registry
-            .register_key(KeyRegistrationV1::new(
+            .lock()
+            .map_err(|_| LedgerError::Store("ledger signing registry is unavailable".to_owned()))?
+            .with_signing_authorization(
                 signing_identity,
                 key_material_digest(&signing_key.to_bytes()),
-                Some(public_verification_key),
-            ))
-            .map_err(|error| LedgerError::Store(format!("ledger signing registration: {error}")))?;
+                public_verification_key,
+                || (),
+            )
+            .map_err(|error| {
+                LedgerError::Store(format!("ledger signing authorization: {error}"))
+            })?;
         Ok(Self {
             store,
             timeline_id,
@@ -87,8 +102,12 @@ impl EventLedgerStore {
     ) -> Result<(), LedgerError> {
         let head = self.head_seq()?;
         let payload_hash = self.hasher.hash_payload(&payload);
+        let mut key_registry = self
+            .key_registry
+            .lock()
+            .map_err(|_| LedgerError::Store("ledger signing registry is unavailable".to_owned()))?;
         let signature = sign_for_registered_role(
-            &mut self.key_registry,
+            &mut *key_registry,
             &self.signing_key,
             self.signing_identity,
             &payload,
@@ -106,6 +125,7 @@ impl EventLedgerStore {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: Some(signature),
+            signature_identity: Some(self.signing_identity),
             payload_hash,
         };
 
@@ -191,6 +211,7 @@ impl LedgerStore for EventLedgerStore {
 mod tests {
     use super::*;
     use crate::contract;
+    use pos_core::KeyRegistrationV1;
     use pos_crypto::{
         chain::{hash_payload, Blake3Hasher},
         key_roles::verify_for_role,
@@ -199,6 +220,7 @@ mod tests {
 
     fn make_store() -> Result<EventLedgerStore, Box<dyn std::error::Error>> {
         let (sk, _vk) = pos_crypto::signing::generate_keypair();
+        let (registry, identity) = registry_for(&sk)?;
         let mut mem = MemoryStore::new();
         let tl = mem.create_timeline("ledger")?;
         Ok(EventLedgerStore::new(
@@ -206,8 +228,76 @@ mod tests {
             tl.id(),
             EntityId::new(),
             sk,
+            registry,
+            identity,
             Box::new(Blake3Hasher),
         )?)
+    }
+
+    fn registry_for(
+        signing_key: &SigningKey,
+    ) -> Result<(Arc<Mutex<KeyRegistryStateV1>>, KeyIdentityV1), Box<dyn std::error::Error>> {
+        let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+        let mut registry = KeyRegistryStateV1::new();
+        registry.register_key(KeyRegistrationV1::new(
+            identity,
+            key_material_digest(&signing_key.to_bytes()),
+            Some(public_key_from_verifying_key(&signing_key.verifying_key())),
+        ))?;
+        Ok((Arc::new(Mutex::new(registry)), identity))
+    }
+
+    #[test]
+    fn constructor_rejects_a_registry_without_active_authority(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (signing_key, _) = pos_crypto::signing::generate_keypair();
+        let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+        let error = EventLedgerStore::new(
+            Box::new(MemoryStore::new()),
+            pos_core::ids::TimelineId::new(),
+            EntityId::new(),
+            signing_key,
+            Arc::new(Mutex::new(KeyRegistryStateV1::new())),
+            identity,
+            Box::new(Blake3Hasher),
+        )
+        .err()
+        .ok_or("expected registry authorization error")?;
+        assert!(matches!(error, LedgerError::Store(_)));
+        Ok(())
+    }
+
+    #[test]
+    fn external_registry_destruction_blocks_future_ledger_signing(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (signing_key, _) = pos_crypto::signing::generate_keypair();
+        let (registry, identity) = registry_for(&signing_key)?;
+        let material_digest = key_material_digest(&signing_key.to_bytes());
+        let mut mem = MemoryStore::new();
+        let timeline = mem.create_timeline("ledger")?;
+        let mut store = EventLedgerStore::new(
+            Box::new(mem),
+            timeline.id(),
+            EntityId::new(),
+            signing_key,
+            Arc::clone(&registry),
+            identity,
+            Box::new(Blake3Hasher),
+        )?;
+        registry
+            .lock()
+            .map_err(|_| std::io::Error::other("registry poisoned"))?
+            .destroy_key(pos_core::KeyDestructionRequestV1::new(
+                identity,
+                material_digest,
+                pos_core::Hash::from_bytes([8; 32]),
+            ))?;
+        let error = store
+            .register(crate::contract::sample_new_prediction("2026-08-01"))
+            .err()
+            .ok_or("expected destroyed-signing error")?;
+        assert!(error.to_string().contains("destroyed"));
+        Ok(())
     }
 
     #[test]
@@ -326,6 +416,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash,
         };
         store.store.append_committed(store.timeline_id, &[event])?;
@@ -351,6 +442,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash,
         };
         store.store.append_committed(store.timeline_id, &[event])?;
@@ -376,6 +468,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash,
         };
         store.store.append_committed(store.timeline_id, &[event])?;
@@ -409,6 +502,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash,
         };
         store.store.append_committed(store.timeline_id, &[event])?;
@@ -439,6 +533,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash,
         };
         store.store.append_committed(store.timeline_id, &[event])?;
@@ -467,6 +562,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash,
         };
         store.store.append_committed(store.timeline_id, &[event])?;
@@ -492,6 +588,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash,
         };
         store.store.append_committed(store.timeline_id, &[event])?;
@@ -503,6 +600,7 @@ mod tests {
     #[test]
     fn load_fails_on_missing_timeline() -> Result<(), Box<dyn std::error::Error>> {
         let (sk, _vk) = pos_crypto::signing::generate_keypair();
+        let (registry, identity) = registry_for(&sk)?;
         let mem = MemoryStore::new();
         let tl_id = pos_core::ids::TimelineId::new();
         let store = EventLedgerStore::new(
@@ -510,6 +608,8 @@ mod tests {
             tl_id,
             EntityId::new(),
             sk,
+            registry,
+            identity,
             Box::new(Blake3Hasher),
         )?;
         let err = store.load("2026-07-25").err().ok_or("expected error")?;
@@ -520,6 +620,7 @@ mod tests {
     #[test]
     fn resolve_fails_on_missing_timeline() -> Result<(), Box<dyn std::error::Error>> {
         let (sk, _vk) = pos_crypto::signing::generate_keypair();
+        let (registry, identity) = registry_for(&sk)?;
         let mem = MemoryStore::new();
         let tl_id = pos_core::ids::TimelineId::new();
         let mut store = EventLedgerStore::new(
@@ -527,6 +628,8 @@ mod tests {
             tl_id,
             EntityId::new(),
             sk,
+            registry,
+            identity,
             Box::new(Blake3Hasher),
         )?;
         let err = store
@@ -552,6 +655,7 @@ mod tests {
     #[test]
     fn register_fails_on_missing_timeline() -> Result<(), Box<dyn std::error::Error>> {
         let (sk, _vk) = pos_crypto::signing::generate_keypair();
+        let (registry, identity) = registry_for(&sk)?;
         let mem = MemoryStore::new();
         let tl_id = pos_core::ids::TimelineId::new();
         let mut store = EventLedgerStore::new(
@@ -559,6 +663,8 @@ mod tests {
             tl_id,
             EntityId::new(),
             sk,
+            registry,
+            identity,
             Box::new(Blake3Hasher),
         )?;
         let err = store

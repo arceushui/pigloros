@@ -16,7 +16,7 @@ const ROLE_SIGNATURE_DOMAIN: &[u8] = b"pigloros/role-signature/v1";
 /// roles or two epochs.  Role and epoch are bound separately by the registry
 /// identity and by [`sign_for_registered_role`].
 #[must_use]
-pub fn key_material_digest(private_material: &[u8]) -> Hash {
+pub fn key_material_digest(private_material: &[u8; 32]) -> Hash {
     let mut hasher = blake3::Hasher::new();
     hasher.update(KEY_MATERIAL_DOMAIN);
     hasher.update(private_material);
@@ -135,9 +135,9 @@ mod tests {
 
     #[test]
     fn material_digest_is_stable_across_roles_and_epochs() {
-        let material = b"same private material";
-        let first = key_material_digest(material);
-        let same_material = key_material_digest(material);
+        let material = [7; 32];
+        let first = key_material_digest(&material);
+        let same_material = key_material_digest(&material);
         assert_eq!(first, same_material);
     }
 

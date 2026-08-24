@@ -1016,6 +1016,7 @@ fn materialize_fork_export_as_root(export: &mut TimelineExport) {
             event.causation_id = id_map.get(&cid).copied();
         }
         event.signature = None;
+        event.signature_identity = None;
     }
 }
 
@@ -1219,6 +1220,7 @@ mod tests {
                         correlation_id: d.correlation_id,
                         schema_version: d.schema_version,
                         signature: None,
+                        signature_identity: None,
                         payload_hash: Hash::from_bytes([0u8; 32]),
                     }
                 })
@@ -1283,6 +1285,7 @@ mod tests {
                         correlation_id: d.correlation_id,
                         schema_version: d.schema_version,
                         signature: None,
+                        signature_identity: None,
                         payload_hash: Hash::from_bytes([0u8; 32]),
                     }
                 })
@@ -1419,6 +1422,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
         let meta = TimelineMeta::root("original");
@@ -1562,6 +1566,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
         let export = TimelineExport {
@@ -1641,6 +1646,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
         let export = TimelineExport {
@@ -1726,6 +1732,7 @@ mod tests {
                 correlation_id: None,
                 schema_version: SchemaVersion::V1,
                 signature: None,
+                signature_identity: None,
                 payload_hash: Hash::from_bytes([0u8; 32]),
             }],
             parent_fork_hash: None,
@@ -1935,6 +1942,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::zero(),
         };
         let id = crate::ids::EventId::new();
@@ -2672,6 +2680,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: Some(crate::Signature::from_bytes([1u8; 64])),
+            signature_identity: None,
             payload_hash: Hash::zero(),
         };
         let original_id = event.id;
@@ -2759,6 +2768,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: Some(crate::Signature::from_bytes([9u8; 64])),
+            signature_identity: None,
             payload_hash: Hash::zero(),
         };
         let export = export_timeline(
@@ -2851,6 +2861,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::zero(),
         };
         let export = export_timeline(
@@ -3156,6 +3167,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
         let export = TimelineExport {
@@ -3196,6 +3208,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
         let export = TimelineExport {

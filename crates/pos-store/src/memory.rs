@@ -595,6 +595,7 @@ impl MemoryStore {
             correlation_id: draft.correlation_id,
             schema_version: draft.schema_version,
             signature: None,
+            signature_identity: None,
             payload_hash,
         };
         state.events.push(event.clone());
@@ -1413,6 +1414,7 @@ impl GeographicAdmissionStore for MemoryStore {
             correlation_id: None,
             schema_version: pos_core::SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash,
         };
         staged_state.timeline.head = event_seq;
@@ -4382,6 +4384,7 @@ mod tests {
                 correlation_id: None,
                 schema_version: pos_core::SchemaVersion::V1,
                 signature: None,
+                signature_identity: None,
                 payload_hash: pos_crypto::chain::hash_payload(&payload),
             }
         };
@@ -4407,6 +4410,7 @@ mod tests {
             correlation_id: None,
             schema_version: pos_core::SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
         assert!(store.append_committed(timeline.id(), &[event]).is_err());
@@ -4652,6 +4656,7 @@ mod tests {
             correlation_id: None,
             schema_version: pos_core::SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
         store.append_committed(leaf.id(), &[ev]).test_ok();

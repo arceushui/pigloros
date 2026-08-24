@@ -40,7 +40,7 @@ use pos_core::{
         AppendOrDuplicateOutcome, EventReadBounds, EventStore, PurgeOutcome, SeqRange,
     },
     timeline::{Timeline, TimelineMeta, TimelineMode},
-    ConsentAppendPermit, CoreError, Hash, GEOGRAPHIC_EVENT_TYPE,
+    ConsentAppendPermit, CoreError, Hash, KeyIdentityV1, KeyRoleV1, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -227,6 +227,7 @@ impl SqliteStore {
             correlation_id: draft.correlation_id,
             schema_version: draft.schema_version,
             signature: None,
+            signature_identity: None,
             payload_hash,
         })
     }
@@ -419,6 +420,8 @@ impl SqliteStore {
                  schema_version INTEGER NOT NULL CHECK (schema_version = 1),
                  payload_hash BLOB NOT NULL,
                  signature   BLOB,
+                 signature_role INTEGER,
+                 signature_epoch INTEGER,
                  PRIMARY KEY (timeline_id, seq)
              );
              CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id);
@@ -764,7 +767,8 @@ impl SqliteStore {
         max_elapsed_micros: u64,
     ) -> Result<Vec<Event>, CoreError> {
         const SQL: &str = "SELECT seq, event_id, entity_id, event_type, payload, wall_time,
-                                causation_id, correlation_id, schema_version, payload_hash, signature
+                                causation_id, correlation_id, schema_version, payload_hash, signature,
+                                signature_role, signature_epoch
                          FROM events
                          WHERE timeline_id = ?1
                            AND seq >= ?2
@@ -823,6 +827,10 @@ impl SqliteStore {
             let ph_bytes: Vec<u8> = row.get(9).map_err(|e| CoreError::Storage(e.to_string()))?;
             let sig_bytes: Option<Vec<u8>> =
                 row.get(10).map_err(|e| CoreError::Storage(e.to_string()))?;
+            let signature_role: Option<i64> =
+                row.get(11).map_err(|e| CoreError::Storage(e.to_string()))?;
+            let signature_epoch: Option<i64> =
+                row.get(12).map_err(|e| CoreError::Storage(e.to_string()))?;
             let ph_arr: [u8; 32] = ph_bytes
                 .try_into()
                 .map_err(|_| CoreError::Serialization("bad hash".to_owned()))?;
@@ -833,6 +841,24 @@ impl SqliteStore {
                         .try_into()
                         .map_err(|_| CoreError::Serialization("bad signature length".to_owned()))?;
                     Some(pos_core::Signature::from_bytes(arr))
+                }
+            };
+            let signature_identity = match (signature_role, signature_epoch) {
+                (None, None) => None,
+                (Some(role), Some(epoch)) => Some(KeyIdentityV1::new(
+                    KeyRoleV1::from_code(
+                        u8::try_from(role).map_err(|_| {
+                            CoreError::Serialization("bad signature role".to_owned())
+                        })?,
+                    )
+                    .map_err(|_| CoreError::Serialization("bad signature role".to_owned()))?,
+                    u64::try_from(epoch)
+                        .map_err(|_| CoreError::Serialization("bad signature epoch".to_owned()))?,
+                )),
+                _ => {
+                    return Err(CoreError::Serialization(
+                        "signature identity is incomplete".to_owned(),
+                    ));
                 }
             };
             events.push(Event {
@@ -849,6 +875,7 @@ impl SqliteStore {
                     .transpose()?,
                 schema_version: SchemaVersion::V1,
                 signature,
+                signature_identity,
                 payload_hash: pos_core::Hash::from_bytes(ph_arr),
             });
         }
@@ -1962,6 +1989,7 @@ impl SqliteStore {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash,
         })
     }
@@ -3664,12 +3692,19 @@ impl SqliteStore {
                 .hasher
                 .hash_event(&prev_hash, id_str.as_bytes(), &event.payload);
             let sig_bytes = event.signature.as_ref().map(|s| s.as_bytes().as_slice());
+            let signature_role = event
+                .signature_identity
+                .map(|identity| i64::from(identity.role.code()));
+            let signature_epoch = event
+                .signature_identity
+                .map(|identity| u64_as_i64(identity.epoch));
             self.conn
                 .execute(
                     "INSERT INTO events
                      (timeline_id, seq, event_id, entity_id, event_type, payload, wall_time,
-                      causation_id, correlation_id, schema_version, payload_hash, signature)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                      causation_id, correlation_id, schema_version, payload_hash, signature,
+                      signature_role, signature_epoch)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                     params![
                         timeline.to_string(),
                         seq_as_i64(event.seq),
@@ -3683,6 +3718,8 @@ impl SqliteStore {
                         i64::from(event.schema_version.as_u32()),
                         event.payload_hash.as_bytes().as_slice(),
                         sig_bytes,
+                        signature_role,
+                        signature_epoch,
                     ],
                 )
                 .map_err(|e| CoreError::Storage(e.to_string()))?;
@@ -7086,7 +7123,8 @@ mod tests {
             .execute(
                 "CREATE VIEW events AS SELECT timeline_id, seq, row_error() AS event_id,
                  entity_id, event_type, payload, wall_time, causation_id, correlation_id,
-                 schema_version, payload_hash, signature FROM events_real",
+                 schema_version, payload_hash, signature, NULL AS signature_role,
+                 NULL AS signature_epoch FROM events_real",
                 [],
             )
             .test_ok();
@@ -8777,10 +8815,12 @@ mod tests {
         ev.seq = Seq::from_u64(1);
         ev.id = EventId::new();
         ev.signature = Some(pos_core::Signature::from_bytes([7u8; 64]));
+        ev.signature_identity = Some(KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1));
         ev.payload_hash = hash_payload(&ev.payload);
         store.append_committed(other.id(), &[ev.clone()]).test_ok();
         let read = store.read(other.id(), SeqRange::all()).test_ok();
         assert_eq!(read[0].signature, ev.signature);
+        assert_eq!(read[0].signature_identity, ev.signature_identity);
     }
 
     #[test]
@@ -9162,6 +9202,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
         assert!(store.append_committed(timeline.id(), &[event]).is_err());
@@ -9423,6 +9464,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
         corrupt_store
@@ -9592,7 +9634,7 @@ mod coverage_entrypoints {
              'event' AS event_id, 'entity' AS entity_id, zeroblob(1) AS event_type,\
              zeroblob(1) AS payload, 1 AS wall_time, NULL AS causation_id,\
              NULL AS correlation_id, 1 AS schema_version, zeroblob(32) AS payload_hash,\
-             NULL AS signature",
+             NULL AS signature, NULL AS signature_role, NULL AS signature_epoch",
             id = timeline.id()
         );
         ok(store.conn.execute_batch(&sql));
@@ -9622,7 +9664,7 @@ mod coverage_entrypoints {
              'event' AS event_id, 'entity' AS entity_id, NULL AS event_type,\
              NULL AS payload, 1 AS wall_time, NULL AS causation_id,\
              NULL AS correlation_id, 1 AS schema_version, zeroblob(32) AS payload_hash,\
-             NULL AS signature",
+             NULL AS signature, NULL AS signature_role, NULL AS signature_epoch",
             id = timeline.id()
         );
         ok(store.conn.execute_batch(&sql));
@@ -9647,7 +9689,7 @@ mod coverage_entrypoints {
              'event' AS event_id, 'entity' AS entity_id, NULL AS event_type,\
              zeroblob(1) AS payload, 1 AS wall_time, NULL AS causation_id,\
              NULL AS correlation_id, 1 AS schema_version, zeroblob(32) AS payload_hash,\
-             NULL AS signature",
+             NULL AS signature, NULL AS signature_role, NULL AS signature_epoch",
             id = timeline.id()
         );
         ok(store.conn.execute_batch(&sql));
