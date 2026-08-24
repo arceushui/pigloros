@@ -139,7 +139,7 @@ fn protected_public_seam_checks_timeline_and_rechecks_at_commit_head() {
     let grant = grant(subject);
     let token = authority.record_grant_on_timeline(timeline, &grant);
     let mut registry = PluginRegistry::new().with_consent_authority(authority.clone());
-    registry.register_driver(Box::new(ProtectedEventDriver { entity: subject }));
+    registry.register_driver(Box::new(EmptyDriver));
 
     let drafts =
         test_ok(registry.step_all_anchored_protected(timeline, Seq::ZERO, token.clone(), 1, &[]));
@@ -404,6 +404,31 @@ fn append_fence_revalidates_caller_supplied_drafts() {
     registry.register_driver(Box::new(ProtectedEventDriver { entity: subject }));
     let _staged =
         test_ok(registry.step_all_anchored_protected(timeline.id(), Seq::ZERO, token, 1, &[]));
+    let replacement = vec![EventDraft::new(
+        subject,
+        Kind::new("consent.granted.v1"),
+        CanonicalBytes::from_static(b"forged"),
+    )];
+
+    let error =
+        test_err(registry.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 1, &replacement));
+    assert!(matches!(
+        error,
+        RuntimeError::ConsentDraft { ref event_type } if event_type == "consent.granted.v1"
+    ));
+    assert_eq!(test_ok(store.logical_head(timeline.id())), Seq::ZERO);
+}
+
+#[test]
+fn public_append_fence_revalidates_caller_supplied_drafts() {
+    use pos_store::{open_store, StoreConfig};
+
+    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let timeline = test_ok(store.create_timeline("public-draft-replacement"));
+    let subject = EntityId::new();
+    let mut registry = PluginRegistry::new();
+    registry.register_driver(Box::new(EmptyDriver));
+    let _staged = test_ok(registry.step_all_anchored(timeline.id(), Seq::ZERO));
     let replacement = vec![EventDraft::new(
         subject,
         Kind::new("consent.granted.v1"),
