@@ -1330,7 +1330,7 @@ mod coverage_entrypoints {
     #[test]
     fn inverse_rejects_a_corrupted_cached_origin_basis() {
         let capability = WorldGeographicEvidenceCapabilityV1::for_trusted_core();
-        let origin = WorldOriginV1::new(
+        let origin = ok(WorldOriginV1::new(
             &capability,
             [1; 16],
             [2; 16],
@@ -1338,14 +1338,14 @@ mod coverage_entrypoints {
             ok(Wgs84PositionV1::new(35.0, -120.0, 100.0)),
             [3; 32],
             10_000.0,
-        );
+        ));
         let position = ok(Wgs84PositionV1::new(35.0, -120.0, 100.0));
         let mut transform = ok(WorldTransformV1::new(&capability, origin));
         let coordinate = ok(transform.forward(&capability, position));
         transform.origin_cos_latitude = 0.5;
-        assert_eq!(
+        assert!(matches!(
             transform.inverse(&capability, coordinate),
             Err(WorldTransformError::NonConvergent)
-        );
+        ));
     }
 }
