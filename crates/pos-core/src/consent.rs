@@ -1880,6 +1880,15 @@ mod tests {
         assert!(token
             .authorize_event_type(&Kind::new("retention.extend.v1"))
             .is_ok());
+
+        let mut no_modalities = grant;
+        no_modalities.modalities = 0;
+        no_modalities.grant_seq = 2;
+        let no_modalities_token = authority.record_grant_on_timeline(timeline, &no_modalities);
+        assert_eq!(
+            no_modalities_token.authorize_event_type(&Kind::new("persona.update.v1")),
+            Err(ConsentError::ModalityNotGranted)
+        );
     }
 
     #[test]
