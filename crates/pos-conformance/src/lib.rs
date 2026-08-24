@@ -357,11 +357,6 @@ impl ReplayClaimV1 {
     /// Apply an erasure disposition without ever upgrading a claim.
     #[must_use]
     pub const fn after_erasure(self, disposition: ErasureDispositionV1) -> Self {
-        if matches!(self, Self::IncompatibleProfile)
-            || matches!(disposition, ErasureDispositionV1::IncompatibleProfile)
-        {
-            return Self::IncompatibleProfile;
-        }
         let disposition = match disposition {
             ErasureDispositionV1::None => self,
             ErasureDispositionV1::RedactedViews => Self::ExactAuthoritativeWithRedactedViews,

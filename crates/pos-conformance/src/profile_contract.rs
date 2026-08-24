@@ -5186,6 +5186,33 @@ mod tests {
             Err(ConformanceContractError::IndependenceEvidenceMissing)
         );
 
+        let reject_pair = |change: &dyn Fn(&mut StableImplementationEvidenceV1)| {
+            let mut changed_first = first.clone();
+            let changed_second = second.clone();
+            change(&mut changed_first);
+            let mut changed_profile = profile_value.clone();
+            changed_profile.stable_evidence = vec![changed_first, changed_second];
+            assert_eq!(
+                validate_stable_evidence(&changed_profile, Some(&trusted_root_policy()),),
+                Err(ConformanceContractError::IndependenceEvidenceMissing)
+            );
+        };
+        reject_pair(&|value| {
+            value.implementation.public_contract_digest = digest(55);
+            refresh_stable_report(value);
+        });
+        reject_pair(&|value| value.evaluator_protocol_digest = digest(99));
+        reject_pair(&|value| value.report.report_digest = [0; 32]);
+
+        let mut same_report = first.clone();
+        same_report.report.report_digest = second.report.report_digest;
+        let mut same_report_profile = profile_value.clone();
+        same_report_profile.stable_evidence = vec![same_report, second.clone()];
+        assert_eq!(
+            validate_stable_evidence(&same_report_profile, Some(&trusted_root_policy()),),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+
         let mut wrong_key_policy = trusted_root_policy();
         wrong_key_policy.trusted_root_public_keys =
             vec![ed25519_dalek::SigningKey::from_bytes(&[7; 32])
@@ -5384,6 +5411,13 @@ mod tests {
         assert!(!case_matches_fixture(&changed, fixture));
 
         let mut changed = base.clone();
+        changed.expected_error = Some(SafeErrorCodeV1::ClosureIncomplete);
+        assert!(!case_matches_fixture(&changed, fixture));
+        let mut changed = base.clone();
+        changed.actual_error = Some(SafeErrorCodeV1::ClosureIncomplete);
+        assert!(!case_matches_fixture(&changed, fixture));
+
+        let mut changed = base.clone();
         changed.verification_outcome = VerificationOutcomeV1::Diverged;
         assert!(!case_matches_fixture(&changed, fixture));
         let mut changed = base.clone();
@@ -5392,6 +5426,28 @@ mod tests {
         let mut changed = base;
         changed.actual_digest = Some(digest(99));
         assert!(!case_matches_fixture(&changed, fixture));
+
+        let coordinate = b"timeline/7".to_vec();
+        let mut divergent_fixture = fixture.clone();
+        divergent_fixture.expected = ExpectedResultV1::AllowedDivergence {
+            classification: DivergenceMismatchKindV1::TypedFailure,
+            first_coordinate: coordinate.clone(),
+        };
+        divergent_fixture.expected_verification_outcome = VerificationOutcomeV1::Diverged;
+        let mut divergent = case_outcome_record(ExecutionModeV1::Local);
+        divergent.fixture_digest = fixture_digest(&divergent_fixture);
+        divergent.expected_digest = Some(digest(20));
+        divergent.actual_digest = Some(digest(21));
+        divergent.verification_outcome = VerificationOutcomeV1::Diverged;
+        divergent.divergence_kind = Some(DivergenceMismatchKindV1::TypedFailure);
+        divergent.first_coordinate = Some(coordinate.clone());
+        assert!(case_matches_fixture(&divergent, &divergent_fixture));
+        let mut changed = divergent.clone();
+        changed.divergence_kind = Some(DivergenceMismatchKindV1::CanonicalBytes);
+        assert!(!case_matches_fixture(&changed, &divergent_fixture));
+        let mut changed = divergent;
+        changed.first_coordinate = Some(b"timeline/8".to_vec());
+        assert!(!case_matches_fixture(&changed, &divergent_fixture));
     }
 
     #[test]
@@ -5466,6 +5522,7 @@ mod tests {
         let profile_value = candidate();
         refresh_stable_report_for_profile(&mut evidence, &profile_value);
         assert_eq!(validate_report_binding(&evidence, &profile_value), Ok(()));
+        assert_ne!(evidence.report.fixture_bundle_digest, digest(1));
         let reject_report = |change: &dyn Fn(&mut StableImplementationEvidenceV1)| {
             let mut changed = stable_evidence("alpha", 30);
             change(&mut changed);
@@ -5477,16 +5534,46 @@ mod tests {
             );
         };
         reject_report(&|value| value.report.normative_spec_digest = digest(99));
+        reject_report(&|value| value.report.implementation.source_digest = digest(99));
+        reject_report(&|value| value.report.independence.declaration_digest = digest(99));
+        reject_report(&|value| value.report.evaluator_protocol_digest = digest(99));
+        reject_report(&|value| value.evaluator_protocol_digest = digest(99));
         reject_report(&|value| value.report.limitations_digest = digest(99));
         reject_report(&|value| value.report.provenance_digest = digest(99));
         reject_report(&|value| value.report.fixture_bundle_digest = digest(99));
         reject_report(&|value| value.report.profile_digest = digest(99));
+        reject_report(&|value| value.report.execution_profile_digest = digest(99));
+        reject_report(&|value| {
+            value.report.cases.pop();
+        });
         reject_report(&|value| value.report.cases[0].case_id.push('x'));
         reject_report(&|value| value.report.cases[0].fixture_digest = digest(99));
         reject_report(&|value| value.report.cases[0].execution_profile_digest = digest(99));
         reject_report(&|value| value.report.cases[0].claim_layer = ClaimLayerV1::MetricConformance);
         reject_report(&|value| value.report.cases[0].mode = ExecutionModeV1::Fork);
         reject_report(&|value| value.report.cases[0].replay_claim = ReplayClaimV1::StructuralOnly);
+
+        let reject_case = |change: &dyn Fn(&mut CaseOutcomeV1)| {
+            let mut changed = evidence.clone();
+            change(&mut changed.case_outcomes[0]);
+            assert_eq!(
+                validate_report_binding(&changed, &profile_value),
+                Err(ConformanceContractError::IndependenceEvidenceMissing)
+            );
+        };
+        reject_case(&|case| case.case_id.push('x'));
+        reject_case(&|case| case.fixture_digest = digest(99));
+        reject_case(&|case| case.execution_profile_digest = digest(99));
+        reject_case(&|case| case.mode = ExecutionModeV1::Fork);
+        reject_case(&|case| case.claim_layer = ClaimLayerV1::MetricConformance);
+        reject_case(&|case| case.outcome = CaseOutcomeStatusV1::Fail);
+        reject_case(&|case| case.expected_digest = Some(digest(99)));
+        reject_case(&|case| case.actual_digest = Some(digest(99)));
+        reject_case(&|case| case.expected_error = Some(SafeErrorCodeV1::ClosureIncomplete));
+        reject_case(&|case| case.actual_error = Some(SafeErrorCodeV1::ClosureIncomplete));
+        reject_case(&|case| case.replay_claim = ReplayClaimV1::StructuralOnly);
+        reject_case(&|case| case.redaction_state = RedactionStateV1::StructuralOnly);
+        reject_case(&|case| case.provenance_digest = digest(99));
     }
 
     #[test]
@@ -5781,6 +5868,7 @@ mod tests {
         reject_stable_change(|value| value.case_outcomes[0].outcome = CaseOutcomeStatusV1::Fail);
         reject_stable_change(|value| value.case_outcomes[0].expected_digest = Some(digest(99)));
         reject_stable_change(|value| value.case_outcomes[0].actual_digest = Some(digest(99)));
+        reject_stable_change(|value| value.case_outcomes.clear());
         reject_stable_change(|value| {
             value.case_outcomes[0].replay_claim = ReplayClaimV1::StructuralOnly;
         });
