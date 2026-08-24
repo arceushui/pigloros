@@ -5612,17 +5612,30 @@ mod tests {
             .is_none());
     }
 
-    #[test]
-    fn durable_session_append_empty_boundary_and_subject_recovery_are_public() -> Result<(), String>
-    {
-        let database = tempfile::NamedTempFile::new()
-            .map_err(|error| format!("temporary database creation failed: {error:?}"))?;
+    fn diagnostic_result<T, E: std::fmt::Debug>(
+        label: &str,
+        result: Result<T, E>,
+    ) -> Result<T, String> {
+        result.map_err(|error| format!("{label}: {error:?}"))
+    }
+
+    struct DurableSubjectRecoveryFixture {
+        database: tempfile::NamedTempFile,
+        store_config: StoreConfig,
+        timeline_id: TimelineId,
+        subject: EntityId,
+        authority: ConsentAuthority,
+        token: ConsentCapabilityToken,
+        plugin_id: PluginId,
+    }
+
+    fn durable_subject_recovery_fixture() -> Result<DurableSubjectRecoveryFixture, String> {
+        let database = diagnostic_result(
+            "temporary database creation",
+            tempfile::NamedTempFile::new(),
+        )?;
         let store_config = StoreConfig::Sqlite {
-            path: database
-                .path()
-                .to_str()
-                .ok_or_else(|| "temporary database path was not UTF-8".to_owned())?
-                .to_owned(),
+            path: database.path().to_str().test_ok().to_owned(),
         };
         let plugin = make_plugin("unit-session-events", &["unit.session.event"]);
         let plugin_id = plugin.id;
@@ -5631,12 +5644,11 @@ mod tests {
             stop: StopCondition::MaxTicks(2),
             store_config: store_config.clone(),
         });
-        experiment
-            .register(&plugin, None, None)
-            .map_err(|error| format!("experiment registration failed: {error:?}"))?;
-        let session = experiment
-            .start()
-            .map_err(|error| format!("session start failed: {error:?}"))?;
+        diagnostic_result(
+            "experiment registration",
+            experiment.register(&plugin, None, None),
+        )?;
+        let session = diagnostic_result("session start", experiment.start())?;
         let timeline_id = session.timeline().id();
         let subject = EntityId::new();
         let authority = ConsentAuthority::new();
@@ -5658,53 +5670,67 @@ mod tests {
         let mut session = session
             .with_consent_authority(authority.clone())
             .with_protected_token(token.clone(), 0);
-        let empty_append = session
-            .append_events(&[])
-            .map_err(|error| format!("empty append failed: {error:?}"))?;
-        if empty_append != 0 {
-            return Err(format!("empty append emitted {empty_append} events"));
-        }
-        let event_append = session
-            .append_events(&[EventDraft::new(
-                subject,
-                Kind::new("unit.session.event"),
-                CanonicalBytes::from_static(b"unit"),
-            )])
-            .map_err(|error| format!("event append failed: {error:?}"))?;
-        if event_append != 1 {
-            return Err(format!("event append emitted {event_append} events"));
-        }
-        let source_event_count = session
-            .source_events()
-            .map_err(|error| format!("source event read failed: {error:?}"))?
-            .len();
-        if source_event_count != 1 {
-            return Err(format!("source event count was {source_event_count}"));
-        }
-        let live_projection = session
-            .projection_state_for_reducer("missing", subject, &token, current_now_secs())
-            .map_err(|error| format!("live projection read failed: {error:?}"))?;
-        if live_projection.is_some() {
-            return Err("missing reducer unexpectedly returned projection state".to_owned());
-        }
+        assert_eq!(
+            diagnostic_result("empty append", session.append_events(&[]))?,
+            0
+        );
+        assert_eq!(
+            diagnostic_result(
+                "event append",
+                session.append_events(&[EventDraft::new(
+                    subject,
+                    Kind::new("unit.session.event"),
+                    CanonicalBytes::from_static(b"unit"),
+                )]),
+            )?,
+            1
+        );
+        assert_eq!(
+            diagnostic_result("source event read", session.source_events())?.len(),
+            1
+        );
+        assert!(diagnostic_result(
+            "live projection read",
+            session.projection_state_for_reducer("missing", subject, &token, current_now_secs())
+        )?
+        .is_none());
 
         session.revoke_consent_for_subject_at_boundary(subject);
-        let revocation_boundary = session
-            .step_tick()
-            .map_err(|error| format!("revocation boundary failed: {error:?}"))?;
-        if !matches!(
-            revocation_boundary,
-            TickOutcome::Advanced {
-                emitted_events: 1,
-                ..
-            }
-        ) {
-            return Err(format!(
-                "revocation boundary outcome was {revocation_boundary:?}"
-            ));
-        }
+        let revocation_boundary = diagnostic_result("revocation boundary", session.step_tick())?;
+        assert!(
+            matches!(
+                revocation_boundary,
+                TickOutcome::Advanced {
+                    emitted_events: 1,
+                    ..
+                }
+            ),
+            "revocation boundary outcome was {revocation_boundary:?}"
+        );
         drop(session);
+        Ok(DurableSubjectRecoveryFixture {
+            database,
+            store_config,
+            timeline_id,
+            subject,
+            authority,
+            token,
+            plugin_id,
+        })
+    }
 
+    #[test]
+    fn durable_session_append_empty_boundary_and_subject_recovery_are_public() -> Result<(), String>
+    {
+        let DurableSubjectRecoveryFixture {
+            database: _database,
+            store_config,
+            timeline_id,
+            subject,
+            authority,
+            token,
+            plugin_id,
+        } = durable_subject_recovery_fixture()?;
         let resumed_plugin = TestPlugin {
             id: plugin_id,
             name: "unit-session-events",
@@ -5716,20 +5742,20 @@ mod tests {
             stop: StopCondition::MaxTicks(2),
             store_config,
         });
-        resumed_experiment
-            .register(&resumed_plugin, None, None)
-            .map_err(|error| format!("resumed registration failed: {error:?}"))?;
-        let resumed = resumed_experiment
-            .with_consent_authority(authority)
-            .resume(timeline_id)
-            .map_err(|error| format!("resume failed: {error:?}"))?;
-        let resumed_projection =
-            resumed.projection_state_for_reducer("missing", subject, &token, current_now_secs());
-        if !matches!(resumed_projection, Err(ExperimentError::ConsentRevoked)) {
-            return Err(format!(
-                "resumed projection result was {resumed_projection:?}"
-            ));
-        }
+        diagnostic_result(
+            "resumed registration",
+            resumed_experiment.register(&resumed_plugin, None, None),
+        )?;
+        let resumed = diagnostic_result(
+            "resume",
+            resumed_experiment
+                .with_consent_authority(authority)
+                .resume(timeline_id),
+        )?;
+        assert!(matches!(
+            resumed.projection_state_for_reducer("missing", subject, &token, current_now_secs()),
+            Err(ExperimentError::ConsentRevoked)
+        ));
         Ok(())
     }
 
