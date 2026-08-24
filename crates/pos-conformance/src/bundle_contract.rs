@@ -1400,17 +1400,17 @@ mod tests {
     #[test]
     fn mandatory_fixture_matching_requires_case_and_layer_and_execution_profile(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut profile = profile();
-        let same_layer = profile_fixture(7, profile.fixtures[0].claim_layer);
-        profile.fixtures.push(same_layer);
-        profile.profile_digest = profile.digest();
-        let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
+        let mut case_layer_profile = profile();
+        let same_layer = profile_fixture(7, case_layer_profile.fixtures[0].claim_layer);
+        case_layer_profile.fixtures.push(same_layer);
+        case_layer_profile.profile_digest = case_layer_profile.digest();
+        let bundle = signed_bundle(&case_layer_profile, BundleModeV1::Local)?;
         let mut manifest = bundle.manifest.clone();
         manifest
             .expected_results
             .retain(|expected| expected.case_id != "case-00");
         assert_eq!(
-            validate_expected_results(&profile, &manifest, &bundle.members),
+            validate_expected_results(&case_layer_profile, &manifest, &bundle.members),
             Err(BundleContractErrorV1::MemberMissing)
         );
 
