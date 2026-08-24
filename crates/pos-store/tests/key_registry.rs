@@ -7,21 +7,19 @@ use pos_core::{
 };
 use pos_store::sqlite::SqliteStore;
 
-fn registry() -> (KeyRegistryStateV1, KeyIdentityV1, Hash) {
+fn registry() -> Result<(KeyRegistryStateV1, KeyIdentityV1, Hash), CoreError> {
     let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
     let material_digest = Hash::from_bytes([3; 32]);
     let mut registry = KeyRegistryStateV1::new();
-    registry
-        .register_key(KeyRegistrationV1::new(
-            identity,
-            material_digest,
-            Some(pos_core::PublicKey::from_bytes([4; 32])),
-        ))
-        .expect("test registry should accept its first key");
-    (registry, identity, material_digest)
+    registry.register_key(KeyRegistrationV1::new(
+        identity,
+        material_digest,
+        Some(pos_core::PublicKey::from_bytes([4; 32])),
+    ))?;
+    Ok((registry, identity, material_digest))
 }
 
-fn seed_event(store: &mut SqliteStore, timeline: TimelineId) -> Event {
+fn seed_event(store: &mut SqliteStore, timeline: TimelineId) -> Result<Event, CoreError> {
     store
         .append(
             timeline,
@@ -30,24 +28,23 @@ fn seed_event(store: &mut SqliteStore, timeline: TimelineId) -> Event {
                 pos_core::Kind::new("registry.seed"),
                 pos_core::CanonicalBytes::from_static(b"seed"),
             )],
-        )
-        .expect("seed event should append")
+        )?
         .into_iter()
         .next()
-        .expect("seed append should return an event")
+        .ok_or_else(|| CoreError::Storage("seed append returned no event".to_owned()))
 }
 
 #[test]
 fn sqlite_key_registry_public_contract_covers_persistence_and_authorization(
 ) -> Result<(), CoreError> {
-    let (registry, identity, material_digest) = registry();
+    let (registry, identity, material_digest) = registry()?;
     let mut store = SqliteStore::open_in_memory()?;
     assert!(store.load_key_registry()?.is_none());
     store.save_key_registry(&registry)?;
     assert_eq!(store.load_key_registry()?, Some(registry.clone()));
 
     let timeline = store.create_timeline("registry-contract")?;
-    let mut event = seed_event(&mut store, timeline.id());
+    let mut event = seed_event(&mut store, timeline.id())?;
     event.id = EventId::new();
     let mut callback = move |_registry: &KeyRegistryStateV1, seq: Seq| {
         event.seq = seq;

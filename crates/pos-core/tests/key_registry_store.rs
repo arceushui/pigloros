@@ -122,18 +122,17 @@ impl EventStore for RegistryStore {
     }
 }
 
-fn registered_state() -> (KeyRegistryStateV1, KeyIdentityV1, Hash) {
+fn registered_state(
+) -> Result<(KeyRegistryStateV1, KeyIdentityV1, Hash), Box<dyn std::error::Error>> {
     let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
     let material_digest = Hash::from_bytes([3; 32]);
     let mut registry = KeyRegistryStateV1::new();
-    registry
-        .register_key(KeyRegistrationV1::new(
-            identity,
-            material_digest,
-            Some(PublicKey::from_bytes([4; 32])),
-        ))
-        .expect("test registry should accept its first key");
-    (registry, identity, material_digest)
+    registry.register_key(KeyRegistrationV1::new(
+        identity,
+        material_digest,
+        Some(PublicKey::from_bytes([4; 32])),
+    ))?;
+    Ok((registry, identity, material_digest))
 }
 
 fn event_at(seq: Seq) -> Event {
@@ -185,8 +184,9 @@ fn event_store_key_registry_defaults_are_closed_and_exercised() -> Result<(), Co
 }
 
 #[test]
-fn event_store_key_registry_defaults_cover_authorized_paths() -> Result<(), CoreError> {
-    let (registry, identity, material_digest) = registered_state();
+fn event_store_key_registry_defaults_cover_authorized_paths(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (registry, identity, material_digest) = registered_state()?;
     let mut store = RegistryStore::new(Some(registry.clone()));
     let timeline = store
         .timeline
