@@ -11251,12 +11251,11 @@ mod key_registry_coverage {
     }
 
     #[cfg(test)]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     mod sqlite_key_registry_failure_paths {
         use super::{
             sqlite_append_signed_authorized, sqlite_destroy_key_registry, sqlite_load_key_registry,
-            CoreError, Event, Hash, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1,
-            Seq, SqliteStore, TimelineId, FAIL_BEGIN_IMMEDIATE,
+            CoreError, Event, EventStore, Hash, KeyDestructionRequestV1, KeyIdentityV1,
+            KeyRegistryStateV1, Seq, SqliteStore, TimelineId, FAIL_BEGIN_IMMEDIATE,
         };
 
         pub(super) fn run(
