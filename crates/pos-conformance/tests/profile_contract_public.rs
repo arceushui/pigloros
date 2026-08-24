@@ -403,7 +403,7 @@ fn profile_for_digest() -> ConformanceProfileV1 {
                 max_profile_bytes: 16 * 1024 * 1024,
                 max_cases: 65_536,
                 max_bundle_members: 65_536,
-                max_member_path_bytes: 256,
+                max_member_path_bytes: 128,
                 max_member_bytes: 1_073_741_824,
                 max_total_bundle_bytes: 1_073_741_824,
                 max_compression_expansion: 100,
@@ -511,7 +511,9 @@ fn public_trusted_root_policy_accepts_exact_root_cap_and_rejects_one_more() {
 
 #[test]
 fn public_profile_digest_normalizes_stable_lifecycle_to_selected_identity() {
-    let candidate = profile_for_digest();
+    let mut candidate = profile_for_digest();
+    candidate.lifecycle = pos_conformance::ProfileLifecycleV1::Candidate;
+    candidate.profile_digest = candidate.digest();
     let mut stable = candidate.clone();
     stable.lifecycle = pos_conformance::ProfileLifecycleV1::Stable;
     stable.profile_digest = stable.digest();
