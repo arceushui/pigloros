@@ -1,7 +1,9 @@
 # Public conformance fixture sources
 
 These files are the public, deterministic inputs and expected-result records
-for the seven CPF1 claim layers. They contain no implementation-private state,
+for the seven CPF1 claim layers. Each directory under `profiles/` is a
+separate public profile manifest and binds exactly one claim layer to its
+input/expected-result pair. They contain no implementation-private state,
 credentials, or signing material.
 
 The immutable bundle boundary in `pos-conformance` accepts these bytes from a
@@ -13,9 +15,10 @@ profile capability policy remains network-deny.
 The scenario names intentionally cover positive, negative, malformed, resource
 limit, deletion, downgrade, and independent-evaluation cases.
 
-`SHA256SUMS` is the independent byte inventory for all seven input records,
-seven expected-result records, and seven required support artifacts. The
-verification script checks this inventory before bundle materialization.
+`SHA256SUMS` is the independent byte inventory for all seven profile manifests,
+seven input records, seven expected-result records, and seven required support
+artifacts. The verification script checks this inventory before bundle
+materialization.
 
 The support directory contains the normative specification, schema, licence,
 notice, SBOM, provenance, and limitations members that every immutable bundle

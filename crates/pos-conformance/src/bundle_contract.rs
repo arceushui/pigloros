@@ -501,6 +501,14 @@ impl ConformanceBundleV1 {
             return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
         }
         preflight_archive(bytes)?;
+        let preflight = preflight_archive_caps(bytes)?;
+        let preflight_profile = ConformanceProfileV1::from_canonical_cbor(
+            preflight
+                .profile_bytes
+                .ok_or(BundleContractErrorV1::MemberMissing)?,
+        )
+        .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
+        validate_preflight_archive_caps(&preflight_profile, &preflight, bytes.len())?;
         let value = ciborium::from_reader(Cursor::new(bytes))
             .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
         let canonical_bytes = encode_archive_value(&value)
@@ -667,6 +675,233 @@ fn preflight_archive(bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
     } else {
         Err(BundleContractErrorV1::ArchiveEncodingInvalid)
     }
+}
+
+struct ArchivePreflight<'a> {
+    profile_bytes: Option<&'a [u8]>,
+    member_count: usize,
+    total_member_bytes: u64,
+    largest_member_bytes: u64,
+    largest_member_path_bytes: usize,
+    maximum_depth: usize,
+}
+
+struct ScannedArchiveItem<'a> {
+    bytes: Option<&'a [u8]>,
+    text_bytes: Option<usize>,
+    unsigned: Option<u64>,
+    maximum_depth: usize,
+}
+
+fn preflight_archive_caps(bytes: &[u8]) -> Result<ArchivePreflight<'_>, BundleContractErrorV1> {
+    fn length(
+        bytes: &[u8],
+        index: &mut usize,
+        additional: u8,
+    ) -> Result<u64, BundleContractErrorV1> {
+        let width = match additional {
+            value @ 0..=23 => return Ok(u64::from(value)),
+            24 => 1,
+            25 => 2,
+            26 => 4,
+            27 => 8,
+            _ => return Err(BundleContractErrorV1::ArchiveEncodingInvalid),
+        };
+        let end = index
+            .checked_add(width)
+            .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
+        let encoded = bytes
+            .get(*index..end)
+            .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
+        *index = end;
+        let mut value = [0_u8; 8];
+        value[8 - width..].copy_from_slice(encoded);
+        Ok(u64::from_be_bytes(value))
+    }
+
+    fn array_length(bytes: &[u8], index: &mut usize) -> Result<u64, BundleContractErrorV1> {
+        let initial = *bytes
+            .get(*index)
+            .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
+        *index += 1;
+        if initial >> 5 != 4 {
+            return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+        }
+        let length = length(bytes, index, initial & 0x1f)?;
+        if length > u64::try_from(MAX_MEMBERS).unwrap_or(u64::MAX) {
+            return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+        }
+        Ok(length)
+    }
+
+    fn item<'a>(
+        bytes: &'a [u8],
+        index: &mut usize,
+        depth: usize,
+    ) -> Result<ScannedArchiveItem<'a>, BundleContractErrorV1> {
+        if depth > usize::from(MAX_STRUCTURAL_NESTING) {
+            return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+        }
+        let initial = *bytes
+            .get(*index)
+            .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
+        *index += 1;
+        let major = initial >> 5;
+        let item_length = length(bytes, index, initial & 0x1f)?;
+        let mut scanned = ScannedArchiveItem {
+            bytes: None,
+            text_bytes: None,
+            unsigned: None,
+            maximum_depth: depth,
+        };
+        match major {
+            0 => scanned.unsigned = Some(item_length),
+            1 => {}
+            2 => {
+                if item_length > MAX_MEMBER_BYTES {
+                    return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+                }
+                let end = index
+                    .checked_add(usize::try_from(item_length).unwrap_or(usize::MAX))
+                    .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
+                scanned.bytes = Some(
+                    bytes
+                        .get(*index..end)
+                        .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?,
+                );
+                *index = end;
+            }
+            3 => {
+                if item_length > u64::try_from(MAX_MEMBER_PATH_BYTES).unwrap_or(u64::MAX) {
+                    return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+                }
+                let end = index
+                    .checked_add(usize::try_from(item_length).unwrap_or(usize::MAX))
+                    .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
+                bytes
+                    .get(*index..end)
+                    .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
+                scanned.text_bytes = Some(usize::try_from(item_length).unwrap_or(usize::MAX));
+                *index = end;
+            }
+            4 => {
+                if item_length > u64::try_from(MAX_MEMBERS).unwrap_or(u64::MAX) {
+                    return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+                }
+                for _ in 0..item_length {
+                    let child = item(bytes, index, depth + 1)?;
+                    scanned.maximum_depth = scanned.maximum_depth.max(child.maximum_depth);
+                }
+            }
+            7 => match initial & 0x1f {
+                20..=22 => {}
+                _ => return Err(BundleContractErrorV1::ArchiveEncodingInvalid),
+            },
+            _ => return Err(BundleContractErrorV1::ArchiveEncodingInvalid),
+        }
+        Ok(scanned)
+    }
+
+    fn members<'a>(
+        bytes: &'a [u8],
+        index: &mut usize,
+    ) -> Result<ArchivePreflight<'a>, BundleContractErrorV1> {
+        let member_count = array_length(bytes, index)?;
+        let mut result = ArchivePreflight {
+            profile_bytes: None,
+            member_count: usize::try_from(member_count).unwrap_or(usize::MAX),
+            total_member_bytes: 0,
+            largest_member_bytes: 0,
+            largest_member_path_bytes: 0,
+            maximum_depth: 1,
+        };
+        for _ in 0..member_count {
+            if array_length(bytes, index)? != 3 {
+                return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+            }
+            let path = item(bytes, index, 2)?;
+            let member = item(bytes, index, 2)?;
+            let role = item(bytes, index, 2)?;
+            let path_bytes = path
+                .text_bytes
+                .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
+            let member_bytes = member
+                .bytes
+                .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
+            let role = role
+                .unsigned
+                .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
+            result.maximum_depth = result
+                .maximum_depth
+                .max(path.maximum_depth)
+                .max(member.maximum_depth)
+                .max(role.maximum_depth);
+            result.largest_member_path_bytes = result.largest_member_path_bytes.max(path_bytes);
+            result.largest_member_bytes = result
+                .largest_member_bytes
+                .max(u64::try_from(member_bytes.len()).unwrap_or(u64::MAX));
+            result.total_member_bytes = result
+                .total_member_bytes
+                .checked_add(u64::try_from(member_bytes.len()).unwrap_or(u64::MAX))
+                .ok_or(BundleContractErrorV1::MemberOutOfBounds)?;
+            if role == BundleMemberRoleV1::Profile.code()
+                && result.profile_bytes.replace(member_bytes).is_some()
+            {
+                return Err(BundleContractErrorV1::MemberMissing);
+            }
+        }
+        Ok(result)
+    }
+
+    let mut index = 0;
+    if array_length(bytes, &mut index)? != 6 {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+    }
+    let mut maximum_depth = 0;
+    for field in 0..6 {
+        if field == 3 {
+            let mut result = members(bytes, &mut index)?;
+            for _ in 0..3 {
+                let field = item(bytes, &mut index, 1)?;
+                maximum_depth = maximum_depth.max(field.maximum_depth);
+            }
+            maximum_depth = maximum_depth.max(result.maximum_depth);
+            if index != bytes.len() {
+                return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+            }
+            result.maximum_depth = maximum_depth;
+            return Ok(result);
+        }
+        let field = item(bytes, &mut index, 1)?;
+        maximum_depth = maximum_depth.max(field.maximum_depth);
+    }
+    Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+}
+
+fn validate_preflight_archive_caps(
+    profile: &ConformanceProfileV1,
+    preflight: &ArchivePreflight<'_>,
+    encoded_len: usize,
+) -> Result<(), BundleContractErrorV1> {
+    let caps = &profile.evaluator_protocol.hard_caps;
+    if u64::try_from(encoded_len).unwrap_or(u64::MAX) > caps.max_total_bundle_bytes
+        || u64::try_from(preflight.profile_bytes.map_or(0, <[u8]>::len)).unwrap_or(u64::MAX)
+            > caps.max_profile_bytes
+        || preflight.maximum_depth > usize::from(caps.max_structural_nesting)
+        || preflight.member_count > usize::try_from(caps.max_bundle_members).unwrap_or(usize::MAX)
+        || preflight.largest_member_path_bytes > usize::from(caps.max_member_path_bytes)
+        || preflight.largest_member_bytes > caps.max_member_bytes
+        || preflight.total_member_bytes > caps.max_total_bundle_bytes
+    {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    caps.validate_case_count(u32::try_from(profile.fixtures.len()).unwrap_or(u32::MAX))
+        .map_err(|_| BundleContractErrorV1::MemberOutOfBounds)?;
+    caps.validate_compression_expansion(
+        u64::try_from(encoded_len).unwrap_or(u64::MAX),
+        u64::try_from(encoded_len).unwrap_or(u64::MAX),
+    )
+    .map_err(|_| BundleContractErrorV1::MemberOutOfBounds)
 }
 
 fn validate_archive_caps(
@@ -1080,10 +1315,15 @@ fn validate_supporting_members(
         BundleMemberRoleV1::Provenance,
         BundleMemberRoleV1::Limitations,
     ];
-    if REQUIRED_ROLES
-        .iter()
-        .any(|role| !members.iter().any(|member| member.role == *role))
-    {
+    if REQUIRED_ROLES.iter().any(|role| {
+        let required = required_support_digests(profile, *role);
+        let provided = members
+            .iter()
+            .filter(|member| member.role == *role)
+            .map(|member| member.digest)
+            .collect::<BTreeSet<_>>();
+        required.is_empty() || !required.is_subset(&provided)
+    }) {
         Err(BundleContractErrorV1::MemberMissing)
     } else if members
         .iter()
@@ -1096,45 +1336,78 @@ fn validate_supporting_members(
     }
 }
 
+fn required_support_digests(
+    profile: &ConformanceProfileV1,
+    role: BundleMemberRoleV1,
+) -> BTreeSet<[u8; 32]> {
+    let mut digests = BTreeSet::new();
+    match role {
+        BundleMemberRoleV1::NormativeSpecification => {
+            digests.insert(profile.normative_spec_digest);
+        }
+        BundleMemberRoleV1::Schema => {
+            digests.extend(profile.public_schema_digests.iter().copied());
+            digests.extend(
+                profile
+                    .fixtures
+                    .iter()
+                    .map(|fixture| fixture.public_schema_digest),
+            );
+        }
+        BundleMemberRoleV1::Licence => {
+            digests.extend(profile.fixtures.iter().map(|fixture| {
+                let identity = format!("{}\n", fixture.provenance.licence_id);
+                *blake3::hash(identity.as_bytes()).as_bytes()
+            }));
+        }
+        BundleMemberRoleV1::Notice => {
+            digests.extend(
+                profile
+                    .fixtures
+                    .iter()
+                    .map(|fixture| fixture.provenance.notices_digest),
+            );
+        }
+        BundleMemberRoleV1::Sbom => {
+            digests.extend(
+                profile
+                    .fixtures
+                    .iter()
+                    .map(|fixture| fixture.provenance.sbom_digest),
+            );
+        }
+        BundleMemberRoleV1::Provenance => {
+            digests.insert(profile.provenance_digest);
+            digests.extend(profile.fixtures.iter().flat_map(|fixture| {
+                [
+                    fixture.provenance.source_digest,
+                    fixture.provenance.build_digest,
+                    fixture.provenance.publication_review_digest,
+                ]
+            }));
+        }
+        BundleMemberRoleV1::Limitations => {
+            digests.insert(profile.limitations_digest);
+            digests.extend(
+                profile
+                    .fixtures
+                    .iter()
+                    .map(|fixture| fixture.provenance.limitations_digest),
+            );
+        }
+        BundleMemberRoleV1::FixtureInput
+        | BundleMemberRoleV1::ExpectedResult
+        | BundleMemberRoleV1::Profile => {}
+    }
+    digests
+}
+
 fn support_digest_is_bound(
     profile: &ConformanceProfileV1,
     role: BundleMemberRoleV1,
     digest: &[u8; 32],
 ) -> bool {
-    match role {
-        BundleMemberRoleV1::NormativeSpecification => *digest == profile.normative_spec_digest,
-        BundleMemberRoleV1::Schema => profile.public_schema_digests.contains(digest),
-        BundleMemberRoleV1::Licence => profile.fixtures.iter().any(|fixture| {
-            let licence_identity = format!("{}\n", fixture.provenance.licence_id);
-            *digest == *blake3::hash(licence_identity.as_bytes()).as_bytes()
-        }),
-        BundleMemberRoleV1::Notice => profile
-            .fixtures
-            .iter()
-            .any(|fixture| *digest == fixture.provenance.notices_digest),
-        BundleMemberRoleV1::Sbom => profile
-            .fixtures
-            .iter()
-            .any(|fixture| *digest == fixture.provenance.sbom_digest),
-        BundleMemberRoleV1::Provenance => {
-            *digest == profile.provenance_digest
-                || profile.fixtures.iter().any(|fixture| {
-                    *digest == fixture.provenance.source_digest
-                        || *digest == fixture.provenance.build_digest
-                        || *digest == fixture.provenance.publication_review_digest
-                })
-        }
-        BundleMemberRoleV1::Limitations => {
-            *digest == profile.limitations_digest
-                || profile
-                    .fixtures
-                    .iter()
-                    .any(|fixture| *digest == fixture.provenance.limitations_digest)
-        }
-        BundleMemberRoleV1::FixtureInput
-        | BundleMemberRoleV1::ExpectedResult
-        | BundleMemberRoleV1::Profile => false,
-    }
+    role.is_supporting() && required_support_digests(profile, role).contains(digest)
 }
 
 fn validate_selected_bundle_caps(
@@ -1506,6 +1779,14 @@ mod tests {
         profile
     }
 
+    fn profile_for_claim_layer(index: usize, claim_layer: ClaimLayerV1) -> ConformanceProfileV1 {
+        let mut profile = profile();
+        profile.profile_id = format!("pigloros.w8.{}.1.0.0", claim_layer_code(claim_layer));
+        profile.fixtures = vec![profile.fixtures[index].clone()];
+        profile.profile_digest = profile.digest();
+        profile
+    }
+
     fn bundle_inputs(
         profile: &ConformanceProfileV1,
         mode: BundleModeV1,
@@ -1810,6 +2091,31 @@ mod tests {
     }
 
     #[test]
+    fn each_public_claim_layer_materializes_as_its_own_profile_and_bundle(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let claim_layers = [
+            ClaimLayerV1::ArtifactIntegrity,
+            ClaimLayerV1::ReplayConformance,
+            ClaimLayerV1::KnowledgeNonInterference,
+            ClaimLayerV1::GatewayClientConformance,
+            ClaimLayerV1::PluginConformance,
+            ClaimLayerV1::MetricConformance,
+            ClaimLayerV1::EmpiricalEvaluation,
+        ];
+        for (index, claim_layer) in claim_layers.into_iter().enumerate() {
+            let profile = profile_for_claim_layer(index, claim_layer);
+            assert_eq!(profile.fixtures.len(), 1);
+            for mode in [BundleModeV1::Local, BundleModeV1::AirGapped] {
+                let bundle = signed_bundle(&profile, mode)?;
+                assert_eq!(bundle.manifest.expected_results.len(), 1);
+                assert_eq!(bundle.manifest.mode, mode);
+                bundle.validate()?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn public_archive_decoder_rejects_noncanonical_and_unknown_roles(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let bundle = signed_bundle(&profile(), BundleModeV1::Local)?;
@@ -2107,6 +2413,13 @@ mod tests {
         assert_eq!(
             validate_selected_bundle_caps(&limited_profile, &bundle),
             Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+
+        let mut incomplete_profile = profile();
+        incomplete_profile.public_schema_digests.push(digest(99));
+        assert_eq!(
+            validate_supporting_members(&incomplete_profile, &bundle.members),
+            Err(BundleContractErrorV1::MemberMissing)
         );
         Ok(())
     }

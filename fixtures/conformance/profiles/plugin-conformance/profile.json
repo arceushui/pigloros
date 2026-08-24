@@ -1,0 +1,8 @@
+{
+  "profile_id": "pigloros.w8.plugin-conformance.1.0.0",
+  "claim_layer": "plugin-conformance",
+  "input": "inputs/plugin-deletion.json",
+  "expected": "expected/plugin-deletion.json",
+  "execution_profiles": ["deterministic-local-v1", "deterministic-air-gapped-v1"],
+  "bundle_modes": ["local", "air-gapped"]
+}
