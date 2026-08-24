@@ -3070,6 +3070,47 @@ mod tests {
             Err(ConsentError::NoConsent)
         );
         assert!(!appended.get());
+
+        struct FenceGate;
+
+        impl ConsentGate for FenceGate {
+            fn check_consent(
+                &self,
+                _: TimelineId,
+                _: EntityId,
+                _: &Kind,
+                _: u64,
+                _: u64,
+            ) -> Result<ConsentCapabilityToken, ConsentError> {
+                Err(ConsentError::NoConsent)
+            }
+
+            fn fence_timeline_at(
+                &self,
+                _: TimelineId,
+                _: u64,
+            ) -> Result<(), ConsentError> {
+                Ok(())
+            }
+
+            fn fence_subject_at(
+                &self,
+                _: TimelineId,
+                _: EntityId,
+                _: u64,
+            ) -> Result<(), ConsentError> {
+                Ok(())
+            }
+        }
+
+        let fence_gate = FenceGate;
+        assert!(fence_gate
+            .with_revocation_fence(timeline, None, 1, &mut append)
+            .is_ok());
+        assert!(fence_gate
+            .with_revocation_fence(timeline, Some(grant.subject_id), 1, &mut append)
+            .is_ok());
+        assert!(appended.get());
     }
 
     #[test]

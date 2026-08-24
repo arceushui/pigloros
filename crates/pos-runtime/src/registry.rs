@@ -320,8 +320,12 @@ mod coverage_entrypoints {
         let mut registry = PluginRegistry::new();
         registry.register_driver(Box::new(NoopDriver));
         let timeline = TimelineId::new();
+        let restore_event = event("coverage.restore", 1);
         assert!(registry
-            .restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[],)
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(timeline, Seq::from_u64(1))],
+                &[restore_event],
+            )
             .is_ok());
         assert!(registry.tick_cadenced(timeline, 0).is_ok());
     }
@@ -452,6 +456,7 @@ mod coverage_entrypoints {
             event(pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE, 2),
         ];
 
+        registry.fold_events(&events);
         assert!(registry
             .restore_driver_state(
                 &[TimelineHistorySegment::new(timeline, Seq::from_u64(2))],
@@ -464,6 +469,7 @@ mod coverage_entrypoints {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             vec!["ordinary.event".to_owned()]
         );
+        assert!(registry.tick_cadenced(timeline, 0).is_ok());
     }
 }
 
