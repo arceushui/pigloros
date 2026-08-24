@@ -832,7 +832,8 @@ mod tests {
     fn bundle_inputs(
         profile: &ConformanceProfileV1,
         mode: BundleModeV1,
-    ) -> (Vec<BundleMemberV1>, Vec<BundleExpectedResultV1>) {
+    ) -> Result<(Vec<BundleMemberV1>, Vec<BundleExpectedResultV1>), Box<dyn std::error::Error>>
+    {
         let execution_mode = match mode {
             BundleModeV1::Local => ExecutionModeV1::Local,
             BundleModeV1::AirGapped => ExecutionModeV1::AirGapped,
@@ -855,8 +856,7 @@ mod tests {
             }
             let bytes = match &fixture.expected {
                 ExpectedResultV1::CanonicalBytes { bytes, .. } => bytes.clone(),
-                typed_or_divergent => crate::expected_result_bytes(typed_or_divergent)
-                    .expect("test fixture expected result must encode"),
+                typed_or_divergent => crate::expected_result_bytes(typed_or_divergent)?,
             };
             let path = expected_member_path(
                 &fixture.case_id,
@@ -875,25 +875,24 @@ mod tests {
             assert!(fixture.modes.contains(&execution_mode));
             members.push(member);
         }
-        (members, expected_results)
+        Ok((members, expected_results))
     }
 
     fn signed_bundle(
         profile: &ConformanceProfileV1,
         mode: BundleModeV1,
     ) -> Result<ConformanceBundleV1, Box<dyn std::error::Error>> {
-        let (members, expected_results) = bundle_inputs(profile, mode);
+        let (members, expected_results) = bundle_inputs(profile, mode)?;
         let bundle = ConformanceBundleV1::materialize(profile, mode, members, expected_results)?;
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
         Ok(bundle.sign(&signing_key)?)
     }
 
-    fn expected_member_index(bundle: &ConformanceBundleV1) -> usize {
+    fn expected_member_index(bundle: &ConformanceBundleV1) -> Option<usize> {
         bundle
             .members
             .iter()
             .position(|member| member.expected_result)
-            .expect("test bundle has an expected-result member")
     }
 
     #[test]
@@ -1092,7 +1091,7 @@ mod tests {
             BundleMemberV1::new("b", vec![2], false),
         ];
         assert!(members_strictly_ordered(&ordered));
-        let mut descending = ordered.clone();
+        let mut descending = ordered;
         descending.swap(0, 1);
         assert!(!members_strictly_ordered(&descending));
         let duplicate = vec![
@@ -1180,7 +1179,8 @@ mod tests {
 
         let mut air_with_other_path = air_gapped;
         let alternate_path = "expected/alternate.bin".to_owned();
-        let expected_index = expected_member_index(&air_with_other_path);
+        let expected_index = expected_member_index(&air_with_other_path)
+            .ok_or("test bundle has an expected-result member")?;
         air_with_other_path.members[expected_index].path = alternate_path.clone();
         air_with_other_path.manifest.members[expected_index].path = alternate_path.clone();
         air_with_other_path.manifest.expected_results[0].member_path = alternate_path;
@@ -1332,13 +1332,12 @@ mod tests {
             Err(BundleContractErrorV1::ExpectedResultMismatch)
         );
 
-        let mut typed_profile = profile.clone();
+        let mut typed_profile = profile;
         typed_profile.fixtures[0].expected =
             ExpectedResultV1::TypedFailure(SafeErrorCodeV1::InvalidEncoding);
-        let typed_bytes = crate::expected_result_bytes(&typed_profile.fixtures[0].expected)
-            .expect("typed failure has a canonical public representation");
+        let typed_bytes = crate::expected_result_bytes(&typed_profile.fixtures[0].expected)?;
         let typed_digest = *blake3::hash(&typed_bytes).as_bytes();
-        let mut typed_members = bundle.members.clone();
+        let mut typed_members = bundle.members;
         let typed_path = expected_member_path(
             &typed_profile.fixtures[0].case_id,
             typed_profile.fixtures[0].claim_layer,
@@ -1347,9 +1346,9 @@ mod tests {
         let typed_member_index = typed_members
             .iter()
             .position(|member| member.path == typed_path)
-            .expect("case-00 expected member");
+            .ok_or("case-00 expected member")?;
         typed_members[typed_member_index] = BundleMemberV1::new(typed_path, typed_bytes, true);
-        let mut typed_manifest = bundle.manifest.clone();
+        let mut typed_manifest = bundle.manifest;
         typed_manifest.expected_results[0].digest = typed_digest;
         assert_eq!(
             validate_expected_results(&typed_profile, &typed_manifest, &typed_members),
@@ -1364,7 +1363,8 @@ mod tests {
         let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
 
         let mut wrong_digest_members = bundle.members.clone();
-        let expected_index = expected_member_index(&bundle);
+        let expected_index =
+            expected_member_index(&bundle).ok_or("test bundle has an expected-result member")?;
         wrong_digest_members[expected_index].digest = digest(99);
         assert_eq!(
             validate_expected_results(&profile, &bundle.manifest, &wrong_digest_members,),
@@ -1379,7 +1379,8 @@ mod tests {
             *digest = *blake3::hash(bytes).as_bytes();
         }
         let mut empty_members = bundle.members.clone();
-        let expected_index = expected_member_index(&bundle);
+        let expected_index =
+            expected_member_index(&bundle).ok_or("test bundle has an expected-result member")?;
         empty_members[expected_index].bytes.clear();
         empty_members[expected_index].digest =
             *blake3::hash(&empty_members[expected_index].bytes).as_bytes();
@@ -1471,7 +1472,8 @@ mod tests {
         let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
 
         let mut tampered = bundle.clone();
-        let expected_index = expected_member_index(&tampered);
+        let expected_index =
+            expected_member_index(&tampered).ok_or("test bundle has an expected-result member")?;
         tampered.members[expected_index].bytes[0] ^= 1;
         assert_eq!(
             tampered.validate(),
@@ -1578,7 +1580,8 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let profile = profile();
         let mut secret = signed_bundle(&profile, BundleModeV1::Local)?;
-        let expected_index = expected_member_index(&secret);
+        let expected_index =
+            expected_member_index(&secret).ok_or("test bundle has an expected-result member")?;
         secret.members[expected_index].bytes = b"PRIVATE KEY material".to_vec();
         secret.members[expected_index].digest =
             *blake3::hash(&secret.members[expected_index].bytes).as_bytes();
