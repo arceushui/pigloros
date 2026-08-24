@@ -10,8 +10,8 @@ use pos_core::{
     },
     ids::{EntityId, EventId, TimelineId},
     store::{
-        AppendIdentity, AppendIntent, AppendOrDuplicateOutcome, EventReadBounds, EventStore,
-        PurgeOutcome, SeqRange,
+        AppendDedupScope, AppendIdentity, AppendIntent, AppendOrDuplicateOutcome, EventReadBounds,
+        EventStore, PurgeOutcome, SeqRange,
     },
     timeline::Timeline,
     ConsentGrantedV1, ConsentRevocationReservation, ConsentRevokedV1, CoreError,
