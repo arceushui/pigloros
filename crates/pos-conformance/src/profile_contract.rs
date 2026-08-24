@@ -1189,6 +1189,22 @@ fn validate_stable_attestation(
     policy: Option<&TrustedRootPolicyV1>,
 ) -> Result<(), ConformanceContractError> {
     let attestation = &evidence.attestation;
+    validate_stable_attestation_fields(attestation, requirements, policy)?;
+    let key = signing::verifying_key_from_public_key(&PublicKey::from_bytes(
+        attestation.signer_public_key,
+    ))
+    .map_err(|_| ConformanceContractError::IndependenceEvidenceMissing)?;
+    let signature = Signature::from_bytes(attestation.signature);
+    let payload = encode_value(&stable_attestation_payload(evidence))?;
+    signing::verify(&key, &CanonicalBytes::from_vec(payload), &signature)
+        .map_err(|_| ConformanceContractError::IndependenceEvidenceMissing)
+}
+
+fn validate_stable_attestation_fields(
+    attestation: &StableEvidenceAttestationV1,
+    requirements: &IndependenceRequirementsV1,
+    policy: Option<&TrustedRootPolicyV1>,
+) -> Result<(), ConformanceContractError> {
     if zero_digest(&attestation.signer_public_key)
         || attestation.signature == [0; 64]
         || zero_digest(&attestation.trust_root_digest)
@@ -1204,14 +1220,7 @@ fn validate_stable_attestation(
     {
         return Err(ConformanceContractError::IndependenceEvidenceMissing);
     }
-    let key = signing::verifying_key_from_public_key(&PublicKey::from_bytes(
-        attestation.signer_public_key,
-    ))
-    .map_err(|_| ConformanceContractError::IndependenceEvidenceMissing)?;
-    let signature = Signature::from_bytes(attestation.signature);
-    let payload = encode_value(&stable_attestation_payload(evidence))?;
-    signing::verify(&key, &CanonicalBytes::from_vec(payload), &signature)
-        .map_err(|_| ConformanceContractError::IndependenceEvidenceMissing)
+    Ok(())
 }
 
 fn stable_attestation_payload(evidence: &StableImplementationEvidenceV1) -> Value {
@@ -5652,6 +5661,39 @@ mod tests {
                 Err(ConformanceContractError::IndependenceEvidenceMissing)
             );
         }
+
+        let valid = stable_evidence("alpha", 30).attestation;
+        let mut zero_signer = valid.clone();
+        zero_signer.signer_public_key = [0; 32];
+        zero_signer.trust_root_digest = digest_bytes(
+            b"PiglorOS.ConformanceTrustRoot.v1",
+            &Value::Bytes(vec![0; 32]),
+        );
+        assert_eq!(
+            validate_stable_attestation_fields(&zero_signer, &requirements, None),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+
+        let mut zero_signature = valid.clone();
+        zero_signature.signature = [0; 64];
+        assert_eq!(
+            validate_stable_attestation_fields(&zero_signature, &requirements, None),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+
+        let mut zero_root = valid.clone();
+        zero_root.trust_root_digest = [0; 32];
+        assert_eq!(
+            validate_stable_attestation_fields(&zero_root, &requirements, None),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+
+        let mut wrong_nonzero_root = valid;
+        wrong_nonzero_root.trust_root_digest = digest(99);
+        assert_eq!(
+            validate_stable_attestation_fields(&wrong_nonzero_root, &requirements, None),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
