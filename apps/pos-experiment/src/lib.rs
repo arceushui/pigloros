@@ -5628,6 +5628,7 @@ mod tests {
         experiment.register(&plugin, None, None).test_ok();
         let session = experiment.start().test_ok();
         let timeline_id = session.timeline().id();
+        eprintln!("durable-recovery stage=start timeline={timeline_id}");
         let subject = EntityId::new();
         let authority = ConsentAuthority::new();
         let token = authority.record_grant_on_timeline(
@@ -5649,6 +5650,7 @@ mod tests {
             .with_consent_authority(authority.clone())
             .with_protected_token(token.clone(), 0);
         assert_eq!(session.append_events(&[]).test_ok(), 0);
+        eprintln!("durable-recovery stage=empty-append");
         assert_eq!(
             session
                 .append_events(&[EventDraft::new(
@@ -5659,11 +5661,13 @@ mod tests {
                 .test_ok(),
             1
         );
+        eprintln!("durable-recovery stage=event-append");
         assert_eq!(session.source_events().test_ok().len(), 1);
         assert!(session
             .projection_state_for_reducer("missing", subject, &token, current_now_secs())
             .test_ok()
             .is_none());
+        eprintln!("durable-recovery stage=projection-before-revoke");
 
         session.revoke_consent_for_subject_at_boundary(subject);
         assert!(matches!(
@@ -5673,6 +5677,7 @@ mod tests {
                 ..
             })
         ));
+        eprintln!("durable-recovery stage=revoke-step");
         drop(session);
 
         let resumed_plugin = TestPlugin {
@@ -5693,8 +5698,12 @@ mod tests {
             .with_consent_authority(authority)
             .resume(timeline_id)
             .test_ok();
+        eprintln!("durable-recovery stage=resume");
+        let projection =
+            resumed.projection_state_for_reducer("missing", subject, &token, current_now_secs());
+        eprintln!("durable-recovery projection={projection:?}");
         assert!(matches!(
-            resumed.projection_state_for_reducer("missing", subject, &token, current_now_secs()),
+            projection,
             Err(ExperimentError::Runtime(RuntimeError::Consent(
                 pos_core::ConsentError::Revoked
             )))
