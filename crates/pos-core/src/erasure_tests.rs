@@ -915,7 +915,7 @@ fn coordinator_finalize_from_dispatched_state_rechecks_authority() -> Result<(),
 #[test]
 fn coordinator_persists_host_freeze_provenance() -> Result<(), ErasureErrorV1> {
     let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
-    let port = test_port(true, vec![target]);
+    let mut port = test_port(true, vec![target]);
     port.admitted_freeze_provenance = Some(reference(42));
     port.admitted_freeze_position = Some(42);
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
