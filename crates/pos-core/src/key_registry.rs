@@ -84,7 +84,8 @@ impl KeyRoleV1 {
 /// subject-data-key path described by ADR-041.
 ///
 /// This is a policy marker, not a compatibility implementation: the current
-/// product has no legacy signer, migration path, or ReplayClaim upgrade path.
+/// product has no legacy signer, migration path, or `ReplayClaim` upgrade
+/// path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LegacySubjectDataSignatureDispositionV1 {
     /// Existing signatures may be verified with their recorded public key,
