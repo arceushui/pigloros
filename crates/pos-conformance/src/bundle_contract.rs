@@ -2414,7 +2414,7 @@ mod tests {
         );
 
         let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
-        let mut limited_profile = profile;
+        let mut limited_profile = profile.clone();
         limited_profile
             .evaluator_protocol
             .hard_caps
