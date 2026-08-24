@@ -5235,7 +5235,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn independence_and_stable_report_bindings_reject_each_mismatch() {
         let requirements = profile().independence_requirements;
-        let evidence = stable_evidence("alpha", 30);
+        let mut evidence = stable_evidence("alpha", 30);
         assert_eq!(
             validate_independence_evidence(&evidence.independence, &requirements),
             Ok(())
@@ -5301,6 +5301,7 @@ mod tests {
         );
 
         let profile_value = profile();
+        refresh_stable_report_for_profile(&mut evidence, &profile_value);
         assert_eq!(validate_report_binding(&evidence, &profile_value), Ok(()));
         let reject_report = |change: &dyn Fn(&mut StableImplementationEvidenceV1)| {
             let mut changed = stable_evidence("alpha", 30);
