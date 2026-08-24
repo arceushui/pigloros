@@ -6986,7 +6986,7 @@ pub mod tests {
         assert!(!valid_conformance_case_result(&mismatched_error));
         assert_case_rejects(mismatched_error);
 
-        let mut coordinate_without_match = valid.clone();
+        let mut coordinate_without_match = valid;
         coordinate_without_match.first_coordinate = Some(vec![1]);
         assert!(!valid_conformance_case_result(&coordinate_without_match));
         assert_case_rejects(coordinate_without_match);
