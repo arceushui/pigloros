@@ -2240,6 +2240,7 @@ mod tests {
         id: PluginId,
         name: &'static str,
         event_types: Vec<Kind>,
+        has_driver: bool,
         has_reducer: bool,
     }
 
@@ -2254,7 +2255,7 @@ mod tests {
             Capability {
                 owned_event_types: self.event_types.clone(),
                 owned_entity_kinds: vec![],
-                has_driver: true,
+                has_driver: self.has_driver,
                 has_reducer: self.has_reducer,
             }
         }
@@ -2265,6 +2266,7 @@ mod tests {
             id: PluginId::new(),
             name,
             event_types: event_types.iter().map(|s| Kind::new(*s)).collect(),
+            has_driver: true,
             has_reducer: false,
         }
     }
@@ -4506,6 +4508,7 @@ mod tests {
                 id: plugin_id,
                 name: "session-ticker",
                 event_types: vec![Kind::new("session.event")],
+                has_driver: true,
                 has_reducer: true,
             };
             let driver = FixedDriver::new(entity, "session.event", 1);
@@ -4638,6 +4641,7 @@ mod tests {
             id: plugin_id,
             name: "consent-ticker",
             event_types: vec![Kind::new("experiment.tick")],
+            has_driver: true,
             has_reducer: false,
         };
         let mut recovery = Experiment::new(ExperimentConfig {
@@ -5622,6 +5626,7 @@ mod tests {
             id: PluginId::new(),
             name: "unit-session-events",
             event_types: vec![Kind::new("unit.session.event")],
+            has_driver: false,
             has_reducer: false,
         };
         let plugin_id = plugin.id;
@@ -5688,6 +5693,7 @@ mod tests {
             id: plugin_id,
             name: "unit-session-events",
             event_types: vec![Kind::new("unit.session.event")],
+            has_driver: false,
             has_reducer: false,
         };
         let mut resumed_experiment = Experiment::new(ExperimentConfig {
