@@ -581,10 +581,10 @@ fn append_driver_drafts(
         return Err(error.into());
     }
     if drafts.is_empty() {
-        if let Err(error) = registry.commit_step_at(observed_through, 0) {
-            return Err(error.into());
-        }
-        Ok(0)
+        registry
+            .commit_step_at(observed_through, 0)
+            .map(|()| 0)
+            .map_err(ExperimentError::from)
     } else {
         store
             .logical_head(timeline_id)
@@ -1053,9 +1053,9 @@ impl Experiment {
                     || gate.fence_timeline_at(timeline_id, marker.seq.as_u64()),
                     |subject| gate.fence_subject_at(timeline_id, subject, marker.seq.as_u64()),
                 );
-                if let Err(error) = result {
-                    return Err(map_runtime_error(pos_runtime::RuntimeError::Consent(error)));
-                }
+                result.map_err(|error| {
+                    map_runtime_error(pos_runtime::RuntimeError::Consent(error))
+                })?;
             }
         }
         Ok(ExperimentSession {
