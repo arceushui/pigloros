@@ -2176,6 +2176,20 @@ mod tests {
     }
 
     #[test]
+    fn host_authority_rejects_a_same_key_token_with_changed_authority_state() {
+        let authority = ConsentAuthority::new();
+        let grant = sample_granted();
+        let (timeline, token) = record_test_grant(&authority, &grant);
+        let mut changed = token.clone();
+        changed.fork_permitted = !changed.fork_permitted;
+
+        assert_eq!(
+            authority.validate_on_timeline(timeline, &changed, 0, 0),
+            Err(ConsentError::Revoked)
+        );
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn host_authority_rejects_a_changed_token_even_when_the_active_token_is_unfenced() {
         let authority = ConsentAuthority::new();
@@ -3010,6 +3024,21 @@ mod tests {
             .test_ok();
         authority.restore_from_history(timeline, &[]).test_ok();
         assert_eq!(reservation.commit_durable(), Err(ConsentError::NoConsent));
+    }
+
+    #[test]
+    fn abort_durable_reports_when_the_reservation_was_already_rolled_back() {
+        let authority = ConsentAuthority::new();
+        let timeline = TimelineId::new();
+        let grant = sample_granted();
+        let _token = authority.record_grant_on_timeline(timeline, &grant);
+        let revocation = sample_revoked(&grant);
+        let mut reservation = authority
+            .begin_revocation_on_timeline(timeline, &revocation)
+            .test_ok();
+        reservation.rollback();
+
+        assert!(!reservation.abort_durable());
     }
 
     #[test]
