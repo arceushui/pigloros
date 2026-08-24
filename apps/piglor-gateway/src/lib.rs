@@ -884,8 +884,8 @@ impl Gateway {
     ) -> tokio::sync::OwnedMutexGuard<()> {
         let mut hasher = DefaultHasher::new();
         timeline.hash(&mut hasher);
-        let stripe = usize::try_from(hasher.finish() % CONSENT_LOCK_STRIPES_U64)
-            .unwrap_or_default();
+        let stripe =
+            usize::try_from(hasher.finish() % CONSENT_LOCK_STRIPES_U64).unwrap_or_default();
         let lock = Arc::clone(&self.consent_history_locks[stripe]);
         lock.lock_owned().await
     }
@@ -1251,7 +1251,6 @@ impl Gateway {
                     "consent revocation was already fenced".to_owned(),
                 )))
             }
-            Err(error) => return Err(GatewayError::Store(CoreError::Storage(error.to_string()))),
         };
         let event = match self
             .store
@@ -2960,10 +2959,7 @@ mod tests {
         let clone = gateway.clone();
         let grant_task = tokio::spawn(async move {
             clone
-                .issue_consent_grant(
-                    &timeline.to_string(),
-                    consent_grant(EntityId::new(), 1),
-                )
+                .issue_consent_grant(&timeline.to_string(), consent_grant(EntityId::new(), 1))
                 .await
         });
 
