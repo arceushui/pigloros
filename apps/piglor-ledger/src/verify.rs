@@ -1037,6 +1037,74 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn verify_store_event_rejects_unbound_and_invalid_role_signatures(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use pos_core::{
+            clock::{Seq, WallTime},
+            event::{CanonicalBytes, Event, Kind, SchemaVersion},
+            ids::{EntityId, EventId},
+            Hash, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, PublicKey,
+            Signature,
+        };
+        use pos_crypto::key_roles::key_material_digest;
+
+        let payload = CanonicalBytes::from_static(b"signed payload");
+        let mut event = Event {
+            id: EventId::new(),
+            entity: EntityId::new(),
+            event_type: Kind::new(EVENT_TYPE_PREDICTION),
+            payload,
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: Some(Signature::from_bytes([0; 64])),
+            signature_identity: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        };
+        let empty_registry = KeyRegistryStateV1::new();
+        let missing_identity = super::verify_store_event(&event, None, &empty_registry)
+            .test_ok()?
+            .ok_or("expected missing identity mismatch")?;
+        assert!(missing_identity.1.contains("identity is missing"));
+
+        event.signature_identity = Some(KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 1));
+        let wrong_role = super::verify_store_event(&event, None, &empty_registry)
+            .test_ok()?
+            .ok_or("expected wrong role mismatch")?;
+        assert!(wrong_role.1.contains("TimelineIntegritySigning"));
+
+        let (signing_key, verifying_key) = pos_crypto::signing::generate_keypair();
+        let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+        let registered_key = PublicKey::from_bytes(verifying_key.to_bytes());
+        let mut registry = KeyRegistryStateV1::new();
+        registry
+            .register_key(KeyRegistrationV1::new(
+                identity,
+                key_material_digest(&signing_key.to_bytes()),
+                Some(registered_key),
+            ))
+            .test_ok()?;
+        event.signature_identity = Some(identity);
+
+        let supplied_mismatch =
+            super::verify_store_event(&event, Some(PublicKey::from_bytes([7; 32])), &registry)
+                .test_ok()?
+                .ok_or("expected supplied-key mismatch")?;
+        assert!(supplied_mismatch.1.contains("persisted registry"));
+
+        let no_public_key = super::verify_store_event(&event, None, &empty_registry).test_err()?;
+        assert!(no_public_key.to_string().contains("no public key"));
+
+        let invalid_signature = super::verify_store_event(&event, None, &registry)
+            .test_ok()?
+            .ok_or("expected invalid signature mismatch")?;
+        assert!(!invalid_signature.1.is_empty());
+        Ok(())
+    }
+
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn nib_rejects_invalid_hex_char() {

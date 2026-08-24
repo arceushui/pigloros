@@ -145,6 +145,11 @@ mod tests {
     fn role_signature_rejects_role_and_epoch_confusion() -> Result<(), Box<dyn std::error::Error>> {
         let (signing_key, verifying_key) = generate_keypair();
         let value = payload(b"attribution");
+        assert!(KeyRoleV1::SubjectAttributionSigning.is_signing());
+        assert!(KeyRoleV1::TimelineIntegritySigning.is_signing());
+        assert!(KeyRoleV1::PluginReleaseSigning.is_signing());
+        assert!(!KeyRoleV1::SubjectDataEncryption.is_signing());
+        assert!(!KeyRoleV1::ExportRecipientEncryption.is_signing());
         let signature = sign_for_role(
             &signing_key,
             KeyRoleV1::SubjectAttributionSigning,

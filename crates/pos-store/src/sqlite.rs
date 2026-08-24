@@ -8990,6 +8990,18 @@ mod tests {
     }
 
     #[test]
+    fn registry_destruction_reports_a_missing_durable_snapshot() {
+        let mut store = new_store();
+        let request = KeyDestructionRequestV1::new(
+            KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1),
+            Hash::from_bytes([1; 32]),
+            Hash::from_bytes([2; 32]),
+        );
+        let error = store.destroy_key_registry(request).test_err();
+        assert!(error.to_string().contains("durable key registry"));
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn read_rejects_bad_signature_blob_length() {
         let mut store = new_store();
