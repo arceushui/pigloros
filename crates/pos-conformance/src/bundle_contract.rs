@@ -570,9 +570,7 @@ fn validate_expected_results(
     Ok(())
 }
 
-fn expected_identity(
-    values: &[BundleExpectedResultV1],
-) -> Vec<(&str, ClaimLayerV1, [u8; 32], &str, [u8; 32])> {
+fn expected_identity(values: &[BundleExpectedResultV1]) -> ExpectedIdentity<'_> {
     values
         .iter()
         .map(|value| {
@@ -586,6 +584,8 @@ fn expected_identity(
         })
         .collect()
 }
+
+type ExpectedIdentity<'a> = Vec<(&'a str, ClaimLayerV1, [u8; 32], &'a str, [u8; 32])>;
 
 fn validate_member_path(path: &str) -> Result<(), BundleContractErrorV1> {
     if path.is_empty()
@@ -1399,7 +1399,11 @@ mod tests {
 
         let mut undeclared_path_manifest = bundle.manifest.clone();
         let mut undeclared_path_members = bundle.members.clone();
-        let expected_index = expected_member_index(&bundle);
+        let expected_index = bundle
+            .members
+            .iter()
+            .position(|member| member.path == bundle.manifest.expected_results[0].member_path)
+            .ok_or("test bundle has the first expected-result member")?;
         let alternate_path = "expected/alternate".to_owned();
         undeclared_path_members[expected_index].path = alternate_path.clone();
         undeclared_path_manifest.expected_results[0].member_path = alternate_path;
