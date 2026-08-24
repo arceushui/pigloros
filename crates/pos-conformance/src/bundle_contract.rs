@@ -693,8 +693,9 @@ struct ScannedArchiveItem<'a> {
     maximum_depth: usize,
 }
 
-#[allow(clippy::too_many_lines)]
-fn preflight_archive_caps(bytes: &[u8]) -> Result<ArchivePreflight<'_>, BundleContractErrorV1> {
+mod archive_preflight {
+    use super::*;
+
     fn length(
         bytes: &[u8],
         index: &mut usize,
@@ -855,29 +856,35 @@ fn preflight_archive_caps(bytes: &[u8]) -> Result<ArchivePreflight<'_>, BundleCo
         Ok(result)
     }
 
-    let mut index = 0;
-    if array_length(bytes, &mut index)? != 6 {
-        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
-    }
-    let mut maximum_depth = 0;
-    for field in 0..6 {
-        if field == 3 {
-            let mut result = members(bytes, &mut index)?;
-            for _ in 0..3 {
-                let field = item(bytes, &mut index, 1)?;
-                maximum_depth = maximum_depth.max(field.maximum_depth);
-            }
-            maximum_depth = maximum_depth.max(result.maximum_depth);
-            if index != bytes.len() {
-                return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
-            }
-            result.maximum_depth = maximum_depth;
-            return Ok(result);
+    fn scan(bytes: &[u8]) -> Result<ArchivePreflight<'_>, BundleContractErrorV1> {
+        let mut index = 0;
+        if array_length(bytes, &mut index)? != 6 {
+            return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
         }
-        let field = item(bytes, &mut index, 1)?;
-        maximum_depth = maximum_depth.max(field.maximum_depth);
+        let mut maximum_depth = 0;
+        for field in 0..6 {
+            if field == 3 {
+                let mut result = members(bytes, &mut index)?;
+                for _ in 0..3 {
+                    let field = item(bytes, &mut index, 1)?;
+                    maximum_depth = maximum_depth.max(field.maximum_depth);
+                }
+                maximum_depth = maximum_depth.max(result.maximum_depth);
+                if index != bytes.len() {
+                    return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+                }
+                result.maximum_depth = maximum_depth;
+                return Ok(result);
+            }
+            let field = item(bytes, &mut index, 1)?;
+            maximum_depth = maximum_depth.max(field.maximum_depth);
+        }
+        Err(BundleContractErrorV1::ArchiveEncodingInvalid)
     }
-    Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+}
+
+fn preflight_archive_caps(bytes: &[u8]) -> Result<ArchivePreflight<'_>, BundleContractErrorV1> {
+    archive_preflight::scan(bytes)
 }
 
 fn validate_preflight_archive_caps(
