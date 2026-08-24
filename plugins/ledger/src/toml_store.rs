@@ -51,7 +51,7 @@ impl TomlLedgerStore {
             // policy: delete, don't exempt).
             .filter_map(Result::ok)
             .filter_map(|entry| {
-                let path = entry.ok()?.path();
+                let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) != Some("toml") {
                     return None;
                 }
