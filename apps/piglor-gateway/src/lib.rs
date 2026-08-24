@@ -2966,11 +2966,11 @@ mod tests {
             fence_error,
             GatewayError::ConsentRevocationFenceMismatch
         ));
-        let page = gateway
+        let page_error = gateway
             .read_events_page(&timeline.id().to_string(), 0, 2)
             .await
-            .test_ok();
-        assert_eq!(page.events.len(), 1);
+            .test_err();
+        assert!(matches!(page_error, GatewayError::ResourceUnavailable));
         drop(gateway);
     }
 
