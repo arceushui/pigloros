@@ -8,6 +8,7 @@
 use ciborium::value::Value;
 use pos_core::{CanonicalBytes, PublicKey, Signature};
 use pos_crypto::{canonical, signing};
+use std::collections::BTreeSet;
 use thiserror::Error;
 
 use crate::{
@@ -317,6 +318,7 @@ impl ConformanceBundleV1 {
                         member.path
                             == fixture_input_path(
                                 &fixture.case_id,
+                                fixture.claim_layer,
                                 &fixture.execution_profile_digest,
                                 &input.member_id,
                             )
@@ -392,12 +394,14 @@ fn validate_member_size(member_size: u64) -> Result<(), BundleContractErrorV1> {
 
 fn fixture_input_path(
     case_id: &str,
+    claim_layer: ClaimLayerV1,
     execution_profile_digest: &[u8; 32],
     member_id: &str,
 ) -> String {
     let mut input = Vec::new();
     input.extend_from_slice(b"PiglorOS.CPF1InputPath.v1\0");
     append_path_component(&mut input, case_id);
+    input.push(claim_layer_code(claim_layer) as u8);
     input.extend_from_slice(execution_profile_digest);
     append_path_component(&mut input, member_id);
     format!("{INPUT_MEMBER_PREFIX}{}.bin", blake3::hash(&input).to_hex())
@@ -429,6 +433,7 @@ fn validate_fixture_inputs(
         for input in &fixture.inputs {
             let path = fixture_input_path(
                 &fixture.case_id,
+                fixture.claim_layer,
                 &fixture.execution_profile_digest,
                 &input.member_id,
             );
@@ -618,10 +623,12 @@ fn strictly_ordered<T: Ord>(values: &[T]) -> bool {
 }
 
 fn members_strictly_ordered(values: &[BundleMemberV1]) -> bool {
-    values.windows(2).all(|pair| {
-        pair[0].path.as_str() < pair[1].path.as_str()
-            && !pair[0].path.eq_ignore_ascii_case(&pair[1].path)
-    })
+    let mut normalized = BTreeSet::new();
+    normalized.extend(values.iter().map(|value| value.path.to_ascii_lowercase()));
+    normalized.len() == values.len()
+        && values
+            .windows(2)
+            .all(|pair| pair[0].path.as_str() < pair[1].path.as_str())
 }
 
 fn manifest_value(manifest: &BundleManifestV1) -> Value {
@@ -840,6 +847,7 @@ mod tests {
                 members.push(BundleMemberV1::new(
                     fixture_input_path(
                         &fixture.case_id,
+                        fixture.claim_layer,
                         &fixture.execution_profile_digest,
                         &input.member_id,
                     ),
@@ -955,12 +963,26 @@ mod tests {
         let first = digest(1);
         let second = digest(2);
         assert_ne!(
-            fixture_input_path("case/a", &first, "member/b"),
-            fixture_input_path("case", &first, "a/member/b")
+            fixture_input_path(
+                "case/a",
+                ClaimLayerV1::ArtifactIntegrity,
+                &first,
+                "member/b",
+            ),
+            fixture_input_path(
+                "case",
+                ClaimLayerV1::ArtifactIntegrity,
+                &first,
+                "a/member/b",
+            )
         );
         assert_ne!(
-            fixture_input_path("case", &first, "member"),
-            fixture_input_path("case", &second, "member")
+            fixture_input_path("case", ClaimLayerV1::ArtifactIntegrity, &first, "member"),
+            fixture_input_path("case", ClaimLayerV1::ArtifactIntegrity, &second, "member")
+        );
+        assert_ne!(
+            fixture_input_path("case", ClaimLayerV1::ArtifactIntegrity, &first, "member"),
+            fixture_input_path("case", ClaimLayerV1::ReplayConformance, &first, "member")
         );
         assert_ne!(
             expected_member_path("case", ClaimLayerV1::ArtifactIntegrity, &first),
@@ -1087,6 +1109,12 @@ mod tests {
             BundleMemberV1::new("A", vec![2], false),
         ];
         assert!(!members_strictly_ordered(&case_collision));
+        let non_adjacent_case_collision = vec![
+            BundleMemberV1::new("A", vec![1], false),
+            BundleMemberV1::new("B", vec![2], false),
+            BundleMemberV1::new("a", vec![3], false),
+        ];
+        assert!(!members_strictly_ordered(&non_adjacent_case_collision));
     }
 
     #[test]
