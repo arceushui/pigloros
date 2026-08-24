@@ -3048,13 +3048,13 @@ mod tests {
             Err(ConsentError::NoConsent)
         );
 
-        let mut appended = false;
-        let mut append = || appended = true;
+        let appended = std::cell::Cell::new(false);
+        let mut append = || appended.set(true);
         assert_eq!(
             gate.with_revocation_fence(timeline, None, 1, &mut append),
             Err(ConsentError::NoConsent)
         );
-        assert!(!appended);
+        assert!(!appended.get());
         assert_eq!(
             gate.with_revocation_fence(
                 timeline,
@@ -3064,12 +3064,12 @@ mod tests {
             ),
             Err(ConsentError::NoConsent)
         );
-        assert!(!appended);
+        assert!(!appended.get());
         assert_eq!(
             gate.with_token_fence(timeline, &token, 0, 0, &mut append),
             Err(ConsentError::NoConsent)
         );
-        assert!(!appended);
+        assert!(!appended.get());
     }
 
     #[test]

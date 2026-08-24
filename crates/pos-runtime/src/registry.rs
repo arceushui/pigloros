@@ -43,6 +43,7 @@ fn extend_unique_subscriptions(
 fn driver_visible_event(event: &Event) -> bool {
     !pos_core::is_consent_event_type(&event.event_type)
         && !pos_core::is_geographic_event_type(&event.event_type)
+        && event.event_type.as_str() != pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE
 }
 
 #[cfg(test)]
@@ -290,6 +291,7 @@ mod coverage_entrypoints {
         ids::{EntityId, EventId, TimelineId},
         ConsentAuthority, ConsentGranted,
     };
+    use std::sync::{Arc, Mutex};
 
     struct NoopDriver;
 
@@ -397,6 +399,71 @@ mod coverage_entrypoints {
             .with_consent_authority(authority)
             .into_authorized_projections(timeline, Seq::ZERO, 0, Some(&token), None)
             .is_ok());
+    }
+
+    struct VisibilityDriver {
+        observed: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Driver for VisibilityDriver {
+        fn step(
+            &mut self,
+            _: TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            Ok(StepOutput::empty())
+        }
+
+        fn name(&self) -> &'static str {
+            "coverage-visibility-driver"
+        }
+
+        fn needs_recovery_payload(&self, _: &crate::driver::RecoveryEventHeader) -> bool {
+            true
+        }
+
+        fn stage_restore_from_history(
+            &mut self,
+            evidence: &crate::driver::DriverRecoveryEvidence,
+        ) -> Result<(), RuntimeError> {
+            self.observed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend(
+                    evidence
+                        .events()
+                        .iter()
+                        .map(|event| event.header().event_type().as_str().to_owned()),
+                );
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn recovery_hides_host_control_markers_from_drivers() {
+        let timeline = TimelineId::new();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let mut registry = PluginRegistry::new();
+        registry.register_driver(Box::new(VisibilityDriver {
+            observed: Arc::clone(&observed),
+        }));
+        let events = vec![
+            event("ordinary.event", 1),
+            event(pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE, 2),
+        ];
+
+        assert!(registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(timeline, Seq::from_u64(2))],
+                &events,
+            )
+            .is_ok());
+        assert_eq!(
+            *observed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["ordinary.event".to_owned()]
+        );
     }
 }
 
@@ -713,7 +780,12 @@ impl PluginRegistry {
 
     /// Fold a host-captured Event range into the registered reducers.
     pub fn fold_events(&mut self, events: &[Event]) {
-        self.projections.fold_events(events);
+        let visible_events: Vec<Event> = events
+            .iter()
+            .filter(|event| event.event_type.as_str() != pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE)
+            .cloned()
+            .collect();
+        self.projections.fold_events(&visible_events);
     }
 
     /// Consume the registry after authorizing its final projection snapshot.
