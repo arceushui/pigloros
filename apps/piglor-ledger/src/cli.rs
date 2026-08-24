@@ -400,6 +400,7 @@ mod tests {
     use super::*;
     use crate::hex::nib;
     use crate::test_helpers::{running_as_root, TestOptionExt, TestResultExt};
+    use pos_core::store::EventStore;
     use tempfile::TempDir;
 
     #[cfg(unix)]
@@ -1931,6 +1932,25 @@ mod tests {
     #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
+    fn open_store_rejects_a_persisted_registry_for_another_key() -> Result<(), Box<dyn Error>> {
+        let tmp = TempDir::new().test_ok()?;
+        let db = tmp.path().join("mismatched.db");
+        let key_path = tmp.path().join("sk");
+        run_keygen(&key_path)?;
+        let mut raw = pos_store::sqlite::SqliteStore::open(db.to_str().test_ok()?).test_ok()?;
+        raw.create_timeline("ledger").test_ok()?;
+        raw.save_key_registry(&KeyRegistryStateV1::new())
+            .test_ok()?;
+        drop(raw);
+
+        let error = open_store(&Source::Store(db), Some(&key_path)).test_err()?;
+        assert!(error.to_string().contains("authorization"), "{error}");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
     fn find_or_create_skips_non_ledger_timelines_in_loop() -> Result<(), Box<dyn std::error::Error>>
     {
         // Exercises line 134: the `}` closing the inner `if` in the `for` loop
@@ -2353,6 +2373,33 @@ mod tests {
         ]);
         assert!(err.is_err(), "expected error for invalid today");
 
+        Ok(())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn build_store_with_key_writes_the_site() -> Result<(), Box<dyn Error>> {
+        let tmp = TempDir::new().test_ok()?;
+        let db = tmp.path().join("ledger.db");
+        let key_path = tmp.path().join("sk");
+        let site = tmp.path().join("site");
+        run_keygen(&key_path)?;
+        run(&[
+            "piglor-ledger".into(),
+            "build".into(),
+            "--source".into(),
+            format!("store:{}", db.display()),
+            "--key".into(),
+            key_path.to_str().test_ok()?.to_owned(),
+            "--site".into(),
+            site.to_str().test_ok()?.to_owned(),
+            "--today".into(),
+            "2026-07-25".into(),
+        ])
+        .test_ok()?;
+        assert!(site.join("ledger/index.html").is_file());
+        assert!(site.join("ledger/ledger.json").is_file());
+        assert!(site.join("index.html").is_file());
         Ok(())
     }
 }

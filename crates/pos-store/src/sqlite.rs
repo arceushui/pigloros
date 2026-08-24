@@ -11258,6 +11258,7 @@ mod key_registry_coverage {
             KeyRegistryStateV1, Seq, SqliteStore, TimelineId, FAIL_BEGIN_IMMEDIATE,
         };
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         pub(super) fn run(
             registry: &KeyRegistryStateV1,
             identity: KeyIdentityV1,

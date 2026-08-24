@@ -272,7 +272,11 @@ impl LedgerStore for EventLedgerStore {
 mod tests {
     use super::*;
     use crate::contract;
-    use pos_core::{KeyRegistrationV1, KeyRoleV1};
+    use pos_core::{
+        event::EventDraft,
+        timeline::{Timeline, TimelineMeta},
+        KeyRegistrationV1, KeyRoleV1, SeqRange,
+    };
     use pos_crypto::{
         chain::{hash_payload, Blake3Hasher},
         key_roles::verify_for_role,
@@ -308,6 +312,94 @@ mod tests {
             Some(public_key_from_verifying_key(&signing_key.verifying_key())),
         ))?;
         Ok((Arc::new(Mutex::new(registry)), identity))
+    }
+
+    enum RegistryFailure {
+        Load,
+        Save,
+        Destroy,
+    }
+
+    struct RegistryFailureStore {
+        timeline: Timeline,
+        registry: KeyRegistryStateV1,
+        failure: RegistryFailure,
+    }
+
+    impl RegistryFailureStore {
+        fn new(registry: KeyRegistryStateV1, failure: RegistryFailure) -> Self {
+            Self {
+                timeline: Timeline::new(TimelineMeta::root("ledger")),
+                registry,
+                failure,
+            }
+        }
+    }
+
+    impl EventStore for RegistryFailureStore {
+        fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
+            Ok(Timeline::new(TimelineMeta::root(name)))
+        }
+
+        fn append(
+            &mut self,
+            _timeline: pos_core::ids::TimelineId,
+            _drafts: &[EventDraft],
+        ) -> Result<Vec<Event>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        fn read(
+            &self,
+            _timeline: pos_core::ids::TimelineId,
+            _range: SeqRange,
+        ) -> Result<Vec<Event>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        fn fork(
+            &mut self,
+            _parent: pos_core::ids::TimelineId,
+            _at_seq: Seq,
+            name: &str,
+        ) -> Result<Timeline, CoreError> {
+            Ok(Timeline::new(TimelineMeta::root(name)))
+        }
+
+        fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+            Ok(vec![self.timeline.clone()])
+        }
+
+        fn get_timeline(
+            &self,
+            id: pos_core::ids::TimelineId,
+        ) -> Result<Option<Timeline>, CoreError> {
+            Ok((self.timeline.id() == id).then(|| self.timeline.clone()))
+        }
+
+        fn load_key_registry(&self) -> Result<Option<KeyRegistryStateV1>, CoreError> {
+            if matches!(&self.failure, RegistryFailure::Load) {
+                return Err(CoreError::Storage("registry load failed".to_owned()));
+            }
+            if matches!(&self.failure, RegistryFailure::Save) {
+                return Ok(None);
+            }
+            Ok(Some(self.registry.clone()))
+        }
+
+        fn save_key_registry(&mut self, _registry: &KeyRegistryStateV1) -> Result<(), CoreError> {
+            if matches!(&self.failure, RegistryFailure::Save) {
+                return Err(CoreError::Storage("registry save failed".to_owned()));
+            }
+            Ok(())
+        }
+
+        fn destroy_key_registry(
+            &mut self,
+            _request: KeyDestructionRequestV1,
+        ) -> Result<(KeyDestructionOutcomeV1, KeyRegistryStateV1), CoreError> {
+            Err(CoreError::Storage("registry destroy failed".to_owned()))
+        }
     }
 
     fn poisoned_registry() -> Arc<Mutex<KeyRegistryStateV1>> {
@@ -388,6 +480,48 @@ mod tests {
     }
 
     #[test]
+    fn constructor_reports_durable_registry_load_and_save_errors(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (signing_key, _) = pos_crypto::signing::generate_keypair();
+        let (registry, identity) = registry_for(&signing_key)?;
+        let load_failure = RegistryFailureStore::new(
+            registry
+                .lock()
+                .map_err(|_| "registry lock poisoned")?
+                .clone(),
+            RegistryFailure::Load,
+        );
+        let load_error = EventLedgerStore::new(
+            Box::new(load_failure),
+            pos_core::ids::TimelineId::new(),
+            EntityId::new(),
+            signing_key.clone(),
+            Arc::clone(&registry),
+            identity,
+            Box::new(Blake3Hasher),
+        )
+        .err()
+        .ok_or("expected durable registry load error")?;
+        assert!(load_error.to_string().contains("registry load failed"));
+
+        let save_failure =
+            RegistryFailureStore::new(KeyRegistryStateV1::new(), RegistryFailure::Save);
+        let save_error = EventLedgerStore::new(
+            Box::new(save_failure),
+            pos_core::ids::TimelineId::new(),
+            EntityId::new(),
+            signing_key.clone(),
+            registry,
+            identity,
+            Box::new(Blake3Hasher),
+        )
+        .err()
+        .ok_or("expected durable registry save error")?;
+        assert!(save_error.to_string().contains("registry save failed"));
+        Ok(())
+    }
+
+    #[test]
     fn external_registry_destruction_blocks_future_ledger_signing(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (signing_key, _) = pos_crypto::signing::generate_keypair();
@@ -414,6 +548,69 @@ mod tests {
             .err()
             .ok_or("expected destroyed-signing error")?;
         assert!(error.to_string().contains("destroyed"));
+        Ok(())
+    }
+
+    #[test]
+    fn destruction_reports_registry_lock_and_store_errors() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (signing_key, _) = pos_crypto::signing::generate_keypair();
+        let (registry, identity) = registry_for(&signing_key)?;
+        let material_digest = key_material_digest(&signing_key.to_bytes());
+        let persisted = registry
+            .lock()
+            .map_err(|_| "registry lock poisoned")?
+            .clone();
+        let mut store = EventLedgerStore::new(
+            Box::new(RegistryFailureStore::new(
+                persisted,
+                RegistryFailure::Destroy,
+            )),
+            pos_core::ids::TimelineId::new(),
+            EntityId::new(),
+            signing_key.clone(),
+            registry,
+            identity,
+            Box::new(Blake3Hasher),
+        )?;
+        let request = pos_core::KeyDestructionRequestV1::new(
+            identity,
+            material_digest,
+            pos_core::Hash::from_bytes([8; 32]),
+        );
+        let store_error = store
+            .destroy_signing_key(request)
+            .err()
+            .ok_or("expected durable destruction error")?;
+        assert!(store_error.to_string().contains("registry destroy failed"));
+
+        let (registry, identity) = registry_for(&signing_key)?;
+        let mut memory = MemoryStore::new();
+        let timeline = memory.create_timeline("ledger")?;
+        let mut poisoned = EventLedgerStore::new(
+            Box::new(memory),
+            timeline.id(),
+            EntityId::new(),
+            signing_key.clone(),
+            registry,
+            identity,
+            Box::new(Blake3Hasher),
+        )?;
+        poisoned.key_registry = poisoned_registry();
+        let lock_error = poisoned
+            .destroy_signing_key(pos_core::KeyDestructionRequestV1::new(
+                identity,
+                material_digest,
+                pos_core::Hash::from_bytes([9; 32]),
+            ))
+            .err()
+            .ok_or("expected poisoned registry error")?;
+        assert!(lock_error.to_string().contains("registry is unavailable"));
+        let append_error = poisoned
+            .register(crate::contract::sample_new_prediction("2026-08-01"))
+            .err()
+            .ok_or("expected poisoned append registry error")?;
+        assert!(append_error.to_string().contains("registry is unavailable"));
         Ok(())
     }
 

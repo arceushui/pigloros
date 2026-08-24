@@ -777,6 +777,26 @@ mod tests {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
+    fn verify_store_reports_registry_load_failure() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new().test_ok()?;
+        let db = tmp.path().join("missing-registry-table.db");
+        pos_store::open_store(pos_store::StoreConfig::Sqlite {
+            path: db.to_string_lossy().into_owned(),
+        })
+        .test_ok()?;
+        let conn = rusqlite::Connection::open(&db).test_ok()?;
+        conn.execute("DROP TABLE key_registry", []).test_ok()?;
+
+        let error = run(&Source::Store(db), Some(&"aa".repeat(32)), None).test_err()?;
+        assert!(
+            !error.to_string().is_empty(),
+            "expected registry load failure"
+        );
+        Ok(())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
     fn verify_store_with_corrupted_db_errors() -> Result<(), Box<dyn std::error::Error>> {
         // Covers L183: `format!("list timelines: {e}")` in verify_store.
         let tmp = TempDir::new().test_ok()?;
@@ -1194,6 +1214,9 @@ mod tests {
             })
             .test_ok()?;
             store.create_timeline("ledger").test_ok()?;
+            store
+                .save_key_registry(&KeyRegistryStateV1::new())
+                .test_ok()?;
         }
         {
             let conn = rusqlite::Connection::open(&db).test_ok()?;
