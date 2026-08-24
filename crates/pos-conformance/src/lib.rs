@@ -21,7 +21,7 @@ mod profile_contract;
 
 pub use bundle_contract::{
     BundleContractErrorV1, BundleExpectedResultV1, BundleManifestV1, BundleMemberDescriptorV1,
-    BundleMemberV1, BundleModeV1, ConformanceBundlePairV1, ConformanceBundleV1,
+    BundleMemberRoleV1, BundleMemberV1, BundleModeV1, ConformanceBundlePairV1, ConformanceBundleV1,
     CONFORMANCE_BUNDLE_MAGIC_V1,
 };
 #[doc(hidden)]
