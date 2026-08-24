@@ -2785,10 +2785,10 @@ mod tests {
             },
         )
         .test_ok();
-        match folded.0 {
-            TickAdvance::Advanced { folded_events } => assert_eq!(folded_events, 1),
-            TickAdvance::Quiescent => panic!("a pending event must advance the tick"),
-        }
+        assert!(matches!(
+            folded.0,
+            TickAdvance::Advanced { folded_events: 1 }
+        ));
     }
 
     #[test]
