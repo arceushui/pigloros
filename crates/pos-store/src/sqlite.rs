@@ -9138,6 +9138,8 @@ mod tests {
     fn registry_transaction_reports_commit_and_rollback_failures() {
         let conn = Connection::open_in_memory().test_ok();
         conn.execute_batch("BEGIN").test_ok();
+        conn.execute_batch("CREATE TABLE transaction_marker(value INTEGER)")
+            .test_ok();
         conn.commit_hook(Some(|| true)).test_ok();
         let commit_error = finish_immediate_transaction::<()>(&conn, Ok(())).test_err();
         assert!(matches!(commit_error, CoreError::Storage(_)));
