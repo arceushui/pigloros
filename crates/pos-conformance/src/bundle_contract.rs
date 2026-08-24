@@ -1254,7 +1254,8 @@ mod tests {
         let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
 
         let mut tampered = bundle.clone();
-        tampered.members[expected_member_index(&tampered)].bytes[0] ^= 1;
+        let expected_index = expected_member_index(&tampered);
+        tampered.members[expected_index].bytes[0] ^= 1;
         assert_eq!(
             tampered.validate(),
             Err(BundleContractErrorV1::MemberDigestMismatch)
