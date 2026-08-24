@@ -1188,6 +1188,7 @@ mod tests {
         air_with_other_path.members[expected_index].path = alternate_path.clone();
         air_with_other_path.manifest.members[expected_index].path = alternate_path.clone();
         air_with_other_path.manifest.expected_results[0].member_path = alternate_path;
+        air_with_other_path.rebuild_member_descriptors();
         let air_with_other_path = air_with_other_path.sign(&signing_key)?;
         assert_eq!(
             (ConformanceBundlePairV1 {
@@ -1400,34 +1401,36 @@ mod tests {
     #[test]
     fn mandatory_fixture_matching_requires_case_and_layer_and_execution_profile(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut case_layer_profile = profile();
-        let same_layer = profile_fixture(7, case_layer_profile.fixtures[0].claim_layer);
-        case_layer_profile.fixtures.push(same_layer);
-        case_layer_profile.profile_digest = case_layer_profile.digest();
-        let bundle = signed_bundle(&case_layer_profile, BundleModeV1::Local)?;
-        let mut manifest = bundle.manifest.clone();
-        manifest
+        let profile = profile();
+        let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
+
+        let mut missing_case = bundle.manifest.clone();
+        missing_case.expected_results[0].case_id = "case-unknown".to_owned();
+        assert_eq!(
+            validate_expected_results(&profile, &missing_case, &bundle.members),
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
+        );
+
+        let mut missing_layer = bundle.manifest.clone();
+        missing_layer.expected_results[0].claim_layer = ClaimLayerV1::ReplayConformance;
+        assert_eq!(
+            validate_expected_results(&profile, &missing_layer, &bundle.members),
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
+        );
+
+        let mut missing_execution_profile = bundle.manifest.clone();
+        missing_execution_profile.expected_results[0].execution_profile_digest = digest(99);
+        assert_eq!(
+            validate_expected_results(&profile, &missing_execution_profile, &bundle.members),
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
+        );
+
+        let mut missing_mandatory_case = bundle.manifest.clone();
+        missing_mandatory_case
             .expected_results
             .retain(|expected| expected.case_id != "case-00");
         assert_eq!(
-            validate_expected_results(&case_layer_profile, &manifest, &bundle.members),
-            Err(BundleContractErrorV1::MemberMissing)
-        );
-
-        let mut execution_profile = profile();
-        let mut same_case_and_layer = profile_fixture(7, execution_profile.fixtures[0].claim_layer);
-        same_case_and_layer.case_id = execution_profile.fixtures[0].case_id.clone();
-        same_case_and_layer.execution_profile_digest = digest(99);
-        execution_profile.execution_profile_digests.push(digest(99));
-        execution_profile.fixtures.push(same_case_and_layer);
-        execution_profile.profile_digest = execution_profile.digest();
-        let bundle = signed_bundle(&execution_profile, BundleModeV1::Local)?;
-        let mut manifest = bundle.manifest.clone();
-        manifest
-            .expected_results
-            .retain(|expected| expected.execution_profile_digest != digest(99));
-        assert_eq!(
-            validate_expected_results(&execution_profile, &manifest, &bundle.members),
+            validate_expected_results(&profile, &missing_mandatory_case, &bundle.members),
             Err(BundleContractErrorV1::MemberMissing)
         );
         Ok(())
@@ -1462,7 +1465,8 @@ mod tests {
         );
 
         let mut undeclared = signed_bundle(&profile, BundleModeV1::Local)?;
-        undeclared.manifest.members[0].path = "expected/case-00-wrong".to_owned();
+        let last_descriptor = undeclared.manifest.members.len() - 1;
+        undeclared.manifest.members[last_descriptor].path = "profile/CPF1-alt.cbor".to_owned();
         assert_eq!(
             undeclared.validate(),
             Err(BundleContractErrorV1::UndeclaredMember)
