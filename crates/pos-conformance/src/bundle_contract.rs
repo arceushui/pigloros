@@ -1587,7 +1587,7 @@ impl BundleLifecycleCode for ProfileLifecycleV1 {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::{
         CapabilityPolicyV1, EvaluatorHardCapsV1, EvaluatorProtocolV1, FixtureBoundsV1,
@@ -1720,7 +1720,7 @@ mod tests {
         }
     }
 
-    fn profile() -> ConformanceProfileV1 {
+    pub(super) fn profile() -> ConformanceProfileV1 {
         let claim_layers = [
             ClaimLayerV1::ArtifactIntegrity,
             ClaimLayerV1::ReplayConformance,
@@ -1815,7 +1815,7 @@ mod tests {
         profile
     }
 
-    fn bundle_inputs(
+    pub(super) fn bundle_inputs(
         profile: &ConformanceProfileV1,
         mode: BundleModeV1,
     ) -> Result<(Vec<BundleMemberV1>, Vec<BundleExpectedResultV1>), Box<dyn std::error::Error>>
@@ -3313,6 +3313,174 @@ mod tests {
             .collect();
         let expected_error = validate_expected_results(&network_profile, &manifest, &members);
         assert_eq!(expected_error, Err(BundleContractErrorV1::AirGappedNetwork));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod coverage_entrypoints {
+    use super::tests;
+    use super::{
+        archive_array_bounded, archive_array_exact, archive_bytes, archive_text, archive_u64,
+        bundle_value, encode_archive_value, preflight_archive, preflight_archive_caps,
+        validate_archive_caps, validate_fixture_inputs, validate_preflight_archive_caps,
+        validate_selected_bundle_caps, BundleContractErrorV1, BundleMemberRoleV1, BundleModeV1,
+        ConformanceBundleV1, Value, MAX_STRUCTURAL_NESTING,
+    };
+
+    fn signed_bundle() -> Result<ConformanceBundleV1, Box<dyn std::error::Error>> {
+        let profile = tests::profile();
+        let (members, expected_results) = tests::bundle_inputs(&profile, BundleModeV1::Local)?;
+        let unsigned = ConformanceBundleV1::materialize(
+            &profile,
+            BundleModeV1::Local,
+            members,
+            expected_results,
+        )?;
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+        Ok(unsigned.sign(&signing_key)?)
+    }
+
+    #[test]
+    fn public_bundle_paths_are_instrumented() -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = signed_bundle()?;
+        let manifest = bundle.manifest_bytes()?;
+        assert!(!manifest.is_empty());
+        assert!(bundle.bundle_digest()?.iter().any(|byte| *byte != 0));
+        bundle.validate()?;
+        let encoded = bundle.to_canonical_cbor()?;
+        let decoded = ConformanceBundleV1::from_canonical_cbor(&encoded)?;
+        assert_eq!(decoded, bundle);
+        assert_eq!(decoded.to_canonical_cbor()?, encoded);
+        let preflight = preflight_archive_caps(&encoded)?;
+        assert_eq!(preflight.member_count, bundle.members.len());
+        assert_eq!(
+            preflight.maximum_depth,
+            super::value_depth(&bundle_value(&bundle))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn public_bundle_rejection_paths_are_instrumented() -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = signed_bundle()?;
+        let mut invalid_magic = bundle.clone();
+        invalid_magic.manifest.magic = "invalid".to_owned();
+        assert_eq!(
+            invalid_magic.validate(),
+            Err(BundleContractErrorV1::LifecycleInvalid)
+        );
+
+        let mut invalid_lifecycle = bundle.clone();
+        invalid_lifecycle.manifest.lifecycle = super::ProfileLifecycleV1::Stable;
+        assert_eq!(
+            invalid_lifecycle.validate(),
+            Err(BundleContractErrorV1::LifecycleInvalid)
+        );
+
+        let mut invalid_profile = bundle.clone();
+        invalid_profile
+            .members
+            .retain(|member| member.role != BundleMemberRoleV1::Profile);
+        assert_eq!(
+            invalid_profile.validate(),
+            Err(BundleContractErrorV1::MemberMissing)
+        );
+
+        let mut trailing = bundle.to_canonical_cbor()?;
+        trailing.push(0);
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&trailing),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        for bytes in [
+            vec![0x01, 0],
+            vec![0xa0],
+            vec![0xc0],
+            vec![0xfa, 0, 0, 0, 0],
+        ] {
+            assert_eq!(
+                ConformanceBundleV1::from_canonical_cbor(&bytes),
+                Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn private_archive_and_cap_paths_are_instrumented() -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = signed_bundle()?;
+        let value = bundle_value(&bundle);
+        assert_eq!(
+            preflight_archive(&encode_archive_value(&Value::Null)?),
+            Ok(())
+        );
+        assert_eq!(
+            preflight_archive(&encode_archive_value(&Value::Array(vec![Value::Null]))?),
+            Ok(())
+        );
+        assert_eq!(
+            preflight_archive(&encode_archive_value(&Value::Text("a".repeat(257)))?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+
+        assert_eq!(
+            archive_array_exact(&Value::Array(vec![Value::Null]), 0),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            archive_array_bounded(&Value::Array(vec![Value::Null]), 0),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            archive_text(&Value::Null),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            archive_bytes(&Value::Null),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            archive_u64(&Value::Null),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+
+        assert_eq!(
+            validate_archive_caps(&bundle, &Value::Null, usize::MAX),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+        assert_eq!(validate_archive_caps(&bundle, &Value::Null, 1), Ok(()));
+        let profile = tests::profile();
+        let profile_bytes = [1_u8];
+        let preflight = super::ArchivePreflight {
+            profile_bytes: Some(&profile_bytes),
+            member_count: 1,
+            total_member_bytes: 1,
+            largest_member_bytes: 1,
+            largest_member_path_bytes: 1,
+            maximum_depth: 1,
+        };
+        assert_eq!(
+            validate_preflight_archive_caps(&profile, &preflight, 1),
+            Ok(())
+        );
+        assert_eq!(validate_selected_bundle_caps(&profile, &bundle), Ok(()));
+        let mut invalid_inputs = bundle.members.clone();
+        let input_index = invalid_inputs
+            .iter()
+            .position(|member| member.role == BundleMemberRoleV1::FixtureInput)
+            .ok_or("missing fixture input")?;
+        invalid_inputs[input_index].bytes.clear();
+        assert_eq!(
+            validate_fixture_inputs(&profile, &invalid_inputs),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+        let nested = (0..usize::from(MAX_STRUCTURAL_NESTING))
+            .fold(Value::Null, |value, _| Value::Array(vec![value]));
+        assert_eq!(
+            super::value_depth(&nested),
+            usize::from(MAX_STRUCTURAL_NESTING) + 1
+        );
         Ok(())
     }
 }
