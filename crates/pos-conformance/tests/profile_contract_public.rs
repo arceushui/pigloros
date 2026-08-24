@@ -553,7 +553,7 @@ fn public_request_output_limits_accept_exact_caps_and_reject_each_overflow() {
         Err(ConformanceContractError::FieldOutOfBounds)
     );
 
-    let mut diagnostic_overflow = exact;
+    let mut diagnostic_overflow = exact.clone();
     diagnostic_overflow.output_capability.diagnostic_bytes_limit += 1;
     diagnostic_overflow.output_capability.capability_digest =
         diagnostic_overflow.expected_output_capability_digest();
