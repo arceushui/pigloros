@@ -81,6 +81,7 @@ fn ledger_signing_registry(
     (Arc::new(Mutex::new(registry)), identity)
 }
 
+#[cfg(test)]
 fn ledger_signing_registry_for(
     signing_key: &ed25519_dalek::SigningKey,
     identity: KeyIdentityV1,
