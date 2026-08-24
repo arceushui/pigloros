@@ -902,7 +902,6 @@ fn coordinator_finalize_from_dispatched_state_rechecks_authority() -> Result<(),
     assert_eq!(
         coordinator
             .existing(reference(1))
-            .map(ErasureCoordinatorRecordV1::state)
             .map(ErasureStateV1::lifecycle),
         Some(ErasureLifecycleV1::DestructionDispatched)
     );
@@ -927,7 +926,10 @@ fn coordinator_persists_host_freeze_provenance() -> Result<(), ErasureErrorV1> {
         ),
     )?;
     let persisted = coordinator
-        .existing(reference(1))
+        .port
+        .records
+        .borrow()
+        .first()
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     assert_eq!(persisted.freeze_provenance(), Some(reference(42)));
     assert_eq!(persisted.state().provenance(), reference(42));
