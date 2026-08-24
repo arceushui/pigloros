@@ -4563,7 +4563,8 @@ mod tests {
             stop: StopCondition::MaxTicks(8),
             store_config: store_config.clone(),
         };
-        let mut experiment = Experiment::new(config);
+        let mut experiment =
+            Experiment::new(config).with_consent_authority(ConsentAuthority::new());
         experiment
             .register(
                 &plugin,
@@ -5643,7 +5644,8 @@ mod coverage_entrypoints {
             id: PluginId::new(),
         };
         let mut experiment =
-            Experiment::new(config("coverage-revoked-draft", StopCondition::MaxTicks(3)));
+            Experiment::new(config("coverage-revoked-draft", StopCondition::MaxTicks(3)))
+                .with_consent_authority(ConsentAuthority::new());
         ok(experiment.register(&plugin, None, Some(Box::new(SubjectDriver { subject }))));
         let mut session = ok(experiment.start());
         session.revoke_consent_for_subject_at_boundary(subject);
@@ -5659,7 +5661,8 @@ mod coverage_entrypoints {
         let mut failing = Experiment::new(config(
             "coverage-faulted-projection",
             StopCondition::MaxTicks(2),
-        ));
+        ))
+        .with_consent_authority(ConsentAuthority::new());
         ok(failing.register(&failing_plugin, None, Some(Box::new(FailingDriver))));
         let mut faulted = ok(failing.start());
         let failed_step = faulted.step_tick();
@@ -5701,7 +5704,7 @@ mod coverage_entrypoints {
     }
 
     #[test]
-    fn resume_recovers_host_closure_without_a_gate() {
+    fn resume_rejects_host_closure_without_a_gate() {
         let database = ok(tempfile::NamedTempFile::new());
         let path = ok(database
             .path()
@@ -5722,13 +5725,18 @@ mod coverage_entrypoints {
             ));
             timeline.id()
         };
-        let session = ok(Experiment::new(ExperimentConfig {
+        let result = Experiment::new(ExperimentConfig {
             name: "coverage-resume-closure".to_owned(),
             stop: StopCondition::MaxTicks(1),
             store_config: config,
         })
-        .resume(timeline));
-        assert!(session.consent_revoked);
+        .resume(timeline);
+        assert!(matches!(
+            result,
+            Err(ExperimentError::Runtime(
+                RuntimeError::ConsentOperationUnavailable
+            ))
+        ));
     }
 
     #[test]
@@ -5765,7 +5773,7 @@ mod coverage_entrypoints {
     }
 
     #[test]
-    fn no_gate_revocation_boundary_uses_the_host_append_path() {
+    fn no_gate_revocation_boundary_fails_closed() {
         let mut session = ok(Experiment::new(config(
             "coverage-no-gate-revocation",
             StopCondition::MaxTicks(1),
@@ -5774,10 +5782,9 @@ mod coverage_entrypoints {
         session.revoke_consent_at_boundary();
         assert!(matches!(
             session.step_tick(),
-            Ok(TickOutcome::Advanced {
-                emitted_events: 1,
-                ..
-            })
+            Err(ExperimentError::Runtime(
+                RuntimeError::ConsentOperationUnavailable
+            ))
         ));
     }
 
@@ -6329,12 +6336,13 @@ mod coverage_entrypoints {
 
     #[test]
     fn consent_revocation_boundaries_filter_control_markers_and_continue_subjects() {
+        let authority = ConsentAuthority::new();
         let experiment = Experiment::new(config(
             "coverage-consent-boundaries",
             StopCondition::MaxTicks(3),
-        ));
+        ))
+        .with_consent_authority(authority.clone());
         let mut session = ok(experiment.start());
-        let authority = ConsentAuthority::new();
         let subject = EntityId::new();
         let token = authority.record_grant_on_timeline(
             session.timeline().id(),
@@ -6884,30 +6892,6 @@ mod backtest_tests {
         let err = runner.run();
         assert!(err.is_err(), "expected error from bad driver in eval phase");
     }
-
-    #[test]
-    fn backtest_result_build_errors_are_propagated_for_both_phases() {
-        for fail_on_call in [3, 4] {
-            let mut store = FailLogicalHeadStore {
-                inner: Box::new(pos_store::memory::MemoryStore::new()),
-                calls: Cell::new(0),
-                fail_on_call,
-            };
-            let runner = BacktestRunner::new(
-                BacktestConfig {
-                    experiment_name: format!("bt-result-error-{fail_on_call}"),
-                    train_ticks: 0,
-                    eval_ticks: 0,
-                    store_config: StoreConfig::Memory,
-                },
-                registry_with_emit_driver,
-            );
-            assert!(matches!(
-                runner.run_on_store(&mut store),
-                Err(ExperimentError::Store(CoreError::Storage(_)))
-            ));
-        }
-    }
 }
 
 #[cfg(test)]
@@ -7176,6 +7160,30 @@ mod fault_injection_tests {
     }
 
     #[test]
+    fn backtest_result_build_errors_are_propagated_for_both_phases() {
+        for fail_on_call in [3, 4] {
+            let mut store = FailLogicalHeadStore {
+                inner: Box::new(pos_store::memory::MemoryStore::new()),
+                calls: Cell::new(0),
+                fail_on_call,
+            };
+            let runner = BacktestRunner::new(
+                BacktestConfig {
+                    experiment_name: format!("bt-result-error-{fail_on_call}"),
+                    train_ticks: 0,
+                    eval_ticks: 0,
+                    store_config: StoreConfig::Memory,
+                },
+                registry_with_emit_driver,
+            );
+            assert!(matches!(
+                runner.run_on_store(&mut store),
+                Err(ExperimentError::Store(CoreError::Storage(_)))
+            ));
+        }
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_result_branch_open_store_fails_on_directory_path() {
         let dir = tempfile::tempdir().test_ok();
@@ -7302,11 +7310,13 @@ mod fault_injection_tests {
 
     #[test]
     fn default_consent_revocation_uses_the_session_subject() {
+        let authority = ConsentAuthority::new();
         let mut session = Experiment::new(ExperimentConfig {
             name: "default-consent-revocation".to_owned(),
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Memory,
         })
+        .with_consent_authority(authority)
         .start()
         .test_ok();
         session.revoke_consent_at_boundary();
@@ -7322,11 +7332,13 @@ mod fault_injection_tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn revocation_boundary_faults_closed_when_its_fence_head_cannot_be_read() {
+        let authority = ConsentAuthority::new();
         let mut session = Experiment::new(ExperimentConfig {
             name: "revocation-fence-fault".to_owned(),
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Memory,
         })
+        .with_consent_authority(authority)
         .start()
         .test_ok();
         {
@@ -7353,11 +7365,13 @@ mod fault_injection_tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn revocation_boundary_faults_closed_when_post_append_capture_fails() {
+        let authority = ConsentAuthority::new();
         let mut session = Experiment::new(ExperimentConfig {
             name: "revocation-capture-fault".to_owned(),
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Memory,
         })
+        .with_consent_authority(authority)
         .start()
         .test_ok();
         {
