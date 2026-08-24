@@ -1274,11 +1274,16 @@ async fn worker_loop_async(
     let mut reads_since_write = 0;
     loop {
         if pending.is_empty() {
-            if draining || disconnected {
-                disconnected |= matches!(
+            if match (draining, disconnected) {
+                (false, false) => false,
+                (true, _) | (false, true) => true,
+            } {
+                if matches!(
                     drain_available(receiver, &mut pending),
                     QueueDrainOutcome::Disconnected
-                );
+                ) {
+                    disconnected = true;
+                }
                 if pending.is_empty() {
                     break;
                 }
@@ -1300,10 +1305,12 @@ async fn worker_loop_async(
             }
         }
 
-        disconnected |= matches!(
+        if matches!(
             drain_available(receiver, &mut pending),
             QueueDrainOutcome::Disconnected
-        );
+        ) {
+            disconnected = true;
+        }
         #[cfg(test)]
         if let Some(observer) = &observer {
             observer.drain_completed(pending.len(), disconnected);

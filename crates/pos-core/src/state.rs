@@ -174,6 +174,21 @@ mod tests {
     }
 
     #[test]
+    fn state_registry_retain_only_keeps_the_requested_subject() {
+        let reducer = CountReducer;
+        let retained = EntityId::new();
+        let removed = EntityId::new();
+        let mut registry = StateRegistry::new();
+        registry.apply(&reducer, &make_event(retained));
+        registry.apply(&reducer, &make_event(removed));
+
+        registry.retain_only(&retained);
+
+        assert!(registry.get(&retained).is_some());
+        assert!(registry.get(&removed).is_none());
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn state_registry_remove_forgets_existing_subject_state() {
         let reducer = CountReducer;

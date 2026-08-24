@@ -1685,9 +1685,9 @@ impl Gateway {
         Ok(event)
     }
 
-    fn publish_notice(&self, timeline: TimelineId, event: &Event) {
+    fn publish_notice(&self, timeline: TimelineId, event: &Event) -> bool {
         if pos_core::is_consent_event_type(&event.event_type) {
-            return;
+            return false;
         }
         let notice = EventNotice {
             timeline_id: timeline.to_string(),
@@ -1696,7 +1696,7 @@ impl Gateway {
             event_type: event.event_type.as_str().to_owned(),
             seq: event.seq.as_u64(),
         };
-        drop(self.bus.send(notice));
+        self.bus.send(notice).is_ok()
     }
 
     fn publish_geographic_notice(
@@ -2837,6 +2837,30 @@ mod tests {
             .await
             .test_ok();
         assert!(page.events.is_empty());
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn gateway_preserves_an_unclassified_consent_grant_append_error() {
+        let gateway = Gateway::new(Box::new(ScriptedStore {
+            mode: ScriptMode::FailAppend,
+        }));
+        let timeline = gateway
+            .create_timeline("consent-grant-append-error")
+            .await
+            .test_ok();
+        let error = gateway
+            .issue_consent_grant(
+                &timeline.id().to_string(),
+                consent_grant(EntityId::new(), 1),
+            )
+            .await
+            .test_err();
+        assert!(matches!(
+            error,
+            GatewayError::Store(CoreError::Storage(message))
+                if message == "append failed"
+        ));
         drop(gateway);
     }
 

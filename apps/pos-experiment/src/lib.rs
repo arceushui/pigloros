@@ -553,14 +553,31 @@ fn validate_captured_range(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FoldedEventCount(u64);
+
+impl FoldedEventCount {
+    const fn is_zero(self) -> bool {
+        self.0 == 0
+    }
+
+    const fn saturating_add(self, other: Self) -> Self {
+        Self(self.0.saturating_add(other.0))
+    }
+
+    const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 fn fold_captured_range(
     boundary: &mut TickBoundaryCoordinator,
     registry: &mut PluginRegistry,
     captured: &CapturedRange,
-) -> u64 {
+) -> FoldedEventCount {
     registry.fold_events(&captured.events);
     boundary.folded_through = captured.through;
-    u64::try_from(captured.events.len()).unwrap_or(u64::MAX)
+    FoldedEventCount(u64::try_from(captured.events.len()).unwrap_or(u64::MAX))
 }
 
 fn append_driver_drafts(
@@ -611,10 +628,12 @@ fn advance_tick(
         append_driver_drafts(store, timeline_id, registry, boundary.folded_through)?;
     let after = capture_pending_range(store, timeline_id, boundary.folded_through)?;
     folded_events = folded_events.saturating_add(fold_captured_range(boundary, registry, &after));
-    let outcome = if folded_events == 0 && emitted_events == 0 {
+    let outcome = if folded_events.is_zero() && emitted_events == 0 {
         TickAdvance::Quiescent
     } else {
-        TickAdvance::Advanced { folded_events }
+        TickAdvance::Advanced {
+            folded_events: folded_events.get(),
+        }
     };
     Ok((outcome, after.timeline))
 }
@@ -1574,14 +1593,14 @@ impl ExperimentSession {
             &after,
         ));
         self.timeline = after.timeline;
-        self.total_events = self.total_events.saturating_add(folded_events);
+        self.total_events = self.total_events.saturating_add(folded_events.get());
         self.ticks = self.ticks.saturating_add(1);
 
-        if folded_events == 0 && emitted_events == 0 {
+        if folded_events.is_zero() && emitted_events == 0 {
             Ok(TickOutcome::Quiescent)
         } else {
             Ok(TickOutcome::Advanced {
-                folded_events,
+                folded_events: folded_events.get(),
                 emitted_events,
             })
         }
@@ -1651,7 +1670,7 @@ impl ExperimentSession {
             })?;
         let folded_events = fold_captured_range(&mut self.boundary, &mut self.registry, &after);
         self.timeline = after.timeline;
-        self.total_events = self.total_events.saturating_add(folded_events);
+        self.total_events = self.total_events.saturating_add(folded_events.get());
         self.ticks = self.ticks.saturating_add(1);
         if let Some(subject) = subject {
             self.revoked_subjects.insert(subject);
@@ -1660,7 +1679,7 @@ impl ExperimentSession {
             self.complete = true;
         }
         Ok(TickOutcome::Advanced {
-            folded_events,
+            folded_events: folded_events.get(),
             emitted_events,
         })
     }
@@ -1682,7 +1701,7 @@ impl ExperimentSession {
         })?;
         committed_events.extend(before.events.iter().cloned());
         let folded_events = fold_captured_range(&mut self.boundary, &mut self.registry, &before);
-        Ok((folded_events, committed_events))
+        Ok((folded_events.get(), committed_events))
     }
 
     fn hydrate_fork_registry(
@@ -2610,6 +2629,18 @@ mod tests {
         }
     }
 
+    struct UnknownEventApprover;
+
+    impl ActionApprover for UnknownEventApprover {
+        fn approve(&self, proposal: &ProposedAction) -> Result<EventDraft, ActionRejected> {
+            Ok(EventDraft::new(
+                proposal.actor_entity_id,
+                Kind::new("unregistered.approved.event"),
+                proposal.payload.clone(),
+            ))
+        }
+    }
+
     #[test]
     fn experiment_register_with_approver_forwards_the_full_registration() {
         let plugin = CompositionPlugin(CompositionPluginSpec {
@@ -2673,7 +2704,14 @@ mod tests {
             CanonicalBytes::from_static(b"approved"),
             Kind::new("submit.event.submit"),
         );
+        let denied = ProposedAction::new(
+            Kind::new("submit.event"),
+            EntityId::new(),
+            CanonicalBytes::from_static(b"denied"),
+            Kind::new("submit.event.invalid"),
+        );
 
+        assert!(session.submit_action(&denied).is_err());
         assert_eq!(session.submit_action(&proposal).test_ok(), 1);
         assert_eq!(session.source_events().test_ok().len(), 1);
     }
@@ -2689,6 +2727,106 @@ mod tests {
         .test_ok();
 
         assert!(matches!(session.step_tick(), Ok(TickOutcome::Quiescent)));
+        assert!(matches!(session.step_tick(), Ok(TickOutcome::Stopped)));
+    }
+
+    #[test]
+    fn current_now_secs_uses_epoch_seconds() {
+        assert!(current_now_secs() > 1_000_000);
+    }
+
+    #[test]
+    fn fold_captured_range_advances_the_boundary() {
+        let mut store = pos_store::memory::MemoryStore::new();
+        let timeline = store.create_timeline("fold-boundary").test_ok();
+        let mut boundary = TickBoundaryCoordinator {
+            folded_through: pos_core::clock::Seq::ZERO,
+        };
+        let mut registry = PluginRegistry::new();
+        let captured = CapturedRange {
+            through: pos_core::clock::Seq::from_u64(3),
+            events: Vec::new(),
+            timeline,
+        };
+
+        assert_eq!(
+            fold_captured_range(&mut boundary, &mut registry, &captured).get(),
+            0
+        );
+        assert_eq!(boundary.folded_through, pos_core::clock::Seq::from_u64(3));
+    }
+
+    #[test]
+    fn session_submit_action_rejects_an_approver_output_with_an_unknown_schema() {
+        let plugin = CompositionPlugin(CompositionPluginSpec {
+            id: PluginId::new(),
+            name: "unknown-output-plugin",
+            version: "1",
+            event_type: "submit.event",
+        });
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "unknown-output".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        });
+        experiment
+            .register_with_approver(
+                &plugin,
+                None,
+                None,
+                Some(Box::new(UnknownEventApprover)),
+                [Kind::new("submit.event")],
+            )
+            .test_ok();
+        let mut session = experiment.start().test_ok();
+        let proposal = ProposedAction::new(
+            Kind::new("submit.event"),
+            EntityId::new(),
+            CanonicalBytes::from_static(b"unknown-output"),
+            Kind::new("submit.event.submit"),
+        );
+
+        assert!(session.submit_action(&proposal).is_err());
+    }
+
+    #[test]
+    fn session_submit_action_propagates_store_append_failure() {
+        let plugin = CompositionPlugin(CompositionPluginSpec {
+            id: PluginId::new(),
+            name: "append-failure-plugin",
+            version: "1",
+            event_type: "submit.event",
+        });
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "append-failure".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        });
+        experiment
+            .register_with_approver(
+                &plugin,
+                None,
+                None,
+                Some(Box::new(AcceptingApprover)),
+                [Kind::new("submit.event")],
+            )
+            .test_ok();
+        let mut session = experiment
+            .start_with_store(Box::new(CaptureAwareStore {
+                base: Box::new(pos_store::memory::MemoryStore::new()),
+                state: Arc::new(Mutex::new(HostTransactionState::default())),
+                fail_append: true,
+                fail_post_step_capture: false,
+            }))
+            .test_ok();
+        let proposal = ProposedAction::new(
+            Kind::new("submit.event"),
+            EntityId::new(),
+            CanonicalBytes::from_static(b"append-failure"),
+            Kind::new("submit.event.submit"),
+        );
+
+        assert!(session.submit_action(&proposal).is_err());
     }
 
     fn assert_incompatible_fork(mut session: ExperimentSession) {
@@ -6447,6 +6585,31 @@ mod coverage_entrypoints {
     }
 
     #[test]
+    fn public_session_fork_rejects_protected_history() {
+        let experiment = Experiment::new(config(
+            "coverage-session-protected",
+            StopCondition::MaxTicks(1),
+        ))
+        .with_fork_registry_factory(|| Ok(PluginRegistry::new()));
+        let mut session = ok(experiment.start());
+        let timeline_id = session.timeline().id();
+        let mut store = lock_store(&session.store).test_ok();
+        store
+            .append(
+                timeline_id,
+                &[EventDraft::new(
+                    EntityId::new(),
+                    Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+                    pos_core::CanonicalBytes::from_static(b"protected"),
+                )],
+            )
+            .test_ok();
+        drop(store);
+
+        assert!(session.fork("coverage-session-protected-child").is_err());
+    }
+
+    #[test]
     fn protected_fork_hydration_propagates_driver_restore_errors() {
         let authority = ConsentAuthority::new();
         let plugin = CoveragePlugin {
@@ -7936,6 +8099,20 @@ mod fault_injection_tests {
         assert!(session
             .fork_timeline_at("child", pos_core::clock::Seq::ZERO)
             .is_err());
+
+        let failing_store = FailLogicalHeadStore {
+            inner: Box::new(pos_store::memory::MemoryStore::new()),
+            calls: Cell::new(0),
+            fail_on_call: 1,
+        };
+        let mut session = Experiment::new(config(
+            "fork-initial-head-error",
+            StopCondition::MaxTicks(1),
+        ))
+        .with_fork_registry_factory(|| Ok(PluginRegistry::new()))
+        .start_with_store(Box::new(failing_store))
+        .test_ok();
+        assert!(session.fork("child").is_err());
     }
 
     #[test]

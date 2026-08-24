@@ -705,8 +705,10 @@ impl ConsentRevocationReservation {
     }
 
     /// Abort a durable revocation that was not appended.
-    pub fn abort_durable(mut self) {
+    pub fn abort_durable(mut self) -> bool {
+        let was_pending = !self.completed;
         self.rollback();
+        was_pending
     }
 }
 
@@ -832,7 +834,11 @@ impl ConsentAuthority {
         let Some(active) = sessions.get_mut(&key) else {
             return Err(ConsentError::NoConsent);
         };
-        if active.token.fence_seq <= revocation.fence_seq {
+        let already_fenced = match active.token.fence_seq.cmp(&revocation.fence_seq) {
+            std::cmp::Ordering::Less | std::cmp::Ordering::Equal => true,
+            std::cmp::Ordering::Greater => false,
+        };
+        if already_fenced {
             return Err(ConsentError::Revoked);
         }
         let previous_fence_seq = active.token.fence_seq;
@@ -872,11 +878,12 @@ impl ConsentAuthority {
     ///
     /// A later direct revocation or grant publication is preserved if it has
     /// already changed the session while the reservation was being resolved.
-    pub fn abort_revocation(&self, reservation: ConsentRevocationReservation) {
+    pub fn abort_revocation(&self, reservation: ConsentRevocationReservation) -> bool {
         if reservation.authority_id != self.authority_id {
-            return;
+            drop(reservation);
+            return false;
         }
-        reservation.abort_durable();
+        reservation.abort_durable()
     }
 
     fn validate_revocation_with_timeline(
@@ -993,7 +1000,9 @@ impl ConsentAuthority {
         let Some(active) = sessions.get(key) else {
             return Err(ConsentError::NoConsent);
         };
-        if active.token != *token || !active.token.is_valid_at(timeline_head) {
+        let token_matches = active.token == *token;
+        let token_is_current = active.token.is_valid_at(timeline_head);
+        if !(token_matches && token_is_current) {
             return Err(ConsentError::Revoked);
         }
         if active.expiry_secs != 0 && now_secs >= u64::from(active.expiry_secs) {
@@ -2012,6 +2021,18 @@ mod tests {
     }
 
     #[test]
+    fn required_modality_covers_both_geographic_prefixes() {
+        assert_eq!(
+            required_modality_for_event(&Kind::new("geo.location.v1")),
+            MODALITY_LOCATION
+        );
+        assert_eq!(
+            required_modality_for_event(&Kind::new("location.coordinate.v1")),
+            MODALITY_LOCATION
+        );
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn token_is_valid_before_fence_seq() {
         let g = sample_granted();
@@ -2136,6 +2157,19 @@ mod tests {
                 },
             ),
             Err(ConsentError::NoConsent)
+        );
+    }
+
+    #[test]
+    fn host_authority_rejects_a_matching_token_at_its_fence() {
+        let authority = ConsentAuthority::new();
+        let grant = sample_granted();
+        let (timeline, token) = record_test_grant(&authority, &grant);
+        authority.fence_timeline_at(timeline, 5).test_ok();
+
+        assert_eq!(
+            authority.validate_on_timeline(timeline, &token, 4, 0),
+            Err(ConsentError::Revoked)
         );
     }
 
@@ -2768,6 +2802,10 @@ mod tests {
             .is_ok());
         assert!(full_token.authorize_geo_resolution(1).is_ok());
         assert!(full_token.authorize_retention(30).is_ok());
+        assert_eq!(
+            full_token.authorize_retention(31),
+            Err(ConsentError::RetentionNotPermitted)
+        );
         assert!(authority
             .check_consent(
                 timeline,
@@ -2819,6 +2857,15 @@ mod tests {
                 timeline,
                 full_grant.subject_id,
                 &Kind::new("location.coordinate.v1"),
+                0,
+                0,
+            )
+            .is_ok());
+        assert!(authority
+            .check_consent(
+                timeline,
+                constrained_grant.subject_id,
+                &Kind::new("world.observation.v1"),
                 0,
                 0,
             )
@@ -2930,7 +2977,7 @@ mod tests {
                 .test_err(),
             ConsentError::Revoked
         );
-        authority.abort_revocation(reservation);
+        assert!(authority.abort_revocation(reservation));
 
         let reservation = authority
             .begin_revocation_on_timeline(timeline, &revocation)
@@ -2950,7 +2997,7 @@ mod tests {
         let reservation = authority
             .begin_revocation_on_timeline(timeline, &revocation)
             .test_ok();
-        other_authority.abort_revocation(reservation);
+        assert!(!other_authority.abort_revocation(reservation));
         assert_eq!(
             authority.validate_revocation_on_timeline(TimelineId::new(), &revocation),
             Err(ConsentError::NoConsent)
@@ -3007,6 +3054,29 @@ mod tests {
             Err(ConsentCodecError::HistoryTooLong {
                 count: MAX_CONSENT_HISTORY_EVENTS + 1,
             })
+        );
+    }
+
+    #[test]
+    fn restore_from_history_accepts_the_history_limit() {
+        let event = Event {
+            id: EventId::new(),
+            entity: EntityId::new(),
+            event_type: Kind::new("world.observation.v1"),
+            payload: CanonicalBytes::from_static(b"ignored"),
+            wall_time: WallTime::from_micros(1),
+            seq: crate::clock::Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        };
+        let events = vec![event; MAX_CONSENT_HISTORY_EVENTS];
+
+        assert_eq!(
+            ConsentAuthority::new().restore_from_history(TimelineId::new(), &events),
+            Ok(())
         );
     }
 
@@ -3147,6 +3217,32 @@ mod tests {
         assert!(authority
             .validate_token(timeline, &second_token, 5, 0)
             .is_err());
+    }
+
+    #[test]
+    fn revocation_fence_scopes_subject_before_durable_append() {
+        let authority = ConsentAuthority::new();
+        let timeline = TimelineId::new();
+        let first = sample_granted();
+        let mut second = sample_granted();
+        second.subject_id = EntityId::new();
+        let first_token = authority.record_grant_on_timeline(timeline, &first);
+        let second_token = authority.record_grant_on_timeline(timeline, &second);
+
+        let mut appended = false;
+        authority
+            .with_revocation_fence(timeline, Some(first.subject_id), 5, &mut || {
+                appended = true;
+            })
+            .test_ok();
+        assert!(appended);
+        assert_eq!(
+            authority.validate_on_timeline(timeline, &first_token, 4, 0),
+            Err(ConsentError::Revoked)
+        );
+        assert!(authority
+            .validate_on_timeline(timeline, &second_token, 4, 0)
+            .is_ok());
     }
 
     #[test]

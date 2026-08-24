@@ -7816,6 +7816,63 @@ pub mod tests {
         }
     }
 
+    #[test]
+    fn verifier_accepts_host_closure_and_rejects_each_host_closure_boundary() {
+        fn host_fixture() -> (ConsentAuditV1, Vec<AuthoritativeEventV1>) {
+            let mut value = evidence();
+            value.consent_audit.revocation_event_type =
+                "experiment.lifecycle.consent-closed.v1".to_owned();
+            value.authoritative_events[2].event_type =
+                "experiment.lifecycle.consent-closed.v1".to_owned();
+            (value.consent_audit, value.authoritative_events)
+        }
+
+        let (valid_audit, valid_events) = host_fixture();
+        assert_eq!(verify_host_closure(&valid_audit, &valid_events), Ok(()));
+        let mut valid = evidence();
+        valid.consent_audit.revocation_event_type =
+            "experiment.lifecycle.consent-closed.v1".to_owned();
+        valid.authoritative_events[2].event_type =
+            "experiment.lifecycle.consent-closed.v1".to_owned();
+        assert_eq!(verify_evidence(&valid), Ok(()));
+
+        let cases: [fn(&mut ConsentAuditV1, &mut Vec<AuthoritativeEventV1>); 9] = [
+            |audit, _| audit.subject.clear(),
+            |audit, _| audit.revocation_payload_digest = [0; 32],
+            |audit, _| audit.requested_after_seq = audit.effective_after_seq,
+            |audit, events| {
+                audit.revocation_event_seq = 2;
+                events[2].seq = 2;
+            },
+            |audit, _| audit.halted_at_tick_boundary = false,
+            |_, events| {
+                let duplicate = events[2].clone();
+                events.push(duplicate);
+            },
+            |_, events| {
+                events[2].event_type = "other".to_owned();
+                events.push(AuthoritativeEventV1 {
+                    seq: 4,
+                    tick: 3,
+                    entity: "host".to_owned(),
+                    event_type: "experiment.lifecycle.consent-closed.v1".to_owned(),
+                    payload_digest: [7; 32],
+                    causation_seq: None,
+                });
+            },
+            |_, events| events[2].seq = 4,
+            |_, events| events[2].payload_digest = [8; 32],
+        ];
+        for mutate in cases {
+            let (mut audit, mut events) = host_fixture();
+            mutate(&mut audit, &mut events);
+            assert_eq!(
+                verify_host_closure(&audit, &events),
+                Err(EvidenceError::InvalidConsentAudit)
+            );
+        }
+    }
+
     macro_rules! typed_verifier_boundary_cases {
         () => {{
             for event_type in [
