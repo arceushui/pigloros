@@ -238,7 +238,8 @@ impl RunResult {
                 ))
             })?;
         let current_head = store.logical_head(timeline.id())?;
-        let mut fork_result = None;
+        let mut fork_result: Result<Timeline, ExperimentError> =
+            Err(pos_runtime::RuntimeError::ConsentOperationUnavailable.into());
         match (self.consent_gate.as_ref(), self.protected_token.as_ref()) {
             (Some(gate), Some(token)) => {
                 if !token.fork_permitted() {
@@ -248,7 +249,9 @@ impl RunResult {
                     .into());
                 }
                 let mut append = || {
-                    fork_result = Some(store.fork(timeline.id(), current_head, name));
+                    fork_result = store
+                        .fork(timeline.id(), current_head, name)
+                        .map_err(ExperimentError::from);
                 };
                 if let Err(error) = gate.with_token_fence(
                     self.timeline_id,
@@ -265,14 +268,12 @@ impl RunResult {
             }
             (None, None) => {
                 reject_protected_history(store.as_ref(), timeline.id(), current_head)?;
-                fork_result = Some(store.fork(timeline.id(), current_head, name));
+                fork_result = store
+                    .fork(timeline.id(), current_head, name)
+                    .map_err(ExperimentError::from);
             }
         }
-        let forked = fork_result.map_or_else(
-            || Err(pos_runtime::RuntimeError::ConsentOperationUnavailable.into()),
-            |result| result.map_err(ExperimentError::from),
-        )?;
-        Ok(forked)
+        fork_result
     }
 
     /// Consume this result to form a host-executable reproduction manifest.
@@ -1158,9 +1159,12 @@ impl Experiment {
         let Some(gate) = self.registry.clone_consent_gate() else {
             return Err(pos_runtime::RuntimeError::ConsentOperationUnavailable.into());
         };
-        let mut fork_result = None;
+        let mut fork_result: Result<Timeline, ExperimentError> =
+            Err(pos_runtime::RuntimeError::ConsentOperationUnavailable.into());
         let mut append = || {
-            fork_result = Some(store.fork(timeline.id(), current_head, name));
+            fork_result = store
+                .fork(timeline.id(), current_head, name)
+                .map_err(ExperimentError::from);
         };
         if let Err(error) = gate.with_token_fence(
             timeline.id(),
@@ -1171,10 +1175,7 @@ impl Experiment {
         ) {
             return Err(map_runtime_error(pos_runtime::RuntimeError::Consent(error)));
         }
-        fork_result.map_or_else(
-            || Err(pos_runtime::RuntimeError::ConsentOperationUnavailable.into()),
-            |result| result.map_err(ExperimentError::from),
-        )
+        fork_result
     }
 }
 
