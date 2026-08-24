@@ -6808,7 +6808,7 @@ pub mod tests {
         let mut high = 128_usize;
         let mut best = 0_usize;
         while low <= high {
-            let midpoint = (low + high) / 2;
+            let midpoint = low.midpoint(high);
             set_coordinate_length(&mut report, midpoint);
             let encoded = strict_codec::encode_conformance_report(&report).unwrap_or_default();
             if encoded.len() <= MAX_REPORT_BYTES {

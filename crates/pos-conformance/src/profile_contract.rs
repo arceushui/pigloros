@@ -4923,6 +4923,67 @@ mod tests {
         assert!(exact_report_cap.validate().is_ok());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn request_profile_output_caps_are_independently_enforced() {
+        let mut capped_profile = profile();
+        capped_profile
+            .evaluator_protocol
+            .hard_caps
+            .max_profile_bytes = MAX_PROFILE_BYTES as u64 - 1;
+        capped_profile
+            .evaluator_protocol
+            .hard_caps
+            .max_diagnostic_bytes = MAX_DIAGNOSTIC_BYTES - 1;
+        capped_profile.profile_digest = capped_profile.digest();
+        let mut over_cap = request();
+        over_cap.conformance_profile_digest = capped_profile.profile_digest;
+        over_cap.fixture_bundle_digest = fixture_bundle_digest(&capped_profile);
+        over_cap.evaluator_hard_caps_digest = capped_profile.evaluator_protocol.hard_caps.digest();
+        over_cap.output_capability.report_bytes_limit = MAX_PROFILE_BYTES as u64;
+        over_cap.output_capability.diagnostic_bytes_limit = MAX_DIAGNOSTIC_BYTES;
+        over_cap.output_capability.capability_digest = over_cap.expected_output_capability_digest();
+        over_cap.request_digest = over_cap.digest();
+        assert_eq!(
+            over_cap.validate_against_profile(&capped_profile),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+
+        over_cap.output_capability.report_bytes_limit = capped_profile
+            .evaluator_protocol
+            .hard_caps
+            .max_profile_bytes;
+        over_cap.output_capability.capability_digest = over_cap.expected_output_capability_digest();
+        over_cap.request_digest = over_cap.digest();
+        assert_eq!(
+            over_cap.validate_against_profile(&capped_profile),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+
+        over_cap.output_capability.report_bytes_limit = capped_profile
+            .evaluator_protocol
+            .hard_caps
+            .max_profile_bytes;
+        over_cap.output_capability.diagnostic_bytes_limit = capped_profile
+            .evaluator_protocol
+            .hard_caps
+            .max_diagnostic_bytes
+            + 1;
+        over_cap.output_capability.capability_digest = over_cap.expected_output_capability_digest();
+        over_cap.request_digest = over_cap.digest();
+        assert_eq!(
+            over_cap.validate_against_profile(&capped_profile),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+
+        over_cap.output_capability.diagnostic_bytes_limit = capped_profile
+            .evaluator_protocol
+            .hard_caps
+            .max_diagnostic_bytes;
+        over_cap.output_capability.capability_digest = over_cap.expected_output_capability_digest();
+        over_cap.request_digest = over_cap.digest();
+        assert_eq!(over_cap.validate_against_profile(&capped_profile), Ok(()));
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn public_request_authorities_are_revalidated_after_each_identity_change() {
@@ -4990,63 +5051,7 @@ mod tests {
         assert_eq!(exact.validate_with_protocol(&protocol), Ok(()));
         assert_eq!(request().validate_with_protocol(&protocol), Ok(()));
 
-        let mut capped_profile = profile();
-        capped_profile
-            .evaluator_protocol
-            .hard_caps
-            .max_profile_bytes = MAX_PROFILE_BYTES as u64 - 1;
-        capped_profile
-            .evaluator_protocol
-            .hard_caps
-            .max_diagnostic_bytes = MAX_DIAGNOSTIC_BYTES - 1;
-        capped_profile.profile_digest = capped_profile.digest();
-        let mut over_cap = request();
-        over_cap.conformance_profile_digest = capped_profile.profile_digest;
-        over_cap.fixture_bundle_digest = fixture_bundle_digest(&capped_profile);
-        over_cap.evaluator_hard_caps_digest = capped_profile.evaluator_protocol.hard_caps.digest();
-        over_cap.output_capability.report_bytes_limit = MAX_PROFILE_BYTES as u64;
-        over_cap.output_capability.diagnostic_bytes_limit = MAX_DIAGNOSTIC_BYTES;
-        over_cap.output_capability.capability_digest = over_cap.expected_output_capability_digest();
-        over_cap.request_digest = over_cap.digest();
-        assert_eq!(
-            over_cap.validate_against_profile(&capped_profile),
-            Err(ConformanceContractError::FieldOutOfBounds)
-        );
-
-        over_cap.output_capability.report_bytes_limit = capped_profile
-            .evaluator_protocol
-            .hard_caps
-            .max_profile_bytes;
-        over_cap.output_capability.capability_digest = over_cap.expected_output_capability_digest();
-        over_cap.request_digest = over_cap.digest();
-        assert_eq!(
-            over_cap.validate_against_profile(&capped_profile),
-            Err(ConformanceContractError::FieldOutOfBounds)
-        );
-
-        over_cap.output_capability.report_bytes_limit = capped_profile
-            .evaluator_protocol
-            .hard_caps
-            .max_profile_bytes;
-        over_cap.output_capability.diagnostic_bytes_limit = capped_profile
-            .evaluator_protocol
-            .hard_caps
-            .max_diagnostic_bytes
-            + 1;
-        over_cap.output_capability.capability_digest = over_cap.expected_output_capability_digest();
-        over_cap.request_digest = over_cap.digest();
-        assert_eq!(
-            over_cap.validate_against_profile(&capped_profile),
-            Err(ConformanceContractError::FieldOutOfBounds)
-        );
-
-        over_cap.output_capability.diagnostic_bytes_limit = capped_profile
-            .evaluator_protocol
-            .hard_caps
-            .max_diagnostic_bytes;
-        over_cap.output_capability.capability_digest = over_cap.expected_output_capability_digest();
-        over_cap.request_digest = over_cap.digest();
-        assert_eq!(over_cap.validate_against_profile(&capped_profile), Ok(()));
+        request_profile_output_caps_are_independently_enforced();
     }
 
     #[test]
@@ -5568,11 +5573,11 @@ mod tests {
         let changes: [fn(&mut StableImplementationEvidenceV1, &mut StableImplementationEvidenceV1);
             5] = [
             |first, second| {
-                first.implementation.source_digest = second.implementation.source_digest
+                first.implementation.source_digest = second.implementation.source_digest;
             },
             |first, second| first.implementation.build_digest = second.implementation.build_digest,
             |first, second| {
-                first.implementation.binary_digest = second.implementation.binary_digest
+                first.implementation.binary_digest = second.implementation.binary_digest;
             },
             |first, _second| first.implementation.public_contract_digest = digest(55),
             |first, _second| first.evaluator_protocol_digest = digest(99),
