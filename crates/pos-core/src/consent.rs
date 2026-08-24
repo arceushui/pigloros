@@ -427,12 +427,11 @@ pub type ConsentRevokedV1 = ConsentRevoked;
 impl ConsentRevoked {
     /// Validate the Timeline coordinates carried by this V1 revocation.
     ///
-    /// A revocation is appended after the grant it fences, so the durable
-    /// revocation coordinate must be strictly greater than the grant
-    /// coordinate.  This rejects the otherwise ambiguous all-zero sentinel
-    /// pair at the public codec boundary.
+    /// A revocation is a durable Timeline event, so its fence coordinate must
+    /// not use the zero sentinel. The host's append fence separately verifies
+    /// that the coordinate is the next committed sequence.
     pub const fn validate(&self) -> Result<(), ConsentCodecError> {
-        if self.grant_seq >= self.fence_seq {
+        if self.fence_seq == 0 {
             Err(ConsentCodecError::FieldOutOfBounds)
         } else {
             Ok(())
@@ -1944,10 +1943,9 @@ mod tests {
     fn consent_revoked_rejects_non_advancing_timeline_coordinates() {
         let g = sample_granted();
         let mut r = sample_revoked(&g);
-        r.fence_seq = r.grant_seq;
+        r.fence_seq = 0;
         assert_eq!(r.encode().test_err(), ConsentCodecError::FieldOutOfBounds);
 
-        r.fence_seq = 0;
         r.grant_seq = 0;
         let bytes = {
             let arr = Value::Array(vec![

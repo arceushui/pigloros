@@ -28,7 +28,7 @@ use pos_core::{
     },
     timeline::Timeline,
     ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
-    ConsentGrantedV1, ConsentRevokedV1, CoreError, Plugin, ProposedAction,
+    ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, Plugin, ProposedAction,
 };
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
 use pos_plugin_world::{WorldPlugin, EVENT_TYPE_ACTION};
@@ -312,6 +312,10 @@ mod coverage_tests {
             .test_ok();
         let gateway = Gateway::new_with_geo_location_admission(store);
         let mut notices = gateway.subscribe();
+        let (grant_event, token) = gateway
+            .issue_consent_grant(&timeline.id().to_string(), consent_grant(entity, 1))
+            .await
+            .test_ok();
         let request = || {
             GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
                 timeline.id(),
@@ -325,19 +329,27 @@ mod coverage_tests {
         };
 
         assert!(gateway
-            .admit_geo_location_from_core(request())
+            .admit_geo_location_with_consent(request(), &token, grant_event.seq.as_u64(), 0, 1,)
             .await
             .test_ok()
             .is_accepted());
         assert_eq!(notices.recv().await.test_ok().event_type, "geo.location");
         assert!(gateway
-            .admit_geo_location_from_core(request())
+            .admit_geo_location_with_consent(request(), &token, grant_event.seq.as_u64(), 0, 1,)
             .await
             .test_ok()
             .is_duplicate());
         assert!(matches!(
             notices.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        let resolution_error = gateway
+            .admit_geo_location_with_consent(request(), &token, grant_event.seq.as_u64(), 0, 0)
+            .await
+            .test_err();
+        assert!(matches!(
+            resolution_error,
+            GatewayError::Consent(ConsentError::GeoResolutionNotPermitted)
         ));
         drop(gateway);
     }
@@ -704,6 +716,9 @@ pub enum GatewayError {
     /// Underlying store failure.
     #[error(transparent)]
     Store(#[from] CoreError),
+    /// Host consent fence rejected the protected operation.
+    #[error(transparent)]
+    Consent(#[from] ConsentError),
     /// Ledger domain error.
     #[error(transparent)]
     Ledger(#[from] pos_plugin_ledger::LedgerError),
@@ -1078,6 +1093,35 @@ impl Gateway {
         Ok(outcome)
     }
 
+    /// Admit one geographic request after applying the host consent fence.
+    ///
+    /// The caller supplies the effective minimized resolution captured by the
+    /// request. The token is checked both against the operation head and
+    /// against the grant's ADR-026 geographic floor before the dedicated
+    /// geographic store capability is invoked.
+    ///
+    /// # Errors
+    /// Returns [`GatewayError::Consent`] when the capability is stale,
+    /// expired, or does not cover the requested resolution.
+    pub async fn admit_geo_location_with_consent(
+        &self,
+        request: GeoLocationAdmissionRequestV1,
+        token: &ConsentCapabilityToken,
+        timeline_head: u64,
+        now_secs: u64,
+        effective_resolution: u8,
+    ) -> Result<GeoLocationAdmissionOutcome, GatewayError> {
+        self.consent_authority.validate_on_timeline(
+            request.timeline(),
+            token,
+            timeline_head,
+            now_secs,
+        )?;
+        token.authorize_event_type(&Kind::new("geo.location"))?;
+        token.authorize_geo_resolution(effective_resolution)?;
+        self.admit_geo_location_from_core(request).await
+    }
+
     /// Authenticate, rate-limit, and admit one minimized `OwnTracks` update.
     ///
     /// A notice is published only for a definite newly accepted Event.
@@ -1279,6 +1323,10 @@ impl Gateway {
                 return Err(error.into());
             }
         };
+        self.store
+            .remove_append_identities(ingress_dedup_scope(revocation.subject_id))
+            .await
+            .map_err(GatewayError::from)?;
         Ok(event)
     }
 
@@ -1787,13 +1835,17 @@ fn ingress_identity(timeline: TimelineId, entity: EntityId, ingress_id: &str) ->
     key.update(entity.to_string().as_bytes());
     key.update(b"\ningress:");
     key.update(ingress_id.as_bytes());
+    AppendIdentity::new(
+        AppendDedupKey::from_keyed_hash(*key.finalize().as_bytes()),
+        ingress_dedup_scope(entity),
+    )
+}
+
+fn ingress_dedup_scope(entity: EntityId) -> AppendDedupScope {
     let mut scope = blake3::Hasher::new_derive_key("pigloros ingress dedup scope v1");
     scope.update(b"entity:");
     scope.update(entity.to_string().as_bytes());
-    AppendIdentity::new(
-        AppendDedupKey::from_keyed_hash(*key.finalize().as_bytes()),
-        AppendDedupScope::from_keyed_hash(*scope.finalize().as_bytes()),
-    )
+    AppendDedupScope::from_keyed_hash(*scope.finalize().as_bytes())
 }
 
 const fn event_seq(event: &Event) -> u64 {
@@ -2818,6 +2870,60 @@ mod tests {
             GatewayError::Store(CoreError::Storage(message))
                 if message == "consent revocation was already fenced"
         ));
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn consent_revocation_removes_subject_ingress_dedup_identities() {
+        let gateway = memory_gw();
+        let timeline = gateway
+            .create_timeline("consent-dedup-cleanup")
+            .await
+            .test_ok();
+        let subject = EntityId::new();
+        let subject_text = subject.to_string();
+        let (grant_event, token) = gateway
+            .issue_consent_grant(&timeline.id().to_string(), consent_grant(subject, 1))
+            .await
+            .test_ok();
+
+        let first = gateway
+            .append_identified_action(
+                &timeline.id().to_string(),
+                &subject_text,
+                EVENT_TYPE_ACTION,
+                &serde_json::json!({"dx": 1.0}),
+                "device-1:42",
+            )
+            .await
+            .test_ok();
+        assert!(!first.duplicate);
+
+        gateway
+            .issue_consent_revocation(
+                &timeline.id().to_string(),
+                ConsentRevokedV1 {
+                    subject_id: token.subject_id(),
+                    grantee_id: token.grantee_id(),
+                    grant_seq: token.grant_seq(),
+                    fence_seq: grant_event.seq.as_u64().saturating_add(2),
+                },
+            )
+            .await
+            .test_ok();
+
+        let retried = gateway
+            .append_identified_action(
+                &timeline.id().to_string(),
+                &subject_text,
+                EVENT_TYPE_ACTION,
+                &serde_json::json!({"dx": 1.0}),
+                "device-1:42",
+            )
+            .await
+            .test_ok();
+        assert!(!retried.duplicate);
         drop(gateway);
     }
 

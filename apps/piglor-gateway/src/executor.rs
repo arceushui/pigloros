@@ -165,6 +165,10 @@ enum Command {
         limit: NonZeroUsize,
         reply: oneshot::Sender<Result<PurgeOutcome, StoreExecutorError>>,
     },
+    RemoveAppendIdentities {
+        scope: AppendDedupScope,
+        reply: oneshot::Sender<Result<usize, StoreExecutorError>>,
+    },
     RootCount {
         maximum: usize,
         reply: oneshot::Sender<Result<usize, StoreExecutorError>>,
@@ -240,6 +244,7 @@ impl Command {
             Self::AdmitOwnTracksIngress { .. }
             | Self::AdmitGeoLocation { .. }
             | Self::Purge { .. }
+            | Self::RemoveAppendIdentities { .. }
             | Self::Create { .. }
             | Self::Append { .. }
             | Self::AppendConsentGrant { .. }
@@ -994,6 +999,15 @@ impl StoreExecutor {
     ) -> Result<PurgeOutcome, StoreExecutorError> {
         submit!(self, |reply| Command::Purge { limit, reply })
     }
+    pub(crate) async fn remove_append_identities(
+        &self,
+        scope: AppendDedupScope,
+    ) -> Result<usize, StoreExecutorError> {
+        submit!(self, |reply| Command::RemoveAppendIdentities {
+            scope,
+            reply
+        })
+    }
     pub(crate) async fn admit_geo_location(
         &self,
         request: GeoLocationAdmissionRequestV1,
@@ -1407,6 +1421,9 @@ fn expire_command(command: Command) {
         Command::Purge { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
+        Command::RemoveAppendIdentities { reply, .. } => {
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+        }
         Command::RootCount { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
@@ -1559,6 +1576,12 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
             execute_geo_location_command(state, request, reply);
         }
         Command::Purge { limit, reply } => execute_purge_command(state, limit, reply),
+        Command::RemoveAppendIdentities { scope, reply } => {
+            send_store_result(
+                reply,
+                state.store.event_store().remove_append_identities(scope),
+            );
+        }
         Command::RootCount { maximum, reply } => execute_root_count_command(state, maximum, reply),
         Command::Create { name, reply } => execute_create_command(state, &name, reply),
         Command::Read {
@@ -2552,6 +2575,15 @@ mod tests {
         assert_expired(
             Command::Purge {
                 limit: NonZeroUsize::new(1).test_ok()?,
+                reply,
+            },
+            receiver,
+        );
+
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(
+            Command::RemoveAppendIdentities {
+                scope: AppendDedupScope::from_keyed_hash([3; 32]),
                 reply,
             },
             receiver,
