@@ -61,13 +61,15 @@ impl TomlLedgerStore {
                 path: path.display().to_string(),
                 reason: e.to_string(),
             })?;
-            let Some(stem) = path.file_stem() else {
-                return Err(LedgerError::InvalidPrediction(format!(
-                    "TOML path has no filename stem: {}",
-                    path.display()
-                )));
-            };
-            let stem = stem.to_string_lossy().into_owned();
+            // Directory entries always have a filename. If an exotic path
+            // ever reaches this point without a stem, the empty stem is
+            // rejected by the caller's prediction/resolution identity check.
+            let stem = path
+                .file_stem()
+                .map(ToOwned::to_owned)
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
             items.push((stem, value));
         }
         Ok(items)
