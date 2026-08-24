@@ -748,9 +748,8 @@ impl PluginRegistry {
             }
             OperationContext::Public => Ok(()),
             OperationContext::Protected { token, now_secs } => {
-                let gate = match self.consent_gate.as_ref() {
-                    Some(gate) => gate,
-                    None => return Err(RuntimeError::ConsentOperationUnavailable),
+                let Some(gate) = self.consent_gate.as_ref() else {
+                    return Err(RuntimeError::ConsentOperationUnavailable);
                 };
                 for key in &subscriptions {
                     gate.authorize_projection(
@@ -977,9 +976,8 @@ impl PluginRegistry {
         };
         let gate = self.consent_gate.as_ref();
         for draft in drafts {
-            let gate = match gate {
-                Some(gate) => gate,
-                None => return Err(RuntimeError::ConsentOperationUnavailable),
+            let Some(gate) = gate else {
+                return Err(RuntimeError::ConsentOperationUnavailable);
             };
             let subject = protected_token.map_or(draft.entity, ConsentCapabilityToken::subject_id);
             match protected_token {

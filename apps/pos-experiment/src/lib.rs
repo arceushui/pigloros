@@ -186,9 +186,8 @@ impl RunResult {
             .consent_gate
             .as_ref()
             .ok_or(pos_runtime::RuntimeError::ConsentOperationUnavailable)?;
-        let store_config = match self.store_config.clone() {
-            Some(config) => config,
-            None => return Err(ExperimentError::MissingStoreRecoveryRecipe),
+        let Some(store_config) = self.store_config.clone() else {
+            return Err(ExperimentError::MissingStoreRecoveryRecipe);
         };
         let store = match open_store(store_config) {
             Ok(store) => store,
@@ -1162,9 +1161,8 @@ impl Experiment {
             )
             .into());
         }
-        let gate = match self.registry.clone_consent_gate() {
-            Some(gate) => gate,
-            None => return Err(pos_runtime::RuntimeError::ConsentOperationUnavailable.into()),
+        let Some(gate) = self.registry.clone_consent_gate() else {
+            return Err(pos_runtime::RuntimeError::ConsentOperationUnavailable.into());
         };
         let mut fork_result = None;
         let mut append = || {
@@ -6307,34 +6305,42 @@ mod coverage_entrypoints {
             &durable_token,
             0,
         ));
-        authority.fence_timeline_at(durable_timeline, 1).test_ok();
+        ok(authority.fence_timeline_at(durable_timeline, 1));
         expect_err(&result.branch("coverage-revoked-branch"));
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn public_branch_propagates_protected_history_read_failure() {
-        let mut read_fault_store = CaptureFaultStore {
-            base: pos_store::memory::MemoryStore::new(),
-            fault: CaptureFault::Read,
-            head_calls: std::cell::Cell::new(0),
-        };
-        let read_fault_timeline = read_fault_store
-            .create_timeline("coverage-read-fault")
-            .test_ok();
-        read_fault_store
-            .append(
-                read_fault_timeline.id(),
-                &[EventDraft::new(
-                    EntityId::new(),
-                    Kind::new("coverage.read.fault"),
-                    CanonicalBytes::from_static(b"coverage"),
-                )],
-            )
-            .test_ok();
+        let database = ok(tempfile::NamedTempFile::new());
+        let path = ok(database
+            .path()
+            .to_str()
+            .ok_or("coverage read path is not utf8"));
+        let mut store = ok(open_store(StoreConfig::Sqlite {
+            path: path.to_owned(),
+        }));
+        let timeline = ok(store.create_timeline("coverage-read-fault"));
+        ok(store.append(
+            timeline.id(),
+            &[EventDraft::new(
+                EntityId::new(),
+                Kind::new("coverage.read.fault"),
+                CanonicalBytes::from_static(b"coverage"),
+            )],
+        ));
+        drop(store);
+        ok(rusqlite::Connection::open(path).and_then(|connection| {
+            connection
+                .execute("UPDATE events SET payload = X'FF'", [])
+                .map(|_| ())
+        }));
+        let mut reopened = ok(open_store(StoreConfig::Sqlite {
+            path: path.to_owned(),
+        }));
         assert!(
             Experiment::new(config("coverage-read-fault", StopCondition::MaxTicks(1),))
-                .branch("coverage-read-fault-child", &mut read_fault_store)
+                .branch("coverage-read-fault-child", reopened.as_mut())
                 .is_err()
         );
     }
@@ -6342,27 +6348,43 @@ mod coverage_entrypoints {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_driver_drafts_propagates_head_failure() {
-        let mut head_fault_store = CaptureFaultStore {
-            base: pos_store::memory::MemoryStore::new(),
-            fault: CaptureFault::LogicalHead,
-            head_calls: std::cell::Cell::new(0),
-        };
-        let head_fault_timeline = head_fault_store
-            .create_timeline("coverage-head-fault")
-            .test_ok();
+        struct EmitDriver {
+            entity: EntityId,
+        }
+
+        impl Driver for EmitDriver {
+            fn name(&self) -> &'static str {
+                "coverage-head-fault-driver"
+            }
+
+            fn step(
+                &mut self,
+                _: pos_core::ids::TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                Ok(StepOutput {
+                    drafts: vec![EventDraft::new(
+                        self.entity,
+                        Kind::new("coverage.failure"),
+                        CanonicalBytes::from_static(b"head-fault"),
+                    )],
+                })
+            }
+        }
+
+        let mut head_fault_store = pos_store::memory::MemoryStore::new();
         let entity = EntityId::new();
-        let plugin = make_plugin("coverage-head-fault", &["coverage.head.fault"]);
         let mut registry = PluginRegistry::new();
-        registry
-            .register(
-                &plugin,
-                None,
-                Some(Box::new(FixedDriver::new(entity, "coverage.head.fault", 1))),
-            )
-            .test_ok();
+        ok(registry.register(
+            &CoveragePlugin {
+                id: PluginId::new(),
+            },
+            None,
+            Some(Box::new(EmitDriver { entity })),
+        ));
         assert!(append_driver_drafts(
             &mut head_fault_store,
-            head_fault_timeline.id(),
+            pos_core::ids::TimelineId::new(),
             &mut registry,
             pos_core::clock::Seq::ZERO,
         )
