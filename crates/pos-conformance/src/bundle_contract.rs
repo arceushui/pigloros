@@ -694,7 +694,10 @@ struct ScannedArchiveItem<'a> {
 }
 
 mod archive_preflight {
-    use super::*;
+    use super::{
+        ArchivePreflight, BundleContractErrorV1, BundleMemberRoleV1, ScannedArchiveItem,
+        MAX_MEMBERS, MAX_MEMBER_BYTES, MAX_MEMBER_PATH_BYTES, MAX_STRUCTURAL_NESTING,
+    };
 
     fn length(
         bytes: &[u8],
@@ -865,7 +868,7 @@ mod archive_preflight {
         for field in 0..6 {
             if field == 3 {
                 let mut result = members(bytes, &mut index)?;
-                for _ in 0..3 {
+                for _ in 0..2 {
                     let field = item(bytes, &mut index, 1)?;
                     maximum_depth = maximum_depth.max(field.maximum_depth);
                 }
@@ -1808,8 +1811,13 @@ mod tests {
         let mut members = Vec::new();
         let mut expected_results = Vec::new();
         for (index, fixture) in profile.fixtures.iter().enumerate() {
+            let fixture_index = fixture
+                .case_id
+                .strip_prefix("case-")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(index);
             for input in &fixture.inputs {
-                let input_bytes = fixture_input_bytes(index);
+                let input_bytes = fixture_input_bytes(fixture_index);
                 members.push(BundleMemberV1::new(
                     fixture_input_path(
                         &fixture.case_id,
@@ -2397,16 +2405,11 @@ mod tests {
         );
 
         let mut unbound_support = signed_bundle(&profile, BundleModeV1::Local)?;
-        let schema_index = unbound_support
-            .members
-            .iter()
-            .position(|member| member.role == BundleMemberRoleV1::Schema)
-            .ok_or("missing schema support member")?;
-        unbound_support.members[schema_index] = BundleMemberV1::supporting(
-            "support/schema-cpf1-v1.cddl",
+        unbound_support.members.push(BundleMemberV1::supporting(
+            "support/unbound-schema.cddl",
             b"unbound schema".to_vec(),
             BundleMemberRoleV1::Schema,
-        );
+        ));
         unbound_support.rebuild_member_descriptors();
         assert_eq!(
             unbound_support.validate(),
