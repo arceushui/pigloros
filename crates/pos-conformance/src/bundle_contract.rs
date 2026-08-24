@@ -1468,7 +1468,7 @@ fn members_strictly_ordered(values: &[BundleMemberV1]) -> bool {
     normalized.len() == values.len()
         && values
             .windows(2)
-            .all(|pair| pair[0].path.as_str() < pair[1].path.as_str())
+            .all(|pair| pair[0].path.as_str().cmp(pair[1].path.as_str()).is_lt())
 }
 
 fn value_depth(value: &Value) -> usize {
@@ -1945,7 +1945,9 @@ mod tests {
             validate_member_path("control\nresult"),
             Err(BundleContractErrorV1::MemberOutOfBounds)
         );
+        assert!(validate_member_path(&"a".repeat(MAX_MEMBER_PATH_BYTES)).is_ok());
         assert!(validate_member_path("nested/result").is_ok());
+        assert!(validate_member_path("space result").is_ok());
         assert!(contains_secret_marker(b"PUBLIC PRIVATE_KEY material"));
         assert!(!contains_secret_marker(b"public expected result"));
     }
@@ -2510,6 +2512,16 @@ mod tests {
             Value::Text("key".to_owned()),
             Value::Tag(1, Box::new(Value::Array(vec![Value::Null]))),
         )]);
+        let mut nesting_cap = profile();
+        nesting_cap.evaluator_protocol.hard_caps.max_profile_bytes = u64::MAX;
+        nesting_cap
+            .evaluator_protocol
+            .hard_caps
+            .max_structural_nesting = 0;
+        assert_eq!(
+            validate_selected_bundle_caps(&nesting_cap, &bundle),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
         assert_eq!(value_depth(&nested), 4);
         Ok(())
     }
@@ -2746,6 +2758,23 @@ mod tests {
     }
 
     #[test]
+    fn expected_identity_preserves_all_expected_result_fields(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile = profile();
+        let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
+        let identity = expected_identity(&bundle.manifest.expected_results);
+        assert_eq!(identity.len(), bundle.manifest.expected_results.len());
+        assert!(!identity.is_empty());
+        assert_eq!(identity[0].0, bundle.manifest.expected_results[0].case_id);
+        assert_eq!(
+            identity[0].3,
+            bundle.manifest.expected_results[0].member_path
+        );
+        assert_eq!(identity[0].4, bundle.manifest.expected_results[0].digest);
+        Ok(())
+    }
+
+    #[test]
     fn pair_validation_checks_modes_and_member_paths() -> Result<(), Box<dyn std::error::Error>> {
         let profile = profile();
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
@@ -2962,6 +2991,29 @@ mod tests {
     }
 
     #[test]
+    fn canonical_expected_result_digest_binds_fixture_bytes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut profile = profile();
+        let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
+        let ExpectedResultV1::CanonicalBytes { bytes, .. } = &mut profile.fixtures[0].expected
+        else {
+            return Err("profile fixture must use canonical bytes".into());
+        };
+        bytes.push(b'!');
+        assert_eq!(
+            validate_expected_results(&profile, &bundle.manifest, &bundle.members),
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
+        );
+        let typed = crate::expected_result_bytes(&ExpectedResultV1::TypedFailure(
+            SafeErrorCodeV1::InvalidEncoding,
+        ))?;
+        assert!(!typed.is_empty());
+        assert_ne!(typed, vec![0]);
+        assert_ne!(typed, vec![1]);
+        Ok(())
+    }
+
+    #[test]
     fn expected_result_member_guards_are_independent() -> Result<(), Box<dyn std::error::Error>> {
         let profile = profile();
         let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
@@ -3064,6 +3116,25 @@ mod tests {
             .retain(|expected| expected.case_id != "case-00");
         assert_eq!(
             validate_expected_results(&profile, &missing_mandatory_case, &bundle.members),
+            Err(BundleContractErrorV1::MemberMissing)
+        );
+
+        let mut duplicate_case_profile = profile();
+        let mut duplicate_case_fixture = duplicate_case_profile.fixtures[0].clone();
+        duplicate_case_fixture.claim_layer = ClaimLayerV1::ReplayConformance;
+        duplicate_case_profile.fixtures.push(duplicate_case_fixture);
+        duplicate_case_profile.profile_digest = duplicate_case_profile.digest();
+        let duplicate_case_bundle = signed_bundle(&duplicate_case_profile, BundleModeV1::Local)?;
+        let mut missing_one_of_duplicate_cases = duplicate_case_bundle.manifest.clone();
+        missing_one_of_duplicate_cases
+            .expected_results
+            .retain(|expected| expected.claim_layer != ClaimLayerV1::ArtifactIntegrity);
+        assert_eq!(
+            validate_expected_results(
+                &duplicate_case_profile,
+                &missing_one_of_duplicate_cases,
+                &duplicate_case_bundle.members,
+            ),
             Err(BundleContractErrorV1::MemberMissing)
         );
         Ok(())
