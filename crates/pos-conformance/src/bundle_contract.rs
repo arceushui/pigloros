@@ -1813,8 +1813,7 @@ mod tests {
     fn public_archive_decoder_rejects_noncanonical_and_unknown_roles(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let bundle = signed_bundle(&profile(), BundleModeV1::Local)?;
-        let encoded = bundle.to_canonical_cbor()?;
-        let mut trailing = encoded.clone();
+        let mut trailing = bundle.to_canonical_cbor()?;
         trailing.push(0);
         assert_eq!(
             ConformanceBundleV1::from_canonical_cbor(&trailing),
