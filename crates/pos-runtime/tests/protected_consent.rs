@@ -916,6 +916,8 @@ fn protected_draft_seam_rejects_a_modality_not_in_the_presented_token() {
 #[test]
 fn public_restore_failure_aborts_prior_driver_and_reports_commit_panic() {
     let timeline = TimelineId::new();
+    let restore_event = projection_event(EntityId::new(), "restore.event", 1);
+    let restore_segments = [TimelineHistorySegment::new(timeline, Seq::from_u64(1))];
     let tracking_aborts = Arc::new(Mutex::new(0));
     let tracking_commits = Arc::new(Mutex::new(0));
     let failing_aborts = Arc::new(Mutex::new(0));
@@ -930,7 +932,7 @@ fn public_restore_failure_aborts_prior_driver_and_reports_commit_panic() {
     test_ok(registry.step_all(timeline));
 
     assert!(matches!(
-        registry.restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[]),
+        registry.restore_driver_state(&restore_segments, std::slice::from_ref(&restore_event)),
         Err(RuntimeError::InvalidRecoveryEvidence { .. })
     ));
     assert_eq!(
@@ -956,9 +958,25 @@ fn public_restore_failure_aborts_prior_driver_and_reports_commit_panic() {
     panicking.register_driver(Box::new(PanickingRestoreDriver));
     test_ok(panicking.step_all(timeline));
     assert!(matches!(
-        panicking.restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[]),
+        panicking.restore_driver_state(&restore_segments, std::slice::from_ref(&restore_event)),
         Err(RuntimeError::DriverRestorePanicked { .. })
     ));
+
+    let successful_commits = Arc::new(Mutex::new(0));
+    let mut successful = PluginRegistry::new();
+    successful.register_driver(Box::new(RestoreTrackingDriver {
+        aborts: Arc::new(Mutex::new(0)),
+        commits: Arc::clone(&successful_commits),
+    }));
+    test_ok(
+        successful.restore_driver_state(&restore_segments, std::slice::from_ref(&restore_event)),
+    );
+    assert_eq!(
+        *successful_commits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        1
+    );
 }
 
 #[test]
