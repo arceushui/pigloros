@@ -431,14 +431,8 @@ impl ConformanceProfileV1 {
     ///
     /// Returns a closed safe error when encoding, validation, or digest verification fails.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ConformanceContractError> {
-        self.validate().and_then(|()| {
-            let expected = self.digest();
-            if self.profile_digest == expected {
-                encode_bounded(&encode_profile(self, true))
-            } else {
-                Err(ConformanceContractError::FixtureDigestMismatch)
-            }
-        })
+        self.validate()
+            .and_then(|()| encode_bounded(&encode_profile(self, true)))
     }
 
     /// Validate and encode a Stable profile using an externally supplied root policy.
@@ -465,15 +459,7 @@ impl ConformanceProfileV1 {
         }
         decode_value(bytes)
             .and_then(|value| decode_profile(&value))
-            .and_then(|profile| {
-                profile.validate().and_then(|()| {
-                    if profile.profile_digest == profile.digest() {
-                        Ok(profile)
-                    } else {
-                        Err(ConformanceContractError::FixtureDigestMismatch)
-                    }
-                })
-            })
+            .and_then(|profile| profile.validate().map(|()| profile))
     }
 
     /// Decode and validate a profile without attaching Stable sidecar evidence.
@@ -714,9 +700,6 @@ impl EvaluatorRequestV1 {
         &self,
         profile: &ConformanceProfileV1,
     ) -> Result<(), ConformanceContractError> {
-        if profile.profile_digest != profile.digest() {
-            return Err(ConformanceContractError::FixtureDigestMismatch);
-        }
         if self.conformance_profile_digest != profile.profile_digest
             || self.fixture_bundle_digest != fixture_bundle_digest(profile)
             || self.trust_policy_snapshot_digest
@@ -1785,7 +1768,13 @@ fn encode_expected(value: &ExpectedResultV1) -> Value {
     }
 }
 
-pub(crate) fn expected_result_bytes(
+/// Encode a typed or classified expected result as canonical public bytes.
+///
+/// # Errors
+///
+/// Returns [`ConformanceContractError::InvalidEncoding`] when canonical
+/// encoding fails.
+pub fn expected_result_bytes(
     value: &ExpectedResultV1,
 ) -> Result<Vec<u8>, ConformanceContractError> {
     canonical::encode(&encode_expected(value))
@@ -3358,6 +3347,14 @@ mod tests {
             ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&oversized, &policy),
             Err(ConformanceContractError::FieldOutOfBounds)
         );
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor_with_stable_evidence(
+                &oversized,
+                Vec::new(),
+                &policy,
+            ),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
 
         let mut tampered = encode_profile(&candidate_profile, true);
         replace_profile_path(&mut tampered, &[16], Value::Bytes(digest(99).to_vec()));
@@ -3736,6 +3733,16 @@ mod tests {
         assert!(decode_safe_error(&unknown).is_err());
         assert!(decode_verification_outcome(&unknown).is_err());
         assert!(decode_divergence_mismatch(&unknown).is_err());
+
+        for (outcome, code) in [
+            (CaseOutcomeStatusV1::Pass, 0),
+            (CaseOutcomeStatusV1::Fail, 1),
+            (CaseOutcomeStatusV1::Skip, 2),
+            (CaseOutcomeStatusV1::Unavailable, 3),
+            (CaseOutcomeStatusV1::NotApplicable, 4),
+        ] {
+            assert_eq!(case_outcome(outcome), uint(code));
+        }
     }
 
     #[test]
