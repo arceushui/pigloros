@@ -3549,7 +3549,7 @@ mod coverage_entrypoints {
         let magic_len = super::CONFORMANCE_BUNDLE_MAGIC_V1.len();
         let version_index = 1 + 1 + usize::from(magic_len >= 24) + magic_len;
         assert_eq!(canonical[version_index], 1);
-        let mut noncanonical = canonical.clone();
+        let mut noncanonical = canonical;
         noncanonical.splice(version_index..=version_index, [0x18, 0x01]);
         assert_eq!(
             ConformanceBundleV1::from_canonical_cbor(&noncanonical),
