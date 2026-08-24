@@ -484,7 +484,7 @@ fn validate_member_path(path: &str) -> Result<(), BundleContractErrorV1> {
         || path.len() > MAX_MEMBER_PATH_BYTES
         || path.starts_with('/')
         || path.contains("..")
-        || path.split('/').any(|component| component.is_empty())
+        || path.split('/').any(str::is_empty)
     {
         Err(BundleContractErrorV1::MemberOutOfBounds)
     } else {
@@ -711,7 +711,12 @@ mod tests {
         let mut members = Vec::new();
         let mut expected_results = Vec::new();
         for (index, fixture) in profile.fixtures.iter().enumerate() {
-            let bytes = format!("expected-result-{index}").into_bytes();
+            let bytes = match &fixture.expected {
+                ExpectedResultV1::CanonicalBytes { bytes, .. } => bytes.clone(),
+                ExpectedResultV1::TypedFailure(_) | ExpectedResultV1::AllowedDivergence { .. } => {
+                    format!("expected-result-{index}").into_bytes()
+                }
+            };
             let path = format!("expected/case-{index:02}.bin");
             let member = BundleMemberV1::new(path.clone(), bytes, true);
             expected_results.push(BundleExpectedResultV1 {
@@ -843,7 +848,7 @@ mod tests {
         );
 
         let mut undeclared = signed_bundle(&profile, BundleModeV1::Local)?;
-        undeclared.manifest.members[0].path = "other/member".to_owned();
+        undeclared.manifest.members[0].path = "expected/case-00-wrong".to_owned();
         assert_eq!(
             undeclared.validate(),
             Err(BundleContractErrorV1::UndeclaredMember)
