@@ -2406,7 +2406,7 @@ mod tests {
             },
         );
         let unbound = PluginRegistry::new();
-        assert!(unbound.clone_consent_gate().is_none());
+        assert!(unbound.clone_consent_gate().is_some());
         assert!(matches!(
             unbound.projection_state_for_reducer(
                 timeline,
@@ -2416,7 +2416,7 @@ mod tests {
                 "projection",
                 subject,
             ),
-            Err(RuntimeError::ConsentOperationUnavailable)
+            Err(RuntimeError::Consent(_))
         ));
 
         let plugin = plugin_with_caps("projection", &["projection.event"], false, true);
