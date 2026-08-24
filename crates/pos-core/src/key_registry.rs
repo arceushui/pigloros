@@ -397,8 +397,9 @@ impl KeyRegistryStateV1 {
     ///
     /// # Errors
     ///
-    /// Returns a closed [`KeyRegistryErrorV1`] when the identity is missing or
-    /// the expected material fingerprint does not match.
+    /// Returns a closed [`KeyRegistryErrorV1`] when the identity is missing,
+    /// the expected material fingerprint does not match, or a repeated request
+    /// does not exactly match the durable tombstone.
     pub fn destroy_key(
         &mut self,
         request: KeyDestructionRequestV1,
