@@ -194,6 +194,8 @@ mod tests {
             "build".into(),
             "--source".into(),
             format!("store:{}", store_db.display()),
+            "--key".into(),
+            key_path.to_str().test_ok()?.to_owned(),
             "--site".into(),
             site.to_str().test_ok()?.to_owned(),
             "--today".into(),

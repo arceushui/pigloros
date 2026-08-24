@@ -4,11 +4,12 @@
 //! TOML tier: recomputes the b3sum-compatible BLAKE3 of each file's raw
 //! bytes and optionally compares against a previously-written [`ExportManifest`].
 //! Store tier: re-reads ledger events from the `SQLite` store and verifies
-//! Ed25519 signatures against the supplied `--pubkey`.
+//! Ed25519 signatures against the persisted role/epoch registry. An optional
+//! `--pubkey` is accepted only as an additional trust check.
 
 use std::path::Path;
 
-use pos_core::store::SeqRange;
+use pos_core::store::{EventStore, SeqRange};
 use pos_core::KeyRoleV1;
 use pos_crypto::{key_roles::verify_for_role, signing::verifying_key_from_public_key};
 use pos_plugin_ledger::EVENT_TYPE_PREDICTION;
@@ -54,8 +55,9 @@ impl std::fmt::Display for VerifyReport {
 /// Run verification against `source`.
 ///
 /// If `manifest_path` is provided (TOML tier), the recomputed hashes are
-/// compared against that manifest. If `pubkey_hex` is provided (store tier),
-/// event signatures are checked against that public key.
+/// compared against that manifest. For the store tier, the persisted registry
+/// resolves each event identity; `pubkey_hex`, when provided, is an additional
+/// trust check against the resolved public key.
 ///
 /// # Errors
 /// Returns [`CliError`] on adapter failure. Verification *failures* are
@@ -162,21 +164,30 @@ fn collect_hashes(dir: &Path) -> Result<Vec<(String, String)>, CliError> {
 }
 
 fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, CliError> {
-    let pubkey_hex = pubkey_hex
-        .ok_or_else(|| CliError::BadSource("store tier verify requires --pubkey HEX".to_owned()))?;
-    let pubkey_bytes =
-        hex_decode(pubkey_hex).map_err(|e| CliError::BadKey(format!("--pubkey: {e}")))?;
-    let arr: [u8; 32] = pubkey_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| CliError::BadKey("--pubkey must be 32 bytes".to_owned()))?;
-    let pk = pos_core::PublicKey::from_bytes(arr);
-    let vk = verifying_key_from_public_key(&pk).map_err(|e| CliError::BadKey(e.to_string()))?;
+    let supplied_public_key = pubkey_hex
+        .map(|pubkey_hex| {
+            let pubkey_bytes =
+                hex_decode(pubkey_hex).map_err(|e| CliError::BadKey(format!("--pubkey: {e}")))?;
+            let arr: [u8; 32] = pubkey_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| CliError::BadKey("--pubkey must be 32 bytes".to_owned()))?;
+            Ok(pos_core::PublicKey::from_bytes(arr))
+        })
+        .transpose()?;
 
     let store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
         path: db.to_string_lossy().into_owned(),
     })
     .map_err(|e| CliError::BadSource(e.to_string()))?;
+    let registry = store
+        .load_key_registry()
+        .map_err(|e| CliError::BadSource(e.to_string()))?;
+    if registry.is_none() {
+        return Err(CliError::BadSource(
+            "store verification requires a persisted role/epoch registry".to_owned(),
+        ));
+    }
     let timeline = store
         .list_timelines()?
         .into_iter()
@@ -220,6 +231,30 @@ fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, Cli
                 },
             });
         }
+        let registry_public_key = registry
+            .as_ref()
+            .and_then(|state| state.key_record(identity))
+            .and_then(|record| record.public_verification_key);
+        if let (Some(supplied), Some(registered)) = (supplied_public_key, registry_public_key) {
+            if supplied != registered {
+                return Ok(VerifyReport {
+                    tier: "store".to_owned(),
+                    n,
+                    outcome: VerifyOutcome::Mismatch {
+                        which: format!("seq={}", event.seq.as_u64()),
+                        reason: "supplied public key does not match the persisted registry"
+                            .to_owned(),
+                    },
+                });
+            }
+        }
+        let public_key = registry_public_key.ok_or_else(|| {
+            CliError::BadSource(
+                "store verification has no public key for event identity".to_owned(),
+            )
+        })?;
+        let vk = verifying_key_from_public_key(&public_key)
+            .map_err(|e| CliError::BadKey(e.to_string()))?;
         if let Err(error) = verify_for_role(&vk, identity.role, identity.epoch, &event.payload, sig)
         {
             return Ok(VerifyReport {
@@ -536,7 +571,7 @@ mod tests {
         })
         .test_ok()?;
         let err = run(&Source::Store(db), None, None).test_err()?;
-        assert!(err.to_string().contains("--pubkey"));
+        assert!(err.to_string().contains("role/epoch registry"));
 
         Ok(())
     }
@@ -887,6 +922,9 @@ mod tests {
             payload_hash,
         };
         store.append_committed(tl.id(), &[event]).test_ok()?;
+        store
+            .save_key_registry(&pos_core::KeyRegistryStateV1::new())
+            .test_ok()?;
         drop(store);
 
         let report = run(&Source::Store(db), Some(&pubkey), None).test_ok()?;
@@ -943,6 +981,9 @@ mod tests {
             payload_hash,
         };
         store.append_committed(tl.id(), &[event]).test_ok()?;
+        store
+            .save_key_registry(&pos_core::KeyRegistryStateV1::new())
+            .test_ok()?;
         drop(store);
 
         // verify_store should skip the unknown event and return Ok (n=1).

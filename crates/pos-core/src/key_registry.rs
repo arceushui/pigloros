@@ -342,7 +342,7 @@ pub trait KeyDestructionPortV1 {
 }
 
 /// Reference state machine for adapters and public-interface tests.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct KeyRegistryStateV1 {
     records: BTreeMap<KeyIdentityV1, KeyRecordV1>,
     active: BTreeMap<KeyRoleV1, KeyIdentityV1>,

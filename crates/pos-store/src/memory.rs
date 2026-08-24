@@ -42,7 +42,7 @@ use pos_core::{
         SeqRange,
     },
     timeline::{Timeline, TimelineMeta},
-    ConsentAppendPermit, GEOGRAPHIC_EVENT_TYPE,
+    ConsentAppendPermit, KeyRegistryStateV1, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -148,6 +148,8 @@ pub struct MemoryStore {
     geographic_cell_links: HashMap<(TimelineId, EventId), GeographicCellLink>,
     /// Trusted Gateway authority bound to this adapter's protected append port.
     consent_authority_permit: Option<ConsentAppendPermit>,
+    /// Durable-equivalent role/epoch registry for adapter tests.
+    key_registry: Option<KeyRegistryStateV1>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
 }
@@ -440,6 +442,7 @@ impl MemoryStore {
             geographic_cell_snapshots: HashMap::new(),
             geographic_cell_links: HashMap::new(),
             consent_authority_permit: None,
+            key_registry: None,
             hasher,
             clock: Box::new(SystemAdmissionClock),
         }
@@ -1635,6 +1638,15 @@ impl EventStore for MemoryStore {
         crate::ensure_non_geographic_drafts(drafts, timeline)
             .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
             .and_then(|()| self.append_visible(timeline, drafts))
+    }
+
+    fn load_key_registry(&self) -> Result<Option<KeyRegistryStateV1>, CoreError> {
+        Ok(self.key_registry.clone())
+    }
+
+    fn save_key_registry(&mut self, registry: &KeyRegistryStateV1) -> Result<(), CoreError> {
+        self.key_registry = Some(registry.clone());
+        Ok(())
     }
 
     fn append_bounded(

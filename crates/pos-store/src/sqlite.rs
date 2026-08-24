@@ -40,7 +40,8 @@ use pos_core::{
         AppendOrDuplicateOutcome, EventReadBounds, EventStore, PurgeOutcome, SeqRange,
     },
     timeline::{Timeline, TimelineMeta, TimelineMode},
-    ConsentAppendPermit, CoreError, Hash, KeyIdentityV1, KeyRoleV1, GEOGRAPHIC_EVENT_TYPE,
+    ConsentAppendPermit, CoreError, Hash, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1,
+    GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -423,6 +424,10 @@ impl SqliteStore {
                  signature_role INTEGER,
                  signature_epoch INTEGER,
                  PRIMARY KEY (timeline_id, seq)
+             );
+             CREATE TABLE IF NOT EXISTS key_registry (
+                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                 state_json BLOB NOT NULL
              );
              CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id);
              CREATE TABLE IF NOT EXISTS append_identities (
@@ -2856,6 +2861,34 @@ impl EventStore for SqliteStore {
         crate::ensure_non_geographic_drafts(drafts, timeline)
             .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
             .and_then(|()| self.append_visible(timeline, drafts))
+    }
+
+    fn load_key_registry(&self) -> Result<Option<KeyRegistryStateV1>, CoreError> {
+        let state_json = match self.conn.query_row(
+            "SELECT state_json FROM key_registry WHERE singleton = 1",
+            [],
+            |row| row.get::<_, Vec<u8>>(0),
+        ) {
+            Ok(bytes) => bytes,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+            Err(error) => return Err(CoreError::Storage(error.to_string())),
+        };
+        serde_json::from_slice(&state_json)
+            .map(Some)
+            .map_err(|error| CoreError::Serialization(error.to_string()))
+    }
+
+    fn save_key_registry(&mut self, registry: &KeyRegistryStateV1) -> Result<(), CoreError> {
+        let state_json = serde_json::to_vec(registry)
+            .map_err(|error| CoreError::Serialization(error.to_string()))?;
+        self.conn
+            .execute(
+                "INSERT INTO key_registry (singleton, state_json) VALUES (1, ?1)
+                 ON CONFLICT(singleton) DO UPDATE SET state_json = excluded.state_json",
+                params![state_json],
+            )
+            .map(|_| ())
+            .map_err(|error| CoreError::Storage(error.to_string()))
     }
 
     fn append_bounded(

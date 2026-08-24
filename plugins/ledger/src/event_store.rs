@@ -7,7 +7,8 @@ use pos_core::{
     hasher::Hasher,
     ids::{EntityId, EventId},
     store::{EventStore, SeqRange},
-    CoreError, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1,
+    CoreError, KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1,
+    KeyRoleV1,
 };
 use pos_crypto::{
     key_roles::{key_material_digest, sign_for_registered_role},
@@ -54,7 +55,7 @@ impl EventLedgerStore {
     /// Returns [`LedgerError::Store`] when the supplied registry does not
     /// authorize the signing identity for the supplied key.
     pub fn new(
-        store: Box<dyn EventStore>,
+        mut store: Box<dyn EventStore>,
         timeline_id: pos_core::ids::TimelineId,
         entity: EntityId,
         signing_key: SigningKey,
@@ -62,6 +63,21 @@ impl EventLedgerStore {
         signing_identity: KeyIdentityV1,
         hasher: Box<dyn Hasher>,
     ) -> Result<Self, LedgerError> {
+        if let Some(persisted_registry) = store.load_key_registry().map_err(LedgerError::from)? {
+            *key_registry.lock().map_err(|_| {
+                LedgerError::Store("ledger signing registry is unavailable".to_owned())
+            })? = persisted_registry;
+        } else {
+            let initial_registry = key_registry
+                .lock()
+                .map_err(|_| {
+                    LedgerError::Store("ledger signing registry is unavailable".to_owned())
+                })?
+                .clone();
+            store
+                .save_key_registry(&initial_registry)
+                .map_err(LedgerError::from)?;
+        }
         let public_verification_key = public_key_from_verifying_key(&signing_key.verifying_key());
         key_registry
             .lock()
@@ -84,6 +100,35 @@ impl EventLedgerStore {
             signing_identity,
             hasher,
         })
+    }
+
+    /// Irreversibly destroy one signing identity and persist its tombstone.
+    ///
+    /// The registry lock is held while the durable snapshot is replaced, so a
+    /// concurrent append cannot authorize a signature against a state that has
+    /// not yet recorded the destruction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LedgerError::Store`] when the request is invalid or the
+    /// durable registry cannot be updated.
+    pub fn destroy_signing_key(
+        &mut self,
+        request: KeyDestructionRequestV1,
+    ) -> Result<KeyDestructionOutcomeV1, LedgerError> {
+        let mut registry = self
+            .key_registry
+            .lock()
+            .map_err(|_| LedgerError::Store("ledger signing registry is unavailable".to_owned()))?;
+        let mut next = registry.clone();
+        let outcome = next
+            .destroy_key(request)
+            .map_err(|error| LedgerError::Store(format!("ledger key destruction: {error}")))?;
+        self.store
+            .save_key_registry(&next)
+            .map_err(LedgerError::from)?;
+        *registry = next;
+        Ok(outcome)
     }
 
     fn head_seq(&self) -> Result<Seq, LedgerError> {
@@ -284,18 +329,64 @@ mod tests {
             identity,
             Box::new(Blake3Hasher),
         )?;
-        registry
-            .lock()
-            .map_err(|_| std::io::Error::other("registry poisoned"))?
-            .destroy_key(pos_core::KeyDestructionRequestV1::new(
-                identity,
-                material_digest,
-                pos_core::Hash::from_bytes([8; 32]),
-            ))?;
+        store.destroy_signing_key(pos_core::KeyDestructionRequestV1::new(
+            identity,
+            material_digest,
+            pos_core::Hash::from_bytes([8; 32]),
+        ))?;
         let error = store
             .register(crate::contract::sample_new_prediction("2026-08-01"))
             .err()
             .ok_or("expected destroyed-signing error")?;
+        assert!(error.to_string().contains("destroyed"));
+        Ok(())
+    }
+
+    #[test]
+    fn destroyed_registry_state_survives_sqlite_reopen() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let db = temp.path().join("ledger.db");
+        let (signing_key, _) = pos_crypto::signing::generate_keypair();
+        let (registry, identity) = registry_for(&signing_key)?;
+        let material_digest = key_material_digest(&signing_key.to_bytes());
+        let mut raw_store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+            path: db.to_string_lossy().into_owned(),
+        })?;
+        let timeline = raw_store.create_timeline("ledger")?;
+        let mut store = EventLedgerStore::new(
+            raw_store,
+            timeline.id(),
+            EntityId::new(),
+            signing_key.clone(),
+            registry,
+            identity,
+            Box::new(Blake3Hasher),
+        )?;
+        store.destroy_signing_key(pos_core::KeyDestructionRequestV1::new(
+            identity,
+            material_digest,
+            pos_core::Hash::from_bytes([9; 32]),
+        ))?;
+        drop(store);
+
+        let reopened = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+            path: db.to_string_lossy().into_owned(),
+        })?;
+        let persisted = reopened
+            .load_key_registry()?
+            .ok_or("expected persisted registry")?;
+        assert!(persisted.tombstone(identity).is_some());
+        let error = EventLedgerStore::new(
+            reopened,
+            timeline.id(),
+            EntityId::new(),
+            signing_key,
+            Arc::new(Mutex::new(KeyRegistryStateV1::new())),
+            identity,
+            Box::new(Blake3Hasher),
+        )
+        .err()
+        .ok_or("destroyed identity must not authorize after reopen")?;
         assert!(error.to_string().contains("destroyed"));
         Ok(())
     }

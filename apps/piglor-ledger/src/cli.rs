@@ -213,8 +213,8 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
             output_stderr!("  predict --source toml:DIR|store:DB [--key <path>] --title T --statement S --predicted-outcome O --confidence 0..1 --made-at TS --resolve-by DATE --osf URL [--scenario NAME]");
             output_stderr!("  resolve --source toml:DIR|store:DB [--key <path>] --id ULID --outcome true|false --resolved-at TS");
             output_stderr!("  export --source toml:DIR|store:DB [--out FILE] [--today YYYY-MM-DD] [--pubkey HEX]");
-            output_stderr!("  build  --source toml:DIR|store:DB --site DIR [--today YYYY-MM-DD] [--pubkey HEX]");
-            output_stderr!("  verify --source toml:DIR|store:DB [--pubkey HEX (required for store:)] [--manifest FILE]");
+            output_stderr!("  build  --source toml:DIR|store:DB [--key PATH] --site DIR [--today YYYY-MM-DD] [--pubkey HEX]");
+            output_stderr!("  verify --source toml:DIR|store:DB [--pubkey HEX (optional trust check for store:)] [--manifest FILE]");
             Ok(())
         }
     }
@@ -330,18 +330,22 @@ fn cmd_export(args: &[String]) -> Result<(), CliError> {
 
 fn cmd_build(args: &[String]) -> Result<(), CliError> {
     let source = Source::parse(require(args, "--source")?)?;
+    let key = flag(args, "--key").map(PathBuf::from);
     let site = PathBuf::from(require(args, "--site")?);
     let pubkey = flag(args, "--pubkey").map(str::to_owned);
     let today = flag(args, "--today").map_or_else(today_utc, str::to_owned);
     let ledger = match &source {
         Source::Toml(dir) => TomlLedgerStore::new(dir).load(&today)?,
         Source::Store(db) => {
+            let key_path = key.as_deref().ok_or_else(|| {
+                CliError::BadSource("store: source requires --key <path>".to_owned())
+            })?;
             let mut store = pos_store::open_store(StoreConfig::Sqlite {
                 path: db.to_string_lossy().into_owned(),
             })
             .map_err(|e| CliError::BadSource(e.to_string()))?;
             let timeline_id = find_or_create_ledger_timeline(&mut *store)?;
-            let (sk, _) = pos_crypto::signing::generate_keypair();
+            let sk = load_signing_key(key_path)?;
             let (registry, identity) = ledger_signing_registry(&sk)?;
             let ledger_store = EventLedgerStore::new(
                 store,

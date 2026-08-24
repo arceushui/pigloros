@@ -764,6 +764,29 @@ pub trait EventStore: Send {
             "import_committed not supported by this store".to_owned(),
         ))
     }
+
+    /// Load the durable role/epoch registry owned by this store, when present.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the registry snapshot cannot be read
+    /// or decoded.
+    fn load_key_registry(&self) -> Result<Option<crate::KeyRegistryStateV1>, CoreError> {
+        Ok(None)
+    }
+
+    /// Replace the durable role/epoch registry owned by this store.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the adapter cannot persist the
+    /// registry snapshot.
+    fn save_key_registry(
+        &mut self,
+        _registry: &crate::KeyRegistryStateV1,
+    ) -> Result<(), CoreError> {
+        Err(CoreError::Storage(
+            "durable key registry is unsupported by this EventStore".to_owned(),
+        ))
+    }
 }
 
 /// Export a timeline's **logical** event stream as a portable snapshot.
