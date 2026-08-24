@@ -1209,6 +1209,28 @@ pub trait ConsentGate: Send + Sync {
         Err(ConsentError::NoConsent)
     }
 
+    /// Fence capabilities and execute a host-owned closure while the fence is
+    /// held. Concrete authorities override this to serialize the fence with
+    /// the durable marker append.
+    ///
+    /// # Errors
+    /// Returns the fence error without invoking `append` when the gate cannot
+    /// publish the requested fence.
+    fn with_revocation_fence(
+        &self,
+        timeline_id: TimelineId,
+        subject: Option<EntityId>,
+        fence_seq: u64,
+        append: &mut dyn FnMut(),
+    ) -> Result<(), ConsentError> {
+        match subject {
+            Some(subject) => self.fence_subject_at(timeline_id, subject, fence_seq)?,
+            None => self.fence_timeline_at(timeline_id, fence_seq)?,
+        }
+        append();
+        Ok(())
+    }
+
     /// Hold the host's consent fence while the caller performs its durable
     /// append. Authorities that share revocation state with this gate override
     /// this method so revocation cannot interleave between validation and the
@@ -1400,6 +1422,29 @@ impl ConsentGate for ConsentAuthority {
                 active.token.fence_seq = active.token.fence_seq.min(pending_fence_seq);
             }
         }
+        drop(sessions);
+        Ok(())
+    }
+
+    fn with_revocation_fence(
+        &self,
+        timeline_id: TimelineId,
+        subject: Option<EntityId>,
+        fence_seq: u64,
+        append: &mut dyn FnMut(),
+    ) -> Result<(), ConsentError> {
+        let pending_fence_seq = fence_seq.saturating_sub(1);
+        let mut sessions = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for ((active_timeline, active_subject, _, _), active) in &mut *sessions {
+            let subject_matches = subject.is_none_or(|subject| *active_subject == subject);
+            if *active_timeline == timeline_id && subject_matches {
+                active.token.fence_seq = active.token.fence_seq.min(pending_fence_seq);
+            }
+        }
+        append();
         drop(sessions);
         Ok(())
     }

@@ -153,7 +153,7 @@ impl MoatProofRun {
         let mut parent = experiment.start()?;
         parent.step_tick()?;
         let fork_cut_seq = parent
-            .source_events()?
+            .source_events_with_control()?
             .last()
             .map(|event| event.seq.as_u64())
             .ok_or(MoatProofError::MissingForkCut)?;
@@ -164,18 +164,20 @@ impl MoatProofRun {
         finish(&mut child)?;
         let consent_audit = commit_consent_boundary(&mut parent, "proof-subject")?;
         let counterfactual_consent_audit = commit_consent_boundary(&mut child, "proof-subject")?;
-        let baseline_events = parent.source_events()?;
-        let counterfactual_events = child.source_events()?;
+        let baseline_events = parent.source_events_with_control()?;
+        let counterfactual_events = child.source_events_with_control()?;
+        let parent_result = parent.run_to_completion()?;
+        let child_result = child.run_to_completion()?;
         let (prefix_identical_through_fork, suffix_recomputed) =
             suffix_audit(&baseline_events, &counterfactual_events, fork_cut_seq);
         let baseline = evidence(&EvidenceContext {
             input: &input,
             mode,
-            timeline_id: parent.timeline().id(),
+            timeline_id: parent_result.timeline_id,
             fork_cut_seq: Some(fork_cut_seq),
             events: baseline_events.as_slice(),
             factual_events: baseline_events.as_slice(),
-            projections: parent.projections_for_host()?,
+            projections: &parent_result.projections,
             topology: &topology,
             plugin_versions: &plugin_versions,
             failure_probes: &failure_probes,
@@ -184,11 +186,11 @@ impl MoatProofRun {
         let counterfactual = evidence(&EvidenceContext {
             input: &input,
             mode,
-            timeline_id: child.timeline().id(),
+            timeline_id: child_result.timeline_id,
             fork_cut_seq: Some(fork_cut_seq),
             events: counterfactual_events.as_slice(),
             factual_events: baseline_events.as_slice(),
-            projections: child.projections_for_host()?,
+            projections: &child_result.projections,
             topology: &topology,
             plugin_versions: &plugin_versions,
             failure_probes: &failure_probes,
@@ -1579,9 +1581,9 @@ fn failure_probe(
         })),
     )?;
     let mut session = experiment.start()?;
-    let before = session.source_events()?;
+    let before = session.source_events_with_control()?;
     let step_failed = session.step_tick().is_err();
-    let after = session.source_events()?;
+    let after = session.source_events_with_control()?;
     let failure_class = match class {
         "resource_exhaustion" => PluginFailureClassV1::ResourceExhaustion,
         _ => PluginFailureClassV1::PluginCrash,
@@ -1604,10 +1606,10 @@ fn commit_consent_boundary(
     subject: &str,
 ) -> Result<ConsentAuditV1, MoatProofError> {
     let boundary_seq = session
-        .source_events()?
+        .source_events_with_control()?
         .last()
         .map_or(0, |event| event.seq.as_u64());
-    session.revoke_consent_for_subject_at_boundary(fixed_id(5));
+    session.revoke_consent_at_boundary();
     let post_revocation_append = session.append_events(&[EventDraft::new(
         fixed_id(5),
         Kind::new("proof.consent.tick"),
@@ -1623,14 +1625,14 @@ fn commit_consent_boundary(
             ..
         }
     );
-    let marker_events = session.source_events()?;
+    let marker_events = session.source_events_with_control()?;
     let marker = marker_events
         .last()
         .filter(|event| event.event_type.as_str() == crate::EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE)
         .ok_or(MoatProofError::ConsentMarkerMissing)?;
     let halted = marker_committed && matches!(session.step_tick()?, crate::TickOutcome::Stopped);
     let after_seq = session
-        .source_events()?
+        .source_events_with_control()?
         .last()
         .map_or(0, |event| event.seq.as_u64());
     Ok(ConsentAuditV1 {

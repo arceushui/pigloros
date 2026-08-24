@@ -448,7 +448,7 @@ pub struct PluginRegistry {
     plugins: IndexMap<PluginId, PluginEntry>,
     approver_map: IndexMap<Kind, PluginId>,
     pub schemas: SchemaRegistry,
-    pub projections: ProjectionRegistry,
+    projections: ProjectionRegistry,
     pending_step: Option<PendingStep>,
     run_mode: RunMode,
     resource_limit: Option<u64>,
@@ -622,6 +622,17 @@ impl PluginRegistry {
     #[must_use]
     pub fn clone_consent_gate(&self) -> Option<Arc<dyn ConsentGate>> {
         self.consent_gate.clone()
+    }
+
+    /// Fold a host-captured Event range into the registered reducers.
+    pub fn fold_events(&mut self, events: &[Event]) {
+        self.projections.fold_events(events);
+    }
+
+    /// Consume the registry and return its accumulated projections.
+    #[must_use]
+    pub fn into_projections(self) -> ProjectionRegistry {
+        self.projections
     }
 
     /// Read one projection state after the bound host gate authorizes its subject.
