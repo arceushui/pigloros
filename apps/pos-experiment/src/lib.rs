@@ -1587,11 +1587,9 @@ impl ExperimentSession {
                 return Err(error);
             }
         };
-        folded_events = folded_events.saturating_add(fold_captured_range(
-            &mut self.boundary,
-            &mut self.registry,
-            &after,
-        ));
+        folded_events = folded_events.saturating_add(
+            fold_captured_range(&mut self.boundary, &mut self.registry, &after).get(),
+        );
         self.timeline = after.timeline;
         self.total_events = self.total_events.saturating_add(folded_events.get());
         self.ticks = self.ticks.saturating_add(1);
