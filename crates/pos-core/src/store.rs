@@ -1078,22 +1078,11 @@ mod tests {
     /// Minimal in-memory store used only for trait-level tests in pos-core.
     struct TrivialStore {
         counter: u64,
-        bounded: bool,
     }
 
     impl TrivialStore {
         fn new() -> Self {
-            Self {
-                counter: 0,
-                bounded: false,
-            }
-        }
-
-        fn new_bounded() -> Self {
-            Self {
-                counter: 0,
-                bounded: true,
-            }
+            Self { counter: 0 }
         }
     }
 
@@ -1228,16 +1217,13 @@ mod tests {
 
         fn append_bounded(
             &mut self,
-            timeline: TimelineId,
-            drafts: &[EventDraft],
+            _timeline: TimelineId,
+            _drafts: &[EventDraft],
             _max_owned_events: u64,
         ) -> Result<Option<Vec<Event>>, CoreError> {
-            if !self.bounded {
-                return Err(CoreError::Storage(
-                    "atomic bounded append is unsupported by this EventStore".to_owned(),
-                ));
-            }
-            self.append(timeline, drafts).map(Some)
+            Err(CoreError::Storage(
+                "generic bounded adapter rejects consent drafts".to_owned(),
+            ))
         }
 
         fn read(&self, _timeline: TimelineId, _range: SeqRange) -> Result<Vec<Event>, CoreError> {
@@ -1265,7 +1251,7 @@ mod tests {
 
     #[test]
     fn append_or_duplicate_defaults_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
-        let mut store = TrivialStore::new_bounded();
+        let mut store = TrivialStore::new();
         let identity = AppendIdentity::new(
             AppendDedupKey::from_keyed_hash([1; 32]),
             AppendDedupScope::from_keyed_hash([2; 32]),
@@ -1314,16 +1300,17 @@ mod tests {
             .test_err()?;
         assert!(withdrawal_error.to_string().contains("withdrawal"));
 
-        let bounded_draft = EventDraft::new(
+        let consent_draft = EventDraft::new(
             EntityId::new(),
-            Kind::new("test.bounded"),
+            Kind::new("consent.granted.v1"),
             CanonicalBytes::from_static(b"bounded-default"),
         );
-        let committed = store
-            .append_consent_bounded(TimelineId::new(), &[bounded_draft], 1)
-            .test_ok()?;
-        let committed = committed.ok_or("default consent append returned no events")?;
-        assert_eq!(committed.len(), 1);
+        let delegated_error = store
+            .append_consent_bounded(TimelineId::new(), &[consent_draft], 1)
+            .test_err()?;
+        assert!(delegated_error
+            .to_string()
+            .contains("generic bounded adapter rejects consent"));
 
         Ok(())
     }
