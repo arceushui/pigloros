@@ -21,10 +21,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  mutation-baseline:
+    name: mutation baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: mutation-baseline
+      - name: Run baseline tests
+        run: |
+          set -euo pipefail
+          cargo test --workspace --all-features --locked -- --include-ignored 2>&1 \
+            | tee "${RUNNER_TEMP}/cargo-test.log"
+          bash scripts/assert-no-ignored-in-test-summary.sh "${RUNNER_TEMP}/cargo-test.log"
+
   mutation:
-    name: diff mutation testing
+    name: diff mutation testing (shard ${{ matrix.shard }})
+    needs: mutation-baseline
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -54,6 +79,8 @@ jobs:
           --all-features
           --in-diff "${{ runner.temp }}/changes.diff"
           --no-shuffle
+          --shard "${{ matrix.shard }}/4"
+          --baseline skip
           --jobs 4
           --timeout 1800
           --cap-lints true
@@ -62,6 +89,17 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: mutation-report
+          name: mutation-report-shard-${{ matrix.shard }}
           path: mutants.out
           if-no-files-found: ignore
+
+  mutation-gate:
+    name: diff mutation testing
+    if: always()
+    needs: [mutation-baseline, mutation]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require baseline and every mutation shard to pass
+        run: |
+          test "${{ needs.mutation-baseline.result }}" = success
+          test "${{ needs.mutation.result }}" = success
