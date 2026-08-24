@@ -1078,11 +1078,22 @@ mod tests {
     /// Minimal in-memory store used only for trait-level tests in pos-core.
     struct TrivialStore {
         counter: u64,
+        bounded: bool,
     }
 
     impl TrivialStore {
         fn new() -> Self {
-            Self { counter: 0 }
+            Self {
+                counter: 0,
+                bounded: false,
+            }
+        }
+
+        fn new_bounded() -> Self {
+            Self {
+                counter: 0,
+                bounded: true,
+            }
         }
     }
 
@@ -1221,6 +1232,11 @@ mod tests {
             drafts: &[EventDraft],
             _max_owned_events: u64,
         ) -> Result<Option<Vec<Event>>, CoreError> {
+            if !self.bounded {
+                return Err(CoreError::Storage(
+                    "atomic bounded append is unsupported by this EventStore".to_owned(),
+                ));
+            }
             self.append(timeline, drafts).map(Some)
         }
 
@@ -1249,7 +1265,7 @@ mod tests {
 
     #[test]
     fn append_or_duplicate_defaults_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
-        let mut store = TrivialStore::new();
+        let mut store = TrivialStore::new_bounded();
         let identity = AppendIdentity::new(
             AppendDedupKey::from_keyed_hash([1; 32]),
             AppendDedupScope::from_keyed_hash([2; 32]),
