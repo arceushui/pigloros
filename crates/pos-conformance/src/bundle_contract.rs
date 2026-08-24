@@ -3410,7 +3410,8 @@ mod coverage_entrypoints {
         validate_preflight_archive_caps, validate_selected_bundle_caps,
         validate_supporting_members, validate_total_bytes, BundleContractErrorV1,
         BundleMemberRoleV1, BundleModeV1, ConformanceBundlePairV1, ConformanceBundleV1, PublicKey,
-        Value, MAX_MEMBERS, MAX_MEMBER_BYTES, MAX_STRUCTURAL_NESTING, MAX_TOTAL_BUNDLE_BYTES,
+        Value, MAX_MEMBERS, MAX_MEMBER_BYTES, MAX_MEMBER_PATH_BYTES, MAX_STRUCTURAL_NESTING,
+        MAX_TOTAL_BUNDLE_BYTES,
     };
 
     fn signed_bundle() -> Result<ConformanceBundleV1, Box<dyn std::error::Error>> {
@@ -3586,7 +3587,8 @@ mod coverage_entrypoints {
             next.extend_from_slice(&exact_depth);
             exact_depth = next;
         }
-        let exact_depth_scan = super::archive_preflight::scan(&raw_archive(&exact_depth, &[0x80]))?;
+        let exact_depth_archive = raw_archive(&exact_depth, &[0x80]);
+        let exact_depth_scan = super::archive_preflight::scan(&exact_depth_archive)?;
         assert_eq!(
             exact_depth_scan.maximum_depth,
             usize::from(MAX_STRUCTURAL_NESTING)
@@ -3595,8 +3597,8 @@ mod coverage_entrypoints {
         over_depth.extend_from_slice(&exact_depth);
         assert!(super::archive_preflight::scan(&raw_archive(&over_depth, &[0x80])).is_err());
 
-        let exact_members =
-            super::archive_preflight::scan(&raw_archive(&[0x60], &exact_member_array()))?;
+        let exact_member_archive = raw_archive(&[0x60], &exact_member_array());
+        let exact_members = super::archive_preflight::scan(&exact_member_archive)?;
         assert_eq!(exact_members.member_count, MAX_MEMBERS);
         assert_eq!(exact_members.maximum_depth, 4);
         assert!(super::archive_preflight::scan(&raw_archive_with_header(
