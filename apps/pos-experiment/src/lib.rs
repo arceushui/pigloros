@@ -5480,6 +5480,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_entrypoints {
     use super::*;
     use pos_core::store::EventStore;
@@ -5575,6 +5576,30 @@ mod coverage_entrypoints {
         ) -> Result<(), RuntimeError> {
             Err(RuntimeError::InvalidRecoveryEvidence {
                 reason: "coverage restore failure",
+            })
+        }
+    }
+
+    struct BacktestDriver {
+        entity: EntityId,
+    }
+
+    impl Driver for BacktestDriver {
+        fn name(&self) -> &'static str {
+            "coverage-backtest-driver"
+        }
+
+        fn step(
+            &mut self,
+            _: pos_core::ids::TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            Ok(StepOutput {
+                drafts: vec![EventDraft::new(
+                    self.entity,
+                    Kind::new("coverage.failure"),
+                    pos_core::CanonicalBytes::from_static(b"backtest"),
+                )],
             })
         }
     }
@@ -5700,6 +5725,84 @@ mod coverage_entrypoints {
         })
         .resume(timeline));
         assert!(session.consent_revoked);
+    }
+
+    #[test]
+    fn resume_applies_host_closure_to_a_bound_gate() {
+        let database = ok(tempfile::NamedTempFile::new());
+        let path = ok(database
+            .path()
+            .to_str()
+            .ok_or("coverage bound resume path is not utf8"))
+        .to_owned();
+        let store_config = StoreConfig::Sqlite { path };
+        let timeline = {
+            let mut store = ok(open_store(store_config.clone()));
+            let timeline = ok(store.create_timeline("coverage-bound-resume"));
+            ok(store.append(
+                timeline.id(),
+                &[EventDraft::new(
+                    EntityId::new(),
+                    Kind::new(EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE),
+                    pos_core::CanonicalBytes::from_static(EXPERIMENT_CONSENT_TIMELINE_MARKER),
+                )],
+            ));
+            timeline.id()
+        };
+        let authority = ConsentAuthority::new();
+        let session = ok(Experiment::new(ExperimentConfig {
+            name: "coverage-bound-resume".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config,
+        })
+        .with_consent_authority(authority)
+        .resume(timeline));
+        assert!(session.consent_revoked);
+    }
+
+    #[test]
+    fn no_gate_revocation_boundary_uses_the_host_append_path() {
+        let mut session = ok(Experiment::new(config(
+            "coverage-no-gate-revocation",
+            StopCondition::MaxTicks(1),
+        ))
+        .start());
+        session.revoke_consent_at_boundary();
+        assert!(matches!(
+            session.step_tick(),
+            Ok(TickOutcome::Advanced {
+                emitted_events: 1,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn backtest_builds_train_and_eval_results_through_public_runner() {
+        let plugin_id = PluginId::new();
+        let entity = EntityId::new();
+        let runner = BacktestRunner::new(
+            BacktestConfig {
+                experiment_name: "coverage-nonempty-backtest".to_owned(),
+                train_ticks: 1,
+                eval_ticks: 1,
+                store_config: StoreConfig::Memory,
+            },
+            move || {
+                let mut registry = PluginRegistry::new();
+                ok(registry.register(
+                    &CoveragePlugin { id: plugin_id },
+                    None,
+                    Some(Box::new(BacktestDriver { entity })),
+                ));
+                registry
+            },
+        );
+        let result = ok(runner.run());
+        assert_eq!(result.train_events, 1);
+        assert_eq!(result.eval_events, 1);
+        assert_eq!(result.train_result.timeline_head, 1);
+        assert_eq!(result.eval_result.timeline_head, 2);
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
