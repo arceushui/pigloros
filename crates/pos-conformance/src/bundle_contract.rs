@@ -1797,13 +1797,13 @@ mod tests {
     fn wide_profile() -> ConformanceProfileV1 {
         let mut profile = profile();
         let caps = &mut profile.evaluator_protocol.hard_caps;
-        caps.max_profile_bytes = u64::MAX;
-        caps.max_cases = u32::MAX;
-        caps.max_bundle_members = u32::MAX;
-        caps.max_member_path_bytes = u16::MAX;
-        caps.max_member_bytes = u64::MAX;
-        caps.max_total_bundle_bytes = u64::MAX;
-        caps.max_structural_nesting = u8::MAX;
+        caps.max_profile_bytes = 16 * 1024 * 1024;
+        caps.max_cases = 65_536;
+        caps.max_bundle_members = 65_536;
+        caps.max_member_path_bytes = 256;
+        caps.max_member_bytes = 64 * 1024 * 1024;
+        caps.max_total_bundle_bytes = 1024 * 1024 * 1024;
+        caps.max_structural_nesting = 32;
         profile
     }
 
@@ -2279,30 +2279,30 @@ mod tests {
     }
 
     #[test]
-    fn preflight_archive_caps_check_each_limit_independently(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let profile_bytes = [1_u8];
+    fn preflight_archive_caps_check_each_limit_independently() {
+        let profile_bytes = [1_u8, 2];
         for limit in 0..7 {
             let mut profile = wide_profile();
             let mut preflight = ArchivePreflight {
                 profile_bytes: Some(&profile_bytes),
-                member_count: 1,
-                total_member_bytes: 1,
-                largest_member_bytes: 1,
-                largest_member_path_bytes: 1,
-                maximum_depth: 1,
+                member_count: 2,
+                total_member_bytes: 2,
+                largest_member_bytes: 2,
+                largest_member_path_bytes: 2,
+                maximum_depth: 2,
             };
-            let encoded_len = 1;
+            let mut encoded_len = 1;
             match limit {
                 0 => {
-                    profile.evaluator_protocol.hard_caps.max_total_bundle_bytes = 0;
-                    preflight.total_member_bytes = 0;
+                    profile.evaluator_protocol.hard_caps.max_total_bundle_bytes = 1;
+                    preflight.total_member_bytes = 1;
+                    encoded_len = 2;
                 }
-                1 => profile.evaluator_protocol.hard_caps.max_profile_bytes = 0,
-                2 => profile.evaluator_protocol.hard_caps.max_structural_nesting = 0,
-                3 => profile.evaluator_protocol.hard_caps.max_bundle_members = 0,
-                4 => profile.evaluator_protocol.hard_caps.max_member_path_bytes = 0,
-                5 => profile.evaluator_protocol.hard_caps.max_member_bytes = 0,
+                1 => profile.evaluator_protocol.hard_caps.max_profile_bytes = 1,
+                2 => profile.evaluator_protocol.hard_caps.max_structural_nesting = 1,
+                3 => profile.evaluator_protocol.hard_caps.max_bundle_members = 1,
+                4 => profile.evaluator_protocol.hard_caps.max_member_path_bytes = 1,
+                5 => profile.evaluator_protocol.hard_caps.max_member_bytes = 1,
                 _ => {
                     profile.evaluator_protocol.hard_caps.max_total_bundle_bytes = 1;
                     preflight.total_member_bytes = 2;
@@ -2314,20 +2314,35 @@ mod tests {
             );
         }
 
-        let exact = wide_profile();
-        let preflight = ArchivePreflight {
-            profile_bytes: Some(&profile_bytes),
-            member_count: 1,
-            total_member_bytes: 1,
-            largest_member_bytes: 1,
-            largest_member_path_bytes: 1,
-            maximum_depth: 1,
-        };
-        assert_eq!(
-            validate_preflight_archive_caps(&exact, &preflight, 1),
-            Ok(())
-        );
-        Ok(())
+        for limit in 0..7 {
+            let mut profile = wide_profile();
+            let mut preflight = ArchivePreflight {
+                profile_bytes: Some(&profile_bytes[..1]),
+                member_count: 1,
+                total_member_bytes: 1,
+                largest_member_bytes: 1,
+                largest_member_path_bytes: 1,
+                maximum_depth: 1,
+            };
+            let mut encoded_len = 1;
+            match limit {
+                0 => profile.evaluator_protocol.hard_caps.max_total_bundle_bytes = 1,
+                1 => profile.evaluator_protocol.hard_caps.max_profile_bytes = 1,
+                2 => profile.evaluator_protocol.hard_caps.max_structural_nesting = 1,
+                3 => profile.evaluator_protocol.hard_caps.max_bundle_members = 1,
+                4 => profile.evaluator_protocol.hard_caps.max_member_path_bytes = 1,
+                5 => profile.evaluator_protocol.hard_caps.max_member_bytes = 1,
+                _ => {
+                    profile.evaluator_protocol.hard_caps.max_total_bundle_bytes = 2;
+                    preflight.total_member_bytes = 2;
+                    encoded_len = 1;
+                }
+            }
+            assert_eq!(
+                validate_preflight_archive_caps(&profile, &preflight, encoded_len),
+                Ok(())
+            );
+        }
     }
 
     #[test]
@@ -2539,13 +2554,14 @@ mod tests {
             .map(|member| member.bytes.len() as u64)
             .ok_or("missing profile member")?;
         let manifest_depth = value_depth(&manifest_value(&bundle.manifest));
-        let member_count = bundle.members.len() as u32;
+        let member_count = u32::try_from(bundle.members.len())?;
         let largest_path = bundle
             .members
             .iter()
             .map(|member| member.path.len())
             .max()
-            .ok_or("missing bundle members")? as u16;
+            .ok_or("missing bundle members")?;
+        let largest_path = u16::try_from(largest_path)?;
         let largest_member = bundle
             .members
             .iter()
