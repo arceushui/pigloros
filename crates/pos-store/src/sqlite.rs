@@ -8971,7 +8971,7 @@ mod tests {
 
     #[test]
     fn registry_storage_errors_are_reported_by_sqlite_port() {
-        let mut store = new_store();
+        let store = new_store();
         store.conn.execute("DROP TABLE key_registry", []).test_ok();
         assert!(matches!(
             store.load_key_registry(),
