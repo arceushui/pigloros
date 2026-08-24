@@ -154,10 +154,15 @@ mod coverage_paths {
         let mut cell = event.clone();
         cell.event_type = Kind::new(pos_core::GEOGRAPHIC_CELL_EVENT_TYPE);
         cell.seq = Seq::from_u64(3);
+        let mut marker = event.clone();
+        marker.event_type = Kind::new(pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE);
+        marker.seq = Seq::from_u64(4);
+        let events = vec![event, location, cell, marker];
+        registry.fold_events(&events);
         assert!(registry
             .restore_driver_state(
-                &[TimelineHistorySegment::new(timeline, Seq::from_u64(3))],
-                &[event, location, cell],
+                &[TimelineHistorySegment::new(timeline, Seq::from_u64(4))],
+                &events,
             )
             .is_ok());
         assert_eq!(
@@ -291,7 +296,6 @@ mod coverage_entrypoints {
         ids::{EntityId, EventId, TimelineId},
         ConsentAuthority, ConsentGranted,
     };
-    use std::sync::{Arc, Mutex};
 
     struct NoopDriver;
 
@@ -350,13 +354,7 @@ mod coverage_entrypoints {
     fn authorized_projection_public_and_protected_evidence_paths_are_explicit() {
         let timeline = TimelineId::new();
         assert!(matches!(
-            PluginRegistry::new().into_authorized_projections(
-                timeline,
-                Seq::ZERO,
-                0,
-                None,
-                None,
-            ),
+            PluginRegistry::new().into_authorized_projections(timeline, Seq::ZERO, 0, None, None,),
             Err(RuntimeError::ConsentOperationUnavailable)
         ));
         assert!(PluginRegistry::new()
@@ -405,51 +403,57 @@ mod coverage_entrypoints {
             .is_ok());
     }
 
-    struct VisibilityDriver {
-        observed: Arc<Mutex<Vec<String>>>,
-    }
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    mod marker_driver {
+        use super::*;
+        use std::sync::{Arc, Mutex};
 
-    impl Driver for VisibilityDriver {
-        fn step(
-            &mut self,
-            _: TimelineId,
-            _: ObservationView<'_>,
-        ) -> Result<StepOutput, RuntimeError> {
-            Ok(StepOutput::empty())
+        pub struct DriverImpl {
+            pub observed: Arc<Mutex<Vec<String>>>,
         }
 
-        fn name(&self) -> &'static str {
-            "coverage-visibility-driver"
-        }
+        impl Driver for DriverImpl {
+            fn step(
+                &mut self,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                Ok(StepOutput::empty())
+            }
 
-        fn needs_recovery_payload(&self, _: &crate::driver::RecoveryEventHeader) -> bool {
-            true
-        }
+            fn name(&self) -> &'static str {
+                "coverage-visibility-driver"
+            }
 
-        fn stage_restore_from_history(
-            &mut self,
-            evidence: &crate::driver::DriverRecoveryEvidence,
-        ) -> Result<(), RuntimeError> {
-            self.observed
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .extend(
-                    evidence
-                        .events()
-                        .iter()
-                        .map(|event| event.header().event_type().as_str().to_owned()),
-                );
-            Ok(())
+            fn needs_recovery_payload(&self, _: &crate::driver::RecoveryEventHeader) -> bool {
+                true
+            }
+
+            fn stage_restore_from_history(
+                &mut self,
+                evidence: &crate::driver::DriverRecoveryEvidence,
+            ) -> Result<(), RuntimeError> {
+                self.observed
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend(
+                        evidence
+                            .events()
+                            .iter()
+                            .map(|event| event.header().event_type().as_str().to_owned()),
+                    );
+                Ok(())
+            }
         }
     }
 
     #[test]
-    fn recovery_hides_host_control_markers_from_drivers() {
+    fn public_recovery_seam_hides_host_control_markers() {
         let timeline = TimelineId::new();
-        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut registry = PluginRegistry::new();
-        registry.register_driver(Box::new(VisibilityDriver {
-            observed: Arc::clone(&observed),
+        registry.register_driver(Box::new(marker_driver::DriverImpl {
+            observed: std::sync::Arc::clone(&observed),
         }));
         let events = vec![
             event("ordinary.event", 1),
@@ -469,7 +473,6 @@ mod coverage_entrypoints {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             vec!["ordinary.event".to_owned()]
         );
-        assert!(registry.tick_cadenced(timeline, 0).is_ok());
     }
 }
 

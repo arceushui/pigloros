@@ -3088,12 +3088,7 @@ mod tests {
         );
         assert!(!appended.get());
         assert_eq!(
-            gate.with_revocation_fence(
-                timeline,
-                Some(grant.subject_id),
-                1,
-                &mut append,
-            ),
+            gate.with_revocation_fence(timeline, Some(grant.subject_id), 1, &mut append,),
             Err(ConsentError::NoConsent)
         );
         assert!(!appended.get());
@@ -3104,6 +3099,16 @@ mod tests {
         assert!(!appended.get());
 
         let fence_gate = FenceGate;
+        assert_eq!(
+            fence_gate.authorize_event(
+                timeline,
+                grant.subject_id,
+                &Kind::new("world.observation.v1"),
+                0,
+                0,
+            ),
+            Err(ConsentError::NoConsent)
+        );
         assert!(fence_gate
             .with_revocation_fence(timeline, None, 1, &mut append)
             .is_ok());
