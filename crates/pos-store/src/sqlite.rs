@@ -2895,8 +2895,8 @@ impl EventStore for SqliteStore {
     fn append_signed_authorized(
         &mut self,
         timeline: TimelineId,
-        event: &Event,
         expected_registry: &KeyRegistryStateV1,
+        create_event: &mut dyn FnMut(&KeyRegistryStateV1, Seq) -> Result<Event, CoreError>,
     ) -> Result<(), CoreError> {
         self.conn
             .execute_batch(begin_immediate_sql())
@@ -2910,20 +2910,13 @@ impl EventStore for SqliteStore {
                     "durable key registry changed during signing".to_owned(),
                 ));
             }
-            self.append_committed(timeline, std::slice::from_ref(event))
+            let head = self
+                .get_timeline(timeline)?
+                .ok_or(CoreError::TimelineNotFound(timeline))?;
+            let event = create_event(&persisted, head.head.next())?;
+            self.append_committed(timeline, &[event])
         })();
-        match result {
-            Ok(()) => self
-                .conn
-                .execute_batch("COMMIT")
-                .map_err(|error| CoreError::Storage(error.to_string())),
-            Err(error) => {
-                match self.conn.execute_batch("ROLLBACK") {
-                    Ok(()) | Err(_) => {}
-                }
-                Err(error)
-            }
-        }
+        finish_immediate_transaction(&self.conn, result)
     }
 
     fn destroy_key_registry(
@@ -2943,20 +2936,7 @@ impl EventStore for SqliteStore {
             self.save_key_registry(&registry)?;
             Ok((outcome, registry))
         })();
-        match result {
-            Ok(value) => {
-                self.conn
-                    .execute_batch("COMMIT")
-                    .map_err(|error| CoreError::Storage(error.to_string()))?;
-                Ok(value)
-            }
-            Err(error) => {
-                match self.conn.execute_batch("ROLLBACK") {
-                    Ok(()) | Err(_) => {}
-                }
-                Err(error)
-            }
-        }
+        finish_immediate_transaction(&self.conn, result)
     }
 
     fn append_bounded(
@@ -3876,6 +3856,31 @@ fn begin_immediate_sql() -> &'static str {
 #[cfg(not(test))]
 const fn begin_immediate_sql() -> &'static str {
     "BEGIN IMMEDIATE"
+}
+
+fn finish_immediate_transaction<T>(
+    conn: &Connection,
+    result: Result<T, CoreError>,
+) -> Result<T, CoreError> {
+    match result {
+        Ok(value) => match conn.execute_batch("COMMIT") {
+            Ok(()) => Ok(value),
+            Err(commit_error) => match conn.execute_batch("ROLLBACK") {
+                Ok(()) => Err(CoreError::Storage(format!(
+                    "transaction commit failed: {commit_error}"
+                ))),
+                Err(rollback_error) => Err(CoreError::Storage(format!(
+                    "transaction commit failed: {commit_error}; rollback failed: {rollback_error}"
+                ))),
+            },
+        },
+        Err(error) => match conn.execute_batch("ROLLBACK") {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(CoreError::Storage(format!(
+                "{error}; rollback failed: {rollback_error}"
+            ))),
+        },
+    }
 }
 
 const fn mode_str(mode: TimelineMode) -> &'static str {

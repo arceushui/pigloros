@@ -142,37 +142,39 @@ impl EventLedgerStore {
         payload: CanonicalBytes,
         event_type: Kind,
     ) -> Result<(), LedgerError> {
-        let head = self.head_seq()?;
         let payload_hash = self.hasher.hash_payload(&payload);
         let mut key_registry = self
             .key_registry
             .lock()
             .map_err(|_| LedgerError::Store("ledger signing registry is unavailable".to_owned()))?;
-        let signature = sign_for_registered_role(
-            &mut *key_registry,
-            &self.signing_key,
-            self.signing_identity,
-            &payload,
-        )
-        .map_err(|error| LedgerError::Store(format!("ledger signing authorization: {error}")))?;
-
-        let event = Event {
-            id: EventId::new(),
-            entity: self.entity,
-            event_type,
-            payload,
-            wall_time: WallTime::now(),
-            seq: head.next(),
-            causation_id: None,
-            correlation_id: None,
-            schema_version: SchemaVersion::V1,
-            signature: Some(signature),
-            signature_identity: Some(self.signing_identity),
-            payload_hash,
+        let signing_key = &self.signing_key;
+        let signing_identity = self.signing_identity;
+        let entity = self.entity;
+        let mut create_event = move |registry: &KeyRegistryStateV1, seq: Seq| {
+            let mut registry = registry.clone();
+            let signature =
+                sign_for_registered_role(&mut registry, signing_key, signing_identity, &payload)
+                    .map_err(|error| {
+                        CoreError::Storage(format!("ledger signing authorization: {error}"))
+                    })?;
+            Ok(Event {
+                id: EventId::new(),
+                entity,
+                event_type: event_type.clone(),
+                payload: payload.clone(),
+                wall_time: WallTime::now(),
+                seq,
+                causation_id: None,
+                correlation_id: None,
+                schema_version: SchemaVersion::V1,
+                signature: Some(signature),
+                signature_identity: Some(signing_identity),
+                payload_hash,
+            })
         };
 
         self.store
-            .append_signed_authorized(self.timeline_id, &event, &key_registry)
+            .append_signed_authorized(self.timeline_id, &key_registry, &mut create_event)
             .map_err(LedgerError::from)
     }
 }

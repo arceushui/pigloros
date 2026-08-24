@@ -788,13 +788,14 @@ pub trait EventStore: Send {
         ))
     }
 
-    /// Atomically recheck a registry snapshot and append one authorized event.
+    /// Atomically recheck a registry snapshot, create, and append one
+    /// authorized event.
     ///
     /// Durable stores must hold their database-wide serialization boundary across
     /// both the registry recheck and the event append.  The default is a closed
     /// snapshot check for small in-memory adapters; SQLite overrides it with one
-    /// transaction so another connection cannot destroy the key between the two
-    /// operations.
+    /// transaction so another connection cannot destroy the key between the
+    /// authorization callback and append.
     ///
     /// # Errors
     /// Returns [`CoreError::Storage`] when the persisted registry differs from
@@ -802,8 +803,8 @@ pub trait EventStore: Send {
     fn append_signed_authorized(
         &mut self,
         timeline: TimelineId,
-        event: &Event,
         expected_registry: &crate::KeyRegistryStateV1,
+        create_event: &mut dyn FnMut(&crate::KeyRegistryStateV1, Seq) -> Result<Event, CoreError>,
     ) -> Result<(), CoreError> {
         let persisted = self
             .load_key_registry()?
@@ -813,7 +814,11 @@ pub trait EventStore: Send {
                 "durable key registry changed during signing".to_owned(),
             ));
         }
-        self.append_committed(timeline, std::slice::from_ref(event))
+        let head = self
+            .get_timeline(timeline)?
+            .ok_or(CoreError::TimelineNotFound(timeline))?;
+        let event = create_event(&persisted, head.head.next())?;
+        self.append_committed(timeline, &[event])
     }
 
     /// Atomically destroy a registry identity and return the committed state.
