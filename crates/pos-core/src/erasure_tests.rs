@@ -21,6 +21,7 @@ struct TestCoordinatorPort {
     accepted: bool,
     acknowledgement_admitted: bool,
     freeze_error: Option<ErasureErrorV1>,
+    admitted_freeze_provenance: Option<ErasureReferenceV1>,
     dispatch_error: Option<ErasureErrorV1>,
     receipt_error: Option<ErasureErrorV1>,
     load_error: Option<ErasureErrorV1>,
@@ -87,7 +88,9 @@ impl ErasureCoordinatorPortV1 for TestCoordinatorPort {
         }
         Ok(ErasureFreezeAdmissionV1 {
             freeze_position: requested.freeze_position.unwrap_or(10),
-            provenance: requested.provenance,
+            provenance: self
+                .admitted_freeze_provenance
+                .unwrap_or(requested.provenance),
         })
     }
     fn dispatch_destruction(
@@ -152,6 +155,7 @@ fn test_port(accepted: bool, targets: Vec<ErasureRequiredTargetV1>) -> TestCoord
         accepted,
         acknowledgement_admitted: true,
         freeze_error: None,
+        admitted_freeze_provenance: None,
         dispatch_error: None,
         receipt_error: None,
         load_error: None,
@@ -895,6 +899,38 @@ fn coordinator_finalize_from_dispatched_state_rechecks_authority() -> Result<(),
         coordinator.finalize(reference(1), input),
         Err(ErasureErrorV1::PolicyConflict)
     );
+    assert_eq!(
+        coordinator
+            .existing(reference(1))
+            .map(ErasureCoordinatorRecordV1::state)
+            .map(ErasureStateV1::lifecycle),
+        Some(ErasureLifecycleV1::DestructionDispatched)
+    );
+    Ok(())
+}
+
+#[test]
+fn coordinator_persists_host_freeze_provenance() -> Result<(), ErasureErrorV1> {
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let mut port = test_port(true, vec![target]);
+    port.admitted_freeze_provenance = Some(reference(42));
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+    coordinator.submit(request()?, reference(3))?;
+    coordinator.authorize(reference(1), reference(9))?;
+    coordinator.freeze_inventory(
+        reference(1),
+        change(
+            ErasureLifecycleV1::AccessFrozen,
+            Some(10),
+            Vec::new(),
+            Vec::new(),
+        ),
+    )?;
+    let persisted = coordinator
+        .existing(reference(1))
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    assert_eq!(persisted.freeze_provenance(), Some(reference(42)));
+    assert_eq!(persisted.state().provenance(), reference(42));
     Ok(())
 }
 

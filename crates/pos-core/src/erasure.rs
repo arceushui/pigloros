@@ -1704,20 +1704,24 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                 self.port
                     .admit_freeze(request, &requested_transition)
                     .and_then(|admission| {
+                        let provenance = admission.provenance;
                         let replay_claim = record.state.replay_claim();
-                        record.state.transition(ErasureStateTransitionV1 {
-                            lifecycle: ErasureLifecycleV1::AccessFrozen,
-                            freeze_position: Some(admission.freeze_position),
-                            pending_owners: Vec::new(),
-                            failed_owners: Vec::new(),
-                            acknowledged_targets: Vec::new(),
-                            replay_claim,
-                            provenance: admission.provenance,
-                        })
+                        record
+                            .state
+                            .transition(ErasureStateTransitionV1 {
+                                lifecycle: ErasureLifecycleV1::AccessFrozen,
+                                freeze_position: Some(admission.freeze_position),
+                                pending_owners: Vec::new(),
+                                failed_owners: Vec::new(),
+                                acknowledged_targets: Vec::new(),
+                                replay_claim,
+                                provenance,
+                            })
+                            .map(|state| (state, provenance))
                     })
-                    .and_then(|state| {
+                    .and_then(|(state, provenance)| {
                         record.state = state;
-                        record.freeze_provenance = Some(requested_transition.provenance);
+                        record.freeze_provenance = Some(provenance);
                         record.targets = targets;
                         let state = record.state.clone();
                         self.commit(record).map(|()| state)
@@ -1884,16 +1888,10 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     replay_claim,
                     provenance,
                 });
-                return awaiting
-                    .and_then(|state| {
-                        record.state = state;
-                        self.commit(record)
-                    })
-                    .and_then(|()| self.record(request))
-                    .and_then(|loaded| {
-                        let mut loaded = loaded;
-                        Self::finalize_record(self, request, &mut loaded, input)
-                    });
+                return awaiting.and_then(|state| {
+                    record.state = state;
+                    Self::finalize_record(self, request, &mut record, input)
+                });
             }
             Self::finalize_record(self, request, &mut record, input)
         })
