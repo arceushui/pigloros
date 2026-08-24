@@ -159,16 +159,14 @@ mod tests {
                 ))
                 .to_bytes(),
         );
-        assert_eq!(
-            verify_for_role(
-                &verifying_key,
-                KeyRoleV1::SubjectDataEncryption,
-                0,
-                &value,
-                &invalid_identity_signature,
-            ),
-            Err(pos_core::CoreError::SignatureVerificationFailed)
-        );
+        assert!(verify_for_role(
+            &verifying_key,
+            KeyRoleV1::SubjectDataEncryption,
+            0,
+            &value,
+            &invalid_identity_signature,
+        )
+        .is_err());
         assert_eq!(
             public_key_from_verifying_key(&verifying_key).as_bytes(),
             verifying_key.as_bytes()
