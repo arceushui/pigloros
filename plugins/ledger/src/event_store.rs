@@ -182,6 +182,11 @@ impl EventLedgerStore {
 /// Load and fold a ledger view from an event store without requiring signing
 /// credentials. Read-only consumers must not construct a signing adapter or
 /// mutate the store's durable key registry just to inspect existing events.
+///
+/// # Errors
+///
+/// Returns [`LedgerError`] when the event store cannot be read, an event cannot
+/// be decoded, or an outcome has no matching prediction.
 pub fn load_ledger_from_store(
     store: &dyn EventStore,
     timeline_id: pos_core::ids::TimelineId,
