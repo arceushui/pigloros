@@ -2886,10 +2886,7 @@ mod tests {
         drop(gateway);
     }
 
-    #[tokio::test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    async fn gateway_revocation_revalidates_its_host_session_before_and_during_append(
-    ) -> Result<(), String> {
+    async fn gateway_with_consent_grant() -> (Gateway, Timeline, Event, ConsentCapabilityToken) {
         let gateway = Gateway::with_limits(
             open_store(StoreConfig::Memory).test_ok(),
             GatewayLimits {
@@ -2898,7 +2895,31 @@ mod tests {
             },
         );
         let timeline = gateway
-            .create_timeline("consent-revocation-errors")
+            .create_timeline("consent-revocation-test")
+            .await
+            .test_ok();
+        let (grant_event, token) = gateway
+            .issue_consent_grant(
+                &timeline.id().to_string(),
+                consent_grant(EntityId::new(), 1),
+            )
+            .await
+            .test_ok();
+        (gateway, timeline, grant_event, token)
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn gateway_revocation_rejects_unknown_session_before_append() {
+        let gateway = Gateway::with_limits(
+            open_store(StoreConfig::Memory).test_ok(),
+            GatewayLimits {
+                max_timelines: 1,
+                max_events_per_timeline: 1,
+            },
+        );
+        let timeline = gateway
+            .create_timeline("consent-revocation-unknown")
             .await
             .test_ok();
         let unknown = ConsentRevokedV1 {
@@ -2911,29 +2932,24 @@ mod tests {
             .issue_consent_revocation(&timeline.id().to_string(), unknown)
             .await
             .test_err();
-        if !matches!(
-            &unknown_error,
+        assert!(matches!(
+            unknown_error,
             GatewayError::Store(CoreError::Storage(message))
                 if message == "consent revocation did not name an active grant"
-        ) {
-            return Err(format!(
-                "unexpected unknown revocation error: {unknown_error:?}"
-            ));
-        }
+        ));
         assert!(gateway
             .read_events_page(&timeline.id().to_string(), 0, 1)
             .await
             .test_ok()
             .events
             .is_empty());
+        drop(gateway);
+    }
 
-        let (grant_event, token) = gateway
-            .issue_consent_grant(
-                &timeline.id().to_string(),
-                consent_grant(EntityId::new(), 1),
-            )
-            .await
-            .test_ok();
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn gateway_revocation_rejects_stale_fence_before_append() {
+        let (gateway, timeline, grant_event, token) = gateway_with_consent_grant().await;
         let fence_error = gateway
             .issue_consent_revocation(
                 &timeline.id().to_string(),
@@ -2946,16 +2962,38 @@ mod tests {
             )
             .await
             .test_err();
-        if !matches!(&fence_error, GatewayError::ConsentRevocationFenceMismatch) {
-            return Err(format!(
-                "unexpected fence revocation error: {fence_error:?}"
-            ));
-        }
+        assert!(matches!(
+            fence_error,
+            GatewayError::ConsentRevocationFenceMismatch
+        ));
         let page = gateway
             .read_events_page(&timeline.id().to_string(), 0, 2)
             .await
             .test_ok();
         assert_eq!(page.events.len(), 1);
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn gateway_revocation_rejects_event_ceiling_after_fence_validation() {
+        let (gateway, timeline, grant_event, token) = gateway_with_consent_grant().await;
+        let stale_fence = gateway
+            .issue_consent_revocation(
+                &timeline.id().to_string(),
+                ConsentRevokedV1 {
+                    subject_id: token.subject_id(),
+                    grantee_id: token.grantee_id(),
+                    grant_seq: token.grant_seq(),
+                    fence_seq: grant_event.seq.as_u64(),
+                },
+            )
+            .await
+            .test_err();
+        assert!(matches!(
+            stale_fence,
+            GatewayError::ConsentRevocationFenceMismatch
+        ));
         let ceiling_error = gateway
             .issue_consent_revocation(
                 &timeline.id().to_string(),
@@ -2968,16 +3006,11 @@ mod tests {
             )
             .await
             .test_err();
-        if !matches!(
-            &ceiling_error,
+        assert!(matches!(
+            ceiling_error,
             GatewayError::EventLimitReached { maximum: 1 }
-        ) {
-            return Err(format!(
-                "unexpected ceiling revocation error: {ceiling_error:?}"
-            ));
-        }
+        ));
         drop(gateway);
-        Ok(())
     }
 
     #[tokio::test]
