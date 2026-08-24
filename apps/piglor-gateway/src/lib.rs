@@ -1206,7 +1206,6 @@ impl Gateway {
             Err(error) => return Err(error.into()),
             Ok(event) => event,
         };
-        self.publish_notice(timeline, &event);
         let token = self
             .consent_authority
             .record_grant_on_timeline(timeline, &grant);
@@ -1280,7 +1279,6 @@ impl Gateway {
                 return Err(error.into());
             }
         };
-        self.publish_notice(timeline, &event);
         Ok(event)
     }
 
@@ -1610,7 +1608,14 @@ impl Gateway {
             AppendOrDuplicateOutcome::Conflict => return Err(GatewayError::IngressConflict),
         };
         if !duplicate {
-            self.publish_notice(timeline, &event);
+            let notice = EventNotice {
+                timeline_id: timeline.to_string(),
+                event_id: event.id.to_string(),
+                entity_id: event.entity.to_string(),
+                event_type: event.event_type.as_str().to_owned(),
+                seq: event.seq.as_u64(),
+            };
+            drop(self.bus.send(notice));
         }
         Ok(IdentifiedAppend { event, duplicate })
     }
@@ -1681,22 +1686,17 @@ impl Gateway {
                 }
             }
         };
-        self.publish_notice(timeline, &event);
-        Ok(event)
-    }
-
-    fn publish_notice(&self, timeline: TimelineId, event: &Event) {
-        if pos_core::is_consent_event_type(&event.event_type) {
-            return;
+        if !pos_core::is_consent_event_type(&event.event_type) {
+            let notice = EventNotice {
+                timeline_id: timeline.to_string(),
+                event_id: event.id.to_string(),
+                entity_id: event.entity.to_string(),
+                event_type: event.event_type.as_str().to_owned(),
+                seq: event.seq.as_u64(),
+            };
+            drop(self.bus.send(notice));
         }
-        let notice = EventNotice {
-            timeline_id: timeline.to_string(),
-            event_id: event.id.to_string(),
-            entity_id: event.entity.to_string(),
-            event_type: event.event_type.as_str().to_owned(),
-            seq: event.seq.as_u64(),
-        };
-        drop(self.bus.send(notice));
+        Ok(event)
     }
 
     fn publish_geographic_notice(

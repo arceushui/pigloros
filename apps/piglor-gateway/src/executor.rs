@@ -1274,8 +1274,13 @@ async fn worker_loop_async(
     let mut reads_since_write = 0;
     loop {
         if pending.is_empty() {
-            if worker_is_draining(draining, disconnected) {
+            let should_drain = draining || disconnected;
+            debug_assert_eq!(worker_is_draining(draining, disconnected), should_drain);
+            if should_drain {
                 drain_and_mark_disconnected(receiver, &mut pending, &mut disconnected);
+                if receiver.is_closed() {
+                    disconnected = true;
+                }
                 if pending.is_empty() {
                     break;
                 }
@@ -1298,6 +1303,9 @@ async fn worker_loop_async(
         }
 
         drain_and_mark_disconnected(receiver, &mut pending, &mut disconnected);
+        if receiver.is_closed() {
+            disconnected = true;
+        }
         #[cfg(test)]
         if let Some(observer) = &observer {
             observer.drain_completed(pending.len(), disconnected);
@@ -3485,6 +3493,17 @@ mod tests {
         assert!(super::worker_is_draining(true, false));
         assert!(super::worker_is_draining(false, true));
         assert!(super::worker_is_draining(true, true));
+    }
+
+    #[test]
+    fn drain_and_mark_disconnected_observes_closed_receiver() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        drop(sender);
+        let mut pending = Vec::new();
+        let mut disconnected = false;
+        super::drain_and_mark_disconnected(&mut receiver, &mut pending, &mut disconnected);
+        assert!(disconnected);
+        assert!(pending.is_empty());
     }
 
     #[tokio::test]
