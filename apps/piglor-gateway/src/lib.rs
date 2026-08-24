@@ -1685,9 +1685,9 @@ impl Gateway {
         Ok(event)
     }
 
-    fn publish_notice(&self, timeline: TimelineId, event: &Event) -> bool {
+    fn publish_notice(&self, timeline: TimelineId, event: &Event) {
         if pos_core::is_consent_event_type(&event.event_type) {
-            return false;
+            return;
         }
         let notice = EventNotice {
             timeline_id: timeline.to_string(),
@@ -1696,7 +1696,7 @@ impl Gateway {
             event_type: event.event_type.as_str().to_owned(),
             seq: event.seq.as_u64(),
         };
-        self.bus.send(notice).is_ok()
+        drop(self.bus.send(notice));
     }
 
     fn publish_geographic_notice(

@@ -3479,6 +3479,14 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn worker_is_draining_requires_shutdown_or_disconnect() {
+        assert!(!super::worker_is_draining(false, false));
+        assert!(super::worker_is_draining(true, false));
+        assert!(super::worker_is_draining(false, true));
+        assert!(super::worker_is_draining(true, true));
+    }
+
     #[tokio::test]
     async fn disconnected_receiver_drains_pending_commands_through_scheduler() {
         let result = disconnected_receiver_drains_pending_commands_through_scheduler_impl().await;
