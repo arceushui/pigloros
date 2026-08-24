@@ -910,6 +910,7 @@ dependencies = [
 name = "pos-store"
 version = "0.1.0"
 dependencies = [
+ "ciborium",
  "pos-core",
  "pos-crypto",
  "rusqlite",

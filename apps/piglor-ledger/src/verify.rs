@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use pos_core::store::{EventStore, SeqRange};
+use pos_core::store::SeqRange;
 use pos_core::KeyRoleV1;
 use pos_crypto::{key_roles::verify_for_role, signing::verifying_key_from_public_key};
 use pos_plugin_ledger::EVENT_TYPE_PREDICTION;
@@ -165,7 +165,7 @@ fn collect_hashes(dir: &Path) -> Result<Vec<(String, String)>, CliError> {
 
 fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, CliError> {
     let supplied_public_key = pubkey_hex
-        .map(|pubkey_hex| {
+        .map(|pubkey_hex| -> Result<pos_core::PublicKey, CliError> {
             let pubkey_bytes =
                 hex_decode(pubkey_hex).map_err(|e| CliError::BadKey(format!("--pubkey: {e}")))?;
             let arr: [u8; 32] = pubkey_bytes
