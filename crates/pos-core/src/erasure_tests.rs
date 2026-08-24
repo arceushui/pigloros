@@ -1733,6 +1733,23 @@ fn codec_predicates_and_cbor_argument_widths_are_closed_at_the_public_boundary()
     });
     assert!(!inventories_exceed_bound(&inventories));
 
+    inventories.artifacts =
+        std::iter::repeat_n(inventory_result(target), ERASURE_MAX_INVENTORY_RESULTS).collect();
+    assert!(!inventories_exceed_bound(&inventories));
+    inventories.artifacts.clear();
+    inventories.keys =
+        std::iter::repeat_n(inventory_result(target), ERASURE_MAX_INVENTORY_RESULTS).collect();
+    assert!(!inventories_exceed_bound(&inventories));
+    inventories.keys.clear();
+    inventories.replicas =
+        std::iter::repeat_n(inventory_result(target), ERASURE_MAX_INVENTORY_RESULTS).collect();
+    assert!(!inventories_exceed_bound(&inventories));
+    inventories.replicas.clear();
+    inventories.backups =
+        std::iter::repeat_n(inventory_result(target), ERASURE_MAX_INVENTORY_RESULTS).collect();
+    assert!(!inventories_exceed_bound(&inventories));
+    inventories.backups.clear();
+
     for inventory in [
         &mut inventories.artifacts,
         &mut inventories.keys,
@@ -1768,6 +1785,30 @@ fn codec_predicates_and_cbor_argument_widths_are_closed_at_the_public_boundary()
             backups: Vec::new(),
         }
     ));
+    assert!(inventories_have_duplicate_targets(
+        &ErasureReceiptInventoriesV1 {
+            artifacts: Vec::new(),
+            keys: vec![inventory_result(target), inventory_result(target)],
+            replicas: Vec::new(),
+            backups: Vec::new(),
+        }
+    ));
+    assert!(inventories_have_duplicate_targets(
+        &ErasureReceiptInventoriesV1 {
+            artifacts: Vec::new(),
+            keys: Vec::new(),
+            replicas: vec![inventory_result(target), inventory_result(target)],
+            backups: Vec::new(),
+        }
+    ));
+    assert!(inventories_have_duplicate_targets(
+        &ErasureReceiptInventoriesV1 {
+            artifacts: Vec::new(),
+            keys: Vec::new(),
+            replicas: Vec::new(),
+            backups: vec![inventory_result(target), inventory_result(target)],
+        }
+    ));
 
     let owner = reference(70);
     assert!(invalid_owner_sets(&[owner], &[owner]));
@@ -1788,6 +1829,22 @@ fn codec_predicates_and_cbor_argument_widths_are_closed_at_the_public_boundary()
     );
     assert_eq!(
         cbor_argument_bytes(&[0x00, 0x00, 0x00, 0x00], 0, 4, 65_536),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+    assert_eq!(
+        cbor_item_end(&[0x01], 0, 16, ERASURE_MAX_INVENTORY_RESULTS),
+        Ok(1)
+    );
+    assert_eq!(
+        cbor_item_end(&[0x42, 0xaa], 0, 0, ERASURE_MAX_INVENTORY_RESULTS),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+    assert_eq!(
+        cbor_shape_is_bounded(&[0x83, 0x01, 0x01, 0x01], 2,),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+    assert_eq!(
+        cbor_item_end(&[0xf8, 0x17], 0, 0, ERASURE_MAX_INVENTORY_RESULTS),
         Err(ErasureErrorV1::InvalidEncoding)
     );
 }

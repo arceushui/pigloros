@@ -1427,8 +1427,7 @@ impl ErasureCoordinatorRecordV1 {
         {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
-        if has_duplicate(&self.targets)
-            || !self.targets.windows(2).all(|pair| pair[0] < pair[1])
+        if !self.targets.windows(2).all(|pair| pair[0] < pair[1])
             || has_duplicate_by_target(&self.acknowledgements)
             || self
                 .acknowledgements
