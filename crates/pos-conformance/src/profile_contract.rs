@@ -59,7 +59,8 @@ pub enum ConformanceContractError {
     UnknownExecutionProfile,
     /// A fixture references a public schema outside the CPF1 inventory.
     UnknownPublicSchema,
-    /// A fixture's replay claim is stronger than its redaction state permits.
+    /// A fixture's replay claim is stronger than its redaction state permits;
+    /// `IncompatibleProfile` remains orthogonal to that state.
     ClaimRedactionMismatch,
 }
 
@@ -352,6 +353,10 @@ pub struct StableEvidenceAttestationV1 {
 }
 
 /// Immutable CPF1 public contract. It deliberately carries no aggregate pass flag.
+///
+/// `profile_digest` commits the selected profile and a nested digest of attached
+/// Stable evidence. Signed Stable reports bind the evidence-independent selected
+/// profile identity so their signature does not become recursively self-referential.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConformanceProfileV1 {
     pub profile_id: String,
@@ -500,15 +505,26 @@ impl ConformanceProfileV1 {
         })
     }
 
-    /// Digest the immutable selected CPF fields, excluding attached Stable
-    /// evidence and the self-referential digest field.
+    /// Digest the immutable CPF fields and the attached Stable-evidence commitment.
+    ///
+    /// Stable evidence contains reports that attest the selected-profile digest,
+    /// so the evidence is committed through a separate nested digest rather than
+    /// by recursively embedding the outer profile digest in the signed report.
     #[must_use]
     pub fn digest(&self) -> [u8; 32] {
+        let stable_evidence_digest = digest_bytes(
+            b"PiglorOS.ConformanceProfileStableEvidence.v1",
+            &Value::Array(
+                self.stable_evidence
+                    .iter()
+                    .map(encode_stable_evidence)
+                    .collect(),
+            ),
+        );
         let mut identity = self.clone();
-        // Stable evidence is attached to the selected CPF; it is not part of
-        // the CPF identity (including it would make report attestation
-        // self-referential). Stable and Candidate therefore share the same
-        // immutable selected-profile digest.
+        // The report inside Stable evidence signs the selected-profile digest,
+        // not this enclosing evidence commitment. Normalize lifecycle and omit
+        // the recursive fields before hashing the selected CPF identity.
         identity.stable_evidence.clear();
         if identity.lifecycle == ProfileLifecycleV1::Stable {
             identity.lifecycle = ProfileLifecycleV1::Candidate;
@@ -516,7 +532,10 @@ impl ConformanceProfileV1 {
         identity.profile_digest = [0; 32];
         digest_bytes(
             b"PiglorOS.ConformanceProfile.v1",
-            &encode_profile(&identity, false),
+            &Value::Array(vec![
+                encode_profile(&identity, false),
+                digest(&stable_evidence_digest),
+            ]),
         )
     }
 
@@ -681,6 +700,13 @@ impl EvaluatorRequestV1 {
             })
         {
             return Err(ConformanceContractError::FixtureDigestMismatch);
+        }
+        if self.output_capability.report_bytes_limit
+            > profile.evaluator_protocol.hard_caps.max_profile_bytes
+            || self.output_capability.diagnostic_bytes_limit
+                > profile.evaluator_protocol.hard_caps.max_diagnostic_bytes
+        {
+            return Err(ConformanceContractError::FieldOutOfBounds);
         }
         Ok(())
     }
@@ -862,6 +888,9 @@ fn validate_fixtures(profile: &ConformanceProfileV1) -> Result<(), ConformanceCo
 }
 
 fn validate_fixture_claim(fixture: &FixtureDescriptorV1) -> Result<(), ConformanceContractError> {
+    if fixture.replay_claim == ReplayClaimV1::IncompatibleProfile {
+        return Ok(());
+    }
     let coherent = match fixture.redaction_state {
         RedactionStateV1::None => true,
         RedactionStateV1::RedactedViews => {
@@ -1193,7 +1222,7 @@ fn validate_report_binding(
         || report.limitations_digest != profile.limitations_digest
         || report.provenance_digest != profile.provenance_digest
         || report.fixture_bundle_digest != fixture_bundle_digest(profile)
-        || report.profile_digest != profile.profile_digest
+        || report.profile_digest != selected_profile_digest(profile)
         || !profile
             .execution_profile_digests
             .contains(&report.execution_profile_digest)
@@ -1234,6 +1263,14 @@ fn validate_report_binding(
         return Err(ConformanceContractError::IndependenceEvidenceMissing);
     }
     Ok(())
+}
+
+fn selected_profile_digest(profile: &ConformanceProfileV1) -> [u8; 32] {
+    let mut selected = profile.clone();
+    selected.lifecycle = ProfileLifecycleV1::Candidate;
+    selected.stable_evidence.clear();
+    selected.profile_digest = [0; 32];
+    selected.digest()
 }
 
 fn fixture_bundle_digest(profile: &ConformanceProfileV1) -> [u8; 32] {
@@ -4993,6 +5030,55 @@ mod tests {
         exact.request_digest = exact.digest();
         assert_eq!(exact.validate_with_protocol(&protocol), Ok(()));
         assert_eq!(request().validate_with_protocol(&protocol), Ok(()));
+
+        let mut capped_profile = profile();
+        capped_profile
+            .evaluator_protocol
+            .hard_caps
+            .max_profile_bytes = MAX_PROFILE_BYTES as u64 - 1;
+        capped_profile
+            .evaluator_protocol
+            .hard_caps
+            .max_diagnostic_bytes = MAX_DIAGNOSTIC_BYTES - 1;
+        capped_profile.profile_digest = capped_profile.digest();
+        let mut over_cap = request();
+        over_cap.conformance_profile_digest = capped_profile.profile_digest;
+        over_cap.fixture_bundle_digest = fixture_bundle_digest(&capped_profile);
+        over_cap.evaluator_hard_caps_digest = capped_profile.evaluator_protocol.hard_caps.digest();
+        over_cap.output_capability.report_bytes_limit = MAX_PROFILE_BYTES as u64;
+        over_cap.output_capability.diagnostic_bytes_limit = MAX_DIAGNOSTIC_BYTES;
+        over_cap.output_capability.capability_digest = over_cap.expected_output_capability_digest();
+        over_cap.request_digest = over_cap.digest();
+        assert_eq!(
+            over_cap.validate_against_profile(&capped_profile),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+
+        over_cap.output_capability.report_bytes_limit = capped_profile
+            .evaluator_protocol
+            .hard_caps
+            .max_profile_bytes;
+        over_cap.output_capability.diagnostic_bytes_limit = capped_profile
+            .evaluator_protocol
+            .hard_caps
+            .max_diagnostic_bytes;
+        over_cap.output_capability.capability_digest = over_cap.expected_output_capability_digest();
+        over_cap.request_digest = over_cap.digest();
+        assert_eq!(over_cap.validate_against_profile(&capped_profile), Ok(()));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_profile_digest_commits_attached_stable_evidence() {
+        let stable = stable_profile();
+        let mut changed = stable.clone();
+        changed.stable_evidence[0].implementation.implementation_id =
+            "changed-independent-impl".to_owned();
+        assert_ne!(stable.digest(), changed.digest());
+        changed.profile_digest = stable.profile_digest;
+        assert!(changed
+            .to_canonical_cbor_with_trust_policy(&trusted_root_policy())
+            .is_err());
     }
 
     #[test]
@@ -5048,6 +5134,22 @@ mod tests {
             encode_bounded(&over_bytes),
             Err(ConformanceContractError::FieldOutOfBounds)
         );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_profile_incompatible_claim_is_orthogonal_to_redaction() {
+        for redaction_state in [
+            RedactionStateV1::RedactedViews,
+            RedactionStateV1::StructuralOnly,
+            RedactionStateV1::EvidenceMissing,
+        ] {
+            let mut value = profile();
+            value.fixtures[0].replay_claim = ReplayClaimV1::IncompatibleProfile;
+            value.fixtures[0].redaction_state = redaction_state;
+            value.profile_digest = value.digest();
+            assert_eq!(value.validate(), Ok(()));
+        }
     }
 
     #[test]

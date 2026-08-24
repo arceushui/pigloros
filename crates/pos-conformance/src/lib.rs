@@ -325,6 +325,8 @@ pub enum ReplayClaimV1 {
     ExactAuthoritativeWithRedactedViews,
     StructuralOnly,
     UnverifiableArtifactsMissing,
+    /// The selected runtime/profile cannot evaluate the artifact; orthogonal
+    /// to the amount of replay evidence retained after redaction.
     IncompatibleProfile,
 }
 
@@ -355,6 +357,11 @@ impl ReplayClaimV1 {
     /// Apply an erasure disposition without ever upgrading a claim.
     #[must_use]
     pub const fn after_erasure(self, disposition: ErasureDispositionV1) -> Self {
+        if matches!(self, Self::IncompatibleProfile)
+            || matches!(disposition, ErasureDispositionV1::IncompatibleProfile)
+        {
+            return Self::IncompatibleProfile;
+        }
         let disposition = match disposition {
             ErasureDispositionV1::None => Self::Exact,
             ErasureDispositionV1::RedactedViews => Self::ExactAuthoritativeWithRedactedViews,
@@ -1266,7 +1273,9 @@ fn matrix_digest(domain: &[u8], seed: [u8; 32], descriptor: &[u8]) -> [u8; 32] {
 ///
 /// `execution_profile_digest` identifies the selected report authority;
 /// each case also carries its own profile digest so one CNR can bind a CPF
-/// matrix containing multiple execution profiles.
+/// matrix containing multiple execution profiles. Stable evidence binds its
+/// report to the evidence-independent selected CPF identity; the enclosing
+/// CPF digest separately commits the serialized Stable-evidence set.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConformanceReportV1 {
@@ -5874,13 +5883,14 @@ fn valid_conformance_case_result(case: &CaseOutcomeV1) -> bool {
 }
 
 fn valid_redacted_case(case: &CaseOutcomeV1) -> bool {
+    let incompatible = case.replay_claim == ReplayClaimV1::IncompatibleProfile;
     match case.redaction_state {
         RedactionStateV1::None => true,
         RedactionStateV1::RedactedViews => {
-            case.replay_claim == ReplayClaimV1::ExactAuthoritativeWithRedactedViews
+            incompatible || case.replay_claim == ReplayClaimV1::ExactAuthoritativeWithRedactedViews
         }
         RedactionStateV1::StructuralOnly => {
-            case.replay_claim == ReplayClaimV1::StructuralOnly
+            (incompatible || case.replay_claim == ReplayClaimV1::StructuralOnly)
                 && case.expected_digest.is_none()
                 && case.actual_digest.is_none()
                 && case.expected_error.is_none()
@@ -5888,7 +5898,7 @@ fn valid_redacted_case(case: &CaseOutcomeV1) -> bool {
                 && case.first_coordinate.is_none()
         }
         RedactionStateV1::EvidenceMissing => {
-            case.replay_claim == ReplayClaimV1::UnverifiableArtifactsMissing
+            (incompatible || case.replay_claim == ReplayClaimV1::UnverifiableArtifactsMissing)
                 && case.outcome != CaseOutcomeStatusV1::Pass
                 && case.expected_digest.is_none()
                 && case.actual_digest.is_none()
@@ -7016,7 +7026,7 @@ pub mod tests {
             assert_case_rejects(wrong_replay);
         }
 
-        let mut structural = valid;
+        let mut structural = valid.clone();
         structural.redaction_state = RedactionStateV1::StructuralOnly;
         structural.replay_claim = ReplayClaimV1::StructuralOnly;
         structural.expected_digest = None;
@@ -7042,15 +7052,37 @@ pub mod tests {
             assert_case_rejects(invalid);
         }
 
-        let mut evidence_missing = structural;
+        let mut evidence_missing = structural.clone();
         evidence_missing.redaction_state = RedactionStateV1::EvidenceMissing;
         evidence_missing.replay_claim = ReplayClaimV1::UnverifiableArtifactsMissing;
         evidence_missing.outcome = CaseOutcomeStatusV1::Fail;
         assert!(valid_redacted_case(&evidence_missing));
-        let mut missing_pass = evidence_missing;
+        let mut missing_pass = evidence_missing.clone();
         missing_pass.outcome = CaseOutcomeStatusV1::Pass;
         assert!(!valid_redacted_case(&missing_pass));
         assert_case_rejects(missing_pass);
+
+        let mut incompatible_redacted = valid.clone();
+        incompatible_redacted.redaction_state = RedactionStateV1::RedactedViews;
+        incompatible_redacted.replay_claim = ReplayClaimV1::IncompatibleProfile;
+        assert!(valid_redacted_case(&incompatible_redacted));
+        assert_eq!(
+            validate_conformance_case(&incompatible_redacted, &mut BTreeSet::new()),
+            Ok(())
+        );
+
+        let mut incompatible_structural = structural.clone();
+        incompatible_structural.replay_claim = ReplayClaimV1::IncompatibleProfile;
+        assert!(valid_redacted_case(&incompatible_structural));
+
+        let mut incompatible_missing = evidence_missing.clone();
+        incompatible_missing.replay_claim = ReplayClaimV1::IncompatibleProfile;
+        assert!(valid_redacted_case(&incompatible_missing));
+
+        assert_eq!(
+            ReplayClaimV1::IncompatibleProfile.after_erasure(ErasureDispositionV1::StructuralOnly),
+            ReplayClaimV1::IncompatibleProfile
+        );
     }
 
     #[test]
