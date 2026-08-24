@@ -230,14 +230,14 @@ pub enum KeyRegistryErrorV1 {
     /// Unknown role code while decoding a stable representation.
     #[error("invalid key role code")]
     InvalidRoleCode,
-    /// The requested epoch is behind the active role epoch.
-    #[error("stale key epoch for {role:?}: requested {requested}, active {active}")]
+    /// The requested epoch is behind the highest accepted role epoch.
+    #[error("stale key epoch for {role:?}: requested {requested}, highest {active}")]
     StaleEpoch {
         /// Role being rotated.
         role: KeyRoleV1,
         /// Requested epoch.
         requested: u64,
-        /// Current active epoch.
+        /// Highest epoch previously accepted for the role.
         active: u64,
     },
     /// One identity cannot be registered with two different materials.
@@ -311,6 +311,7 @@ pub struct KeyRegistryStateV1 {
     records: BTreeMap<KeyIdentityV1, KeyRecordV1>,
     active: BTreeMap<KeyRoleV1, KeyIdentityV1>,
     tombstones: BTreeMap<KeyIdentityV1, KeyTombstoneV1>,
+    highest_epoch: BTreeMap<KeyRoleV1, u64>,
 }
 
 impl KeyRegistryStateV1 {
@@ -321,6 +322,7 @@ impl KeyRegistryStateV1 {
             records: BTreeMap::new(),
             active: BTreeMap::new(),
             tombstones: BTreeMap::new(),
+            highest_epoch: BTreeMap::new(),
         }
     }
 
@@ -339,12 +341,12 @@ impl KeyRegistryStateV1 {
         if self.tombstones.contains_key(&identity) {
             return Err(KeyRegistryErrorV1::Destroyed);
         }
-        if let Some(active) = self.active.get(&identity.role) {
-            if active.epoch > identity.epoch {
+        if let Some(highest) = self.highest_epoch.get(&identity.role) {
+            if *highest > identity.epoch {
                 return Err(KeyRegistryErrorV1::StaleEpoch {
                     role: identity.role,
                     requested: identity.epoch,
-                    active: active.epoch,
+                    active: *highest,
                 });
             }
         }
@@ -368,6 +370,7 @@ impl KeyRegistryStateV1 {
             },
         );
         self.active.insert(identity.role, identity);
+        self.highest_epoch.insert(identity.role, identity.epoch);
         Ok(KeyRegistrationOutcomeV1::Registered)
     }
 
@@ -622,6 +625,41 @@ mod tests {
     }
 
     #[test]
+    fn destruction_does_not_allow_epoch_rollback() -> Result<(), KeyRegistryErrorV1> {
+        let mut registry = KeyRegistryStateV1::new();
+        let latest = KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 3);
+        registry.register_key(KeyRegistrationV1::new(latest, digest(30), None))?;
+        registry.destroy_key(KeyDestructionRequestV1::new(latest, digest(30), digest(31)))?;
+
+        assert_eq!(
+            registry.register_key(KeyRegistrationV1::new(
+                KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 2),
+                digest(32),
+                None,
+            )),
+            Err(KeyRegistryErrorV1::StaleEpoch {
+                role: KeyRoleV1::SubjectDataEncryption,
+                requested: 2,
+                active: 3,
+            })
+        );
+        assert_eq!(registry.active_key(KeyRoleV1::SubjectDataEncryption), None);
+
+        let next = KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 4);
+        assert_eq!(
+            registry.register_key(KeyRegistrationV1::new(next, digest(33), None)),
+            Ok(KeyRegistrationOutcomeV1::Registered)
+        );
+        assert_eq!(
+            registry
+                .active_key(KeyRoleV1::SubjectDataEncryption)
+                .map(|key| key.identity),
+            Some(next)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn stale_epoch_and_wrong_digest_are_rejected() -> Result<(), KeyRegistryErrorV1> {
         let mut registry = KeyRegistryStateV1::new();
         registry.register_key(KeyRegistrationV1::new(DATA, digest(7), None))?;
@@ -634,14 +672,19 @@ mod tests {
             registry.register_key(KeyRegistrationV1::new(DATA, digest(9), None)),
             Err(KeyRegistryErrorV1::StaleEpoch { .. })
         ));
+        let identity = KeyIdentityV1::new(DATA.role, 2);
+        let record_before = registry.key_record(identity);
+        let active_before = registry.active_key(DATA.role);
         assert_eq!(
             registry.destroy_key(KeyDestructionRequestV1::new(
-                KeyIdentityV1::new(DATA.role, 2),
+                identity,
                 digest(99),
                 digest(10),
             )),
             Err(KeyRegistryErrorV1::MaterialDigestMismatch)
         );
+        assert_eq!(registry.key_record(identity), record_before);
+        assert_eq!(registry.active_key(DATA.role), active_before);
         Ok(())
     }
 
