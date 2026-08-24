@@ -153,7 +153,7 @@ mod tests {
         let invalid_identity_signature = Signature::from_bytes(
             signing_key
                 .sign(&role_bound_message(
-                    KeyRoleV1::SubjectDataEncryption,
+                    KeyRoleV1::SubjectAttributionSigning,
                     0,
                     &value,
                 ))
@@ -161,7 +161,7 @@ mod tests {
         );
         assert!(verify_for_role(
             &verifying_key,
-            KeyRoleV1::SubjectDataEncryption,
+            KeyRoleV1::SubjectAttributionSigning,
             0,
             &value,
             &invalid_identity_signature,
