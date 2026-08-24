@@ -694,9 +694,36 @@ mod tests {
 
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
-        let _ = pos_store::open_store(pos_store::StoreConfig::Sqlite {
-            path: db.to_string_lossy().into_owned(),
-        })
+        let key_path = tmp.path().join("sk");
+        cli_run(&[
+            "piglor-ledger".into(),
+            "keygen".into(),
+            "--out".into(),
+            key_path.to_str().test_ok()?.to_owned(),
+        ])
+        .test_ok()?;
+        cli_run(&[
+            "piglor-ledger".into(),
+            "predict".into(),
+            "--source".into(),
+            format!("store:{}", db.display()),
+            "--key".into(),
+            key_path.to_str().test_ok()?.to_owned(),
+            "--title".into(),
+            "T".into(),
+            "--statement".into(),
+            "S".into(),
+            "--predicted-outcome".into(),
+            "O".into(),
+            "--confidence".into(),
+            "0.7".into(),
+            "--made-at".into(),
+            "2026-07-25T12:00:00Z".into(),
+            "--resolve-by".into(),
+            "2026-08-01".into(),
+            "--osf".into(),
+            "https://osf.io/example".into(),
+        ])
         .test_ok()?;
         let err = run(&Source::Store(db), Some(&invalid_hex), None).test_err()?;
         assert!(err.to_string().contains("invalid --key"), "{err}");
@@ -709,10 +736,14 @@ mod tests {
     fn verify_store_handles_missing_ledger_timeline() -> Result<(), Box<dyn std::error::Error>> {
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("novelty.db");
-        let _store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+        let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
             path: db.to_string_lossy().into_owned(),
         })
         .test_ok()?;
+        store
+            .save_key_registry(&pos_core::KeyRegistryStateV1::new())
+            .test_ok()?;
+        drop(store);
         let err = run(&Source::Store(db), Some(&"0".repeat(64)), None).test_err()?;
         assert!(err.to_string().contains("ledger"));
 

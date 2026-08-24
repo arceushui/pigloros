@@ -179,37 +179,47 @@ impl EventLedgerStore {
     }
 }
 
+/// Load and fold a ledger view from an event store without requiring signing
+/// credentials. Read-only consumers must not construct a signing adapter or
+/// mutate the store's durable key registry just to inspect existing events.
+pub fn load_ledger_from_store(
+    store: &dyn EventStore,
+    timeline_id: pos_core::ids::TimelineId,
+    today: &str,
+) -> Result<Ledger, LedgerError> {
+    let events = store
+        .read(timeline_id, SeqRange::all())
+        .map_err(LedgerError::from)?;
+
+    let mut pairs: Vec<(LedgerPrediction, Option<LedgerOutcome>)> = Vec::new();
+
+    for event in &events {
+        match event.event_type.as_str() {
+            EVENT_TYPE_PREDICTION => {
+                let pred = decode_prediction(event.payload.as_slice())?;
+                pairs.push((pred, None));
+            }
+            EVENT_TYPE_OUTCOME => {
+                let outcome = decode_outcome(event.payload.as_slice())?;
+                let slot = pairs
+                    .iter_mut()
+                    .find(|(p, _)| p.prediction_id == outcome.prediction_id)
+                    .map(|(_, slot)| slot);
+                match slot {
+                    Some(slot) => *slot = Some(outcome),
+                    None => return Err(LedgerError::OrphanResolution(outcome.prediction_id)),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ledger::from_pairs(pairs, today)
+}
+
 impl LedgerStore for EventLedgerStore {
     fn load(&self, today: &str) -> Result<Ledger, LedgerError> {
-        let events = self
-            .store
-            .read(self.timeline_id, SeqRange::all())
-            .map_err(LedgerError::from)?;
-
-        let mut pairs: Vec<(LedgerPrediction, Option<LedgerOutcome>)> = Vec::new();
-
-        for event in &events {
-            match event.event_type.as_str() {
-                EVENT_TYPE_PREDICTION => {
-                    let pred = decode_prediction(event.payload.as_slice())?;
-                    pairs.push((pred, None));
-                }
-                EVENT_TYPE_OUTCOME => {
-                    let outcome = decode_outcome(event.payload.as_slice())?;
-                    let slot = pairs
-                        .iter_mut()
-                        .find(|(p, _)| p.prediction_id == outcome.prediction_id)
-                        .map(|(_, slot)| slot);
-                    match slot {
-                        Some(slot) => *slot = Some(outcome),
-                        None => return Err(LedgerError::OrphanResolution(outcome.prediction_id)),
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        Ledger::from_pairs(pairs, today)
+        load_ledger_from_store(self.store.as_ref(), self.timeline_id, today)
     }
 
     fn register(&mut self, new: NewPrediction) -> Result<String, LedgerError> {

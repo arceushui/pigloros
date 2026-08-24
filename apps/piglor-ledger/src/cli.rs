@@ -1365,10 +1365,10 @@ mod tests {
             "verify".into(),
             "--source".into(),
             format!("store:{}", db.display()),
-            // No --pubkey → verify::run returns Err("store tier verify requires --pubkey")
+            // No --pubkey on an empty store → the persisted registry is required first.
         ])
         .test_err()?;
-        assert!(err.to_string().contains("--pubkey"), "{err}");
+        assert!(err.to_string().contains("role/epoch registry"), "{err}");
 
         Ok(())
     }
@@ -1449,11 +1449,11 @@ mod tests {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn build_store_without_key_succeeds() -> Result<(), Box<dyn std::error::Error>> {
-        // build --source store:DB no longer requires --key (uses throwaway key).
+    fn build_store_without_key_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        // Store-backed builds are signing-authorized and require an explicit key.
         let tmp = TempDir::new().test_ok()?;
         let db_path = tmp.path().join("x.db");
-        run(&[
+        let err = run(&[
             "piglor-ledger".into(),
             "build".into(),
             "--source".into(),
@@ -1461,14 +1461,8 @@ mod tests {
             "--site".into(),
             tmp.path().join("site").to_str().test_ok()?.to_owned(),
         ])
-        .test_ok()?;
-        assert!(tmp
-            .path()
-            .join("site")
-            .join("ledger")
-            .join("index.html")
-            .exists());
-        assert!(tmp.path().join("site").join("index.html").exists());
+        .test_err()?;
+        assert!(err.to_string().contains("--key"), "{err}");
 
         Ok(())
     }

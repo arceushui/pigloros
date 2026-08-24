@@ -142,22 +142,7 @@ fn build_store(db: &Path, today: &str, pubkey: Option<String>) -> Result<ExportM
         .find(|t| t.meta.name.as_deref() == Some("ledger"))
         .ok_or_else(|| CliError::BadSource("no 'ledger' timeline in store".into()))?;
     let events = store.read(timeline.id(), SeqRange::all())?;
-    // Fold the ledger view via the port by reusing EventLedgerStore's load.
-    // We have no key here — synthesise a throwaway one because load() doesn't
-    // sign; only writes need a live key.
-    let (sk, _) = pos_crypto::signing::generate_keypair();
-    let (registry, identity) = crate::cli::ledger_signing_registry(&sk)?;
-    let ledger_store = pos_plugin_ledger::EventLedgerStore::new(
-        store,
-        timeline.id(),
-        crate::well_known_entity(),
-        sk,
-        registry,
-        identity,
-        Box::new(pos_crypto::chain::Blake3Hasher),
-    )
-    .map_err(|error| CliError::BadSource(error.to_string()))?;
-    let ledger = ledger_store.load(today)?;
+    let ledger = pos_plugin_ledger::load_ledger_from_store(store.as_ref(), timeline.id(), today)?;
     let view = LedgerView::from(&ledger);
     let records: Vec<SignedEventRecord> = events
         .iter()
