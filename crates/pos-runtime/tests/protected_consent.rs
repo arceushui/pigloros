@@ -52,6 +52,25 @@ impl Driver for ProtectedEventDriver {
     }
 }
 
+struct SensitiveEventDriver {
+    entity: EntityId,
+    event_type: &'static str,
+}
+
+impl Driver for SensitiveEventDriver {
+    fn name(&self) -> &'static str {
+        "sensitive-event"
+    }
+
+    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
+        Ok(StepOutput::new(vec![EventDraft::new(
+            self.entity,
+            Kind::new(self.event_type),
+            CanonicalBytes::from_static(b"sensitive"),
+        )]))
+    }
+}
+
 struct MismatchedSubjectDriver {
     entity: EntityId,
 }
@@ -826,6 +845,72 @@ fn public_registry_gate_projection_and_control_marker_seams_are_distinguishable(
     assert!(projections
         .state_for_reducer("projection-public-seam", &unrelated)
         .is_none());
+}
+
+#[test]
+fn protected_projection_seams_reject_foreign_subjects_and_missing_or_foreign_gates() {
+    let timeline = TimelineId::new();
+    let subject = EntityId::new();
+    let foreign_subject = EntityId::new();
+    let authority = ConsentAuthority::new();
+    let token = authority.record_grant_on_timeline(timeline, &grant(subject));
+    let mut foreign_projection = PluginRegistry::new().with_consent_authority(authority.clone());
+    foreign_projection.register_driver(Box::new(SubscribedDriver {
+        key: pos_runtime::ProjectionKey::new(foreign_subject),
+    }));
+    assert!(matches!(
+        test_err(foreign_projection.step_all_anchored_protected(
+            timeline,
+            Seq::ZERO,
+            token.clone(),
+            1,
+            &[],
+        )),
+        RuntimeError::Consent(ConsentError::NoConsent)
+    ));
+
+    let no_gate = PluginRegistry::new().without_consent_gate();
+    assert!(matches!(
+        no_gate.into_authorized_projections(timeline, Seq::ZERO, 1, Some(&token), None),
+        Err(RuntimeError::ConsentOperationUnavailable)
+    ));
+    let no_gate_projection = PluginRegistry::new().without_consent_gate();
+    assert!(matches!(
+        no_gate_projection.projection_state_for_reducer(
+            timeline,
+            Seq::ZERO,
+            1,
+            &token,
+            "projection-public-seam",
+            subject,
+        ),
+        Err(RuntimeError::ConsentOperationUnavailable)
+    ));
+
+    let foreign_authority = ConsentAuthority::new();
+    let foreign_gate = PluginRegistry::new().with_consent_authority(foreign_authority);
+    assert!(matches!(
+        foreign_gate.into_authorized_projections(timeline, Seq::ZERO, 1, Some(&token), None),
+        Err(RuntimeError::Consent(ConsentError::NoConsent))
+    ));
+}
+
+#[test]
+fn protected_draft_seam_rejects_a_modality_not_in_the_presented_token() {
+    let timeline = TimelineId::new();
+    let subject = EntityId::new();
+    let authority = ConsentAuthority::new();
+    let token = authority.record_grant_on_timeline(timeline, &grant(subject));
+    let mut registry = PluginRegistry::new().with_consent_authority(authority);
+    registry.register_driver(Box::new(SensitiveEventDriver {
+        entity: subject,
+        event_type: "persona.profile.v1",
+    }));
+
+    assert!(matches!(
+        test_err(registry.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[],)),
+        RuntimeError::Consent(ConsentError::ModalityNotGranted)
+    ));
 }
 
 #[test]
