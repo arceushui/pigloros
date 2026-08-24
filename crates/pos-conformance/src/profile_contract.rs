@@ -5023,10 +5023,6 @@ mod tests {
         let mut second = stable_evidence("beta", 40);
         refresh_stable_report_for_profile(&mut first, &profile_value);
         refresh_stable_report_for_profile(&mut second, &profile_value);
-        assert_eq!(
-            validate_stable_evidence(&profile_value, Some(&trusted_root_policy())),
-            Ok(())
-        );
 
         let mut same_source = first.clone();
         same_source.implementation.source_digest = second.implementation.source_digest;

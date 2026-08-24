@@ -6920,6 +6920,8 @@ pub mod tests {
 
         let mut at_limit = valid.clone();
         at_limit.case_id = "x".repeat(128);
+        at_limit.outcome = CaseOutcomeStatusV1::Fail;
+        at_limit.actual_digest = Some([15; 32]);
         at_limit.first_coordinate = Some(vec![b'x'; 128]);
         assert_case_accepts(at_limit);
         let mut too_long = valid.clone();
@@ -7060,6 +7062,8 @@ pub mod tests {
             .map(|index| format!("reviewer-{index:02}"))
             .collect();
         at_limit.cases[0].case_id = "c".repeat(128);
+        at_limit.cases[0].outcome = CaseOutcomeStatusV1::Fail;
+        at_limit.cases[0].actual_digest = Some([15; 32]);
         at_limit.cases[0].first_coordinate = Some(vec![b'x'; 128]);
         refresh_test_report(&mut at_limit);
         assert_eq!(at_limit.validate(), Ok(()));
