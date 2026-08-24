@@ -9016,7 +9016,7 @@ mod tests {
         malformed
             .conn
             .execute(
-                "UPDATE key_registry SET state_cbor = X'01' WHERE singleton = 1",
+                "INSERT INTO key_registry (singleton, state_cbor) VALUES (1, X'01')",
                 [],
             )
             .test_ok();

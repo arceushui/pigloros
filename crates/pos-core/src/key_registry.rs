@@ -80,6 +80,26 @@ impl KeyRoleV1 {
     }
 }
 
+/// Security disposition for signatures emitted by the pre-#183
+/// subject-data-key path described by ADR-041.
+///
+/// This is a policy marker, not a compatibility implementation: the current
+/// product has no legacy signer, migration path, or ReplayClaim upgrade path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LegacySubjectDataSignatureDispositionV1 {
+    /// Existing signatures may be verified with their recorded public key,
+    /// but cannot be reissued, migrated, or used to upgrade a replay claim.
+    VerifyOnlyNoReplayUpgrade,
+}
+
+impl LegacySubjectDataSignatureDispositionV1 {
+    /// Return the only permitted disposition.
+    #[must_use]
+    pub const fn current() -> Self {
+        Self::VerifyOnlyNoReplayUpgrade
+    }
+}
+
 /// A role and monotonically increasing key epoch.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct KeyIdentityV1 {
@@ -642,6 +662,15 @@ mod tests {
         assert_eq!(
             KeyRoleV1::from_code(99),
             Err(KeyRegistryErrorV1::InvalidRoleCode)
+        );
+    }
+
+    #[test]
+    fn legacy_subject_signatures_are_verify_only() {
+        let disposition = LegacySubjectDataSignatureDispositionV1::current();
+        assert_eq!(
+            disposition,
+            LegacySubjectDataSignatureDispositionV1::VerifyOnlyNoReplayUpgrade
         );
     }
 
