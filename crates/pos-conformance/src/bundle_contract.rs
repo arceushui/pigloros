@@ -477,14 +477,13 @@ fn validate_expected_results(
 
 fn expected_identity(
     values: &[BundleExpectedResultV1],
-) -> Vec<(&str, ClaimLayerV1, BundleModeV1, &str, [u8; 32])> {
+) -> Vec<(&str, ClaimLayerV1, &str, [u8; 32])> {
     values
         .iter()
         .map(|value| {
             (
                 value.case_id.as_str(),
                 value.claim_layer,
-                value.mode,
                 value.member_path.as_str(),
                 value.digest,
             )
