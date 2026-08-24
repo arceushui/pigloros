@@ -2571,6 +2571,16 @@ mod tests {
             ),
             Err(ConsentError::ConsentEventsForbidden)
         );
+        assert_eq!(
+            authority.authorize_event(
+                timeline,
+                grant.subject_id,
+                &Kind::new("retention.extend.v1"),
+                0,
+                0,
+            ),
+            Err(ConsentError::NoConsent)
+        );
         assert!(authority
             .authorize_event(
                 timeline,
