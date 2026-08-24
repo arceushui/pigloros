@@ -404,7 +404,7 @@ fn profile_for_digest() -> ConformanceProfileV1 {
                 max_cases: 65_536,
                 max_bundle_members: 65_536,
                 max_member_path_bytes: 128,
-                max_member_bytes: 1_073_741_824,
+                max_member_bytes: 64 * 1024 * 1024,
                 max_total_bundle_bytes: 1_073_741_824,
                 max_compression_expansion: 100,
                 max_structural_nesting: 32,
@@ -595,7 +595,7 @@ fn public_profile_caps_accept_exact_profile_and_member_path_limits() {
     exact_path
         .evaluator_protocol
         .hard_caps
-        .max_member_path_bytes = 11;
+        .max_member_path_bytes = 12;
     exact_path.profile_digest = exact_path.digest();
     assert_eq!(exact_path.validate(), Ok(()));
 
@@ -603,7 +603,7 @@ fn public_profile_caps_accept_exact_profile_and_member_path_limits() {
     short_path
         .evaluator_protocol
         .hard_caps
-        .max_member_path_bytes = 10;
+        .max_member_path_bytes = 11;
     short_path.profile_digest = short_path.digest();
     assert_eq!(
         short_path.validate(),
