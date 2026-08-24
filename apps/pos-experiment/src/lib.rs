@@ -5628,7 +5628,7 @@ mod tests {
         experiment.register(&plugin, None, None).test_ok();
         let session = experiment.start().test_ok();
         let timeline_id = session.timeline().id();
-        eprintln!("durable-recovery stage=start timeline={timeline_id}");
+        let mut stage = "start";
         let subject = EntityId::new();
         let authority = ConsentAuthority::new();
         let token = authority.record_grant_on_timeline(
@@ -5649,8 +5649,8 @@ mod tests {
         let mut session = session
             .with_consent_authority(authority.clone())
             .with_protected_token(token.clone(), 0);
-        assert_eq!(session.append_events(&[]).test_ok(), 0);
-        eprintln!("durable-recovery stage=empty-append");
+        assert_eq!(session.append_events(&[]).test_ok(), 0, "stage={stage}");
+        stage = "empty-append";
         assert_eq!(
             session
                 .append_events(&[EventDraft::new(
@@ -5659,25 +5659,32 @@ mod tests {
                     CanonicalBytes::from_static(b"unit"),
                 )])
                 .test_ok(),
-            1
+            1,
+            "stage={stage}"
         );
-        eprintln!("durable-recovery stage=event-append");
-        assert_eq!(session.source_events().test_ok().len(), 1);
-        assert!(session
-            .projection_state_for_reducer("missing", subject, &token, current_now_secs())
-            .test_ok()
-            .is_none());
-        eprintln!("durable-recovery stage=projection-before-revoke");
+        stage = "event-append";
+        assert_eq!(session.source_events().test_ok().len(), 1, "stage={stage}");
+        assert!(
+            session
+                .projection_state_for_reducer("missing", subject, &token, current_now_secs())
+                .test_ok()
+                .is_none(),
+            "stage={stage}"
+        );
+        stage = "projection-before-revoke";
 
         session.revoke_consent_for_subject_at_boundary(subject);
-        assert!(matches!(
-            session.step_tick(),
-            Ok(TickOutcome::Advanced {
-                emitted_events: 1,
-                ..
-            })
-        ));
-        eprintln!("durable-recovery stage=revoke-step");
+        assert!(
+            matches!(
+                session.step_tick(),
+                Ok(TickOutcome::Advanced {
+                    emitted_events: 1,
+                    ..
+                })
+            ),
+            "stage={stage}"
+        );
+        stage = "revoke-step";
         drop(session);
 
         let resumed_plugin = TestPlugin {
@@ -5698,16 +5705,19 @@ mod tests {
             .with_consent_authority(authority)
             .resume(timeline_id)
             .test_ok();
-        eprintln!("durable-recovery stage=resume");
+        stage = "resume";
         let projection =
             resumed.projection_state_for_reducer("missing", subject, &token, current_now_secs());
-        eprintln!("durable-recovery projection={projection:?}");
-        assert!(matches!(
-            projection,
-            Err(ExperimentError::Runtime(RuntimeError::Consent(
-                pos_core::ConsentError::Revoked
-            )))
-        ));
+        let projection_debug = format!("{projection:?}");
+        assert!(
+            matches!(
+                projection,
+                Err(ExperimentError::Runtime(RuntimeError::Consent(
+                    pos_core::ConsentError::Revoked
+                )))
+            ),
+            "stage={stage} projection={projection_debug}"
+        );
     }
 
     #[test]
