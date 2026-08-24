@@ -2104,10 +2104,7 @@ mod tests {
             let bundle = signed_bundle(&profile, mode)?;
             let encoded = bundle.to_canonical_cbor()?;
             let preflight = preflight_archive_caps(&encoded)?;
-            assert_eq!(
-                preflight.maximum_depth,
-                value_depth(&bundle_value(&bundle))
-            );
+            assert_eq!(preflight.maximum_depth, value_depth(&bundle_value(&bundle)));
             let decoded = ConformanceBundleV1::from_canonical_cbor(&encoded)?;
             assert_eq!(decoded, bundle);
             assert_eq!(decoded.to_canonical_cbor()?, encoded);
