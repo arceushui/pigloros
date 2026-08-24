@@ -23,3 +23,10 @@ materialization.
 The support directory contains the normative specification, schema, licence,
 notice, SBOM, provenance, and limitations members that every immutable bundle
 manifest must declare.
+
+The Draft `matrix/adr-059-complete.json` records all twelve accepted
+non-interference rows and their 192 required Local/Air-Gapped/Replay/Fork
+variant cases. `expected-authority/inventory.json` records the eleven #172
+handoff vectors. Their expected-result digest slots remain explicitly open in
+Draft and must be filled with real BLAKE3 evidence before Candidate
+publication.

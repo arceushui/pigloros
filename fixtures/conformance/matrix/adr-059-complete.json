@@ -1,0 +1,374 @@
+{
+  "magic": "NIM1",
+  "version": 1,
+  "matrix_id": "adr-059-complete-required-matrix-v1",
+  "lifecycle": "Draft",
+  "source": "Accepted ADR-059",
+  "row_count": 12,
+  "variant_count": 4,
+  "mode_count": 4,
+  "case_count": 192,
+  "expected_result_policy": "Every executed case must carry a real BLAKE3 expected-result digest before Candidate; open slots are never a pass.",
+  "rows": [
+    {
+      "fixture_id": "NI-TOOL-001",
+      "channel": "Host tools and imported services",
+      "sole_unauthorized_delta": "one denied tool/service response changes value, size, and error text behind the same denied capability",
+      "observable_surfaces": [
+        "Imported-service registry",
+        "tool result handle",
+        "Plugin imports",
+        "staged EventDrafts",
+        "public outcome",
+        "audit record"
+      ],
+      "classification": "tool bytes unauthorized; denial category authoritative; minimized diagnostics operational",
+      "variants": [
+        "S",
+        "D",
+        "W",
+        "C"
+      ],
+      "modes": [
+        "L",
+        "A",
+        "R",
+        "F"
+      ],
+      "equality": "AuthEq=PublicEq=OpEq across L=A=R=F as declared by ADR-059",
+      "case_count": 16,
+      "executed_case_count": 0,
+      "expected_result_digest": null
+    },
+    {
+      "fixture_id": "NI-CACHE-002",
+      "channel": "Authorization, materialization, schema, artifact, and query caches",
+      "sole_unauthorized_delta": "canary cache entry, hit/miss state, eviction order, and warm/cold latency differ",
+      "observable_surfaces": [
+        "Cache API return",
+        "snapshot bytes",
+        "Plugin inputs",
+        "typed errors",
+        "logs/metrics",
+        "evaluator bundle"
+      ],
+      "classification": "cache contents and timing operational; must not be authoritative inputs",
+      "variants": [
+        "S",
+        "D",
+        "W",
+        "C"
+      ],
+      "modes": [
+        "L",
+        "A",
+        "R",
+        "F"
+      ],
+      "equality": "AuthEq=PublicEq=OpEq across L=A=R=F as declared by ADR-059",
+      "case_count": 16,
+      "executed_case_count": 0,
+      "expected_result_digest": null
+    },
+    {
+      "fixture_id": "NI-STATE-003",
+      "channel": "Plugin state and migrations",
+      "sole_unauthorized_delta": "unauthorized state member and migration-only canary differ while authorized state digest is constant",
+      "observable_surfaces": [
+        "Migration request/result",
+        "activated state",
+        "PluginInvocation",
+        "PluginOutput",
+        "EventDrafts",
+        "quarantine/error"
+      ],
+      "classification": "authorized state/output authoritative; canary bytes and derived digest excluded",
+      "variants": [
+        "S",
+        "D",
+        "W",
+        "C"
+      ],
+      "modes": [
+        "L",
+        "A",
+        "R",
+        "F"
+      ],
+      "equality": "AuthEq=PublicEq=OpEq across L=A=R=F as declared by ADR-059",
+      "case_count": 16,
+      "executed_case_count": 0,
+      "expected_result_digest": null
+    },
+    {
+      "fixture_id": "NI-OBS-004",
+      "channel": "Logs, metrics, traces, and crash reports",
+      "sole_unauthorized_delta": "secret changes text, label, stack, path, cardinality, and payload length",
+      "observable_surfaces": [
+        "Structured logs",
+        "metric names/labels/counts",
+        "trace spans",
+        "crash artifact",
+        "public support bundle"
+      ],
+      "classification": "operational unless explicitly promoted; secret-bearing content prohibited",
+      "variants": [
+        "S",
+        "D",
+        "W",
+        "C"
+      ],
+      "modes": [
+        "L",
+        "A",
+        "R",
+        "F"
+      ],
+      "equality": "AuthEq=PublicEq=OpEq across L=A=R=F as declared by ADR-059",
+      "case_count": 16,
+      "executed_case_count": 0,
+      "expected_result_digest": null
+    },
+    {
+      "fixture_id": "NI-TIME-005",
+      "channel": "Wall clock, latency, cache timing, and watchdogs",
+      "sole_unauthorized_delta": "wall time, host latency, cache timing, watchdog firing point, and process scheduling differ",
+      "observable_surfaces": [
+        "Plugin imports",
+        "deterministic deadline",
+        "safe-stop record",
+        "status/error",
+        "logs/metrics",
+        "evaluator input"
+      ],
+      "classification": "Simulation Time and deterministic budget authoritative; wall duration operational",
+      "variants": [
+        "S",
+        "D",
+        "W",
+        "C"
+      ],
+      "modes": [
+        "L",
+        "A",
+        "R",
+        "F"
+      ],
+      "equality": "AuthEq=PublicEq=OpEq across L=A=R=F as declared by ADR-059",
+      "case_count": 16,
+      "executed_case_count": 0,
+      "expected_result_digest": null
+    },
+    {
+      "fixture_id": "NI-PUBLIC-006",
+      "channel": "Public errors, status, cursors, and padding",
+      "sole_unauthorized_delta": "denied object existence, secret length, and internal field ordinal differ",
+      "observable_surfaces": [
+        "HTTP/Plugin error",
+        "status transition",
+        "cursor bytes",
+        "page count",
+        "response length/padding"
+      ],
+      "classification": "closed error/status/cursor shape is public authoritative",
+      "variants": [
+        "S",
+        "D",
+        "W",
+        "C"
+      ],
+      "modes": [
+        "L",
+        "A",
+        "R",
+        "F"
+      ],
+      "equality": "AuthEq=PublicEq=OpEq across L=A=R=F as declared by ADR-059",
+      "case_count": 16,
+      "executed_case_count": 0,
+      "expected_result_digest": null
+    },
+    {
+      "fixture_id": "NI-EVAL-007",
+      "channel": "Evaluator inputs",
+      "sole_unauthorized_delta": "unauthorized subject field, hidden expected output, and private implementation hint differ",
+      "observable_surfaces": [
+        "Export bundle",
+        "manifest",
+        "fixture descriptor",
+        "evaluator stdin/files",
+        "ConformanceReport"
+      ],
+      "classification": "admitted evaluator bundle authoritative; hidden/private data prohibited",
+      "variants": [
+        "S",
+        "D",
+        "W",
+        "C"
+      ],
+      "modes": [
+        "L",
+        "A",
+        "R",
+        "F"
+      ],
+      "equality": "AuthEq=PublicEq=OpEq across L=A=R=F as declared by ADR-059",
+      "case_count": 16,
+      "executed_case_count": 0,
+      "expected_result_digest": null
+    },
+    {
+      "fixture_id": "NI-FORK-008",
+      "channel": "Fork artifacts",
+      "sole_unauthorized_delta": "unauthorized factual-suffix value and hidden participant field differ",
+      "observable_surfaces": [
+        "Fork parent/cut",
+        "CounterfactualPlan",
+        "RecomputationFrontier",
+        "SuffixInvalidation",
+        "snapshots",
+        "checkpoints",
+        "result",
+        "ReproManifest",
+        "exports"
+      ],
+      "classification": "parent prefix, intervention, authorized frozen inputs, and recomputed suffix authoritative",
+      "variants": [
+        "S",
+        "D",
+        "W",
+        "C"
+      ],
+      "modes": [
+        "L",
+        "A",
+        "R",
+        "F"
+      ],
+      "equality": "AuthEq=PublicEq=OpEq across L=A=R=F as declared by ADR-059",
+      "case_count": 16,
+      "executed_case_count": 0,
+      "expected_result_digest": null
+    },
+    {
+      "fixture_id": "NI-ARCHIVE-009",
+      "channel": "Archive ordering and compression",
+      "sole_unauthorized_delta": "secret changes source filename, insertion order, compressor metadata, block layout, and compressibility",
+      "observable_surfaces": [
+        "Member table",
+        "archive bytes",
+        "decompressed bundle",
+        "digest",
+        "evaluator import",
+        "logs"
+      ],
+      "classification": "canonical member table and decompressed bytes authoritative",
+      "variants": [
+        "S",
+        "D",
+        "W",
+        "C"
+      ],
+      "modes": [
+        "L",
+        "A",
+        "R",
+        "F"
+      ],
+      "equality": "AuthEq=PublicEq=OpEq across L=A=R=F as declared by ADR-059",
+      "case_count": 16,
+      "executed_case_count": 0,
+      "expected_result_digest": null
+    },
+    {
+      "fixture_id": "NI-NET-010",
+      "channel": "Network and tool-call sequence",
+      "sole_unauthorized_delta": "denied endpoint, DNS result, retry timing, response body, and hidden tool-call branch differ",
+      "observable_surfaces": [
+        "Capability checks",
+        "attempted-call records",
+        "retry count",
+        "Plugin output",
+        "Timeline",
+        "logs",
+        "evaluator bundle"
+      ],
+      "classification": "deterministic/Air-Gapped network absent; denied/live sequence cannot expose body",
+      "variants": [
+        "S",
+        "D",
+        "W",
+        "C"
+      ],
+      "modes": [
+        "L",
+        "A",
+        "R",
+        "F"
+      ],
+      "equality": "AuthEq=PublicEq=OpEq across L=A=R=F as declared by ADR-059",
+      "case_count": 16,
+      "executed_case_count": 0,
+      "expected_result_digest": null
+    },
+    {
+      "fixture_id": "NI-SERVICE-011",
+      "channel": "Frozen imported response sequence",
+      "sole_unauthorized_delta": "unauthorized field inside a digest-addressed admitted service fixture differs while permitted projection is identical",
+      "observable_surfaces": [
+        "Exact request digest",
+        "frozen response projection",
+        "call ordinal",
+        "PluginInvocation",
+        "generated dependency edges"
+      ],
+      "classification": "permitted projection and exact request identity authoritative",
+      "variants": [
+        "S",
+        "D",
+        "W",
+        "C"
+      ],
+      "modes": [
+        "L",
+        "A",
+        "R",
+        "F"
+      ],
+      "equality": "AuthEq=PublicEq=OpEq across L=A=R=F as declared by ADR-059",
+      "case_count": 16,
+      "executed_case_count": 0,
+      "expected_result_digest": null
+    },
+    {
+      "fixture_id": "NI-CRASH-012",
+      "channel": "Failure and archive handoff",
+      "sole_unauthorized_delta": "unauthorized value changes guest diagnostic string, trap payload, core dump, or archive filename",
+      "observable_surfaces": [
+        "Guest error",
+        "host error mapping",
+        "quarantine",
+        "crash report",
+        "support archive",
+        "next Tick status"
+      ],
+      "classification": "deterministic closed error category authoritative; raw diagnostics operational",
+      "variants": [
+        "S",
+        "D",
+        "W",
+        "C"
+      ],
+      "modes": [
+        "L",
+        "A",
+        "R",
+        "F"
+      ],
+      "equality": "AuthEq=PublicEq=OpEq across L=A=R=F as declared by ADR-059",
+      "case_count": 16,
+      "executed_case_count": 0,
+      "expected_result_digest": null
+    }
+  ]
+}

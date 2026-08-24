@@ -3,6 +3,7 @@
   "claim_layer": "knowledge-non-interference",
   "input": "inputs/knowledge-malformed.json",
   "expected": "expected/knowledge-malformed.json",
+  "matrix": "matrix/adr-059-complete.json",
   "execution_profiles": ["deterministic-local-v1", "deterministic-air-gapped-v1"],
   "bundle_modes": ["local", "air-gapped"]
 }

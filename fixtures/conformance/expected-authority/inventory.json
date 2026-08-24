@@ -1,0 +1,86 @@
+{
+  "magic": "W8H1",
+  "version": 1,
+  "lifecycle": "Draft",
+  "source": "#172 wave8-execution-repro-handoff-v1",
+  "entries": [
+    {
+      "fixture_id": "RPL-001",
+      "execution_class": "RecordedReplay",
+      "expected_outcome": "VerifiedExact",
+      "expected_result_digest": null,
+      "materialization_status": "open-draft-slot"
+    },
+    {
+      "fixture_id": "PRF-001",
+      "execution_class": "ProfileRecomputation",
+      "expected_outcome": "VerifiedExact",
+      "expected_result_digest": null,
+      "materialization_status": "open-draft-slot"
+    },
+    {
+      "fixture_id": "PRF-002",
+      "execution_class": "CrossProfileConformance",
+      "expected_outcome": "VerifiedExact",
+      "expected_result_digest": null,
+      "materialization_status": "open-draft-slot"
+    },
+    {
+      "fixture_id": "DIV-001",
+      "execution_class": "ProfileRecomputation",
+      "expected_outcome": "Diverged",
+      "expected_result_digest": null,
+      "materialization_status": "open-draft-slot"
+    },
+    {
+      "fixture_id": "INV-001",
+      "execution_class": "Any deterministic profile",
+      "expected_outcome": "InvalidManifest",
+      "expected_result_digest": null,
+      "materialization_status": "open-draft-slot"
+    },
+    {
+      "fixture_id": "INV-002",
+      "execution_class": "Any deterministic profile",
+      "expected_outcome": "UnverifiableArtifactsMissing",
+      "expected_result_digest": null,
+      "materialization_status": "open-draft-slot"
+    },
+    {
+      "fixture_id": "INV-003",
+      "execution_class": "Any deterministic profile",
+      "expected_outcome": "IncompatibleProfile",
+      "expected_result_digest": null,
+      "materialization_status": "open-draft-slot"
+    },
+    {
+      "fixture_id": "RES-001",
+      "execution_class": "ProfileRecomputation",
+      "expected_outcome": "ResourceLimitExceeded",
+      "expected_result_digest": null,
+      "materialization_status": "open-draft-slot"
+    },
+    {
+      "fixture_id": "LIVE-001",
+      "execution_class": "LiveUnverified",
+      "expected_outcome": "Non-deterministic admission",
+      "expected_result_digest": null,
+      "materialization_status": "open-draft-slot"
+    },
+    {
+      "fixture_id": "ERA-001",
+      "execution_class": "RecordedReplay plus erasure state",
+      "expected_outcome": "Outcome preserved; ReplayClaim degraded",
+      "expected_result_digest": null,
+      "materialization_status": "open-draft-slot"
+    },
+    {
+      "fixture_id": "SEC-001",
+      "execution_class": "Deterministic profile",
+      "expected_outcome": "InvalidManifest or typed failure",
+      "expected_result_digest": null,
+      "materialization_status": "open-draft-slot"
+    }
+  ],
+  "publication_gate": "Candidate publication rejects any open digest slot and requires real fixture bytes plus BLAKE3 expected-result digests."
+}
