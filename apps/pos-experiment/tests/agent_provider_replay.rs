@@ -20,6 +20,7 @@ use pos_core::{
     clock::Seq,
     event::{CanonicalBytes, Event, EventDraft, Kind},
     ids::{EntityId, PluginId, TimelineId},
+    plugin::{ActionApprover, ActionRejected, Capability, Plugin, ProposedAction},
     store::EventStore,
     ConsentAuthority, ConsentGranted, CoreError, Timeline,
 };
@@ -193,13 +194,28 @@ impl HostFixture {
         parent_attempts: Vec<ProviderAttempt>,
         child_attempts: Vec<ProviderAttempt>,
     ) -> Experiment {
+        self.forkable_experiment_with_store(
+            name,
+            parent_attempts,
+            child_attempts,
+            StoreConfig::Memory,
+        )
+    }
+
+    fn forkable_experiment_with_store(
+        &self,
+        name: &str,
+        parent_attempts: Vec<ProviderAttempt>,
+        child_attempts: Vec<ProviderAttempt>,
+        store_config: StoreConfig,
+    ) -> Experiment {
         let plugin = Arc::new(AgentPlugin::new());
         let child_plugin = Arc::clone(&plugin);
         let child_host = self.clone();
         let mut experiment = Experiment::new(ExperimentConfig {
             name: name.to_owned(),
             stop: StopCondition::MaxTicks(2),
-            store_config: StoreConfig::Memory,
+            store_config,
         })
         .with_fork_registry_factory(move || {
             let provider = FixtureAgentDecisionProvider::new(child_attempts.clone());
@@ -357,6 +373,41 @@ enum BoundaryDriver {
     Empty,
     Fails,
     EmitsUnknown,
+}
+
+struct InterventionPlugin {
+    id: PluginId,
+}
+
+impl Plugin for InterventionPlugin {
+    fn id(&self) -> PluginId {
+        self.id
+    }
+
+    fn name(&self) -> &'static str {
+        "intervention"
+    }
+
+    fn capability(&self) -> Capability {
+        Capability {
+            owned_event_types: vec![Kind::new("fixture.intervention")],
+            owned_entity_kinds: Vec::new(),
+            has_driver: false,
+            has_reducer: false,
+        }
+    }
+}
+
+struct AcceptingInterventionApprover;
+
+impl ActionApprover for AcceptingInterventionApprover {
+    fn approve(&self, proposal: &ProposedAction) -> Result<EventDraft, ActionRejected> {
+        Ok(EventDraft::new(
+            proposal.actor_entity_id,
+            proposal.event_type.clone(),
+            proposal.payload.clone(),
+        ))
+    }
 }
 
 impl Driver for BoundaryDriver {
@@ -892,6 +943,225 @@ fn protected_result_export_and_faulted_projection_fail_closed() {
         faulted.projection_state_for_reducer("agent", EntityId::new(), &fault_token, 0),
         Err(ExperimentError::SessionFaulted)
     ));
+}
+
+#[test]
+fn protected_result_export_succeeds_with_a_durable_authority() {
+    let directory = tempfile::tempdir().test_ok();
+    let store_config = StoreConfig::Sqlite {
+        path: directory
+            .path()
+            .join("protected-result-export-success.sqlite")
+            .to_string_lossy()
+            .into_owned(),
+    };
+    let authority = ConsentAuthority::new();
+    let experiment = Experiment::new(ExperimentConfig {
+        name: "protected-result-export-success".to_owned(),
+        stop: StopCondition::MaxTicks(1),
+        store_config,
+    })
+    .with_consent_authority(authority.clone());
+    let session = experiment.start().test_ok();
+    let token = authority.record_grant_on_timeline(
+        session.timeline().id(),
+        &ConsentGranted {
+            subject_id: EntityId::new(),
+            grantee_id: EntityId::new(),
+            purpose: "protected-result-export-success".to_owned(),
+            modalities: 0,
+            min_geo_resolution: 0,
+            fork_permitted: true,
+            export_permitted: true,
+            retention_days: 30,
+            expiry_secs: 0,
+            grant_seq: 1,
+        },
+    );
+    let manifest = session
+        .with_protected_token(token, 0)
+        .run_to_completion()
+        .test_ok()
+        .into_reproduction_manifest(ReproductionRecipe::new(
+            "protected-result-export-success",
+            1,
+            serde_json::json!({}),
+        ))
+        .test_ok();
+    assert_eq!(manifest.recipe.format_version, 1);
+}
+
+#[test]
+fn protected_session_fork_succeeds_from_a_durable_timeline() {
+    let host = HostFixture::new();
+    let directory = tempfile::tempdir().test_ok();
+    let store_config = StoreConfig::Sqlite {
+        path: directory
+            .path()
+            .join("protected-session-fork.sqlite")
+            .to_string_lossy()
+            .into_owned(),
+    };
+    let authority = ConsentAuthority::new();
+    let experiment =
+        host.forkable_experiment_with_store("protected-session-fork", vec![], vec![], store_config);
+    let session = experiment
+        .with_consent_authority(authority.clone())
+        .start()
+        .test_ok();
+    let parent_id = session.timeline().id();
+    let token = authority.record_grant_on_timeline(
+        parent_id,
+        &ConsentGranted {
+            subject_id: host.agent,
+            grantee_id: EntityId::new(),
+            purpose: "protected-session-fork".to_owned(),
+            modalities: 0,
+            min_geo_resolution: 0,
+            fork_permitted: true,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        },
+    );
+    let mut protected = session.with_protected_token(token, 0);
+    let child = protected.fork("protected-session-child").test_ok();
+    assert_ne!(child.timeline().id(), parent_id);
+}
+
+#[test]
+fn public_branch_with_token_and_durable_session_boundaries_are_reachable() {
+    let authority = ConsentAuthority::new();
+    let mut store = MemoryStore::new();
+    let timeline = store.create_timeline("public-branch-success").test_ok();
+    let token = authority.record_grant_on_timeline(
+        timeline.id(),
+        &ConsentGranted {
+            subject_id: EntityId::new(),
+            grantee_id: EntityId::new(),
+            purpose: "public-branch-success".to_owned(),
+            modalities: 0,
+            min_geo_resolution: 0,
+            fork_permitted: true,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        },
+    );
+    let experiment = Experiment::new(ExperimentConfig {
+        name: "public-branch-success".to_owned(),
+        stop: StopCondition::MaxTicks(1),
+        store_config: StoreConfig::Memory,
+    })
+    .with_consent_authority(authority);
+    let child = experiment
+        .branch_with_token("public-branch-child", &mut store, &token, 0)
+        .test_ok();
+    assert_eq!(child.meta.fork_point.map(|(_, seq)| seq), Some(Seq::ZERO));
+}
+
+#[test]
+fn durable_session_reads_appends_empty_boundaries_and_revocations() {
+    let directory = tempfile::tempdir().test_ok();
+    let store_config = StoreConfig::Sqlite {
+        path: directory
+            .path()
+            .join("durable-session-boundaries.sqlite")
+            .to_string_lossy()
+            .into_owned(),
+    };
+    let plugin = InterventionPlugin {
+        id: PluginId::new(),
+    };
+    let authority = ConsentAuthority::new();
+    let subject = EntityId::new();
+    let mut experiment = Experiment::new(ExperimentConfig {
+        name: "durable-session-boundaries".to_owned(),
+        stop: StopCondition::MaxTicks(3),
+        store_config,
+    })
+    .with_consent_authority(authority.clone());
+    experiment
+        .register_with_approver(
+            &plugin,
+            None,
+            None,
+            Some(Box::new(AcceptingInterventionApprover)),
+            [Kind::new("fixture.intervention")],
+        )
+        .test_ok();
+    let mut session = experiment.start().test_ok();
+    let timeline = session.timeline().id();
+    let token = authority.record_grant_on_timeline(
+        timeline,
+        &ConsentGranted {
+            subject_id: subject,
+            grantee_id: EntityId::new(),
+            purpose: "durable-session-boundaries".to_owned(),
+            modalities: 0,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        },
+    );
+    assert!(matches!(
+        session.step_tick().test_ok(),
+        TickOutcome::Quiescent
+    ));
+    assert!(session
+        .projection_state_for_reducer("missing", subject, &token, 0)
+        .test_ok()
+        .is_none());
+    let proposal = ProposedAction::new(
+        Kind::new("fixture.intervention"),
+        subject,
+        CanonicalBytes::from_static(b"append"),
+        Kind::new("fixture.intervention.submit"),
+    );
+    assert_eq!(session.submit_action(&proposal).test_ok(), 1);
+    assert_eq!(session.source_events().test_ok().len(), 1);
+    session.revoke_consent_at_boundary();
+    assert!(matches!(
+        session.step_tick().test_ok(),
+        TickOutcome::Advanced { .. }
+    ));
+    assert!(matches!(
+        session.projection_state_for_reducer("missing", subject, &token, 0),
+        Err(ExperimentError::ConsentRevoked)
+    ));
+    assert!(matches!(
+        session.step_tick().test_ok(),
+        TickOutcome::Stopped
+    ));
+}
+
+#[test]
+fn durable_backtest_builds_public_run_results() {
+    let directory = tempfile::tempdir().test_ok();
+    let result = BacktestRunner::new(
+        BacktestConfig {
+            experiment_name: "durable-backtest-results".to_owned(),
+            train_ticks: 1,
+            eval_ticks: 1,
+            store_config: StoreConfig::Sqlite {
+                path: directory
+                    .path()
+                    .join("durable-backtest-results.sqlite")
+                    .to_string_lossy()
+                    .into_owned(),
+            },
+        },
+        PluginRegistry::new,
+    )
+    .run()
+    .test_ok();
+    assert_eq!(result.train_result.ticks, 1);
+    assert_eq!(result.eval_result.ticks, 1);
 }
 
 #[test]

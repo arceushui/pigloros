@@ -3137,12 +3137,7 @@ mod tests {
 
     #[test]
     fn public_restore_decodes_revocation_history() {
-        fn event(
-            event_type: &str,
-            entity: EntityId,
-            payload: CanonicalBytes,
-            seq: u64,
-        ) -> Event {
+        fn event(event_type: &str, entity: EntityId, payload: CanonicalBytes, seq: u64) -> Event {
             Event {
                 id: EventId::new(),
                 entity,
