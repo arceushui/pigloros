@@ -8,7 +8,6 @@ use pos_core::{
     ids::{EntityId, EventId},
     store::{EventStore, SeqRange},
     CoreError, KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1,
-    KeyRoleV1,
 };
 use pos_crypto::{
     key_roles::{key_material_digest, sign_for_registered_role},
@@ -128,6 +127,7 @@ impl EventLedgerStore {
         Ok(outcome)
     }
 
+    #[cfg(test)]
     fn head_seq(&self) -> Result<Seq, LedgerError> {
         self.store
             .get_timeline(self.timeline_id)
@@ -143,7 +143,7 @@ impl EventLedgerStore {
         event_type: Kind,
     ) -> Result<(), LedgerError> {
         let payload_hash = self.hasher.hash_payload(&payload);
-        let mut key_registry = self
+        let key_registry = self
             .key_registry
             .lock()
             .map_err(|_| LedgerError::Store("ledger signing registry is unavailable".to_owned()))?;
@@ -255,7 +255,7 @@ impl LedgerStore for EventLedgerStore {
 mod tests {
     use super::*;
     use crate::contract;
-    use pos_core::KeyRegistrationV1;
+    use pos_core::{KeyRegistrationV1, KeyRoleV1};
     use pos_crypto::{
         chain::{hash_payload, Blake3Hasher},
         key_roles::verify_for_role,
