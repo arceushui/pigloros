@@ -629,10 +629,50 @@ impl PluginRegistry {
         self.projections.fold_events(events);
     }
 
-    /// Consume the registry and return its accumulated projections.
-    #[must_use]
-    pub fn into_projections(self) -> ProjectionRegistry {
-        self.projections
+    /// Consume the registry after authorizing its final projection snapshot.
+    ///
+    /// A protected registry requires a token issued by the bound host authority.
+    /// A token-less registry is only exportable when the caller supplies the
+    /// completed durable Event prefix and every Event in that prefix is public.
+    /// Registered schemas alone do not determine whether this particular run
+    /// emitted protected Events, which keeps public Backtest runs valid.
+    ///
+    /// # Errors
+    /// Returns a consent error when a protected registry lacks a valid capability,
+    /// when a public caller supplies no Event-prefix evidence, or when that
+    /// evidence contains a protected Event family.
+    pub fn into_authorized_projections(
+        self,
+        timeline: pos_core::ids::TimelineId,
+        timeline_head: Seq,
+        now_secs: u64,
+        token: Option<&ConsentCapabilityToken>,
+        public_events: Option<&[Event]>,
+    ) -> Result<ProjectionRegistry, RuntimeError> {
+        match token {
+            Some(token) => self
+                .consent_gate
+                .as_ref()
+                .ok_or(RuntimeError::ConsentOperationUnavailable)?
+                .validate_token(timeline, token, timeline_head.as_u64(), now_secs)
+                .map_err(RuntimeError::Consent)?,
+            None => {
+                let Some(events) = public_events else {
+                    return Err(RuntimeError::ConsentOperationUnavailable);
+                };
+                if events.iter().any(|event| {
+                    pos_core::is_consent_event_type(&event.event_type)
+                        || event.event_type.as_str() == pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE
+                        || pos_core::is_geographic_event_type(&event.event_type)
+                        || pos_core::required_modality_for_event(&event.event_type) != 0
+                        || event.event_type.as_str().starts_with("timeline.fork.")
+                        || event.event_type.as_str().starts_with("retention.")
+                }) {
+                    return Err(RuntimeError::ConsentOperationUnavailable);
+                }
+            }
+        }
+        Ok(self.projections)
     }
 
     /// Read one projection state after the bound host gate authorizes its subject.

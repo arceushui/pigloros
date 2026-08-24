@@ -42,6 +42,33 @@ fn is_public_event_type(event_type: &Kind) -> bool {
         && !event_type.as_str().starts_with("retention.")
 }
 
+fn reject_protected_events(events: &[pos_core::Event]) -> Result<(), ExperimentError> {
+    if events
+        .iter()
+        .any(|event| !is_public_event_type(&event.event_type))
+    {
+        Err(pos_runtime::RuntimeError::ConsentOperationUnavailable.into())
+    } else {
+        Ok(())
+    }
+}
+
+fn reject_protected_history(
+    store: &dyn pos_core::store::EventStore,
+    timeline: pos_core::ids::TimelineId,
+    head: pos_core::clock::Seq,
+) -> Result<(), ExperimentError> {
+    let events = if head == pos_core::clock::Seq::ZERO {
+        Vec::new()
+    } else {
+        store.read(
+            timeline,
+            pos_store::SeqRange::bounded(pos_core::clock::Seq::from_u64(1), head),
+        )?
+    };
+    reject_protected_events(&events)
+}
+
 pub mod moat_proof;
 
 // ---------------------------------------------------------------------------
@@ -232,7 +259,11 @@ impl RunResult {
             (Some(_), None) => {
                 return Err(pos_runtime::RuntimeError::ConsentOperationUnavailable.into());
             }
-            (None, _) => {
+            (None, Some(_)) => {
+                return Err(pos_runtime::RuntimeError::ConsentOperationUnavailable.into());
+            }
+            (None, None) => {
+                reject_protected_history(store.as_ref(), timeline.id(), current_head)?;
                 fork_result = Some(store.fork(timeline.id(), current_head, name));
             }
         }
@@ -282,7 +313,10 @@ impl RunResult {
             (Some(_), None) => {
                 return Err(pos_runtime::RuntimeError::ConsentOperationUnavailable.into());
             }
-            (None, _) => {}
+            (None, Some(_)) => {
+                return Err(pos_runtime::RuntimeError::ConsentOperationUnavailable.into());
+            }
+            (None, None) => {}
         }
         Ok(ReproductionManifest {
             manifest: self.manifest,
@@ -1060,20 +1094,7 @@ impl Experiment {
             })?;
 
         let current_head = store.logical_head(timeline.id())?;
-        let events = if current_head == pos_core::clock::Seq::ZERO {
-            Vec::new()
-        } else {
-            store.read(
-                timeline.id(),
-                pos_store::SeqRange::bounded(pos_core::clock::Seq::from_u64(1), current_head),
-            )?
-        };
-        if events
-            .iter()
-            .any(|event| !is_public_event_type(&event.event_type))
-        {
-            return Err(pos_runtime::RuntimeError::ConsentOperationUnavailable.into());
-        }
+        reject_protected_history(store, timeline.id(), current_head)?;
         Ok(store.fork(timeline.id(), current_head, name)?)
     }
 
@@ -1652,6 +1673,8 @@ impl ExperimentSession {
             return Err(ExperimentError::SessionFaulted);
         }
         let fork_head = self.boundary.folded_through;
+        let durable_head =
+            lock_store(&self.store).and_then(|store| store.logical_head(self.timeline.id()))?;
         if let Some(token) = self.operation_token.as_ref() {
             let gate = self
                 .registry
@@ -1660,7 +1683,7 @@ impl ExperimentSession {
             gate.validate_token(
                 self.timeline.id(),
                 token,
-                fork_head.as_u64(),
+                durable_head.as_u64(),
                 current_now_secs(),
             )
             .map_err(pos_runtime::RuntimeError::Consent)?;
@@ -1691,8 +1714,39 @@ impl ExperimentSession {
             )?;
             Ok((events, ancestry))
         })?;
-        registry.restore_driver_state(&ancestry, &events)?;
-        hydrate_projections(&mut registry, &events);
+        if self.operation_token.is_none() {
+            reject_protected_events(&events)?;
+            registry.restore_driver_state(&ancestry, &events)?;
+            hydrate_projections(&mut registry, &events);
+        } else {
+            let token = self
+                .operation_token
+                .as_ref()
+                .ok_or(pos_runtime::RuntimeError::ConsentOperationUnavailable)?;
+            let gate = self
+                .registry
+                .clone_consent_gate()
+                .ok_or(pos_runtime::RuntimeError::ConsentOperationUnavailable)?;
+            let mut hydration_error = None;
+            let mut hydrate = || {
+                if let Err(error) = registry.restore_driver_state(&ancestry, &events) {
+                    hydration_error = Some(error);
+                } else {
+                    hydrate_projections(&mut registry, &events);
+                }
+            };
+            gate.with_token_fence(
+                self.timeline.id(),
+                token,
+                durable_head.as_u64(),
+                current_now_secs(),
+                &mut hydrate,
+            )
+            .map_err(pos_runtime::RuntimeError::Consent)?;
+            if let Some(error) = hydration_error {
+                return Err(error.into());
+            }
+        }
         let config = ExperimentConfig {
             name: name.to_owned(),
             stop: self.config.stop.clone(),
@@ -1701,6 +1755,7 @@ impl ExperimentSession {
 
         lock_store(&self.store)
             .and_then(|mut store| {
+                let durable_head = store.logical_head(self.timeline.id())?;
                 let mut fork_result = None;
                 let mut append = || {
                     fork_result = Some(store.fork(self.timeline.id(), fork_head, name));
@@ -1713,7 +1768,7 @@ impl ExperimentSession {
                     gate.with_token_fence(
                         self.timeline.id(),
                         token,
-                        fork_head.as_u64(),
+                        durable_head.as_u64(),
                         current_now_secs(),
                         &mut append,
                     )
@@ -1764,12 +1819,38 @@ impl ExperimentSession {
         }
 
         let timeline_id = self.timeline.id();
+        let timeline_head = self.boundary.folded_through;
+        let plugin_versions: Vec<(String, String)> = self
+            .registry
+            .plugin_versions()
+            .map(|(name, version)| (name.to_owned(), version.to_owned()))
+            .collect();
+        let consent_gate = self
+            .operation_token
+            .as_ref()
+            .and_then(|_| self.registry.clone_consent_gate());
+        let protected_token = self.operation_token;
+        let public_events = lock_store(&self.store)
+            .and_then(|store| read_completed_prefix(store.as_ref(), timeline_id, timeline_head))?;
+        let projections = self
+            .registry
+            .into_authorized_projections(
+                timeline_id,
+                timeline_head,
+                current_now_secs(),
+                protected_token.as_ref(),
+                Some(&public_events),
+            )
+            .map_err(ExperimentError::Runtime)?;
+        let ticks = self.ticks;
+        let total_events = self.total_events;
+        let store_config = self.recovery_store_config;
         lock_store(&self.store)
             .and_then(|store| chain_head(store.as_ref(), timeline_id))
             .map(|chain_head| {
                 let mut manifest = ReproManifest::new(timeline_id, chain_head, WallTime::now());
-                for (name, version) in self.registry.plugin_versions() {
-                    manifest = manifest.with_plugin_version(name, version.to_owned());
+                for (name, version) in &plugin_versions {
+                    manifest = manifest.with_plugin_version(name, version.clone());
                 }
                 manifest
                     .adapter_records
@@ -1783,20 +1864,16 @@ impl ExperimentSession {
                         wall_time: WallTime::now(),
                     });
 
-                let consent_gate = self
-                    .operation_token
-                    .as_ref()
-                    .and_then(|_| self.registry.clone_consent_gate());
                 RunResult {
                     timeline_id,
-                    ticks: self.ticks,
-                    total_events: self.total_events,
-                    timeline_head: self.boundary.folded_through.as_u64(),
+                    ticks,
+                    total_events,
+                    timeline_head: timeline_head.as_u64(),
                     manifest,
-                    projections: self.registry.into_projections(),
+                    projections,
                     consent_gate,
-                    protected_token: self.operation_token,
-                    store_config: self.recovery_store_config,
+                    protected_token,
+                    store_config,
                 }
             })
     }
@@ -1933,6 +2010,7 @@ impl BacktestRunner {
         )?;
 
         let train_head_seq = store.logical_head(train_tl_id)?;
+        let train_history = read_completed_prefix(store, train_tl_id, train_head_seq)?;
 
         // --- Fork train timeline to eval ---
         let eval_name = format!("{}-eval", self.config.experiment_name);
@@ -1985,6 +2063,7 @@ impl BacktestRunner {
         let train_manifest = ReproManifest::new(train_tl_id, train_chain_head, WallTime::now());
         let eval_manifest = ReproManifest::new(eval_tl_id, eval_chain_head, WallTime::now());
         let eval_head_seq = store.logical_head(eval_tl_id)?;
+        let eval_history = read_completed_prefix(store, eval_tl_id, eval_head_seq)?;
 
         let train_result = RunResult {
             timeline_id: train_tl_id,
@@ -1992,7 +2071,15 @@ impl BacktestRunner {
             total_events: train_events,
             timeline_head: train_head_seq.as_u64(),
             manifest: train_manifest,
-            projections: train_registry.into_projections(),
+            projections: train_registry
+                .into_authorized_projections(
+                    train_tl_id,
+                    train_head_seq,
+                    current_now_secs(),
+                    None,
+                    Some(&train_history),
+                )
+                .map_err(ExperimentError::Runtime)?,
             consent_gate: None,
             protected_token: None,
             store_config: Some(store_config.clone()),
@@ -2003,7 +2090,15 @@ impl BacktestRunner {
             total_events: eval_events,
             timeline_head: eval_head_seq.as_u64(),
             manifest: eval_manifest,
-            projections: eval_registry.into_projections(),
+            projections: eval_registry
+                .into_authorized_projections(
+                    eval_tl_id,
+                    eval_head_seq,
+                    current_now_secs(),
+                    None,
+                    Some(&eval_history),
+                )
+                .map_err(ExperimentError::Runtime)?,
             consent_gate: None,
             protected_token: None,
             store_config: Some(store_config),
