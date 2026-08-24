@@ -810,6 +810,7 @@ mod archive_preflight {
     fn members<'a>(
         bytes: &'a [u8],
         index: &mut usize,
+        depth: usize,
     ) -> Result<ArchivePreflight<'a>, BundleContractErrorV1> {
         let member_count = array_length(bytes, index)?;
         let mut result = ArchivePreflight {
@@ -818,15 +819,16 @@ mod archive_preflight {
             total_member_bytes: 0,
             largest_member_bytes: 0,
             largest_member_path_bytes: 0,
-            maximum_depth: 1,
+            maximum_depth: depth,
         };
         for _ in 0..member_count {
             if array_length(bytes, index)? != 3 {
                 return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
             }
-            let path = item(bytes, index, 2)?;
-            let member = item(bytes, index, 2)?;
-            let role = item(bytes, index, 2)?;
+            let member_depth = depth + 1;
+            let path = item(bytes, index, member_depth + 1)?;
+            let member = item(bytes, index, member_depth + 1)?;
+            let role = item(bytes, index, member_depth + 1)?;
             let role_depth = role.maximum_depth;
             let path_bytes = path
                 .text_bytes
@@ -855,6 +857,7 @@ mod archive_preflight {
             {
                 return Err(BundleContractErrorV1::MemberMissing);
             }
+            result.maximum_depth = result.maximum_depth.max(member_depth);
         }
         Ok(result)
     }
@@ -864,12 +867,12 @@ mod archive_preflight {
         if array_length(bytes, &mut index)? != 6 {
             return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
         }
-        let mut maximum_depth = 0;
+        let mut maximum_depth = 1;
         for field in 0..6 {
             if field == 3 {
-                let mut result = members(bytes, &mut index)?;
+                let mut result = members(bytes, &mut index, 2)?;
                 for _ in 0..2 {
-                    let field = item(bytes, &mut index, 1)?;
+                    let field = item(bytes, &mut index, 2)?;
                     maximum_depth = maximum_depth.max(field.maximum_depth);
                 }
                 maximum_depth = maximum_depth.max(result.maximum_depth);
@@ -879,7 +882,7 @@ mod archive_preflight {
                 result.maximum_depth = maximum_depth;
                 return Ok(result);
             }
-            let field = item(bytes, &mut index, 1)?;
+            let field = item(bytes, &mut index, 2)?;
             maximum_depth = maximum_depth.max(field.maximum_depth);
         }
         Err(BundleContractErrorV1::ArchiveEncodingInvalid)
@@ -2100,6 +2103,11 @@ mod tests {
         for mode in [BundleModeV1::Local, BundleModeV1::AirGapped] {
             let bundle = signed_bundle(&profile, mode)?;
             let encoded = bundle.to_canonical_cbor()?;
+            let preflight = preflight_archive_caps(&encoded)?;
+            assert_eq!(
+                preflight.maximum_depth,
+                value_depth(&bundle_value(&bundle))
+            );
             let decoded = ConformanceBundleV1::from_canonical_cbor(&encoded)?;
             assert_eq!(decoded, bundle);
             assert_eq!(decoded.to_canonical_cbor()?, encoded);
