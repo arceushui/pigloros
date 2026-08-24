@@ -1304,9 +1304,9 @@ async fn worker_loop_async(
             QueueDrainOutcome::Open => disconnected,
         };
         #[cfg(test)]
-        observer.as_ref().map_or((), |o| {
-            o.drain_completed(pending.len(), disconnected);
-        });
+        for observer in observer.iter() {
+            observer.drain_completed(pending.len(), disconnected);
+        }
         let index = select_pending_index(&pending, reads_since_write);
         if matches!(
             pending[index]
@@ -1328,9 +1328,9 @@ async fn worker_loop_async(
         } = pending.remove(index);
         let permit_owners = (global_permit, read_permit);
         #[cfg(test)]
-        observer.as_ref().map_or((), |o| {
-            o.selected(admission_ordinal, class, reads_since_write);
-        });
+        for observer in observer.iter() {
+            observer.selected(admission_ordinal, class, reads_since_write);
+        }
         reads_since_write = match class {
             CommandClass::Read => reads_since_write.saturating_add(1).min(READ_BURST),
             CommandClass::Write => 0,
