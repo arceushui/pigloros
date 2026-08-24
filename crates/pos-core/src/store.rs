@@ -1562,12 +1562,12 @@ mod tests {
         let mut missing_callback = |_registry: &crate::KeyRegistryStateV1, _seq: Seq| {
             Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
         };
-        assert_eq!(
+        assert!(matches!(
             missing_timeline
                 .append_signed_authorized(timeline, &registry, &mut missing_callback)
                 .test_err()?,
-            CoreError::TimelineNotFound(timeline)
-        );
+            CoreError::TimelineNotFound(found) if found == timeline
+        ));
 
         let mut callback_error = |_registry: &crate::KeyRegistryStateV1, _seq: Seq| {
             Err::<Event, _>(CoreError::Storage("callback failed".to_owned()))
