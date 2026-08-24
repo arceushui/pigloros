@@ -3605,6 +3605,12 @@ mod coverage_entrypoints {
             assert_eq!(super::decode_claim_layer(code).is_ok(), code < 7);
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn bundle_cap_rejection_paths_are_instrumented() -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = signed_bundle()?;
         assert_eq!(
             validate_member_count(MAX_MEMBERS + 1),
             Err(BundleContractErrorV1::LifecycleInvalid)
