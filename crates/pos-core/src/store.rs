@@ -1215,6 +1215,15 @@ mod tests {
             Ok(events)
         }
 
+        fn append_bounded(
+            &mut self,
+            timeline: TimelineId,
+            drafts: &[EventDraft],
+            _max_owned_events: u64,
+        ) -> Result<Option<Vec<Event>>, CoreError> {
+            self.append(timeline, drafts).map(Some)
+        }
+
         fn read(&self, _timeline: TimelineId, _range: SeqRange) -> Result<Vec<Event>, CoreError> {
             Ok(Vec::new())
         }
@@ -1288,6 +1297,17 @@ mod tests {
             .remove_append_identities(AppendDedupScope::from_keyed_hash([2; 32]))
             .test_err()?;
         assert!(withdrawal_error.to_string().contains("withdrawal"));
+
+        let consent = EventDraft::new(
+            EntityId::new(),
+            Kind::new("consent.granted.v1"),
+            CanonicalBytes::from_static(b"bounded-default"),
+        );
+        let committed = store
+            .append_consent_bounded(TimelineId::new(), &[consent], 1)
+            .test_ok()?;
+        let committed = committed.ok_or("default consent append returned no events")?;
+        assert_eq!(committed.len(), 1);
 
         Ok(())
     }
