@@ -5633,7 +5633,8 @@ mod coverage_entrypoints {
         ));
         ok(failing.register(&failing_plugin, None, Some(Box::new(FailingDriver))));
         let mut faulted = ok(failing.start());
-        let _ = faulted.step_tick();
+        let failed_step = faulted.step_tick();
+        expect_err(&failed_step);
         let authority = ConsentAuthority::new();
         let token = authority.record_grant_on_timeline(
             faulted.timeline().id(),
