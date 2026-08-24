@@ -898,8 +898,20 @@ mod tests {
             Err(BundleContractErrorV1::ExpectedResultMismatch)
         );
 
+        let mut missing_layer = profile.clone();
+        missing_layer.fixtures.remove(0);
+        assert_eq!(
+            validate_expected_results(&missing_layer, &bundle.manifest, &bundle.members),
+            Err(BundleContractErrorV1::MemberMissing)
+        );
+
         let mut unsupported_mode = profile.clone();
         unsupported_mode.fixtures[0].modes = vec![ExecutionModeV1::AirGapped];
+        let mut supporting_artifact = unsupported_mode.fixtures[0].clone();
+        supporting_artifact.case_id = "case-support".to_owned();
+        supporting_artifact.mandatory = false;
+        supporting_artifact.modes = vec![ExecutionModeV1::Local];
+        unsupported_mode.fixtures.push(supporting_artifact);
         assert_eq!(
             validate_expected_results(&unsupported_mode, &bundle.manifest, &bundle.members),
             Err(BundleContractErrorV1::ExpectedResultMismatch)
