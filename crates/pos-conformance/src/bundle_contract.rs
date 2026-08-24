@@ -3315,37 +3315,6 @@ mod tests {
         assert_eq!(expected_error, Err(BundleContractErrorV1::AirGappedNetwork));
         Ok(())
     }
-
-    pub(super) fn exercise_contract_paths() -> Result<(), Box<dyn std::error::Error>> {
-        manifest_encoding_is_deterministic()?;
-        materialized_bundle_is_signed_content_addressed_and_bound_to_profile()?;
-        public_archive_codec_round_trips_both_execution_modes()?;
-        each_public_claim_layer_materializes_as_its_own_profile_and_bundle()?;
-        public_archive_decoder_rejects_noncanonical_and_unknown_roles()?;
-        archive_preflight_rejects_unsafe_shapes_before_decode()?;
-        archive_preflight_supported_items_and_boundaries_are_explicit()?;
-        archive_preflight_caps_report_member_statistics()?;
-        preflight_archive_caps_check_each_limit_independently();
-        archive_decoder_rejects_invalid_fields_and_cap_overflows()?;
-        archive_array_decoder_boundaries_are_inclusive();
-        decoded_archive_caps_accept_exact_depth_and_reject_overflow()?;
-        support_digest_fallbacks_and_selected_caps_are_checked()?;
-        selected_bundle_caps_check_each_limit_independently()?;
-        validation_rejects_descriptor_role_and_profile_path_mismatches()?;
-        required_support_artifacts_and_selected_caps_are_enforced()?;
-        ordering_predicates_reject_descending_and_duplicate_values();
-        local_and_air_gapped_bundles_require_expected_result_parity()?;
-        pair_validation_checks_modes_and_member_paths()?;
-        validation_rejects_profile_and_manifest_contract_mismatches()?;
-        expected_result_validation_rejects_each_binding_mismatch()?;
-        expected_result_member_guards_are_independent()?;
-        mandatory_fixture_matching_requires_case_and_layer_and_execution_profile()?;
-        validation_rejects_tampered_bytes_and_unsorted_members()?;
-        validation_binds_each_profile_input_to_public_member_bytes()?;
-        fixture_input_guards_are_independent()?;
-        validation_rejects_secret_payloads_and_air_gapped_network_access()?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -3354,22 +3323,41 @@ mod coverage_entrypoints {
     use super::{
         archive_array_bounded, archive_array_exact, archive_bytes, archive_text, archive_u64,
         bundle_value, encode_archive_value, preflight_archive, preflight_archive_caps,
-        validate_archive_caps, validate_fixture_inputs, validate_preflight_archive_caps,
-        validate_selected_bundle_caps, BundleContractErrorV1, BundleMemberRoleV1, BundleModeV1,
-        ConformanceBundleV1, Value, MAX_STRUCTURAL_NESTING,
+        required_support_digests, validate_archive_caps, validate_fixture_inputs,
+        validate_member_count, validate_member_size, validate_preflight_archive_caps,
+        validate_selected_bundle_caps, validate_total_bytes, BundleContractErrorV1,
+        BundleMemberRoleV1, BundleModeV1, ConformanceBundleV1, PublicKey, Value, MAX_MEMBERS,
+        MAX_MEMBER_BYTES, MAX_STRUCTURAL_NESTING, MAX_TOTAL_BUNDLE_BYTES,
     };
 
     fn signed_bundle() -> Result<ConformanceBundleV1, Box<dyn std::error::Error>> {
-        let profile = tests::profile();
-        let (members, expected_results) = tests::bundle_inputs(&profile, BundleModeV1::Local)?;
-        let unsigned = ConformanceBundleV1::materialize(
-            &profile,
-            BundleModeV1::Local,
-            members,
-            expected_results,
-        )?;
+        signed_bundle_for(&tests::profile(), BundleModeV1::Local)
+    }
+
+    fn signed_bundle_for(
+        profile: &super::ConformanceProfileV1,
+        mode: BundleModeV1,
+    ) -> Result<ConformanceBundleV1, Box<dyn std::error::Error>> {
+        let (members, expected_results) = tests::bundle_inputs(profile, mode)?;
+        let unsigned = ConformanceBundleV1::materialize(profile, mode, members, expected_results)?;
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
         Ok(unsigned.sign(&signing_key)?)
+    }
+
+    fn raw_archive_with_header(top_header: &[u8], first: &[u8], members: &[u8]) -> Vec<u8> {
+        let mut bytes = top_header.to_vec();
+        bytes.extend_from_slice(first);
+        bytes.extend_from_slice(&[0x01, 0x80]);
+        bytes.extend_from_slice(members);
+        bytes.extend_from_slice(&[0x58, 0x20]);
+        bytes.extend_from_slice(&[0; 32]);
+        bytes.extend_from_slice(&[0x58, 0x40]);
+        bytes.extend_from_slice(&[0; 64]);
+        bytes
+    }
+
+    fn raw_archive(first: &[u8], members: &[u8]) -> Vec<u8> {
+        raw_archive_with_header(&[0x86], first, members)
     }
 
     #[test]
@@ -3435,6 +3423,236 @@ mod coverage_entrypoints {
                 Err(BundleContractErrorV1::ArchiveEncodingInvalid)
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn archive_scanner_rejection_paths_are_instrumented() {
+        let valid_member = [0x81, 0x83, 0x60, 0x40, 0x00];
+        assert!(super::archive_preflight::scan(&raw_archive(&[0x60], &valid_member)).is_ok());
+        assert!(super::archive_preflight::scan(&raw_archive_with_header(
+            &[0x9a, 0, 0, 0, 6],
+            &[0x60],
+            &[0x80],
+        ))
+        .is_ok());
+        assert!(super::archive_preflight::scan(&raw_archive_with_header(
+            &[0x9b, 0, 0, 0, 0, 0, 0, 0, 6],
+            &[0x60],
+            &[0x80],
+        ))
+        .is_ok());
+        assert!(super::archive_preflight::scan(&[0x9f]).is_err());
+        assert!(super::archive_preflight::scan(&raw_archive(&[0xf0], &[])).is_err());
+        assert!(super::archive_preflight::scan(&raw_archive(&[0xa0], &[])).is_err());
+        assert!(super::archive_preflight::scan(&[0x80]).is_err());
+        assert!(super::archive_preflight::scan(&[0x87]).is_err());
+
+        let too_many_members = [0x9a, 0, 1, 0, 1];
+        assert!(super::archive_preflight::scan(&raw_archive(&[0x60], &too_many_members,)).is_err());
+
+        let mut huge_member = vec![0x81, 0x83, 0x60, 0x5b];
+        huge_member.extend_from_slice(&(MAX_MEMBER_BYTES + 1).to_be_bytes());
+        assert!(super::archive_preflight::scan(&raw_archive(&[0x60], &huge_member)).is_err());
+
+        let long_path = [0x81, 0x83, 0x59, 0x01, 0x01];
+        assert!(super::archive_preflight::scan(&raw_archive(&[0x60], &long_path)).is_err());
+        let oversized_member_array = [0x9a, 0, 1, 0, 1];
+        assert!(
+            super::archive_preflight::scan(&raw_archive(&[0x60], &oversized_member_array)).is_err()
+        );
+        assert!(
+            super::archive_preflight::scan(&raw_archive(&[0x60], &[0x81, 0x82, 0x60, 0x40],))
+                .is_err()
+        );
+        assert!(super::archive_preflight::scan(&raw_archive(
+            &[0x60],
+            &[0x81, 0x83, 0x00, 0x40, 0x00],
+        ))
+        .is_err());
+        assert!(super::archive_preflight::scan(&raw_archive(
+            &[0x60],
+            &[0x81, 0x83, 0x60, 0x00, 0x00],
+        ))
+        .is_err());
+        assert!(super::archive_preflight::scan(&raw_archive(
+            &[0x60],
+            &[0x81, 0x83, 0x60, 0x40, 0x40],
+        ))
+        .is_err());
+
+        let profile_member = [0x83, 0x60, 0x40, 0x02];
+        let duplicate_profiles = [
+            0x82,
+            profile_member[0],
+            profile_member[1],
+            profile_member[2],
+            profile_member[3],
+            profile_member[0],
+            profile_member[1],
+            profile_member[2],
+            profile_member[3],
+        ];
+        assert!(
+            super::archive_preflight::scan(&raw_archive(&[0x60], &duplicate_profiles)).is_err()
+        );
+
+        let mut nested = vec![0x60];
+        for _ in 0..=usize::from(MAX_STRUCTURAL_NESTING) {
+            let mut next = vec![0x81];
+            next.extend_from_slice(&nested);
+            nested = next;
+        }
+        assert!(super::archive_preflight::scan(&raw_archive(&nested, &[])).is_err());
+
+        let mut trailing = raw_archive(&[0x60], &[0x80]);
+        trailing.push(0);
+        assert!(super::archive_preflight::scan(&trailing).is_err());
+    }
+
+    #[test]
+    fn archive_decoder_and_cap_rejection_paths_are_instrumented(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = signed_bundle()?;
+        let mut invalid_unsigned = bundle.clone();
+        invalid_unsigned.manifest.magic = "invalid".to_owned();
+        assert_eq!(
+            invalid_unsigned.to_canonical_cbor(),
+            Err(BundleContractErrorV1::LifecycleInvalid)
+        );
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+        assert_eq!(
+            invalid_unsigned.sign(&signing_key),
+            Err(BundleContractErrorV1::LifecycleInvalid)
+        );
+
+        let mut invalid_key = bundle.clone();
+        invalid_key.signer_public_key = PublicKey::from_bytes([0xff; 32]);
+        assert_eq!(
+            invalid_key.validate(),
+            Err(BundleContractErrorV1::SignatureInvalid)
+        );
+
+        let mut invalid_profile = bundle.clone();
+        let profile_member = invalid_profile
+            .members
+            .iter_mut()
+            .find(|member| member.role == BundleMemberRoleV1::Profile)
+            .ok_or("missing profile member")?;
+        profile_member.bytes = vec![0x01];
+        assert_eq!(
+            invalid_profile.validate(),
+            Err(BundleContractErrorV1::ProfileInvalid)
+        );
+
+        let canonical = bundle.to_canonical_cbor()?;
+        let magic_len = super::CONFORMANCE_BUNDLE_MAGIC_V1.len();
+        let version_index = 1 + 1 + usize::from(magic_len >= 24) + magic_len;
+        assert_eq!(canonical[version_index], 1);
+        let mut noncanonical = canonical.clone();
+        noncanonical.splice(version_index..=version_index, [0x18, 0x01]);
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&noncanonical),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+
+        let mut bad_magic_value = bundle_value(&bundle);
+        if let Value::Array(fields) = &mut bad_magic_value {
+            fields[0] = Value::Text("wrong magic".to_owned());
+        }
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&encode_archive_value(&bad_magic_value)?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+
+        for field_index in [4_usize, 5] {
+            let mut invalid_value = bundle_value(&bundle);
+            if let Value::Array(fields) = &mut invalid_value {
+                fields[field_index] = Value::Bytes(Vec::new());
+            }
+            assert_eq!(
+                ConformanceBundleV1::from_canonical_cbor(&encode_archive_value(&invalid_value)?),
+                Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+            );
+        }
+
+        assert_eq!(
+            super::decode_manifest(&Value::Null),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            super::decode_member(&Value::Null),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            archive_u64(&Value::Integer((-1_i64).into())),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            super::archive_digest::<32>(&Value::Bytes(Vec::new())),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        for code in 0..=9 {
+            assert_eq!(super::decode_member_role(code).is_ok(), code < 9);
+        }
+        for code in 0..=2 {
+            assert_eq!(super::decode_bundle_mode(code).is_ok(), code < 2);
+        }
+        for code in 0..=4 {
+            assert_eq!(super::decode_lifecycle(code).is_ok(), code < 4);
+        }
+        for code in 0..=7 {
+            assert_eq!(super::decode_claim_layer(code).is_ok(), code < 7);
+        }
+
+        assert_eq!(
+            validate_member_count(MAX_MEMBERS + 1),
+            Err(BundleContractErrorV1::LifecycleInvalid)
+        );
+        assert_eq!(
+            validate_member_size(MAX_MEMBER_BYTES + 1),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+        assert_eq!(
+            validate_total_bytes(MAX_TOTAL_BUNDLE_BYTES + 1),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+        for role in [
+            BundleMemberRoleV1::FixtureInput,
+            BundleMemberRoleV1::ExpectedResult,
+            BundleMemberRoleV1::Profile,
+        ] {
+            assert!(required_support_digests(&tests::profile(), role).is_empty());
+        }
+
+        let mut path_limited = tests::profile();
+        path_limited
+            .evaluator_protocol
+            .hard_caps
+            .max_member_path_bytes = 1;
+        assert_eq!(
+            validate_selected_bundle_caps(&path_limited, &bundle),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+        let mut member_limited = tests::profile();
+        member_limited.evaluator_protocol.hard_caps.max_member_bytes = 1;
+        assert_eq!(
+            validate_selected_bundle_caps(&member_limited, &bundle),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+        let mut total_limited = tests::profile();
+        total_limited
+            .evaluator_protocol
+            .hard_caps
+            .max_total_bundle_bytes = 1;
+        total_limited.evaluator_protocol.hard_caps.max_member_bytes = 64 * 1024 * 1024;
+        assert_eq!(
+            validate_selected_bundle_caps(&total_limited, &bundle),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+        let mut invalid_profile = tests::profile();
+        invalid_profile.lifecycle = super::ProfileLifecycleV1::Stable;
+        assert!(signed_bundle_for(&invalid_profile, BundleModeV1::Local).is_err());
         Ok(())
     }
 
@@ -3514,10 +3732,5 @@ mod coverage_entrypoints {
             usize::from(MAX_STRUCTURAL_NESTING) + 1
         );
         Ok(())
-    }
-
-    #[test]
-    fn existing_contract_paths_are_instrumented() -> Result<(), Box<dyn std::error::Error>> {
-        tests::exercise_contract_paths()
     }
 }
