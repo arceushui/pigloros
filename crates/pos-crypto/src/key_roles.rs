@@ -81,6 +81,7 @@ mod tests {
     use super::*;
     use crate::signing::{generate_keypair, public_key_from_verifying_key};
     use ed25519_dalek::Signer;
+    use pos_core::{KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1};
 
     fn payload(bytes: &[u8]) -> CanonicalBytes {
         CanonicalBytes::from_vec(bytes.to_vec())
@@ -170,6 +171,44 @@ mod tests {
         assert_eq!(
             public_key_from_verifying_key(&verifying_key).as_bytes(),
             verifying_key.as_bytes()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn historical_role_signature_verifies_after_registry_destruction(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (signing_key, verifying_key) = generate_keypair();
+        let identity = KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 1);
+        let material_digest = key_material_digest(&signing_key.to_bytes());
+        let mut registry = KeyRegistryStateV1::new();
+        registry.register_key(KeyRegistrationV1::new(
+            identity,
+            material_digest,
+            Some(public_key_from_verifying_key(&verifying_key)),
+        ))?;
+
+        let value = payload(b"historical attribution");
+        let signature = sign_for_role(&signing_key, identity.role, identity.epoch, &value)?;
+        registry.destroy_key(KeyDestructionRequestV1::new(
+            identity,
+            material_digest,
+            Hash::from_bytes([7; 32]),
+        ))?;
+
+        assert!(verify_for_role(
+            &verifying_key,
+            identity.role,
+            identity.epoch,
+            &value,
+            &signature,
+        )
+        .is_ok());
+        assert_eq!(
+            registry
+                .key_record(identity)
+                .and_then(|record| record.public_verification_key),
+            Some(public_key_from_verifying_key(&verifying_key))
         );
         Ok(())
     }
