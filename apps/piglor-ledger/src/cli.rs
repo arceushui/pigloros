@@ -71,13 +71,11 @@ fn ledger_signing_registry(
     // The fixed role/epoch and generated key material are valid by construction.
     // If that invariant ever changes, the empty registry fails authorization
     // in EventLedgerStore rather than allowing an unsigned operation.
-    let _registration_result = registry
-        .register_key(KeyRegistrationV1::new(
-            identity,
-            key_material_digest(&signing_key.to_bytes()),
-            Some(public_key_from_verifying_key(&signing_key.verifying_key())),
-        ))
-        .is_ok();
+    let _registration_result = registry.register_key(KeyRegistrationV1::new(
+        identity,
+        key_material_digest(&signing_key.to_bytes()),
+        Some(public_key_from_verifying_key(&signing_key.verifying_key())),
+    ));
     (Arc::new(Mutex::new(registry)), identity)
 }
 
