@@ -856,7 +856,7 @@ mod archive_preflight {
         Ok(result)
     }
 
-    fn scan(bytes: &[u8]) -> Result<ArchivePreflight<'_>, BundleContractErrorV1> {
+    pub(super) fn scan(bytes: &[u8]) -> Result<ArchivePreflight<'_>, BundleContractErrorV1> {
         let mut index = 0;
         if array_length(bytes, &mut index)? != 6 {
             return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
