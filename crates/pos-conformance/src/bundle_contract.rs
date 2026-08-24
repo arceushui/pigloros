@@ -693,6 +693,7 @@ struct ScannedArchiveItem<'a> {
     maximum_depth: usize,
 }
 
+#[allow(clippy::too_many_lines)]
 fn preflight_archive_caps(bytes: &[u8]) -> Result<ArchivePreflight<'_>, BundleContractErrorV1> {
     fn length(
         bytes: &[u8],
@@ -2416,7 +2417,7 @@ mod tests {
             Err(BundleContractErrorV1::MemberOutOfBounds)
         );
 
-        let mut incomplete_profile = profile();
+        let mut incomplete_profile = profile.clone();
         incomplete_profile.public_schema_digests.push(digest(99));
         assert_eq!(
             validate_supporting_members(&incomplete_profile, &bundle.members),
