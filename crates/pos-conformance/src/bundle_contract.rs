@@ -1597,7 +1597,7 @@ mod tests {
         network_profile.fixtures[0]
             .capability_policy
             .network_allowed = true;
-        let (members, expected_results) = bundle_inputs(&network_profile, BundleModeV1::AirGapped);
+        let (members, expected_results) = bundle_inputs(&network_profile, BundleModeV1::AirGapped)?;
         assert_eq!(
             ConformanceBundleV1::materialize(
                 &network_profile,
