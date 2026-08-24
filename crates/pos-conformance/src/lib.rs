@@ -8,13 +8,24 @@
 //! plugin. A second implementation can deserialize the JSON representation,
 //! compare authoritative evidence, and classify a divergence without
 //! importing the implementation under test.
-#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use blake3::Hash;
 use ciborium::value::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
+
+mod profile_contract;
+
+pub use profile_contract::{
+    AllowedDivergenceV1, CapabilityPolicyV1, ConformanceContractError, ConformanceProfileV1,
+    EvaluatorHardCapsV1, EvaluatorOutputCapabilityV1, EvaluatorProtocolV1, EvaluatorRequestV1,
+    ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1, FixtureInputMemberV1,
+    FixtureProvenanceV1, IndependenceRequirementsV1, ProfileLifecycleV1,
+    StableEvidenceAttestationV1, StableImplementationEvidenceV1, SubjectAdapterKindV1,
+    TrustedRootPolicyV1, CONFORMANCE_PROFILE_MAGIC_V1, EVALUATOR_REQUEST_MAGIC_V1,
+};
 
 /// Version of the first independent proof-evidence envelope.
 pub const EVIDENCE_FORMAT_V1: u32 = 1;
@@ -107,6 +118,30 @@ mod coverage_entrypoints {
         let nested = fields.remove(outer);
         fields.insert(outer, replace_field(nested, inner, replacement));
         ciborium::Value::Array(fields)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn replace_evidence_case_coordinate(
+        evidence: &ciborium::Value,
+        coordinate: ciborium::Value,
+    ) -> ciborium::Value {
+        let mut evidence_fields = evidence.as_array().map_or_else(Vec::new, Clone::clone);
+        let mut contract_fields = evidence_fields[10]
+            .as_array()
+            .map_or_else(Vec::new, Clone::clone);
+        let mut report_fields = contract_fields[6]
+            .as_array()
+            .map_or_else(Vec::new, Clone::clone);
+        let mut cases = report_fields[13]
+            .as_array()
+            .map_or_else(Vec::new, Clone::clone);
+        let mut case = cases[0].as_array().map_or_else(Vec::new, Clone::clone);
+        case[6] = coordinate;
+        cases[0] = ciborium::Value::Array(case);
+        report_fields[13] = ciborium::Value::Array(cases);
+        contract_fields[6] = ciborium::Value::Array(report_fields);
+        evidence_fields[10] = ciborium::Value::Array(contract_fields);
+        ciborium::Value::Array(evidence_fields)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -243,6 +278,29 @@ mod coverage_entrypoints {
         report.driver_or_plugin_id = Some("x".repeat(20_000));
         expect_err(&report.to_canonical_cbor());
     }
+
+    #[test]
+    fn public_evidence_decoder_enforces_case_coordinate_boundary() {
+        let evidence = tests::evidence();
+        let encoded = decode_value(ok(evidence.to_canonical_cbor()));
+        let exact =
+            replace_evidence_case_coordinate(&encoded, ciborium::Value::Bytes(vec![b'x'; 128]));
+        assert!(MoatProofEvidenceV1::from_canonical_cbor(&encode_value(&exact)).is_ok());
+
+        let oversized =
+            replace_evidence_case_coordinate(&encoded, ciborium::Value::Bytes(vec![b'x'; 129]));
+        expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
+            &oversized,
+        )));
+
+        let wrong_type = replace_evidence_case_coordinate(
+            &encoded,
+            ciborium::Value::Text("coordinate".to_owned()),
+        );
+        expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
+            &wrong_type,
+        )));
+    }
 }
 
 /// The reproducibility claim made by a proof artifact.
@@ -267,6 +325,8 @@ pub enum ReplayClaimV1 {
     ExactAuthoritativeWithRedactedViews,
     StructuralOnly,
     UnverifiableArtifactsMissing,
+    /// The selected runtime/profile cannot evaluate the artifact; orthogonal
+    /// to the amount of replay evidence retained after redaction.
     IncompatibleProfile,
 }
 
@@ -298,13 +358,13 @@ impl ReplayClaimV1 {
     #[must_use]
     pub const fn after_erasure(self, disposition: ErasureDispositionV1) -> Self {
         let disposition = match disposition {
-            ErasureDispositionV1::None => Self::Exact,
+            ErasureDispositionV1::None => self,
             ErasureDispositionV1::RedactedViews => Self::ExactAuthoritativeWithRedactedViews,
             ErasureDispositionV1::StructuralOnly => Self::StructuralOnly,
             ErasureDispositionV1::ArtifactsMissing => Self::UnverifiableArtifactsMissing,
             ErasureDispositionV1::IncompatibleProfile => Self::IncompatibleProfile,
         };
-        if self.rank() <= disposition.rank() {
+        if self.rank() >= disposition.rank() {
             self
         } else {
             disposition
@@ -1003,8 +1063,12 @@ pub struct IndependenceEvidenceV1 {
     pub reviewer_ids: Vec<String>,
 }
 
-/// One public conformance case. The wire representation is the exact
-/// Fourteen-field public conformance case record.
+/// One CNR1 public conformance case.
+///
+/// The wire representation is the exact fourteen-field ADR-062 record. CPF1
+/// carries the richer [`ProfileCaseOutcomeV1`] record separately because
+/// verification outcome and divergence classification are profile semantics,
+/// not part of the stable CNR1 report shape.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaseOutcomeV1 {
@@ -1014,7 +1078,32 @@ pub struct CaseOutcomeV1 {
     pub mode: ExecutionModeV1,
     pub claim_layer: ClaimLayerV1,
     pub outcome: CaseOutcomeStatusV1,
-    pub first_coordinate: Option<String>,
+    pub first_coordinate: Option<Vec<u8>>,
+    pub expected_digest: Option<[u8; 32]>,
+    pub actual_digest: Option<[u8; 32]>,
+    pub expected_error: Option<SafeErrorCodeV1>,
+    pub actual_error: Option<SafeErrorCodeV1>,
+    pub replay_claim: ReplayClaimV1,
+    pub redaction_state: RedactionStateV1,
+    pub provenance_digest: [u8; 32],
+}
+
+/// CPF1-only case evidence with profile verification semantics.
+///
+/// This is intentionally a separately named record from [`CaseOutcomeV1`].
+/// Adding these fields to CNR1 would silently change its exact fourteen-field
+/// wire contract while retaining the `CNR1`/version `1` identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProfileCaseOutcomeV1 {
+    pub case_id: String,
+    pub fixture_digest: [u8; 32],
+    pub execution_profile_digest: [u8; 32],
+    pub mode: ExecutionModeV1,
+    pub claim_layer: ClaimLayerV1,
+    pub outcome: CaseOutcomeStatusV1,
+    pub verification_outcome: VerificationOutcomeV1,
+    pub divergence_kind: Option<DivergenceMismatchKindV1>,
+    pub first_coordinate: Option<Vec<u8>>,
     pub expected_digest: Option<[u8; 32]>,
     pub actual_digest: Option<[u8; 32]>,
     pub expected_error: Option<SafeErrorCodeV1>,
@@ -1175,7 +1264,13 @@ fn matrix_digest(domain: &[u8], seed: [u8; 32], descriptor: &[u8]) -> [u8; 32] {
     *blake3::hash(&input).as_bytes()
 }
 
-/// Conformance report, with 24 logical fields represented by these grouped values.
+/// Conformance report, with 24 logical fields represented by grouped values.
+///
+/// `execution_profile_digest` identifies the selected report authority;
+/// each case also carries its own profile digest so one CNR can bind a CPF
+/// matrix containing multiple execution profiles. Stable evidence binds its
+/// report to the evidence-independent selected CPF identity; the enclosing
+/// CPF digest separately commits the serialized Stable-evidence set.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConformanceReportV1 {
@@ -1201,6 +1296,58 @@ pub struct ConformanceReportV1 {
     pub limitations_digest: [u8; 32],
     pub provenance_digest: [u8; 32],
     pub report_digest: [u8; 32],
+}
+
+impl ConformanceReportV1 {
+    /// Validate the complete public CNR1 record, including case shape,
+    /// aggregate counts, weakest claims, and the self-digest.
+    ///
+    /// # Errors
+    /// Returns [`EvidenceError::InvalidConformanceReport`] when any CNR1
+    /// invariant or the digest over fields `0..22` is invalid.
+    pub fn validate(&self) -> Result<(), EvidenceError> {
+        validate_conformance_report_shape(self)
+    }
+
+    /// Encode the exact 24-field CNR1 array.
+    ///
+    /// # Errors
+    /// Returns [`EvidenceError::InvalidConformanceReport`] when the record is
+    /// not a complete, self-consistent report.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, EvidenceError> {
+        self.validate()?;
+        let bytes = strict_codec::encode_conformance_report(self)
+            .map_err(|_| EvidenceError::InvalidConformanceReport)?;
+        if bytes.len() > 16 * 1024 * 1024 {
+            Err(EvidenceError::InvalidConformanceReport)
+        } else {
+            Ok(bytes)
+        }
+    }
+
+    /// Decode and validate an exact canonical CNR1 array.
+    ///
+    /// # Errors
+    /// Returns [`EvidenceError::InvalidConformanceReport`] for malformed,
+    /// noncanonical, incomplete, or tampered reports.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, EvidenceError> {
+        if bytes.len() > 16 * 1024 * 1024 {
+            return Err(EvidenceError::InvalidConformanceReport);
+        }
+        let report = strict_codec::decode_conformance_report(bytes)
+            .map_err(|_| EvidenceError::InvalidConformanceReport)?;
+        report.validate().map(|()| report)
+    }
+
+    /// Compute the CNR1 digest over fields `0..22`.
+    ///
+    /// # Errors
+    /// Returns [`EvidenceError::InvalidConformanceReport`] when the fields
+    /// cannot be represented by the strict canonical codec.
+    pub fn digest(&self) -> Result<[u8; 32], EvidenceError> {
+        strict_codec::conformance_report_digest(self)
+            .map_err(|_| EvidenceError::InvalidConformanceReport)
+    }
 }
 
 /// All typed Wave 8 seams that an independent evaluator must see.
@@ -3444,7 +3591,11 @@ pub mod strict_codec {
             enum_mode(case.mode),
             enum_claim_layer(case.claim_layer),
             enum_case_outcome(case.outcome),
-            optional(case.first_coordinate.as_deref().map(text)),
+            optional(
+                case.first_coordinate
+                    .as_ref()
+                    .map(|coordinate| Value::Bytes(coordinate.clone())),
+            ),
             optional(case.expected_digest.as_ref().map(digest)),
             optional(case.actual_digest.as_ref().map(digest)),
             optional_safe_error(case.expected_error),
@@ -3464,7 +3615,18 @@ pub mod strict_codec {
             mode: decode_mode(&fields[3])?,
             claim_layer: decode_claim_layer(&fields[4])?,
             outcome: decode_case_outcome(&fields[5])?,
-            first_coordinate: optional_string(&fields[6], "case_coordinate")?,
+            first_coordinate: if matches!(fields[6], Value::Null) {
+                None
+            } else {
+                match &fields[6] {
+                    Value::Bytes(bytes) if bytes.len() <= 128 => Some(bytes.clone()),
+                    _ => {
+                        return Err(StrictCborError::InvalidField {
+                            field: "case_coordinate".to_owned(),
+                        });
+                    }
+                }
+            },
             expected_digest: if matches!(fields[7], Value::Null) {
                 None
             } else {
@@ -3543,8 +3705,28 @@ pub mod strict_codec {
         })
     }
 
-    fn encode_report(report: &ConformanceReportV1) -> Value {
-        Value::Array(vec![
+    pub(crate) fn encode_conformance_report(
+        report: &ConformanceReportV1,
+    ) -> Result<Vec<u8>, StrictCborError> {
+        encode_value(&encode_report_value(report, true))
+    }
+
+    pub(crate) fn decode_conformance_report(
+        bytes: &[u8],
+    ) -> Result<ConformanceReportV1, StrictCborError> {
+        let value = decode_value(bytes)?;
+        decode_report(&value)
+    }
+
+    pub(crate) fn conformance_report_digest(
+        report: &ConformanceReportV1,
+    ) -> Result<[u8; 32], StrictCborError> {
+        let bytes = encode_value(&encode_report_value(report, false))?;
+        Ok(domain_digest(b"PiglorOS.ConformanceReport.v1", &bytes))
+    }
+
+    pub(crate) fn encode_report_value(report: &ConformanceReportV1, include_digest: bool) -> Value {
+        let mut fields = vec![
             text(CONFORMANCE_REPORT_MAGIC_V1),
             uint(1),
             digest16(&report.report_id),
@@ -3568,8 +3750,11 @@ pub mod strict_codec {
             enum_redaction_state(report.redaction_state),
             digest(&report.limitations_digest),
             digest(&report.provenance_digest),
-            digest(&report.report_digest),
-        ])
+        ];
+        if include_digest {
+            fields.push(digest(&report.report_digest));
+        }
+        Value::Array(fields)
     }
 
     fn decode_report(value: &Value) -> Result<ConformanceReportV1, StrictCborError> {
@@ -3722,7 +3907,7 @@ pub mod strict_codec {
             ),
             encode_counterfactual(&contract.counterfactual),
             Value::Array(contract.atomicity.iter().map(encode_atomicity).collect()),
-            encode_report(&contract.conformance_report),
+            encode_report_value(&contract.conformance_report, true),
             Value::Array(
                 contract
                     .non_interference
@@ -4130,14 +4315,18 @@ pub mod strict_codec {
                 reject_each_field(&case_value, decode_case);
 
                 let mut case_with_all_optionals = contract.conformance_report.cases[0].clone();
-                case_with_all_optionals.first_coordinate = Some("tick=1".to_owned());
+                case_with_all_optionals.first_coordinate = Some(b"tick=1".to_vec());
                 case_with_all_optionals.expected_digest = Some([24; 32]);
                 case_with_all_optionals.actual_digest = Some([25; 32]);
                 case_with_all_optionals.expected_error = Some(SafeErrorCodeV1::DigestMismatch);
                 case_with_all_optionals.actual_error = Some(SafeErrorCodeV1::ResourceLimitExceeded);
                 consume(decode_case(&encode_case(&case_with_all_optionals)));
-                consume(decode_report(&encode_report(&contract.conformance_report)));
-                let report_value_all_fields = encode_report(&contract.conformance_report);
+                consume(decode_report(&encode_report_value(
+                    &contract.conformance_report,
+                    true,
+                )));
+                let report_value_all_fields =
+                    encode_report_value(&contract.conformance_report, true);
                 reject_each_field(&report_value_all_fields, decode_report);
                 consume(decode_plugin_boundary(&encode_plugin_boundary(
                     &contract.plugin_boundary,
@@ -4176,7 +4365,7 @@ pub mod strict_codec {
                     consume(decode_plugin_boundary(&invalid));
                 }
 
-                let report_value = encode_report(&contract.conformance_report);
+                let report_value = encode_report_value(&contract.conformance_report, true);
                 for index in [14_usize, 15, 16, 17, 18] {
                     let invalid = replace_field(&report_value, index, uint(u64::MAX));
                     consume(decode_report(&invalid));
@@ -5513,47 +5702,29 @@ fn verify_intervention_contract(
 fn verify_conformance_report(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceError> {
     let contract = &evidence.contract;
     let report = &contract.conformance_report;
+    report.validate()?;
     let counterfactual = &contract.counterfactual;
-    let mut modes = BTreeSet::new();
-    let mut case_keys = BTreeSet::new();
-    let mut counts = (0_u32, 0_u32, 0_u32, 0_u32, 0_u32);
-    for case in &report.cases {
-        modes.insert(case.mode);
-        if !case_keys.insert((
-            case.case_id.as_str(),
-            case.mode,
-            case.claim_layer,
-            case.fixture_digest,
-        )) || case.case_id.trim().is_empty()
-            || case.case_id.len() > 128
-            || case.fixture_digest == [0; 32]
-            || case.execution_profile_digest == [0; 32]
-            || case.provenance_digest == [0; 32]
-            || case
-                .first_coordinate
-                .as_ref()
-                .is_some_and(|coordinate| coordinate.len() > 128)
-            || case.redaction_state != RedactionStateV1::None
-            || (case.outcome == CaseOutcomeStatusV1::Pass
-                && (case.expected_digest.is_none()
-                    || case.expected_digest != case.actual_digest
-                    || case.expected_error.is_some()
-                    || case.actual_error.is_some()))
-            || (case.outcome != CaseOutcomeStatusV1::Pass
-                && case.expected_digest == case.actual_digest
-                && case.expected_error == case.actual_error)
-        {
-            return Err(EvidenceError::InvalidConformanceReport);
-        }
-        match case.outcome {
-            CaseOutcomeStatusV1::Pass => counts.0 = counts.0.saturating_add(1),
-            CaseOutcomeStatusV1::Fail => counts.1 = counts.1.saturating_add(1),
-            CaseOutcomeStatusV1::Skip => counts.2 = counts.2.saturating_add(1),
-            CaseOutcomeStatusV1::Unavailable => counts.3 = counts.3.saturating_add(1),
-            CaseOutcomeStatusV1::NotApplicable => counts.4 = counts.4.saturating_add(1),
-        }
+    let modes = report
+        .cases
+        .iter()
+        .map(|case| case.mode)
+        .collect::<BTreeSet<_>>();
+    if !report
+        .replay_claim
+        .is_no_stronger_than(evidence.manifest.replay_claim)
+        || !counterfactual
+            .replay_claim
+            .is_no_stronger_than(evidence.manifest.replay_claim)
+        || !modes.contains(&evidence.manifest.execution_mode)
+    {
+        return Err(EvidenceError::InvalidConformanceReport);
     }
-    if report.report_digest == [0; 32]
+    Ok(())
+}
+
+fn validate_conformance_report_shape(report: &ConformanceReportV1) -> Result<(), EvidenceError> {
+    if report.report_id == [0; 16]
+        || report.subject_artifact_digest == [0; 32]
         || report.profile_digest == [0; 32]
         || report.normative_spec_digest == [0; 32]
         || report.execution_profile_digest == [0; 32]
@@ -5563,34 +5734,69 @@ fn verify_conformance_report(evidence: &MoatProofEvidenceV1) -> Result<(), Evide
         || report.evaluator_protocol_digest == [0; 32]
         || report.limitations_digest == [0; 32]
         || report.provenance_digest == [0; 32]
-        || !report
-            .replay_claim
-            .is_no_stronger_than(evidence.manifest.replay_claim)
-        || !counterfactual
-            .replay_claim
-            .is_no_stronger_than(evidence.manifest.replay_claim)
-        || report.implementation.implementation_id.trim().is_empty()
+        || report.cases.is_empty()
+        || report.cases.len() > 65_536
+        || report.implementation.implementation_id.is_empty()
+        || report.implementation.implementation_id.len() > 128
+        || report
+            .implementation
+            .organization_id
+            .as_ref()
+            .is_some_and(|id| id.is_empty() || id.len() > 128)
+        || report.implementation.source_digest == [0; 32]
+        || report.implementation.build_digest == [0; 32]
+        || report.implementation.binary_digest == [0; 32]
+        || report.implementation.public_contract_digest == [0; 32]
         || report.independence.reviewer_ids.is_empty()
+        || report.independence.reviewer_ids.len() > 32
+        || report
+            .independence
+            .reviewer_ids
+            .iter()
+            .any(|id| id.is_empty() || id.len() > 128)
         || report
             .independence
             .reviewer_ids
             .windows(2)
             .any(|pair| pair[0] >= pair[1])
-        || report.cases.is_empty()
-        || !modes.contains(&evidence.manifest.execution_mode)
-        || report.cases.windows(2).any(|pair| {
-            (
-                pair[0].case_id.as_str(),
-                pair[0].mode,
-                pair[0].claim_layer,
-                pair[0].fixture_digest,
-            ) >= (
-                pair[1].case_id.as_str(),
-                pair[1].mode,
-                pair[1].claim_layer,
-                pair[1].fixture_digest,
-            )
-        })
+        || report.independence.declaration_digest == [0; 32]
+        || report.independence.shared_code_audit_digest == [0; 32]
+    {
+        return Err(EvidenceError::InvalidConformanceReport);
+    }
+    let mut case_keys = BTreeSet::new();
+    let mut counts = (0_u32, 0_u32, 0_u32, 0_u32, 0_u32);
+    let mut weakest_redaction = RedactionStateV1::None;
+    let mut weakest_replay_claim = ReplayClaimV1::Exact;
+    for case in &report.cases {
+        validate_conformance_case(case, &mut case_keys)?;
+        weakest_redaction = weakest_redaction.max(case.redaction_state);
+        weakest_replay_claim = weakest_replay_claim.max(case.replay_claim);
+        match case.outcome {
+            CaseOutcomeStatusV1::Pass => counts.0 = counts.0.saturating_add(1),
+            CaseOutcomeStatusV1::Fail => counts.1 = counts.1.saturating_add(1),
+            CaseOutcomeStatusV1::Skip => counts.2 = counts.2.saturating_add(1),
+            CaseOutcomeStatusV1::Unavailable => counts.3 = counts.3.saturating_add(1),
+            CaseOutcomeStatusV1::NotApplicable => counts.4 = counts.4.saturating_add(1),
+        }
+    }
+    if report.cases.windows(2).any(|pair| {
+        (
+            pair[0].case_id.as_str(),
+            pair[0].mode,
+            pair[0].claim_layer,
+            pair[0].fixture_digest,
+        ) >= (
+            pair[1].case_id.as_str(),
+            pair[1].mode,
+            pair[1].claim_layer,
+            pair[1].fixture_digest,
+        )
+    }) {
+        return Err(EvidenceError::InvalidConformanceReport);
+    }
+    if report.redaction_state != weakest_redaction
+        || report.replay_claim != weakest_replay_claim
         || counts
             != (
                 report.passed,
@@ -5599,17 +5805,97 @@ fn verify_conformance_report(evidence: &MoatProofEvidenceV1) -> Result<(), Evide
                 report.unavailable,
                 report.not_applicable,
             )
-        || counts
-            .0
-            .saturating_add(counts.1)
-            .saturating_add(counts.2)
-            .saturating_add(counts.3)
-            .saturating_add(counts.4) as usize
-            != report.cases.len()
+        || report.report_digest != report.digest()?
     {
         return Err(EvidenceError::InvalidConformanceReport);
     }
     Ok(())
+}
+
+fn validate_conformance_case<'a>(
+    case: &'a CaseOutcomeV1,
+    case_keys: &mut BTreeSet<(&'a str, ExecutionModeV1, ClaimLayerV1, [u8; 32])>,
+) -> Result<(), EvidenceError> {
+    if !case_keys.insert((
+        case.case_id.as_str(),
+        case.mode,
+        case.claim_layer,
+        case.fixture_digest,
+    )) || case.case_id.trim().is_empty()
+        || case.case_id.len() > 128
+        || case.fixture_digest == [0; 32]
+        || case.execution_profile_digest == [0; 32]
+        || case.provenance_digest == [0; 32]
+        || case
+            .first_coordinate
+            .as_ref()
+            .is_some_and(|coordinate| coordinate.len() > 128)
+        || !valid_conformance_case_result(case)
+        || !valid_redacted_case(case)
+        || (matches!(
+            case.redaction_state,
+            RedactionStateV1::None | RedactionStateV1::RedactedViews
+        ) && case.outcome != CaseOutcomeStatusV1::Pass
+            && case.expected_digest == case.actual_digest
+            && case.expected_error == case.actual_error)
+    {
+        Err(EvidenceError::InvalidConformanceReport)
+    } else {
+        Ok(())
+    }
+}
+
+fn valid_conformance_case_result(case: &CaseOutcomeV1) -> bool {
+    if matches!(
+        case.redaction_state,
+        RedactionStateV1::StructuralOnly | RedactionStateV1::EvidenceMissing
+    ) {
+        return true;
+    }
+    let exact = case.expected_digest.is_some()
+        && case.expected_digest == case.actual_digest
+        && case.expected_error.is_none()
+        && case.actual_error.is_none()
+        && case.first_coordinate.is_none();
+    let typed_failure = case.expected_digest.is_none()
+        && case.actual_digest.is_none()
+        && case.expected_error.is_some()
+        && case.expected_error == case.actual_error
+        && case.first_coordinate.is_none();
+    let allowed_divergence = case.expected_digest.is_some()
+        && case.actual_digest.is_some()
+        && case.expected_digest != case.actual_digest
+        && case.expected_error.is_none()
+        && case.actual_error.is_none()
+        && case.first_coordinate.is_some();
+    case.outcome != CaseOutcomeStatusV1::Pass || exact || typed_failure || allowed_divergence
+}
+
+fn valid_redacted_case(case: &CaseOutcomeV1) -> bool {
+    let incompatible = case.replay_claim == ReplayClaimV1::IncompatibleProfile;
+    match case.redaction_state {
+        RedactionStateV1::None => true,
+        RedactionStateV1::RedactedViews => {
+            incompatible || case.replay_claim == ReplayClaimV1::ExactAuthoritativeWithRedactedViews
+        }
+        RedactionStateV1::StructuralOnly => {
+            (incompatible || case.replay_claim == ReplayClaimV1::StructuralOnly)
+                && case.expected_digest.is_none()
+                && case.actual_digest.is_none()
+                && case.expected_error.is_none()
+                && case.actual_error.is_none()
+                && case.first_coordinate.is_none()
+        }
+        RedactionStateV1::EvidenceMissing => {
+            (incompatible || case.replay_claim == ReplayClaimV1::UnverifiableArtifactsMissing)
+                && case.outcome != CaseOutcomeStatusV1::Pass
+                && case.expected_digest.is_none()
+                && case.actual_digest.is_none()
+                && case.expected_error.is_none()
+                && case.actual_error.is_none()
+                && case.first_coordinate.is_none()
+        }
+    }
 }
 
 fn verify_atomicity(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceError> {
@@ -6455,7 +6741,7 @@ pub mod tests {
                 provenance_digest: [15; 32],
             },
         ];
-        ConformanceReportV1 {
+        let mut report = ConformanceReportV1 {
             report_id: [1; 16],
             subject_artifact_digest: [1; 32],
             profile_digest: [2; 32],
@@ -6491,8 +6777,512 @@ pub mod tests {
             redaction_state: RedactionStateV1::None,
             limitations_digest: [11; 32],
             provenance_digest: [12; 32],
-            report_digest: [13; 32],
+            report_digest: [0; 32],
+        };
+        report.report_digest = report.digest().unwrap_or([0; 32]);
+        report
+    }
+
+    fn report_at_canonical_byte_limit() -> (ConformanceReportV1, Vec<u8>) {
+        const MAX_REPORT_BYTES: usize = 16 * 1024 * 1024;
+        let mut report = test_report();
+        let template = report.cases[0].clone();
+        report.cases = (0..=65_535)
+            .map(|index| {
+                let mut case = template.clone();
+                case.case_id = format!("{index:05}");
+                case.outcome = CaseOutcomeStatusV1::Fail;
+                case.actual_digest = Some([99; 32]);
+                case.first_coordinate = Some(Vec::new());
+                case
+            })
+            .collect();
+
+        let set_coordinate_length = |report: &mut ConformanceReportV1, length: usize| {
+            for case in &mut report.cases {
+                case.first_coordinate = Some(vec![b'x'; length]);
+            }
+            refresh_test_report(report);
+        };
+        let mut low = 0_usize;
+        let mut high = 128_usize;
+        let mut best = 0_usize;
+        while low <= high {
+            let midpoint = low.midpoint(high);
+            set_coordinate_length(&mut report, midpoint);
+            let encoded = strict_codec::encode_conformance_report(&report).unwrap_or_default();
+            if encoded.len() <= MAX_REPORT_BYTES {
+                best = midpoint;
+                low = midpoint + 1;
+            } else if midpoint == 0 {
+                break;
+            } else {
+                high = midpoint - 1;
+            }
         }
+        set_coordinate_length(&mut report, best);
+        let current = strict_codec::encode_conformance_report(&report).unwrap_or_default();
+        let additional_id_bytes = MAX_REPORT_BYTES - current.len();
+        let per_case = additional_id_bytes / report.cases.len();
+        let remainder = additional_id_bytes % report.cases.len();
+        assert!(per_case <= 123);
+        for (index, case) in report.cases.iter_mut().enumerate() {
+            let suffix_length = per_case + usize::from(index < remainder);
+            case.case_id = format!("{index:05}{}", "x".repeat(suffix_length));
+        }
+        refresh_test_report(&mut report);
+        let encoded = strict_codec::encode_conformance_report(&report).unwrap_or_default();
+        assert_eq!(encoded.len(), MAX_REPORT_BYTES);
+        (report, encoded)
+    }
+
+    fn refresh_test_report(report: &mut ConformanceReportV1) {
+        let mut counts = [0_u32; 5];
+        let mut weakest_redaction = RedactionStateV1::None;
+        let mut weakest_replay_claim = ReplayClaimV1::Exact;
+        for case in &report.cases {
+            match case.outcome {
+                CaseOutcomeStatusV1::Pass => counts[0] += 1,
+                CaseOutcomeStatusV1::Fail => counts[1] += 1,
+                CaseOutcomeStatusV1::Skip => counts[2] += 1,
+                CaseOutcomeStatusV1::Unavailable => counts[3] += 1,
+                CaseOutcomeStatusV1::NotApplicable => counts[4] += 1,
+            }
+            weakest_redaction = weakest_redaction.max(case.redaction_state);
+            weakest_replay_claim = weakest_replay_claim.max(case.replay_claim);
+        }
+        [
+            &mut report.passed,
+            &mut report.failed,
+            &mut report.skipped,
+            &mut report.unavailable,
+            &mut report.not_applicable,
+        ]
+        .into_iter()
+        .zip(counts)
+        .for_each(|(slot, count)| *slot = count);
+        report.redaction_state = weakest_redaction;
+        report.replay_claim = weakest_replay_claim;
+        report.report_digest = report.digest().unwrap_or([0; 32]);
+    }
+
+    fn assert_report_rejects(change: impl FnOnce(&mut ConformanceReportV1)) {
+        let mut report = test_report();
+        change(&mut report);
+        report.report_digest = report.digest().unwrap_or([0; 32]);
+        assert_eq!(
+            report.validate(),
+            Err(EvidenceError::InvalidConformanceReport)
+        );
+    }
+
+    #[test]
+    fn public_report_validation_rejects_each_independent_shape_violation() {
+        assert_report_rejects(|report| report.report_id = [0; 16]);
+        assert_report_rejects(|report| report.subject_artifact_digest = [0; 32]);
+        assert_report_rejects(|report| report.profile_digest = [0; 32]);
+        assert_report_rejects(|report| report.normative_spec_digest = [0; 32]);
+        assert_report_rejects(|report| report.execution_profile_digest = [0; 32]);
+        assert_report_rejects(|report| report.fixture_bundle_digest = [0; 32]);
+        assert_report_rejects(|report| report.evaluator_source_digest = [0; 32]);
+        assert_report_rejects(|report| report.evaluator_binary_digest = [0; 32]);
+        assert_report_rejects(|report| report.evaluator_protocol_digest = [0; 32]);
+        assert_report_rejects(|report| report.limitations_digest = [0; 32]);
+        assert_report_rejects(|report| report.provenance_digest = [0; 32]);
+        assert_report_rejects(|report| report.cases.clear());
+        assert_report_rejects(|report| report.implementation.implementation_id.clear());
+        assert_report_rejects(|report| {
+            report.implementation.implementation_id = "x".repeat(129);
+        });
+        assert_report_rejects(|report| {
+            report.implementation.organization_id = Some(String::new());
+        });
+        assert_report_rejects(|report| {
+            report.implementation.organization_id = Some("x".repeat(129));
+        });
+        assert_report_rejects(|report| report.implementation.source_digest = [0; 32]);
+        assert_report_rejects(|report| report.implementation.build_digest = [0; 32]);
+        assert_report_rejects(|report| report.implementation.binary_digest = [0; 32]);
+        assert_report_rejects(|report| report.implementation.public_contract_digest = [0; 32]);
+        assert_report_rejects(|report| report.independence.reviewer_ids.clear());
+        assert_report_rejects(|report| {
+            report.independence.reviewer_ids =
+                (0..33).map(|i| format!("reviewer-{i:02}")).collect();
+        });
+        assert_report_rejects(|report| report.independence.reviewer_ids[0].clear());
+        assert_report_rejects(|report| {
+            report.independence.reviewer_ids = vec!["zulu".to_owned(), "alpha".to_owned()];
+        });
+        assert_report_rejects(|report| report.independence.declaration_digest = [0; 32]);
+        assert_report_rejects(|report| report.independence.shared_code_audit_digest = [0; 32]);
+
+        assert_report_rejects(|report| report.cases[0].case_id.clear());
+        assert_report_rejects(|report| report.cases[0].case_id = "x".repeat(129));
+        assert_report_rejects(|report| report.cases[0].fixture_digest = [0; 32]);
+        assert_report_rejects(|report| report.cases[0].execution_profile_digest = [0; 32]);
+        assert_report_rejects(|report| report.cases[0].provenance_digest = [0; 32]);
+        assert_report_rejects(|report| report.cases[0].first_coordinate = Some(vec![0; 129]));
+        assert_report_rejects(|report| {
+            report.cases[0].expected_digest = None;
+            report.cases[0].actual_digest = None;
+        });
+        assert_report_rejects(|report| {
+            report.cases[0].redaction_state = RedactionStateV1::RedactedViews;
+            report.cases[0].replay_claim = ReplayClaimV1::Exact;
+        });
+        assert_report_rejects(|report| {
+            report.cases[0].redaction_state = RedactionStateV1::StructuralOnly;
+        });
+        assert_report_rejects(|report| {
+            report.cases[0].redaction_state = RedactionStateV1::EvidenceMissing;
+        });
+        assert_report_rejects(|report| {
+            report.cases[0].outcome = CaseOutcomeStatusV1::Fail;
+        });
+        assert_report_rejects(|report| {
+            report.cases[1] = report.cases[0].clone();
+        });
+        assert_report_rejects(|report| {
+            report.passed = 1;
+        });
+        assert_report_rejects(|report| {
+            report.redaction_state = RedactionStateV1::RedactedViews;
+        });
+        assert_report_rejects(|report| {
+            report.replay_claim = ReplayClaimV1::StructuralOnly;
+        });
+
+        assert_ne!(test_report().digest().unwrap_or([0; 32]), [1; 32]);
+    }
+
+    #[test]
+    fn public_report_case_predicates_and_boundaries_are_fail_closed() {
+        let valid = test_report().cases[0].clone();
+        let assert_case_rejects = |case: CaseOutcomeV1| {
+            let mut keys = BTreeSet::new();
+            assert_eq!(
+                validate_conformance_case(&case, &mut keys),
+                Err(EvidenceError::InvalidConformanceReport)
+            );
+        };
+        let assert_case_accepts = |case: CaseOutcomeV1| {
+            let mut keys = BTreeSet::new();
+            assert_eq!(validate_conformance_case(&case, &mut keys), Ok(()));
+        };
+
+        let mut at_limit = valid.clone();
+        at_limit.case_id = "x".repeat(128);
+        at_limit.outcome = CaseOutcomeStatusV1::Fail;
+        at_limit.actual_digest = Some([15; 32]);
+        at_limit.first_coordinate = Some(vec![b'x'; 128]);
+        assert_case_accepts(at_limit);
+        let mut too_long = valid.clone();
+        too_long.case_id = "x".repeat(129);
+        assert_case_rejects(too_long);
+        let mut too_long_coordinate = valid.clone();
+        too_long_coordinate.first_coordinate = Some(vec![b'x'; 129]);
+        assert_case_rejects(too_long_coordinate);
+
+        let duplicate = valid.clone();
+        let mut keys = BTreeSet::new();
+        assert!(keys.insert((
+            duplicate.case_id.as_str(),
+            duplicate.mode,
+            duplicate.claim_layer,
+            duplicate.fixture_digest,
+        )));
+        assert_eq!(
+            validate_conformance_case(&duplicate, &mut keys),
+            Err(EvidenceError::InvalidConformanceReport)
+        );
+
+        for invalid in [
+            {
+                let mut value = valid.clone();
+                value.case_id = "   ".to_owned();
+                value
+            },
+            {
+                let mut value = valid.clone();
+                value.fixture_digest = [0; 32];
+                value
+            },
+            {
+                let mut value = valid.clone();
+                value.execution_profile_digest = [0; 32];
+                value
+            },
+            {
+                let mut value = valid.clone();
+                value.provenance_digest = [0; 32];
+                value
+            },
+        ] {
+            assert_case_rejects(invalid);
+        }
+
+        let mut invalid_result = valid.clone();
+        invalid_result.expected_digest = None;
+        invalid_result.actual_digest = None;
+        assert!(!valid_conformance_case_result(&invalid_result));
+        assert_case_rejects(invalid_result);
+
+        let mut mismatched_digest = valid.clone();
+        mismatched_digest.actual_digest = Some([15; 32]);
+        assert!(!valid_conformance_case_result(&mismatched_digest));
+        assert_case_rejects(mismatched_digest);
+
+        let mut mismatched_error = valid.clone();
+        mismatched_error.expected_digest = None;
+        mismatched_error.actual_digest = None;
+        mismatched_error.expected_error = Some(SafeErrorCodeV1::ClosureIncomplete);
+        mismatched_error.actual_error = None;
+        assert!(!valid_conformance_case_result(&mismatched_error));
+        assert_case_rejects(mismatched_error);
+
+        let mut coordinate_without_match = valid;
+        coordinate_without_match.first_coordinate = Some(vec![1]);
+        assert!(!valid_conformance_case_result(&coordinate_without_match));
+        assert_case_rejects(coordinate_without_match);
+    }
+
+    #[test]
+    fn public_report_redaction_predicates_are_fail_closed() {
+        let valid = test_report().cases[0].clone();
+        let assert_case_rejects = |case: CaseOutcomeV1| {
+            let mut keys = BTreeSet::new();
+            assert_eq!(
+                validate_conformance_case(&case, &mut keys),
+                Err(EvidenceError::InvalidConformanceReport)
+            );
+        };
+
+        for state in [
+            RedactionStateV1::StructuralOnly,
+            RedactionStateV1::EvidenceMissing,
+        ] {
+            let mut wrong_replay = valid.clone();
+            wrong_replay.redaction_state = state;
+            wrong_replay.replay_claim = ReplayClaimV1::Exact;
+            assert!(!valid_redacted_case(&wrong_replay));
+            assert_case_rejects(wrong_replay);
+        }
+
+        let mut structural = valid.clone();
+        structural.redaction_state = RedactionStateV1::StructuralOnly;
+        structural.replay_claim = ReplayClaimV1::StructuralOnly;
+        structural.expected_digest = None;
+        structural.actual_digest = None;
+        structural.expected_error = None;
+        structural.actual_error = None;
+        structural.first_coordinate = None;
+        assert!(valid_redacted_case(&structural));
+        let changes: [fn(&mut CaseOutcomeV1); 6] = [
+            |case: &mut CaseOutcomeV1| case.replay_claim = ReplayClaimV1::Exact,
+            |case: &mut CaseOutcomeV1| case.expected_digest = Some([1; 32]),
+            |case: &mut CaseOutcomeV1| case.actual_digest = Some([1; 32]),
+            |case: &mut CaseOutcomeV1| {
+                case.expected_error = Some(SafeErrorCodeV1::ClosureIncomplete);
+            },
+            |case: &mut CaseOutcomeV1| case.actual_error = Some(SafeErrorCodeV1::ClosureIncomplete),
+            |case: &mut CaseOutcomeV1| case.first_coordinate = Some(vec![1]),
+        ];
+        for change in changes {
+            let mut invalid = structural.clone();
+            change(&mut invalid);
+            assert!(!valid_redacted_case(&invalid));
+            assert_case_rejects(invalid);
+        }
+
+        let mut evidence_missing = structural.clone();
+        evidence_missing.redaction_state = RedactionStateV1::EvidenceMissing;
+        evidence_missing.replay_claim = ReplayClaimV1::UnverifiableArtifactsMissing;
+        evidence_missing.outcome = CaseOutcomeStatusV1::Fail;
+        assert!(valid_redacted_case(&evidence_missing));
+        let mut missing_pass = evidence_missing.clone();
+        missing_pass.outcome = CaseOutcomeStatusV1::Pass;
+        assert!(!valid_redacted_case(&missing_pass));
+        assert_case_rejects(missing_pass);
+
+        let mut incompatible_redacted = valid;
+        incompatible_redacted.redaction_state = RedactionStateV1::RedactedViews;
+        incompatible_redacted.replay_claim = ReplayClaimV1::IncompatibleProfile;
+        assert!(valid_redacted_case(&incompatible_redacted));
+        assert_eq!(
+            validate_conformance_case(&incompatible_redacted, &mut BTreeSet::new()),
+            Ok(())
+        );
+
+        let mut incompatible_structural = structural;
+        incompatible_structural.replay_claim = ReplayClaimV1::IncompatibleProfile;
+        assert!(valid_redacted_case(&incompatible_structural));
+
+        let mut incompatible_missing = evidence_missing;
+        incompatible_missing.replay_claim = ReplayClaimV1::IncompatibleProfile;
+        assert!(valid_redacted_case(&incompatible_missing));
+
+        assert_eq!(
+            ReplayClaimV1::IncompatibleProfile.after_erasure(ErasureDispositionV1::StructuralOnly),
+            ReplayClaimV1::IncompatibleProfile
+        );
+    }
+
+    #[test]
+    fn public_report_shape_boundaries_and_verifier_claims_are_exact() {
+        let mut at_limit = test_report();
+        at_limit.implementation.implementation_id = "x".repeat(128);
+        at_limit.implementation.organization_id = Some("o".repeat(128));
+        at_limit.independence.reviewer_ids = (0..32)
+            .map(|index| format!("reviewer-{index:02}"))
+            .collect();
+        at_limit.independence.reviewer_ids[0] = "a".repeat(128);
+        at_limit.cases[0].case_id = "c".repeat(128);
+        at_limit.cases[0].outcome = CaseOutcomeStatusV1::Fail;
+        at_limit.cases[0].actual_digest = Some([15; 32]);
+        at_limit.cases[0].first_coordinate = Some(vec![b'x'; 128]);
+        refresh_test_report(&mut at_limit);
+        assert_eq!(at_limit.validate(), Ok(()));
+        let encoded = at_limit.to_canonical_cbor().unwrap_or_default();
+        assert!(encoded.len() > 1_025);
+        assert_eq!(
+            ConformanceReportV1::from_canonical_cbor(&encoded),
+            Ok(at_limit)
+        );
+
+        let mut reviewer_over_limit = test_report();
+        reviewer_over_limit.independence.reviewer_ids[0] = "a".repeat(129);
+        assert_eq!(
+            validate_conformance_report_shape(&reviewer_over_limit),
+            Err(EvidenceError::InvalidConformanceReport)
+        );
+
+        let mut cases_over_limit = test_report();
+        cases_over_limit.cases = vec![cases_over_limit.cases[0].clone(); 65_537];
+        assert_eq!(
+            validate_conformance_report_shape(&cases_over_limit),
+            Err(EvidenceError::InvalidConformanceReport)
+        );
+
+        let mut invalid = evidence();
+        invalid.manifest.replay_claim = ReplayClaimV1::StructuralOnly;
+        invalid.contract.conformance_report.replay_claim = ReplayClaimV1::Exact;
+        invalid.contract.counterfactual.replay_claim = ReplayClaimV1::StructuralOnly;
+        assert_eq!(
+            verify_conformance_report(&invalid),
+            Err(EvidenceError::InvalidConformanceReport)
+        );
+
+        let mut invalid = evidence();
+        invalid.manifest.replay_claim = ReplayClaimV1::StructuralOnly;
+        invalid.contract.conformance_report.replay_claim = ReplayClaimV1::StructuralOnly;
+        invalid.contract.counterfactual.replay_claim = ReplayClaimV1::Exact;
+        assert_eq!(
+            verify_conformance_report(&invalid),
+            Err(EvidenceError::InvalidConformanceReport)
+        );
+
+        let mut invalid = evidence();
+        invalid.manifest.execution_mode = ExecutionModeV1::Replay;
+        assert_eq!(
+            verify_conformance_report(&invalid),
+            Err(EvidenceError::InvalidConformanceReport)
+        );
+    }
+
+    #[test]
+    fn public_cnr1_codec_validates_shape_and_fields_zero_through_twenty_two() {
+        let report = test_report();
+        let bytes = report.to_canonical_cbor().unwrap_or_default();
+        assert_eq!(
+            ConformanceReportV1::from_canonical_cbor(&bytes),
+            Ok(report.clone())
+        );
+
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert_eq!(
+            ConformanceReportV1::from_canonical_cbor(&trailing),
+            Err(EvidenceError::InvalidConformanceReport)
+        );
+
+        for index in 0..23 {
+            let mut fields =
+                ciborium::from_reader::<Value, _>(Cursor::new(&bytes)).unwrap_or(Value::Null);
+            if let Value::Array(ref mut values) = fields {
+                values[index] = Value::Null;
+            }
+            let mut malformed = Vec::new();
+            ciborium::into_writer(&fields, &mut malformed).unwrap_or_default();
+            assert_eq!(
+                ConformanceReportV1::from_canonical_cbor(&malformed),
+                Err(EvidenceError::InvalidConformanceReport)
+            );
+        }
+
+        let mut tampered_digest =
+            ciborium::from_reader::<Value, _>(Cursor::new(&bytes)).unwrap_or(Value::Null);
+        if let Value::Array(ref mut values) = tampered_digest {
+            values[22] = Value::Bytes(vec![0; 32]);
+        }
+        let mut malformed = Vec::new();
+        ciborium::into_writer(&tampered_digest, &mut malformed).unwrap_or_default();
+        assert_eq!(
+            ConformanceReportV1::from_canonical_cbor(&malformed),
+            Err(EvidenceError::InvalidConformanceReport)
+        );
+
+        let (at_limit, at_limit_bytes) = report_at_canonical_byte_limit();
+        assert_eq!(at_limit_bytes.len(), 16 * 1024 * 1024);
+        assert_eq!(at_limit.to_canonical_cbor(), Ok(at_limit_bytes.clone()));
+        assert_eq!(
+            ConformanceReportV1::from_canonical_cbor(&at_limit_bytes),
+            Ok(at_limit)
+        );
+
+        let oversized = vec![0; 16 * 1024 * 1024 + 1];
+        assert_eq!(
+            ConformanceReportV1::from_canonical_cbor(&oversized),
+            Err(EvidenceError::InvalidConformanceReport)
+        );
+
+        let mut mixed_profile_report = report;
+        mixed_profile_report.cases[0].execution_profile_digest = [99; 32];
+        mixed_profile_report.report_digest = mixed_profile_report.digest().unwrap_or([0; 32]);
+        // CNR1 permits a per-case execution-profile matrix; CPF1 performs
+        // the authoritative fixture/profile membership check.
+        assert_eq!(mixed_profile_report.validate(), Ok(()));
+
+        let mut unordered_cases =
+            ciborium::from_reader::<Value, _>(Cursor::new(&bytes)).unwrap_or(Value::Null);
+        if let Value::Array(ref mut values) = unordered_cases {
+            if let Value::Array(ref mut cases) = values[13] {
+                cases.swap(0, 1);
+            }
+        }
+        let mut malformed = Vec::new();
+        ciborium::into_writer(&unordered_cases, &mut malformed).unwrap_or_default();
+        assert_eq!(
+            ConformanceReportV1::from_canonical_cbor(&malformed),
+            Err(EvidenceError::InvalidConformanceReport)
+        );
+
+        let mut oversized_report = test_report();
+        let template = oversized_report.cases[0].clone();
+        oversized_report.cases = (0..=65_535)
+            .map(|index| {
+                let mut case = template.clone();
+                case.case_id = format!("{index:05}{}", "x".repeat(123));
+                case.outcome = CaseOutcomeStatusV1::Fail;
+                case.actual_digest = Some([99; 32]);
+                case.first_coordinate = Some(vec![b'x'; 128]);
+                case
+            })
+            .collect();
+        refresh_test_report(&mut oversized_report);
+        assert_eq!(
+            oversized_report.to_canonical_cbor(),
+            Err(EvidenceError::InvalidConformanceReport)
+        );
     }
 
     fn test_contract() -> Wave8ProofContractV1 {
@@ -6751,6 +7541,13 @@ pub mod tests {
         assert_eq!(
             verify_evidence(&invalid),
             Err(EvidenceError::InvalidConsentAudit)
+        );
+
+        let mut invalid = evidence();
+        invalid.manifest.execution_mode = ExecutionModeV1::Replay;
+        assert_eq!(
+            verify_evidence(&invalid),
+            Err(EvidenceError::InvalidConformanceReport)
         );
     }
 
@@ -7606,7 +8403,79 @@ pub mod tests {
             report_cases.contract.conformance_report.skipped = 1;
             report_cases.contract.conformance_report.unavailable = 1;
             report_cases.contract.conformance_report.not_applicable = 1;
+            refresh_test_report(&mut report_cases.contract.conformance_report);
             assert_eq!(verify_wave8_contract(&report_cases), Ok(()));
+
+            let mut typed_report = value.clone();
+            typed_report.contract.conformance_report.cases[0].expected_digest = None;
+            typed_report.contract.conformance_report.cases[0].actual_digest = None;
+            typed_report.contract.conformance_report.cases[0].expected_error =
+                Some(SafeErrorCodeV1::ClosureIncomplete);
+            typed_report.contract.conformance_report.cases[0].actual_error =
+                Some(SafeErrorCodeV1::ClosureIncomplete);
+            refresh_test_report(&mut typed_report.contract.conformance_report);
+            assert_eq!(verify_evidence(&typed_report), Ok(()));
+
+            let mut divergence_report = value.clone();
+            divergence_report.contract.conformance_report.cases[0].actual_digest =
+                Some([15; 32]);
+            divergence_report.contract.conformance_report.cases[0].first_coordinate =
+                Some(vec![1, 2]);
+            refresh_test_report(&mut divergence_report.contract.conformance_report);
+            assert_eq!(verify_evidence(&divergence_report), Ok(()));
+
+            let mut redacted_report = value.clone();
+            redacted_report.contract.conformance_report.cases[0].redaction_state =
+                RedactionStateV1::RedactedViews;
+            redacted_report.contract.conformance_report.cases[0].replay_claim =
+                ReplayClaimV1::ExactAuthoritativeWithRedactedViews;
+            redacted_report.contract.conformance_report.redaction_state =
+                RedactionStateV1::RedactedViews;
+            redacted_report.contract.conformance_report.replay_claim =
+                ReplayClaimV1::ExactAuthoritativeWithRedactedViews;
+            refresh_test_report(&mut redacted_report.contract.conformance_report);
+            assert_eq!(verify_evidence(&redacted_report), Ok(()));
+            let mut mismatched_redaction = redacted_report.clone();
+            mismatched_redaction.contract.conformance_report.redaction_state =
+                RedactionStateV1::StructuralOnly;
+            assert_eq!(
+                verify_evidence(&mismatched_redaction),
+                Err(EvidenceError::InvalidConformanceReport)
+            );
+
+            let mut structural_report = value.clone();
+            let structural_case = &mut structural_report.contract.conformance_report.cases[0];
+            structural_case.outcome = CaseOutcomeStatusV1::Pass;
+            structural_case.first_coordinate = None;
+            structural_case.expected_digest = None;
+            structural_case.actual_digest = None;
+            structural_case.expected_error = None;
+            structural_case.actual_error = None;
+            structural_case.replay_claim = ReplayClaimV1::StructuralOnly;
+            structural_case.redaction_state = RedactionStateV1::StructuralOnly;
+            structural_report.contract.conformance_report.redaction_state =
+                RedactionStateV1::StructuralOnly;
+            structural_report.contract.conformance_report.replay_claim =
+                ReplayClaimV1::StructuralOnly;
+            refresh_test_report(&mut structural_report.contract.conformance_report);
+            assert_eq!(verify_evidence(&structural_report), Ok(()));
+
+            let mut missing_report = structural_report.clone();
+            missing_report.contract.conformance_report.cases[0].outcome =
+                CaseOutcomeStatusV1::Fail;
+            missing_report.contract.conformance_report.redaction_state =
+                RedactionStateV1::EvidenceMissing;
+            missing_report.contract.conformance_report.replay_claim =
+                ReplayClaimV1::UnverifiableArtifactsMissing;
+            missing_report.contract.conformance_report.cases[0].redaction_state =
+                RedactionStateV1::EvidenceMissing;
+            missing_report.contract.conformance_report.cases[0].replay_claim =
+                ReplayClaimV1::UnverifiableArtifactsMissing;
+            missing_report.contract.conformance_report.passed = 1;
+            missing_report.contract.conformance_report.failed = 1;
+            refresh_test_report(&mut missing_report.contract.conformance_report);
+            assert_eq!(verify_evidence(&missing_report), Ok(()));
+
             let mut invalid_report = report_cases.clone();
             invalid_report.contract.conformance_report.passed = 0;
             assert_eq!(
@@ -7785,7 +8654,7 @@ pub mod tests {
 
             let mut invalid_coordinate = report_cases.clone();
             invalid_coordinate.contract.conformance_report.cases[0].first_coordinate =
-                Some("x".repeat(129));
+                Some(vec![b'x'; 129]);
             assert_eq!(
                 verify_wave8_contract(&invalid_coordinate),
                 Err(EvidenceError::InvalidConformanceReport)
