@@ -9,6 +9,7 @@ use ciborium::value::Value;
 use pos_core::{CanonicalBytes, PublicKey, Signature};
 use pos_crypto::{canonical, signing};
 use std::collections::BTreeSet;
+use std::io::Cursor;
 use thiserror::Error;
 
 use crate::{
@@ -66,6 +67,9 @@ pub enum BundleContractErrorV1 {
     /// Canonical manifest encoding failed.
     #[error("conformance bundle manifest encoding failed")]
     EncodingFailed,
+    /// The public archive encoding is malformed or not canonical.
+    #[error("conformance bundle archive encoding is invalid")]
+    ArchiveEncodingInvalid,
 }
 
 /// The two execution modes materialized by #190.
@@ -86,6 +90,55 @@ impl BundleModeV1 {
     }
 }
 
+/// The authority-bearing role of one bundle member.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum BundleMemberRoleV1 {
+    /// A public fixture input declared by CPF1.
+    FixtureInput,
+    /// A public expected-result record declared by CPF1.
+    ExpectedResult,
+    /// The canonical CPF1 profile bytes.
+    Profile,
+    /// The normative requirements and specification artifact.
+    NormativeSpecification,
+    /// A public schema artifact.
+    Schema,
+    /// The governing licence artifact.
+    Licence,
+    /// The public notices artifact.
+    Notice,
+    /// The software bill of materials artifact.
+    Sbom,
+    /// The source/build/publication provenance artifact.
+    Provenance,
+    /// The limitations and exclusions artifact.
+    Limitations,
+}
+
+impl BundleMemberRoleV1 {
+    const fn code(self) -> u64 {
+        match self {
+            Self::FixtureInput => 0,
+            Self::ExpectedResult => 1,
+            Self::Profile => 2,
+            Self::NormativeSpecification => 3,
+            Self::Schema => 4,
+            Self::Licence => 5,
+            Self::Notice => 6,
+            Self::Sbom => 7,
+            Self::Provenance => 8,
+            Self::Limitations => 9,
+        }
+    }
+
+    const fn is_supporting(self) -> bool {
+        !matches!(
+            self,
+            Self::FixtureInput | Self::ExpectedResult | Self::Profile
+        )
+    }
+}
+
 /// One byte-bearing member in a materialized bundle.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BundleMemberV1 {
@@ -95,7 +148,13 @@ pub struct BundleMemberV1 {
     pub bytes: Vec<u8>,
     /// Recomputed BLAKE3 content address.
     pub digest: [u8; 32],
+    /// Authority-bearing role committed by the manifest.
+    pub role: BundleMemberRoleV1,
     /// Whether this member is an expected-result payload.
+    ///
+    /// This field remains as an explicit invariant seam for callers that
+    /// classify expected-result members. Validation rejects disagreement with
+    /// [`Self::role`].
     pub expected_result: bool,
 }
 
@@ -108,7 +167,26 @@ impl BundleMemberV1 {
             path: path.into(),
             bytes,
             digest,
+            role: if expected_result {
+                BundleMemberRoleV1::ExpectedResult
+            } else {
+                BundleMemberRoleV1::FixtureInput
+            },
             expected_result,
+        }
+    }
+
+    /// Construct a typed public support artifact member.
+    #[must_use]
+    pub fn supporting(path: impl Into<String>, bytes: Vec<u8>, role: BundleMemberRoleV1) -> Self {
+        debug_assert!(role.is_supporting());
+        let digest = *blake3::hash(&bytes).as_bytes();
+        Self {
+            path: path.into(),
+            bytes,
+            digest,
+            role,
+            expected_result: false,
         }
     }
 }
@@ -157,6 +235,8 @@ pub struct BundleMemberDescriptorV1 {
     pub size_bytes: u64,
     /// BLAKE3 digest of the raw bytes.
     pub digest: [u8; 32],
+    /// Authority-bearing member role.
+    pub role: BundleMemberRoleV1,
 }
 
 /// One signed, immutable Draft or Candidate bundle.
@@ -200,6 +280,9 @@ impl ConformanceBundleV1 {
             profile_bytes,
             false,
         ));
+        if let Some(profile_member) = members.last_mut() {
+            profile_member.role = BundleMemberRoleV1::Profile;
+        }
         let mut bundle = Self {
             manifest: BundleManifestV1 {
                 magic: CONFORMANCE_BUNDLE_MAGIC_V1.to_owned(),
@@ -280,7 +363,11 @@ impl ConformanceBundleV1 {
         let profile_member = self
             .members
             .iter()
-            .find(|member| member.path == PROFILE_MEMBER_PATH)
+            .find(|member| {
+                member.path == PROFILE_MEMBER_PATH
+                    && member.role == BundleMemberRoleV1::Profile
+                    && !member.expected_result
+            })
             .ok_or(BundleContractErrorV1::MemberMissing)?;
         let profile = ConformanceProfileV1::from_canonical_cbor(&profile_member.bytes)
             .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
@@ -302,17 +389,21 @@ impl ConformanceBundleV1 {
             if descriptor.path != member.path {
                 return Err(BundleContractErrorV1::UndeclaredMember);
             }
+            if descriptor.role != member.role
+                || member.expected_result != (member.role == BundleMemberRoleV1::ExpectedResult)
+            {
+                return Err(BundleContractErrorV1::UndeclaredMember);
+            }
             let expected_reference_count = self
                 .manifest
                 .expected_results
                 .iter()
                 .filter(|expected| expected.member_path == member.path)
                 .count();
-            if member.expected_result && expected_reference_count != 1 {
+            if member.role == BundleMemberRoleV1::ExpectedResult && expected_reference_count != 1 {
                 return Err(BundleContractErrorV1::UndeclaredMember);
             }
-            if !member.expected_result
-                && member.path != PROFILE_MEMBER_PATH
+            if member.role == BundleMemberRoleV1::FixtureInput
                 && !profile.fixtures.iter().any(|fixture| {
                     fixture.inputs.iter().any(|input| {
                         member.path
@@ -325,6 +416,9 @@ impl ConformanceBundleV1 {
                     })
                 })
             {
+                return Err(BundleContractErrorV1::UndeclaredMember);
+            }
+            if member.role == BundleMemberRoleV1::Profile && member.path != PROFILE_MEMBER_PATH {
                 return Err(BundleContractErrorV1::UndeclaredMember);
             }
             if descriptor.size_bytes != u64::try_from(member.bytes.len()).unwrap_or(u64::MAX)
@@ -343,6 +437,8 @@ impl ConformanceBundleV1 {
             }
         }
         validate_total_bytes(total_bytes)?;
+        validate_supporting_members(&self.members)?;
+        validate_selected_bundle_caps(&profile, self)?;
         validate_expected_results(&profile, &self.manifest, &self.members)
     }
 
@@ -356,15 +452,291 @@ impl ConformanceBundleV1 {
                 path: member.path.clone(),
                 size_bytes: member.bytes.len() as u64,
                 digest: member.digest,
+                role: member.role,
             })
             .collect();
         self.manifest.expected_results.sort_unstable();
     }
 
-    fn manifest_bytes(&self) -> Result<Vec<u8>, BundleContractErrorV1> {
+    /// Return the exact canonical bytes signed by this bundle.
+    pub fn manifest_bytes(&self) -> Result<Vec<u8>, BundleContractErrorV1> {
         canonical::encode(&manifest_value(&self.manifest))
             .map(|bytes| bytes.as_slice().to_vec())
             .map_err(|_| BundleContractErrorV1::EncodingFailed)
+    }
+
+    /// Encode the complete immutable bundle as canonical public archive bytes.
+    ///
+    /// The archive carries the manifest, every raw member, the signer key, and
+    /// the manifest signature. It is deterministic and contains no compression
+    /// layer, so an independent evaluator can materialize and verify it without
+    /// importing the implementation under test.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error when validation, selected hard caps, or canonical
+    /// encoding fails.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, BundleContractErrorV1> {
+        self.validate()?;
+        let value = bundle_value(self);
+        let bytes = canonical::encode(&value)
+            .map(|encoded| encoded.as_slice().to_vec())
+            .map_err(|_| BundleContractErrorV1::EncodingFailed)?;
+        validate_archive_caps(self, &value, bytes.len())?;
+        Ok(bytes)
+    }
+
+    /// Decode and validate complete canonical public archive bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error for malformed/noncanonical bytes, invalid bundle
+    /// declarations, a profile-cap violation, or an invalid signature.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, BundleContractErrorV1> {
+        if bytes.is_empty() || bytes.len() as u64 > MAX_TOTAL_BUNDLE_BYTES {
+            return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+        }
+        let value = ciborium::from_reader(Cursor::new(bytes))
+            .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
+        let canonical_bytes =
+            canonical::encode(&value).map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
+        if canonical_bytes.as_slice() != bytes {
+            return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+        }
+        let fields = archive_array_exact(&value, 6)?;
+        if archive_text(&fields[0])? != CONFORMANCE_BUNDLE_MAGIC_V1 || archive_u64(&fields[1])? != 1
+        {
+            return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+        }
+        let manifest = decode_manifest(&fields[2])?;
+        let members = archive_array_bounded(&fields[3], MAX_MEMBERS)?
+            .iter()
+            .map(decode_member)
+            .collect::<Result<Vec<_>, _>>()?;
+        let signer_public_key = archive_digest::<32>(&fields[4])
+            .map(PublicKey::from_bytes)
+            .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
+        let signature = archive_digest::<64>(&fields[5])
+            .map(Signature::from_bytes)
+            .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
+        let bundle = Self {
+            manifest,
+            members,
+            signer_public_key,
+            signature,
+        };
+        let profile_member = bundle
+            .members
+            .iter()
+            .find(|member| member.role == BundleMemberRoleV1::Profile)
+            .ok_or(BundleContractErrorV1::MemberMissing)?;
+        let profile = ConformanceProfileV1::from_canonical_cbor(&profile_member.bytes)
+            .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
+        validate_archive_caps(&bundle, &value, bytes.len())?;
+        profile
+            .evaluator_protocol
+            .hard_caps
+            .validate_compression_expansion(bytes.len() as u64, bytes.len() as u64)
+            .map_err(|_| BundleContractErrorV1::MemberOutOfBounds)?;
+        bundle.validate().map(|()| bundle)
+    }
+}
+
+fn bundle_value(bundle: &ConformanceBundleV1) -> Value {
+    Value::Array(vec![
+        Value::Text(CONFORMANCE_BUNDLE_MAGIC_V1.to_owned()),
+        Value::Integer(1_u64.into()),
+        manifest_value(&bundle.manifest),
+        Value::Array(
+            bundle
+                .members
+                .iter()
+                .map(|member| {
+                    Value::Array(vec![
+                        Value::Text(member.path.clone()),
+                        Value::Bytes(member.bytes.clone()),
+                        Value::Integer(member.role.code().into()),
+                    ])
+                })
+                .collect(),
+        ),
+        Value::Bytes(bundle.signer_public_key.as_bytes().to_vec()),
+        Value::Bytes(bundle.signature.as_bytes().to_vec()),
+    ])
+}
+
+fn validate_archive_caps(
+    bundle: &ConformanceBundleV1,
+    value: &Value,
+    encoded_len: usize,
+) -> Result<(), BundleContractErrorV1> {
+    let profile_member = bundle
+        .members
+        .iter()
+        .find(|member| member.role == BundleMemberRoleV1::Profile)
+        .ok_or(BundleContractErrorV1::MemberMissing)?;
+    let profile = ConformanceProfileV1::from_canonical_cbor(&profile_member.bytes)
+        .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
+    let caps = &profile.evaluator_protocol.hard_caps;
+    if u64::try_from(encoded_len).unwrap_or(u64::MAX) > caps.max_total_bundle_bytes
+        || value_depth(value) > usize::from(caps.max_structural_nesting)
+    {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    caps.validate_compression_expansion(
+        u64::try_from(encoded_len).unwrap_or(u64::MAX),
+        u64::try_from(encoded_len).unwrap_or(u64::MAX),
+    )
+    .map_err(|_| BundleContractErrorV1::MemberOutOfBounds)
+}
+
+fn decode_manifest(value: &Value) -> Result<BundleManifestV1, BundleContractErrorV1> {
+    let fields = archive_array_exact(value, 6)?;
+    let members = archive_array_bounded(&fields[4], MAX_MEMBERS)?
+        .iter()
+        .map(|value| {
+            let fields = archive_array_exact(value, 4)?;
+            Ok(BundleMemberDescriptorV1 {
+                path: archive_text(&fields[0])?.to_owned(),
+                size_bytes: archive_u64(&fields[1])?,
+                digest: archive_digest(&fields[2])?,
+                role: decode_member_role(archive_u64(&fields[3])?)?,
+            })
+        })
+        .collect::<Result<Vec<_>, BundleContractErrorV1>>()?;
+    let expected_results = archive_array_bounded(&fields[5], MAX_MEMBERS)?
+        .iter()
+        .map(|value| {
+            let fields = archive_array_exact(value, 6)?;
+            Ok(BundleExpectedResultV1 {
+                case_id: archive_text(&fields[0])?.to_owned(),
+                claim_layer: decode_claim_layer(archive_u64(&fields[1])?)?,
+                execution_profile_digest: archive_digest(&fields[2])?,
+                mode: decode_bundle_mode(archive_u64(&fields[3])?)?,
+                member_path: archive_text(&fields[4])?.to_owned(),
+                digest: archive_digest(&fields[5])?,
+            })
+        })
+        .collect::<Result<Vec<_>, BundleContractErrorV1>>()?;
+    Ok(BundleManifestV1 {
+        magic: archive_text(&fields[0])?.to_owned(),
+        lifecycle: decode_lifecycle(archive_u64(&fields[1])?)?,
+        mode: decode_bundle_mode(archive_u64(&fields[2])?)?,
+        profile_digest: archive_digest(&fields[3])?,
+        members,
+        expected_results,
+    })
+}
+
+fn decode_member(value: &Value) -> Result<BundleMemberV1, BundleContractErrorV1> {
+    let fields = archive_array_exact(value, 3)?;
+    let path = archive_text(&fields[0])?.to_owned();
+    let bytes = archive_bytes(&fields[1])?.to_vec();
+    let role = decode_member_role(archive_u64(&fields[2])?)?;
+    Ok(BundleMemberV1 {
+        path,
+        digest: *blake3::hash(&bytes).as_bytes(),
+        bytes,
+        role,
+        expected_result: role == BundleMemberRoleV1::ExpectedResult,
+    })
+}
+
+fn archive_array_exact(
+    value: &Value,
+    expected_len: usize,
+) -> Result<&[Value], BundleContractErrorV1> {
+    match value {
+        Value::Array(values) if values.len() == expected_len => Ok(values),
+        _ => Err(BundleContractErrorV1::ArchiveEncodingInvalid),
+    }
+}
+
+fn archive_array_bounded(
+    value: &Value,
+    maximum_len: usize,
+) -> Result<&[Value], BundleContractErrorV1> {
+    match value {
+        Value::Array(values) if values.len() <= maximum_len => Ok(values),
+        _ => Err(BundleContractErrorV1::ArchiveEncodingInvalid),
+    }
+}
+
+fn archive_text(value: &Value) -> Result<&str, BundleContractErrorV1> {
+    match value {
+        Value::Text(text) => Ok(text),
+        _ => Err(BundleContractErrorV1::ArchiveEncodingInvalid),
+    }
+}
+
+fn archive_bytes(value: &Value) -> Result<&[u8], BundleContractErrorV1> {
+    match value {
+        Value::Bytes(bytes) => Ok(bytes),
+        _ => Err(BundleContractErrorV1::ArchiveEncodingInvalid),
+    }
+}
+
+fn archive_u64(value: &Value) -> Result<u64, BundleContractErrorV1> {
+    match value {
+        Value::Integer(integer) => integer
+            .clone()
+            .try_into()
+            .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid),
+        _ => Err(BundleContractErrorV1::ArchiveEncodingInvalid),
+    }
+}
+
+fn archive_digest<const N: usize>(value: &Value) -> Result<[u8; N], BundleContractErrorV1> {
+    let bytes = archive_bytes(value)?;
+    bytes
+        .try_into()
+        .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)
+}
+
+fn decode_member_role(code: u64) -> Result<BundleMemberRoleV1, BundleContractErrorV1> {
+    match code {
+        0 => Ok(BundleMemberRoleV1::FixtureInput),
+        1 => Ok(BundleMemberRoleV1::ExpectedResult),
+        2 => Ok(BundleMemberRoleV1::Profile),
+        3 => Ok(BundleMemberRoleV1::NormativeSpecification),
+        4 => Ok(BundleMemberRoleV1::Schema),
+        5 => Ok(BundleMemberRoleV1::Licence),
+        6 => Ok(BundleMemberRoleV1::Notice),
+        7 => Ok(BundleMemberRoleV1::Sbom),
+        8 => Ok(BundleMemberRoleV1::Provenance),
+        9 => Ok(BundleMemberRoleV1::Limitations),
+        _ => Err(BundleContractErrorV1::ArchiveEncodingInvalid),
+    }
+}
+
+fn decode_bundle_mode(code: u64) -> Result<BundleModeV1, BundleContractErrorV1> {
+    match code {
+        0 => Ok(BundleModeV1::Local),
+        1 => Ok(BundleModeV1::AirGapped),
+        _ => Err(BundleContractErrorV1::ArchiveEncodingInvalid),
+    }
+}
+
+fn decode_lifecycle(code: u64) -> Result<ProfileLifecycleV1, BundleContractErrorV1> {
+    match code {
+        0 => Ok(ProfileLifecycleV1::Draft),
+        1 => Ok(ProfileLifecycleV1::Candidate),
+        2 => Ok(ProfileLifecycleV1::Stable),
+        3 => Ok(ProfileLifecycleV1::Retired),
+        _ => Err(BundleContractErrorV1::ArchiveEncodingInvalid),
+    }
+}
+
+fn decode_claim_layer(code: u64) -> Result<ClaimLayerV1, BundleContractErrorV1> {
+    match code {
+        0 => Ok(ClaimLayerV1::ArtifactIntegrity),
+        1 => Ok(ClaimLayerV1::ReplayConformance),
+        2 => Ok(ClaimLayerV1::KnowledgeNonInterference),
+        3 => Ok(ClaimLayerV1::GatewayClientConformance),
+        4 => Ok(ClaimLayerV1::PluginConformance),
+        5 => Ok(ClaimLayerV1::MetricConformance),
+        6 => Ok(ClaimLayerV1::EmpiricalEvaluation),
+        _ => Err(BundleContractErrorV1::ArchiveEncodingInvalid),
     }
 }
 
@@ -440,7 +812,8 @@ fn validate_fixture_inputs(
             let Some(member) = members.iter().find(|member| member.path == path) else {
                 return Err(BundleContractErrorV1::MemberMissing);
             };
-            if member.expected_result
+            if member.role != BundleMemberRoleV1::FixtureInput
+                || member.expected_result
                 || member.bytes.is_empty()
                 || member.bytes.len() as u64 != input.size_bytes
                 || member.digest != input.digest
@@ -502,7 +875,11 @@ fn validate_expected_results(
         else {
             return Err(BundleContractErrorV1::MemberMissing);
         };
-        if !member.expected_result || member.bytes.is_empty() || member.digest != expected.digest {
+        if member.role != BundleMemberRoleV1::ExpectedResult
+            || !member.expected_result
+            || member.bytes.is_empty()
+            || member.digest != expected.digest
+        {
             return Err(BundleContractErrorV1::ExpectedResultMismatch);
         }
         let Some(fixture) = profile.fixtures.iter().find(|fixture| {
@@ -587,6 +964,63 @@ fn expected_identity(values: &[BundleExpectedResultV1]) -> ExpectedIdentity<'_> 
 
 type ExpectedIdentity<'a> = Vec<(&'a str, ClaimLayerV1, [u8; 32], &'a str, [u8; 32])>;
 
+fn validate_supporting_members(members: &[BundleMemberV1]) -> Result<(), BundleContractErrorV1> {
+    const REQUIRED_ROLES: [BundleMemberRoleV1; 7] = [
+        BundleMemberRoleV1::NormativeSpecification,
+        BundleMemberRoleV1::Schema,
+        BundleMemberRoleV1::Licence,
+        BundleMemberRoleV1::Notice,
+        BundleMemberRoleV1::Sbom,
+        BundleMemberRoleV1::Provenance,
+        BundleMemberRoleV1::Limitations,
+    ];
+    if REQUIRED_ROLES
+        .iter()
+        .any(|role| !members.iter().any(|member| member.role == *role))
+    {
+        Err(BundleContractErrorV1::MemberMissing)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_selected_bundle_caps(
+    profile: &ConformanceProfileV1,
+    bundle: &ConformanceBundleV1,
+) -> Result<(), BundleContractErrorV1> {
+    let caps = &profile.evaluator_protocol.hard_caps;
+    let profile_member = bundle
+        .members
+        .iter()
+        .find(|member| member.role == BundleMemberRoleV1::Profile)
+        .ok_or(BundleContractErrorV1::MemberMissing)?;
+    if u64::try_from(profile_member.bytes.len()).unwrap_or(u64::MAX) > caps.max_profile_bytes
+        || value_depth(&manifest_value(&bundle.manifest)) > usize::from(caps.max_structural_nesting)
+    {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    caps.validate_case_count(u32::try_from(profile.fixtures.len()).unwrap_or(u32::MAX))
+        .map_err(|_| BundleContractErrorV1::MemberOutOfBounds)?;
+    if bundle.members.len() > usize::try_from(caps.max_bundle_members).unwrap_or(usize::MAX) {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    let mut total_bytes = 0_u64;
+    for member in &bundle.members {
+        if member.path.len() > usize::from(caps.max_member_path_bytes)
+            || u64::try_from(member.bytes.len()).unwrap_or(u64::MAX) > caps.max_member_bytes
+        {
+            return Err(BundleContractErrorV1::MemberOutOfBounds);
+        }
+        total_bytes = total_bytes
+            .checked_add(u64::try_from(member.bytes.len()).unwrap_or(u64::MAX))
+            .ok_or(BundleContractErrorV1::MemberOutOfBounds)?;
+    }
+    if total_bytes > caps.max_total_bundle_bytes {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    Ok(())
+}
+
 fn validate_member_path(path: &str) -> Result<(), BundleContractErrorV1> {
     if path.is_empty()
         || path.len() > MAX_MEMBER_PATH_BYTES
@@ -629,6 +1063,21 @@ fn members_strictly_ordered(values: &[BundleMemberV1]) -> bool {
             .all(|pair| pair[0].path.as_str() < pair[1].path.as_str())
 }
 
+fn value_depth(value: &Value) -> usize {
+    match value {
+        Value::Array(values) => 1 + values.iter().map(value_depth).max().unwrap_or_default(),
+        Value::Map(values) => {
+            1 + values
+                .iter()
+                .map(|(key, value)| value_depth(key).max(value_depth(value)))
+                .max()
+                .unwrap_or_default()
+        }
+        Value::Tag(_, value) => 1 + value_depth(value),
+        _ => 1,
+    }
+}
+
 fn manifest_value(manifest: &BundleManifestV1) -> Value {
     Value::Array(vec![
         Value::Text(manifest.magic.clone()),
@@ -644,6 +1093,7 @@ fn manifest_value(manifest: &BundleManifestV1) -> Value {
                         Value::Text(member.path.clone()),
                         Value::Integer(member.size_bytes.into()),
                         Value::Bytes(member.digest.to_vec()),
+                        Value::Integer(member.role.code().into()),
                     ])
                 })
                 .collect(),
@@ -709,9 +1159,46 @@ mod tests {
         [seed; 32]
     }
 
+    fn fixture_input_bytes(index: usize) -> Vec<u8> {
+        [
+            include_bytes!("../../../fixtures/conformance/inputs/artifact-positive.json")
+                .as_slice(),
+            include_bytes!("../../../fixtures/conformance/inputs/empirical-independent.json")
+                .as_slice(),
+            include_bytes!("../../../fixtures/conformance/inputs/gateway-resource-limit.json")
+                .as_slice(),
+            include_bytes!("../../../fixtures/conformance/inputs/knowledge-malformed.json")
+                .as_slice(),
+            include_bytes!("../../../fixtures/conformance/inputs/metric-downgrade.json").as_slice(),
+            include_bytes!("../../../fixtures/conformance/inputs/plugin-deletion.json").as_slice(),
+            include_bytes!("../../../fixtures/conformance/inputs/replay-negative.json").as_slice(),
+        ][index]
+            .to_vec()
+    }
+
+    fn fixture_expected_bytes(index: usize) -> Vec<u8> {
+        [
+            include_bytes!("../../../fixtures/conformance/expected/artifact-positive.json")
+                .as_slice(),
+            include_bytes!("../../../fixtures/conformance/expected/empirical-independent.json")
+                .as_slice(),
+            include_bytes!("../../../fixtures/conformance/expected/gateway-resource-limit.json")
+                .as_slice(),
+            include_bytes!("../../../fixtures/conformance/expected/knowledge-malformed.json")
+                .as_slice(),
+            include_bytes!("../../../fixtures/conformance/expected/metric-downgrade.json")
+                .as_slice(),
+            include_bytes!("../../../fixtures/conformance/expected/plugin-deletion.json")
+                .as_slice(),
+            include_bytes!("../../../fixtures/conformance/expected/replay-negative.json")
+                .as_slice(),
+        ][index]
+            .to_vec()
+    }
+
     fn profile_fixture(index: usize, claim_layer: ClaimLayerV1) -> FixtureDescriptorV1 {
-        let expected_bytes = format!("expected-result-{index}").into_bytes();
-        let input_bytes = format!("fixture-input-{index}").into_bytes();
+        let expected_bytes = fixture_expected_bytes(index);
+        let input_bytes = fixture_input_bytes(index);
         FixtureDescriptorV1 {
             case_id: format!("case-{index:02}"),
             mandatory: true,
@@ -842,7 +1329,7 @@ mod tests {
         let mut expected_results = Vec::new();
         for (index, fixture) in profile.fixtures.iter().enumerate() {
             for input in &fixture.inputs {
-                let input_bytes = format!("fixture-input-{index}").into_bytes();
+                let input_bytes = fixture_input_bytes(index);
                 members.push(BundleMemberV1::new(
                     fixture_input_path(
                         &fixture.case_id,
@@ -875,6 +1362,45 @@ mod tests {
             assert!(fixture.modes.contains(&execution_mode));
             members.push(member);
         }
+        members.extend([
+            BundleMemberV1::supporting(
+                "support/normative-requirements.md",
+                include_bytes!("../../../fixtures/conformance/support/normative-requirements.md")
+                    .to_vec(),
+                BundleMemberRoleV1::NormativeSpecification,
+            ),
+            BundleMemberV1::supporting(
+                "support/schema-cpf1-v1.cddl",
+                include_bytes!("../../../fixtures/conformance/support/schema-cpf1-v1.cddl")
+                    .to_vec(),
+                BundleMemberRoleV1::Schema,
+            ),
+            BundleMemberV1::supporting(
+                "support/LICENSE",
+                include_bytes!("../../../fixtures/conformance/support/LICENSE").to_vec(),
+                BundleMemberRoleV1::Licence,
+            ),
+            BundleMemberV1::supporting(
+                "support/NOTICE",
+                include_bytes!("../../../fixtures/conformance/support/NOTICE").to_vec(),
+                BundleMemberRoleV1::Notice,
+            ),
+            BundleMemberV1::supporting(
+                "support/sbom.json",
+                include_bytes!("../../../fixtures/conformance/support/sbom.json").to_vec(),
+                BundleMemberRoleV1::Sbom,
+            ),
+            BundleMemberV1::supporting(
+                "support/provenance.json",
+                include_bytes!("../../../fixtures/conformance/support/provenance.json").to_vec(),
+                BundleMemberRoleV1::Provenance,
+            ),
+            BundleMemberV1::supporting(
+                "support/limitations.md",
+                include_bytes!("../../../fixtures/conformance/support/limitations.md").to_vec(),
+                BundleMemberRoleV1::Limitations,
+            ),
+        ]);
         Ok((members, expected_results))
     }
 
@@ -1017,6 +1543,7 @@ mod tests {
                 path: PROFILE_MEMBER_PATH.to_owned(),
                 size_bytes: 1,
                 digest: [2; 32],
+                role: BundleMemberRoleV1::Profile,
             }],
             expected_results: vec![BundleExpectedResultV1 {
                 case_id: "case".to_owned(),
@@ -1075,6 +1602,75 @@ mod tests {
             *blake3::hash(&digest_input).as_bytes()
         );
         assert_eq!(bundle.manifest.profile_digest, profile.profile_digest);
+        Ok(())
+    }
+
+    #[test]
+    fn public_archive_codec_round_trips_both_execution_modes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile = profile();
+        for mode in [BundleModeV1::Local, BundleModeV1::AirGapped] {
+            let bundle = signed_bundle(&profile, mode)?;
+            let encoded = bundle.to_canonical_cbor()?;
+            let decoded = ConformanceBundleV1::from_canonical_cbor(&encoded)?;
+            assert_eq!(decoded, bundle);
+            assert_eq!(decoded.to_canonical_cbor()?, encoded);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn public_archive_decoder_rejects_noncanonical_and_unknown_roles(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = signed_bundle(&profile(), BundleModeV1::Local)?;
+        let encoded = bundle.to_canonical_cbor()?;
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&trailing),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+
+        let mut invalid_role = bundle_value(&bundle);
+        if let Value::Array(fields) = &mut invalid_role {
+            if let Value::Array(members) = &mut fields[3] {
+                if let Value::Array(member) = &mut members[0] {
+                    member[2] = Value::Integer(99_u64.into());
+                }
+            }
+        }
+        let invalid_role_bytes = canonical::encode(&invalid_role)?.as_slice().to_vec();
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&invalid_role_bytes),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn required_support_artifacts_and_selected_caps_are_enforced(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile = profile();
+        let mut missing_support = signed_bundle(&profile, BundleModeV1::Local)?;
+        missing_support
+            .members
+            .retain(|member| member.role != BundleMemberRoleV1::Schema);
+        missing_support.rebuild_member_descriptors();
+        assert_eq!(
+            missing_support.validate(),
+            Err(BundleContractErrorV1::MemberMissing)
+        );
+
+        let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
+        let mut limited_profile = profile;
+        limited_profile
+            .evaluator_protocol
+            .hard_caps
+            .max_bundle_members = 1;
+        assert_eq!(
+            validate_selected_bundle_caps(&limited_profile, &bundle),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
         Ok(())
     }
 
@@ -1622,6 +2218,7 @@ mod tests {
                 path: member.path.clone(),
                 size_bytes: member.bytes.len() as u64,
                 digest: member.digest,
+                role: member.role,
             })
             .collect();
         let expected_error = validate_expected_results(&network_profile, &manifest, &members);
