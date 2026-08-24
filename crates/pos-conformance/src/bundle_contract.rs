@@ -22,6 +22,7 @@ const MAX_MEMBER_PATH_BYTES: usize = 256;
 const MAX_MEMBERS: usize = 65_536;
 const MAX_MEMBER_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TOTAL_BUNDLE_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_STRUCTURAL_NESTING: u8 = 32;
 const PROFILE_MEMBER_PATH: &str = "profile/CPF1.cbor";
 const INPUT_MEMBER_PREFIX: &str = "inputs/";
 
@@ -437,7 +438,7 @@ impl ConformanceBundleV1 {
             }
         }
         validate_total_bytes(total_bytes)?;
-        validate_supporting_members(&self.members)?;
+        validate_supporting_members(&profile, &self.members)?;
         validate_selected_bundle_caps(&profile, self)?;
         validate_expected_results(&profile, &self.manifest, &self.members)
     }
@@ -499,6 +500,7 @@ impl ConformanceBundleV1 {
         if bytes.is_empty() || bytes.len() as u64 > MAX_TOTAL_BUNDLE_BYTES {
             return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
         }
+        preflight_archive(bytes)?;
         let value = ciborium::from_reader(Cursor::new(bytes))
             .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
         let canonical_bytes = encode_archive_value(&value)
@@ -573,6 +575,99 @@ fn encode_archive_value(value: &Value) -> Result<Vec<u8>, BundleContractErrorV1>
     ciborium::into_writer(value, &mut bytes)
         .map(|()| bytes)
         .map_err(|_| BundleContractErrorV1::EncodingFailed)
+}
+
+fn preflight_archive(bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
+    fn length(
+        bytes: &[u8],
+        index: &mut usize,
+        additional: u8,
+    ) -> Result<u64, BundleContractErrorV1> {
+        let width = match additional {
+            value @ 0..=23 => return Ok(u64::from(value)),
+            24 => 1,
+            25 => 2,
+            26 => 4,
+            27 => 8,
+            _ => return Err(BundleContractErrorV1::ArchiveEncodingInvalid),
+        };
+        let end = index
+            .checked_add(width)
+            .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
+        let encoded = bytes
+            .get(*index..end)
+            .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
+        *index = end;
+        let mut value = [0_u8; 8];
+        value[8 - width..].copy_from_slice(encoded);
+        Ok(u64::from_be_bytes(value))
+    }
+
+    fn item(bytes: &[u8], index: &mut usize, depth: u8) -> Result<(), BundleContractErrorV1> {
+        if depth > MAX_STRUCTURAL_NESTING {
+            return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+        }
+        let initial = *bytes
+            .get(*index)
+            .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
+        *index += 1;
+        let major = initial >> 5;
+        let item_length = length(bytes, index, initial & 0x1f)?;
+        match major {
+            0 | 1 => Ok(()),
+            2 => {
+                if item_length > MAX_MEMBER_BYTES {
+                    return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+                }
+                let end = index
+                    .checked_add(usize::try_from(item_length).unwrap_or(usize::MAX))
+                    .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
+                *index = end;
+                if end <= bytes.len() {
+                    Ok(())
+                } else {
+                    Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+                }
+            }
+            3 => {
+                if item_length > u64::try_from(MAX_MEMBER_PATH_BYTES).unwrap_or(u64::MAX) {
+                    return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+                }
+                let end = index
+                    .checked_add(usize::try_from(item_length).unwrap_or(usize::MAX))
+                    .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
+                *index = end;
+                if end <= bytes.len() {
+                    Ok(())
+                } else {
+                    Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+                }
+            }
+            4 => {
+                if item_length > u64::try_from(MAX_MEMBERS).unwrap_or(u64::MAX) {
+                    return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+                }
+                for _ in 0..item_length {
+                    item(bytes, index, depth + 1)?;
+                }
+                Ok(())
+            }
+            5 | 6 => Err(BundleContractErrorV1::ArchiveEncodingInvalid),
+            7 => match initial & 0x1f {
+                20..=22 => Ok(()),
+                _ => Err(BundleContractErrorV1::ArchiveEncodingInvalid),
+            },
+            _ => Err(BundleContractErrorV1::ArchiveEncodingInvalid),
+        }
+    }
+
+    let mut index = 0;
+    item(bytes, &mut index, 0)?;
+    if index == bytes.len() {
+        Ok(())
+    } else {
+        Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+    }
 }
 
 fn validate_archive_caps(
@@ -973,7 +1068,10 @@ fn expected_identity(values: &[BundleExpectedResultV1]) -> ExpectedIdentity<'_> 
 
 type ExpectedIdentity<'a> = Vec<(&'a str, ClaimLayerV1, [u8; 32], &'a str, [u8; 32])>;
 
-fn validate_supporting_members(members: &[BundleMemberV1]) -> Result<(), BundleContractErrorV1> {
+fn validate_supporting_members(
+    profile: &ConformanceProfileV1,
+    members: &[BundleMemberV1],
+) -> Result<(), BundleContractErrorV1> {
     const REQUIRED_ROLES: [BundleMemberRoleV1; 7] = [
         BundleMemberRoleV1::NormativeSpecification,
         BundleMemberRoleV1::Schema,
@@ -988,8 +1086,55 @@ fn validate_supporting_members(members: &[BundleMemberV1]) -> Result<(), BundleC
         .any(|role| !members.iter().any(|member| member.role == *role))
     {
         Err(BundleContractErrorV1::MemberMissing)
+    } else if members
+        .iter()
+        .filter(|member| member.role.is_supporting())
+        .any(|member| !support_digest_is_bound(profile, member.role, &member.digest))
+    {
+        Err(BundleContractErrorV1::MemberDigestMismatch)
     } else {
         Ok(())
+    }
+}
+
+fn support_digest_is_bound(
+    profile: &ConformanceProfileV1,
+    role: BundleMemberRoleV1,
+    digest: &[u8; 32],
+) -> bool {
+    match role {
+        BundleMemberRoleV1::NormativeSpecification => *digest == profile.normative_spec_digest,
+        BundleMemberRoleV1::Schema => profile.public_schema_digests.contains(digest),
+        BundleMemberRoleV1::Licence => profile.fixtures.iter().any(|fixture| {
+            let licence_identity = format!("{}\n", fixture.provenance.licence_id);
+            *digest == *blake3::hash(licence_identity.as_bytes()).as_bytes()
+        }),
+        BundleMemberRoleV1::Notice => profile
+            .fixtures
+            .iter()
+            .any(|fixture| *digest == fixture.provenance.notices_digest),
+        BundleMemberRoleV1::Sbom => profile
+            .fixtures
+            .iter()
+            .any(|fixture| *digest == fixture.provenance.sbom_digest),
+        BundleMemberRoleV1::Provenance => {
+            *digest == profile.provenance_digest
+                || profile.fixtures.iter().any(|fixture| {
+                    *digest == fixture.provenance.source_digest
+                        || *digest == fixture.provenance.build_digest
+                        || *digest == fixture.provenance.publication_review_digest
+                })
+        }
+        BundleMemberRoleV1::Limitations => {
+            *digest == profile.limitations_digest
+                || profile
+                    .fixtures
+                    .iter()
+                    .any(|fixture| *digest == fixture.provenance.limitations_digest)
+        }
+        BundleMemberRoleV1::FixtureInput
+        | BundleMemberRoleV1::ExpectedResult
+        | BundleMemberRoleV1::Profile => false,
     }
 }
 
@@ -1321,6 +1466,42 @@ mod tests {
             stable_evidence: Vec::new(),
             profile_digest: [0; 32],
         };
+        let normative_digest = *blake3::hash(include_bytes!(
+            "../../../fixtures/conformance/support/normative-requirements.md"
+        ))
+        .as_bytes();
+        let schema_digest = *blake3::hash(include_bytes!(
+            "../../../fixtures/conformance/support/schema-cpf1-v1.cddl"
+        ))
+        .as_bytes();
+        let notice_digest = *blake3::hash(include_bytes!(
+            "../../../fixtures/conformance/support/NOTICE"
+        ))
+        .as_bytes();
+        let sbom_digest = *blake3::hash(include_bytes!(
+            "../../../fixtures/conformance/support/sbom.json"
+        ))
+        .as_bytes();
+        let provenance_digest = *blake3::hash(include_bytes!(
+            "../../../fixtures/conformance/support/provenance.json"
+        ))
+        .as_bytes();
+        let limitations_digest = *blake3::hash(include_bytes!(
+            "../../../fixtures/conformance/support/limitations.md"
+        ))
+        .as_bytes();
+        profile.normative_spec_digest = normative_digest;
+        profile.public_schema_digests = vec![schema_digest];
+        profile.limitations_digest = limitations_digest;
+        profile.provenance_digest = provenance_digest;
+        for fixture in &mut profile.fixtures {
+            fixture.provenance.notices_digest = notice_digest;
+            fixture.provenance.sbom_digest = sbom_digest;
+            fixture.provenance.source_digest = provenance_digest;
+            fixture.provenance.build_digest = provenance_digest;
+            fixture.provenance.publication_review_digest = provenance_digest;
+            fixture.provenance.limitations_digest = limitations_digest;
+        }
         profile.profile_digest = profile.digest();
         profile
     }
@@ -1648,9 +1829,44 @@ mod tests {
                 }
             }
         }
-        let invalid_role_bytes = canonical::encode(&invalid_role)?.as_slice().to_vec();
+        let invalid_role_bytes = encode_archive_value(&invalid_role)?;
         assert_eq!(
             ConformanceBundleV1::from_canonical_cbor(&invalid_role_bytes),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn archive_preflight_rejects_unsafe_shapes_before_decode(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for bytes in [
+            vec![0x18],
+            vec![0x1f],
+            vec![0x19, 0, 0x17],
+            vec![0x1a, 0, 0, 0, 0x17],
+            vec![0x1b, 0, 0, 0, 0, 0, 0, 0, 0x17],
+            vec![0x58, 1, 0],
+            vec![0x78, 1, b'a'],
+            vec![0xa0],
+            vec![0xc0],
+            vec![0xfa, 0, 0, 0, 0],
+            vec![0x9a, 0, 1, 0, 1],
+            vec![0x7a, 0, 0, 1, 1],
+            vec![0x5b, 0, 0, 0, 0, 4, 0, 0, 1],
+        ] {
+            assert_eq!(
+                ConformanceBundleV1::from_canonical_cbor(&bytes),
+                Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+            );
+        }
+        let mut deeply_nested = Value::Null;
+        for _ in 0..=usize::from(MAX_STRUCTURAL_NESTING) {
+            deeply_nested = Value::Array(vec![deeply_nested]);
+        }
+        let deeply_nested_bytes = encode_archive_value(&deeply_nested)?;
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&deeply_nested_bytes),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
         );
         Ok(())
@@ -1668,6 +1884,23 @@ mod tests {
         assert_eq!(
             missing_support.validate(),
             Err(BundleContractErrorV1::MemberMissing)
+        );
+
+        let mut unbound_support = signed_bundle(&profile, BundleModeV1::Local)?;
+        let schema_index = unbound_support
+            .members
+            .iter()
+            .position(|member| member.role == BundleMemberRoleV1::Schema)
+            .ok_or("missing schema support member")?;
+        unbound_support.members[schema_index] = BundleMemberV1::supporting(
+            "support/schema-cpf1-v1.cddl",
+            b"unbound schema".to_vec(),
+            BundleMemberRoleV1::Schema,
+        );
+        unbound_support.rebuild_member_descriptors();
+        assert_eq!(
+            unbound_support.validate(),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
         );
 
         let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
