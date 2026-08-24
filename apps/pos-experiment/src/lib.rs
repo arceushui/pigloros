@@ -5745,6 +5745,42 @@ mod coverage_entrypoints {
     }
 
     #[test]
+    fn resume_rejects_host_closure_when_the_gate_is_unavailable() {
+        let database = ok(tempfile::NamedTempFile::new());
+        let path = ok(database
+            .path()
+            .to_str()
+            .ok_or("coverage missing-gate path is not utf8"))
+        .to_owned();
+        let config = StoreConfig::Sqlite { path };
+        let timeline = {
+            let mut store = ok(open_store(config.clone()));
+            let timeline = ok(store.create_timeline("coverage-missing-gate-resume"));
+            ok(store.append(
+                timeline.id(),
+                &[EventDraft::new(
+                    EntityId::new(),
+                    Kind::new(EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE),
+                    pos_core::CanonicalBytes::from_static(EXPERIMENT_CONSENT_TIMELINE_MARKER),
+                )],
+            ));
+            timeline.id()
+        };
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "coverage-missing-gate-resume".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: config,
+        });
+        experiment.registry.consent_gate = None;
+        assert!(matches!(
+            experiment.resume(timeline),
+            Err(ExperimentError::Runtime(
+                RuntimeError::ConsentOperationUnavailable
+            ))
+        ));
+    }
+
+    #[test]
     fn resume_applies_host_closure_to_a_bound_gate() {
         let database = ok(tempfile::NamedTempFile::new());
         let path = ok(database
@@ -5791,6 +5827,23 @@ mod coverage_entrypoints {
                 emitted_events: 1,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn revocation_boundary_rejects_missing_gate_before_append() {
+        let mut experiment = Experiment::new(config(
+            "coverage-missing-gate-revocation",
+            StopCondition::MaxTicks(1),
+        ));
+        experiment.registry.consent_gate = None;
+        let mut session = ok(experiment.start());
+        session.revoke_consent_at_boundary();
+        assert!(matches!(
+            session.step_tick(),
+            Err(ExperimentError::Runtime(
+                RuntimeError::ConsentOperationUnavailable
+            ))
         ));
     }
 
