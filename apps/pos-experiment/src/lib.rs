@@ -6602,6 +6602,7 @@ mod coverage_entrypoints {
         ));
         drop(store);
 
+        ok(session.step_tick());
         assert!(session.fork("coverage-session-protected-child").is_err());
     }
 
