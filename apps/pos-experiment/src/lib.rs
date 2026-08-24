@@ -6695,7 +6695,7 @@ mod coverage_entrypoints {
             timeline_id,
             &[EventDraft::new(
                 EntityId::new(),
-                Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+                Kind::new("retention.policy.v1"),
                 pos_core::CanonicalBytes::from_static(b"protected"),
             )],
         ));
@@ -6811,7 +6811,7 @@ mod coverage_entrypoints {
             timeline.id(),
             &[EventDraft::new(
                 EntityId::new(),
-                Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+                Kind::new("retention.policy.v1"),
                 pos_core::CanonicalBytes::from_static(b"host-owned"),
             )],
         ));
