@@ -5695,7 +5695,9 @@ mod tests {
             .test_ok();
         assert!(matches!(
             resumed.projection_state_for_reducer("missing", subject, &token, current_now_secs()),
-            Err(ExperimentError::ConsentRevoked)
+            Err(ExperimentError::Runtime(RuntimeError::Consent(
+                pos_core::ConsentError::Revoked
+            )))
         ));
     }
 
