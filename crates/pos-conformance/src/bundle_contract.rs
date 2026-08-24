@@ -3592,8 +3592,8 @@ mod coverage_entrypoints {
             super::archive_digest::<32>(&Value::Bytes(Vec::new())),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
         );
-        for code in 0..=9 {
-            assert_eq!(super::decode_member_role(code).is_ok(), code < 9);
+        for code in 0..=10 {
+            assert_eq!(super::decode_member_role(code).is_ok(), code < 10);
         }
         for code in 0..=2 {
             assert_eq!(super::decode_bundle_mode(code).is_ok(), code < 2);
