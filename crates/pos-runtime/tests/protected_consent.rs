@@ -5,7 +5,8 @@ use pos_core::{
     crypto::Hash,
     event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
     ids::{EntityId, EventId, TimelineId},
-    ConsentAuthority, ConsentCapabilityToken, ConsentError, ConsentGate, ConsentGranted,
+    Capability, ConsentAuthority, ConsentCapabilityToken, ConsentError, ConsentGate,
+    ConsentGranted, Plugin, PluginId, Reducer, State,
 };
 use pos_runtime::{
     Driver, ObservationView, PluginRegistry, RuntimeError, StepOutput, TimelineHistorySegment,
@@ -13,6 +14,7 @@ use pos_runtime::{
 use std::{
     fmt::Debug,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 fn test_ok<T, E: Debug>(result: Result<T, E>) -> T {
@@ -95,6 +97,152 @@ struct EmptyDriver;
 impl Driver for EmptyDriver {
     fn name(&self) -> &'static str {
         "empty-public-seam"
+    }
+
+    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
+        Ok(StepOutput::empty())
+    }
+}
+
+struct ProjectionPlugin {
+    id: PluginId,
+}
+
+impl Plugin for ProjectionPlugin {
+    fn id(&self) -> PluginId {
+        self.id
+    }
+
+    fn name(&self) -> &'static str {
+        "projection-public-seam"
+    }
+
+    fn capability(&self) -> Capability {
+        Capability {
+            owned_event_types: vec![Kind::new("projection.public")],
+            owned_entity_kinds: Vec::new(),
+            has_driver: false,
+            has_reducer: true,
+        }
+    }
+}
+
+struct CountingReducer;
+
+impl Reducer for CountingReducer {
+    fn initial(&self) -> State {
+        State::new()
+    }
+
+    fn apply(&self, state: &mut State, _: &Event) {
+        let count = state
+            .get("count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        state.set("count", serde_json::Value::Number((count + 1).into()));
+    }
+}
+
+fn projection_event(entity: EntityId, event_type: &str, seq: u64) -> Event {
+    Event {
+        id: EventId::new(),
+        entity,
+        event_type: Kind::new(event_type),
+        payload: CanonicalBytes::from_static(b"projection"),
+        wall_time: WallTime::from_micros(1),
+        seq: Seq::from_u64(seq),
+        causation_id: None,
+        correlation_id: None,
+        schema_version: SchemaVersion::V1,
+        signature: None,
+        payload_hash: Hash::from_bytes([0; 32]),
+    }
+}
+
+struct RestoreTrackingDriver {
+    aborts: Arc<Mutex<u32>>,
+    commits: Arc<Mutex<u32>>,
+}
+
+impl Driver for RestoreTrackingDriver {
+    fn name(&self) -> &'static str {
+        "restore-tracking"
+    }
+
+    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
+        Ok(StepOutput::empty())
+    }
+
+    fn commit_restore_from_history(&mut self) {
+        *self
+            .commits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+    }
+
+    fn abort_restore_from_history(&mut self) {
+        *self
+            .aborts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+    }
+}
+
+struct RestoreFailureDriver {
+    aborts: Arc<Mutex<u32>>,
+}
+
+impl Driver for RestoreFailureDriver {
+    fn name(&self) -> &'static str {
+        "restore-failure"
+    }
+
+    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
+        Ok(StepOutput::empty())
+    }
+
+    fn stage_restore_from_history(
+        &mut self,
+        _: &pos_runtime::DriverRecoveryEvidence,
+    ) -> Result<(), RuntimeError> {
+        Err(RuntimeError::InvalidRecoveryEvidence {
+            reason: "public restore failure",
+        })
+    }
+
+    fn abort_restore_from_history(&mut self) {
+        *self
+            .aborts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+    }
+}
+
+struct PanickingRestoreDriver;
+
+impl Driver for PanickingRestoreDriver {
+    fn name(&self) -> &'static str {
+        "restore-panic"
+    }
+
+    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
+        Ok(StepOutput::empty())
+    }
+
+    fn commit_restore_from_history(&mut self) {
+        std::panic::resume_unwind(Box::new("public restore commit panic"));
+    }
+}
+
+struct OverflowCadencedDriver;
+
+impl Driver for OverflowCadencedDriver {
+    fn name(&self) -> &'static str {
+        "overflow-cadence"
+    }
+
+    fn tick_interval(&self) -> Duration {
+        Duration::from_nanos(1)
     }
 
     fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
@@ -621,4 +769,123 @@ fn public_cadence_executes_driver_output_through_the_consent_boundary() {
 
     let drafts = test_ok(registry.tick_cadenced(timeline, 1));
     assert!(drafts.is_empty());
+}
+
+#[test]
+fn public_registry_gate_projection_and_control_marker_seams_are_distinguishable() {
+    let unbound = PluginRegistry::new().without_consent_gate();
+    assert!(unbound.clone_consent_gate().is_none());
+    let authority = ConsentAuthority::new();
+    let protected_token =
+        authority.record_grant_on_timeline(TimelineId::new(), &grant(EntityId::new()));
+    assert!(matches!(
+        test_err(unbound.step_all_anchored_protected(
+            TimelineId::new(),
+            Seq::ZERO,
+            protected_token,
+            1,
+            &[],
+        )),
+        RuntimeError::ConsentOperationUnavailable
+    ));
+
+    let timeline = TimelineId::new();
+    let subject = EntityId::new();
+    let unrelated = EntityId::new();
+    let authority = ConsentAuthority::new();
+    let token = authority.record_grant_on_timeline(timeline, &grant(subject));
+    let mut registry = PluginRegistry::new().with_consent_authority(authority);
+    test_ok(registry.register(
+        &ProjectionPlugin {
+            id: PluginId::new(),
+        },
+        Some(Box::new(CountingReducer)),
+        None,
+    ));
+
+    registry.fold_events(&[
+        projection_event(subject, "projection.public", 1),
+        projection_event(subject, "projection.public", 2),
+        projection_event(unrelated, "projection.public", 3),
+        projection_event(subject, pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE, 4),
+    ]);
+    let projections = test_ok(registry.into_authorized_projections(
+        timeline,
+        Seq::from_u64(4),
+        1,
+        Some(&token),
+        None,
+    ));
+    assert_eq!(
+        projections
+            .state_for_reducer("projection-public-seam", &subject)
+            .and_then(|state| state.get("count"))
+            .and_then(serde_json::Value::as_u64),
+        Some(2)
+    );
+    assert!(projections
+        .state_for_reducer("projection-public-seam", &unrelated)
+        .is_none());
+}
+
+#[test]
+fn public_restore_failure_aborts_prior_driver_and_reports_commit_panic() {
+    let timeline = TimelineId::new();
+    let tracking_aborts = Arc::new(Mutex::new(0));
+    let tracking_commits = Arc::new(Mutex::new(0));
+    let failing_aborts = Arc::new(Mutex::new(0));
+    let mut registry = PluginRegistry::new();
+    registry.register_driver(Box::new(RestoreTrackingDriver {
+        aborts: Arc::clone(&tracking_aborts),
+        commits: Arc::clone(&tracking_commits),
+    }));
+    registry.register_driver(Box::new(RestoreFailureDriver {
+        aborts: Arc::clone(&failing_aborts),
+    }));
+    test_ok(registry.step_all(timeline));
+
+    assert!(matches!(
+        registry.restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[]),
+        Err(RuntimeError::InvalidRecoveryEvidence { .. })
+    ));
+    assert_eq!(
+        *tracking_aborts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        1
+    );
+    assert_eq!(
+        *failing_aborts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        1
+    );
+    assert_eq!(
+        *tracking_commits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        0
+    );
+
+    let mut panicking = PluginRegistry::new();
+    panicking.register_driver(Box::new(PanickingRestoreDriver));
+    test_ok(panicking.step_all(timeline));
+    assert!(matches!(
+        panicking.restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[]),
+        Err(RuntimeError::DriverRestorePanicked { .. })
+    ));
+}
+
+#[test]
+fn public_cadence_and_empty_registry_cover_ready_and_overflow_boundaries() {
+    let timeline = TimelineId::new();
+    assert!(test_ok(PluginRegistry::new().step_all(timeline)).is_empty());
+
+    let mut registry = PluginRegistry::new();
+    registry.register_driver(Box::new(OverflowCadencedDriver));
+    assert!(test_ok(registry.tick_cadenced(timeline, u128::MAX)).is_empty());
+    assert!(matches!(
+        test_err(registry.tick_cadenced(timeline, u128::MAX)),
+        RuntimeError::CadenceOverflow { .. }
+    ));
 }

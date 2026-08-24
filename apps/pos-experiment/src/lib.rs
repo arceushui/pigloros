@@ -6470,6 +6470,8 @@ mod coverage_entrypoints {
             session.step_tick(),
             Ok(TickOutcome::Advanced { .. })
         ));
+        session.revoke_consent_at_boundary();
+        session.revoke_consent_for_subject_at_boundary(revoked_subject);
         assert!(matches!(session.step_tick(), Ok(TickOutcome::Stopped)));
     }
 
@@ -6840,6 +6842,10 @@ mod backtest_tests {
             "lift_vs_persistence should be ~0, got {}",
             result.lift_vs_persistence
         );
+
+        let (_, _, _, unequal_average_lift) = backtest_metrics(2, 3, 4, 2);
+        let expected_unequal_average_lift = (0.5_f64 / 1.5_f64) - 1.0_f64;
+        assert!((unequal_average_lift - expected_unequal_average_lift).abs() < 1e-10);
     }
 
     // ---------- helper structs for error-propagation tests -------------------
