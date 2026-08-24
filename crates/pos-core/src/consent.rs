@@ -16,8 +16,8 @@ use std::{
 use ciborium::Value;
 
 use crate::{
-    event::{CanonicalBytes, Kind},
     erasure::ErasureReplayClaimV1,
+    event::{CanonicalBytes, Kind},
     ids::{EntityId, TimelineId},
 };
 
@@ -3487,7 +3487,8 @@ mod tests {
             ErasureReplayClaimV1::StructuralOnly
         );
         assert_eq!(
-            destroyed.weaken_replay_claim(ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews),
+            destroyed
+                .weaken_replay_claim(ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews),
             ErasureReplayClaimV1::StructuralOnly
         );
         for claim in [
