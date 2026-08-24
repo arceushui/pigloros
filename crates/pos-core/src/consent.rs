@@ -2180,7 +2180,7 @@ mod tests {
         let authority = ConsentAuthority::new();
         let grant = sample_granted();
         let (timeline, token) = record_test_grant(&authority, &grant);
-        let mut changed = token.clone();
+        let mut changed = token;
         changed.fork_permitted = !changed.fork_permitted;
 
         assert_eq!(
