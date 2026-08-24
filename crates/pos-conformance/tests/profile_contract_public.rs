@@ -7,7 +7,8 @@ use pos_conformance::{
     EvaluatorOutputCapabilityV1, EvaluatorProtocolV1, EvaluatorRequestV1, ExecutionModeV1,
     ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1, FixtureInputMemberV1,
     FixtureProvenanceV1, ImplementationIdentityV1, IndependenceEvidenceV1,
-    IndependenceRequirementsV1, RedactionStateV1, ReplayClaimV1, SubjectAdapterKindV1,
+    IndependenceRequirementsV1, ProfileCaseOutcomeV1, RedactionStateV1, ReplayClaimV1,
+    SubjectAdapterKindV1, VerificationOutcomeV1,
 };
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -225,7 +226,7 @@ pub mod fixtures {
 
     #[must_use]
     pub fn profile(lifecycle: u64, with_stable_evidence: bool) -> Vec<u8> {
-        encode(&Value::Array(vec![
+        let mut fields = vec![
             text("CPF1"),
             uint(1),
             text("pigloros.w8.external"),
@@ -242,13 +243,14 @@ pub mod fixtures {
             bytes(18),
             bytes(19),
             Value::Null,
-            if with_stable_evidence {
-                Value::Array(vec![stable_evidence()])
-            } else {
-                Value::Array(vec![])
-            },
-            Value::Bytes(vec![1]),
-        ]))
+        ];
+        if with_stable_evidence {
+            // Stable evidence is a sidecar, not an undocumented CPF1 field.
+            // Keep this optional fixture as an explicit extra-field rejection.
+            fields.push(Value::Array(vec![stable_evidence()]));
+        }
+        fields.push(Value::Bytes(vec![1]));
+        encode(&Value::Array(fields))
     }
 
     #[must_use]
@@ -423,7 +425,6 @@ fn profile_for_digest() -> ConformanceProfileV1 {
         limitations_digest: [19; 32],
         provenance_digest: [20; 32],
         previous_profile_digest: None,
-        stable_evidence: vec![],
         profile_digest: [0; 32],
     };
     profile.profile_digest = profile.digest();
@@ -518,6 +519,29 @@ fn public_profile_digest_normalizes_stable_lifecycle_to_selected_identity() {
     stable.lifecycle = pos_conformance::ProfileLifecycleV1::Stable;
     stable.profile_digest = stable.digest();
     assert_eq!(stable.digest(), candidate.digest());
+}
+
+#[test]
+fn public_stable_case_outcome_type_can_be_constructed_externally() {
+    let outcome = ProfileCaseOutcomeV1 {
+        case_id: "ART-001".to_owned(),
+        fixture_digest: [1; 32],
+        execution_profile_digest: [2; 32],
+        mode: ExecutionModeV1::Local,
+        claim_layer: ClaimLayerV1::ArtifactIntegrity,
+        outcome: CaseOutcomeStatusV1::Pass,
+        verification_outcome: VerificationOutcomeV1::VerifiedExact,
+        divergence_kind: None,
+        first_coordinate: None,
+        expected_digest: Some([3; 32]),
+        actual_digest: Some([3; 32]),
+        expected_error: None,
+        actual_error: None,
+        replay_claim: ReplayClaimV1::Exact,
+        redaction_state: RedactionStateV1::None,
+        provenance_digest: [4; 32],
+    };
+    assert_eq!(outcome.case_id, "ART-001");
 }
 
 #[test]

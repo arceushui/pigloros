@@ -335,7 +335,7 @@ pub struct StableImplementationEvidenceV1 {
     pub independence: IndependenceEvidenceV1,
     pub evaluator_protocol_digest: [u8; 32],
     pub report: ConformanceReportV1,
-    pub case_outcomes: Vec<CaseOutcomeV1>,
+    pub case_outcomes: Vec<ProfileCaseOutcomeV1>,
     /// Authenticated attribution for this evidence. Stable evidence is not
     /// accepted from the implementation's self-authored metadata alone.
     pub attestation: StableEvidenceAttestationV1,
@@ -358,9 +358,10 @@ pub struct StableEvidenceAttestationV1 {
 
 /// Immutable CPF1 public contract. It deliberately carries no aggregate pass flag.
 ///
-/// `profile_digest` commits the selected profile and a nested digest of attached
-/// Stable evidence. Signed Stable reports bind the evidence-independent selected
-/// profile identity so their signature does not become recursively self-referential.
+/// `profile_digest` commits the selected profile and a nested digest of the
+/// separately transported Stable-evidence sidecar. Signed Stable reports bind
+/// the evidence-independent selected profile identity so their signature does
+/// not become recursively self-referential.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConformanceProfileV1 {
     pub profile_id: String,
@@ -377,6 +378,8 @@ pub struct ConformanceProfileV1 {
     pub limitations_digest: [u8; 32],
     pub provenance_digest: [u8; 32],
     pub previous_profile_digest: Option<[u8; 32]>,
+    /// Stable-promotion evidence is a signed sidecar, not a CPF1 wire field.
+    /// It must be supplied when validating or decoding a Stable profile.
     pub stable_evidence: Vec<StableImplementationEvidenceV1>,
     pub profile_digest: [u8; 32],
 }
@@ -473,7 +476,11 @@ impl ConformanceProfileV1 {
             })
     }
 
-    /// Decode and validate a Stable profile against an external root policy.
+    /// Decode and validate a profile without attaching Stable sidecar evidence.
+    ///
+    /// Stable profiles require [`Self::from_canonical_cbor_with_stable_evidence`]
+    /// so their separately transported promotion evidence is available for
+    /// validation and digest verification.
     ///
     /// # Errors
     ///
@@ -488,6 +495,35 @@ impl ConformanceProfileV1 {
         decode_value(bytes)
             .and_then(|value| decode_profile(&value))
             .and_then(|profile| profile.validate_with_trust_policy(policy).map(|()| profile))
+    }
+
+    /// Decode a Stable CPF1 record together with its separately transported
+    /// signed promotion evidence and external trust policy.
+    ///
+    /// Stable evidence is intentionally a sidecar: ADR-062's exact CPF1 wire
+    /// record does not contain an undocumented evidence field. The profile
+    /// digest still commits the canonical sidecar so the two artifacts cannot
+    /// be substituted independently.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed safe error when the profile, sidecar evidence, or
+    /// external policy is invalid or the sidecar does not match the profile
+    /// digest.
+    pub fn from_canonical_cbor_with_stable_evidence(
+        bytes: &[u8],
+        stable_evidence: Vec<StableImplementationEvidenceV1>,
+        policy: &TrustedRootPolicyV1,
+    ) -> Result<Self, ConformanceContractError> {
+        if bytes.len() > MAX_PROFILE_BYTES {
+            return Err(ConformanceContractError::FieldOutOfBounds);
+        }
+        decode_value(bytes).and_then(|value| {
+            decode_profile(&value).and_then(|mut profile| {
+                profile.stable_evidence = stable_evidence;
+                profile.validate_with_trust_policy(policy).map(|()| profile)
+            })
+        })
     }
 
     /// Validate a profile, requiring a trusted-root policy for Stable profiles.
@@ -1031,7 +1067,14 @@ fn validate_stable_evidence(
     profile: &ConformanceProfileV1,
     policy: Option<&TrustedRootPolicyV1>,
 ) -> Result<(), ConformanceContractError> {
-    if profile.stable_evidence.len() != 2 {
+    if !profile
+        .independence_requirements
+        .technical_independence_required
+        || !profile
+            .independence_requirements
+            .authorship_independence_required
+        || profile.stable_evidence.len() != 2
+    {
         return Err(ConformanceContractError::IndependenceEvidenceMissing);
     }
     let first = &profile.stable_evidence[0];
@@ -1677,13 +1720,6 @@ fn encode_profile(profile: &ConformanceProfileV1, include_digest: bool) -> Value
         digest(&profile.limitations_digest),
         digest(&profile.provenance_digest),
         optional(profile.previous_profile_digest.as_ref().map(digest)),
-        Value::Array(
-            profile
-                .stable_evidence
-                .iter()
-                .map(encode_stable_evidence)
-                .collect(),
-        ),
         if include_digest {
             digest(&profile.profile_digest)
         } else {
@@ -1883,7 +1919,7 @@ fn encode_output_capability(value: &EvaluatorOutputCapabilityV1) -> Value {
 }
 
 fn decode_profile(value: &Value) -> Result<ConformanceProfileV1, ConformanceContractError> {
-    let fields = array(value, 18)?;
+    let fields = array(value, 17)?;
     if text_value(&fields[0])? != CONFORMANCE_PROFILE_MAGIC_V1 || uint_value(&fields[1])? != 1 {
         return Err(ConformanceContractError::UnsupportedVersion);
     }
@@ -1908,11 +1944,8 @@ fn decode_profile(value: &Value) -> Result<ConformanceProfileV1, ConformanceCont
         limitations_digest: digest_value(&fields[13])?,
         provenance_digest: digest_value(&fields[14])?,
         previous_profile_digest: optional_digest(&fields[15])?,
-        stable_evidence: array_values(&fields[16])?
-            .iter()
-            .map(decode_stable_evidence)
-            .collect::<Result<Vec<_>, _>>()?,
-        profile_digest: digest_value(&fields[17])?,
+        stable_evidence: Vec::new(),
+        profile_digest: digest_value(&fields[16])?,
     })
 }
 
@@ -2800,7 +2833,6 @@ mod tests {
             limitations_digest: digest(18),
             provenance_digest: digest(19),
             previous_profile_digest: None,
-            stable_evidence: vec![],
             profile_digest: [0; 32],
         };
         profile.profile_digest = profile.digest();
@@ -3369,9 +3401,17 @@ mod tests {
             Err(ConformanceContractError::IndependenceEvidenceMissing)
         );
         let bytes = encode_value(&encode_profile(&stable, true)).unwrap_or_default();
+        assert!(matches!(
+            encode_profile(&stable, true),
+            Value::Array(fields) if fields.len() == 17
+        ));
         assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&bytes, &policy),
+            ConformanceProfileV1::from_canonical_cbor_with_stable_evidence(
+                &bytes,
+                stable.stable_evidence.clone(),
+                &policy,
+            ),
             Ok(stable)
         );
 
@@ -3382,7 +3422,7 @@ mod tests {
         );
 
         let mut tampered = encode_profile(&candidate_profile, true);
-        replace_profile_path(&mut tampered, &[17], Value::Bytes(digest(99).to_vec()));
+        replace_profile_path(&mut tampered, &[16], Value::Bytes(digest(99).to_vec()));
         let tampered_bytes = encode_value(&tampered).unwrap_or_default();
         assert_eq!(
             ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&tampered_bytes, &policy,),
@@ -3980,8 +4020,9 @@ mod tests {
             .to_canonical_cbor_with_trust_policy(&trusted_root_policy())
             .unwrap_or_default();
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor_with_trust_policy(
+            ConformanceProfileV1::from_canonical_cbor_with_stable_evidence(
                 &stable_bytes,
+                stable.stable_evidence.clone(),
                 &trusted_root_policy(),
             ),
             Ok(stable)
@@ -4157,7 +4198,7 @@ mod tests {
     #[test]
     fn public_profile_decoder_reaches_top_level_invalid_field_seams() {
         let value = profile();
-        for index in 0..18 {
+        for index in 0..17 {
             // `previous_profile_digest` is an optional field; CBOR null is
             // valid there, so use a wrong type for that one schema path.
             let replacement = if index == 15 {
@@ -4285,53 +4326,41 @@ mod tests {
         assert!(stable_bytes_result.is_ok());
         let stable_bytes = stable_bytes_result.unwrap_or_default();
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&stable_bytes, &policy),
+            ConformanceProfileV1::from_canonical_cbor_with_stable_evidence(
+                &stable_bytes,
+                stable.stable_evidence.clone(),
+                &policy,
+            ),
             Ok(stable.clone())
         );
+        let evidence = encode_stable_evidence(&stable.stable_evidence[0]);
         for index in 0..6 {
-            let bytes = malformed_profile_bytes(&stable, &[16, 0, index], Value::Map(Vec::new()));
-            assert!(
-                ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&bytes, &policy)
-                    .is_err()
-            );
+            let mut malformed = evidence.clone();
+            replace_profile_path(&mut malformed, &[index], Value::Map(Vec::new()));
+            assert!(decode_stable_evidence(&malformed).is_err());
         }
         for index in 0..6 {
-            let bytes =
-                malformed_profile_bytes(&stable, &[16, 0, 0, index], Value::Map(Vec::new()));
-            assert!(
-                ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&bytes, &policy)
-                    .is_err()
-            );
-            let bytes =
-                malformed_profile_bytes(&stable, &[16, 0, 1, index], Value::Map(Vec::new()));
-            assert!(
-                ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&bytes, &policy)
-                    .is_err()
-            );
+            let mut malformed = evidence.clone();
+            replace_profile_path(&mut malformed, &[0, index], Value::Map(Vec::new()));
+            assert!(decode_stable_evidence(&malformed).is_err());
+            let mut malformed = evidence.clone();
+            replace_profile_path(&mut malformed, &[1, index], Value::Map(Vec::new()));
+            assert!(decode_stable_evidence(&malformed).is_err());
         }
         for index in 0..16 {
-            let bytes =
-                malformed_profile_bytes(&stable, &[16, 0, 4, 0, index], Value::Map(Vec::new()));
-            assert!(
-                ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&bytes, &policy)
-                    .is_err()
-            );
+            let mut malformed = evidence.clone();
+            replace_profile_path(&mut malformed, &[4, 0, index], Value::Map(Vec::new()));
+            assert!(decode_stable_evidence(&malformed).is_err());
         }
         for index in 0..24 {
-            let bytes =
-                malformed_profile_bytes(&stable, &[16, 0, 3, index], Value::Map(Vec::new()));
-            assert!(
-                ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&bytes, &policy)
-                    .is_err()
-            );
+            let mut malformed = evidence.clone();
+            replace_profile_path(&mut malformed, &[3, index], Value::Map(Vec::new()));
+            assert!(decode_stable_evidence(&malformed).is_err());
         }
         for index in 0..3 {
-            let bytes =
-                malformed_profile_bytes(&stable, &[16, 0, 5, index], Value::Map(Vec::new()));
-            assert!(
-                ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&bytes, &policy)
-                    .is_err()
-            );
+            let mut malformed = evidence.clone();
+            replace_profile_path(&mut malformed, &[5, index], Value::Map(Vec::new()));
+            assert!(decode_stable_evidence(&malformed).is_err());
         }
     }
 
@@ -4802,8 +4831,9 @@ mod tests {
             .to_canonical_cbor_with_trust_policy(&trusted_root_policy())
             .unwrap_or_default();
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor_with_trust_policy(
+            ConformanceProfileV1::from_canonical_cbor_with_stable_evidence(
                 &stable_bytes,
+                stable.stable_evidence.clone(),
                 &trusted_root_policy(),
             ),
             Ok(stable)
@@ -6245,6 +6275,30 @@ mod tests {
                 ProfileLifecycleV1::Stable,
                 vec![required_first, stable_evidence("beta", 40)],
             ),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_stable_requires_technical_and_authorship_independence() {
+        let mut configured = profile();
+        configured
+            .independence_requirements
+            .technical_independence_required = false;
+        configured
+            .independence_requirements
+            .authorship_independence_required = false;
+        let candidate = configured
+            .transition_to(ProfileLifecycleV1::Candidate, vec![])
+            .unwrap_or_else(|_| profile());
+        let mut first = stable_evidence("alpha", 30);
+        let mut second = stable_evidence("beta", 40);
+        refresh_stable_report_for_profile(&mut first, &candidate);
+        refresh_stable_report_for_profile(&mut second, &candidate);
+
+        assert_eq!(
+            candidate.transition_to(ProfileLifecycleV1::Stable, vec![first, second]),
             Err(ConformanceContractError::IndependenceEvidenceMissing)
         );
     }
