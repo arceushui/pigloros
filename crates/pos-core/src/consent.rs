@@ -2435,8 +2435,7 @@ mod tests {
         let authority = ConsentAuthority::new();
         let existing_timeline = TimelineId::new();
         let existing_grant = sample_granted();
-        let existing_token = authority
-            .record_grant_on_timeline(existing_timeline, &existing_grant);
+        let existing_token = authority.record_grant_on_timeline(existing_timeline, &existing_grant);
         assert_eq!(
             authority
                 .restore_from_history(
@@ -2719,14 +2718,7 @@ mod tests {
         let other_authority = ConsentAuthority::new();
         let other_token = other_authority.record_grant_on_timeline(timeline, &grant);
         assert_eq!(
-            ConsentGate::with_token_fence(
-                &authority,
-                timeline,
-                &other_token,
-                0,
-                0,
-                &mut || {},
-            ),
+            ConsentGate::with_token_fence(&authority, timeline, &other_token, 0, 0, &mut || {},),
             Err(ConsentError::NoConsent)
         );
 
