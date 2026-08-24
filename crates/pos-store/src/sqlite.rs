@@ -3963,7 +3963,7 @@ mod tests {
         geo_admission::GeoLocationAdmissionFenceV1,
         ids::{EntityId, EventId},
         store::{EventReadBounds, SeqRange},
-        CoreError, OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStatusV1,
+        CoreError, KeyRegistrationV1, OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStatusV1,
         OwnTracksEnrollmentStore,
     };
 
@@ -8987,6 +8987,33 @@ mod tests {
             .append_signed_authorized(timeline.id(), &KeyRegistryStateV1::new(), &mut create_event)
             .test_err();
         assert!(error.to_string().contains("durable key registry"));
+    }
+
+    #[test]
+    fn sqlite_key_registry_persists_and_rejects_stale_authorization() {
+        let mut store = new_store();
+        let mut persisted = KeyRegistryStateV1::new();
+        persisted
+            .register_key(KeyRegistrationV1::new(
+                KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1),
+                Hash::from_bytes([3; 32]),
+                Some(pos_core::PublicKey::from_bytes([4; 32])),
+            ))
+            .test_ok();
+        store.save_key_registry(&persisted).test_ok();
+        assert_eq!(store.load_key_registry().test_ok(), Some(persisted));
+
+        let timeline = store.create_timeline("stale-registry").test_ok();
+        let mut callback_called = false;
+        let mut create_event = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            callback_called = true;
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        let error = store
+            .append_signed_authorized(timeline.id(), &KeyRegistryStateV1::new(), &mut create_event)
+            .test_err();
+        assert!(error.to_string().contains("changed during signing"));
+        assert!(!callback_called);
     }
 
     #[test]

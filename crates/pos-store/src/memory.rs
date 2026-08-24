@@ -2060,7 +2060,8 @@ mod tests {
         },
         ids::{EntityId, EventId},
         store::{SeqRange, TimelineExport},
-        OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore,
+        KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1,
+        OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore, PublicKey,
     };
 
     trait TestValueExt<T> {
@@ -4859,6 +4860,35 @@ mod tests {
         let events = store.append(tl.id(), &drafts).test_ok();
         assert_eq!(events.len(), 1);
         assert!(!events[0].payload_hash.as_bytes().iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn key_registry_snapshot_and_authorized_append_reject_stale_state() {
+        let mut store = MemoryStore::new();
+        assert_eq!(store.load_key_registry().test_ok(), None);
+        let mut persisted = KeyRegistryStateV1::new();
+        persisted
+            .register_key(KeyRegistrationV1::new(
+                KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1),
+                Hash::from_bytes([3; 32]),
+                Some(PublicKey::from_bytes([4; 32])),
+            ))
+            .test_ok();
+        store.save_key_registry(&persisted).test_ok();
+        assert_eq!(store.load_key_registry().test_ok(), Some(persisted.clone()));
+
+        let timeline = store.create_timeline("stale-registry").test_ok();
+        let expected = KeyRegistryStateV1::new();
+        let mut callback_called = false;
+        let mut create_event = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            callback_called = true;
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        let error = store
+            .append_signed_authorized(timeline.id(), &expected, &mut create_event)
+            .test_err();
+        assert!(error.to_string().contains("changed during signing"));
+        assert!(!callback_called);
     }
 
     #[test]
