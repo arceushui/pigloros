@@ -365,7 +365,8 @@ impl ConformanceBundleV1 {
                     && !member.expected_result
             })
             .ok_or(BundleContractErrorV1::MemberMissing)?;
-        let profile = &preflight_profile;
+        let profile = ConformanceProfileV1::from_canonical_cbor(&profile_member.bytes)
+            .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
         if profile.lifecycle != self.manifest.lifecycle
             || profile.profile_digest != self.manifest.profile_digest
         {
