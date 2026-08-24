@@ -1,6 +1,8 @@
 //! Ed25519 sign/verify for events.
 
-use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
+#[cfg(test)]
+use ed25519_dalek::Signer;
+use ed25519_dalek::{SigningKey, Verifier, VerifyingKey};
 use pos_core::{CanonicalBytes, CoreError, PublicKey, Signature};
 use rand::{rand_core::UnwrapErr, rngs::SysRng};
 
