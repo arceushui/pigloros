@@ -1277,7 +1277,12 @@ async fn worker_loop_async(
             let should_drain = draining || disconnected;
             debug_assert_eq!(worker_is_draining(draining, disconnected), should_drain);
             if should_drain {
-                drain_and_mark_disconnected(receiver, &mut pending, &mut disconnected);
+                if matches!(
+                    drain_available(receiver, &mut pending),
+                    QueueDrainOutcome::Disconnected
+                ) {
+                    disconnected = true;
+                }
                 if receiver.is_closed() {
                     disconnected = true;
                 }
@@ -1302,7 +1307,12 @@ async fn worker_loop_async(
             }
         }
 
-        drain_and_mark_disconnected(receiver, &mut pending, &mut disconnected);
+        if matches!(
+            drain_available(receiver, &mut pending),
+            QueueDrainOutcome::Disconnected
+        ) {
+            disconnected = true;
+        }
         if receiver.is_closed() {
             disconnected = true;
         }
@@ -1363,19 +1373,6 @@ const fn worker_is_draining(draining: bool, disconnected: bool) -> bool {
     match (draining, disconnected) {
         (false, false) => false,
         (true, _) | (false, true) => true,
-    }
-}
-
-fn drain_and_mark_disconnected(
-    receiver: &mut mpsc::Receiver<CommandEnvelope>,
-    pending: &mut Vec<CommandEnvelope>,
-    disconnected: &mut bool,
-) {
-    if matches!(
-        drain_available(receiver, pending),
-        QueueDrainOutcome::Disconnected
-    ) {
-        *disconnected = true;
     }
 }
 
@@ -3496,13 +3493,14 @@ mod tests {
     }
 
     #[test]
-    fn drain_and_mark_disconnected_observes_closed_receiver() {
+    fn drain_available_observes_closed_receiver() {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
         drop(sender);
         let mut pending = Vec::new();
-        let mut disconnected = false;
-        super::drain_and_mark_disconnected(&mut receiver, &mut pending, &mut disconnected);
-        assert!(disconnected);
+        assert!(matches!(
+            super::drain_available(&mut receiver, &mut pending),
+            super::QueueDrainOutcome::Disconnected
+        ));
         assert!(pending.is_empty());
     }
 

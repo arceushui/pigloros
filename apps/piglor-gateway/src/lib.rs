@@ -1607,16 +1607,17 @@ impl Gateway {
             }
             AppendOrDuplicateOutcome::Conflict => return Err(GatewayError::IngressConflict),
         };
-        if !duplicate {
-            let notice = EventNotice {
-                timeline_id: timeline.to_string(),
-                event_id: event.id.to_string(),
-                entity_id: event.entity.to_string(),
-                event_type: event.event_type.as_str().to_owned(),
-                seq: event.seq.as_u64(),
-            };
-            drop(self.bus.send(notice));
+        if duplicate {
+            return Ok(IdentifiedAppend { event, duplicate });
         }
+        let notice = EventNotice {
+            timeline_id: timeline.to_string(),
+            event_id: event.id.to_string(),
+            entity_id: event.entity.to_string(),
+            event_type: event.event_type.as_str().to_owned(),
+            seq: event.seq.as_u64(),
+        };
+        drop(self.bus.send(notice));
         Ok(IdentifiedAppend { event, duplicate })
     }
 
@@ -1686,16 +1687,17 @@ impl Gateway {
                 }
             }
         };
-        if !pos_core::is_consent_event_type(&event.event_type) {
-            let notice = EventNotice {
-                timeline_id: timeline.to_string(),
-                event_id: event.id.to_string(),
-                entity_id: event.entity.to_string(),
-                event_type: event.event_type.as_str().to_owned(),
-                seq: event.seq.as_u64(),
-            };
-            drop(self.bus.send(notice));
+        if pos_core::is_consent_event_type(&event.event_type) {
+            return Ok(event);
         }
+        let notice = EventNotice {
+            timeline_id: timeline.to_string(),
+            event_id: event.id.to_string(),
+            entity_id: event.entity.to_string(),
+            event_type: event.event_type.as_str().to_owned(),
+            seq: event.seq.as_u64(),
+        };
+        drop(self.bus.send(notice));
         Ok(event)
     }
 
