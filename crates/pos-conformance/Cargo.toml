@@ -9,14 +9,12 @@ publish.workspace = true
 [dependencies]
 blake3 = { workspace = true }
 ciborium = { workspace = true }
+ed25519-dalek = { workspace = true }
 pos-core = { path = "../pos-core" }
 pos-crypto = { path = "../pos-crypto" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-
-[dev-dependencies]
-ed25519-dalek = { workspace = true }
 
 [lints]
 workspace = true

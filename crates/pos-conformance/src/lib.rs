@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 
 mod profile_contract;
+mod bundle_contract;
 
 pub use profile_contract::{
     AllowedDivergenceV1, CapabilityPolicyV1, ConformanceContractError, ConformanceProfileV1,
@@ -25,6 +26,11 @@ pub use profile_contract::{
     FixtureProvenanceV1, IndependenceRequirementsV1, ProfileLifecycleV1,
     StableEvidenceAttestationV1, StableImplementationEvidenceV1, SubjectAdapterKindV1,
     TrustedRootPolicyV1, CONFORMANCE_PROFILE_MAGIC_V1, EVALUATOR_REQUEST_MAGIC_V1,
+};
+pub use bundle_contract::{
+    BundleContractErrorV1, BundleExpectedResultV1, BundleMemberDescriptorV1, BundleMemberV1,
+    BundleManifestV1, BundleModeV1, ConformanceBundlePairV1, ConformanceBundleV1,
+    CONFORMANCE_BUNDLE_MAGIC_V1,
 };
 
 /// Version of the first independent proof-evidence envelope.
