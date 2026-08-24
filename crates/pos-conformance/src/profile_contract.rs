@@ -5150,13 +5150,18 @@ mod tests {
 
         let mut exact_depth = profile();
         let depth = value_depth(&encode_profile(&exact_depth, true));
-        exact_depth.evaluator_protocol.hard_caps.max_structural_nesting =
-            u8::try_from(depth).unwrap_or(u8::MAX);
+        exact_depth
+            .evaluator_protocol
+            .hard_caps
+            .max_structural_nesting = u8::try_from(depth).unwrap_or(u8::MAX);
         exact_depth.profile_digest = exact_depth.digest();
         assert_eq!(exact_depth.validate(), Ok(()));
 
         let mut exact_member_path = profile();
-        exact_member_path.evaluator_protocol.hard_caps.max_member_path_bytes = 255;
+        exact_member_path
+            .evaluator_protocol
+            .hard_caps
+            .max_member_path_bytes = 255;
         exact_member_path.fixtures[0].inputs[0].member_id = "x".repeat(256);
         exact_member_path.profile_digest = exact_member_path.digest();
         assert_eq!(
@@ -5263,7 +5268,9 @@ mod tests {
             Err(ConformanceContractError::IndependenceEvidenceMissing)
         );
         let mut invalid = evidence.independence.clone();
-        invalid.reviewer_ids = (0..33).map(|index| format!("reviewer-{index:02}")).collect();
+        invalid.reviewer_ids = (0..33)
+            .map(|index| format!("reviewer-{index:02}"))
+            .collect();
         assert_eq!(
             validate_independence_evidence(&invalid, &requirements),
             Err(ConformanceContractError::IndependenceEvidenceMissing)
@@ -5294,10 +5301,7 @@ mod tests {
         );
 
         let profile_value = profile();
-        assert_eq!(
-            validate_report_binding(&evidence, &profile_value),
-            Ok(())
-        );
+        assert_eq!(validate_report_binding(&evidence, &profile_value), Ok(()));
         let reject_report = |change: &dyn Fn(&mut StableImplementationEvidenceV1)| {
             let mut changed = stable_evidence("alpha", 30);
             change(&mut changed);
