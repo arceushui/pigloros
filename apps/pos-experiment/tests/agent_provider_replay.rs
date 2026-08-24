@@ -833,7 +833,7 @@ fn protected_result_export_and_faulted_projection_fail_closed() {
     let experiment = Experiment::new(ExperimentConfig {
         name: "protected-result-export".to_owned(),
         stop: StopCondition::MaxTicks(1),
-        store_config: store_config.clone(),
+        store_config,
     })
     .with_consent_authority(authority.clone());
     let session = experiment.start().test_ok();
