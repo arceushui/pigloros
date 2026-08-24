@@ -3315,6 +3315,37 @@ mod tests {
         assert_eq!(expected_error, Err(BundleContractErrorV1::AirGappedNetwork));
         Ok(())
     }
+
+    pub(super) fn exercise_contract_paths() -> Result<(), Box<dyn std::error::Error>> {
+        manifest_encoding_is_deterministic()?;
+        materialized_bundle_is_signed_content_addressed_and_bound_to_profile()?;
+        public_archive_codec_round_trips_both_execution_modes()?;
+        each_public_claim_layer_materializes_as_its_own_profile_and_bundle()?;
+        public_archive_decoder_rejects_noncanonical_and_unknown_roles()?;
+        archive_preflight_rejects_unsafe_shapes_before_decode()?;
+        archive_preflight_supported_items_and_boundaries_are_explicit()?;
+        archive_preflight_caps_report_member_statistics()?;
+        preflight_archive_caps_check_each_limit_independently();
+        archive_decoder_rejects_invalid_fields_and_cap_overflows()?;
+        archive_array_decoder_boundaries_are_inclusive();
+        decoded_archive_caps_accept_exact_depth_and_reject_overflow()?;
+        support_digest_fallbacks_and_selected_caps_are_checked()?;
+        selected_bundle_caps_check_each_limit_independently()?;
+        validation_rejects_descriptor_role_and_profile_path_mismatches()?;
+        required_support_artifacts_and_selected_caps_are_enforced()?;
+        ordering_predicates_reject_descending_and_duplicate_values();
+        local_and_air_gapped_bundles_require_expected_result_parity()?;
+        pair_validation_checks_modes_and_member_paths()?;
+        validation_rejects_profile_and_manifest_contract_mismatches()?;
+        expected_result_validation_rejects_each_binding_mismatch()?;
+        expected_result_member_guards_are_independent()?;
+        mandatory_fixture_matching_requires_case_and_layer_and_execution_profile()?;
+        validation_rejects_tampered_bytes_and_unsorted_members()?;
+        validation_binds_each_profile_input_to_public_member_bytes()?;
+        fixture_input_guards_are_independent()?;
+        validation_rejects_secret_payloads_and_air_gapped_network_access()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -3483,5 +3514,10 @@ mod coverage_entrypoints {
             usize::from(MAX_STRUCTURAL_NESTING) + 1
         );
         Ok(())
+    }
+
+    #[test]
+    fn existing_contract_paths_are_instrumented() -> Result<(), Box<dyn std::error::Error>> {
+        tests::exercise_contract_paths()
     }
 }
