@@ -222,10 +222,7 @@ mod coverage_entrypoints {
         registry.register_driver(Box::new(NoopDriver));
         let timeline = TimelineId::new();
         assert!(registry
-            .restore_driver_state(
-                &[TimelineHistorySegment::new(timeline, Seq::ZERO)],
-                &[],
-            )
+            .restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[],)
             .is_ok());
         assert!(registry.tick_cadenced(timeline, 0).is_ok());
     }

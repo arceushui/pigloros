@@ -1,8 +1,8 @@
 use piglor_gateway::{router, ActionPrincipal, AppState, Gateway, GatewayError, LedgerWriteMode};
 use piglor_ledger::LedgerView;
 use pos_core::{
-    Capability, ConsentAuthority, ConsentGranted, ConsentRevoked, EntityId, Kind, Plugin,
-    PluginId, TimelineId, WallTime,
+    Capability, ConsentAuthority, ConsentGranted, ConsentRevoked, EntityId, Kind, Plugin, PluginId,
+    TimelineId, WallTime,
 };
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition, TickOutcome};
 use pos_plugin_agent::{
@@ -784,9 +784,8 @@ async fn gateway_reloads_durable_consent_before_revocation(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let database = tempfile::NamedTempFile::new().test_ok()?;
     let path = database.path().to_str().test_ok()?.to_owned();
-    let first_gateway = Gateway::new(
-        open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok()?,
-    );
+    let first_gateway =
+        Gateway::new(open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok()?);
     let timeline = first_gateway
         .create_timeline("consent-recovery")
         .await
@@ -810,8 +809,7 @@ async fn gateway_reloads_durable_consent_before_revocation(
         .test_ok()?;
     drop(first_gateway);
 
-    let recovered_gateway =
-        Gateway::new(open_store(StoreConfig::Sqlite { path }).test_ok()?);
+    let recovered_gateway = Gateway::new(open_store(StoreConfig::Sqlite { path }).test_ok()?);
     let unknown_error = recovered_gateway
         .issue_consent_revocation(
             &timeline.id().to_string(),
