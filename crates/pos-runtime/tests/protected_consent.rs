@@ -773,7 +773,7 @@ fn public_cadence_executes_driver_output_through_the_consent_boundary() {
 
 #[test]
 fn public_registry_gate_projection_and_control_marker_seams_are_distinguishable() {
-    let unbound = PluginRegistry::new().without_consent_gate();
+    let mut unbound = PluginRegistry::new().without_consent_gate();
     assert!(unbound.clone_consent_gate().is_none());
     let authority = ConsentAuthority::new();
     let protected_token =
