@@ -5701,7 +5701,11 @@ mod tests {
         let resumed_result = resumed_experiment
             .with_consent_authority(authority)
             .resume(timeline_id);
-        assert!(resumed_result.is_ok(), "resume result: {resumed_result:?}");
+        assert!(
+            resumed_result.is_ok(),
+            "resume error: {:?}",
+            resumed_result.as_ref().err()
+        );
         let resumed = resumed_result.test_ok();
         let projection =
             resumed.projection_state_for_reducer("missing", subject, &token, current_now_secs());
