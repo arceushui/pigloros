@@ -288,6 +288,13 @@ pub enum ExperimentError {
     },
 }
 
+fn map_runtime_error(error: pos_runtime::RuntimeError) -> ExperimentError {
+    match error {
+        pos_runtime::RuntimeError::Store(error) => ExperimentError::Store(error),
+        error => ExperimentError::Runtime(error),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Private helpers: shared tick and completion pipeline
 // ---------------------------------------------------------------------------
@@ -380,11 +387,10 @@ fn append_driver_drafts(
         Ok(0)
     } else {
         let head = store.logical_head(timeline_id)?;
-        match registry.append_and_commit_step_at(store, head, 0, &drafts) {
-            Ok(events) => Ok(u64::try_from(events.len()).unwrap_or(u64::MAX)),
-            Err(pos_runtime::RuntimeError::Store(error)) => Err(ExperimentError::Store(error)),
-            Err(error) => Err(error.into()),
-        }
+        registry
+            .append_and_commit_step_at(store, head, 0, &drafts)
+            .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
+            .map_err(map_runtime_error)
     }
 }
 
@@ -1184,12 +1190,7 @@ impl ExperimentSession {
                             self.operation_now_secs,
                             &drafts,
                         )
-                        .map_err(|error| match error {
-                            pos_runtime::RuntimeError::Store(error) => {
-                                ExperimentError::Store(error)
-                            }
-                            error => ExperimentError::Runtime(error),
-                        })
+                        .map_err(map_runtime_error)
                 })
                 .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
             {
@@ -4593,9 +4594,8 @@ mod tests {
 #[cfg(test)]
 mod coverage_entrypoints {
     use super::*;
-    use pos_core::{clock::Seq, Capability, ConsentError, ConsentGate, Plugin, PluginId};
+    use pos_core::{clock::Seq, Capability, Plugin, PluginId};
     use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct CoveragePlugin {
         id: PluginId,
@@ -4637,88 +4637,6 @@ mod coverage_entrypoints {
         }
     }
 
-    struct DraftPlugin {
-        id: PluginId,
-    }
-
-    impl Plugin for DraftPlugin {
-        fn id(&self) -> PluginId {
-            self.id
-        }
-
-        fn name(&self) -> &'static str {
-            "coverage-draft-plugin"
-        }
-
-        fn capability(&self) -> Capability {
-            Capability {
-                owned_event_types: vec![Kind::new("coverage.append")],
-                has_driver: true,
-                ..Capability::default()
-            }
-        }
-    }
-
-    struct DraftDriver;
-
-    impl Driver for DraftDriver {
-        fn name(&self) -> &'static str {
-            "coverage-draft-driver"
-        }
-
-        fn step(
-            &mut self,
-            _: pos_core::ids::TimelineId,
-            _: ObservationView<'_>,
-        ) -> Result<StepOutput, RuntimeError> {
-            Ok(StepOutput::new(vec![EventDraft::new(
-                EntityId::new(),
-                Kind::new("coverage.append"),
-                pos_core::CanonicalBytes::from_static(b"coverage"),
-            )]))
-        }
-    }
-
-    struct ToggleGate {
-        calls: AtomicUsize,
-    }
-
-    impl ToggleGate {
-        fn new() -> Self {
-            Self {
-                calls: AtomicUsize::new(0),
-            }
-        }
-    }
-
-    impl ConsentGate for ToggleGate {
-        fn check_consent(
-            &self,
-            _: pos_core::ids::TimelineId,
-            _: EntityId,
-            _: &Kind,
-            _: u64,
-            _: u64,
-        ) -> Result<ConsentCapabilityToken, ConsentError> {
-            Err(ConsentError::NoConsent)
-        }
-
-        fn authorize_event(
-            &self,
-            _: pos_core::ids::TimelineId,
-            _: EntityId,
-            _: &Kind,
-            _: u64,
-            _: u64,
-        ) -> Result<(), ConsentError> {
-            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                Ok(())
-            } else {
-                Err(ConsentError::Expired)
-            }
-        }
-    }
-
     #[test]
     fn consent_drafts_are_rejected_at_the_public_session_seam() {
         let experiment =
@@ -4748,32 +4666,20 @@ mod coverage_entrypoints {
     }
 
     #[test]
-    fn append_paths_preserve_non_store_runtime_errors() {
-        let plugin = DraftPlugin {
-            id: PluginId::new(),
-        };
-        let mut registry = PluginRegistry::new().with_consent_gate(Arc::new(ToggleGate::new()));
-        ok(registry.register(&plugin, None, Some(Box::new(DraftDriver))));
-        let mut store = ok(open_store(StoreConfig::Memory));
-        let timeline = ok(store.create_timeline("coverage-runtime"));
+    fn runtime_error_mapping_preserves_store_and_generic_variants() {
+        let store = map_runtime_error(pos_runtime::RuntimeError::Store(
+            pos_core::CoreError::Storage("coverage-store".to_owned()),
+        ));
         assert!(matches!(
-            append_driver_drafts(store.as_mut(), timeline.id(), &mut registry, Seq::ZERO),
-            Err(ExperimentError::Runtime(_))
+            store,
+            ExperimentError::Store(pos_core::CoreError::Storage(message))
+                if message == "coverage-store"
         ));
 
-        let mut experiment = Experiment::new(config(
-            "coverage-session-runtime",
-            StopCondition::MaxTicks(1),
-        ));
-        ok(experiment.register(&plugin, None, Some(Box::new(DraftDriver))));
-        let mut session = ok(experiment.start());
-        session.registry = session
-            .registry
-            .with_consent_gate(Arc::new(ToggleGate::new()));
-        assert!(matches!(
-            session.step_tick(),
-            Err(ExperimentError::Runtime(_))
-        ));
+        let generic = map_runtime_error(pos_runtime::RuntimeError::InvalidRecoveryEvidence {
+            reason: "coverage-runtime",
+        });
+        assert!(matches!(generic, ExperimentError::Runtime(_)));
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
