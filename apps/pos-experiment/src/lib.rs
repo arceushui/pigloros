@@ -6367,7 +6367,6 @@ mod coverage_entrypoints {
     fn run_result_projection_and_public_export_fail_closed_or_succeed_explicitly() {
         let authority = ConsentAuthority::new();
         let subject = EntityId::new();
-        let revoked_subject = EntityId::new();
         let token = authority.record_grant_on_timeline(
             pos_core::ids::TimelineId::new(),
             &ConsentGranted {
@@ -6417,6 +6416,7 @@ mod coverage_entrypoints {
         .with_consent_authority(authority.clone());
         let mut session = ok(experiment.start());
         let subject = EntityId::new();
+        let revoked_subject = EntityId::new();
         let token = authority.record_grant_on_timeline(
             session.timeline().id(),
             &ConsentGranted {
