@@ -129,6 +129,55 @@ fn assert_generic_geographic_admission_is_closed(store: &mut dyn EventStore) {
     }
 }
 
+fn assert_generic_consent_admission_is_closed(store: &mut dyn EventStore) {
+    let timeline = store.create_timeline("generic-consent-admission").test_ok();
+    let entity = EntityId::new();
+    let draft = EventDraft::new(
+        entity,
+        Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+        CanonicalBytes::from_static(b"forbidden-consent-draft"),
+    );
+
+    assert!(store
+        .append(timeline.id(), std::slice::from_ref(&draft))
+        .is_err());
+    assert!(store
+        .append_bounded(timeline.id(), std::slice::from_ref(&draft), 10)
+        .is_err());
+    assert!(store
+        .append_or_duplicate(
+            timeline.id(),
+            AppendIdentity::new(
+                AppendDedupKey::from_keyed_hash([3; 32]),
+                AppendDedupScope::from_keyed_hash([4; 32]),
+            ),
+            WallTime::from_micros(1),
+            draft.clone(),
+        )
+        .is_err());
+    assert!(store
+        .append_committed(
+            timeline.id(),
+            &[geographic_event(
+                pos_core::EVENT_TYPE_CONSENT_REVOKED_V1,
+                entity,
+            )]
+        )
+        .is_err());
+
+    assert!(store
+        .append_consent_bounded(
+            timeline.id(),
+            &[EventDraft::new(
+                entity,
+                Kind::new("ordinary.event"),
+                CanonicalBytes::from_static(b"not-consent"),
+            )],
+            10,
+        )
+        .is_err());
+}
+
 #[test]
 fn memory_generic_geographic_admission_is_closed() {
     assert_generic_geographic_admission_is_closed(&mut MemoryStore::default());
@@ -138,6 +187,17 @@ fn memory_generic_geographic_admission_is_closed() {
 fn sqlite_generic_geographic_admission_is_closed() {
     let mut store = pos_store::sqlite::SqliteStore::open_in_memory().test_ok();
     assert_generic_geographic_admission_is_closed(&mut store);
+}
+
+#[test]
+fn memory_generic_consent_admission_is_closed() {
+    assert_generic_consent_admission_is_closed(&mut MemoryStore::default());
+}
+
+#[test]
+fn sqlite_generic_consent_admission_is_closed() {
+    let mut store = pos_store::sqlite::SqliteStore::open_in_memory().test_ok();
+    assert_generic_consent_admission_is_closed(&mut store);
 }
 
 #[test]
