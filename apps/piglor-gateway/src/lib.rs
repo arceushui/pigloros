@@ -2888,7 +2888,8 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    async fn gateway_revocation_revalidates_its_host_session_before_and_during_append() {
+    async fn gateway_revocation_revalidates_its_host_session_before_and_during_append(
+    ) -> Result<(), String> {
         let gateway = Gateway::with_limits(
             open_store(StoreConfig::Memory).test_ok(),
             GatewayLimits {
@@ -2910,14 +2911,15 @@ mod tests {
             .issue_consent_revocation(&timeline.id().to_string(), unknown)
             .await
             .test_err();
-        assert!(
-            matches!(
-                &unknown_error,
-                GatewayError::Store(CoreError::Storage(message))
-                    if message == "consent revocation did not name an active grant"
-            ),
-            "unexpected unknown revocation error: {unknown_error:?}"
-        );
+        if !matches!(
+            &unknown_error,
+            GatewayError::Store(CoreError::Storage(message))
+                if message == "consent revocation did not name an active grant"
+        ) {
+            return Err(format!(
+                "unexpected unknown revocation error: {unknown_error:?}"
+            ));
+        }
         assert!(gateway
             .read_events_page(&timeline.id().to_string(), 0, 1)
             .await
@@ -2944,10 +2946,11 @@ mod tests {
             )
             .await
             .test_err();
-        assert!(
-            matches!(&fence_error, GatewayError::ConsentRevocationFenceMismatch),
-            "unexpected fence revocation error: {fence_error:?}"
-        );
+        if !matches!(&fence_error, GatewayError::ConsentRevocationFenceMismatch) {
+            return Err(format!(
+                "unexpected fence revocation error: {fence_error:?}"
+            ));
+        }
         let page = gateway
             .read_events_page(&timeline.id().to_string(), 0, 2)
             .await
@@ -2965,14 +2968,16 @@ mod tests {
             )
             .await
             .test_err();
-        assert!(
-            matches!(
-                &ceiling_error,
-                GatewayError::EventLimitReached { maximum: 1 }
-            ),
-            "unexpected ceiling revocation error: {ceiling_error:?}"
-        );
+        if !matches!(
+            &ceiling_error,
+            GatewayError::EventLimitReached { maximum: 1 }
+        ) {
+            return Err(format!(
+                "unexpected ceiling revocation error: {ceiling_error:?}"
+            ));
+        }
         drop(gateway);
+        Ok(())
     }
 
     #[tokio::test]
