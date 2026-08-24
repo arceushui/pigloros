@@ -1224,8 +1224,8 @@ impl ExperimentSession {
         {
             return Err(ExperimentError::ConsentRevoked);
         }
-        let timeline_head =
-            lock_store(&self.store).and_then(|store| store.logical_head(self.timeline.id()))?;
+        let timeline_head = lock_store(&self.store)
+            .and_then(|store| Ok(store.logical_head(self.timeline.id())?))?;
         self.registry
             .projection_state_for_reducer(
                 self.timeline.id(),
@@ -1650,8 +1650,8 @@ impl ExperimentSession {
         if self.health == SessionHealth::Faulted {
             return Err(ExperimentError::SessionFaulted);
         }
-        let current_head =
-            lock_store(&self.store).and_then(|store| store.logical_head(self.timeline.id()))?;
+        let current_head = lock_store(&self.store)
+            .and_then(|store| Ok(store.logical_head(self.timeline.id())?))?;
         if let Some(token) = self.operation_token.as_ref() {
             let gate = self
                 .registry
