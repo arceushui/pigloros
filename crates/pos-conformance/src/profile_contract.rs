@@ -5511,7 +5511,7 @@ mod tests {
             validate_independence_evidence(&invalid, &requirements),
             Err(ConformanceContractError::IndependenceEvidenceMissing)
         );
-        let mut invalid = evidence.independence.clone();
+        invalid.declaration_digest = evidence.independence.declaration_digest;
         invalid.shared_code_audit_digest = [0; 32];
         assert_eq!(
             validate_independence_evidence(&invalid, &requirements),
