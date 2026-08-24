@@ -1314,13 +1314,13 @@ mod tests {
             .test_err()?;
         assert!(withdrawal_error.to_string().contains("withdrawal"));
 
-        let consent = EventDraft::new(
+        let bounded_draft = EventDraft::new(
             EntityId::new(),
-            Kind::new("consent.granted.v1"),
+            Kind::new("test.bounded"),
             CanonicalBytes::from_static(b"bounded-default"),
         );
         let committed = store
-            .append_consent_bounded(TimelineId::new(), &[consent], 1)
+            .append_consent_bounded(TimelineId::new(), &[bounded_draft], 1)
             .test_ok()?;
         let committed = committed.ok_or("default consent append returned no events")?;
         assert_eq!(committed.len(), 1);
@@ -1387,7 +1387,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn event_store_defaults_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
-        let mut store = TrivialStore::new();
+        let mut store = FlakyStore::new(FlakyMode::Healthy);
         let id = TimelineId::new();
         let result = store.append_bounded(
             TimelineId::new(),
