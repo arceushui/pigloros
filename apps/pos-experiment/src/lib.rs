@@ -58,18 +58,16 @@ fn reject_protected_history(
     timeline: pos_core::ids::TimelineId,
     head: pos_core::clock::Seq,
 ) -> Result<(), ExperimentError> {
-    let events = if head == pos_core::clock::Seq::ZERO {
-        Vec::new()
-    } else {
-        match store.read(
+    if head == pos_core::clock::Seq::ZERO {
+        return reject_protected_events(&[]);
+    }
+    store
+        .read(
             timeline,
             pos_store::SeqRange::bounded(pos_core::clock::Seq::from_u64(1), head),
-        ) {
-            Ok(events) => events,
-            Err(error) => return Err(error.into()),
-        }
-    };
-    reject_protected_events(&events)
+        )
+        .map_err(ExperimentError::from)
+        .and_then(|events| reject_protected_events(&events))
 }
 
 pub mod moat_proof;
@@ -186,30 +184,30 @@ impl RunResult {
             .consent_gate
             .as_ref()
             .ok_or(pos_runtime::RuntimeError::ConsentOperationUnavailable)?;
-        let Some(store_config) = self.store_config.clone() else {
-            return Err(ExperimentError::MissingStoreRecoveryRecipe);
-        };
-        let store = match open_store(store_config) {
-            Ok(store) => store,
-            Err(error) => return Err(error.into()),
-        };
-        let timeline_head = match store.logical_head(self.timeline_id) {
-            Ok(head) => head,
-            Err(error) => return Err(error.into()),
-        };
-        if let Err(error) = gate.authorize_projection(
-            self.timeline_id,
-            subject,
-            timeline_head.as_u64(),
-            now_secs,
-            token,
-        ) {
-            return Err(map_runtime_error(pos_runtime::RuntimeError::Consent(error)));
-        }
-        Ok(self
-            .projections
-            .state_for_reducer(reducer, &subject)
-            .cloned())
+        self.store_config
+            .clone()
+            .ok_or(ExperimentError::MissingStoreRecoveryRecipe)
+            .and_then(|config| open_store(config).map_err(ExperimentError::from))
+            .and_then(|store| {
+                store
+                    .logical_head(self.timeline_id)
+                    .map_err(ExperimentError::from)
+            })
+            .and_then(|timeline_head| {
+                gate.authorize_projection(
+                    self.timeline_id,
+                    subject,
+                    timeline_head.as_u64(),
+                    now_secs,
+                    token,
+                )
+                .map_err(|error| map_runtime_error(pos_runtime::RuntimeError::Consent(error)))
+            })
+            .map(|_| {
+                self.projections
+                    .state_for_reducer(reducer, &subject)
+                    .cloned()
+            })
     }
 
     /// Reopen the store and branch from this result's Timeline at its head.
@@ -270,15 +268,10 @@ impl RunResult {
                 fork_result = Some(store.fork(timeline.id(), current_head, name));
             }
         }
-        let forked = match fork_result {
-            Some(result) => match result {
-                Ok(timeline) => timeline,
-                Err(error) => return Err(error.into()),
-            },
-            None => {
-                return Err(pos_runtime::RuntimeError::ConsentOperationUnavailable.into());
-            }
-        };
+        let forked = fork_result.map_or_else(
+            || Err(pos_runtime::RuntimeError::ConsentOperationUnavailable.into()),
+            |result| result.map_err(ExperimentError::from),
+        )?;
         Ok(forked)
     }
 
@@ -592,14 +585,15 @@ fn append_driver_drafts(
         }
         Ok(0)
     } else {
-        let head = match store.logical_head(timeline_id) {
-            Ok(head) => head,
-            Err(error) => return Err(error.into()),
-        };
-        registry
-            .append_and_commit_step_at(store, head, 0, &drafts)
-            .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
-            .map_err(map_runtime_error)
+        store
+            .logical_head(timeline_id)
+            .map_err(ExperimentError::from)
+            .and_then(|head| {
+                registry
+                    .append_and_commit_step_at(store, head, 0, &drafts)
+                    .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
+                    .map_err(map_runtime_error)
+            })
     }
 }
 
@@ -1177,10 +1171,10 @@ impl Experiment {
         ) {
             return Err(map_runtime_error(pos_runtime::RuntimeError::Consent(error)));
         }
-        match fork_result {
-            Some(result) => result.map_err(ExperimentError::from),
-            None => Err(pos_runtime::RuntimeError::ConsentOperationUnavailable.into()),
-        }
+        fork_result.map_or_else(
+            || Err(pos_runtime::RuntimeError::ConsentOperationUnavailable.into()),
+            |result| result.map_err(ExperimentError::from),
+        )
     }
 }
 
@@ -6244,7 +6238,7 @@ mod coverage_entrypoints {
     fn public_result_and_branch_error_boundaries_are_explicit() {
         let subject = EntityId::new();
         let authority = ConsentAuthority::new();
-        let timeline = TimelineId::new();
+        let timeline = pos_core::ids::TimelineId::new();
         let grant = ConsentGranted {
             subject_id: subject,
             grantee_id: EntityId::new(),
@@ -6326,7 +6320,7 @@ mod coverage_entrypoints {
             &[EventDraft::new(
                 EntityId::new(),
                 Kind::new("coverage.read.fault"),
-                CanonicalBytes::from_static(b"coverage"),
+                pos_core::CanonicalBytes::from_static(b"coverage"),
             )],
         ));
         drop(store);
@@ -6366,7 +6360,7 @@ mod coverage_entrypoints {
                     drafts: vec![EventDraft::new(
                         self.entity,
                         Kind::new("coverage.failure"),
-                        CanonicalBytes::from_static(b"head-fault"),
+                        pos_core::CanonicalBytes::from_static(b"head-fault"),
                     )],
                 })
             }
