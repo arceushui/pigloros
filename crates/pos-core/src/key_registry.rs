@@ -192,8 +192,8 @@ impl KeyDestructionRequestV1 {
     }
 }
 
-/// Result of a destruction command.  Repeating a command is safe and returns
-/// the original tombstone rather than attempting restoration or reuse.
+/// Result of a destruction command.  Repeating the exact command is safe and
+/// returns the original tombstone rather than attempting restoration or reuse.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KeyDestructionOutcomeV1 {
     /// Private material was destroyed and a tombstone was committed.
@@ -264,6 +264,9 @@ pub enum KeyRegistryErrorV1 {
     /// The destruction request does not match the live record.
     #[error("destruction request has the wrong material fingerprint")]
     MaterialDigestMismatch,
+    /// A repeated destruction request does not match the durable tombstone.
+    #[error("destruction request authorization does not match the tombstone")]
+    DestructionAuthorizationMismatch,
 }
 
 /// Registry operations needed by the core and its storage adapters.
@@ -293,8 +296,9 @@ pub trait KeyDestructionPortV1 {
     ///
     /// # Errors
     ///
-    /// Returns a closed [`KeyRegistryErrorV1`] when the identity is missing or
-    /// the expected material fingerprint does not match.
+    /// Returns a closed [`KeyRegistryErrorV1`] when the identity is missing,
+    /// the expected material fingerprint does not match, or a repeated request
+    /// does not exactly match the durable tombstone.
     fn destroy_key(
         &mut self,
         request: KeyDestructionRequestV1,
@@ -400,6 +404,12 @@ impl KeyRegistryStateV1 {
         request: KeyDestructionRequestV1,
     ) -> Result<KeyDestructionOutcomeV1, KeyRegistryErrorV1> {
         if let Some(tombstone) = self.tombstones.get(&request.identity).copied() {
+            if tombstone.destroyed_material_digest != request.expected_material_digest {
+                return Err(KeyRegistryErrorV1::MaterialDigestMismatch);
+            }
+            if tombstone.destruction_digest != destruction_digest(&request) {
+                return Err(KeyRegistryErrorV1::DestructionAuthorizationMismatch);
+            }
             return Ok(KeyDestructionOutcomeV1::AlreadyDestroyed(tombstone));
         }
         let Some(record) = self.records.get_mut(&request.identity) else {
@@ -558,6 +568,22 @@ mod tests {
             KeyDestructionOutcomeV1::AlreadyDestroyed(_)
         ));
         assert_eq!(first.tombstone(), second.tombstone());
+        assert_eq!(
+            registry.destroy_key(KeyDestructionRequestV1::new(
+                ATTRIBUTION,
+                digest(99),
+                digest(3),
+            )),
+            Err(KeyRegistryErrorV1::MaterialDigestMismatch)
+        );
+        assert_eq!(
+            registry.destroy_key(KeyDestructionRequestV1::new(
+                ATTRIBUTION,
+                digest(2),
+                digest(99),
+            )),
+            Err(KeyRegistryErrorV1::DestructionAuthorizationMismatch)
+        );
         assert_eq!(
             registry.key_record(ATTRIBUTION),
             Some(KeyRecordV1 {
