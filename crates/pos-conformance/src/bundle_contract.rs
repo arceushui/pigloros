@@ -822,6 +822,7 @@ fn preflight_archive_caps(bytes: &[u8]) -> Result<ArchivePreflight<'_>, BundleCo
             let path = item(bytes, index, 2)?;
             let member = item(bytes, index, 2)?;
             let role = item(bytes, index, 2)?;
+            let role_depth = role.maximum_depth;
             let path_bytes = path
                 .text_bytes
                 .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
@@ -835,7 +836,7 @@ fn preflight_archive_caps(bytes: &[u8]) -> Result<ArchivePreflight<'_>, BundleCo
                 .maximum_depth
                 .max(path.maximum_depth)
                 .max(member.maximum_depth)
-                .max(role.maximum_depth);
+                .max(role_depth);
             result.largest_member_path_bytes = result.largest_member_path_bytes.max(path_bytes);
             result.largest_member_bytes = result
                 .largest_member_bytes
