@@ -947,7 +947,10 @@ impl Experiment {
     ///
     /// # Errors
     /// Returns a store error when the Timeline cannot be opened or its logical
-    /// history is invalid.
+    /// history is invalid. Returns [`ExperimentError::Runtime`] with
+    /// [`pos_runtime::RuntimeError::ConsentOperationUnavailable`] when the
+    /// history contains a host-owned consent-closure marker but this
+    /// experiment has no bound consent authority.
     pub fn resume(
         self,
         timeline_id: pos_core::ids::TimelineId,
@@ -965,7 +968,10 @@ impl Experiment {
     ///
     /// # Errors
     /// Returns a store error when the Timeline cannot be opened or its logical
-    /// history is invalid.
+    /// history is invalid. Returns [`ExperimentError::Runtime`] with
+    /// [`pos_runtime::RuntimeError::ConsentOperationUnavailable`] when the
+    /// history contains a host-owned consent-closure marker but this
+    /// experiment has no bound consent authority.
     pub fn resume_with_store(
         self,
         timeline_id: pos_core::ids::TimelineId,
@@ -1361,9 +1367,11 @@ impl ExperimentSession {
 
     /// Revoke the default session subject's consent at the next Tick Boundary.
     ///
-    /// The current completed boundary remains readable. The next step commits
-    /// only the experiment-owned lifecycle marker; a following step returns
-    /// [`TickOutcome::Stopped`] without invoking or committing any Driver.
+    /// The current completed boundary remains readable. With a bound consent
+    /// authority, the next step commits only the experiment-owned lifecycle
+    /// marker; a following step returns [`TickOutcome::Stopped`] without
+    /// invoking or committing any Driver. Without an authority, that next
+    /// step fails closed before appending the marker.
     pub fn revoke_consent_at_boundary(&mut self) {
         if !self.consent_revoked {
             self.consent_revocation_pending = Some(PendingConsentRevocation::Timeline {
@@ -1374,10 +1382,12 @@ impl ExperimentSession {
 
     /// Schedule a durable, subject-scoped consent revocation.
     ///
-    /// The request immediately closes external append authority. The host
-    /// persists an experiment-owned lifecycle marker as the next atomic boundary;
-    /// Drivers are not invoked for that boundary. Recovery derives the closed
-    /// state from that marker rather than from process memory.
+    /// The request immediately closes external append authority. With a bound
+    /// consent authority, the host persists an experiment-owned lifecycle
+    /// marker as the next atomic boundary; Drivers are not invoked for that
+    /// boundary. Recovery derives the closed state from that marker rather
+    /// than from process memory. Without an authority, the next step fails
+    /// closed before appending the marker.
     pub fn revoke_consent_for_subject_at_boundary(&mut self, subject: EntityId) {
         if !self.consent_revoked {
             self.consent_revocation_pending = Some(PendingConsentRevocation::Subject {
@@ -2326,7 +2336,7 @@ mod tests {
             projections: pos_state::ProjectionRegistry::new(),
             consent_gate: Some(Arc::clone(&gate)),
             protected_token: Some(token.clone()),
-            store_config: Some(store_config.clone()),
+            store_config: Some(store_config),
         };
         result
             .projections
@@ -6182,9 +6192,22 @@ mod coverage_entrypoints {
                 serde_json::json!({}),
             )),
         );
+    }
 
-        let export_authority = ConsentAuthority::new();
-        let export_token = export_authority.record_grant_on_timeline(
+    #[test]
+    fn result_export_accepts_a_matching_export_capability() {
+        let database = ok(tempfile::NamedTempFile::new());
+        let store_config = StoreConfig::Sqlite {
+            path: ok(database
+                .path()
+                .to_str()
+                .ok_or("coverage export path is not utf8"))
+            .to_owned(),
+        };
+        let mut store = ok(open_store(store_config.clone()));
+        let timeline = ok(store.create_timeline("coverage-result-export"));
+        let authority = ConsentAuthority::new();
+        let token = authority.record_grant_on_timeline(
             timeline.id(),
             &ConsentGranted {
                 subject_id: EntityId::new(),
@@ -6210,8 +6233,8 @@ mod coverage_entrypoints {
                 pos_core::clock::WallTime::from_micros(0),
             ),
             projections: pos_state::ProjectionRegistry::new(),
-            consent_gate: Some(Arc::new(export_authority)),
-            protected_token: Some(export_token),
+            consent_gate: Some(Arc::new(authority)),
+            protected_token: Some(token),
             store_config: Some(store_config),
         };
         let manifest = ok(

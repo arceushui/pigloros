@@ -356,12 +356,9 @@ mod coverage_entrypoints {
                 &[restore_event],
             )
             .is_ok());
-        assert_eq!(
-            registry
-                .tick_cadenced(timeline, u128::MAX)
-                .map(|drafts| drafts.len()),
-            Ok(1)
-        );
+        assert!(registry
+            .tick_cadenced(timeline, u128::MAX)
+            .is_ok_and(|drafts| drafts.len() == 1));
     }
 
     #[test]
