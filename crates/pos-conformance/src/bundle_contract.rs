@@ -5,8 +5,6 @@
 //! expected-result members, while this module recomputes their digests,
 //! validates them against CPF1, and verifies the bundle signature.
 
-use std::collections::BTreeSet;
-
 use ciborium::value::Value;
 use pos_core::{CanonicalBytes, PublicKey, Signature};
 use pos_crypto::{canonical, signing};
@@ -271,10 +269,10 @@ impl ConformanceBundleV1 {
                 ProfileLifecycleV1::Draft | ProfileLifecycleV1::Candidate
             )
             || self.members.is_empty()
-            || self.members.len() > MAX_MEMBERS
         {
             return Err(BundleContractErrorV1::LifecycleInvalid);
         }
+        validate_member_count(self.members.len())?;
         let profile_member = self
             .members
             .iter()
@@ -302,11 +300,11 @@ impl ConformanceBundleV1 {
             if descriptor.size_bytes != u64::try_from(member.bytes.len()).unwrap_or(u64::MAX)
                 || descriptor.digest != member.digest
                 || member.bytes.is_empty()
-                || member.bytes.len() as u64 > MAX_MEMBER_BYTES
                 || member.digest != *blake3::hash(&member.bytes).as_bytes()
             {
                 return Err(BundleContractErrorV1::MemberDigestMismatch);
             }
+            validate_member_size(member.bytes.len() as u64)?;
             total_bytes = total_bytes
                 .checked_add(descriptor.size_bytes)
                 .ok_or(BundleContractErrorV1::MemberOutOfBounds)?;
@@ -342,6 +340,22 @@ impl ConformanceBundleV1 {
 
 fn validate_total_bytes(total_bytes: u64) -> Result<(), BundleContractErrorV1> {
     if total_bytes > MAX_TOTAL_BUNDLE_BYTES {
+        Err(BundleContractErrorV1::MemberOutOfBounds)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_member_count(member_count: usize) -> Result<(), BundleContractErrorV1> {
+    if member_count > MAX_MEMBERS {
+        Err(BundleContractErrorV1::LifecycleInvalid)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_member_size(member_size: u64) -> Result<(), BundleContractErrorV1> {
+    if member_size > MAX_MEMBER_BYTES {
         Err(BundleContractErrorV1::MemberOutOfBounds)
     } else {
         Ok(())
@@ -410,16 +424,8 @@ fn validate_expected_results(
     }) {
         return Err(BundleContractErrorV1::MemberMissing);
     }
-    let mut seen = BTreeSet::new();
     for expected in &manifest.expected_results {
-        if expected.mode != manifest.mode
-            || !seen.insert((
-                expected.case_id.as_str(),
-                expected.claim_layer,
-                expected.mode,
-            ))
-            || expected.digest == [0; 32]
-        {
+        if expected.mode != manifest.mode || expected.digest == [0; 32] {
             return Err(BundleContractErrorV1::ExpectedResultMismatch);
         }
         let Some(member) = members
@@ -469,10 +475,20 @@ fn validate_expected_results(
     Ok(())
 }
 
-fn expected_identity(values: &[BundleExpectedResultV1]) -> Vec<(&str, ClaimLayerV1, [u8; 32])> {
+fn expected_identity(
+    values: &[BundleExpectedResultV1],
+) -> Vec<(&str, ClaimLayerV1, BundleModeV1, &str, [u8; 32])> {
     values
         .iter()
-        .map(|value| (value.case_id.as_str(), value.claim_layer, value.digest))
+        .map(|value| {
+            (
+                value.case_id.as_str(),
+                value.claim_layer,
+                value.mode,
+                value.member_path.as_str(),
+                value.digest,
+            )
+        })
         .collect()
 }
 
@@ -760,15 +776,44 @@ mod tests {
     #[test]
     fn path_and_secret_guards_are_closed() {
         assert_eq!(
+            validate_member_path(""),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+        assert_eq!(
+            validate_member_path(&"a".repeat(MAX_MEMBER_PATH_BYTES + 1)),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+        assert_eq!(
+            validate_member_path("/absolute"),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+        assert_eq!(
             validate_member_path("../secret"),
             Err(BundleContractErrorV1::MemberOutOfBounds)
         );
+        assert_eq!(
+            validate_member_path("nested//empty"),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+        assert!(validate_member_path("nested/result").is_ok());
         assert!(contains_secret_marker(b"PUBLIC PRIVATE_KEY material"));
         assert!(!contains_secret_marker(b"public expected result"));
     }
 
     #[test]
     fn total_bundle_size_limit_is_closed() {
+        assert_eq!(MAX_MEMBER_BYTES, 64 * 1024 * 1024);
+        assert_eq!(MAX_TOTAL_BUNDLE_BYTES, 1024 * 1024 * 1024);
+        assert_eq!(validate_member_count(MAX_MEMBERS), Ok(()));
+        assert_eq!(
+            validate_member_count(MAX_MEMBERS + 1),
+            Err(BundleContractErrorV1::LifecycleInvalid)
+        );
+        assert_eq!(validate_member_size(MAX_MEMBER_BYTES), Ok(()));
+        assert_eq!(
+            validate_member_size(MAX_MEMBER_BYTES + 1),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
         assert_eq!(validate_total_bytes(MAX_TOTAL_BUNDLE_BYTES), Ok(()));
         assert_eq!(
             validate_total_bytes(MAX_TOTAL_BUNDLE_BYTES + 1),
@@ -801,6 +846,27 @@ mod tests {
         let second = canonical::encode(&manifest_value(&manifest))
             .map_err(|_| BundleContractErrorV1::EncodingFailed)?;
         assert_eq!(first, second);
+        assert_eq!(BundleModeV1::Local.code(), 0);
+        assert_eq!(BundleModeV1::AirGapped.code(), 1);
+        for (layer, expected_code) in [
+            (ClaimLayerV1::ArtifactIntegrity, 0),
+            (ClaimLayerV1::ReplayConformance, 1),
+            (ClaimLayerV1::KnowledgeNonInterference, 2),
+            (ClaimLayerV1::GatewayClientConformance, 3),
+            (ClaimLayerV1::PluginConformance, 4),
+            (ClaimLayerV1::MetricConformance, 5),
+            (ClaimLayerV1::EmpiricalEvaluation, 6),
+        ] {
+            assert_eq!(claim_layer_code(layer), expected_code);
+        }
+        for (lifecycle, expected_code) in [
+            (ProfileLifecycleV1::Draft, 0),
+            (ProfileLifecycleV1::Candidate, 1),
+            (ProfileLifecycleV1::Stable, 2),
+            (ProfileLifecycleV1::Retired, 3),
+        ] {
+            assert_eq!(lifecycle.code(), expected_code);
+        }
         for lifecycle in [ProfileLifecycleV1::Stable, ProfileLifecycleV1::Retired] {
             let mut lifecycle_manifest = manifest.clone();
             lifecycle_manifest.lifecycle = lifecycle;
@@ -815,9 +881,38 @@ mod tests {
         let profile = profile();
         let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
         bundle.validate()?;
-        assert_ne!(bundle.bundle_digest()?, [0; 32]);
+        let manifest_bytes = bundle.manifest_bytes()?;
+        let mut digest_input = b"PiglorOS.ConformanceBundle.v1\0".to_vec();
+        digest_input.extend_from_slice(&manifest_bytes);
+        assert_eq!(
+            bundle.bundle_digest()?,
+            *blake3::hash(&digest_input).as_bytes()
+        );
         assert_eq!(bundle.manifest.profile_digest, profile.profile_digest);
         Ok(())
+    }
+
+    #[test]
+    fn ordering_predicates_reject_descending_and_duplicate_values() {
+        assert!(strictly_ordered(&[1_u8, 2, 3]));
+        assert!(!strictly_ordered(&[2_u8, 1]));
+        assert!(!strictly_ordered(&[1_u8, 1]));
+        assert!(strictly_ordered::<u8>(&[]));
+        assert!(strictly_ordered(&[1_u8]));
+
+        let ordered = vec![
+            BundleMemberV1::new("a", vec![1], false),
+            BundleMemberV1::new("b", vec![2], false),
+        ];
+        assert!(members_strictly_ordered(&ordered));
+        let mut descending = ordered.clone();
+        descending.swap(0, 1);
+        assert!(!members_strictly_ordered(&descending));
+        let duplicate = vec![
+            BundleMemberV1::new("a", vec![1], false),
+            BundleMemberV1::new("a", vec![2], false),
+        ];
+        assert!(!members_strictly_ordered(&duplicate));
     }
 
     #[test]
@@ -844,6 +939,59 @@ mod tests {
         };
         assert_eq!(
             invalid_pair.validate(),
+            Err(BundleContractErrorV1::ModeParityMismatch)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pair_validation_checks_modes_and_member_paths() -> Result<(), Box<dyn std::error::Error>> {
+        let profile = profile();
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+        let air_gapped = signed_bundle(&profile, BundleModeV1::AirGapped)?;
+
+        let mut local_with_air_mode = signed_bundle(&profile, BundleModeV1::Local)?;
+        local_with_air_mode.manifest.mode = BundleModeV1::AirGapped;
+        for expected in &mut local_with_air_mode.manifest.expected_results {
+            expected.mode = BundleModeV1::AirGapped;
+        }
+        let local_with_air_mode = local_with_air_mode.sign(&signing_key)?;
+        assert_eq!(
+            (ConformanceBundlePairV1 {
+                local: local_with_air_mode,
+                air_gapped: air_gapped.clone(),
+            })
+            .validate(),
+            Err(BundleContractErrorV1::ModeParityMismatch)
+        );
+
+        let mut air_with_local_mode = air_gapped.clone();
+        air_with_local_mode.manifest.mode = BundleModeV1::Local;
+        for expected in &mut air_with_local_mode.manifest.expected_results {
+            expected.mode = BundleModeV1::Local;
+        }
+        let air_with_local_mode = air_with_local_mode.sign(&signing_key)?;
+        assert_eq!(
+            (ConformanceBundlePairV1 {
+                local: signed_bundle(&profile, BundleModeV1::Local)?,
+                air_gapped: air_with_local_mode,
+            })
+            .validate(),
+            Err(BundleContractErrorV1::ModeParityMismatch)
+        );
+
+        let mut air_with_other_path = air_gapped;
+        let alternate_path = "expected/case-00-alt.bin".to_owned();
+        air_with_other_path.members[0].path = alternate_path.clone();
+        air_with_other_path.manifest.members[0].path = alternate_path.clone();
+        air_with_other_path.manifest.expected_results[0].member_path = alternate_path;
+        let air_with_other_path = air_with_other_path.sign(&signing_key)?;
+        assert_eq!(
+            (ConformanceBundlePairV1 {
+                local: signed_bundle(&profile, BundleModeV1::Local)?,
+                air_gapped: air_with_other_path,
+            })
+            .validate(),
             Err(BundleContractErrorV1::ModeParityMismatch)
         );
         Ok(())
@@ -917,6 +1065,13 @@ mod tests {
             Err(BundleContractErrorV1::ExpectedResultMismatch)
         );
 
+        let mut zero_digest = bundle.manifest.clone();
+        zero_digest.expected_results[0].digest = [0; 32];
+        assert_eq!(
+            validate_expected_results(&profile, &zero_digest, &bundle.members),
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
+        );
+
         let mut not_an_expected_result = bundle.members.clone();
         not_an_expected_result[0].expected_result = false;
         assert_eq!(
@@ -983,6 +1138,57 @@ mod tests {
     }
 
     #[test]
+    fn expected_result_member_guards_are_independent() -> Result<(), Box<dyn std::error::Error>> {
+        let profile = profile();
+        let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
+
+        let mut wrong_digest_members = bundle.members.clone();
+        wrong_digest_members[0].digest = digest(99);
+        assert_eq!(
+            validate_expected_results(&profile, &bundle.manifest, &wrong_digest_members,),
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
+        );
+
+        let mut empty_profile = profile.clone();
+        if let ExpectedResultV1::CanonicalBytes { digest, bytes } =
+            &mut empty_profile.fixtures[0].expected
+        {
+            bytes.clear();
+            *digest = *blake3::hash(bytes).as_bytes();
+        }
+        let mut empty_members = bundle.members.clone();
+        empty_members[0].bytes.clear();
+        empty_members[0].digest = *blake3::hash(&empty_members[0].bytes).as_bytes();
+        let mut empty_manifest = bundle.manifest.clone();
+        empty_manifest.expected_results[0].digest = empty_members[0].digest;
+        assert_eq!(
+            validate_expected_results(&empty_profile, &empty_manifest, &empty_members),
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mandatory_fixture_matching_requires_case_and_layer() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut profile = profile();
+        let mut same_layer = profile.fixtures[0].clone();
+        same_layer.case_id = "case-support".to_owned();
+        profile.fixtures.push(same_layer);
+        profile.profile_digest = profile.digest();
+        let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
+        let mut manifest = bundle.manifest.clone();
+        manifest
+            .expected_results
+            .retain(|expected| expected.case_id != "case-00");
+        assert_eq!(
+            validate_expected_results(&profile, &manifest, &bundle.members),
+            Err(BundleContractErrorV1::MemberMissing)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn validation_rejects_tampered_bytes_and_unsorted_members(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let profile = profile();
@@ -999,6 +1205,13 @@ mod tests {
         unsorted.members.swap(0, 1);
         assert_eq!(
             unsorted.validate(),
+            Err(BundleContractErrorV1::NonCanonicalOrder)
+        );
+
+        let mut unsorted_manifest = signed_bundle(&profile, BundleModeV1::Local)?;
+        unsorted_manifest.manifest.members.swap(0, 1);
+        assert_eq!(
+            unsorted_manifest.validate(),
             Err(BundleContractErrorV1::NonCanonicalOrder)
         );
 
