@@ -1229,10 +1229,7 @@ fn validate_expected_results(
         }
         let expected_bytes = match &fixture.expected {
             ExpectedResultV1::CanonicalBytes { bytes, digest } => {
-                if *digest != expected.digest
-                    || *digest != *blake3::hash(bytes).as_bytes()
-                    || bytes.is_empty()
-                {
+                if *digest != expected.digest || *digest != *blake3::hash(bytes).as_bytes() {
                     return Err(BundleContractErrorV1::ExpectedResultMismatch);
                 }
                 bytes.clone()
@@ -2175,6 +2172,10 @@ mod tests {
             deeply_nested = Value::Array(vec![deeply_nested]);
         }
         let deeply_nested_bytes = encode_archive_value(&deeply_nested)?;
+        assert_eq!(
+            preflight_archive(&deeply_nested_bytes),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
         assert_eq!(
             ConformanceBundleV1::from_canonical_cbor(&deeply_nested_bytes),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
@@ -3443,6 +3444,37 @@ mod coverage_entrypoints {
         raw_archive_with_header(&[0x86], first, members)
     }
 
+    fn exact_member_array() -> Vec<u8> {
+        let mut bytes = vec![0x9a, 0, 1, 0, 0];
+        for _ in 0..MAX_MEMBERS {
+            bytes.extend_from_slice(&[0x83, 0x60, 0x40, 0x00]);
+        }
+        bytes
+    }
+
+    fn exact_null_array() -> Vec<u8> {
+        let mut bytes = vec![0x9a, 0, 1, 0, 0];
+        bytes.extend(std::iter::repeat_n(0xf6, MAX_MEMBERS));
+        bytes
+    }
+
+    fn exact_path_member() -> Vec<u8> {
+        let mut bytes = vec![0x81, 0x83, 0x79, 1, 0];
+        bytes.extend(std::iter::repeat_n(b'a', MAX_MEMBER_PATH_BYTES));
+        bytes.extend_from_slice(&[0x40, 0x00]);
+        bytes
+    }
+
+    fn exact_bytes_member() -> Vec<u8> {
+        let length = usize::try_from(MAX_MEMBER_BYTES).unwrap_or_default();
+        let mut bytes = Vec::with_capacity(length + 14);
+        bytes.extend_from_slice(&[0x81, 0x83, 0x60, 0x5b]);
+        bytes.extend_from_slice(&MAX_MEMBER_BYTES.to_be_bytes());
+        bytes.extend(std::iter::repeat_n(0_u8, length));
+        bytes.push(0x00);
+        bytes
+    }
+
     fn manifest_with_member(member: Value) -> Value {
         Value::Array(vec![
             Value::Text(super::CONFORMANCE_BUNDLE_MAGIC_V1.to_owned()),
@@ -3541,6 +3573,43 @@ mod coverage_entrypoints {
                 &[0x81, 0x83, 0x60, 0x41, 0x01, 0x02],
             )),
             Err(BundleContractErrorV1::ProfileInvalid)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn archive_scanner_accepts_inclusive_limits_and_tracks_depth(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut exact_depth = vec![0x60];
+        for _ in 0..(usize::from(MAX_STRUCTURAL_NESTING) - 2) {
+            let mut next = vec![0x81];
+            next.extend_from_slice(&exact_depth);
+            exact_depth = next;
+        }
+        let exact_depth_scan = super::archive_preflight::scan(&raw_archive(&exact_depth, &[0x80]))?;
+        assert_eq!(
+            exact_depth_scan.maximum_depth,
+            usize::from(MAX_STRUCTURAL_NESTING)
+        );
+        let mut over_depth = vec![0x81];
+        over_depth.extend_from_slice(&exact_depth);
+        assert!(super::archive_preflight::scan(&raw_archive(&over_depth, &[0x80])).is_err());
+
+        let exact_members =
+            super::archive_preflight::scan(&raw_archive(&[0x60], &exact_member_array()))?;
+        assert_eq!(exact_members.member_count, MAX_MEMBERS);
+        assert_eq!(exact_members.maximum_depth, 4);
+        assert!(super::archive_preflight::scan(&raw_archive_with_header(
+            &[0x86],
+            &exact_null_array(),
+            &[0x80],
+        ))
+        .is_ok());
+        assert!(
+            super::archive_preflight::scan(&raw_archive(&[0x60], &exact_path_member(),)).is_ok()
+        );
+        assert!(
+            super::archive_preflight::scan(&raw_archive(&[0x60], &exact_bytes_member(),)).is_ok()
         );
         Ok(())
     }
@@ -3998,6 +4067,12 @@ mod coverage_entrypoints {
         );
         assert_eq!(validate_archive_caps(&bundle, &Value::Null, 1), Ok(()));
         let profile = tests::profile();
+        let exact_total =
+            usize::try_from(profile.evaluator_protocol.hard_caps.max_total_bundle_bytes)?;
+        assert_eq!(
+            validate_archive_caps(&bundle, &Value::Null, exact_total),
+            Ok(())
+        );
         let profile_bytes = [1_u8];
         let preflight = super::ArchivePreflight {
             profile_bytes: Some(&profile_bytes),
