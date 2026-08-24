@@ -139,7 +139,7 @@ fn protected_public_seam_checks_timeline_and_rechecks_at_commit_head() {
     let grant = grant(subject);
     let token = authority.record_grant_on_timeline(timeline, &grant);
     let mut registry = PluginRegistry::new().with_consent_authority(authority.clone());
-    registry.register_driver(Box::new(EmptyDriver));
+    registry.register_driver(Box::new(ProtectedEventDriver { entity: subject }));
 
     let drafts =
         test_ok(registry.step_all_anchored_protected(timeline, Seq::ZERO, token.clone(), 1, &[]));
