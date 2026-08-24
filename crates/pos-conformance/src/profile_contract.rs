@@ -2092,38 +2092,6 @@ fn decode_requirements(
     })
 }
 
-fn decode_stable_evidence(
-    value: &Value,
-) -> Result<StableImplementationEvidenceV1, ConformanceContractError> {
-    let fields = array(value, 6)?;
-    Ok(StableImplementationEvidenceV1 {
-        implementation: decode_identity(&fields[0])?,
-        independence: decode_independence(&fields[1])?,
-        evaluator_protocol_digest: digest_value(&fields[2])?,
-        report: crate::strict_codec::decode_conformance_report_value(&fields[3])
-            .map_err(|_| ConformanceContractError::InvalidEncoding)?,
-        case_outcomes: array_values(&fields[4])?
-            .iter()
-            .map(decode_case)
-            .collect::<Result<Vec<_>, _>>()?,
-        attestation: decode_stable_attestation(&fields[5])?,
-    })
-}
-
-fn decode_stable_attestation(
-    value: &Value,
-) -> Result<StableEvidenceAttestationV1, ConformanceContractError> {
-    let fields = array(value, 3)?;
-    let signature = bytes_value(&fields[1])?
-        .try_into()
-        .map_err(|_| ConformanceContractError::FieldOutOfBounds)?;
-    Ok(StableEvidenceAttestationV1 {
-        signer_public_key: digest_value(&fields[0])?,
-        signature,
-        trust_root_digest: digest_value(&fields[2])?,
-    })
-}
-
 fn decode_request(value: &Value) -> Result<EvaluatorRequestV1, ConformanceContractError> {
     let fields = array(value, 14)?;
     if text_value(&fields[0])? != EVALUATOR_REQUEST_MAGIC_V1 || uint_value(&fields[1])? != 1 {
@@ -2190,18 +2158,6 @@ fn encode_independence(value: &IndependenceEvidenceV1) -> Value {
     ])
 }
 
-fn decode_independence(value: &Value) -> Result<IndependenceEvidenceV1, ConformanceContractError> {
-    let fields = array(value, 6)?;
-    Ok(IndependenceEvidenceV1 {
-        technical_independent: bool_value(&fields[0])?,
-        authorship_independent: bool_value(&fields[1])?,
-        organizational_independent: bool_value(&fields[2])?,
-        declaration_digest: digest_value(&fields[3])?,
-        shared_code_audit_digest: digest_value(&fields[4])?,
-        reviewer_ids: strings_value(&fields[5])?,
-    })
-}
-
 fn encode_case(value: &CaseOutcomeV1) -> Value {
     Value::Array(vec![
         text(&value.case_id),
@@ -2226,28 +2182,6 @@ fn encode_case(value: &CaseOutcomeV1) -> Value {
         redaction(value.redaction_state),
         digest(&value.provenance_digest),
     ])
-}
-
-fn decode_case(value: &Value) -> Result<CaseOutcomeV1, ConformanceContractError> {
-    let fields = array(value, 16)?;
-    Ok(CaseOutcomeV1 {
-        case_id: text_value(&fields[0])?,
-        fixture_digest: digest_value(&fields[1])?,
-        execution_profile_digest: digest_value(&fields[2])?,
-        mode: decode_mode(&fields[3])?,
-        claim_layer: decode_claim_layer(&fields[4])?,
-        outcome: decode_case_outcome(&fields[5])?,
-        verification_outcome: decode_verification_outcome(&fields[6])?,
-        divergence_kind: optional_divergence_mismatch(&fields[7])?,
-        first_coordinate: optional_bytes(&fields[8])?,
-        expected_digest: optional_digest(&fields[9])?,
-        actual_digest: optional_digest(&fields[10])?,
-        expected_error: optional_safe_error(&fields[11])?,
-        actual_error: optional_safe_error(&fields[12])?,
-        replay_claim: decode_replay_claim(&fields[13])?,
-        redaction_state: decode_redaction(&fields[14])?,
-        provenance_digest: digest_value(&fields[15])?,
-    })
 }
 
 fn encode_value(value: &Value) -> Result<Vec<u8>, ConformanceContractError> {
@@ -2542,16 +2476,6 @@ fn case_outcome(value: CaseOutcomeStatusV1) -> Value {
         CaseOutcomeStatusV1::NotApplicable => 4,
     })
 }
-fn decode_case_outcome(value: &Value) -> Result<CaseOutcomeStatusV1, ConformanceContractError> {
-    match uint_value(value)? {
-        0 => Ok(CaseOutcomeStatusV1::Pass),
-        1 => Ok(CaseOutcomeStatusV1::Fail),
-        2 => Ok(CaseOutcomeStatusV1::Skip),
-        3 => Ok(CaseOutcomeStatusV1::Unavailable),
-        4 => Ok(CaseOutcomeStatusV1::NotApplicable),
-        _ => Err(ConformanceContractError::InvalidEncoding),
-    }
-}
 fn verification_outcome(value: VerificationOutcomeV1) -> Value {
     uint(match value {
         VerificationOutcomeV1::VerifiedExact => 0,
@@ -2602,15 +2526,6 @@ fn decode_divergence_mismatch(
         7 => Ok(DivergenceMismatchKindV1::NumericProfile),
         8 => Ok(DivergenceMismatchKindV1::ProhibitedOperationalInput),
         _ => Err(ConformanceContractError::InvalidEncoding),
-    }
-}
-fn optional_divergence_mismatch(
-    value: &Value,
-) -> Result<Option<DivergenceMismatchKindV1>, ConformanceContractError> {
-    if matches!(value, Value::Null) {
-        Ok(None)
-    } else {
-        decode_divergence_mismatch(value).map(Some)
     }
 }
 fn replay_claim(value: ReplayClaimV1) -> Value {
@@ -2693,14 +2608,6 @@ fn optional_safe_error(value: &Value) -> Result<Option<SafeErrorCodeV1>, Conform
         decode_safe_error(value).map(Some)
     }
 }
-fn optional_bytes(value: &Value) -> Result<Option<Vec<u8>>, ConformanceContractError> {
-    if matches!(value, Value::Null) {
-        Ok(None)
-    } else {
-        bytes_value(value).map(Some)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     // The public contract tests below exercise canonical CBOR, validation,
@@ -3729,15 +3636,6 @@ mod tests {
             assert_eq!(decode_claim_layer(&claim_layer(value)), Ok(value));
         }
         for value in [
-            CaseOutcomeStatusV1::Pass,
-            CaseOutcomeStatusV1::Fail,
-            CaseOutcomeStatusV1::Skip,
-            CaseOutcomeStatusV1::Unavailable,
-            CaseOutcomeStatusV1::NotApplicable,
-        ] {
-            assert_eq!(decode_case_outcome(&case_outcome(value)), Ok(value));
-        }
-        for value in [
             ReplayClaimV1::Exact,
             ReplayClaimV1::ExactAuthoritativeWithRedactedViews,
             ReplayClaimV1::StructuralOnly,
@@ -3777,7 +3675,6 @@ mod tests {
         assert!(decode_adapter(&unknown).is_err());
         assert!(decode_mode(&unknown).is_err());
         assert!(decode_claim_layer(&unknown).is_err());
-        assert!(decode_case_outcome(&unknown).is_err());
         assert!(decode_replay_claim(&unknown).is_err());
         assert!(decode_redaction(&unknown).is_err());
         assert!(decode_safe_error(&unknown).is_err());
@@ -4308,7 +4205,7 @@ mod tests {
     }
 
     #[test]
-    fn public_stable_profile_decoder_reaches_nested_invalid_field_seams() {
+    fn public_stable_profile_decoder_round_trips_sidecar_evidence() {
         let policy = trusted_root_policy();
         let value = profile();
         let candidate_result = value.transition_to(ProfileLifecycleV1::Candidate, vec![]);
@@ -4333,35 +4230,6 @@ mod tests {
             ),
             Ok(stable.clone())
         );
-        let evidence = encode_stable_evidence(&stable.stable_evidence[0]);
-        for index in 0..6 {
-            let mut malformed = evidence.clone();
-            replace_profile_path(&mut malformed, &[index], Value::Map(Vec::new()));
-            assert!(decode_stable_evidence(&malformed).is_err());
-        }
-        for index in 0..6 {
-            let mut malformed = evidence.clone();
-            replace_profile_path(&mut malformed, &[0, index], Value::Map(Vec::new()));
-            assert!(decode_stable_evidence(&malformed).is_err());
-            let mut malformed = evidence.clone();
-            replace_profile_path(&mut malformed, &[1, index], Value::Map(Vec::new()));
-            assert!(decode_stable_evidence(&malformed).is_err());
-        }
-        for index in 0..16 {
-            let mut malformed = evidence.clone();
-            replace_profile_path(&mut malformed, &[4, 0, index], Value::Map(Vec::new()));
-            assert!(decode_stable_evidence(&malformed).is_err());
-        }
-        for index in 0..24 {
-            let mut malformed = evidence.clone();
-            replace_profile_path(&mut malformed, &[3, index], Value::Map(Vec::new()));
-            assert!(decode_stable_evidence(&malformed).is_err());
-        }
-        for index in 0..3 {
-            let mut malformed = evidence.clone();
-            replace_profile_path(&mut malformed, &[5, index], Value::Map(Vec::new()));
-            assert!(decode_stable_evidence(&malformed).is_err());
-        }
     }
 
     #[test]
@@ -6641,18 +6509,13 @@ mod tests {
         assert!(decode_protocol(&invalid).is_err());
         assert!(decode_hard_caps(&invalid).is_err());
         assert!(decode_requirements(&invalid).is_err());
-        assert!(decode_stable_evidence(&invalid).is_err());
-        assert!(decode_stable_attestation(&invalid).is_err());
         assert!(decode_request(&invalid).is_err());
         assert!(decode_output_capability(&invalid).is_err());
         assert!(decode_identity(&invalid).is_err());
-        assert!(decode_independence(&invalid).is_err());
-        assert!(decode_case(&invalid).is_err());
         assert!(decode_lifecycle(&invalid).is_err());
         assert!(decode_adapter(&invalid).is_err());
         assert!(decode_mode(&invalid).is_err());
         assert!(decode_claim_layer(&invalid).is_err());
-        assert!(decode_case_outcome(&invalid).is_err());
         assert!(decode_verification_outcome(&invalid).is_err());
         assert!(decode_divergence_mismatch(&invalid).is_err());
         assert!(decode_replay_claim(&invalid).is_err());
@@ -6733,28 +6596,10 @@ mod tests {
             |value| decode_requirements(value).map(|_| ()),
         );
         reject_fields(
-            &encode_stable_attestation(&stable_evidence("alpha", 30).attestation),
-            3,
-            &[],
-            |value| decode_stable_attestation(value).map(|_| ()),
-        );
-        reject_fields(
             &encode_identity(&stable_evidence("alpha", 30).implementation),
             6,
             &[5],
             |value| decode_identity(value).map(|_| ()),
-        );
-        reject_fields(
-            &encode_independence(&stable_evidence("alpha", 30).independence),
-            6,
-            &[],
-            |value| decode_independence(value).map(|_| ()),
-        );
-        reject_fields(
-            &encode_case(&case_outcome_record(ExecutionModeV1::Local)),
-            16,
-            &[7, 8, 9, 10, 11, 12],
-            |value| decode_case(value).map(|_| ()),
         );
         reject_fields(&encode_request(&request(), true), 14, &[], |value| {
             decode_request(value).map(|_| ())

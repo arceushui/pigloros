@@ -3711,12 +3711,6 @@ pub mod strict_codec {
         encode_value(&encode_report_value(report, true))
     }
 
-    pub(crate) fn decode_conformance_report_value(
-        value: &Value,
-    ) -> Result<ConformanceReportV1, StrictCborError> {
-        decode_report(value)
-    }
-
     pub(crate) fn decode_conformance_report(
         bytes: &[u8],
     ) -> Result<ConformanceReportV1, StrictCborError> {
