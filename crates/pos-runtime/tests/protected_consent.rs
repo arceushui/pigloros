@@ -854,7 +854,7 @@ fn protected_projection_seams_reject_foreign_subjects_and_missing_or_foreign_gat
     let foreign_subject = EntityId::new();
     let authority = ConsentAuthority::new();
     let token = authority.record_grant_on_timeline(timeline, &grant(subject));
-    let mut foreign_projection = PluginRegistry::new().with_consent_authority(authority.clone());
+    let mut foreign_projection = PluginRegistry::new().with_consent_authority(authority);
     foreign_projection.register_driver(Box::new(SubscribedDriver {
         key: pos_runtime::ProjectionKey::new(foreign_subject),
     }));
