@@ -6183,7 +6183,7 @@ mod coverage_entrypoints {
             projections: pos_state::ProjectionRegistry::new(),
             consent_gate: Some(Arc::clone(&gate)),
             protected_token: Some(token),
-            store_config: Some(store_config.clone()),
+            store_config: Some(store_config),
         };
         expect_err(
             &denied_export.into_reproduction_manifest(ReproductionRecipe::new(
