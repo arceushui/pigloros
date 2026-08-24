@@ -5235,7 +5235,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn independence_and_stable_report_bindings_reject_each_mismatch() {
         let requirements = profile().independence_requirements;
-        let mut evidence = stable_evidence("alpha", 30);
+        let evidence = stable_evidence("alpha", 30);
         assert_eq!(
             validate_independence_evidence(&evidence.independence, &requirements),
             Ok(())
