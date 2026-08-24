@@ -1189,7 +1189,6 @@ mod tests {
         air_with_other_path.manifest.members[expected_index].path = alternate_path.clone();
         air_with_other_path.manifest.expected_results[0].member_path = alternate_path;
         air_with_other_path.rebuild_member_descriptors();
-        let air_with_other_path = air_with_other_path.sign(&signing_key)?;
         assert_eq!(
             (ConformanceBundlePairV1 {
                 local: signed_bundle(&profile, BundleModeV1::Local)?,
@@ -1405,7 +1404,7 @@ mod tests {
         let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
 
         let mut missing_case = bundle.manifest.clone();
-        missing_case.expected_results[0].case_id = "case-unknown".to_owned();
+        missing_case.expected_results[0].case_id = "case-00-unknown".to_owned();
         assert_eq!(
             validate_expected_results(&profile, &missing_case, &bundle.members),
             Err(BundleContractErrorV1::ExpectedResultMismatch)
