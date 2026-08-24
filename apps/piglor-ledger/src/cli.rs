@@ -337,7 +337,7 @@ fn cmd_export(args: &[String]) -> Result<(), CliError> {
     let out_path = flag(args, "--out").map(PathBuf::from);
     let pubkey = flag(args, "--pubkey").map(str::to_owned);
     let export = crate::export::build(&source, &today, pubkey)?;
-    let json = serde_json::to_string_pretty(&export).unwrap_or_default();
+    let json = serde_json::to_string_pretty(&export)?;
     if let Some(path) = out_path {
         std::fs::write(&path, &json)?;
         output_stdout!("wrote {} ({} bytes)", path.display(), json.len());
@@ -2429,12 +2429,15 @@ mod coverage_entrypoints {
         let temp = TempDir::new()?;
         let source = temp.path().join("ledger");
         std::fs::create_dir_all(&source)?;
-        cmd_export(&[
+        run(&[
+            "piglor-ledger".to_owned(),
+            "export".to_owned(),
             "--source".to_owned(),
             format!("toml:{}", source.display()),
             "--today".to_owned(),
             "2026-07-25".to_owned(),
-        ])?;
+        ])
+        .test_ok()?;
         Ok(())
     }
 
@@ -2443,7 +2446,9 @@ mod coverage_entrypoints {
         let temp = TempDir::new()?;
         let database = temp.path().join("ledger.db");
         let missing_key = temp.path().join("missing.key");
-        let error = cmd_build(&[
+        let error = run(&[
+            "piglor-ledger".to_owned(),
+            "build".to_owned(),
             "--source".to_owned(),
             format!("store:{}", database.display()),
             "--site".to_owned(),
@@ -2471,7 +2476,9 @@ mod coverage_entrypoints {
         raw.save_key_registry(&KeyRegistryStateV1::new())?;
         drop(raw);
 
-        let error = cmd_build(&[
+        let error = run(&[
+            "piglor-ledger".to_owned(),
+            "build".to_owned(),
             "--source".to_owned(),
             format!("store:{}", database.display()),
             "--site".to_owned(),
