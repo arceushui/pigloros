@@ -7,7 +7,7 @@ use pos_core::{
 };
 use pos_store::sqlite::SqliteStore;
 
-fn registry() -> Result<(KeyRegistryStateV1, KeyIdentityV1, Hash), CoreError> {
+fn registry() -> Result<(KeyRegistryStateV1, KeyIdentityV1, Hash), Box<dyn std::error::Error>> {
     let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
     let material_digest = Hash::from_bytes([3; 32]);
     let mut registry = KeyRegistryStateV1::new();
@@ -36,7 +36,7 @@ fn seed_event(store: &mut SqliteStore, timeline: TimelineId) -> Result<Event, Co
 
 #[test]
 fn sqlite_key_registry_public_contract_covers_persistence_and_authorization(
-) -> Result<(), CoreError> {
+) -> Result<(), Box<dyn std::error::Error>> {
     let (registry, identity, material_digest) = registry()?;
     let mut store = SqliteStore::open_in_memory()?;
     assert!(store.load_key_registry()?.is_none());
