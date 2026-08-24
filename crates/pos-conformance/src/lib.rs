@@ -22,7 +22,7 @@ pub use profile_contract::{
     AllowedDivergenceV1, CapabilityPolicyV1, ConformanceContractError, ConformanceProfileV1,
     EvaluatorHardCapsV1, EvaluatorOutputCapabilityV1, EvaluatorProtocolV1, EvaluatorRequestV1,
     ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1, FixtureInputMemberV1,
-    FixtureProvenanceV1, IndependenceRequirementsV1, ProfileCaseOutcomeV1, ProfileLifecycleV1,
+    FixtureProvenanceV1, IndependenceRequirementsV1, ProfileLifecycleV1,
     StableEvidenceAttestationV1, StableImplementationEvidenceV1, SubjectAdapterKindV1,
     TrustedRootPolicyV1, CONFORMANCE_PROFILE_MAGIC_V1, EVALUATOR_REQUEST_MAGIC_V1,
 };
