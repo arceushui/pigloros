@@ -2680,9 +2680,13 @@ mod tests {
 
     #[test]
     fn session_without_drivers_commits_a_quiescent_tick() {
-        let mut session = Experiment::new(config("empty-tick", StopCondition::MaxTicks(1)))
-            .start()
-            .test_ok();
+        let mut session = Experiment::new(ExperimentConfig {
+            name: "empty-tick".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        })
+        .start()
+        .test_ok();
 
         assert!(matches!(session.step_tick(), Ok(TickOutcome::Quiescent)));
     }
