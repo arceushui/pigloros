@@ -2087,7 +2087,7 @@ mod tests {
     use super::*;
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
-        ids::{EntityId, PluginId},
+        ids::{EntityId, PluginId, TimelineId},
         ActionApprover, ActionRejected, Capability, ConsentGranted, CoreError, Event, EventStore,
         Plugin, ProposedAction, Reducer, State,
     };
