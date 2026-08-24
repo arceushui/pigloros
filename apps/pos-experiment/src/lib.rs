@@ -1651,8 +1651,7 @@ impl ExperimentSession {
         if self.health == SessionHealth::Faulted {
             return Err(ExperimentError::SessionFaulted);
         }
-        let current_head = lock_store(&self.store)
-            .and_then(|store| Ok(store.logical_head(self.timeline.id())?))?;
+        let fork_head = self.boundary.folded_through;
         if let Some(token) = self.operation_token.as_ref() {
             let gate = self
                 .registry
@@ -1661,7 +1660,7 @@ impl ExperimentSession {
             gate.validate_token(
                 self.timeline.id(),
                 token,
-                current_head.as_u64(),
+                fork_head.as_u64(),
                 current_now_secs(),
             )
             .map_err(pos_runtime::RuntimeError::Consent)?;
@@ -1684,7 +1683,7 @@ impl ExperimentSession {
             return Err(ExperimentError::IncompatibleForkRegistry);
         }
         let (events, ancestry) = lock_store(&self.store).and_then(|store| {
-            let events = read_completed_prefix(store.as_ref(), self.timeline.id(), current_head)?;
+            let events = read_completed_prefix(store.as_ref(), self.timeline.id(), fork_head)?;
             let ancestry = timeline_ancestry(
                 store.as_ref(),
                 self.timeline.id(),
@@ -1702,10 +1701,9 @@ impl ExperimentSession {
 
         lock_store(&self.store)
             .and_then(|mut store| {
-                let fresh_head = store.logical_head(self.timeline.id())?;
                 let mut fork_result = None;
                 let mut append = || {
-                    fork_result = Some(store.fork(self.timeline.id(), fresh_head, name));
+                    fork_result = Some(store.fork(self.timeline.id(), fork_head, name));
                 };
                 if let Some(token) = self.operation_token.as_ref() {
                     let gate = self
@@ -1715,7 +1713,7 @@ impl ExperimentSession {
                     gate.with_token_fence(
                         self.timeline.id(),
                         token,
-                        fresh_head.as_u64(),
+                        fork_head.as_u64(),
                         current_now_secs(),
                         &mut append,
                     )
