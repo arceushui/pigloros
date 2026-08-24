@@ -3784,15 +3784,6 @@ mod coverage_entrypoints {
             Err(BundleContractErrorV1::LifecycleInvalid)
         );
 
-        let mut invalid_key = bundle.clone();
-        let mut invalid_key_bytes = [0_u8; 32];
-        invalid_key_bytes[31] = 0xff;
-        invalid_key.signer_public_key = PublicKey::from_bytes(invalid_key_bytes);
-        assert_eq!(
-            invalid_key.validate(),
-            Err(BundleContractErrorV1::SignatureInvalid)
-        );
-
         let mut invalid_profile = bundle.clone();
         let profile_member = invalid_profile
             .members
@@ -3828,24 +3819,6 @@ mod coverage_entrypoints {
         }
         assert_eq!(
             ConformanceBundleV1::from_canonical_cbor(&encode_archive_value(&bad_magic_value)?),
-            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
-        );
-
-        let mut invalid_field_type = bundle_value(&bundle);
-        if let Value::Array(fields) = &mut invalid_field_type {
-            fields[0] = Value::Null;
-        }
-        assert_eq!(
-            ConformanceBundleV1::from_canonical_cbor(&encode_archive_value(&invalid_field_type)?),
-            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
-        );
-
-        let mut invalid_manifest = bundle_value(&bundle);
-        if let Value::Array(fields) = &mut invalid_manifest {
-            fields[2] = Value::Null;
-        }
-        assert_eq!(
-            ConformanceBundleV1::from_canonical_cbor(&encode_archive_value(&invalid_manifest)?),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
         );
 
@@ -3891,6 +3864,38 @@ mod coverage_entrypoints {
             assert_eq!(super::decode_claim_layer(code).is_ok(), code < 7);
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn archive_field_rejection_paths_are_instrumented() -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = signed_bundle()?;
+        let mut invalid_key = bundle.clone();
+        let mut invalid_key_bytes = [0_u8; 32];
+        invalid_key_bytes[31] = 0xff;
+        invalid_key.signer_public_key = PublicKey::from_bytes(invalid_key_bytes);
+        assert_eq!(
+            invalid_key.validate(),
+            Err(BundleContractErrorV1::SignatureInvalid)
+        );
+
+        let mut invalid_field_type = bundle_value(&bundle);
+        if let Value::Array(fields) = &mut invalid_field_type {
+            fields[0] = Value::Null;
+        }
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&encode_archive_value(&invalid_field_type)?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+
+        let mut invalid_manifest = bundle_value(&bundle);
+        if let Value::Array(fields) = &mut invalid_manifest {
+            fields[2] = Value::Null;
+        }
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&encode_archive_value(&invalid_manifest)?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
         Ok(())
     }
 
