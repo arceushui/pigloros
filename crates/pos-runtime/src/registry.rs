@@ -588,18 +588,8 @@ impl PluginRegistry {
                     token
                         .authorize_event_type(&draft.event_type)
                         .map_err(RuntimeError::Consent)?;
-                    let checked = gate
-                        .check_consent(
-                            timeline,
-                            subject,
-                            &draft.event_type,
-                            timeline_head.as_u64(),
-                            now_secs,
-                        )
+                    gate.validate_token(timeline, token, timeline_head.as_u64(), now_secs)
                         .map_err(RuntimeError::Consent)?;
-                    if checked != *token {
-                        return Err(RuntimeError::Consent(pos_core::ConsentError::NoConsent));
-                    }
                 }
                 None => gate
                     .authorize_event(
