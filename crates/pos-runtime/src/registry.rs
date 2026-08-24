@@ -234,6 +234,9 @@ mod coverage_paths {
         assert!(*committed
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner));
+        assert!(registry
+            .restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[],)
+            .is_ok());
     }
 
     #[test]

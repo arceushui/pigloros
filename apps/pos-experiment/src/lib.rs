@@ -1053,9 +1053,9 @@ impl Experiment {
                     || gate.fence_timeline_at(timeline_id, marker.seq.as_u64()),
                     |subject| gate.fence_subject_at(timeline_id, subject, marker.seq.as_u64()),
                 );
-                result.map_err(|error| {
-                    map_runtime_error(pos_runtime::RuntimeError::Consent(error))
-                })?;
+                if let Err(error) = result {
+                    return Err(map_runtime_error(pos_runtime::RuntimeError::Consent(error)));
+                }
             }
         }
         Ok(ExperimentSession {
@@ -7814,6 +7814,45 @@ mod fault_injection_tests {
             .with_consent_gate(Arc::new(RejectingRevocationGate));
         session.revoke_consent_at_boundary();
         assert!(session.step_tick().is_err());
+    }
+
+    #[test]
+    fn durable_resume_propagates_gate_fence_failure() {
+        let directory = tempfile::tempdir().test_ok();
+        let path = directory.path().join("resume-gate-error.db");
+        let store_config = StoreConfig::Sqlite {
+            path: path.to_str().test_ok().to_owned(),
+        };
+        let timeline = {
+            let mut store = open_store(store_config.clone()).test_ok();
+            let timeline = store.create_timeline("resume-gate-error").test_ok();
+            store
+                .append(
+                    timeline.id(),
+                    &[EventDraft::new(
+                        EntityId::new(),
+                        Kind::new(EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE),
+                        pos_core::CanonicalBytes::from_static(EXPERIMENT_CONSENT_TIMELINE_MARKER),
+                    )],
+                )
+                .test_ok();
+            timeline.id()
+        };
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "resume-gate-error".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config,
+        })
+        .without_consent_gate();
+        experiment.registry = experiment
+            .registry
+            .with_consent_gate(Arc::new(RejectingRevocationGate));
+        assert!(matches!(
+            experiment.resume(timeline),
+            Err(ExperimentError::Runtime(RuntimeError::Consent(
+                pos_core::ConsentError::NoConsent
+            )))
+        ));
     }
 
     #[test]
