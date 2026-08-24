@@ -925,12 +925,8 @@ fn coordinator_persists_host_freeze_provenance() -> Result<(), ErasureErrorV1> {
             Vec::new(),
         ),
     )?;
-    let persisted = coordinator
-        .port
-        .records
-        .borrow()
-        .first()
-        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let records = coordinator.port.records.borrow();
+    let persisted = records.first().ok_or(ErasureErrorV1::ProvenanceMissing)?;
     assert_eq!(persisted.freeze_provenance(), Some(reference(42)));
     assert_eq!(persisted.state().provenance(), reference(42));
     Ok(())
