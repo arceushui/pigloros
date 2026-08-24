@@ -408,8 +408,8 @@ mod coverage_entrypoints {
         use super::*;
         use std::sync::{Arc, Mutex};
 
-        pub struct DriverImpl {
-            pub observed: Arc<Mutex<Vec<String>>>,
+        pub(super) struct DriverImpl {
+            pub(super) observed: Arc<Mutex<Vec<String>>>,
         }
 
         impl Driver for DriverImpl {

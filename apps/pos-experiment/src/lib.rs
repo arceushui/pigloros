@@ -5719,7 +5719,7 @@ mod coverage_entrypoints {
             projections: pos_state::ProjectionRegistry::new(),
             consent_gate: None,
             protected_token: None,
-            store_config: Some(store_config.clone()),
+            store_config: Some(store_config),
         };
         expect_err(&rejected.branch("coverage-rejected-child"));
     }
