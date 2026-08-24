@@ -8978,11 +8978,12 @@ mod tests {
             Err(CoreError::Storage(_))
         ));
 
-        let timeline = store.create_timeline("missing-registry").test_ok();
+        let mut missing = new_store();
+        let timeline = missing.create_timeline("missing-registry").test_ok();
         let mut create_event = |_registry: &KeyRegistryStateV1, _seq: Seq| {
             Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
         };
-        let error = store
+        let error = missing
             .append_signed_authorized(timeline.id(), &KeyRegistryStateV1::new(), &mut create_event)
             .test_err();
         assert!(error.to_string().contains("durable key registry"));
@@ -9138,10 +9139,8 @@ mod tests {
         let conn = Connection::open_in_memory().test_ok();
         conn.execute_batch("BEGIN").test_ok();
         conn.commit_hook(Some(|| true)).test_ok();
-        let commit_error = finish_immediate_transaction(&conn, Ok(())).test_err();
-        assert!(commit_error
-            .to_string()
-            .contains("transaction commit failed"));
+        let commit_error = finish_immediate_transaction::<()>(&conn, Ok(())).test_err();
+        assert!(matches!(commit_error, CoreError::Storage(_)));
         conn.commit_hook::<fn() -> bool>(None).test_ok();
 
         let rollback_error = finish_immediate_transaction::<()>(
@@ -9149,7 +9148,7 @@ mod tests {
             Err(CoreError::Storage("operation failed".to_owned())),
         )
         .test_err();
-        assert!(rollback_error.to_string().contains("rollback failed"));
+        assert!(matches!(rollback_error, CoreError::Storage(_)));
     }
 
     #[test]

@@ -295,9 +295,11 @@ mod tests {
         )?)
     }
 
+    type SigningRegistry = (Arc<Mutex<KeyRegistryStateV1>>, KeyIdentityV1);
+
     fn registry_for(
         signing_key: &SigningKey,
-    ) -> Result<(Arc<Mutex<KeyRegistryStateV1>>, KeyIdentityV1), Box<dyn std::error::Error>> {
+    ) -> Result<SigningRegistry, Box<dyn std::error::Error>> {
         let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
         let mut registry = KeyRegistryStateV1::new();
         registry.register_key(KeyRegistrationV1::new(
@@ -311,13 +313,14 @@ mod tests {
     fn poisoned_registry() -> Arc<Mutex<KeyRegistryStateV1>> {
         let registry = Arc::new(Mutex::new(KeyRegistryStateV1::new()));
         let worker_registry = Arc::clone(&registry);
-        let _ = std::thread::spawn(move || {
+        let poisoned = std::thread::spawn(move || {
             let Ok(_guard) = worker_registry.lock() else {
                 return;
             };
-            panic!("poison registry for constructor test");
+            std::panic::resume_unwind(Box::new("poison registry for constructor test"));
         })
         .join();
+        assert!(poisoned.is_err());
         registry
     }
 
