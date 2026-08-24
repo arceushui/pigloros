@@ -500,7 +500,7 @@ fn public_trusted_root_policy_accepts_exact_root_cap_and_rejects_one_more() {
     exact.trust_policy_snapshot_digest = exact.digest();
     assert_eq!(exact.validate(), Ok(()));
 
-    let mut oversized = exact.clone();
+    let mut oversized = exact;
     oversized.trusted_root_public_keys.push([65; 32]);
     oversized.trust_policy_snapshot_digest = oversized.digest();
     assert_eq!(
@@ -565,7 +565,7 @@ fn public_request_output_limits_accept_exact_caps_and_reject_each_overflow() {
         Err(ConformanceContractError::FieldOutOfBounds)
     );
 
-    let mut protocol_overflow = exact.clone();
+    let mut protocol_overflow = exact;
     protocol_overflow.output_capability.diagnostic_bytes_limit += 1;
     protocol_overflow.output_capability.capability_digest =
         protocol_overflow.expected_output_capability_digest();
@@ -583,7 +583,7 @@ fn public_profile_caps_accept_exact_profile_and_member_path_limits() {
     exact_profiles.profile_digest = exact_profiles.digest();
     assert_eq!(exact_profiles.validate(), Ok(()));
 
-    let mut too_many_profiles = exact_profiles.clone();
+    let mut too_many_profiles = exact_profiles;
     too_many_profiles.execution_profile_digests.push([65; 32]);
     too_many_profiles.profile_digest = too_many_profiles.digest();
     assert_eq!(
