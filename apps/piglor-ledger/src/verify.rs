@@ -1216,7 +1216,7 @@ mod tests {
             .test_ok()?;
             store.create_timeline("ledger").test_ok()?;
             store
-                .save_key_registry(&KeyRegistryStateV1::new())
+                .save_key_registry(&pos_core::KeyRegistryStateV1::new())
                 .test_ok()?;
         }
         {
