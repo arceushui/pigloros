@@ -779,19 +779,20 @@ mod tests {
     #[test]
     fn verify_store_reports_registry_load_failure() -> Result<(), Box<dyn std::error::Error>> {
         let tmp = TempDir::new().test_ok()?;
-        let db = tmp.path().join("missing-registry-table.db");
+        let db = tmp.path().join("malformed-registry.db");
         pos_store::open_store(pos_store::StoreConfig::Sqlite {
             path: db.to_string_lossy().into_owned(),
         })
         .test_ok()?;
         let conn = rusqlite::Connection::open(&db).test_ok()?;
-        conn.execute("DROP TABLE key_registry", []).test_ok()?;
+        conn.execute(
+            "INSERT INTO key_registry (singleton, state_cbor) VALUES (1, X'01')",
+            [],
+        )
+        .test_ok()?;
 
         let error = run(&Source::Store(db), Some(&"aa".repeat(32)), None).test_err()?;
-        assert!(
-            !error.to_string().is_empty(),
-            "expected registry load failure"
-        );
+        assert!(error.to_string().contains("serialization error"), "{error}");
         Ok(())
     }
 
