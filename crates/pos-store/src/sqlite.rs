@@ -9155,7 +9155,13 @@ mod tests {
             .contains("transaction commit failed"));
 
         let rollback_conn = Connection::open_in_memory().test_ok();
-        rollback_conn.execute_batch("BEGIN").test_ok();
+        rollback_conn
+            .execute_batch(
+                "BEGIN;
+                 CREATE TABLE transaction_marker(value INTEGER);
+                 INSERT INTO transaction_marker(value) VALUES (1);",
+            )
+            .test_ok();
         rollback_conn.commit_hook(Some(|| true)).test_ok();
         let rollback_error = finish_immediate_transaction::<()>(&rollback_conn, Ok(())).test_err();
         assert!(matches!(rollback_error, CoreError::Storage(_)));
