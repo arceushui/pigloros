@@ -5951,6 +5951,7 @@ mod tests {
     fn public_profile_execution_inventory_limits_are_exact() {
         let mut at_limit = profile();
         at_limit.execution_profile_digests = (1..=64).map(digest).collect();
+        at_limit.profile_digest = at_limit.digest();
         assert!(at_limit.validate().is_ok());
 
         let mut above_limit = at_limit;
