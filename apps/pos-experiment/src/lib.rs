@@ -1709,7 +1709,7 @@ impl ExperimentSession {
             } else {
                 append();
             }
-            fork_result.ok_or(pos_runtime::RuntimeError::ConsentOperationUnavailable)??
+            Ok(fork_result.ok_or(pos_runtime::RuntimeError::ConsentOperationUnavailable)??)
         })
     }
 
