@@ -7286,12 +7286,20 @@ mod fault_injection_tests {
         event::{CanonicalBytes, EventDraft, Kind},
         ids::{EntityId, PluginId},
         store::EventStore,
-        Capability, CoreError, Plugin,
+        Capability, ConsentGranted, CoreError, Plugin,
     };
     use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
     use pos_store::{open_store, StoreConfig};
     use rusqlite::Connection;
     use std::cell::Cell;
+
+    fn config(name: &str, stop: StopCondition) -> ExperimentConfig {
+        ExperimentConfig {
+            name: name.to_owned(),
+            stop,
+            store_config: StoreConfig::Memory,
+        }
+    }
 
     struct FailLogicalHeadStore {
         inner: Box<dyn EventStore>,
@@ -7835,7 +7843,7 @@ mod fault_injection_tests {
         })
         .with_consent_authority(authority);
         assert!(experiment
-            .branch_with_token("child", &mut store, &token, 0)
+            .branch_with_token("child", store.as_mut(), &token, 0)
             .is_err());
 
         let authority = ConsentAuthority::new();
