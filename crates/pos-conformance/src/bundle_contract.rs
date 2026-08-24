@@ -876,10 +876,16 @@ mod tests {
         network_profile.fixtures[0]
             .capability_policy
             .network_allowed = true;
-        let air_gapped = signed_bundle(&network_profile, BundleModeV1::AirGapped);
-        assert_eq!(air_gapped, Err(BundleContractErrorV1::ProfileInvalid));
-
         let (members, expected_results) = bundle_inputs(&network_profile, BundleModeV1::AirGapped);
+        assert_eq!(
+            ConformanceBundleV1::materialize(
+                &network_profile,
+                BundleModeV1::AirGapped,
+                members.clone(),
+                expected_results.clone(),
+            ),
+            Err(BundleContractErrorV1::ProfileInvalid)
+        );
         let manifest = BundleManifestV1 {
             magic: CONFORMANCE_BUNDLE_MAGIC_V1.to_owned(),
             lifecycle: ProfileLifecycleV1::Candidate,
