@@ -7062,7 +7062,7 @@ pub mod tests {
         assert!(!valid_redacted_case(&missing_pass));
         assert_case_rejects(missing_pass);
 
-        let mut incompatible_redacted = valid.clone();
+        let mut incompatible_redacted = valid;
         incompatible_redacted.redaction_state = RedactionStateV1::RedactedViews;
         incompatible_redacted.replay_claim = ReplayClaimV1::IncompatibleProfile;
         assert!(valid_redacted_case(&incompatible_redacted));
@@ -7071,11 +7071,11 @@ pub mod tests {
             Ok(())
         );
 
-        let mut incompatible_structural = structural.clone();
+        let mut incompatible_structural = structural;
         incompatible_structural.replay_claim = ReplayClaimV1::IncompatibleProfile;
         assert!(valid_redacted_case(&incompatible_structural));
 
-        let mut incompatible_missing = evidence_missing.clone();
+        let mut incompatible_missing = evidence_missing;
         incompatible_missing.replay_claim = ReplayClaimV1::IncompatibleProfile;
         assert!(valid_redacted_case(&incompatible_missing));
 
