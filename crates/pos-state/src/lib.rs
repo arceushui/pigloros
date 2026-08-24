@@ -175,6 +175,13 @@ impl ProjectionRegistry {
         }
     }
 
+    /// Retain only one subject's accumulated state in every reducer.
+    pub fn retain_subject(&mut self, subject: &EntityId) {
+        for (_, slot) in &mut self.slots {
+            slot.registry.retain_only(subject);
+        }
+    }
+
     /// Restore accumulated state from a previously captured snapshot map.
     ///
     /// Resets all accumulated state first (via [`Self::clear_state`]), then

@@ -631,7 +631,8 @@ impl PluginRegistry {
 
     /// Consume the registry after authorizing its final projection snapshot.
     ///
-    /// A protected registry requires a token issued by the bound host authority.
+    /// A protected registry requires a token issued by the bound host authority;
+    /// its returned projection snapshot is reduced to that token's subject.
     /// A token-less registry is only exportable when the caller supplies the
     /// completed durable Event prefix and every Event in that prefix is public.
     /// Registered schemas alone do not determine whether this particular run
@@ -649,28 +650,27 @@ impl PluginRegistry {
         token: Option<&ConsentCapabilityToken>,
         public_events: Option<&[Event]>,
     ) -> Result<ProjectionRegistry, RuntimeError> {
-        match token {
-            Some(token) => self
-                .consent_gate
+        if let Some(token) = token {
+            self.consent_gate
                 .as_ref()
                 .ok_or(RuntimeError::ConsentOperationUnavailable)?
                 .validate_token(timeline, token, timeline_head.as_u64(), now_secs)
-                .map_err(RuntimeError::Consent)?,
-            None => {
-                let Some(events) = public_events else {
-                    return Err(RuntimeError::ConsentOperationUnavailable);
-                };
-                if events.iter().any(|event| {
-                    pos_core::is_consent_event_type(&event.event_type)
-                        || event.event_type.as_str() == pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE
-                        || pos_core::is_geographic_event_type(&event.event_type)
-                        || pos_core::required_modality_for_event(&event.event_type) != 0
-                        || event.event_type.as_str().starts_with("timeline.fork.")
-                        || event.event_type.as_str().starts_with("retention.")
-                }) {
-                    return Err(RuntimeError::ConsentOperationUnavailable);
-                }
-            }
+                .map_err(RuntimeError::Consent)?;
+            self.projections.retain_subject(&token.subject_id());
+            return Ok(self.projections);
+        }
+        let Some(events) = public_events else {
+            return Err(RuntimeError::ConsentOperationUnavailable);
+        };
+        if events.iter().any(|event| {
+            pos_core::is_consent_event_type(&event.event_type)
+                || event.event_type.as_str() == pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE
+                || pos_core::is_geographic_event_type(&event.event_type)
+                || pos_core::required_modality_for_event(&event.event_type) != 0
+                || event.event_type.as_str().starts_with("timeline.fork.")
+                || event.event_type.as_str().starts_with("retention.")
+        }) {
+            return Err(RuntimeError::ConsentOperationUnavailable);
         }
         Ok(self.projections)
     }
@@ -2465,19 +2465,26 @@ mod tests {
             .register(&plugin, Some(Box::new(CountReducer)), None)
             .test_ok();
         assert!(bound.clone_consent_gate().is_some());
-        bound.projections.apply_event(&Event {
+        let projection_event = |entity, seq| Event {
             id: EventId::new(),
-            entity: subject,
+            entity,
             event_type: Kind::new("projection.event"),
             payload: CanonicalBytes::from_static(b"projection"),
             wall_time: WallTime::from_micros(0),
-            seq: Seq::from_u64(1),
+            seq,
             causation_id: None,
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
             payload_hash: Hash::from_bytes([0; 32]),
-        });
+        };
+        bound
+            .projections
+            .apply_event(&projection_event(subject, Seq::from_u64(1)));
+        let unrelated = EntityId::new();
+        bound
+            .projections
+            .apply_event(&projection_event(unrelated, Seq::from_u64(2)));
         let state = bound
             .projection_state_for_reducer(timeline, Seq::ZERO, 0, &token, "projection", subject)
             .test_ok()
@@ -2487,6 +2494,13 @@ mod tests {
             .projection_state_for_reducer(timeline, Seq::ZERO, 0, &token, "missing", subject,)
             .test_ok()
             .is_none());
+        let authorized = bound
+            .into_authorized_projections(timeline, Seq::from_u64(2), 0, Some(&token), None)
+            .test_ok();
+        assert!(authorized
+            .state_for_reducer("projection", &unrelated)
+            .is_none());
+        assert!(authorized.state_for(&subject).is_some());
     }
 
     #[test]

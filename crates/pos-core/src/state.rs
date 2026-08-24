@@ -77,6 +77,11 @@ impl StateRegistry {
     pub fn remove(&mut self, id: &EntityId) {
         self.states.remove(id);
     }
+
+    /// Retain only the state for one subject.
+    pub fn retain_only(&mut self, id: &EntityId) {
+        self.states.retain(|entity, _| entity == id);
+    }
 }
 
 #[cfg(test)]
