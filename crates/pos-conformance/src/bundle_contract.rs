@@ -368,7 +368,7 @@ impl ConformanceBundleV1 {
     }
 }
 
-fn validate_total_bytes(total_bytes: u64) -> Result<(), BundleContractErrorV1> {
+const fn validate_total_bytes(total_bytes: u64) -> Result<(), BundleContractErrorV1> {
     if total_bytes > MAX_TOTAL_BUNDLE_BYTES {
         Err(BundleContractErrorV1::MemberOutOfBounds)
     } else {
@@ -376,7 +376,7 @@ fn validate_total_bytes(total_bytes: u64) -> Result<(), BundleContractErrorV1> {
     }
 }
 
-fn validate_member_count(member_count: usize) -> Result<(), BundleContractErrorV1> {
+const fn validate_member_count(member_count: usize) -> Result<(), BundleContractErrorV1> {
     if member_count > MAX_MEMBERS {
         Err(BundleContractErrorV1::LifecycleInvalid)
     } else {
@@ -384,7 +384,7 @@ fn validate_member_count(member_count: usize) -> Result<(), BundleContractErrorV
     }
 }
 
-fn validate_member_size(member_size: u64) -> Result<(), BundleContractErrorV1> {
+const fn validate_member_size(member_size: u64) -> Result<(), BundleContractErrorV1> {
     if member_size > MAX_MEMBER_BYTES {
         Err(BundleContractErrorV1::MemberOutOfBounds)
     } else {
@@ -401,7 +401,7 @@ fn fixture_input_path(
     let mut input = Vec::new();
     input.extend_from_slice(b"PiglorOS.CPF1InputPath.v1\0");
     append_path_component(&mut input, case_id);
-    input.push(claim_layer_code(claim_layer) as u8);
+    input.push(claim_layer_code(claim_layer));
     input.extend_from_slice(execution_profile_digest);
     append_path_component(&mut input, member_id);
     format!("{INPUT_MEMBER_PREFIX}{}.bin", blake3::hash(&input).to_hex())
@@ -415,7 +415,7 @@ fn expected_member_path(
     let mut input = Vec::new();
     input.extend_from_slice(b"PiglorOS.CPF1ExpectedPath.v1\0");
     append_path_component(&mut input, case_id);
-    input.push(claim_layer_code(claim_layer) as u8);
+    input.push(claim_layer_code(claim_layer));
     input.extend_from_slice(execution_profile_digest);
     format!("expected/{}.bin", blake3::hash(&input).to_hex())
 }
@@ -537,10 +537,8 @@ fn validate_expected_results(
                 }
                 bytes.clone()
             }
-            typed_or_divergent => {
-                crate::profile_contract::expected_result_bytes(typed_or_divergent)
-                    .map_err(|_| BundleContractErrorV1::ExpectedResultMismatch)?
-            }
+            typed_or_divergent => crate::expected_result_bytes(typed_or_divergent)
+                .map_err(|_| BundleContractErrorV1::ExpectedResultMismatch)?,
         };
         if expected.digest != *blake3::hash(&expected_bytes).as_bytes() {
             return Err(BundleContractErrorV1::ExpectedResultMismatch);
@@ -669,7 +667,7 @@ fn manifest_value(manifest: &BundleManifestV1) -> Value {
     ])
 }
 
-const fn claim_layer_code(layer: ClaimLayerV1) -> u64 {
+const fn claim_layer_code(layer: ClaimLayerV1) -> u8 {
     match layer {
         ClaimLayerV1::ArtifactIntegrity => 0,
         ClaimLayerV1::ReplayConformance => 1,
@@ -857,10 +855,8 @@ mod tests {
             }
             let bytes = match &fixture.expected {
                 ExpectedResultV1::CanonicalBytes { bytes, .. } => bytes.clone(),
-                typed_or_divergent => {
-                    crate::profile_contract::expected_result_bytes(typed_or_divergent)
-                        .expect("test fixture expected result must encode")
-                }
+                typed_or_divergent => crate::expected_result_bytes(typed_or_divergent)
+                    .expect("test fixture expected result must encode"),
             };
             let path = expected_member_path(
                 &fixture.case_id,
@@ -1339,9 +1335,8 @@ mod tests {
         let mut typed_profile = profile.clone();
         typed_profile.fixtures[0].expected =
             ExpectedResultV1::TypedFailure(SafeErrorCodeV1::InvalidEncoding);
-        let typed_bytes =
-            crate::profile_contract::expected_result_bytes(&typed_profile.fixtures[0].expected)
-                .expect("typed failure has a canonical public representation");
+        let typed_bytes = crate::expected_result_bytes(&typed_profile.fixtures[0].expected)
+            .expect("typed failure has a canonical public representation");
         let typed_digest = *blake3::hash(&typed_bytes).as_bytes();
         let mut typed_members = bundle.members.clone();
         let typed_path = expected_member_path(
@@ -1392,6 +1387,36 @@ mod tests {
         empty_manifest.expected_results[0].digest = empty_members[expected_index].digest;
         assert_eq!(
             validate_expected_results(&empty_profile, &empty_manifest, &empty_members),
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
+        );
+
+        let mut missing_path_manifest = bundle.manifest.clone();
+        missing_path_manifest.expected_results[0].member_path = "expected/missing".to_owned();
+        assert_eq!(
+            validate_expected_results(&profile, &missing_path_manifest, &bundle.members),
+            Err(BundleContractErrorV1::MemberMissing)
+        );
+
+        let mut undeclared_path_manifest = bundle.manifest.clone();
+        let mut undeclared_path_members = bundle.members.clone();
+        let expected_index = expected_member_index(&bundle);
+        let alternate_path = "expected/alternate".to_owned();
+        undeclared_path_members[expected_index].path = alternate_path.clone();
+        undeclared_path_manifest.expected_results[0].member_path = alternate_path;
+        assert_eq!(
+            validate_expected_results(
+                &profile,
+                &undeclared_path_manifest,
+                &undeclared_path_members,
+            ),
+            Err(BundleContractErrorV1::UndeclaredMember)
+        );
+
+        let mut mismatched_bytes = bundle.members.clone();
+        mismatched_bytes[expected_index].bytes = b"different expected bytes".to_vec();
+        mismatched_bytes[expected_index].digest = bundle.manifest.expected_results[0].digest;
+        assert_eq!(
+            validate_expected_results(&profile, &bundle.manifest, &mismatched_bytes),
             Err(BundleContractErrorV1::ExpectedResultMismatch)
         );
         Ok(())
