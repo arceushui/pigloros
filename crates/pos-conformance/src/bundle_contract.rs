@@ -1872,6 +1872,180 @@ mod tests {
     }
 
     #[test]
+    fn archive_decoder_rejects_invalid_fields_and_cap_overflows(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&[]),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        for bytes in [vec![0x42, 0], vec![0x62, b'a']] {
+            assert_eq!(
+                ConformanceBundleV1::from_canonical_cbor(&bytes),
+                Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+            );
+        }
+
+        let bundle = signed_bundle(&profile(), BundleModeV1::Local)?;
+        let mut invalid_magic = bundle_value(&bundle);
+        if let Value::Array(fields) = &mut invalid_magic {
+            fields[0] = Value::Text("wrong-magic".to_owned());
+        }
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&encode_archive_value(&invalid_magic)?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+
+        let mut invalid_version = bundle_value(&bundle);
+        if let Value::Array(fields) = &mut invalid_version {
+            fields[1] = Value::Integer(2_u64.into());
+        }
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&encode_archive_value(&invalid_version)?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+
+        assert_eq!(
+            archive_array_exact(&Value::Null, 1),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            archive_array_bounded(&Value::Null, 1),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            archive_text(&Value::Null),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            archive_bytes(&Value::Null),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            archive_u64(&Value::Null),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            archive_u64(&Value::Integer((-1_i8).into())),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            decode_bundle_mode(2),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(decode_lifecycle(0), Ok(ProfileLifecycleV1::Draft));
+        assert_eq!(decode_lifecycle(2), Ok(ProfileLifecycleV1::Stable));
+        assert_eq!(decode_lifecycle(3), Ok(ProfileLifecycleV1::Retired));
+        assert_eq!(
+            decode_claim_layer(7),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+
+        let value = bundle_value(&bundle);
+        assert_eq!(
+            validate_archive_caps(&bundle, &value, usize::MAX),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn support_digest_fallbacks_and_selected_caps_are_checked(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut support_profile = profile();
+        support_profile.provenance_digest = digest(100);
+        support_profile.fixtures[0].provenance.source_digest = digest(101);
+        support_profile.fixtures[0].provenance.build_digest = digest(102);
+        support_profile.fixtures[0]
+            .provenance
+            .publication_review_digest = digest(103);
+        assert!(support_digest_is_bound(
+            &support_profile,
+            BundleMemberRoleV1::Provenance,
+            &digest(101)
+        ));
+        assert!(support_digest_is_bound(
+            &support_profile,
+            BundleMemberRoleV1::Provenance,
+            &digest(102)
+        ));
+        assert!(support_digest_is_bound(
+            &support_profile,
+            BundleMemberRoleV1::Provenance,
+            &digest(103)
+        ));
+        support_profile.limitations_digest = digest(104);
+        support_profile.fixtures[0].provenance.limitations_digest = digest(105);
+        assert!(support_digest_is_bound(
+            &support_profile,
+            BundleMemberRoleV1::Limitations,
+            &digest(105)
+        ));
+        assert!(!support_digest_is_bound(
+            &support_profile,
+            BundleMemberRoleV1::FixtureInput,
+            &digest(101)
+        ));
+
+        let bundle = signed_bundle(&profile(), BundleModeV1::Local)?;
+        let mut profile_cap = profile();
+        profile_cap.evaluator_protocol.hard_caps.max_profile_bytes = 0;
+        assert_eq!(
+            validate_selected_bundle_caps(&profile_cap, &bundle),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+        let mut member_cap = profile();
+        member_cap.evaluator_protocol.hard_caps.max_member_bytes = 0;
+        assert_eq!(
+            validate_selected_bundle_caps(&member_cap, &bundle),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+        let mut total_cap = profile();
+        total_cap
+            .evaluator_protocol
+            .hard_caps
+            .max_total_bundle_bytes = 0;
+        assert_eq!(
+            validate_selected_bundle_caps(&total_cap, &bundle),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+
+        let nested = Value::Map(vec![(
+            Value::Text("key".to_owned()),
+            Value::Tag(1, Box::new(Value::Array(vec![Value::Null]))),
+        )]);
+        assert_eq!(value_depth(&nested), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn validation_rejects_descriptor_role_and_profile_path_mismatches(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile = profile();
+        let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
+        let support_index = bundle
+            .members
+            .iter()
+            .position(|member| member.role == BundleMemberRoleV1::Schema)
+            .ok_or("missing schema support member")?;
+
+        let mut mismatched_descriptor = bundle.clone();
+        mismatched_descriptor.manifest.members[support_index].role = BundleMemberRoleV1::Profile;
+        assert_eq!(
+            mismatched_descriptor.validate(),
+            Err(BundleContractErrorV1::UndeclaredMember)
+        );
+
+        let mut mismatched_profile_path = bundle;
+        mismatched_profile_path.members[support_index].role = BundleMemberRoleV1::Profile;
+        mismatched_profile_path.manifest.members[support_index].role = BundleMemberRoleV1::Profile;
+        assert_eq!(
+            mismatched_profile_path.validate(),
+            Err(BundleContractErrorV1::UndeclaredMember)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn required_support_artifacts_and_selected_caps_are_enforced(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let profile = profile();
