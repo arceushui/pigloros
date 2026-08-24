@@ -5134,6 +5134,195 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_contract_boundary_values_cover_mutation_seams() {
+        let protocol = profile().evaluator_protocol;
+        let request = request();
+        assert_eq!(request.validate_with_protocol(&protocol), Ok(()));
+        assert_eq!(request.validate_with_hard_caps(&protocol.hard_caps), Ok(()));
+
+        let mut too_many_profiles = profile();
+        too_many_profiles.execution_profile_digests = (1_u8..=65).map(digest).collect();
+        too_many_profiles.profile_digest = too_many_profiles.digest();
+        assert_eq!(
+            too_many_profiles.validate(),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+
+        let mut exact_depth = profile();
+        let depth = value_depth(&encode_profile(&exact_depth, true));
+        exact_depth.evaluator_protocol.hard_caps.max_structural_nesting =
+            u8::try_from(depth).unwrap_or(u8::MAX);
+        exact_depth.profile_digest = exact_depth.digest();
+        assert_eq!(exact_depth.validate(), Ok(()));
+
+        let mut exact_member_path = profile();
+        exact_member_path.evaluator_protocol.hard_caps.max_member_path_bytes = 255;
+        exact_member_path.fixtures[0].inputs[0].member_id = "x".repeat(256);
+        exact_member_path.profile_digest = exact_member_path.digest();
+        assert_eq!(
+            exact_member_path.validate(),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+
+        let mut exact_diagnostic = request;
+        exact_diagnostic.output_capability.diagnostic_bytes_limit = MAX_DIAGNOSTIC_BYTES;
+        exact_diagnostic.output_capability.capability_digest =
+            exact_diagnostic.expected_output_capability_digest();
+        exact_diagnostic.request_digest = exact_diagnostic.digest();
+        assert_eq!(exact_diagnostic.validate_with_protocol(&protocol), Ok(()));
+
+        let mut oversized_policy = trusted_root_policy();
+        oversized_policy.trusted_root_public_keys = (1_u8..=65).map(|seed| digest(seed)).collect();
+        oversized_policy.trust_policy_snapshot_digest = oversized_policy.digest();
+        assert_eq!(
+            oversized_policy.validate(),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+
+        assert!(semantic_version("1.2.3+build.7"));
+        assert!(!semantic_version("1.2.3+bad!"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn case_matching_checks_each_authoritative_field() {
+        let fixture = &profile().fixtures[0];
+        let base = case_outcome_record(ExecutionModeV1::Local);
+        assert!(case_matches_fixture(&base, fixture));
+
+        let mut changed = base.clone();
+        changed.case_id.push('x');
+        assert!(!case_matches_fixture(&changed, fixture));
+        let mut changed = base.clone();
+        changed.fixture_digest = digest(99);
+        assert!(!case_matches_fixture(&changed, fixture));
+        let mut changed = base.clone();
+        changed.claim_layer = ClaimLayerV1::MetricConformance;
+        assert!(!case_matches_fixture(&changed, fixture));
+        let mut changed = base.clone();
+        changed.execution_profile_digest = digest(99);
+        assert!(!case_matches_fixture(&changed, fixture));
+        let mut changed = base.clone();
+        changed.outcome = CaseOutcomeStatusV1::Fail;
+        assert!(!case_matches_fixture(&changed, fixture));
+        let mut changed = base.clone();
+        changed.replay_claim = ReplayClaimV1::StructuralOnly;
+        assert!(!case_matches_fixture(&changed, fixture));
+        let mut changed = base.clone();
+        changed.redaction_state = RedactionStateV1::StructuralOnly;
+        assert!(!case_matches_fixture(&changed, fixture));
+        let mut changed = base.clone();
+        changed.provenance_digest = digest(99);
+        assert!(!case_matches_fixture(&changed, fixture));
+
+        let mut changed = base.clone();
+        changed.verification_outcome = VerificationOutcomeV1::Diverged;
+        assert!(!case_matches_fixture(&changed, fixture));
+        let mut changed = base.clone();
+        changed.expected_digest = Some(digest(99));
+        assert!(!case_matches_fixture(&changed, fixture));
+        let mut changed = base;
+        changed.actual_digest = Some(digest(99));
+        assert!(!case_matches_fixture(&changed, fixture));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn independence_and_stable_report_bindings_reject_each_mismatch() {
+        let requirements = profile().independence_requirements;
+        let mut evidence = stable_evidence("alpha", 30);
+        assert_eq!(
+            validate_independence_evidence(&evidence.independence, &requirements),
+            Ok(())
+        );
+
+        let mut invalid = evidence.independence.clone();
+        invalid.technical_independent = false;
+        assert_eq!(
+            validate_independence_evidence(&invalid, &requirements),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+        let mut invalid = evidence.independence.clone();
+        invalid.authorship_independent = false;
+        assert_eq!(
+            validate_independence_evidence(&invalid, &requirements),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+        let mut organization_required = requirements.clone();
+        organization_required.organizational_independence_required = true;
+        let mut invalid = evidence.independence.clone();
+        invalid.organizational_independent = false;
+        assert_eq!(
+            validate_independence_evidence(&invalid, &organization_required),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+        let mut invalid = evidence.independence.clone();
+        invalid.reviewer_ids.clear();
+        assert_eq!(
+            validate_independence_evidence(&invalid, &requirements),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+        let mut invalid = evidence.independence.clone();
+        invalid.reviewer_ids = (0..33).map(|index| format!("reviewer-{index:02}")).collect();
+        assert_eq!(
+            validate_independence_evidence(&invalid, &requirements),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+        let mut invalid = evidence.independence.clone();
+        invalid.reviewer_ids = vec!["zulu".to_owned(), "alpha".to_owned()];
+        assert_eq!(
+            validate_independence_evidence(&invalid, &requirements),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+        let mut invalid = evidence.independence.clone();
+        invalid.reviewer_ids = vec!["x".repeat(129)];
+        assert_eq!(
+            validate_independence_evidence(&invalid, &requirements),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+        let mut invalid = evidence.independence.clone();
+        invalid.declaration_digest = [0; 32];
+        assert_eq!(
+            validate_independence_evidence(&invalid, &requirements),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+        let mut invalid = evidence.independence.clone();
+        invalid.shared_code_audit_digest = [0; 32];
+        assert_eq!(
+            validate_independence_evidence(&invalid, &requirements),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+
+        let profile_value = profile();
+        assert_eq!(
+            validate_report_binding(&evidence, &profile_value),
+            Ok(())
+        );
+        let reject_report = |change: &dyn Fn(&mut StableImplementationEvidenceV1)| {
+            let mut changed = stable_evidence("alpha", 30);
+            change(&mut changed);
+            refresh_report_counts(&mut changed.report);
+            changed.report.report_digest = changed.report.digest().unwrap_or([0; 32]);
+            assert_eq!(
+                validate_report_binding(&changed, &profile_value),
+                Err(ConformanceContractError::IndependenceEvidenceMissing)
+            );
+        };
+        reject_report(&|value| value.report.normative_spec_digest = digest(99));
+        reject_report(&|value| value.report.limitations_digest = digest(99));
+        reject_report(&|value| value.report.provenance_digest = digest(99));
+        reject_report(&|value| value.report.fixture_bundle_digest = digest(99));
+        reject_report(&|value| value.report.profile_digest = digest(99));
+        reject_report(&|value| value.report.cases[0].case_id.push('x'));
+        reject_report(&|value| value.report.cases[0].fixture_digest = digest(99));
+        reject_report(&|value| value.report.cases[0].execution_profile_digest = digest(99));
+        reject_report(&|value| value.report.cases[0].claim_layer = ClaimLayerV1::MetricConformance);
+        reject_report(&|value| value.report.cases[0].mode = ExecutionModeV1::Fork);
+        reject_report(&|value| value.report.cases[0].replay_claim = ReplayClaimV1::StructuralOnly);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn public_hard_cap_u64_boundaries_are_exact() {
         let reject = |change: &dyn Fn(&mut EvaluatorHardCapsV1)| {
             let mut caps = original_hard_caps();

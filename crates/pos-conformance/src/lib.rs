@@ -7061,6 +7061,7 @@ pub mod tests {
         at_limit.independence.reviewer_ids = (0..32)
             .map(|index| format!("reviewer-{index:02}"))
             .collect();
+        at_limit.independence.reviewer_ids[0] = "a".repeat(128);
         at_limit.cases[0].case_id = "c".repeat(128);
         at_limit.cases[0].outcome = CaseOutcomeStatusV1::Fail;
         at_limit.cases[0].actual_digest = Some([15; 32]);
@@ -7072,6 +7073,20 @@ pub mod tests {
         assert_eq!(
             ConformanceReportV1::from_canonical_cbor(&encoded),
             Ok(at_limit)
+        );
+
+        let mut reviewer_over_limit = test_report();
+        reviewer_over_limit.independence.reviewer_ids[0] = "a".repeat(129);
+        assert_eq!(
+            validate_conformance_report_shape(&reviewer_over_limit),
+            Err(EvidenceError::InvalidConformanceReport)
+        );
+
+        let mut cases_over_limit = test_report();
+        cases_over_limit.cases = vec![cases_over_limit.cases[0].clone(); 65_537];
+        assert_eq!(
+            validate_conformance_report_shape(&cases_over_limit),
+            Err(EvidenceError::InvalidConformanceReport)
         );
 
         let mut invalid = evidence();
