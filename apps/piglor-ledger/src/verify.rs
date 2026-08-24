@@ -1053,7 +1053,7 @@ mod tests {
         let mut event = Event {
             id: EventId::new(),
             entity: EntityId::new(),
-            event_type: Kind::new(EVENT_TYPE_PREDICTION),
+            event_type: Kind::new(pos_plugin_ledger::EVENT_TYPE_PREDICTION),
             payload,
             wall_time: WallTime::from_micros(1),
             seq: Seq::from_u64(1),
