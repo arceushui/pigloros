@@ -6783,6 +6783,59 @@ pub mod tests {
         report
     }
 
+    fn report_at_canonical_byte_limit() -> (ConformanceReportV1, Vec<u8>) {
+        const MAX_REPORT_BYTES: usize = 16 * 1024 * 1024;
+        let mut report = test_report();
+        let template = report.cases[0].clone();
+        report.cases = (0..=65_535)
+            .map(|index| {
+                let mut case = template.clone();
+                case.case_id = format!("{index:05}");
+                case.outcome = CaseOutcomeStatusV1::Fail;
+                case.actual_digest = Some([99; 32]);
+                case.first_coordinate = Some(Vec::new());
+                case
+            })
+            .collect();
+
+        let set_coordinate_length = |report: &mut ConformanceReportV1, length: usize| {
+            for case in &mut report.cases {
+                case.first_coordinate = Some(vec![b'x'; length]);
+            }
+            refresh_test_report(report);
+        };
+        let mut low = 0_usize;
+        let mut high = 128_usize;
+        let mut best = 0_usize;
+        while low <= high {
+            let midpoint = (low + high) / 2;
+            set_coordinate_length(&mut report, midpoint);
+            let encoded = strict_codec::encode_conformance_report(&report).unwrap_or_default();
+            if encoded.len() <= MAX_REPORT_BYTES {
+                best = midpoint;
+                low = midpoint + 1;
+            } else if midpoint == 0 {
+                break;
+            } else {
+                high = midpoint - 1;
+            }
+        }
+        set_coordinate_length(&mut report, best);
+        let current = strict_codec::encode_conformance_report(&report).unwrap_or_default();
+        let additional_id_bytes = MAX_REPORT_BYTES - current.len();
+        let per_case = additional_id_bytes / report.cases.len();
+        let remainder = additional_id_bytes % report.cases.len();
+        assert!(per_case <= 123);
+        for (index, case) in report.cases.iter_mut().enumerate() {
+            let suffix_length = per_case + usize::from(index < remainder);
+            case.case_id = format!("{index:05}{}", "x".repeat(suffix_length));
+        }
+        refresh_test_report(&mut report);
+        let encoded = strict_codec::encode_conformance_report(&report).unwrap_or_default();
+        assert_eq!(encoded.len(), MAX_REPORT_BYTES);
+        (report, encoded)
+    }
+
     fn refresh_test_report(report: &mut ConformanceReportV1) {
         let mut counts = [0_u32; 5];
         let mut weakest_redaction = RedactionStateV1::None;
@@ -7176,6 +7229,14 @@ pub mod tests {
         assert_eq!(
             ConformanceReportV1::from_canonical_cbor(&malformed),
             Err(EvidenceError::InvalidConformanceReport)
+        );
+
+        let (at_limit, at_limit_bytes) = report_at_canonical_byte_limit();
+        assert_eq!(at_limit_bytes.len(), 16 * 1024 * 1024);
+        assert_eq!(at_limit.to_canonical_cbor(), Ok(at_limit_bytes.clone()));
+        assert_eq!(
+            ConformanceReportV1::from_canonical_cbor(&at_limit_bytes),
+            Ok(at_limit)
         );
 
         let oversized = vec![0; 16 * 1024 * 1024 + 1];

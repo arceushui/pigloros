@@ -2748,6 +2748,37 @@ mod tests {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn profile_at_canonical_byte_limit() -> (ConformanceProfileV1, Vec<u8>) {
+        let mut value = profile();
+        value.fixtures[0].bounds.output_bytes = MAX_MEMBER_BYTES;
+        value.evaluator_protocol.hard_caps.max_member_bytes = MAX_MEMBER_BYTES;
+        for _ in 0..4 {
+            let encoded = encode_value(&encode_profile(&value, true)).unwrap_or_default();
+            if encoded.len() == MAX_PROFILE_BYTES {
+                return (value, encoded);
+            }
+            let current_len = match &value.fixtures[0].expected {
+                ExpectedResultV1::CanonicalBytes { bytes, .. } => bytes.len(),
+                ExpectedResultV1::TypedFailure(_) | ExpectedResultV1::AllowedDivergence { .. } => 0,
+            };
+            let next_len = if encoded.len() < MAX_PROFILE_BYTES {
+                current_len + (MAX_PROFILE_BYTES - encoded.len())
+            } else {
+                current_len - (encoded.len() - MAX_PROFILE_BYTES)
+            };
+            let bytes = vec![0; next_len];
+            value.fixtures[0].expected = ExpectedResultV1::CanonicalBytes {
+                digest: *blake3::hash(&bytes).as_bytes(),
+                bytes,
+            };
+            value.profile_digest = value.digest();
+        }
+        let encoded = encode_value(&encode_profile(&value, true)).unwrap_or_default();
+        assert_eq!(encoded.len(), MAX_PROFILE_BYTES);
+        (value, encoded)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn case_outcome_record(mode: ExecutionModeV1) -> CaseOutcomeV1 {
         let fixture = &profile().fixtures[0];
         let expected_digest = match &fixture.expected {
@@ -3342,6 +3373,31 @@ mod tests {
         assert_eq!(
             invalid_candidate.validate_with_trust_policy(&policy),
             Err(ConformanceContractError::FixtureDigestMismatch)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_profile_decoders_accept_the_inclusive_wire_ceiling() {
+        let (value, bytes) = profile_at_canonical_byte_limit();
+        assert_eq!(bytes.len(), MAX_PROFILE_BYTES);
+        assert_eq!(value.to_canonical_cbor(), Ok(bytes.clone()));
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor(&bytes),
+            Ok(value.clone())
+        );
+        let policy = trusted_root_policy();
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&bytes, &policy),
+            Ok(value.clone())
+        );
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor_with_stable_evidence(
+                &bytes,
+                Vec::new(),
+                &policy,
+            ),
+            Ok(value)
         );
     }
 
@@ -4961,6 +5017,29 @@ mod tests {
             .evaluator_protocol
             .hard_caps
             .max_profile_bytes;
+        over_cap.output_capability.capability_digest = over_cap.expected_output_capability_digest();
+        over_cap.request_digest = over_cap.digest();
+        assert_eq!(
+            over_cap.validate_against_profile(&capped_profile),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+
+        over_cap.output_capability.report_bytes_limit = capped_profile
+            .evaluator_protocol
+            .hard_caps
+            .max_profile_bytes;
+        over_cap.output_capability.diagnostic_bytes_limit = capped_profile
+            .evaluator_protocol
+            .hard_caps
+            .max_diagnostic_bytes
+            + 1;
+        over_cap.output_capability.capability_digest = over_cap.expected_output_capability_digest();
+        over_cap.request_digest = over_cap.digest();
+        assert_eq!(
+            over_cap.validate_against_profile(&capped_profile),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+
         over_cap.output_capability.diagnostic_bytes_limit = capped_profile
             .evaluator_protocol
             .hard_caps
@@ -5484,12 +5563,170 @@ mod tests {
         reject_case(&|case| case.provenance_digest = digest(99));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn stable_identity_binding_rejects_each_independent_change() {
+        let changes: [fn(&mut StableImplementationEvidenceV1, &mut StableImplementationEvidenceV1);
+            5] = [
+            |first, second| {
+                first.implementation.source_digest = second.implementation.source_digest
+            },
+            |first, second| first.implementation.build_digest = second.implementation.build_digest,
+            |first, second| {
+                first.implementation.binary_digest = second.implementation.binary_digest
+            },
+            |first, _second| first.implementation.public_contract_digest = digest(55),
+            |first, _second| first.evaluator_protocol_digest = digest(99),
+        ];
+        let profile_value = candidate();
+        for change in changes {
+            let mut first = stable_evidence("alpha", 30);
+            let mut second = stable_evidence("beta", 40);
+            change(&mut first, &mut second);
+            refresh_stable_report_for_profile(&mut first, &profile_value);
+            refresh_stable_report_for_profile(&mut second, &profile_value);
+            let mut changed_profile = profile_value.clone();
+            changed_profile.stable_evidence = vec![first, second];
+            assert_eq!(
+                validate_stable_evidence(&changed_profile, Some(&trusted_root_policy())),
+                Err(ConformanceContractError::IndependenceEvidenceMissing)
+            );
+        }
+
+        for zero_first in [true, false] {
+            let mut first = stable_evidence("alpha", 30);
+            let second = stable_evidence("beta", 40);
+            first.report.report_digest = if zero_first { [0; 32] } else { digest(40) };
+            let mut changed_profile = profile_value.clone();
+            changed_profile.stable_evidence = if zero_first {
+                vec![first, second]
+            } else {
+                let mut changed_second = second;
+                changed_second.report.report_digest = [0; 32];
+                vec![first, changed_second]
+            };
+            assert_eq!(
+                validate_stable_evidence(&changed_profile, Some(&trusted_root_policy())),
+                Err(ConformanceContractError::IndependenceEvidenceMissing)
+            );
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn stable_implementation_boundaries_reject_each_case_matrix_change() {
+        let mut optional_profile = candidate();
+        optional_profile.fixtures[0].mandatory = false;
+
+        let mut empty = stable_evidence("alpha", 30);
+        empty.case_outcomes.clear();
+        refresh_stable_attestation(&mut empty);
+        assert_eq!(
+            validate_stable_implementation(&empty, &optional_profile, None),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+
+        let mut unordered = stable_evidence("alpha", 30);
+        unordered.case_outcomes.swap(0, 1);
+        refresh_stable_attestation(&mut unordered);
+        assert_eq!(
+            validate_stable_implementation(&unordered, &optional_profile, None),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+
+        let mut unknown = stable_evidence("alpha", 30);
+        unknown.case_outcomes[0].case_id = "unknown-case".to_owned();
+        refresh_stable_attestation(&mut unknown);
+        assert_eq!(
+            validate_stable_implementation(&unknown, &optional_profile, None),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn stable_implementation_coordinate_cap_is_enforced() {
+        let mut constrained = candidate();
+        constrained
+            .evaluator_protocol
+            .hard_caps
+            .max_coordinate_bytes = 127;
+        let mut evidence = stable_evidence("alpha", 30);
+        for case in &mut evidence.case_outcomes {
+            case.first_coordinate = Some(vec![b'x'; 128]);
+        }
+        refresh_stable_attestation(&mut evidence);
+        assert_eq!(
+            validate_stable_implementation(&evidence, &constrained, None),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn stable_attestation_zero_fields_are_rejected() {
+        let requirements = profile().independence_requirements;
+        for change in [
+            0_u8, // signer
+            1,    // signature
+            2,    // trust-root digest
+        ] {
+            let mut evidence = stable_evidence("alpha", 30);
+            match change {
+                0 => evidence.attestation.signer_public_key = [0; 32],
+                1 => evidence.attestation.signature = [0; 64],
+                _ => evidence.attestation.trust_root_digest = [0; 32],
+            }
+            assert_eq!(
+                validate_stable_attestation(&evidence, &requirements, None),
+                Err(ConformanceContractError::IndependenceEvidenceMissing)
+            );
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn stable_report_fixture_membership_rejects_each_identity_change() {
+        let profile_value = candidate();
+        let mut evidence = stable_evidence("alpha", 30);
+        refresh_stable_report_for_profile(&mut evidence, &profile_value);
+        let reject = |change: &dyn Fn(&mut ProfileCaseOutcomeV1, &mut crate::CaseOutcomeV1)| {
+            let mut changed = evidence.clone();
+            change(&mut changed.case_outcomes[0], &mut changed.report.cases[0]);
+            changed.report.report_digest = changed.report.digest().unwrap_or([0; 32]);
+            assert_eq!(
+                validate_report_binding(&changed, &profile_value),
+                Err(ConformanceContractError::IndependenceEvidenceMissing)
+            );
+        };
+        reject(&|profile_case, report_case| {
+            profile_case.case_id = "unknown-case".to_owned();
+            report_case.case_id = "unknown-case".to_owned();
+        });
+        reject(&|profile_case, report_case| {
+            profile_case.claim_layer = ClaimLayerV1::MetricConformance;
+            report_case.claim_layer = ClaimLayerV1::MetricConformance;
+        });
+        reject(&|profile_case, report_case| {
+            profile_case.fixture_digest = digest(99);
+            report_case.fixture_digest = digest(99);
+        });
+        reject(&|profile_case, report_case| {
+            profile_case.execution_profile_digest = digest(99);
+            report_case.execution_profile_digest = digest(99);
+        });
+        reject(&|profile_case, report_case| {
+            profile_case.mode = ExecutionModeV1::Replay;
+            report_case.mode = ExecutionModeV1::Replay;
+        });
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn independence_and_stable_report_bindings_reject_each_mismatch() {
         independence_evidence_rejects_each_mismatch();
         stable_report_binding_rejects_each_mismatch();
         stable_case_binding_rejects_each_mismatch();
+        stable_identity_binding_rejects_each_independent_change();
+        stable_implementation_boundaries_reject_each_case_matrix_change();
+        stable_implementation_coordinate_cap_is_enforced();
+        stable_attestation_zero_fields_are_rejected();
+        stable_report_fixture_membership_rejects_each_identity_change();
     }
 
     #[test]
@@ -6151,25 +6388,30 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn public_stable_requires_technical_and_authorship_independence() {
-        let mut configured = profile();
-        configured
-            .independence_requirements
-            .technical_independence_required = false;
-        configured
-            .independence_requirements
-            .authorship_independence_required = false;
-        let candidate = configured
-            .transition_to(ProfileLifecycleV1::Candidate, vec![])
-            .unwrap_or_else(|_| profile());
-        let mut first = stable_evidence("alpha", 30);
-        let mut second = stable_evidence("beta", 40);
-        refresh_stable_report_for_profile(&mut first, &candidate);
-        refresh_stable_report_for_profile(&mut second, &candidate);
+        for disable_technical in [true, false] {
+            let mut configured = profile();
+            if disable_technical {
+                configured
+                    .independence_requirements
+                    .technical_independence_required = false;
+            } else {
+                configured
+                    .independence_requirements
+                    .authorship_independence_required = false;
+            }
+            let candidate = configured
+                .transition_to(ProfileLifecycleV1::Candidate, vec![])
+                .unwrap_or_else(|_| profile());
+            let mut first = stable_evidence("alpha", 30);
+            let mut second = stable_evidence("beta", 40);
+            refresh_stable_report_for_profile(&mut first, &candidate);
+            refresh_stable_report_for_profile(&mut second, &candidate);
 
-        assert_eq!(
-            candidate.transition_to(ProfileLifecycleV1::Stable, vec![first, second]),
-            Err(ConformanceContractError::IndependenceEvidenceMissing)
-        );
+            assert_eq!(
+                candidate.transition_to(ProfileLifecycleV1::Stable, vec![first, second]),
+                Err(ConformanceContractError::IndependenceEvidenceMissing)
+            );
+        }
     }
 
     #[test]
@@ -6254,11 +6496,14 @@ mod tests {
             |e: &mut StableImplementationEvidenceV1| e.implementation.binary_digest = digest(42),
         ];
         for change in identity_changes {
+            let profile_value = candidate();
             let mut first = stable_evidence("alpha", 30);
-            let second = stable_evidence("beta", 40);
+            let mut second = stable_evidence("beta", 40);
             change(&mut first);
+            refresh_stable_report_for_profile(&mut first, &profile_value);
+            refresh_stable_report_for_profile(&mut second, &profile_value);
             assert_eq!(
-                candidate().transition_to(ProfileLifecycleV1::Stable, vec![first, second]),
+                profile_value.transition_to(ProfileLifecycleV1::Stable, vec![first, second]),
                 Err(ConformanceContractError::IndependenceEvidenceMissing)
             );
         }
