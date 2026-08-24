@@ -1189,11 +1189,14 @@ fn validate_stable_attestation(
     policy: Option<&TrustedRootPolicyV1>,
 ) -> Result<(), ConformanceContractError> {
     let attestation = &evidence.attestation;
-    if attestation.trust_root_digest
-        != digest_bytes(
-            b"PiglorOS.ConformanceTrustRoot.v1",
-            &Value::Bytes(attestation.signer_public_key.to_vec()),
-        )
+    if zero_digest(&attestation.signer_public_key)
+        || attestation.signature == [0; 64]
+        || zero_digest(&attestation.trust_root_digest)
+        || attestation.trust_root_digest
+            != digest_bytes(
+                b"PiglorOS.ConformanceTrustRoot.v1",
+                &Value::Bytes(attestation.signer_public_key.to_vec()),
+            )
         || policy.is_some_and(|value| {
             requirements.trust_policy_snapshot_digest != value.trust_policy_snapshot_digest
                 || !value.contains(&attestation.signer_public_key)
@@ -5641,6 +5644,13 @@ mod tests {
                 validate_stable_attestation(&evidence, &requirements, None),
                 Err(ConformanceContractError::IndependenceEvidenceMissing)
             );
+            assert_eq!(
+                candidate().transition_to(
+                    ProfileLifecycleV1::Stable,
+                    vec![evidence, stable_evidence("beta", 40)],
+                ),
+                Err(ConformanceContractError::IndependenceEvidenceMissing)
+            );
         }
     }
 
@@ -6289,8 +6299,10 @@ mod tests {
             Err(ConformanceContractError::FieldOutOfBounds)
         );
 
-        let mut above_limit = profile();
-        above_limit.fixtures = vec![template; 65_537];
+        let mut above_limit = at_limit;
+        let mut extra = template;
+        extra.case_id = "case-65536".to_owned();
+        above_limit.fixtures.push(extra);
         assert_eq!(
             above_limit.validate(),
             Err(ConformanceContractError::FieldOutOfBounds)
