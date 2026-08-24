@@ -59,6 +59,8 @@ pub enum ConformanceContractError {
     UnknownExecutionProfile,
     /// A fixture references a public schema outside the CPF1 inventory.
     UnknownPublicSchema,
+    /// A fixture's replay claim is stronger than its redaction state permits.
+    ClaimRedactionMismatch,
 }
 
 impl std::fmt::Display for ConformanceContractError {
@@ -76,6 +78,9 @@ impl std::fmt::Display for ConformanceContractError {
             Self::ProvenanceMissing => "required conformance provenance is missing",
             Self::UnknownExecutionProfile => "fixture references an unknown execution profile",
             Self::UnknownPublicSchema => "fixture references an unknown public schema",
+            Self::ClaimRedactionMismatch => {
+                "fixture replay claim is incompatible with its redaction state"
+            }
         })
     }
 }
@@ -399,7 +404,13 @@ impl ConformanceProfileV1 {
     ///
     /// Returns a closed safe error when an invariant is absent or invalid.
     pub fn validate(&self) -> Result<(), ConformanceContractError> {
-        validate_profile(self, None)
+        validate_profile(self, None).and_then(|()| {
+            if self.profile_digest == self.digest() {
+                Ok(())
+            } else {
+                Err(ConformanceContractError::FixtureDigestMismatch)
+            }
+        })
     }
 
     /// Return canonical CPF1 bytes after validating the immutable contract and digest.
@@ -846,7 +857,26 @@ fn validate_fixtures(profile: &ConformanceProfileV1) -> Result<(), ConformanceCo
                 validate_expected_result(&fixture.expected, &profile.allowed_divergences)
             })
             .and_then(|()| validate_fixture_verification_outcome(fixture))
+            .and_then(|()| validate_fixture_claim(fixture))
     })
+}
+
+fn validate_fixture_claim(fixture: &FixtureDescriptorV1) -> Result<(), ConformanceContractError> {
+    let coherent = match fixture.redaction_state {
+        RedactionStateV1::None => true,
+        RedactionStateV1::RedactedViews => {
+            fixture.replay_claim == ReplayClaimV1::ExactAuthoritativeWithRedactedViews
+        }
+        RedactionStateV1::StructuralOnly => fixture.replay_claim == ReplayClaimV1::StructuralOnly,
+        RedactionStateV1::EvidenceMissing => {
+            fixture.replay_claim == ReplayClaimV1::UnverifiableArtifactsMissing
+        }
+    };
+    if coherent {
+        Ok(())
+    } else {
+        Err(ConformanceContractError::ClaimRedactionMismatch)
+    }
 }
 
 fn validate_selected_caps(profile: &ConformanceProfileV1) -> Result<(), ConformanceContractError> {
@@ -3215,6 +3245,10 @@ mod tests {
             value.to_canonical_cbor(),
             Err(ConformanceContractError::FixtureDigestMismatch)
         );
+        assert_eq!(
+            value.validate(),
+            Err(ConformanceContractError::FixtureDigestMismatch)
+        );
         let mut value = profile();
         value.fixtures[0].execution_profile_digest = digest(200);
         value.profile_digest = value.digest();
@@ -3565,6 +3599,7 @@ mod tests {
             ConformanceContractError::ProvenanceMissing,
             ConformanceContractError::UnknownExecutionProfile,
             ConformanceContractError::UnknownPublicSchema,
+            ConformanceContractError::ClaimRedactionMismatch,
         ] {
             assert!(!value.to_string().is_empty());
         }
@@ -5186,6 +5221,28 @@ mod tests {
 
         assert!(semantic_version("1.2.3+build.7"));
         assert!(!semantic_version("1.2.3+bad!"));
+    }
+
+    #[test]
+    fn fixture_redaction_state_cannot_overclaim_replay_strength() {
+        reject_profile_change(
+            |value| value.fixtures[0].redaction_state = RedactionStateV1::RedactedViews,
+            ConformanceContractError::ClaimRedactionMismatch,
+        );
+        reject_profile_change(
+            |value| value.fixtures[0].redaction_state = RedactionStateV1::StructuralOnly,
+            ConformanceContractError::ClaimRedactionMismatch,
+        );
+        reject_profile_change(
+            |value| value.fixtures[0].redaction_state = RedactionStateV1::EvidenceMissing,
+            ConformanceContractError::ClaimRedactionMismatch,
+        );
+
+        let mut coherent = profile();
+        coherent.fixtures[0].replay_claim = ReplayClaimV1::StructuralOnly;
+        coherent.fixtures[0].redaction_state = RedactionStateV1::StructuralOnly;
+        coherent.profile_digest = coherent.digest();
+        assert_eq!(coherent.validate(), Ok(()));
     }
 
     #[test]
