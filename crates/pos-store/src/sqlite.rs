@@ -427,7 +427,7 @@ impl SqliteStore {
              );
              CREATE TABLE IF NOT EXISTS key_registry (
                  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                 state_json BLOB NOT NULL
+                 state_cbor BLOB NOT NULL
              );
              CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id);
              CREATE TABLE IF NOT EXISTS append_identities (
@@ -2864,8 +2864,8 @@ impl EventStore for SqliteStore {
     }
 
     fn load_key_registry(&self) -> Result<Option<KeyRegistryStateV1>, CoreError> {
-        let state_json = match self.conn.query_row(
-            "SELECT state_json FROM key_registry WHERE singleton = 1",
+        let state_cbor = match self.conn.query_row(
+            "SELECT state_cbor FROM key_registry WHERE singleton = 1",
             [],
             |row| row.get::<_, Vec<u8>>(0),
         ) {
@@ -2873,19 +2873,20 @@ impl EventStore for SqliteStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
             Err(error) => return Err(CoreError::Storage(error.to_string())),
         };
-        serde_json::from_slice(&state_json)
+        ciborium::from_reader(state_cbor.as_slice())
             .map(Some)
             .map_err(|error| CoreError::Serialization(error.to_string()))
     }
 
     fn save_key_registry(&mut self, registry: &KeyRegistryStateV1) -> Result<(), CoreError> {
-        let state_json = serde_json::to_vec(registry)
+        let mut state_cbor = Vec::new();
+        ciborium::into_writer(registry, &mut state_cbor)
             .map_err(|error| CoreError::Serialization(error.to_string()))?;
         self.conn
             .execute(
-                "INSERT INTO key_registry (singleton, state_json) VALUES (1, ?1)
-                 ON CONFLICT(singleton) DO UPDATE SET state_json = excluded.state_json",
-                params![state_json],
+                "INSERT INTO key_registry (singleton, state_cbor) VALUES (1, ?1)
+                 ON CONFLICT(singleton) DO UPDATE SET state_cbor = excluded.state_cbor",
+                params![state_cbor],
             )
             .map(|_| ())
             .map_err(|error| CoreError::Storage(error.to_string()))
