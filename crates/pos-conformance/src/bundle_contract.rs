@@ -1587,7 +1587,7 @@ impl BundleLifecycleCode for ProfileLifecycleV1 {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-pub(super) mod tests {
+mod tests {
     use super::*;
     use crate::{
         CapabilityPolicyV1, EvaluatorHardCapsV1, EvaluatorProtocolV1, FixtureBoundsV1,
@@ -3411,6 +3411,7 @@ mod coverage_entrypoints {
     fn private_archive_and_cap_paths_are_instrumented() -> Result<(), Box<dyn std::error::Error>> {
         let bundle = signed_bundle()?;
         let value = bundle_value(&bundle);
+        assert!(matches!(value, Value::Array(_)));
         assert_eq!(
             preflight_archive(&encode_archive_value(&Value::Null)?),
             Ok(())
@@ -3465,7 +3466,7 @@ mod coverage_entrypoints {
             Ok(())
         );
         assert_eq!(validate_selected_bundle_caps(&profile, &bundle), Ok(()));
-        let mut invalid_inputs = bundle.members.clone();
+        let mut invalid_inputs = bundle.members;
         let input_index = invalid_inputs
             .iter()
             .position(|member| member.role == BundleMemberRoleV1::FixtureInput)
