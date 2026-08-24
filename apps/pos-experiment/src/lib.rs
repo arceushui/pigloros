@@ -6424,7 +6424,8 @@ mod coverage_entrypoints {
         let mut session = ok(experiment.start());
         let subject = EntityId::new();
         let revoked_subject = EntityId::new();
-        let token = authority.record_grant_on_timeline(
+        let untrusted_authority = ConsentAuthority::new();
+        let token = untrusted_authority.record_grant_on_timeline(
             session.timeline().id(),
             &ConsentGranted {
                 subject_id: subject,
