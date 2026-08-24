@@ -42,8 +42,17 @@ fn sign_for_role(
     if !role.is_signing() {
         return Err(KeyRegistryErrorV1::SigningRoleRequired);
     }
+    Ok(sign_for_role_unchecked(signing_key, role, epoch, payload))
+}
+
+fn sign_for_role_unchecked(
+    signing_key: &SigningKey,
+    role: KeyRoleV1,
+    epoch: u64,
+    payload: &CanonicalBytes,
+) -> Signature {
     let message = role_bound_message(role, epoch, payload);
-    Ok(Signature::from_bytes(signing_key.sign(&message).to_bytes()))
+    Signature::from_bytes(signing_key.sign(&message).to_bytes())
 }
 
 /// Sign a role/epoch-bound payload under the registry's atomic authorization.
@@ -75,7 +84,7 @@ pub fn sign_for_registered_role<R: KeyRegistrySigningPortV1>(
     let public_verification_key =
         crate::signing::public_key_from_verifying_key(&signing_key.verifying_key());
     registry.with_signing_authorization(identity, material_digest, public_verification_key, || {
-        sign_for_role(signing_key, identity.role, identity.epoch, payload)
+        sign_for_role_unchecked(signing_key, identity.role, identity.epoch, payload)
     })
 }
 
