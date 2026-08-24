@@ -153,12 +153,12 @@ mod coverage_paths {
         let mut cell = event.clone();
         cell.event_type = Kind::new(pos_core::GEOGRAPHIC_CELL_EVENT_TYPE);
         cell.seq = Seq::from_u64(3);
-        registry
+        assert!(registry
             .restore_driver_state(
                 &[TimelineHistorySegment::new(timeline, Seq::from_u64(3))],
                 &[event, location, cell],
             )
-            .unwrap_or_else(|error| panic!("unexpected recovery error: {error:?}"));
+            .is_ok());
         assert_eq!(
             observed
                 .lock()
