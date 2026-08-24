@@ -119,6 +119,8 @@ pub struct BundleExpectedResultV1 {
     pub case_id: String,
     /// CPF1 claim layer.
     pub claim_layer: ClaimLayerV1,
+    /// CPF1 execution-profile identity.
+    pub execution_profile_digest: [u8; 32],
     /// Execution mode represented by this bundle.
     pub mode: BundleModeV1,
     /// Relative path of the public expected-result member.
@@ -312,7 +314,12 @@ impl ConformanceBundleV1 {
                 && member.path != PROFILE_MEMBER_PATH
                 && !profile.fixtures.iter().any(|fixture| {
                     fixture.inputs.iter().any(|input| {
-                        member.path == fixture_input_path(&fixture.case_id, &input.member_id)
+                        member.path
+                            == fixture_input_path(
+                                &fixture.case_id,
+                                &fixture.execution_profile_digest,
+                                &input.member_id,
+                            )
                     })
                 })
             {
@@ -383,8 +390,35 @@ fn validate_member_size(member_size: u64) -> Result<(), BundleContractErrorV1> {
     }
 }
 
-fn fixture_input_path(case_id: &str, member_id: &str) -> String {
-    format!("{INPUT_MEMBER_PREFIX}{case_id}/{member_id}")
+fn fixture_input_path(
+    case_id: &str,
+    execution_profile_digest: &[u8; 32],
+    member_id: &str,
+) -> String {
+    let mut input = Vec::new();
+    input.extend_from_slice(b"PiglorOS.CPF1InputPath.v1\0");
+    append_path_component(&mut input, case_id);
+    input.extend_from_slice(execution_profile_digest);
+    append_path_component(&mut input, member_id);
+    format!("{INPUT_MEMBER_PREFIX}{}.bin", blake3::hash(&input).to_hex())
+}
+
+fn expected_member_path(
+    case_id: &str,
+    claim_layer: ClaimLayerV1,
+    execution_profile_digest: &[u8; 32],
+) -> String {
+    let mut input = Vec::new();
+    input.extend_from_slice(b"PiglorOS.CPF1ExpectedPath.v1\0");
+    append_path_component(&mut input, case_id);
+    input.push(claim_layer_code(claim_layer) as u8);
+    input.extend_from_slice(execution_profile_digest);
+    format!("expected/{}.bin", blake3::hash(&input).to_hex())
+}
+
+fn append_path_component(input: &mut Vec<u8>, value: &str) {
+    input.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    input.extend_from_slice(value.as_bytes());
 }
 
 fn validate_fixture_inputs(
@@ -393,7 +427,11 @@ fn validate_fixture_inputs(
 ) -> Result<(), BundleContractErrorV1> {
     for fixture in &profile.fixtures {
         for input in &fixture.inputs {
-            let path = fixture_input_path(&fixture.case_id, &input.member_id);
+            let path = fixture_input_path(
+                &fixture.case_id,
+                &fixture.execution_profile_digest,
+                &input.member_id,
+            );
             let Some(member) = members.iter().find(|member| member.path == path) else {
                 return Err(BundleContractErrorV1::MemberMissing);
             };
@@ -463,10 +501,21 @@ fn validate_expected_results(
             return Err(BundleContractErrorV1::ExpectedResultMismatch);
         }
         let Some(fixture) = profile.fixtures.iter().find(|fixture| {
-            fixture.case_id == expected.case_id && fixture.claim_layer == expected.claim_layer
+            fixture.case_id == expected.case_id
+                && fixture.claim_layer == expected.claim_layer
+                && fixture.execution_profile_digest == expected.execution_profile_digest
         }) else {
             return Err(BundleContractErrorV1::ExpectedResultMismatch);
         };
+        if expected.member_path
+            != expected_member_path(
+                &fixture.case_id,
+                fixture.claim_layer,
+                &fixture.execution_profile_digest,
+            )
+        {
+            return Err(BundleContractErrorV1::UndeclaredMember);
+        }
         if !fixture.modes.contains(&match expected.mode {
             BundleModeV1::Local => ExecutionModeV1::Local,
             BundleModeV1::AirGapped => ExecutionModeV1::AirGapped,
@@ -508,7 +557,9 @@ fn validate_expected_results(
                 )
             })
             && !manifest.expected_results.iter().any(|expected| {
-                expected.case_id == fixture.case_id && expected.claim_layer == fixture.claim_layer
+                expected.case_id == fixture.case_id
+                    && expected.claim_layer == fixture.claim_layer
+                    && expected.execution_profile_digest == fixture.execution_profile_digest
             })
     }) {
         return Err(BundleContractErrorV1::MemberMissing);
@@ -518,13 +569,14 @@ fn validate_expected_results(
 
 fn expected_identity(
     values: &[BundleExpectedResultV1],
-) -> Vec<(&str, ClaimLayerV1, &str, [u8; 32])> {
+) -> Vec<(&str, ClaimLayerV1, [u8; 32], &str, [u8; 32])> {
     values
         .iter()
         .map(|value| {
             (
                 value.case_id.as_str(),
                 value.claim_layer,
+                value.execution_profile_digest,
                 value.member_path.as_str(),
                 value.digest,
             )
@@ -538,6 +590,8 @@ fn validate_member_path(path: &str) -> Result<(), BundleContractErrorV1> {
         || path.starts_with('/')
         || !path.is_ascii()
         || path.contains('\\')
+        || path.contains(':')
+        || path.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
         || path
             .split('/')
             .any(|segment| segment.is_empty() || segment == "." || segment == "..")
@@ -564,9 +618,10 @@ fn strictly_ordered<T: Ord>(values: &[T]) -> bool {
 }
 
 fn members_strictly_ordered(values: &[BundleMemberV1]) -> bool {
-    values
-        .windows(2)
-        .all(|pair| pair[0].path.as_str() < pair[1].path.as_str())
+    values.windows(2).all(|pair| {
+        pair[0].path.as_str() < pair[1].path.as_str()
+            && !pair[0].path.eq_ignore_ascii_case(&pair[1].path)
+    })
 }
 
 fn manifest_value(manifest: &BundleManifestV1) -> Value {
@@ -595,8 +650,9 @@ fn manifest_value(manifest: &BundleManifestV1) -> Value {
                 .map(|expected| {
                     Value::Array(vec![
                         Value::Text(expected.case_id.clone()),
-                        Value::Integer(expected.mode.code().into()),
                         Value::Integer(claim_layer_code(expected.claim_layer).into()),
+                        Value::Bytes(expected.execution_profile_digest.to_vec()),
+                        Value::Integer(expected.mode.code().into()),
                         Value::Text(expected.member_path.clone()),
                         Value::Bytes(expected.digest.to_vec()),
                     ])
@@ -782,7 +838,11 @@ mod tests {
             for input in &fixture.inputs {
                 let input_bytes = format!("fixture-input-{index}").into_bytes();
                 members.push(BundleMemberV1::new(
-                    fixture_input_path(&fixture.case_id, &input.member_id),
+                    fixture_input_path(
+                        &fixture.case_id,
+                        &fixture.execution_profile_digest,
+                        &input.member_id,
+                    ),
                     input_bytes,
                     false,
                 ));
@@ -794,11 +854,16 @@ mod tests {
                         .expect("test fixture expected result must encode")
                 }
             };
-            let path = format!("expected/case-{index:02}.bin");
+            let path = expected_member_path(
+                &fixture.case_id,
+                fixture.claim_layer,
+                &fixture.execution_profile_digest,
+            );
             let member = BundleMemberV1::new(path.clone(), bytes, true);
             expected_results.push(BundleExpectedResultV1 {
                 case_id: fixture.case_id.clone(),
                 claim_layer: fixture.claim_layer,
+                execution_profile_digest: fixture.execution_profile_digest,
                 mode,
                 member_path: path,
                 digest: member.digest,
@@ -872,9 +937,35 @@ mod tests {
             validate_member_path("résultat"),
             Err(BundleContractErrorV1::MemberOutOfBounds)
         );
+        assert_eq!(
+            validate_member_path("drive:C/result"),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+        assert_eq!(
+            validate_member_path("control\nresult"),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
         assert!(validate_member_path("nested/result").is_ok());
         assert!(contains_secret_marker(b"PUBLIC PRIVATE_KEY material"));
         assert!(!contains_secret_marker(b"public expected result"));
+    }
+
+    #[test]
+    fn derived_member_paths_bind_complete_fixture_identity() {
+        let first = digest(1);
+        let second = digest(2);
+        assert_ne!(
+            fixture_input_path("case/a", &first, "member/b"),
+            fixture_input_path("case", &first, "a/member/b")
+        );
+        assert_ne!(
+            fixture_input_path("case", &first, "member"),
+            fixture_input_path("case", &second, "member")
+        );
+        assert_ne!(
+            expected_member_path("case", ClaimLayerV1::ArtifactIntegrity, &first),
+            expected_member_path("case", ClaimLayerV1::ArtifactIntegrity, &second)
+        );
     }
 
     #[test]
@@ -913,6 +1004,7 @@ mod tests {
             expected_results: vec![BundleExpectedResultV1 {
                 case_id: "case".to_owned(),
                 claim_layer: ClaimLayerV1::ArtifactIntegrity,
+                execution_profile_digest: [4; 32],
                 mode: BundleModeV1::Local,
                 member_path: "expected/result".to_owned(),
                 digest: [3; 32],
@@ -990,6 +1082,11 @@ mod tests {
             BundleMemberV1::new("a", vec![2], false),
         ];
         assert!(!members_strictly_ordered(&duplicate));
+        let case_collision = vec![
+            BundleMemberV1::new("a", vec![1], false),
+            BundleMemberV1::new("A", vec![2], false),
+        ];
+        assert!(!members_strictly_ordered(&case_collision));
     }
 
     #[test]
@@ -1058,7 +1155,7 @@ mod tests {
         );
 
         let mut air_with_other_path = air_gapped;
-        let alternate_path = "expected/case-00-alt.bin".to_owned();
+        let alternate_path = "expected/alternate.bin".to_owned();
         let expected_index = expected_member_index(&air_with_other_path);
         air_with_other_path.members[expected_index].path = alternate_path.clone();
         air_with_other_path.manifest.members[expected_index].path = alternate_path.clone();
@@ -1070,7 +1167,7 @@ mod tests {
                 air_gapped: air_with_other_path,
             })
             .validate(),
-            Err(BundleContractErrorV1::ModeParityMismatch)
+            Err(BundleContractErrorV1::UndeclaredMember)
         );
         Ok(())
     }
@@ -1219,12 +1316,16 @@ mod tests {
                 .expect("typed failure has a canonical public representation");
         let typed_digest = *blake3::hash(&typed_bytes).as_bytes();
         let mut typed_members = bundle.members.clone();
+        let typed_path = expected_member_path(
+            &typed_profile.fixtures[0].case_id,
+            typed_profile.fixtures[0].claim_layer,
+            &typed_profile.fixtures[0].execution_profile_digest,
+        );
         let typed_member_index = typed_members
             .iter()
-            .position(|member| member.path == "expected/case-00.bin")
+            .position(|member| member.path == typed_path)
             .expect("case-00 expected member");
-        typed_members[typed_member_index] =
-            BundleMemberV1::new("expected/case-00.bin", typed_bytes, true);
+        typed_members[typed_member_index] = BundleMemberV1::new(typed_path, typed_bytes, true);
         let mut typed_manifest = bundle.manifest.clone();
         typed_manifest.expected_results[0].digest = typed_digest;
         assert_eq!(
@@ -1269,8 +1370,8 @@ mod tests {
     }
 
     #[test]
-    fn mandatory_fixture_matching_requires_case_and_layer() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn mandatory_fixture_matching_requires_case_and_layer_and_execution_profile(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut profile = profile();
         let same_layer = profile_fixture(7, profile.fixtures[0].claim_layer);
         profile.fixtures.push(same_layer);
@@ -1280,6 +1381,23 @@ mod tests {
         manifest
             .expected_results
             .retain(|expected| expected.case_id != "case-00");
+        assert_eq!(
+            validate_expected_results(&profile, &manifest, &bundle.members),
+            Err(BundleContractErrorV1::MemberMissing)
+        );
+
+        let mut profile = profile();
+        let mut same_case_and_layer = profile_fixture(7, profile.fixtures[0].claim_layer);
+        same_case_and_layer.case_id = profile.fixtures[0].case_id.clone();
+        same_case_and_layer.execution_profile_digest = digest(99);
+        profile.execution_profile_digests.push(digest(99));
+        profile.fixtures.push(same_case_and_layer);
+        profile.profile_digest = profile.digest();
+        let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
+        let mut manifest = bundle.manifest.clone();
+        manifest
+            .expected_results
+            .retain(|expected| expected.execution_profile_digest != digest(99));
         assert_eq!(
             validate_expected_results(&profile, &manifest, &bundle.members),
             Err(BundleContractErrorV1::MemberMissing)
