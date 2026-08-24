@@ -2740,6 +2740,7 @@ mod tests {
             limitations_digest: digest(18),
             provenance_digest: digest(19),
             previous_profile_digest: None,
+            stable_evidence: Vec::new(),
             profile_digest: [0; 32],
         };
         profile.profile_digest = profile.digest();
