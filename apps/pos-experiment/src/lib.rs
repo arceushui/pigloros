@@ -843,6 +843,13 @@ impl Experiment {
         self
     }
 
+    /// Run without a host-owned consent gate; protected operations fail closed.
+    #[must_use]
+    pub fn without_consent_gate(mut self) -> Self {
+        self.registry = self.registry.without_consent_gate();
+        self
+    }
+
     /// Register a plugin (wires schemas + reducer + driver).
     ///
     /// # Errors
@@ -5766,12 +5773,12 @@ mod coverage_entrypoints {
             ));
             timeline.id()
         };
-        let mut experiment = Experiment::new(ExperimentConfig {
+        let experiment = Experiment::new(ExperimentConfig {
             name: "coverage-missing-gate-resume".to_owned(),
             stop: StopCondition::MaxTicks(1),
             store_config: config,
-        });
-        experiment.registry = experiment.registry.without_consent_gate();
+        })
+        .without_consent_gate();
         assert!(matches!(
             experiment.resume(timeline),
             Err(ExperimentError::Runtime(
@@ -5832,11 +5839,11 @@ mod coverage_entrypoints {
 
     #[test]
     fn revocation_boundary_rejects_missing_gate_before_append() {
-        let mut experiment = Experiment::new(config(
+        let experiment = Experiment::new(config(
             "coverage-missing-gate-revocation",
             StopCondition::MaxTicks(1),
-        ));
-        experiment.registry = experiment.registry.without_consent_gate();
+        ))
+        .without_consent_gate();
         let mut session = ok(experiment.start());
         session.revoke_consent_at_boundary();
         assert!(matches!(
