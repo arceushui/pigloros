@@ -4437,7 +4437,7 @@ mod tests {
         let result = exp.run().test_ok();
         // state_for returns from the first reducer ("proj-plugin")
         let n = result
-            .projections_for_host()
+            .projections
             .state_for(&entity)
             .and_then(|s| s.get("n"))
             .and_then(serde_json::Value::as_u64)
@@ -4915,7 +4915,7 @@ mod integration_tests {
         // Verify agent state was projected (decision count should be 5)
         // rule-agent is first registered reducer → state_for_reducer("rule-agent", ...)
         let decisions = result
-            .projections_for_host()
+            .projections
             .state_for_reducer("rule-agent", &agent_entity)
             .and_then(|s| s.get("decisions"))
             .and_then(serde_json::Value::as_u64)
@@ -4924,7 +4924,7 @@ mod integration_tests {
 
         // Verify obs state was projected (observation count should be 5)
         let obs_count = result
-            .projections_for_host()
+            .projections
             .state_for_reducer("synthetic-obs", &obs_entity)
             .and_then(|s| s.get("observations"))
             .and_then(serde_json::Value::as_u64)
