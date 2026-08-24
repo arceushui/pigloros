@@ -1917,6 +1917,10 @@ fn cbor_argument_widths_are_closed_at_the_public_boundary() {
         cbor_item_end(&[0xf8, 0x17], 0, 0, ERASURE_MAX_INVENTORY_RESULTS),
         Err(ErasureErrorV1::InvalidEncoding)
     );
+    assert_eq!(
+        cbor_item_end(&[0xf7], 0, 0, ERASURE_MAX_INVENTORY_RESULTS),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
 }
 
 #[test]
