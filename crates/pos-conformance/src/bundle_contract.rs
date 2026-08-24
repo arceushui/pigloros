@@ -21,6 +21,7 @@ const MAX_MEMBERS: usize = 65_536;
 const MAX_MEMBER_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TOTAL_BUNDLE_BYTES: u64 = 1024 * 1024 * 1024;
 const PROFILE_MEMBER_PATH: &str = "profile/CPF1.cbor";
+const INPUT_MEMBER_PREFIX: &str = "inputs/";
 
 /// Closed bundle failures.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -285,6 +286,7 @@ impl ConformanceBundleV1 {
         {
             return Err(BundleContractErrorV1::ProfileInvalid);
         }
+        validate_fixture_inputs(&profile, &self.members)?;
         if self.manifest.members.len() != self.members.len()
             || !strictly_ordered(&self.manifest.members)
             || !members_strictly_ordered(&self.members)
@@ -295,6 +297,16 @@ impl ConformanceBundleV1 {
         for (member, descriptor) in self.members.iter().zip(&self.manifest.members) {
             validate_member_path(&member.path)?;
             if descriptor.path != member.path {
+                return Err(BundleContractErrorV1::UndeclaredMember);
+            }
+            if !member.expected_result
+                && member.path != PROFILE_MEMBER_PATH
+                && !profile.fixtures.iter().any(|fixture| {
+                    fixture.inputs.iter().any(|input| {
+                        member.path == fixture_input_path(&fixture.case_id, &input.member_id)
+                    })
+                })
+            {
                 return Err(BundleContractErrorV1::UndeclaredMember);
             }
             if descriptor.size_bytes != u64::try_from(member.bytes.len()).unwrap_or(u64::MAX)
@@ -360,6 +372,33 @@ fn validate_member_size(member_size: u64) -> Result<(), BundleContractErrorV1> {
     } else {
         Ok(())
     }
+}
+
+fn fixture_input_path(case_id: &str, member_id: &str) -> String {
+    format!("{INPUT_MEMBER_PREFIX}{case_id}/{member_id}")
+}
+
+fn validate_fixture_inputs(
+    profile: &ConformanceProfileV1,
+    members: &[BundleMemberV1],
+) -> Result<(), BundleContractErrorV1> {
+    for fixture in &profile.fixtures {
+        for input in &fixture.inputs {
+            let path = fixture_input_path(&fixture.case_id, &input.member_id);
+            let Some(member) = members.iter().find(|member| member.path == path) else {
+                return Err(BundleContractErrorV1::MemberMissing);
+            };
+            if member.expected_result
+                || member.bytes.is_empty()
+                || member.bytes.len() as u64 != input.size_bytes
+                || member.digest != input.digest
+                || member.digest != *blake3::hash(&member.bytes).as_bytes()
+            {
+                return Err(BundleContractErrorV1::MemberDigestMismatch);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A Local/Air-Gapped pair that must share exact expected-result records.
@@ -606,6 +645,7 @@ mod tests {
 
     fn profile_fixture(index: usize, claim_layer: ClaimLayerV1) -> FixtureDescriptorV1 {
         let expected_bytes = format!("expected-result-{index}").into_bytes();
+        let input_bytes = format!("fixture-input-{index}").into_bytes();
         FixtureDescriptorV1 {
             case_id: format!("case-{index:02}"),
             mandatory: true,
@@ -616,8 +656,8 @@ mod tests {
             subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
             inputs: vec![FixtureInputMemberV1 {
                 member_id: format!("input-{index:02}.json"),
-                size_bytes: 1,
-                digest: digest(3),
+                size_bytes: input_bytes.len() as u64,
+                digest: *blake3::hash(&input_bytes).as_bytes(),
                 provenance_digest: digest(4),
             }],
             expected: ExpectedResultV1::CanonicalBytes {
@@ -734,6 +774,14 @@ mod tests {
         let mut members = Vec::new();
         let mut expected_results = Vec::new();
         for (index, fixture) in profile.fixtures.iter().enumerate() {
+            for input in &fixture.inputs {
+                let input_bytes = format!("fixture-input-{index}").into_bytes();
+                members.push(BundleMemberV1::new(
+                    fixture_input_path(&fixture.case_id, &input.member_id),
+                    input_bytes,
+                    false,
+                ));
+            }
             let bytes = match &fixture.expected {
                 ExpectedResultV1::CanonicalBytes { bytes, .. } => bytes.clone(),
                 ExpectedResultV1::TypedFailure(_) | ExpectedResultV1::AllowedDivergence { .. } => {
@@ -763,6 +811,14 @@ mod tests {
         let bundle = ConformanceBundleV1::materialize(profile, mode, members, expected_results)?;
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
         Ok(bundle.sign(&signing_key)?)
+    }
+
+    fn expected_member_index(bundle: &ConformanceBundleV1) -> usize {
+        bundle
+            .members
+            .iter()
+            .position(|member| member.expected_result)
+            .expect("test bundle has an expected-result member")
     }
 
     #[test]
@@ -981,8 +1037,9 @@ mod tests {
 
         let mut air_with_other_path = air_gapped;
         let alternate_path = "expected/case-00-alt.bin".to_owned();
-        air_with_other_path.members[0].path = alternate_path.clone();
-        air_with_other_path.manifest.members[0].path = alternate_path.clone();
+        let expected_index = expected_member_index(&air_with_other_path);
+        air_with_other_path.members[expected_index].path = alternate_path.clone();
+        air_with_other_path.manifest.members[expected_index].path = alternate_path.clone();
         air_with_other_path.manifest.expected_results[0].member_path = alternate_path;
         let air_with_other_path = air_with_other_path.sign(&signing_key)?;
         assert_eq!(
@@ -1142,7 +1199,8 @@ mod tests {
         let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
 
         let mut wrong_digest_members = bundle.members.clone();
-        wrong_digest_members[0].digest = digest(99);
+        let expected_index = expected_member_index(&bundle);
+        wrong_digest_members[expected_index].digest = digest(99);
         assert_eq!(
             validate_expected_results(&profile, &bundle.manifest, &wrong_digest_members,),
             Err(BundleContractErrorV1::ExpectedResultMismatch)
@@ -1156,10 +1214,12 @@ mod tests {
             *digest = *blake3::hash(bytes).as_bytes();
         }
         let mut empty_members = bundle.members.clone();
-        empty_members[0].bytes.clear();
-        empty_members[0].digest = *blake3::hash(&empty_members[0].bytes).as_bytes();
+        let expected_index = expected_member_index(&bundle);
+        empty_members[expected_index].bytes.clear();
+        empty_members[expected_index].digest =
+            *blake3::hash(&empty_members[expected_index].bytes).as_bytes();
         let mut empty_manifest = bundle.manifest.clone();
-        empty_manifest.expected_results[0].digest = empty_members[0].digest;
+        empty_manifest.expected_results[0].digest = empty_members[expected_index].digest;
         assert_eq!(
             validate_expected_results(&empty_profile, &empty_manifest, &empty_members),
             Err(BundleContractErrorV1::ExpectedResultMismatch)
@@ -1194,7 +1254,7 @@ mod tests {
         let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
 
         let mut tampered = bundle.clone();
-        tampered.members[0].bytes[0] ^= 1;
+        tampered.members[expected_member_index(&tampered)].bytes[0] ^= 1;
         assert_eq!(
             tampered.validate(),
             Err(BundleContractErrorV1::MemberDigestMismatch)
@@ -1231,14 +1291,69 @@ mod tests {
     }
 
     #[test]
+    fn validation_binds_each_profile_input_to_public_member_bytes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile = profile();
+        let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
+        let input_index = bundle
+            .members
+            .iter()
+            .position(|member| member.path.starts_with(INPUT_MEMBER_PREFIX))
+            .ok_or("missing fixture input member")?;
+
+        let mut tampered = bundle.clone();
+        tampered.members[input_index].bytes = b"different public input".to_vec();
+        tampered.members[input_index].digest =
+            *blake3::hash(&tampered.members[input_index].bytes).as_bytes();
+        tampered.manifest.members[input_index].digest = tampered.members[input_index].digest;
+        tampered.manifest.members[input_index].size_bytes =
+            tampered.members[input_index].bytes.len() as u64;
+        assert_eq!(
+            tampered.validate(),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let mut missing = bundle.clone();
+        missing.members.remove(input_index);
+        missing.manifest.members.remove(input_index);
+        assert_eq!(
+            missing.validate(),
+            Err(BundleContractErrorV1::MemberMissing)
+        );
+
+        let mut marked_as_expected = bundle.clone();
+        marked_as_expected.members[input_index].expected_result = true;
+        assert_eq!(
+            marked_as_expected.validate(),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let mut undeclared = bundle;
+        undeclared.members.push(BundleMemberV1::new(
+            "inputs/case-00/undeclared.json",
+            b"extra public input".to_vec(),
+            false,
+        ));
+        undeclared.rebuild_member_descriptors();
+        assert_eq!(
+            undeclared.validate(),
+            Err(BundleContractErrorV1::UndeclaredMember)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn validation_rejects_secret_payloads_and_air_gapped_network_access(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let profile = profile();
         let mut secret = signed_bundle(&profile, BundleModeV1::Local)?;
-        secret.members[0].bytes = b"PRIVATE KEY material".to_vec();
-        secret.members[0].digest = *blake3::hash(&secret.members[0].bytes).as_bytes();
-        secret.manifest.members[0].digest = secret.members[0].digest;
-        secret.manifest.members[0].size_bytes = secret.members[0].bytes.len() as u64;
+        let expected_index = expected_member_index(&secret);
+        secret.members[expected_index].bytes = b"PRIVATE KEY material".to_vec();
+        secret.members[expected_index].digest =
+            *blake3::hash(&secret.members[expected_index].bytes).as_bytes();
+        secret.manifest.members[expected_index].digest = secret.members[expected_index].digest;
+        secret.manifest.members[expected_index].size_bytes =
+            secret.members[expected_index].bytes.len() as u64;
         assert_eq!(
             secret.validate(),
             Err(BundleContractErrorV1::SecretMaterialDetected)
