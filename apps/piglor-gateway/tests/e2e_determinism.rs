@@ -299,16 +299,10 @@ fn snapshot_json(
 }
 
 fn state_u64(
-    registry: &ProjectionRegistry,
-    reducer: &str,
-    entity: EntityId,
+    state: &pos_core::State,
     key: &str,
 ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
-    registry
-        .state_for_reducer(reducer, &entity)
-        .and_then(|state| state.get(key))
-        .and_then(Value::as_u64)
-        .test_ok()
+    state.get(key).and_then(Value::as_u64).test_ok()
 }
 
 struct MultiRateScenario {
@@ -414,8 +408,14 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
 
 fn register_experiment(
     scenario: &mut MultiRateScenario,
-) -> Result<(Experiment, pos_core::ConsentCapabilityToken), Box<dyn std::error::Error + Send + Sync>>
-{
+) -> Result<
+    (
+        Experiment,
+        pos_core::ConsentCapabilityToken,
+        ConsentAuthority,
+    ),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
     let observation = FixturePlugin::new("observation", false, true);
     let society = SocietyPlugin::new();
     let fast = AgentPlugin::new();
@@ -491,7 +491,11 @@ fn register_experiment(
         grant_seq: 1,
     };
     let token = authority.record_grant_on_timeline(scenario.timeline, &grant);
-    Ok((experiment.with_consent_authority(authority), token))
+    Ok((
+        experiment.with_consent_authority(authority.clone()),
+        token,
+        authority,
+    ))
 }
 
 async fn run_tick_boundaries(
@@ -663,55 +667,61 @@ fn assert_event_order(
 fn assert_projection_state(
     scenario: &MultiRateScenario,
     session: &pos_experiment::ExperimentSession,
+    authority: &ConsentAuthority,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let live = session.projections().test_ok()?;
+    let read_state = |reducer: &str, subject: EntityId| {
+        let token = authority.record_grant_on_timeline(
+            scenario.timeline,
+            &ConsentGranted {
+                subject_id: subject,
+                grantee_id: EntityId::new(),
+                purpose: "multi-rate-projection-read".to_owned(),
+                modalities: 0,
+                min_geo_resolution: 0,
+                fork_permitted: false,
+                export_permitted: false,
+                retention_days: 0,
+                expiry_secs: 0,
+                grant_seq: 2,
+            },
+        );
+        session
+            .projection_state_for_reducer(reducer, subject, &token)
+            .test_ok()?
+            .test_ok()
+    };
+    let observation_human = read_state("observation", scenario.human_entity)?;
+    let observation_fast = read_state("observation", scenario.fast_entity)?;
+    let observation_slow = read_state("observation", scenario.slow_entity)?;
+    let society = read_state("society", scenario.society_entity)?;
+    let society_fast = read_state("society", scenario.fast_entity)?;
+    let agent_fast = read_state("agent", scenario.fast_entity)?;
+    let agent_slow = read_state("agent", scenario.slow_entity)?;
+    assert_eq!(state_u64(&observation_human, "event_count")?, 1);
+    assert_eq!(state_u64(&observation_fast, "event_count")?, 4);
+    assert_eq!(state_u64(&observation_slow, "event_count")?, 2);
+    assert_eq!(state_u64(&society, "signals")?, 1);
+    assert_eq!(state_u64(&society_fast, "signals")?, 1);
+    assert_eq!(state_u64(&agent_fast, "action_count")?, 3);
+    assert_eq!(state_u64(&agent_slow, "action_count")?, 2);
     assert_eq!(
-        state_u64(live, "observation", scenario.human_entity, "event_count")?,
-        1
-    );
-    assert_eq!(
-        state_u64(live, "observation", scenario.fast_entity, "event_count")?,
-        4
-    );
-    assert_eq!(
-        state_u64(live, "observation", scenario.slow_entity, "event_count")?,
-        2
-    );
-    assert_eq!(
-        state_u64(live, "society", scenario.society_entity, "signals")?,
-        1
-    );
-    assert_eq!(
-        state_u64(live, "society", scenario.fast_entity, "signals")?,
-        1
-    );
-    assert_eq!(
-        state_u64(live, "agent", scenario.fast_entity, "action_count")?,
-        3
-    );
-    assert_eq!(
-        state_u64(live, "agent", scenario.slow_entity, "action_count")?,
-        2
-    );
-    assert_eq!(
-        live.state_for_reducer("society", &scenario.society_entity)
-            .and_then(|state| state.get("mean.trust"))
-            .and_then(Value::as_f64),
+        society.get("mean.trust").and_then(Value::as_f64),
         Some(0.75)
     );
     assert_eq!(
-        live.state_for_reducer("society", &scenario.fast_entity)
-            .and_then(|state| state.get("mean.trust"))
-            .and_then(Value::as_f64),
+        society_fast.get("mean.trust").and_then(Value::as_f64),
         Some(0.25)
     );
     assert_eq!(
-        live.state_for_reducer("observation", &scenario.fast_entity)
-            .and_then(|state| state.get("last_event_type"))
+        observation_fast
+            .get("last_event_type")
             .and_then(Value::as_str),
         Some(EVENT_TYPE_ACTION)
     );
-    snapshot_json(live)
+    let events = session.source_events().test_ok()?;
+    let mut replayed = replay_registry();
+    replayed.fold_events(&events);
+    snapshot_json(&replayed)
 }
 
 fn assert_replay(
@@ -756,11 +766,11 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
 async fn multi_rate_human_ai_replay_is_deterministic_impl(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut scenario = create_scenario().await?;
-    let (experiment, token) = register_experiment(&mut scenario)?;
+    let (experiment, token, authority) = register_experiment(&mut scenario)?;
     let session = experiment
         .resume(scenario.timeline)
         .test_ok()?
-        .with_protected_token(token, 0);
+        .with_protected_token(token.clone(), 0);
     let (session, pinned_wall_time) = run_tick_boundaries(&mut scenario, session).await?;
     let polled = poll_events(scenario.address, scenario.timeline).await?;
     assert_event_order(
@@ -770,7 +780,7 @@ async fn multi_rate_human_ai_replay_is_deterministic_impl(
         &polled,
     )?;
 
-    let live_snapshot = assert_projection_state(&scenario, &session)?;
+    let live_snapshot = assert_projection_state(&scenario, &session, &authority)?;
     assert_eq!(*scenario.probe_log.lock().test_ok()?, vec![0, 0, 1]);
     assert_eq!(scenario.fast_decisions.load(Ordering::SeqCst), 3);
     assert_eq!(scenario.slow_decisions.load(Ordering::SeqCst), 2);

@@ -14,10 +14,11 @@ use pos_core::{
     crypto::Hash,
     event::{EventDraft, Kind},
     ids::EntityId,
-    ConsentAuthority, ConsentCapabilityToken, ReproManifest, Timeline,
+    ConsentAuthority, ConsentCapabilityToken, ConsentGate, ReproManifest, Timeline,
 };
 use pos_runtime::PluginRegistry;
 use pos_store::{open_store, StoreConfig};
+use std::fmt::{self, Debug, Formatter};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 // Experiment hosts may close their own session, but they are not a Gateway
@@ -58,7 +59,6 @@ pub struct ExperimentConfig {
 }
 
 /// Result of a completed experiment run.
-#[derive(Debug)]
 pub struct RunResult {
     pub timeline_id: pos_core::ids::TimelineId,
     pub ticks: u64,
@@ -66,9 +66,23 @@ pub struct RunResult {
     /// Exported manifest for reproducibility.
     pub manifest: ReproManifest,
     /// Final projection state after all ticks.
-    pub projections: pos_state::ProjectionRegistry,
+    projections: pos_state::ProjectionRegistry,
+    consent_gate: Option<Arc<dyn ConsentGate>>,
     /// Accurate recipe for re-opening the run's store, when one is known.
     pub store_config: Option<StoreConfig>,
+}
+
+impl Debug for RunResult {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RunResult")
+            .field("timeline_id", &self.timeline_id)
+            .field("ticks", &self.ticks)
+            .field("total_events", &self.total_events)
+            .field("manifest", &self.manifest)
+            .field("store_config", &self.store_config)
+            .finish()
+    }
 }
 
 /// Host-owned configuration required to execute a reproduction.
@@ -104,6 +118,43 @@ pub struct ReproductionManifest {
 }
 
 impl RunResult {
+    /// Read one subject's projection state using a host-issued consent token.
+    ///
+    /// The token must be bound to this result's Timeline and requested subject;
+    /// the host gate captured at run completion revalidates its current fence.
+    ///
+    /// # Errors
+    /// Returns [`ExperimentError::Runtime`] when the token is absent, stale, or
+    /// issued by another host authority.
+    pub fn projection_state_for_reducer(
+        &self,
+        reducer: &str,
+        subject: EntityId,
+        token: &ConsentCapabilityToken,
+        now_secs: u64,
+    ) -> Result<Option<pos_core::State>, ExperimentError> {
+        let gate = self
+            .consent_gate
+            .as_ref()
+            .ok_or(pos_runtime::RuntimeError::ConsentOperationUnavailable)?;
+        gate.authorize_projection(
+            self.timeline_id,
+            subject,
+            self.total_events,
+            now_secs,
+            token,
+        )
+        .map_err(pos_runtime::RuntimeError::Consent)?;
+        Ok(self
+            .projections
+            .state_for_reducer(reducer, &subject)
+            .cloned())
+    }
+
+    fn projections_for_host(&self) -> &pos_state::ProjectionRegistry {
+        &self.projections
+    }
+
     /// Reopen the store and branch from this result's timeline at its head.
     ///
     /// # Errors
@@ -955,12 +1006,33 @@ impl ExperimentSession {
         self.step_with_mode(StepRequest::Cadenced(now_ns))
     }
 
-    /// Return projection state only while this live session is healthy.
+    /// Read one subject's projection state under a host-issued consent token.
     ///
     /// # Errors
     /// Returns [`ExperimentError::SessionFaulted`] after any stateful boundary
     /// failure; rebuild the session through [`Experiment::resume`] before reading.
-    pub fn projections(&self) -> Result<&pos_state::ProjectionRegistry, ExperimentError> {
+    pub fn projection_state_for_reducer(
+        &self,
+        reducer: &str,
+        subject: EntityId,
+        token: &ConsentCapabilityToken,
+    ) -> Result<Option<pos_core::State>, ExperimentError> {
+        if self.health == SessionHealth::Faulted {
+            return Err(ExperimentError::SessionFaulted);
+        }
+        self.registry
+            .projection_state_for_reducer(
+                self.timeline.id(),
+                self.boundary.folded_through,
+                self.operation_now_secs,
+                token,
+                reducer,
+                subject,
+            )
+            .map_err(map_runtime_error)
+    }
+
+    fn projections_for_host(&self) -> Result<&pos_state::ProjectionRegistry, ExperimentError> {
         if self.health == SessionHealth::Faulted {
             Err(ExperimentError::SessionFaulted)
         } else {
@@ -1401,12 +1473,14 @@ impl ExperimentSession {
                         wall_time: WallTime::now(),
                     });
 
+                let consent_gate = self.registry.clone_consent_gate();
                 RunResult {
                     timeline_id,
                     ticks: self.ticks,
                     total_events: self.total_events,
                     manifest,
                     projections: self.registry.projections,
+                    consent_gate,
                     store_config: self.recovery_store_config,
                 }
             })
@@ -1578,20 +1652,24 @@ impl BacktestRunner {
         let train_manifest = ReproManifest::new(train_tl_id, train_chain_head, WallTime::now());
         let eval_manifest = ReproManifest::new(eval_tl_id, eval_chain_head, WallTime::now());
 
+        let train_consent_gate = train_registry.clone_consent_gate();
         let train_result = RunResult {
             timeline_id: train_tl_id,
             ticks: train_ticks,
             total_events: train_events,
             manifest: train_manifest,
             projections: train_registry.projections,
+            consent_gate: train_consent_gate,
             store_config: Some(store_config.clone()),
         };
+        let eval_consent_gate = eval_registry.clone_consent_gate();
         let eval_result = RunResult {
             timeline_id: eval_tl_id,
             ticks: eval_ticks,
             total_events: eval_events,
             manifest: eval_manifest,
             projections: eval_registry.projections,
+            consent_gate: eval_consent_gate,
             store_config: Some(store_config),
         };
 
@@ -1726,6 +1804,7 @@ mod tests {
                 pos_core::clock::WallTime::from_micros(0),
             ),
             projections: pos_state::ProjectionRegistry::new(),
+            consent_gate: None,
             store_config: None,
         };
         let manifest = result.into_reproduction_manifest(ReproductionRecipe::new(
@@ -2233,7 +2312,7 @@ mod tests {
         entity: EntityId,
     ) -> Result<u64, ExperimentError> {
         Ok(session
-            .projections()?
+            .projections_for_host()?
             .state_for(&entity)
             .and_then(|state| state.get("n"))
             .and_then(serde_json::Value::as_u64)
@@ -2928,7 +3007,7 @@ mod tests {
             Err(ExperimentError::Runtime(RuntimeError::UnknownEventType(_)))
         ));
         assert!(matches!(
-            session.projections(),
+            session.projections_for_host(),
             Err(ExperimentError::SessionFaulted)
         ));
         assert!(matches!(
@@ -4362,7 +4441,7 @@ mod tests {
         let result = exp.run().test_ok();
         // state_for returns from the first reducer ("proj-plugin")
         let n = result
-            .projections
+            .projections_for_host()
             .state_for(&entity)
             .and_then(|s| s.get("n"))
             .and_then(serde_json::Value::as_u64)
@@ -4461,6 +4540,7 @@ mod tests {
                 pos_core::clock::WallTime::from_micros(0),
             ),
             projections: pos_state::ProjectionRegistry::new(),
+            consent_gate: None,
             store_config: Some(StoreConfig::Memory),
         };
         // Branching will fail because the timeline doesn't exist in a fresh Memory store
@@ -4716,6 +4796,7 @@ mod coverage_entrypoints {
                 pos_core::clock::WallTime::from_micros(0),
             ),
             projections: pos_state::ProjectionRegistry::new(),
+            consent_gate: None,
             store_config: None,
         };
         expect_err(&result.branch("missing-recipe"));
@@ -4745,7 +4826,7 @@ mod coverage_entrypoints {
         let mut session = ok(experiment.start());
         let _ = ok(session.step_tick());
         let _ = ok(session.step());
-        let _ = ok(session.projections());
+        let _ = ok(session.projections_for_host());
         let _ = ok(session.source_events());
         expect_err(&session.fork("missing-factory"));
 
@@ -4838,7 +4919,7 @@ mod integration_tests {
         // Verify agent state was projected (decision count should be 5)
         // rule-agent is first registered reducer → state_for_reducer("rule-agent", ...)
         let decisions = result
-            .projections
+            .projections_for_host()
             .state_for_reducer("rule-agent", &agent_entity)
             .and_then(|s| s.get("decisions"))
             .and_then(serde_json::Value::as_u64)
@@ -4847,7 +4928,7 @@ mod integration_tests {
 
         // Verify obs state was projected (observation count should be 5)
         let obs_count = result
-            .projections
+            .projections_for_host()
             .state_for_reducer("synthetic-obs", &obs_entity)
             .and_then(|s| s.get("observations"))
             .and_then(serde_json::Value::as_u64)
@@ -5536,6 +5617,7 @@ mod fault_injection_tests {
                 pos_core::clock::WallTime::from_micros(0),
             ),
             projections: pos_state::ProjectionRegistry::new(),
+            consent_gate: None,
             store_config: Some(StoreConfig::Sqlite {
                 path: dir.path().to_str().test_ok().to_owned(),
             }),

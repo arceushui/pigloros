@@ -40,6 +40,11 @@ fn extend_unique_subscriptions(
     }
 }
 
+fn driver_visible_event(event: &Event) -> bool {
+    !pos_core::is_consent_event_type(&event.event_type)
+        && !pos_core::is_geographic_event_type(&event.event_type)
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_paths {
@@ -81,6 +86,86 @@ mod coverage_paths {
 
     struct RestoreFailureDriver {
         aborts: Arc<Mutex<u32>>,
+    }
+
+    struct RecoveryVisibilityDriver {
+        observed: Arc<Mutex<Vec<(String, bool)>>>,
+    }
+
+    impl Driver for RecoveryVisibilityDriver {
+        fn name(&self) -> &'static str {
+            "coverage-recovery-visibility"
+        }
+
+        fn step(
+            &mut self,
+            _: TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            Ok(StepOutput::empty())
+        }
+
+        fn needs_recovery_payload(&self, _: &crate::driver::RecoveryEventHeader) -> bool {
+            true
+        }
+
+        fn stage_restore_from_history(
+            &mut self,
+            evidence: &DriverRecoveryEvidence,
+        ) -> Result<(), RuntimeError> {
+            self.observed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend(evidence.events().iter().map(|event| {
+                    (
+                        event.header().event_type().as_str().to_owned(),
+                        event.payload().is_some(),
+                    )
+                }));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn recovery_filters_geographic_events_before_driver_evidence() {
+        let timeline = TimelineId::new();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let mut registry = PluginRegistry::new();
+        registry.register_driver(Box::new(RecoveryVisibilityDriver {
+            observed: Arc::clone(&observed),
+        }));
+        let event = Event {
+            id: EventId::new(),
+            entity: EntityId::new(),
+            event_type: Kind::new("ordinary.event"),
+            payload: CanonicalBytes::from_static(b"ordinary"),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        };
+        let mut location = event.clone();
+        location.event_type = Kind::new(pos_core::GEOGRAPHIC_EVENT_TYPE);
+        location.seq = Seq::from_u64(2);
+        let mut cell = event.clone();
+        cell.event_type = Kind::new(pos_core::GEOGRAPHIC_CELL_EVENT_TYPE);
+        cell.seq = Seq::from_u64(3);
+        registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(timeline, Seq::from_u64(3))],
+                &[event, location, cell],
+            )
+            .unwrap_or_else(|error| panic!("unexpected recovery error: {error:?}"));
+        assert_eq!(
+            observed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
+            [("ordinary.event".to_owned(), true)]
+        );
     }
 
     impl Driver for RestoreFailureDriver {
@@ -533,6 +618,42 @@ impl PluginRegistry {
         self
     }
 
+    /// Return the host-bound consent gate for a capability-scoped read.
+    #[must_use]
+    pub fn clone_consent_gate(&self) -> Option<Arc<dyn ConsentGate>> {
+        self.consent_gate.clone()
+    }
+
+    /// Read one projection state after the bound host gate authorizes its subject.
+    ///
+    /// The registry never exposes the projection registry through this seam. The
+    /// caller must present a token issued by the same host-bound gate and bound
+    /// to the requested subject and Timeline.
+    ///
+    /// # Errors
+    /// Returns a consent error when the token is invalid or a missing-gate error
+    /// when this registry has no host policy.
+    pub fn projection_state_for_reducer(
+        &self,
+        timeline: pos_core::ids::TimelineId,
+        timeline_head: Seq,
+        now_secs: u64,
+        token: &ConsentCapabilityToken,
+        reducer: &str,
+        subject: pos_core::ids::EntityId,
+    ) -> Result<Option<pos_core::State>, RuntimeError> {
+        let gate = self
+            .consent_gate
+            .as_ref()
+            .ok_or(RuntimeError::ConsentOperationUnavailable)?;
+        gate.authorize_projection(timeline, subject, timeline_head.as_u64(), now_secs, token)
+            .map_err(RuntimeError::Consent)?;
+        Ok(self
+            .projections
+            .state_for_reducer(reducer, &subject)
+            .cloned())
+    }
+
     fn validate_operation(
         &self,
         timeline: pos_core::ids::TimelineId,
@@ -668,7 +789,7 @@ impl PluginRegistry {
         };
         let visible_events: Vec<Event> = committed_events
             .iter()
-            .filter(|event| !pos_core::is_consent_event_type(&event.event_type))
+            .filter(|event| driver_visible_event(event))
             .cloned()
             .collect();
         let observations = snapshot.view_for_events_after(
@@ -983,7 +1104,7 @@ impl PluginRegistry {
         // headers or payloads during recovery.
         let visible_events: Vec<Event> = events
             .iter()
-            .filter(|event| !pos_core::is_consent_event_type(&event.event_type))
+            .filter(|event| driver_visible_event(event))
             .cloned()
             .collect();
         let mut staged = Vec::new();
@@ -2441,6 +2562,8 @@ mod tests {
                     subscriptions: vec![
                         Kind::new("ordinary.event"),
                         Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+                        Kind::new(pos_core::GEOGRAPHIC_EVENT_TYPE),
+                        Kind::new(pos_core::GEOGRAPHIC_CELL_EVENT_TYPE),
                     ],
                     observed: Arc::clone(&observed),
                 })),
@@ -2465,13 +2588,17 @@ mod tests {
         };
         let mut consent = ordinary.clone();
         consent.event_type = Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1);
+        let mut location = ordinary.clone();
+        location.event_type = Kind::new(pos_core::GEOGRAPHIC_EVENT_TYPE);
+        let mut cell = ordinary.clone();
+        cell.event_type = Kind::new(pos_core::GEOGRAPHIC_CELL_EVENT_TYPE);
 
         registry
             .invoke_selected_driver(
                 plugin_id,
                 TimelineId::new(),
                 &ObservationSnapshot::default(),
-                &[ordinary, consent],
+                &[ordinary, consent, location, cell],
             )
             .test_ok();
 

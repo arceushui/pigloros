@@ -21,7 +21,7 @@ use pos_core::{
     event::{CanonicalBytes, Event, EventDraft, Kind},
     ids::{EntityId, PluginId, TimelineId},
     store::EventStore,
-    CoreError, Timeline,
+    ConsentAuthority, ConsentGranted, CoreError, Timeline,
 };
 use pos_experiment::{
     BacktestConfig, BacktestRunner, Experiment, ExperimentConfig, ExperimentError,
@@ -815,10 +815,27 @@ fn live_boundaries_are_atomic_byte_stable_and_provider_free_on_replay() {
         ],
     );
     let adapter = SharedMemoryAdapter::new();
+    let authority = ConsentAuthority::new();
     let mut session = experiment
+        .with_consent_authority(authority.clone())
         .start_with_store(Box::new(adapter.clone()))
         .test_ok();
     let timeline = session.timeline().id();
+    let token = authority.record_grant_on_timeline(
+        timeline,
+        &ConsentGranted {
+            subject_id: host.agent,
+            grantee_id: EntityId::new(),
+            purpose: "agent-projection-test".to_owned(),
+            modalities: 0,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        },
+    );
 
     assert_eq!(
         session.step_tick().test_ok(),
@@ -886,9 +903,8 @@ fn live_boundaries_are_atomic_byte_stable_and_provider_free_on_replay() {
     assert_eq!(events[2].payload.as_slice(), no_action_record);
 
     let state = session
-        .projections()
+        .projection_state_for_reducer("agent", host.agent, &token)
         .test_ok()
-        .state_for_reducer("agent", &host.agent)
         .test_ok();
     assert_eq!(
         state
@@ -915,14 +931,31 @@ fn append_fault_commits_neither_pair_nor_tick_and_fresh_session_recovers() {
     let accepted_response = accepted_response_bytes(0, CONFIDENCE);
     let adapter = SharedMemoryAdapter::new();
     adapter.fail_next_append();
+    let authority = ConsentAuthority::new();
     let (experiment, failed_calls, failed_tick) = host.experiment(
         "agent-provider-replay-fault",
         vec![response_attempt(&accepted_response)],
     );
     let mut failed_session = experiment
+        .with_consent_authority(authority.clone())
         .start_with_store(Box::new(adapter.clone()))
         .test_ok();
     let timeline = failed_session.timeline().id();
+    let token = authority.record_grant_on_timeline(
+        timeline,
+        &ConsentGranted {
+            subject_id: host.agent,
+            grantee_id: EntityId::new(),
+            purpose: "agent-projection-recovery-test".to_owned(),
+            modalities: 0,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        },
+    );
 
     assert!(matches!(
         failed_session.step_tick(),
@@ -939,6 +972,7 @@ fn append_fault_commits_neither_pair_nor_tick_and_fresh_session_recovers() {
         vec![response_attempt(&accepted_response)],
     );
     let mut recovered = recovery
+        .with_consent_authority(authority)
         .resume_with_store(timeline, Box::new(adapter.clone()))
         .test_ok();
     assert_eq!(
@@ -979,9 +1013,8 @@ fn append_fault_commits_neither_pair_nor_tick_and_fresh_session_recovers() {
     assert_eq!(failed_calls.get(), 1);
     assert_eq!(recovery_calls.get(), 1);
     let recovered_state = recovered
-        .projections()
+        .projection_state_for_reducer("agent", host.agent, &token)
         .test_ok()
-        .state_for_reducer("agent", &host.agent)
         .test_ok();
     assert_eq!(
         recovered_state
