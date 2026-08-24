@@ -643,7 +643,7 @@ impl PluginRegistry {
     /// when a public caller supplies no Event-prefix evidence, or when that
     /// evidence contains a protected Event family.
     pub fn into_authorized_projections(
-        self,
+        mut self,
         timeline: pos_core::ids::TimelineId,
         timeline_head: Seq,
         now_secs: u64,
