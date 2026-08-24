@@ -2671,7 +2671,7 @@ mod tests {
             Kind::new("submit.event"),
             EntityId::new(),
             CanonicalBytes::from_static(b"approved"),
-            Kind::new("submit.action"),
+            Kind::new("submit.event.submit"),
         );
 
         assert_eq!(session.submit_action(&proposal).test_ok(), 1);
