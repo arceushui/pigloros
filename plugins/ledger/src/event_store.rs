@@ -85,6 +85,7 @@ impl EventLedgerStore {
             .map_err(|error| {
                 LedgerError::Store(format!("ledger signing authorization: {error}"))
             })?;
+        drop(registry);
         Ok(Self {
             store,
             timeline_id,
