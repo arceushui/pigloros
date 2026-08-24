@@ -6814,6 +6814,95 @@ pub mod tests {
         report.report_digest = report.digest().unwrap_or([0; 32]);
     }
 
+    fn assert_report_rejects(change: impl FnOnce(&mut ConformanceReportV1)) {
+        let mut report = test_report();
+        change(&mut report);
+        report.report_digest = report.digest().unwrap_or([0; 32]);
+        assert_eq!(
+            report.validate(),
+            Err(EvidenceError::InvalidConformanceReport)
+        );
+    }
+
+    #[test]
+    fn public_report_validation_rejects_each_independent_shape_violation() {
+        assert_report_rejects(|report| report.report_id = [0; 16]);
+        assert_report_rejects(|report| report.subject_artifact_digest = [0; 32]);
+        assert_report_rejects(|report| report.profile_digest = [0; 32]);
+        assert_report_rejects(|report| report.normative_spec_digest = [0; 32]);
+        assert_report_rejects(|report| report.execution_profile_digest = [0; 32]);
+        assert_report_rejects(|report| report.fixture_bundle_digest = [0; 32]);
+        assert_report_rejects(|report| report.evaluator_source_digest = [0; 32]);
+        assert_report_rejects(|report| report.evaluator_binary_digest = [0; 32]);
+        assert_report_rejects(|report| report.evaluator_protocol_digest = [0; 32]);
+        assert_report_rejects(|report| report.limitations_digest = [0; 32]);
+        assert_report_rejects(|report| report.provenance_digest = [0; 32]);
+        assert_report_rejects(|report| report.cases.clear());
+        assert_report_rejects(|report| report.implementation.implementation_id.clear());
+        assert_report_rejects(|report| {
+            report.implementation.implementation_id = "x".repeat(129);
+        });
+        assert_report_rejects(|report| {
+            report.implementation.organization_id = Some(String::new());
+        });
+        assert_report_rejects(|report| {
+            report.implementation.organization_id = Some("x".repeat(129));
+        });
+        assert_report_rejects(|report| report.implementation.source_digest = [0; 32]);
+        assert_report_rejects(|report| report.implementation.build_digest = [0; 32]);
+        assert_report_rejects(|report| report.implementation.binary_digest = [0; 32]);
+        assert_report_rejects(|report| report.implementation.public_contract_digest = [0; 32]);
+        assert_report_rejects(|report| report.independence.reviewer_ids.clear());
+        assert_report_rejects(|report| {
+            report.independence.reviewer_ids =
+                (0..33).map(|i| format!("reviewer-{i:02}")).collect();
+        });
+        assert_report_rejects(|report| report.independence.reviewer_ids[0].clear());
+        assert_report_rejects(|report| {
+            report.independence.reviewer_ids = vec!["zulu".to_owned(), "alpha".to_owned()];
+        });
+        assert_report_rejects(|report| report.independence.declaration_digest = [0; 32]);
+        assert_report_rejects(|report| report.independence.shared_code_audit_digest = [0; 32]);
+
+        assert_report_rejects(|report| report.cases[0].case_id.clear());
+        assert_report_rejects(|report| report.cases[0].case_id = "x".repeat(129));
+        assert_report_rejects(|report| report.cases[0].fixture_digest = [0; 32]);
+        assert_report_rejects(|report| report.cases[0].execution_profile_digest = [0; 32]);
+        assert_report_rejects(|report| report.cases[0].provenance_digest = [0; 32]);
+        assert_report_rejects(|report| report.cases[0].first_coordinate = Some(vec![0; 129]));
+        assert_report_rejects(|report| {
+            report.cases[0].expected_digest = None;
+            report.cases[0].actual_digest = None;
+        });
+        assert_report_rejects(|report| {
+            report.cases[0].redaction_state = RedactionStateV1::RedactedViews;
+            report.cases[0].replay_claim = ReplayClaimV1::Exact;
+        });
+        assert_report_rejects(|report| {
+            report.cases[0].redaction_state = RedactionStateV1::StructuralOnly;
+        });
+        assert_report_rejects(|report| {
+            report.cases[0].redaction_state = RedactionStateV1::EvidenceMissing;
+        });
+        assert_report_rejects(|report| {
+            report.cases[0].outcome = CaseOutcomeStatusV1::Fail;
+        });
+        assert_report_rejects(|report| {
+            report.cases[1] = report.cases[0].clone();
+        });
+        assert_report_rejects(|report| {
+            report.passed = 1;
+        });
+        assert_report_rejects(|report| {
+            report.redaction_state = RedactionStateV1::RedactedViews;
+        });
+        assert_report_rejects(|report| {
+            report.replay_claim = ReplayClaimV1::StructuralOnly;
+        });
+
+        assert_ne!(test_report().digest().unwrap_or([0; 32]), [1; 32]);
+    }
+
     #[test]
     fn public_cnr1_codec_validates_shape_and_fields_zero_through_twenty_two() {
         let report = test_report();
