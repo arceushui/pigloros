@@ -916,7 +916,7 @@ fn coordinator_persists_host_freeze_provenance() -> Result<(), ErasureErrorV1> {
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
     coordinator.submit(request()?, reference(3))?;
     coordinator.authorize(reference(1), reference(9))?;
-    coordinator.freeze_inventory(
+    let frozen = coordinator.freeze_inventory(
         reference(1),
         change(
             ErasureLifecycleV1::AccessFrozen,
@@ -925,10 +925,24 @@ fn coordinator_persists_host_freeze_provenance() -> Result<(), ErasureErrorV1> {
             Vec::new(),
         ),
     )?;
-    let records = coordinator.port.records.borrow();
-    let persisted = records.first().ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    assert_eq!(persisted.freeze_provenance(), Some(reference(42)));
-    assert_eq!(persisted.state().provenance(), reference(42));
+    {
+        let records = coordinator.port.records.borrow();
+        let persisted = records.first().ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        assert_eq!(persisted.freeze_provenance(), Some(reference(42)));
+        assert_eq!(persisted.state().provenance(), reference(42));
+    }
+    assert_eq!(
+        coordinator.freeze_inventory(
+            reference(1),
+            change(
+                ErasureLifecycleV1::AccessFrozen,
+                Some(10),
+                Vec::new(),
+                Vec::new(),
+            ),
+        )?,
+        frozen
+    );
     Ok(())
 }
 
@@ -1129,7 +1143,7 @@ fn coordinator_freezes_closure_and_commits_only_derived_terminal_outcomes(
     );
     let mut conflicting_freeze = change(
         ErasureLifecycleV1::AccessFrozen,
-        Some(10),
+        Some(11),
         Vec::new(),
         Vec::new(),
     );
