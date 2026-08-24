@@ -40,8 +40,8 @@ use pos_core::{
         AppendOrDuplicateOutcome, EventReadBounds, EventStore, PurgeOutcome, SeqRange,
     },
     timeline::{Timeline, TimelineMeta, TimelineMode},
-    ConsentAppendPermit, CoreError, Hash, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1,
-    GEOGRAPHIC_EVENT_TYPE,
+    ConsentAppendPermit, CoreError, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
+    KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -2890,6 +2890,73 @@ impl EventStore for SqliteStore {
             )
             .map(|_| ())
             .map_err(|error| CoreError::Storage(error.to_string()))
+    }
+
+    fn append_signed_authorized(
+        &mut self,
+        timeline: TimelineId,
+        event: &Event,
+        expected_registry: &KeyRegistryStateV1,
+    ) -> Result<(), CoreError> {
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let result = (|| {
+            let persisted = self.load_key_registry()?.ok_or_else(|| {
+                CoreError::Storage("durable key registry is unavailable".to_owned())
+            })?;
+            if persisted != *expected_registry {
+                return Err(CoreError::Storage(
+                    "durable key registry changed during signing".to_owned(),
+                ));
+            }
+            self.append_committed(timeline, std::slice::from_ref(event))
+        })();
+        match result {
+            Ok(()) => self
+                .conn
+                .execute_batch("COMMIT")
+                .map_err(|error| CoreError::Storage(error.to_string())),
+            Err(error) => {
+                match self.conn.execute_batch("ROLLBACK") {
+                    Ok(()) | Err(_) => {}
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn destroy_key_registry(
+        &mut self,
+        request: KeyDestructionRequestV1,
+    ) -> Result<(KeyDestructionOutcomeV1, KeyRegistryStateV1), CoreError> {
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let result = (|| {
+            let mut registry = self.load_key_registry()?.ok_or_else(|| {
+                CoreError::Storage("durable key registry is unavailable".to_owned())
+            })?;
+            let outcome = registry
+                .destroy_key(request)
+                .map_err(|error| CoreError::Storage(format!("ledger key destruction: {error}")))?;
+            self.save_key_registry(&registry)?;
+            Ok((outcome, registry))
+        })();
+        match result {
+            Ok(value) => {
+                self.conn
+                    .execute_batch("COMMIT")
+                    .map_err(|error| CoreError::Storage(error.to_string()))?;
+                Ok(value)
+            }
+            Err(error) => {
+                match self.conn.execute_batch("ROLLBACK") {
+                    Ok(()) | Err(_) => {}
+                }
+                Err(error)
+            }
+        }
     }
 
     fn append_bounded(

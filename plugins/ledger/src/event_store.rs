@@ -46,9 +46,9 @@ pub struct EventLedgerStore {
 impl EventLedgerStore {
     /// Construct a ledger adapter from an externally owned signing registry.
     ///
-    /// The caller remains responsible for registry persistence, rotation, and
-    /// destruction. This adapter never registers or restores signing
-    /// authority on its own.
+    /// The store owns the durable registry snapshot and the adapter keeps the
+    /// caller-visible state synchronized with it. Signing and destruction use
+    /// the store's atomic registry boundary.
     ///
     /// # Errors
     ///
@@ -104,9 +104,9 @@ impl EventLedgerStore {
 
     /// Irreversibly destroy one signing identity and persist its tombstone.
     ///
-    /// The registry lock is held while the durable snapshot is replaced, so a
-    /// concurrent append cannot authorize a signature against a state that has
-    /// not yet recorded the destruction.
+    /// The registry lock is held while the store atomically commits the
+    /// destruction, so a stale adapter cannot append after the tombstone is
+    /// durable.
     ///
     /// # Errors
     ///
@@ -120,12 +120,9 @@ impl EventLedgerStore {
             .key_registry
             .lock()
             .map_err(|_| LedgerError::Store("ledger signing registry is unavailable".to_owned()))?;
-        let mut next = registry.clone();
-        let outcome = next
-            .destroy_key(request)
-            .map_err(|error| LedgerError::Store(format!("ledger key destruction: {error}")))?;
-        self.store
-            .save_key_registry(&next)
+        let (outcome, next) = self
+            .store
+            .destroy_key_registry(request)
             .map_err(LedgerError::from)?;
         *registry = next;
         Ok(outcome)
@@ -175,7 +172,7 @@ impl EventLedgerStore {
         };
 
         self.store
-            .append_committed(self.timeline_id, &[event])
+            .append_signed_authorized(self.timeline_id, &event, &key_registry)
             .map_err(LedgerError::from)
     }
 }
@@ -388,6 +385,53 @@ mod tests {
         .err()
         .ok_or("destroyed identity must not authorize after reopen")?;
         assert!(error.to_string().contains("destroyed"));
+        Ok(())
+    }
+
+    #[test]
+    fn stale_sqlite_adapter_cannot_append_after_registry_destruction(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let db = temp.path().join("ledger.db");
+        let (signing_key, _) = pos_crypto::signing::generate_keypair();
+        let (registry, identity) = registry_for(&signing_key)?;
+        let material_digest = key_material_digest(&signing_key.to_bytes());
+        let mut first_raw = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+            path: db.to_string_lossy().into_owned(),
+        })?;
+        let timeline = first_raw.create_timeline("ledger")?;
+        let mut first = EventLedgerStore::new(
+            first_raw,
+            timeline.id(),
+            EntityId::new(),
+            signing_key.clone(),
+            registry,
+            identity,
+            Box::new(Blake3Hasher),
+        )?;
+        let second_raw = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+            path: db.to_string_lossy().into_owned(),
+        })?;
+        let mut second = EventLedgerStore::new(
+            second_raw,
+            timeline.id(),
+            EntityId::new(),
+            signing_key,
+            Arc::new(Mutex::new(KeyRegistryStateV1::new())),
+            identity,
+            Box::new(Blake3Hasher),
+        )?;
+
+        first.destroy_signing_key(pos_core::KeyDestructionRequestV1::new(
+            identity,
+            material_digest,
+            pos_core::Hash::from_bytes([10; 32]),
+        ))?;
+        let error = second
+            .register(crate::contract::sample_new_prediction("2026-08-01"))
+            .err()
+            .ok_or("stale adapter unexpectedly appended after destruction")?;
+        assert!(error.to_string().contains("changed during signing"));
         Ok(())
     }
 

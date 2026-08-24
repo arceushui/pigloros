@@ -787,6 +787,58 @@ pub trait EventStore: Send {
             "durable key registry is unsupported by this EventStore".to_owned(),
         ))
     }
+
+    /// Atomically recheck a registry snapshot and append one authorized event.
+    ///
+    /// Durable stores must hold their database-wide serialization boundary across
+    /// both the registry recheck and the event append.  The default is a closed
+    /// snapshot check for small in-memory adapters; SQLite overrides it with one
+    /// transaction so another connection cannot destroy the key between the two
+    /// operations.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the persisted registry differs from
+    /// `expected_registry`, the registry is unavailable, or the append fails.
+    fn append_signed_authorized(
+        &mut self,
+        timeline: TimelineId,
+        event: &Event,
+        expected_registry: &crate::KeyRegistryStateV1,
+    ) -> Result<(), CoreError> {
+        let persisted = self
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("durable key registry is unavailable".to_owned()))?;
+        if persisted != *expected_registry {
+            return Err(CoreError::Storage(
+                "durable key registry changed during signing".to_owned(),
+            ));
+        }
+        self.append_committed(timeline, std::slice::from_ref(event))
+    }
+
+    /// Atomically destroy a registry identity and return the committed state.
+    ///
+    /// Durable stores must serialize destruction with authorized appends.  The
+    /// default implementation composes the existing snapshot operations for
+    /// adapters without a stronger transaction primitive; SQLite overrides it
+    /// with one database transaction.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the registry is unavailable, the
+    /// request is invalid, or persistence fails.
+    fn destroy_key_registry(
+        &mut self,
+        request: crate::KeyDestructionRequestV1,
+    ) -> Result<(crate::KeyDestructionOutcomeV1, crate::KeyRegistryStateV1), CoreError> {
+        let mut registry = self
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("durable key registry is unavailable".to_owned()))?;
+        let outcome = registry
+            .destroy_key(request)
+            .map_err(|error| CoreError::Storage(format!("ledger key destruction: {error}")))?;
+        self.save_key_registry(&registry)?;
+        Ok((outcome, registry))
+    }
 }
 
 /// Export a timeline's **logical** event stream as a portable snapshot.
