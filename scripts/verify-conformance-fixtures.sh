@@ -16,13 +16,28 @@ authority_path="${fixture_root}/expected-authority/inventory.json"
 }
 
 jq -e '
-  .magic == "NIM1" and .version == 1 and .lifecycle == "Draft" and
-  .row_count == 12 and .variant_count == 4 and .mode_count == 4 and
-  .case_count == 192 and (.rows | length == 12) and
-  all(.rows[]; (.fixture_id | test("^NI-[A-Z]+-[0-9]{3}$")) and
+  . as $root |
+  $root.magic == "NIM1" and $root.version == 1 and $root.lifecycle == "Draft" and
+  $root.row_count == 12 and $root.variant_count == 4 and $root.mode_count == 4 and
+  $root.case_count == 192 and ($root.rows | length == 12) and
+  ([$root.rows[].fixture_id] == [
+    "NI-TOOL-001", "NI-CACHE-002", "NI-STATE-003", "NI-OBS-004",
+    "NI-TIME-005", "NI-PUBLIC-006", "NI-EVAL-007", "NI-FORK-008",
+    "NI-ARCHIVE-009", "NI-NET-010", "NI-SERVICE-011", "NI-CRASH-012"
+  ]) and
+  ([$root.rows[].fixture_id] | unique | length == 12) and
+  ($root.cases | length == 192) and
+  ([$root.cases[].case_id] | unique | length == 192) and
+  all($root.rows[]; (.fixture_id | test("^NI-[A-Z]+-[0-9]{3}$")) and
     (.variants == ["S", "D", "W", "C"]) and
     (.modes == ["L", "A", "R", "F"]) and .case_count == 16 and
-    .executed_case_count == 0 and .expected_result_digest == null)
+    .executed_case_count == 0) and
+  all($root.cases[]; (.fixture_id | test("^NI-[A-Z]+-[0-9]{3}$")) and
+    (.variant | IN("S", "D", "W", "C")) and
+    (.mode | IN("L", "A", "R", "F")) and
+    .case_id == ("\(.fixture_id)-\(.variant)-\(.mode)") and
+    .executed == false and .expected_result_digest == null)
+  and all($root.rows[]; . as $row | ([$root.cases[] | select(.fixture_id == $row.fixture_id)] | length == 16))
 ' "${matrix_path}" >/dev/null || {
   echo "invalid ADR-059 Draft matrix inventory" >&2
   exit 1
@@ -31,6 +46,11 @@ jq -e '
 jq -e '
   .magic == "W8H1" and .version == 1 and .lifecycle == "Draft" and
   (.entries | length == 11) and
+  ([.entries[].fixture_id] == [
+    "RPL-001", "PRF-001", "PRF-002", "DIV-001", "INV-001", "INV-002",
+    "INV-003", "RES-001", "LIVE-001", "ERA-001", "SEC-001"
+  ]) and
+  ([.entries[].fixture_id] | unique | length == 11) and
   all(.entries[]; .expected_result_digest == null and .materialization_status == "open-draft-slot")
 ' "${authority_path}" >/dev/null || {
   echo "invalid #172 expected-authority inventory" >&2
@@ -75,7 +95,8 @@ for index in "${!profile_layers[@]}"; do
     --arg layer "${layer}" \
     --arg input "inputs/${profile_inputs[${index}]}" \
     --arg expected "expected/${profile_inputs[${index}]}" \
-    '.claim_layer == $layer and .input == $input and .expected == $expected and (.execution_profiles | length == 2) and (.bundle_modes | length == 2) and (if $layer == "knowledge-non-interference" then .matrix == "matrix/adr-059-complete.json" else true end)' \
+    --argjson matrix_size "$(wc -c < "${matrix_path}")" \
+    '.claim_layer == $layer and .input == $input and .expected == $expected and (.execution_profiles | length == 2) and (.bundle_modes | length == 2) and (if $layer == "knowledge-non-interference" then (.matrix == "matrix/adr-059-complete.json" and .matrix_size_bytes == $matrix_size and .matrix_blake3_digest == null) else true end)' \
     "${profile}" >/dev/null || {
     echo "invalid public profile manifest for ${layer}" >&2
     exit 1
