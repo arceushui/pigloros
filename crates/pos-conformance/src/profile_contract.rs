@@ -11,7 +11,7 @@ use crate::{
 };
 use ciborium::value::Value;
 use pos_core::{CanonicalBytes, PublicKey, Signature};
-use pos_crypto::signing;
+use pos_crypto::{canonical, signing};
 use std::collections::BTreeSet;
 use std::io::Cursor;
 
@@ -1783,6 +1783,14 @@ fn encode_expected(value: &ExpectedResultV1) -> Value {
             ]),
         ]),
     }
+}
+
+pub(crate) fn expected_result_bytes(
+    value: &ExpectedResultV1,
+) -> Result<Vec<u8>, ConformanceContractError> {
+    canonical::encode(&encode_expected(value))
+        .map(|bytes| bytes.as_slice().to_vec())
+        .map_err(|_| ConformanceContractError::InvalidEncoding)
 }
 
 fn encode_divergence(value: &AllowedDivergenceV1) -> Value {
