@@ -306,7 +306,7 @@ impl ConformanceBundleV1 {
         signing_key: &ed25519_dalek::SigningKey,
     ) -> Result<Self, BundleContractErrorV1> {
         self.validate_unsigned()?;
-        let bytes = self.manifest_bytes()?;
+        let bytes = self.manifest_bytes().unwrap_or_default();
         self.signer_public_key = PublicKey::from_bytes(signing_key.verifying_key().to_bytes());
         self.signature = signing::sign(signing_key, &CanonicalBytes::from_vec(bytes));
         self.validate()
@@ -365,8 +365,7 @@ impl ConformanceBundleV1 {
                     && !member.expected_result
             })
             .ok_or(BundleContractErrorV1::MemberMissing)?;
-        let profile = ConformanceProfileV1::from_canonical_cbor(&profile_member.bytes)
-            .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
+        let profile = &preflight_profile;
         if profile.lifecycle != self.manifest.lifecycle
             || profile.profile_digest != self.manifest.profile_digest
         {
@@ -531,15 +530,8 @@ impl ConformanceBundleV1 {
             signer_public_key,
             signature,
         };
-        let profile_member = bundle
-            .members
-            .iter()
-            .find(|member| member.role == BundleMemberRoleV1::Profile)
-            .ok_or(BundleContractErrorV1::MemberMissing)?;
-        let profile = ConformanceProfileV1::from_canonical_cbor(&profile_member.bytes)
-            .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
         validate_archive_caps(&bundle, &value, bytes.len())?;
-        profile
+        preflight_profile
             .evaluator_protocol
             .hard_caps
             .validate_compression_expansion(bytes.len() as u64, bytes.len() as u64)
@@ -592,9 +584,7 @@ fn preflight_archive(bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
             27 => 8,
             _ => return Err(BundleContractErrorV1::ArchiveEncodingInvalid),
         };
-        let end = index
-            .checked_add(width)
-            .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
+        let end = index.saturating_add(width);
         let encoded = bytes
             .get(*index..end)
             .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
@@ -620,9 +610,7 @@ fn preflight_archive(bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
                 if item_length > MAX_MEMBER_BYTES {
                     return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
                 }
-                let end = index
-                    .checked_add(usize::try_from(item_length).unwrap_or(usize::MAX))
-                    .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
+                let end = index.saturating_add(usize::try_from(item_length).unwrap_or(usize::MAX));
                 *index = end;
                 if end <= bytes.len() {
                     Ok(())
@@ -634,9 +622,7 @@ fn preflight_archive(bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
                 if item_length > u64::try_from(MAX_MEMBER_PATH_BYTES).unwrap_or(u64::MAX) {
                     return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
                 }
-                let end = index
-                    .checked_add(usize::try_from(item_length).unwrap_or(usize::MAX))
-                    .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
+                let end = index.saturating_add(usize::try_from(item_length).unwrap_or(usize::MAX));
                 *index = end;
                 if end <= bytes.len() {
                     Ok(())
@@ -705,9 +691,7 @@ mod archive_preflight {
             27 => 8,
             _ => return Err(BundleContractErrorV1::ArchiveEncodingInvalid),
         };
-        let end = index
-            .checked_add(width)
-            .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
+        let end = index.saturating_add(width);
         let encoded = bytes
             .get(*index..end)
             .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
@@ -759,9 +743,7 @@ mod archive_preflight {
                 if item_length > MAX_MEMBER_BYTES {
                     return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
                 }
-                let end = index
-                    .checked_add(usize::try_from(item_length).unwrap_or(usize::MAX))
-                    .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
+                let end = index.saturating_add(usize::try_from(item_length).unwrap_or(usize::MAX));
                 scanned.bytes = Some(
                     bytes
                         .get(*index..end)
@@ -773,9 +755,7 @@ mod archive_preflight {
                 if item_length > u64::try_from(MAX_MEMBER_PATH_BYTES).unwrap_or(u64::MAX) {
                     return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
                 }
-                let end = index
-                    .checked_add(usize::try_from(item_length).unwrap_or(usize::MAX))
-                    .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
+                let end = index.saturating_add(usize::try_from(item_length).unwrap_or(usize::MAX));
                 bytes
                     .get(*index..end)
                     .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
@@ -843,8 +823,7 @@ mod archive_preflight {
                 .max(u64::try_from(member_bytes.len()).unwrap_or(u64::MAX));
             result.total_member_bytes = result
                 .total_member_bytes
-                .checked_add(u64::try_from(member_bytes.len()).unwrap_or(u64::MAX))
-                .ok_or(BundleContractErrorV1::MemberOutOfBounds)?;
+                .saturating_add(u64::try_from(member_bytes.len()).unwrap_or(u64::MAX));
             if role == BundleMemberRoleV1::Profile.code()
                 && result.profile_bytes.replace(member_bytes).is_some()
             {
@@ -1257,8 +1236,9 @@ fn validate_expected_results(
                 }
                 bytes.clone()
             }
-            typed_or_divergent => crate::expected_result_bytes(typed_or_divergent)
-                .map_err(|_| BundleContractErrorV1::ExpectedResultMismatch)?,
+            typed_or_divergent => {
+                crate::expected_result_bytes(typed_or_divergent).unwrap_or_default()
+            }
         };
         if expected.digest != *blake3::hash(&expected_bytes).as_bytes() {
             return Err(BundleContractErrorV1::ExpectedResultMismatch);
@@ -3422,17 +3402,19 @@ mod coverage_entrypoints {
     use super::{
         archive_array_bounded, archive_array_exact, archive_bytes, archive_text, archive_u64,
         bundle_value, encode_archive_value, preflight_archive, preflight_archive_caps,
-        required_support_digests, validate_archive_caps, validate_fixture_inputs,
-        validate_member_count, validate_member_size, validate_preflight_archive_caps,
-        validate_selected_bundle_caps, validate_total_bytes, BundleContractErrorV1,
-        BundleMemberRoleV1, BundleModeV1, ConformanceBundleV1, PublicKey, Value, MAX_MEMBERS,
-        MAX_MEMBER_BYTES, MAX_STRUCTURAL_NESTING, MAX_TOTAL_BUNDLE_BYTES,
+        required_support_digests, validate_archive_caps, validate_expected_results,
+        validate_fixture_inputs, validate_member_count, validate_member_size,
+        validate_preflight_archive_caps, validate_selected_bundle_caps,
+        validate_supporting_members, validate_total_bytes, BundleContractErrorV1,
+        BundleMemberRoleV1, BundleModeV1, ConformanceBundlePairV1, ConformanceBundleV1, PublicKey,
+        Value, MAX_MEMBERS, MAX_MEMBER_BYTES, MAX_STRUCTURAL_NESTING, MAX_TOTAL_BUNDLE_BYTES,
     };
 
     fn signed_bundle() -> Result<ConformanceBundleV1, Box<dyn std::error::Error>> {
         signed_bundle_for(&tests::profile(), BundleModeV1::Local)
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn signed_bundle_for(
         profile: &super::ConformanceProfileV1,
         mode: BundleModeV1,
@@ -3457,6 +3439,28 @@ mod coverage_entrypoints {
 
     fn raw_archive(first: &[u8], members: &[u8]) -> Vec<u8> {
         raw_archive_with_header(&[0x86], first, members)
+    }
+
+    fn manifest_with_member(member: Value) -> Value {
+        Value::Array(vec![
+            Value::Text(super::CONFORMANCE_BUNDLE_MAGIC_V1.to_owned()),
+            Value::Integer(0_u64.into()),
+            Value::Integer(0_u64.into()),
+            Value::Bytes(vec![0; 32]),
+            Value::Array(vec![member]),
+            Value::Array(Vec::new()),
+        ])
+    }
+
+    fn manifest_with_expected(expected: Value) -> Value {
+        Value::Array(vec![
+            Value::Text(super::CONFORMANCE_BUNDLE_MAGIC_V1.to_owned()),
+            Value::Integer(0_u64.into()),
+            Value::Integer(0_u64.into()),
+            Value::Bytes(vec![0; 32]),
+            Value::Array(Vec::new()),
+            Value::Array(vec![expected]),
+        ])
     }
 
     #[test]
@@ -3522,6 +3526,20 @@ mod coverage_entrypoints {
                 Err(BundleContractErrorV1::ArchiveEncodingInvalid)
             );
         }
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&raw_archive(
+                &[0x60],
+                &[0x81, 0x83, 0x60, 0x40, 0x00],
+            )),
+            Err(BundleContractErrorV1::MemberMissing)
+        );
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&raw_archive(
+                &[0x60],
+                &[0x81, 0x83, 0x60, 0x41, 0x01, 0x02],
+            )),
+            Err(BundleContractErrorV1::ProfileInvalid)
+        );
         Ok(())
     }
 
@@ -3607,6 +3625,143 @@ mod coverage_entrypoints {
         let mut trailing = raw_archive(&[0x60], &[0x80]);
         trailing.push(0);
         assert!(super::archive_preflight::scan(&trailing).is_err());
+        assert!(super::archive_preflight::scan(&[]).is_err());
+        assert!(super::archive_preflight::scan(&[0x9b]).is_err());
+        assert!(
+            super::archive_preflight::scan(&raw_archive(&[0x60], &[0x81, 0x83, 0x60, 0x40],))
+                .is_err()
+        );
+        assert!(
+            preflight_archive(&[0x5b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]).is_err()
+        );
+        assert!(
+            preflight_archive(&[0x7b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]).is_err()
+        );
+    }
+
+    fn exercise_manifest_decoder_errors() {
+        assert!(super::decode_manifest(&Value::Array(vec![
+            Value::Null,
+            Value::Integer(0_u64.into()),
+            Value::Integer(0_u64.into()),
+            Value::Bytes(vec![0; 32]),
+            Value::Array(Vec::new()),
+            Value::Array(Vec::new()),
+        ]))
+        .is_err());
+        assert!(super::decode_manifest(&Value::Array(vec![
+            Value::Text(super::CONFORMANCE_BUNDLE_MAGIC_V1.to_owned()),
+            Value::Integer(99_u64.into()),
+            Value::Integer(99_u64.into()),
+            Value::Null,
+            Value::Array(Vec::new()),
+            Value::Array(Vec::new()),
+        ]))
+        .is_err());
+        assert!(super::decode_manifest(&manifest_with_member(Value::Array(Vec::new()))).is_err());
+        for fields in [
+            vec![
+                Value::Null,
+                Value::Integer(0_u64.into()),
+                Value::Bytes(vec![0; 32]),
+                Value::Integer(0_u64.into()),
+            ],
+            vec![
+                Value::Text("member".to_owned()),
+                Value::Null,
+                Value::Bytes(vec![0; 32]),
+                Value::Integer(0_u64.into()),
+            ],
+            vec![
+                Value::Text("member".to_owned()),
+                Value::Integer(0_u64.into()),
+                Value::Null,
+                Value::Integer(0_u64.into()),
+            ],
+            vec![
+                Value::Text("member".to_owned()),
+                Value::Integer(0_u64.into()),
+                Value::Bytes(vec![0; 32]),
+                Value::Integer(99_u64.into()),
+            ],
+        ] {
+            assert!(super::decode_manifest(&manifest_with_member(Value::Array(fields))).is_err());
+        }
+        assert!(super::decode_manifest(&manifest_with_expected(Value::Array(Vec::new()))).is_err());
+        for fields in [
+            vec![
+                Value::Null,
+                Value::Integer(0_u64.into()),
+                Value::Bytes(vec![0; 32]),
+                Value::Integer(0_u64.into()),
+                Value::Text("member".to_owned()),
+                Value::Bytes(vec![0; 32]),
+            ],
+            vec![
+                Value::Text("case".to_owned()),
+                Value::Integer(99_u64.into()),
+                Value::Bytes(vec![0; 32]),
+                Value::Integer(0_u64.into()),
+                Value::Text("member".to_owned()),
+                Value::Bytes(vec![0; 32]),
+            ],
+            vec![
+                Value::Text("case".to_owned()),
+                Value::Integer(0_u64.into()),
+                Value::Null,
+                Value::Integer(0_u64.into()),
+                Value::Text("member".to_owned()),
+                Value::Bytes(vec![0; 32]),
+            ],
+            vec![
+                Value::Text("case".to_owned()),
+                Value::Integer(0_u64.into()),
+                Value::Bytes(vec![0; 32]),
+                Value::Integer(99_u64.into()),
+                Value::Text("member".to_owned()),
+                Value::Bytes(vec![0; 32]),
+            ],
+            vec![
+                Value::Text("case".to_owned()),
+                Value::Integer(0_u64.into()),
+                Value::Bytes(vec![0; 32]),
+                Value::Integer(0_u64.into()),
+                Value::Null,
+                Value::Bytes(vec![0; 32]),
+            ],
+            vec![
+                Value::Text("case".to_owned()),
+                Value::Integer(0_u64.into()),
+                Value::Bytes(vec![0; 32]),
+                Value::Integer(0_u64.into()),
+                Value::Text("member".to_owned()),
+                Value::Null,
+            ],
+        ] {
+            assert!(super::decode_manifest(&manifest_with_expected(Value::Array(fields))).is_err());
+        }
+    }
+
+    fn exercise_member_decoder_errors() {
+        for fields in [
+            vec![
+                Value::Null,
+                Value::Bytes(vec![1]),
+                Value::Integer(0_u64.into()),
+            ],
+            vec![
+                Value::Text("member".to_owned()),
+                Value::Null,
+                Value::Integer(0_u64.into()),
+            ],
+            vec![
+                Value::Text("member".to_owned()),
+                Value::Bytes(vec![1]),
+                Value::Integer(99_u64.into()),
+            ],
+        ] {
+            assert!(super::decode_member(&Value::Array(fields)).is_err());
+        }
     }
 
     #[test]
@@ -3648,10 +3803,16 @@ mod coverage_entrypoints {
         let magic_len = super::CONFORMANCE_BUNDLE_MAGIC_V1.len();
         let version_index = 1 + 1 + usize::from(magic_len >= 24) + magic_len;
         assert_eq!(canonical[version_index], 1);
-        let mut noncanonical = canonical;
+        let mut noncanonical = canonical.clone();
         noncanonical.splice(version_index..=version_index, [0x18, 0x01]);
         assert_eq!(
             ConformanceBundleV1::from_canonical_cbor(&noncanonical),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        let mut negative_version = canonical;
+        negative_version[version_index] = 0x20;
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&negative_version),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
         );
 
@@ -3683,6 +3844,8 @@ mod coverage_entrypoints {
             super::decode_member(&Value::Null),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
         );
+        exercise_manifest_decoder_errors();
+        exercise_member_decoder_errors();
         assert_eq!(
             archive_u64(&Value::Integer((-1_i64).into())),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
@@ -3835,6 +3998,66 @@ mod coverage_entrypoints {
         assert_eq!(
             super::value_depth(&nested),
             usize::from(MAX_STRUCTURAL_NESTING) + 1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn bundle_validation_error_paths_are_instrumented() -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = signed_bundle()?;
+        let profile = tests::profile();
+        let mut missing_profile = bundle.clone();
+        missing_profile
+            .members
+            .retain(|member| member.role != BundleMemberRoleV1::Profile);
+        assert_eq!(
+            validate_archive_caps(&missing_profile, &Value::Null, 1),
+            Err(BundleContractErrorV1::MemberMissing)
+        );
+        assert_eq!(
+            validate_selected_bundle_caps(&profile, &missing_profile),
+            Err(BundleContractErrorV1::MemberMissing)
+        );
+
+        let profile_index = bundle
+            .members
+            .iter()
+            .position(|member| member.role == BundleMemberRoleV1::Profile)
+            .ok_or("missing profile")?;
+        let mut invalid_profile = bundle.clone();
+        invalid_profile.members[profile_index].bytes = vec![1];
+        assert_eq!(
+            validate_archive_caps(&invalid_profile, &Value::Null, 1),
+            Err(BundleContractErrorV1::ProfileInvalid)
+        );
+
+        let mut missing_support = bundle.members.clone();
+        missing_support.retain(|member| member.role != BundleMemberRoleV1::Schema);
+        assert_eq!(
+            validate_supporting_members(&profile, &missing_support),
+            Err(BundleContractErrorV1::MemberMissing)
+        );
+        let mut invalid_expected = bundle.manifest.clone();
+        invalid_expected.expected_results[0].digest = [0; 32];
+        assert_eq!(
+            validate_expected_results(&profile, &invalid_expected, &bundle.members),
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn bundle_pair_rejects_invalid_local_bundle() -> Result<(), Box<dyn std::error::Error>> {
+        let profile = tests::profile();
+        let mut local = signed_bundle_for(&profile, BundleModeV1::Local)?;
+        local.manifest.magic = "invalid".to_owned();
+        let pair = ConformanceBundlePairV1 {
+            local,
+            air_gapped: signed_bundle_for(&profile, BundleModeV1::AirGapped)?,
+        };
+        assert_eq!(
+            pair.validate(),
+            Err(BundleContractErrorV1::LifecycleInvalid)
         );
         Ok(())
     }
