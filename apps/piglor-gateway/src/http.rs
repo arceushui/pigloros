@@ -366,7 +366,7 @@ impl IntoResponse for GatewayError {
                 | ActionRejected::DomainValidationFailed(_) => StatusCode::UNPROCESSABLE_ENTITY,
                 ActionRejected::PayloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             },
-            Self::Consent(_) => StatusCode::FORBIDDEN,
+            Self::Consent(_) | Self::LedgerWriteDisabled => StatusCode::FORBIDDEN,
             Self::TimelineLimitReached { .. }
             | Self::EventLimitReached { .. }
             | Self::StoreExecutorSaturated => StatusCode::TOO_MANY_REQUESTS,
@@ -380,7 +380,6 @@ impl IntoResponse for GatewayError {
                 StatusCode::NOT_FOUND
             }
             Self::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::LedgerWriteDisabled => StatusCode::FORBIDDEN,
             Self::ActionAuthorizationUnavailable => StatusCode::UNAUTHORIZED,
             Self::StoreExecutorClosed
             | Self::StoreExecutorDeadlineExceeded

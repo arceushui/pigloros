@@ -1408,9 +1408,10 @@ impl ExperimentSession {
             .ok_or(ExperimentError::Runtime(
                 pos_runtime::RuntimeError::ConsentOperationUnavailable,
             ))?;
+        let timeline_id = self.timeline.id();
         let timeline_head = lock_store(&self.store).and_then(|store| {
             store
-                .logical_head(self.timeline.id())
+                .logical_head(timeline_id)
                 .map_err(ExperimentError::from)
         })?;
         let mut result = Err(ExperimentError::Runtime(
@@ -1420,7 +1421,7 @@ impl ExperimentSession {
             result = self.append_events(std::slice::from_ref(&draft));
         };
         gate.with_token_fence(
-            self.timeline.id(),
+            timeline_id,
             &token,
             timeline_head.as_u64(),
             current_now_secs(),
