@@ -1012,19 +1012,22 @@ impl Experiment {
             .iter()
             .any(|event| event.event_type.as_str() == EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE)
         {
-            if let Some(gate) = self.registry.clone_consent_gate() {
-                // Subject-scoped markers retain their actual subject in the
-                // payload. Legacy or malformed markers conservatively close
-                // the whole Timeline so no capability survives a restart.
-                for marker in events.iter().filter(|event| {
-                    event.event_type.as_str() == EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE
-                }) {
-                    let result = marker_subject(marker).map_or_else(
-                        || gate.fence_timeline_at(timeline_id, marker.seq.as_u64()),
-                        |subject| gate.fence_subject_at(timeline_id, subject, marker.seq.as_u64()),
-                    );
-                    result.map_err(pos_runtime::RuntimeError::Consent)?;
-                }
+            let gate = self
+                .registry
+                .clone_consent_gate()
+                .ok_or(pos_runtime::RuntimeError::ConsentOperationUnavailable)?;
+            // Subject-scoped markers retain their actual subject in the
+            // payload. Legacy or malformed markers conservatively close
+            // the whole Timeline so no capability survives a restart.
+            for marker in events
+                .iter()
+                .filter(|event| event.event_type.as_str() == EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE)
+            {
+                let result = marker_subject(marker).map_or_else(
+                    || gate.fence_timeline_at(timeline_id, marker.seq.as_u64()),
+                    |subject| gate.fence_subject_at(timeline_id, subject, marker.seq.as_u64()),
+                );
+                result.map_err(pos_runtime::RuntimeError::Consent)?;
             }
         }
         Ok(ExperimentSession {
@@ -1580,19 +1583,20 @@ impl ExperimentSession {
                 let mut append = || {
                     append_result = store.append(self.timeline.id(), std::slice::from_ref(&draft));
                 };
-                match self.registry.clone_consent_gate() {
-                    Some(gate) => {
-                        gate.with_revocation_fence(
-                            self.timeline.id(),
-                            subject,
-                            head.as_u64().saturating_add(1),
-                            &mut append,
-                        )
-                        .map_err(pos_runtime::RuntimeError::Consent)
-                        .map_err(ExperimentError::Runtime)?;
-                    }
-                    None => append(),
-                }
+                let gate = self
+                    .registry
+                    .clone_consent_gate()
+                    .ok_or(ExperimentError::Runtime(
+                        pos_runtime::RuntimeError::ConsentOperationUnavailable,
+                    ))?;
+                gate.with_revocation_fence(
+                    self.timeline.id(),
+                    subject,
+                    head.as_u64().saturating_add(1),
+                    &mut append,
+                )
+                .map_err(pos_runtime::RuntimeError::Consent)
+                .map_err(ExperimentError::Runtime)?;
                 let events = append_result?;
                 Ok(u64::try_from(events.len()).unwrap_or(u64::MAX))
             })
@@ -2322,7 +2326,7 @@ mod tests {
             projections: pos_state::ProjectionRegistry::new(),
             consent_gate: Some(Arc::clone(&gate)),
             protected_token: Some(token.clone()),
-            store_config: Some(store_config),
+            store_config: Some(store_config.clone()),
         };
         result
             .projections
@@ -5925,7 +5929,15 @@ mod coverage_entrypoints {
             StopCondition::MaxTicks(1),
         ));
         let mut store = pos_store::memory::MemoryStore::new();
-        ok(store.create_timeline("coverage-experiment-branch"));
+        let timeline = ok(store.create_timeline("coverage-experiment-branch"));
+        ok(store.append(
+            timeline.id(),
+            &[EventDraft::new(
+                EntityId::new(),
+                Kind::new("coverage.public.branch"),
+                pos_core::CanonicalBytes::from_static(b"coverage"),
+            )],
+        ));
         let child = ok(experiment.branch("coverage-experiment-child", &mut store));
         assert_eq!(
             child.meta.name.as_deref(),
@@ -6154,7 +6166,7 @@ mod coverage_entrypoints {
             projections: pos_state::ProjectionRegistry::new(),
             consent_gate: Some(Arc::clone(&gate)),
             protected_token: Some(token),
-            store_config: Some(store_config),
+            store_config: Some(store_config.clone()),
         };
         expect_err(
             &denied_export.into_reproduction_manifest(ReproductionRecipe::new(
@@ -6163,6 +6175,46 @@ mod coverage_entrypoints {
                 serde_json::json!({}),
             )),
         );
+
+        let export_authority = ConsentAuthority::new();
+        let export_token = export_authority.record_grant_on_timeline(
+            timeline.id(),
+            &ConsentGranted {
+                subject_id: EntityId::new(),
+                grantee_id: EntityId::new(),
+                purpose: "coverage-result-export".to_owned(),
+                modalities: 0,
+                min_geo_resolution: 0,
+                fork_permitted: false,
+                export_permitted: true,
+                retention_days: 0,
+                expiry_secs: 0,
+                grant_seq: 1,
+            },
+        );
+        let export_result = RunResult {
+            timeline_id: timeline.id(),
+            ticks: 0,
+            total_events: 0,
+            timeline_head: 0,
+            manifest: ReproManifest::new(
+                timeline.id(),
+                pos_core::crypto::Hash::zero(),
+                pos_core::clock::WallTime::from_micros(0),
+            ),
+            projections: pos_state::ProjectionRegistry::new(),
+            consent_gate: Some(Arc::new(export_authority)),
+            protected_token: Some(export_token),
+            store_config: Some(store_config),
+        };
+        let manifest = ok(
+            export_result.into_reproduction_manifest(ReproductionRecipe::new(
+                "coverage-export",
+                1,
+                serde_json::json!({}),
+            )),
+        );
+        assert_eq!(manifest.recipe.host_id, "coverage-export");
     }
 
     #[test]
@@ -6831,6 +6883,30 @@ mod backtest_tests {
         });
         let err = runner.run();
         assert!(err.is_err(), "expected error from bad driver in eval phase");
+    }
+
+    #[test]
+    fn backtest_result_build_errors_are_propagated_for_both_phases() {
+        for fail_on_call in [3, 4] {
+            let mut store = FailLogicalHeadStore {
+                inner: Box::new(pos_store::memory::MemoryStore::new()),
+                calls: Cell::new(0),
+                fail_on_call,
+            };
+            let runner = BacktestRunner::new(
+                BacktestConfig {
+                    experiment_name: format!("bt-result-error-{fail_on_call}"),
+                    train_ticks: 0,
+                    eval_ticks: 0,
+                    store_config: StoreConfig::Memory,
+                },
+                registry_with_emit_driver,
+            );
+            assert!(matches!(
+                runner.run_on_store(&mut store),
+                Err(ExperimentError::Store(CoreError::Storage(_)))
+            ));
+        }
     }
 }
 

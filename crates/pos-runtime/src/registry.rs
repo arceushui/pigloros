@@ -319,6 +319,31 @@ mod coverage_entrypoints {
         }
     }
 
+    struct CommitTrackingDriver {
+        committed: std::sync::Arc<std::sync::Mutex<bool>>,
+    }
+
+    impl Driver for CommitTrackingDriver {
+        fn step(
+            &mut self,
+            _: TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            Ok(StepOutput::empty())
+        }
+
+        fn name(&self) -> &'static str {
+            "coverage-commit-tracking-driver"
+        }
+
+        fn commit_restore_from_history(&mut self) {
+            *self
+                .committed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        }
+    }
+
     #[test]
     fn restore_and_cadence_entrypoints_update_driver_state() {
         let mut registry = PluginRegistry::new();
@@ -331,7 +356,32 @@ mod coverage_entrypoints {
                 &[restore_event],
             )
             .is_ok());
-        assert!(registry.tick_cadenced(timeline, 0).is_ok());
+        assert_eq!(
+            registry
+                .tick_cadenced(timeline, u128::MAX)
+                .map(|drafts| drafts.len()),
+            Ok(1)
+        );
+    }
+
+    #[test]
+    fn restore_commit_and_cursor_paths_are_exercised_at_a_public_seam() {
+        let committed = std::sync::Arc::new(std::sync::Mutex::new(false));
+        let mut registry = PluginRegistry::new();
+        registry.register_driver(Box::new(CommitTrackingDriver {
+            committed: std::sync::Arc::clone(&committed),
+        }));
+        let timeline = TimelineId::new();
+        let restore_event = event("coverage.restore.commit", 1);
+        assert!(registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(timeline, Seq::from_u64(1))],
+                &[restore_event],
+            )
+            .is_ok());
+        assert!(*committed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner));
     }
 
     fn event(event_type: &str, seq: u64) -> Event {
