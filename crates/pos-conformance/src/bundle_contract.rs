@@ -3305,40 +3305,52 @@ mod tests {
         Ok(())
     }
 
-    fn replace_array_field(value: &Value, index: usize, replacement: Value) -> Value {
+    fn replace_array_field(
+        value: &Value,
+        index: usize,
+        replacement: Value,
+    ) -> Result<Value, std::io::Error> {
         let Value::Array(mut fields) = value.clone() else {
-            panic!("expected array");
+            return Err(std::io::Error::other("expected array"));
         };
         fields[index] = replacement;
-        Value::Array(fields)
+        Ok(Value::Array(fields))
     }
 
-    fn replace_member_field(value: &Value, index: usize, replacement: Value) -> Value {
+    fn replace_member_field(
+        value: &Value,
+        index: usize,
+        replacement: Value,
+    ) -> Result<Value, std::io::Error> {
         let Value::Array(mut fields) = value.clone() else {
-            panic!("expected manifest array");
+            return Err(std::io::Error::other("expected manifest array"));
         };
         let Value::Array(members) = &mut fields[4] else {
-            panic!("expected member array");
+            return Err(std::io::Error::other("expected member array"));
         };
         let Value::Array(member) = &mut members[0] else {
-            panic!("expected member fields");
+            return Err(std::io::Error::other("expected member fields"));
         };
         member[index] = replacement;
-        Value::Array(fields)
+        Ok(Value::Array(fields))
     }
 
-    fn replace_expected_field(value: &Value, index: usize, replacement: Value) -> Value {
+    fn replace_expected_field(
+        value: &Value,
+        index: usize,
+        replacement: Value,
+    ) -> Result<Value, std::io::Error> {
         let Value::Array(mut fields) = value.clone() else {
-            panic!("expected manifest array");
+            return Err(std::io::Error::other("expected manifest array"));
         };
         let Value::Array(expected_results) = &mut fields[5] else {
-            panic!("expected result array");
+            return Err(std::io::Error::other("expected result array"));
         };
         let Value::Array(expected) = &mut expected_results[0] else {
-            panic!("expected result fields");
+            return Err(std::io::Error::other("expected result fields"));
         };
         expected[index] = replacement;
-        Value::Array(fields)
+        Ok(Value::Array(fields))
     }
 
     #[test]
@@ -3352,40 +3364,40 @@ mod tests {
             (2, Value::Integer(99_u64.into())),
             (3, Value::Null),
         ] {
-            assert!(decode_manifest(&replace_array_field(&manifest, index, replacement)).is_err());
+            assert!(decode_manifest(&replace_array_field(&manifest, index, replacement)?).is_err());
         }
-        assert!(decode_manifest(&replace_array_field(&manifest, 4, Value::Null)).is_err());
-        assert!(decode_manifest(&replace_array_field(&manifest, 5, Value::Null)).is_err());
-        assert!(decode_manifest(&replace_member_field(&manifest, 0, Value::Null)).is_err());
+        assert!(decode_manifest(&replace_array_field(&manifest, 4, Value::Null)?).is_err());
+        assert!(decode_manifest(&replace_array_field(&manifest, 5, Value::Null)?).is_err());
+        assert!(decode_manifest(&replace_member_field(&manifest, 0, Value::Null)?).is_err());
         assert!(decode_manifest(&replace_member_field(
             &manifest,
             1,
             Value::Integer((-1_i64).into()),
-        ))
+        )?)
         .is_err());
-        assert!(decode_manifest(&replace_member_field(&manifest, 2, Value::Null)).is_err());
+        assert!(decode_manifest(&replace_member_field(&manifest, 2, Value::Null)?).is_err());
         assert!(decode_manifest(&replace_member_field(
             &manifest,
             3,
             Value::Integer(99_u64.into()),
-        ))
+        )?)
         .is_err());
-        assert!(decode_manifest(&replace_expected_field(&manifest, 0, Value::Null)).is_err());
+        assert!(decode_manifest(&replace_expected_field(&manifest, 0, Value::Null)?).is_err());
         assert!(decode_manifest(&replace_expected_field(
             &manifest,
             1,
             Value::Integer(99_u64.into()),
-        ))
+        )?)
         .is_err());
-        assert!(decode_manifest(&replace_expected_field(&manifest, 2, Value::Null)).is_err());
+        assert!(decode_manifest(&replace_expected_field(&manifest, 2, Value::Null)?).is_err());
         assert!(decode_manifest(&replace_expected_field(
             &manifest,
             3,
             Value::Integer(99_u64.into()),
-        ))
+        )?)
         .is_err());
-        assert!(decode_manifest(&replace_expected_field(&manifest, 4, Value::Null)).is_err());
-        assert!(decode_manifest(&replace_expected_field(&manifest, 5, Value::Null)).is_err());
+        assert!(decode_manifest(&replace_expected_field(&manifest, 4, Value::Null)?).is_err());
+        assert!(decode_manifest(&replace_expected_field(&manifest, 5, Value::Null)?).is_err());
 
         let mut member_fields = vec![
             Value::Text("member".to_owned()),
