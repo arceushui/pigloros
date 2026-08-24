@@ -94,7 +94,7 @@ mod tests {
     }
 
     #[test]
-    fn role_signature_rejects_role_and_epoch_confusion() {
+    fn role_signature_rejects_role_and_epoch_confusion() -> Result<(), Box<dyn std::error::Error>> {
         let (signing_key, verifying_key) = generate_keypair();
         let value = payload(b"attribution");
         let signature = sign_for_role(
@@ -102,8 +102,7 @@ mod tests {
             KeyRoleV1::SubjectAttributionSigning,
             3,
             &value,
-        )
-        .expect("signing role is accepted");
+        )?;
         assert!(verify_for_role(
             &verifying_key,
             KeyRoleV1::SubjectAttributionSigning,
@@ -145,5 +144,6 @@ mod tests {
             public_key_from_verifying_key(&verifying_key).as_bytes(),
             verifying_key.as_bytes()
         );
+        Ok(())
     }
 }
