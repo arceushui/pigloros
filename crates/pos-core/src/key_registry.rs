@@ -872,6 +872,31 @@ mod tests {
     }
 
     #[test]
+    fn destroying_an_inactive_epoch_keeps_the_newer_epoch_active() -> Result<(), KeyRegistryErrorV1>
+    {
+        let mut registry = KeyRegistryStateV1::new();
+        let first = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+        let latest = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 2);
+        registry.register_key(signing_registration(first, 40))?;
+        registry.register_key(signing_registration(latest, 41))?;
+
+        registry.destroy_key(KeyDestructionRequestV1::new(first, digest(40), digest(42)))?;
+
+        assert_eq!(
+            registry.active_key(first.role).map(|key| key.identity),
+            Some(latest)
+        );
+        assert_eq!(
+            registry
+                .key_record(first)
+                .and_then(|record| record.private_material_digest),
+            None
+        );
+        assert!(registry.tombstone(first).is_some());
+        Ok(())
+    }
+
+    #[test]
     fn stale_epoch_and_wrong_digest_are_rejected() -> Result<(), KeyRegistryErrorV1> {
         let mut registry = KeyRegistryStateV1::new();
         registry.register_key(KeyRegistrationV1::new(DATA, digest(7), None))?;
