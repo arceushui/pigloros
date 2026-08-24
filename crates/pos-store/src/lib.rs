@@ -154,6 +154,15 @@ pub(crate) fn checked_logical_head(logical_prefix: u64, owned_head: u64) -> Resu
         .ok_or_else(|| CoreError::Storage("logical Timeline sequence overflow".to_owned()))
 }
 
+/// Convert the optional result of a bounded append helper for an unbounded call.
+pub(crate) fn unbounded_append_outcome(
+    outcome: Option<AppendOrDuplicateOutcome>,
+) -> Result<AppendOrDuplicateOutcome, CoreError> {
+    outcome.ok_or_else(|| {
+        CoreError::Storage("unbounded append unexpectedly hit an event limit".to_owned())
+    })
+}
+
 /// Selects which backend [`open_store`] constructs.
 ///
 /// `Memory` is always available. The `Sqlite` variants require the
@@ -351,6 +360,15 @@ mod tests {
             checked_logical_head(u64::MAX, 1),
             Err(CoreError::Storage(_))
         ));
+    }
+
+    #[test]
+    fn unbounded_append_outcome_maps_both_optional_states() {
+        assert_eq!(
+            unbounded_append_outcome(Some(AppendOrDuplicateOutcome::Conflict)),
+            Ok(AppendOrDuplicateOutcome::Conflict)
+        );
+        assert!(unbounded_append_outcome(None).is_err());
     }
 
     #[cfg(feature = "sqlite")]

@@ -64,9 +64,8 @@ impl TomlLedgerStore {
             // The extension filter above guarantees a filename stem.
             let stem = path
                 .file_stem()
-                .expect("a filtered TOML path always has a filename stem")
-                .to_string_lossy()
-                .into_owned();
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default();
             items.push((stem, value));
         }
         Ok(items)

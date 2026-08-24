@@ -2698,7 +2698,7 @@ impl EventStore for SqliteStore {
         draft: EventDraft,
     ) -> Result<AppendOrDuplicateOutcome, CoreError> {
         self.append_or_duplicate_with_limit(timeline, identity, admitted_at, &draft, None)
-            .map(|outcome| outcome.expect("an unbounded append cannot hit an event limit"))
+            .and_then(crate::unbounded_append_outcome)
     }
 
     fn purge_expired_append_identities(&mut self, now: WallTime) -> Result<usize, CoreError> {

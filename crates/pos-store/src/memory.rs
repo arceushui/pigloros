@@ -243,14 +243,6 @@ fn mutable_state(
         .ok_or(CoreError::TimelineNotFound(id))
 }
 
-fn unbounded_append_outcome(
-    outcome: Option<AppendOrDuplicateOutcome>,
-) -> Result<AppendOrDuplicateOutcome, CoreError> {
-    outcome.ok_or_else(|| {
-        CoreError::Storage("unbounded append unexpectedly hit an event limit".to_owned())
-    })
-}
-
 #[inline(never)]
 fn delete_timeline(store: &mut MemoryStore, id: TimelineId) -> Result<(), CoreError> {
     store
@@ -1559,7 +1551,7 @@ impl EventStore for MemoryStore {
         draft: EventDraft,
     ) -> Result<AppendOrDuplicateOutcome, CoreError> {
         self.append_or_duplicate_with_limit(timeline, identity, admitted_at, &draft, None)
-            .and_then(unbounded_append_outcome)
+            .and_then(crate::unbounded_append_outcome)
     }
 
     fn purge_expired_append_identities(&mut self, now: WallTime) -> Result<usize, CoreError> {
@@ -4359,7 +4351,6 @@ mod tests {
         let mut store = MemoryStore::new();
         assert!(mutable_state(&mut store.timelines, TimelineId::new()).is_err());
         assert!(store.state_mut(TimelineId::new()).is_err());
-        assert!(unbounded_append_outcome(None).is_err());
     }
 
     #[test]
