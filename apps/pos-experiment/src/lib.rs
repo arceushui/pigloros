@@ -5625,8 +5625,12 @@ mod tests {
             stop: StopCondition::MaxTicks(2),
             store_config: store_config.clone(),
         });
-        experiment.register(&plugin, None, None).test_ok();
-        let session = experiment.start().test_ok();
+        experiment
+            .register(&plugin, None, None)
+            .unwrap_or_else(|error| panic!("experiment registration failed: {error:?}"));
+        let session = experiment
+            .start()
+            .unwrap_or_else(|error| panic!("session start failed: {error:?}"));
         let timeline_id = session.timeline().id();
         let subject = EntityId::new();
         let authority = ConsentAuthority::new();
@@ -5648,7 +5652,12 @@ mod tests {
         let mut session = session
             .with_consent_authority(authority.clone())
             .with_protected_token(token.clone(), 0);
-        assert_eq!(session.append_events(&[]).test_ok(), 0);
+        assert_eq!(
+            session
+                .append_events(&[])
+                .unwrap_or_else(|error| panic!("empty append failed: {error:?}")),
+            0
+        );
         assert_eq!(
             session
                 .append_events(&[EventDraft::new(
@@ -5656,13 +5665,19 @@ mod tests {
                     Kind::new("unit.session.event"),
                     CanonicalBytes::from_static(b"unit"),
                 )])
-                .test_ok(),
+                .unwrap_or_else(|error| panic!("event append failed: {error:?}")),
             1
         );
-        assert_eq!(session.source_events().test_ok().len(), 1);
+        assert_eq!(
+            session
+                .source_events()
+                .unwrap_or_else(|error| panic!("source event read failed: {error:?}"))
+                .len(),
+            1
+        );
         assert!(session
             .projection_state_for_reducer("missing", subject, &token, current_now_secs())
-            .test_ok()
+            .unwrap_or_else(|error| panic!("live projection read failed: {error:?}"))
             .is_none());
 
         session.revoke_consent_for_subject_at_boundary(subject);
@@ -5688,11 +5703,11 @@ mod tests {
         });
         resumed_experiment
             .register(&resumed_plugin, None, None)
-            .test_ok();
+            .unwrap_or_else(|error| panic!("resumed registration failed: {error:?}"));
         let resumed = resumed_experiment
             .with_consent_authority(authority)
             .resume(timeline_id)
-            .test_ok();
+            .unwrap_or_else(|error| panic!("resume failed: {error:?}"));
         assert!(matches!(
             resumed.projection_state_for_reducer("missing", subject, &token, current_now_secs()),
             Err(ExperimentError::ConsentRevoked)
