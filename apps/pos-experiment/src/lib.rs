@@ -1565,17 +1565,18 @@ impl ExperimentSession {
                 let mut append = || {
                     append_result = store.append(self.timeline.id(), std::slice::from_ref(&draft));
                 };
-                if let Some(gate) = self.registry.clone_consent_gate() {
-                    gate.with_revocation_fence(
-                        self.timeline.id(),
-                        subject,
-                        head.as_u64().saturating_add(1),
-                        &mut append,
-                    )
-                    .map_err(pos_runtime::RuntimeError::Consent)
-                    .map_err(ExperimentError::Runtime)?;
-                } else {
-                    append();
+                match self.registry.clone_consent_gate() {
+                    Some(gate) => {
+                        gate.with_revocation_fence(
+                            self.timeline.id(),
+                            subject,
+                            head.as_u64().saturating_add(1),
+                            &mut append,
+                        )
+                        .map_err(pos_runtime::RuntimeError::Consent)
+                        .map_err(ExperimentError::Runtime)?;
+                    }
+                    None => append(),
                 }
                 let events = append_result?;
                 Ok(u64::try_from(events.len()).unwrap_or(u64::MAX))
