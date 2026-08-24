@@ -815,7 +815,7 @@ fn public_branch_guards_reject_protected_history_and_invalid_capabilities() {
             protected_timeline.id(),
             &[EventDraft::new(
                 EntityId::new(),
-                Kind::new("consent.granted.v1"),
+                Kind::new("retention.policy.v1"),
                 CanonicalBytes::from_static(b"host-owned"),
             )],
         )
