@@ -37,7 +37,7 @@ pub use clock::{
 };
 pub use consent::{
     is_consent_event_type, required_modality_for_event, ConsentAuthority, ConsentCapabilityToken,
-    ConsentCodecError, ConsentError, ConsentGate, ConsentGranted, ConsentGrantedV1,
+    ConsentCodecError, ConsentError, ConsentGate, ConsentGranted, ConsentGrantedV1, FieldState,
     ConsentRevocationFoldListener, ConsentRevocationReservation, ConsentRevoked, ConsentRevokedV1,
     EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1, HOST_CONSENT_CLOSED_EVENT_TYPE,
     MAX_CONSENT_HISTORY_EVENTS, MODALITY_EXPORT, MODALITY_LOCATION, MODALITY_MODEL_FIT,

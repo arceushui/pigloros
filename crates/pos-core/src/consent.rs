@@ -425,20 +425,36 @@ pub type ConsentGrantedV1 = ConsentGranted;
 pub type ConsentRevokedV1 = ConsentRevoked;
 
 impl ConsentRevoked {
+    /// Validate the Timeline coordinates carried by this V1 revocation.
+    ///
+    /// A revocation is appended after the grant it fences, so the durable
+    /// revocation coordinate must be strictly greater than the grant
+    /// coordinate.  This rejects the otherwise ambiguous all-zero sentinel
+    /// pair at the public codec boundary.
+    pub const fn validate(&self) -> Result<(), ConsentCodecError> {
+        if self.grant_seq >= self.fence_seq {
+            Err(ConsentCodecError::FieldOutOfBounds)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Encode to canonical CBOR bytes.
     ///
     /// # Errors
-    /// This function is currently infallible but returns `Result` for API consistency.
+    /// Returns a closed codec error when the Timeline coordinates are invalid.
     pub fn encode(&self) -> Result<CanonicalBytes, ConsentCodecError> {
-        let arr = Value::Array(vec![
-            cbor_bytes(&MAGIC_CRV1),
-            cbor_u8(VERSION_V1),
-            cbor_id(self.subject_id),
-            cbor_id(self.grantee_id),
-            cbor_u64(self.grant_seq),
-            cbor_u64(self.fence_seq),
-        ]);
-        cbor_encode(&arr).map(CanonicalBytes::from_vec)
+        self.validate().and_then(|()| {
+            let arr = Value::Array(vec![
+                cbor_bytes(&MAGIC_CRV1),
+                cbor_u8(VERSION_V1),
+                cbor_id(self.subject_id),
+                cbor_id(self.grantee_id),
+                cbor_u64(self.grant_seq),
+                cbor_u64(self.fence_seq),
+            ]);
+            cbor_encode(&arr).map(CanonicalBytes::from_vec)
+        })
     }
 
     /// Decode from canonical CBOR bytes.
@@ -453,11 +469,14 @@ impl ConsentRevoked {
                 .and_then(|subject_id| {
                     decode_id(&items[3]).and_then(|grantee_id| {
                         decode_u64(&items[4]).and_then(|grant_seq| {
-                            decode_u64(&items[5]).map(|fence_seq| Self {
-                                subject_id,
-                                grantee_id,
-                                grant_seq,
-                                fence_seq,
+                            decode_u64(&items[5]).and_then(|fence_seq| {
+                                let revocation = Self {
+                                    subject_id,
+                                    grantee_id,
+                                    grant_seq,
+                                    fence_seq,
+                                };
+                                revocation.validate().map(|()| revocation)
                             })
                         })
                     })
@@ -1053,6 +1072,9 @@ impl ConsentAuthority {
                     }
                     decoded.push(RestoredConsentEvent::Revoked(revocation));
                 }
+                event_type if event_type.starts_with("consent.") => {
+                    return Err(ConsentCodecError::WrongVersion);
+                }
                 _ => {}
             }
         }
@@ -1278,6 +1300,24 @@ pub trait ConsentGate: Send + Sync {
         let _ = (timeline_id, token, timeline_head, now_secs);
         Err(ConsentError::NoConsent)
     }
+}
+
+// ---------------------------------------------------------------------------
+// FieldState — Replay sentinel for destroyed keys (ADR-039/ADR-060)
+// ---------------------------------------------------------------------------
+
+/// Deterministic state of a protected field during replay.
+///
+/// Key destruction is an expected consequence of consent revocation. Replay
+/// therefore returns [`FieldState::RedactedDestroyed`] instead of failing or
+/// manufacturing a value. The sentinel composes with ADR-060 claim
+/// degradation rules: it can only remove evidence, never strengthen it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldState {
+    /// The protected field remains available as canonical bytes.
+    Present(CanonicalBytes),
+    /// The field's data key was destroyed by the host's revocation lifecycle.
+    RedactedDestroyed,
 }
 
 impl ConsentGate for ConsentAuthority {
@@ -1897,6 +1937,30 @@ mod tests {
         assert_eq!(d.grantee_id, r.grantee_id);
         assert_eq!(d.grant_seq, r.grant_seq);
         assert_eq!(d.fence_seq, r.fence_seq);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn consent_revoked_rejects_non_advancing_timeline_coordinates() {
+        let g = sample_granted();
+        let mut r = sample_revoked(&g);
+        r.fence_seq = r.grant_seq;
+        assert_eq!(r.encode().test_err(), ConsentCodecError::FieldOutOfBounds);
+
+        r.fence_seq = 0;
+        r.grant_seq = 0;
+        let bytes = {
+            let arr = Value::Array(vec![
+                cbor_bytes(&MAGIC_CRV1),
+                cbor_u8(VERSION_V1),
+                cbor_id(r.subject_id),
+                cbor_id(r.grantee_id),
+                cbor_u64(r.grant_seq),
+                cbor_u64(r.fence_seq),
+            ]);
+            CanonicalBytes::from_vec(cbor_encode(&arr).test_ok())
+        };
+        assert_eq!(ConsentRevoked::decode(&bytes).test_err(), ConsentCodecError::FieldOutOfBounds);
     }
 
     #[test]
@@ -2570,6 +2634,38 @@ mod tests {
                 .test_err(),
             ConsentCodecError::CborError
         );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn restore_from_history_rejects_unknown_consent_schema_versions() {
+        fn event(event_type: &str, payload: CanonicalBytes, entity: EntityId, seq: u64) -> Event {
+            Event {
+                id: EventId::new(),
+                entity,
+                event_type: Kind::new(event_type),
+                payload,
+                wall_time: WallTime::from_micros(1),
+                seq: crate::clock::Seq::from_u64(seq),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: SchemaVersion::V1,
+                signature: None,
+                payload_hash: Hash::from_bytes([0; 32]),
+            }
+        }
+
+        let grant = sample_granted();
+        let result = ConsentAuthority::new().restore_from_history(
+            TimelineId::new(),
+            &[event(
+                "consent.granted.v2",
+                grant.encode().test_ok(),
+                grant.subject_id,
+                grant.grant_seq,
+            )],
+        );
+        assert_eq!(result.test_err(), ConsentCodecError::WrongVersion);
     }
 
     #[test]

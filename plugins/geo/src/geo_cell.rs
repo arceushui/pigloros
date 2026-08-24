@@ -300,6 +300,9 @@ impl H3ReferenceCloaker {
             return Err(GeoCellError::NonCanonicalH3Index);
         }
         let parsed = h3o::CellIndex::from_str(index).map_err(|_| GeoCellError::InvalidH3Index)?;
+        if parsed.to_string() != index {
+            return Err(GeoCellError::NonCanonicalH3Index);
+        }
         Ok(GeoCellV1::from_h3o(parsed))
     }
 

@@ -183,7 +183,9 @@ impl AgentDecisionReplayVerifier {
             .iter()
             .map(verification_event)
             .collect::<Vec<_>>();
-        let last_segment = &self.timeline_segments[self.timeline_segments.len() - 1];
+        let Some(last_segment) = self.timeline_segments.last() else {
+            return Err(ReplayVerificationError::InvalidTimelineAncestry);
+        };
         validate_recovery_sequence(&events, last_segment.through())?;
         let state = self.verify_events(&events, ReplayState::default())?;
         Ok(ReplayCheckpoint {
