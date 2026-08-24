@@ -1,7 +1,10 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use ciborium::value::Value;
-use pos_conformance::{ConformanceContractError, ConformanceProfileV1, EvaluatorRequestV1};
+use pos_conformance::{
+    ConformanceContractError, ConformanceProfileV1, ErasureDispositionV1, EvaluatorRequestV1,
+    ReplayClaimV1,
+};
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub mod fixtures {
@@ -278,5 +281,46 @@ fn exported_decoders_reject_terminal_digest_after_nested_decode() {
     assert_eq!(
         EvaluatorRequestV1::from_canonical_cbor(&fixtures::request()),
         Err(ConformanceContractError::InvalidEncoding)
+    );
+}
+
+#[test]
+fn public_replay_claim_erasure_seam_only_preserves_or_weakens() {
+    assert_eq!(
+        ReplayClaimV1::Exact.after_erasure(ErasureDispositionV1::None),
+        ReplayClaimV1::Exact
+    );
+    assert_eq!(
+        ReplayClaimV1::Exact.after_erasure(ErasureDispositionV1::RedactedViews),
+        ReplayClaimV1::ExactAuthoritativeWithRedactedViews
+    );
+    assert_eq!(
+        ReplayClaimV1::Exact.after_erasure(ErasureDispositionV1::StructuralOnly),
+        ReplayClaimV1::StructuralOnly
+    );
+    assert_eq!(
+        ReplayClaimV1::StructuralOnly.after_erasure(ErasureDispositionV1::None),
+        ReplayClaimV1::StructuralOnly
+    );
+    assert_eq!(
+        ReplayClaimV1::StructuralOnly.after_erasure(ErasureDispositionV1::RedactedViews),
+        ReplayClaimV1::StructuralOnly
+    );
+    assert_eq!(
+        ReplayClaimV1::UnverifiableArtifactsMissing
+            .after_erasure(ErasureDispositionV1::StructuralOnly),
+        ReplayClaimV1::UnverifiableArtifactsMissing
+    );
+    assert_eq!(
+        ReplayClaimV1::Exact.after_erasure(ErasureDispositionV1::ArtifactsMissing),
+        ReplayClaimV1::UnverifiableArtifactsMissing
+    );
+    assert_eq!(
+        ReplayClaimV1::IncompatibleProfile.after_erasure(ErasureDispositionV1::None),
+        ReplayClaimV1::IncompatibleProfile
+    );
+    assert_eq!(
+        ReplayClaimV1::Exact.after_erasure(ErasureDispositionV1::IncompatibleProfile),
+        ReplayClaimV1::IncompatibleProfile
     );
 }

@@ -255,6 +255,10 @@ impl EvaluatorHardCapsV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvaluatorProtocolV1 {
     pub protocol_id: String,
+    /// Externally governed identity of the evaluator protocol bundle. CPF1
+    /// commits every protocol field, while request validation requires this
+    /// declared identity to match the selected profile; this crate does not
+    /// invent a second canonical protocol bundle outside CPF1.
     pub protocol_digest: [u8; 32],
     pub request_schema_digest: [u8; 32],
     pub report_schema_digest: [u8; 32],

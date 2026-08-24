@@ -363,13 +363,13 @@ impl ReplayClaimV1 {
             return Self::IncompatibleProfile;
         }
         let disposition = match disposition {
-            ErasureDispositionV1::None => Self::Exact,
+            ErasureDispositionV1::None => self,
             ErasureDispositionV1::RedactedViews => Self::ExactAuthoritativeWithRedactedViews,
             ErasureDispositionV1::StructuralOnly => Self::StructuralOnly,
             ErasureDispositionV1::ArtifactsMissing => Self::UnverifiableArtifactsMissing,
             ErasureDispositionV1::IncompatibleProfile => Self::IncompatibleProfile,
         };
-        if self.rank() <= disposition.rank() {
+        if self.rank() >= disposition.rank() {
             self
         } else {
             disposition
