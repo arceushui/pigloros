@@ -9,6 +9,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: 17 2 * * *
   workflow_dispatch:
 
 concurrency:
@@ -21,7 +23,9 @@ jobs:
   trunk_check:
     name: Trunk Code Quality
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Full scheduled/main checks may inspect the whole repository; allow the
+    # hosted job enough time to finish without changing the PR diff gate.
+    timeout-minutes: 60
     permissions:
       checks: write
       contents: read
@@ -32,4 +36,6 @@ jobs:
       - name: Trunk Check
         uses: trunk-io/trunk-action@e1234e67a86010d61ddac8d8ebf4b783e2ffd2fa # v2.0.0
         with:
-          check-mode: all
+          # Pull requests use Trunk's diff mode; pushes to main and the daily
+          # scheduled run perform the full repository check.
+          check-mode: ${{ (github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'all' || '' }}
