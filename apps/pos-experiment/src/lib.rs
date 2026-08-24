@@ -5628,7 +5628,6 @@ mod tests {
         experiment.register(&plugin, None, None).test_ok();
         let session = experiment.start().test_ok();
         let timeline_id = session.timeline().id();
-        let mut stage = "start";
         let subject = EntityId::new();
         let authority = ConsentAuthority::new();
         let token = authority.record_grant_on_timeline(
@@ -5649,8 +5648,7 @@ mod tests {
         let mut session = session
             .with_consent_authority(authority.clone())
             .with_protected_token(token.clone(), 0);
-        assert_eq!(session.append_events(&[]).test_ok(), 0, "stage={stage}");
-        stage = "empty-append";
+        assert_eq!(session.append_events(&[]).test_ok(), 0);
         assert_eq!(
             session
                 .append_events(&[EventDraft::new(
@@ -5659,32 +5657,22 @@ mod tests {
                     CanonicalBytes::from_static(b"unit"),
                 )])
                 .test_ok(),
-            1,
-            "stage={stage}"
+            1
         );
-        stage = "event-append";
-        assert_eq!(session.source_events().test_ok().len(), 1, "stage={stage}");
-        assert!(
-            session
-                .projection_state_for_reducer("missing", subject, &token, current_now_secs())
-                .test_ok()
-                .is_none(),
-            "stage={stage}"
-        );
-        stage = "projection-before-revoke";
+        assert_eq!(session.source_events().test_ok().len(), 1);
+        assert!(session
+            .projection_state_for_reducer("missing", subject, &token, current_now_secs())
+            .test_ok()
+            .is_none());
 
         session.revoke_consent_for_subject_at_boundary(subject);
-        assert!(
-            matches!(
-                session.step_tick(),
-                Ok(TickOutcome::Advanced {
-                    emitted_events: 1,
-                    ..
-                })
-            ),
-            "stage={stage}"
-        );
-        stage = "revoke-step";
+        assert!(matches!(
+            session.step_tick(),
+            Ok(TickOutcome::Advanced {
+                emitted_events: 1,
+                ..
+            })
+        ));
         drop(session);
 
         let resumed_plugin = TestPlugin {
@@ -5705,7 +5693,6 @@ mod tests {
             .with_consent_authority(authority)
             .resume(timeline_id)
             .test_ok();
-        stage = "resume";
         let projection =
             resumed.projection_state_for_reducer("missing", subject, &token, current_now_secs());
         let projection_debug = format!("{projection:?}");
@@ -5716,7 +5703,7 @@ mod tests {
                     pos_core::ConsentError::Revoked
                 )))
             ),
-            "stage={stage} projection={projection_debug}"
+            "projection={projection_debug}"
         );
     }
 
