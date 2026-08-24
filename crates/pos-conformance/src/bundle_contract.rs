@@ -1125,7 +1125,7 @@ mod tests {
         missing_member.manifest.expected_results[0].member_path = "expected/missing".to_owned();
         assert_eq!(
             missing_member.validate(),
-            Err(BundleContractErrorV1::MemberMissing)
+            Err(BundleContractErrorV1::UndeclaredMember)
         );
         Ok(())
     }
