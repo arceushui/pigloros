@@ -11178,3 +11178,160 @@ mod coverage_entrypoints {
         );
     }
 }
+
+#[cfg(all(test, feature = "sqlite"))]
+mod key_registry_coverage {
+    use super::*;
+    use pos_core::{
+        CanonicalBytes, EntityId, Event, EventDraft, EventId, EventStore, KeyRegistrationV1,
+        PublicKey,
+    };
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn registered_state(
+    ) -> Result<(KeyRegistryStateV1, KeyIdentityV1, Hash), Box<dyn std::error::Error>> {
+        let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+        let material_digest = Hash::from_bytes([3; 32]);
+        let mut registry = KeyRegistryStateV1::new();
+        registry.register_key(KeyRegistrationV1::new(
+            identity,
+            material_digest,
+            Some(PublicKey::from_bytes([4; 32])),
+        ))?;
+        Ok((registry, identity, material_digest))
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn seed_event(store: &mut SqliteStore, timeline: TimelineId) -> Result<Event, CoreError> {
+        store
+            .append(
+                timeline,
+                &[EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("registry.coverage"),
+                    CanonicalBytes::from_static(b"seed"),
+                )],
+            )?
+            .into_iter()
+            .next()
+            .ok_or_else(|| CoreError::Storage("seed append returned no event".to_owned()))
+    }
+
+    #[test]
+    fn sqlite_key_registry_public_paths_are_instrumented() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (registry, identity, material_digest) = registered_state()?;
+        let mut store = SqliteStore::open_in_memory()?;
+        assert!(store.load_key_registry()?.is_none());
+        store.save_key_registry(&registry)?;
+        assert_eq!(store.load_key_registry()?, Some(registry.clone()));
+
+        let timeline = store.create_timeline("registry-coverage")?;
+        let mut event = seed_event(&mut store, timeline.id())?;
+        event.id = EventId::new();
+        let mut callback = move |_registry: &KeyRegistryStateV1, seq: Seq| {
+            event.seq = seq;
+            Ok::<Event, CoreError>(event.clone())
+        };
+        store.append_signed_authorized(timeline.id(), &registry, &mut callback)?;
+
+        let mut mismatch_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        assert!(matches!(
+            store.append_signed_authorized(
+                timeline.id(),
+                &KeyRegistryStateV1::new(),
+                &mut mismatch_callback,
+            ),
+            Err(CoreError::Storage(_))
+        ));
+
+        let mut missing_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        assert!(matches!(
+            store.append_signed_authorized(TimelineId::new(), &registry, &mut missing_callback,),
+            Err(CoreError::TimelineNotFound(_))
+        ));
+
+        let mut callback_failure = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback failed".to_owned()))
+        };
+        assert!(matches!(
+            store.append_signed_authorized(timeline.id(), &registry, &mut callback_failure),
+            Err(CoreError::Storage(_))
+        ));
+
+        let invalid_request = KeyDestructionRequestV1::new(
+            identity,
+            Hash::from_bytes([9; 32]),
+            Hash::from_bytes([2; 32]),
+        );
+        assert!(matches!(
+            store.destroy_key_registry(invalid_request),
+            Err(CoreError::Storage(_))
+        ));
+
+        let valid_request =
+            KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([2; 32]));
+        let (_, destroyed) = store.destroy_key_registry(valid_request)?;
+        assert!(destroyed.key_record(identity).is_some());
+
+        let mut missing_registry = SqliteStore::open_in_memory()?;
+        let missing_timeline = missing_registry.create_timeline("missing-registry")?;
+        let mut missing_registry_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        assert!(matches!(
+            missing_registry.append_signed_authorized(
+                missing_timeline.id(),
+                &registry,
+                &mut missing_registry_callback,
+            ),
+            Err(CoreError::Storage(_))
+        ));
+        assert!(matches!(
+            missing_registry.destroy_key_registry(KeyDestructionRequestV1::new(
+                identity,
+                material_digest,
+                Hash::from_bytes([2; 32]),
+            )),
+            Err(CoreError::Storage(_))
+        ));
+
+        let mut begin_failure = SqliteStore::open_in_memory()?;
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
+        let mut begin_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        assert!(matches!(
+            begin_failure.append_signed_authorized(
+                TimelineId::new(),
+                &registry,
+                &mut begin_callback,
+            ),
+            Err(CoreError::Storage(_))
+        ));
+        assert!(matches!(
+            begin_failure.destroy_key_registry(KeyDestructionRequestV1::new(
+                identity,
+                material_digest,
+                Hash::from_bytes([2; 32]),
+            )),
+            Err(CoreError::Storage(_))
+        ));
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
+
+        let malformed = SqliteStore::open_in_memory()?;
+        malformed.conn.execute(
+            "INSERT INTO key_registry (singleton, state_cbor) VALUES (1, X'01')",
+            [],
+        )?;
+        assert!(matches!(
+            malformed.load_key_registry(),
+            Err(CoreError::Serialization(_))
+        ));
+        Ok(())
+    }
+}
