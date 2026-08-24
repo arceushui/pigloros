@@ -276,14 +276,9 @@ impl ConformanceBundleV1 {
         let profile_bytes = profile
             .to_canonical_cbor()
             .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
-        members.push(BundleMemberV1::new(
-            PROFILE_MEMBER_PATH,
-            profile_bytes,
-            false,
-        ));
-        if let Some(profile_member) = members.last_mut() {
-            profile_member.role = BundleMemberRoleV1::Profile;
-        }
+        let mut profile_member = BundleMemberV1::new(PROFILE_MEMBER_PATH, profile_bytes, false);
+        profile_member.role = BundleMemberRoleV1::Profile;
+        members.push(profile_member);
         let mut bundle = Self {
             manifest: BundleManifestV1 {
                 magic: CONFORMANCE_BUNDLE_MAGIC_V1.to_owned(),
@@ -430,9 +425,7 @@ impl ConformanceBundleV1 {
                 return Err(BundleContractErrorV1::MemberDigestMismatch);
             }
             validate_member_size(member.bytes.len() as u64)?;
-            total_bytes = total_bytes
-                .checked_add(descriptor.size_bytes)
-                .ok_or(BundleContractErrorV1::MemberOutOfBounds)?;
+            total_bytes = total_bytes.saturating_add(descriptor.size_bytes);
             if contains_secret_marker(&member.bytes) {
                 return Err(BundleContractErrorV1::SecretMaterialDetected);
             }
@@ -1449,9 +1442,8 @@ fn validate_selected_bundle_caps(
         {
             return Err(BundleContractErrorV1::MemberOutOfBounds);
         }
-        total_bytes = total_bytes
-            .checked_add(u64::try_from(member.bytes.len()).unwrap_or(u64::MAX))
-            .ok_or(BundleContractErrorV1::MemberOutOfBounds)?;
+        total_bytes =
+            total_bytes.saturating_add(u64::try_from(member.bytes.len()).unwrap_or(u64::MAX));
     }
     if total_bytes > caps.max_total_bundle_bytes {
         return Err(BundleContractErrorV1::MemberOutOfBounds);
@@ -3310,6 +3302,104 @@ mod tests {
             .collect();
         let expected_error = validate_expected_results(&network_profile, &manifest, &members);
         assert_eq!(expected_error, Err(BundleContractErrorV1::AirGappedNetwork));
+        Ok(())
+    }
+
+    fn replace_array_field(value: &Value, index: usize, replacement: Value) -> Value {
+        let Value::Array(mut fields) = value.clone() else {
+            panic!("expected array");
+        };
+        fields[index] = replacement;
+        Value::Array(fields)
+    }
+
+    fn replace_member_field(value: &Value, index: usize, replacement: Value) -> Value {
+        let Value::Array(mut fields) = value.clone() else {
+            panic!("expected manifest array");
+        };
+        let Value::Array(members) = &mut fields[4] else {
+            panic!("expected member array");
+        };
+        let Value::Array(member) = &mut members[0] else {
+            panic!("expected member fields");
+        };
+        member[index] = replacement;
+        Value::Array(fields)
+    }
+
+    fn replace_expected_field(value: &Value, index: usize, replacement: Value) -> Value {
+        let Value::Array(mut fields) = value.clone() else {
+            panic!("expected manifest array");
+        };
+        let Value::Array(expected_results) = &mut fields[5] else {
+            panic!("expected result array");
+        };
+        let Value::Array(expected) = &mut expected_results[0] else {
+            panic!("expected result fields");
+        };
+        expected[index] = replacement;
+        Value::Array(fields)
+    }
+
+    #[test]
+    fn archive_decoder_rejection_matrix_is_exercised() -> Result<(), Box<dyn std::error::Error>> {
+        let profile = profile();
+        let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
+        let manifest = manifest_value(&bundle.manifest);
+        for (index, replacement) in [
+            (0, Value::Null),
+            (1, Value::Integer(99_u64.into())),
+            (2, Value::Integer(99_u64.into())),
+            (3, Value::Null),
+        ] {
+            assert!(decode_manifest(&replace_array_field(&manifest, index, replacement)).is_err());
+        }
+        assert!(decode_manifest(&replace_array_field(&manifest, 4, Value::Null)).is_err());
+        assert!(decode_manifest(&replace_array_field(&manifest, 5, Value::Null)).is_err());
+        assert!(decode_manifest(&replace_member_field(&manifest, 0, Value::Null)).is_err());
+        assert!(decode_manifest(&replace_member_field(
+            &manifest,
+            1,
+            Value::Integer((-1_i64).into()),
+        ))
+        .is_err());
+        assert!(decode_manifest(&replace_member_field(&manifest, 2, Value::Null)).is_err());
+        assert!(decode_manifest(&replace_member_field(
+            &manifest,
+            3,
+            Value::Integer(99_u64.into()),
+        ))
+        .is_err());
+        assert!(decode_manifest(&replace_expected_field(&manifest, 0, Value::Null)).is_err());
+        assert!(decode_manifest(&replace_expected_field(
+            &manifest,
+            1,
+            Value::Integer(99_u64.into()),
+        ))
+        .is_err());
+        assert!(decode_manifest(&replace_expected_field(&manifest, 2, Value::Null)).is_err());
+        assert!(decode_manifest(&replace_expected_field(
+            &manifest,
+            3,
+            Value::Integer(99_u64.into()),
+        ))
+        .is_err());
+        assert!(decode_manifest(&replace_expected_field(&manifest, 4, Value::Null)).is_err());
+        assert!(decode_manifest(&replace_expected_field(&manifest, 5, Value::Null)).is_err());
+
+        let mut member_fields = vec![
+            Value::Text("member".to_owned()),
+            Value::Bytes(vec![1]),
+            Value::Integer(0_u64.into()),
+        ];
+        member_fields[0] = Value::Null;
+        assert!(decode_member(&Value::Array(member_fields.clone())).is_err());
+        member_fields[0] = Value::Text("member".to_owned());
+        member_fields[1] = Value::Null;
+        assert!(decode_member(&Value::Array(member_fields.clone())).is_err());
+        member_fields[1] = Value::Bytes(vec![1]);
+        member_fields[2] = Value::Integer(99_u64.into());
+        assert!(decode_member(&Value::Array(member_fields)).is_err());
         Ok(())
     }
 }
