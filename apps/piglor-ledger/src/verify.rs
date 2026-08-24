@@ -9,8 +9,7 @@
 
 use std::path::Path;
 
-use pos_core::store::SeqRange;
-use pos_core::KeyRoleV1;
+use pos_core::{event::Event, store::SeqRange, KeyRegistryStateV1, KeyRoleV1};
 use pos_crypto::{key_roles::verify_for_role, signing::verifying_key_from_public_key};
 use pos_plugin_ledger::EVENT_TYPE_PREDICTION;
 
@@ -164,17 +163,7 @@ fn collect_hashes(dir: &Path) -> Result<Vec<(String, String)>, CliError> {
 }
 
 fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, CliError> {
-    let supplied_public_key = pubkey_hex
-        .map(|pubkey_hex| -> Result<pos_core::PublicKey, CliError> {
-            let pubkey_bytes =
-                hex_decode(pubkey_hex).map_err(|e| CliError::BadKey(format!("--pubkey: {e}")))?;
-            let arr: [u8; 32] = pubkey_bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| CliError::BadKey("--pubkey must be 32 bytes".to_owned()))?;
-            Ok(pos_core::PublicKey::from_bytes(arr))
-        })
-        .transpose()?;
+    let supplied_public_key = parse_supplied_public_key(pubkey_hex)?;
 
     let store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
         path: db.to_string_lossy().into_owned(),
@@ -183,11 +172,11 @@ fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, Cli
     let registry = store
         .load_key_registry()
         .map_err(|e| CliError::BadSource(e.to_string()))?;
-    if registry.is_none() {
+    let Some(registry) = registry else {
         return Err(CliError::BadSource(
             "store verification requires a persisted role/epoch registry".to_owned(),
         ));
-    }
+    };
     let timeline = store
         .list_timelines()?
         .into_iter()
@@ -196,74 +185,11 @@ fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, Cli
     let events = store.read(timeline.id(), SeqRange::all())?;
     let n = events.len();
     for event in &events {
-        if event.event_type.as_str() != EVENT_TYPE_PREDICTION
-            && event.event_type.as_str() != pos_plugin_ledger::EVENT_TYPE_OUTCOME
-        {
-            continue;
-        }
-        let Some(sig) = &event.signature else {
+        if let Some((which, reason)) = verify_store_event(event, supplied_public_key, &registry)? {
             return Ok(VerifyReport {
                 tier: "store".to_owned(),
                 n,
-                outcome: VerifyOutcome::Mismatch {
-                    which: format!("seq={}", event.seq.as_u64()),
-                    reason: "event is unsigned".to_owned(),
-                },
-            });
-        };
-        let Some(identity) = event.signature_identity else {
-            return Ok(VerifyReport {
-                tier: "store".to_owned(),
-                n,
-                outcome: VerifyOutcome::Mismatch {
-                    which: format!("seq={}", event.seq.as_u64()),
-                    reason: "event signature identity is missing".to_owned(),
-                },
-            });
-        };
-        if identity.role != KeyRoleV1::TimelineIntegritySigning {
-            return Ok(VerifyReport {
-                tier: "store".to_owned(),
-                n,
-                outcome: VerifyOutcome::Mismatch {
-                    which: format!("seq={}", event.seq.as_u64()),
-                    reason: "event signature role is not TimelineIntegritySigning".to_owned(),
-                },
-            });
-        }
-        let registry_public_key = registry
-            .as_ref()
-            .and_then(|state| state.key_record(identity))
-            .and_then(|record| record.public_verification_key);
-        if let (Some(supplied), Some(registered)) = (supplied_public_key, registry_public_key) {
-            if supplied != registered {
-                return Ok(VerifyReport {
-                    tier: "store".to_owned(),
-                    n,
-                    outcome: VerifyOutcome::Mismatch {
-                        which: format!("seq={}", event.seq.as_u64()),
-                        reason: "supplied public key does not match the persisted registry"
-                            .to_owned(),
-                    },
-                });
-            }
-        }
-        let public_key = registry_public_key.ok_or_else(|| {
-            CliError::BadSource(
-                "store verification has no public key for event identity".to_owned(),
-            )
-        })?;
-        let vk = verifying_key_from_public_key(&public_key)
-            .map_err(|e| CliError::BadKey(e.to_string()))?;
-        if let Err(error) = verify_for_role(&vk, identity.role, identity.epoch, &event.payload, sig)
-        {
-            return Ok(VerifyReport {
-                tier: "store".to_owned(),
-                n,
-                outcome: VerifyOutcome::Mismatch {
-                    which: format!("seq={}", event.seq.as_u64()),
-                    reason: error.to_string(),
-                },
+                outcome: VerifyOutcome::Mismatch { which, reason },
             });
         }
     }
@@ -272,6 +198,76 @@ fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, Cli
         n,
         outcome: VerifyOutcome::Ok,
     })
+}
+
+fn parse_supplied_public_key(
+    pubkey_hex: Option<&str>,
+) -> Result<Option<pos_core::PublicKey>, CliError> {
+    pubkey_hex
+        .map(|value| {
+            let bytes = hex_decode(value)
+                .map_err(|error| CliError::BadKey(format!("--pubkey: {error}")))?;
+            let array: [u8; 32] = bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| CliError::BadKey("--pubkey must be 32 bytes".to_owned()))?;
+            Ok(pos_core::PublicKey::from_bytes(array))
+        })
+        .transpose()
+}
+
+fn verify_store_event(
+    event: &Event,
+    supplied_public_key: Option<pos_core::PublicKey>,
+    registry: &KeyRegistryStateV1,
+) -> Result<Option<(String, String)>, CliError> {
+    if event.event_type.as_str() != EVENT_TYPE_PREDICTION
+        && event.event_type.as_str() != pos_plugin_ledger::EVENT_TYPE_OUTCOME
+    {
+        return Ok(None);
+    }
+    let which = format!("seq={}", event.seq.as_u64());
+    let Some(signature) = &event.signature else {
+        return Ok(Some((which, "event is unsigned".to_owned())));
+    };
+    let Some(identity) = event.signature_identity else {
+        return Ok(Some((
+            which,
+            "event signature identity is missing".to_owned(),
+        )));
+    };
+    if identity.role != KeyRoleV1::TimelineIntegritySigning {
+        return Ok(Some((
+            which,
+            "event signature role is not TimelineIntegritySigning".to_owned(),
+        )));
+    }
+    let registry_public_key = registry
+        .key_record(identity)
+        .and_then(|record| record.public_verification_key);
+    if let (Some(supplied), Some(registered)) = (supplied_public_key, registry_public_key) {
+        if supplied != registered {
+            return Ok(Some((
+                which,
+                "supplied public key does not match the persisted registry".to_owned(),
+            )));
+        }
+    }
+    let public_key = registry_public_key.ok_or_else(|| {
+        CliError::BadSource("store verification has no public key for event identity".to_owned())
+    })?;
+    let verifying_key = verifying_key_from_public_key(&public_key)
+        .map_err(|error| CliError::BadKey(error.to_string()))?;
+    if let Err(error) = verify_for_role(
+        &verifying_key,
+        identity.role,
+        identity.epoch,
+        &event.payload,
+        signature,
+    ) {
+        return Ok(Some((which, error.to_string())));
+    }
+    Ok(None)
 }
 
 #[cfg(test)]

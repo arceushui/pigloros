@@ -9144,7 +9144,7 @@ mod tests {
             .contains("transaction commit failed"));
         conn.commit_hook::<fn() -> bool>(None).test_ok();
 
-        let rollback_error = finish_immediate_transaction(
+        let rollback_error = finish_immediate_transaction::<()>(
             &conn,
             Err(CoreError::Storage("operation failed".to_owned())),
         )

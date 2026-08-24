@@ -63,7 +63,7 @@ fn load_signing_key(path: &Path) -> Result<ed25519_dalek::SigningKey, CliError> 
     Ok(ed25519_dalek::SigningKey::from_bytes(&arr))
 }
 
-pub(crate) fn ledger_signing_registry(
+fn ledger_signing_registry(
     signing_key: &ed25519_dalek::SigningKey,
 ) -> Result<(Arc<Mutex<KeyRegistryStateV1>>, KeyIdentityV1), CliError> {
     let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
