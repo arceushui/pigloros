@@ -84,6 +84,24 @@ impl Driver for EmptyDriver {
     }
 }
 
+struct CadencedDraftDriver {
+    entity: EntityId,
+}
+
+impl Driver for CadencedDraftDriver {
+    fn name(&self) -> &'static str {
+        "cadenced-draft"
+    }
+
+    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
+        Ok(StepOutput::new(vec![EventDraft::new(
+            self.entity,
+            Kind::new("runtime.public.cadence"),
+            CanonicalBytes::from_static(b"cadence"),
+        )]))
+    }
+}
+
 impl Driver for SubscribedDriver {
     fn name(&self) -> &'static str {
         "subscribed"
@@ -494,4 +512,20 @@ fn public_registry_recovery_and_unprotected_transactions_run() {
         test_err(projection_registry.step_all_anchored(timeline, Seq::ZERO)),
         RuntimeError::Consent(ConsentError::NoConsent)
     ));
+}
+
+#[test]
+fn public_cadence_executes_driver_output_through_the_consent_boundary() {
+    let timeline = TimelineId::new();
+    let entity = EntityId::new();
+    let mut registry = PluginRegistry::new();
+    registry.register_driver(Box::new(CadencedDraftDriver { entity }));
+
+    let drafts = test_ok(registry.tick_cadenced(timeline, 0));
+    assert_eq!(drafts.len(), 1);
+    assert_eq!(drafts[0].entity, entity);
+    assert_eq!(drafts[0].event_type.as_str(), "runtime.public.cadence");
+
+    let drafts = test_ok(registry.tick_cadenced(timeline, 1));
+    assert!(drafts.is_empty());
 }
