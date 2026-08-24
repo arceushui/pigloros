@@ -9143,14 +9143,18 @@ mod tests {
         conn.commit_hook(Some(|| true)).test_ok();
         let commit_error = finish_immediate_transaction::<()>(&conn, Ok(())).test_err();
         assert!(matches!(commit_error, CoreError::Storage(_)));
-        conn.commit_hook::<fn() -> bool>(None).test_ok();
+        assert!(commit_error
+            .to_string()
+            .contains("transaction commit failed"));
 
+        let rollback_conn = Connection::open_in_memory().test_ok();
         let rollback_error = finish_immediate_transaction::<()>(
-            &conn,
+            &rollback_conn,
             Err(CoreError::Storage("operation failed".to_owned())),
         )
         .test_err();
         assert!(matches!(rollback_error, CoreError::Storage(_)));
+        assert!(rollback_error.to_string().contains("rollback failed"));
     }
 
     #[test]
