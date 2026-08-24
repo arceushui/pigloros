@@ -3497,7 +3497,6 @@ mod tests {
 
 #[cfg(test)]
 mod key_registry_coverage {
-    use super::*;
     use crate::{
         clock::{Seq, WallTime},
         crypto::Hash,
