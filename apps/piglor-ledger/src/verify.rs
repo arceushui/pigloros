@@ -684,13 +684,13 @@ mod tests {
         // Scan 1..=255 until we find a byte pattern that is an invalid Ed25519
         // compressed point. The scan always succeeds because not all 32-byte
         // sequences are valid curve points.
-        let invalid_hex = (1u8..=255)
+        let invalid_byte = (1u8..=255)
             .find(|&candidate| {
                 let pk = PublicKey::from_bytes([candidate; 32]);
                 verifying_key_from_public_key(&pk).is_err()
             })
-            .map(|c| format!("{c:02x}").repeat(32))
             .test_ok()?;
+        let invalid_hex = format!("{invalid_byte:02x}").repeat(32);
 
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
@@ -725,6 +725,22 @@ mod tests {
             "https://osf.io/example".into(),
         ])
         .test_ok()?;
+        let identity =
+            pos_core::KeyIdentityV1::new(pos_core::KeyRoleV1::TimelineIntegritySigning, 1);
+        let mut invalid_registry = pos_core::KeyRegistryStateV1::new();
+        invalid_registry
+            .register_key(pos_core::KeyRegistrationV1::new(
+                identity,
+                pos_core::Hash::from_bytes([1; 32]),
+                Some(PublicKey::from_bytes([invalid_byte; 32])),
+            ))
+            .test_ok()?;
+        let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+            path: db.to_string_lossy().into_owned(),
+        })
+        .test_ok()?;
+        store.save_key_registry(&invalid_registry).test_ok()?;
+        drop(store);
         let err = run(&Source::Store(db), Some(&invalid_hex), None).test_err()?;
         assert!(err.to_string().contains("invalid --key"), "{err}");
 

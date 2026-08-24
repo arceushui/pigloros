@@ -437,6 +437,11 @@ impl KeyRegistryStateV1 {
     /// The reference state machine is synchronous, so its mutable borrow
     /// covers validation and the callback as one operation.  Durable adapters
     /// must provide the equivalent transaction or lock boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed [`KeyRegistryErrorV1`] when the identity is invalid,
+    /// inactive, destroyed, or does not match the registered key material.
     pub fn with_signing_authorization<T, F>(
         &mut self,
         identity: KeyIdentityV1,
@@ -621,6 +626,25 @@ mod tests {
         )
     }
 
+    fn assert_signing_error(
+        registry: &mut KeyRegistryStateV1,
+        identity: KeyIdentityV1,
+        material: u8,
+        public_key: u8,
+        expected: KeyRegistryErrorV1,
+    ) {
+        assert_eq!(
+            KeyRegistrySigningPortV1::with_signing_authorization(
+                registry,
+                identity,
+                digest(material),
+                PublicKey::from_bytes([public_key; 32]),
+                || (),
+            ),
+            Err(expected)
+        );
+    }
+
     #[test]
     fn role_codes_are_closed_and_distinct() {
         for role in [
@@ -684,80 +708,53 @@ mod tests {
         assert!(!called);
         assert_eq!(registry, before_mismatch);
 
-        assert_eq!(
-            KeyRegistrySigningPortV1::with_signing_authorization(
-                &mut registry,
-                ATTRIBUTION,
-                digest(2),
-                PublicKey::from_bytes([9; 32]),
-                || (),
-            ),
-            Err(KeyRegistryErrorV1::SigningKeyMismatch)
+        assert_signing_error(
+            &mut registry,
+            ATTRIBUTION,
+            2,
+            9,
+            KeyRegistryErrorV1::SigningKeyMismatch,
         );
-        assert_eq!(
-            KeyRegistrySigningPortV1::with_signing_authorization(
-                &mut registry,
-                KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 0),
-                digest(2),
-                PublicKey::from_bytes([2; 32]),
-                || (),
-            ),
-            Err(KeyRegistryErrorV1::InvalidEpoch)
+        assert_signing_error(
+            &mut registry,
+            KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 0),
+            2,
+            2,
+            KeyRegistryErrorV1::InvalidEpoch,
         );
-        assert_eq!(
-            KeyRegistrySigningPortV1::with_signing_authorization(
-                &mut registry,
-                DATA,
-                digest(2),
-                PublicKey::from_bytes([2; 32]),
-                || (),
-            ),
-            Err(KeyRegistryErrorV1::SigningRoleRequired)
+        assert_signing_error(
+            &mut registry,
+            DATA,
+            2,
+            2,
+            KeyRegistryErrorV1::SigningRoleRequired,
         );
-        assert_eq!(
-            KeyRegistrySigningPortV1::with_signing_authorization(
-                &mut registry,
-                KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 9),
-                digest(2),
-                PublicKey::from_bytes([2; 32]),
-                || (),
-            ),
-            Err(KeyRegistryErrorV1::NotFound)
+        assert_signing_error(
+            &mut registry,
+            KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 9),
+            2,
+            2,
+            KeyRegistryErrorV1::NotFound,
         );
 
         let next = KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 2);
         registry.register_key(signing_registration(next, 4))?;
-        assert_eq!(
-            KeyRegistrySigningPortV1::with_signing_authorization(
-                &mut registry,
-                ATTRIBUTION,
-                digest(2),
-                PublicKey::from_bytes([2; 32]),
-                || (),
-            ),
-            Err(KeyRegistryErrorV1::InactiveKey)
+        assert_signing_error(
+            &mut registry,
+            ATTRIBUTION,
+            2,
+            2,
+            KeyRegistryErrorV1::InactiveKey,
         );
 
         registry.destroy_key(KeyDestructionRequestV1::new(next, digest(4), digest(5)))?;
-        assert_eq!(
-            KeyRegistrySigningPortV1::with_signing_authorization(
-                &mut registry,
-                next,
-                digest(4),
-                PublicKey::from_bytes([4; 32]),
-                || (),
-            ),
-            Err(KeyRegistryErrorV1::Destroyed)
-        );
-        assert_eq!(
-            KeyRegistrySigningPortV1::with_signing_authorization(
-                &mut registry,
-                ATTRIBUTION,
-                digest(2),
-                PublicKey::from_bytes([2; 32]),
-                || (),
-            ),
-            Err(KeyRegistryErrorV1::InactiveKey)
+        assert_signing_error(&mut registry, next, 4, 4, KeyRegistryErrorV1::Destroyed);
+        assert_signing_error(
+            &mut registry,
+            ATTRIBUTION,
+            2,
+            2,
+            KeyRegistryErrorV1::InactiveKey,
         );
         Ok(())
     }

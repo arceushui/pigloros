@@ -793,7 +793,7 @@ pub trait EventStore: Send {
     ///
     /// Durable stores must hold their database-wide serialization boundary across
     /// both the registry recheck and the event append.  The default is a closed
-    /// snapshot check for small in-memory adapters; SQLite overrides it with one
+    /// snapshot check for small in-memory adapters; `SQLite` overrides it with one
     /// transaction so another connection cannot destroy the key between the
     /// authorization callback and append.
     ///
@@ -825,7 +825,7 @@ pub trait EventStore: Send {
     ///
     /// Durable stores must serialize destruction with authorized appends.  The
     /// default implementation composes the existing snapshot operations for
-    /// adapters without a stronger transaction primitive; SQLite overrides it
+    /// adapters without a stronger transaction primitive; `SQLite` overrides it
     /// with one database transaction.
     ///
     /// # Errors
