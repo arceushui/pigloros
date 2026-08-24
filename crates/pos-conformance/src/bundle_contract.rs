@@ -3629,6 +3629,8 @@ mod coverage_entrypoints {
         assert!(super::archive_preflight::scan(&trailing).is_err());
         assert!(super::archive_preflight::scan(&[]).is_err());
         assert!(super::archive_preflight::scan(&[0x9b]).is_err());
+        assert!(super::archive_preflight::scan(&[0x86]).is_err());
+        assert!(super::archive_preflight::scan(&[0x86, 0x9b]).is_err());
         assert!(
             super::archive_preflight::scan(&raw_archive(&[0x60], &[0x81, 0x83, 0x60, 0x40],))
                 .is_err()
@@ -3783,7 +3785,9 @@ mod coverage_entrypoints {
         );
 
         let mut invalid_key = bundle.clone();
-        invalid_key.signer_public_key = PublicKey::from_bytes([0xff; 32]);
+        let mut invalid_key_bytes = [0_u8; 32];
+        invalid_key_bytes[31] = 0xff;
+        invalid_key.signer_public_key = PublicKey::from_bytes(invalid_key_bytes);
         assert_eq!(
             invalid_key.validate(),
             Err(BundleContractErrorV1::SignatureInvalid)
@@ -3824,6 +3828,24 @@ mod coverage_entrypoints {
         }
         assert_eq!(
             ConformanceBundleV1::from_canonical_cbor(&encode_archive_value(&bad_magic_value)?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+
+        let mut invalid_field_type = bundle_value(&bundle);
+        if let Value::Array(fields) = &mut invalid_field_type {
+            fields[0] = Value::Null;
+        }
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&encode_archive_value(&invalid_field_type)?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+
+        let mut invalid_manifest = bundle_value(&bundle);
+        if let Value::Array(fields) = &mut invalid_manifest {
+            fields[2] = Value::Null;
+        }
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&encode_archive_value(&invalid_manifest)?),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
         );
 
