@@ -44,28 +44,29 @@ impl TomlLedgerStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(LedgerError::Io(e)),
         };
-        let mut paths: Vec<PathBuf> = rd
+        let mut paths: Vec<(PathBuf, String)> = rd
             // Entries that fail mid-iteration are skipped: every collected
             // path is read explicitly below, so real files still surface
             // errors loudly — and no untestable branch remains (coverage
             // policy: delete, don't exempt).
             .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("toml"))
+            .filter_map(|entry| {
+                let path = entry.ok()?.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                    return None;
+                }
+                let stem = path.file_stem()?.to_string_lossy().into_owned();
+                Some((path, stem))
+            })
             .collect();
         paths.sort();
         let mut items = Vec::new();
-        for path in paths {
+        for (path, stem) in paths {
             let text = std::fs::read_to_string(&path)?;
             let value = toml::from_str::<T>(&text).map_err(|e| LedgerError::Toml {
                 path: path.display().to_string(),
                 reason: e.to_string(),
             })?;
-            // The extension filter above guarantees a filename stem.
-            let stem = path
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().into_owned())
-                .unwrap_or_default();
             items.push((stem, value));
         }
         Ok(items)
