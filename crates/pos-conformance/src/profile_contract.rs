@@ -5177,7 +5177,7 @@ mod tests {
         assert_eq!(exact_diagnostic.validate_with_protocol(&protocol), Ok(()));
 
         let mut oversized_policy = trusted_root_policy();
-        oversized_policy.trusted_root_public_keys = (1_u8..=65).map(|seed| digest(seed)).collect();
+        oversized_policy.trusted_root_public_keys = (1_u8..=65).map(digest).collect();
         oversized_policy.trust_policy_snapshot_digest = oversized_policy.digest();
         assert_eq!(
             oversized_policy.validate(),
