@@ -770,7 +770,7 @@ async fn multi_rate_human_ai_replay_is_deterministic_impl(
     let session = experiment
         .resume(scenario.timeline)
         .test_ok()?
-        .with_protected_token(token.clone(), 0);
+        .with_protected_token(token.clone());
     let (session, pinned_wall_time) = run_tick_boundaries(&mut scenario, session).await?;
     let polled = poll_events(scenario.address, scenario.timeline).await?;
     assert_event_order(

@@ -108,13 +108,10 @@ pub(crate) fn ensure_non_geographic_drafts(
     drafts: &[EventDraft],
     timeline: TimelineId,
 ) -> Result<(), CoreError> {
-    match drafts
-        .iter()
-        .find(|draft| {
-            pos_core::is_geographic_event_type(&draft.event_type)
-                || pos_core::is_consent_event_type(&draft.event_type)
-        })
-    {
+    match drafts.iter().find(|draft| {
+        pos_core::is_geographic_event_type(&draft.event_type)
+            || pos_core::is_consent_event_type(&draft.event_type)
+    }) {
         Some(_) => Err(CoreError::TimelineNotFound(timeline)),
         None => Ok(()),
     }
@@ -129,8 +126,7 @@ pub(crate) fn ensure_gateway_consent_drafts(
         || drafts.iter().any(|draft| {
             !matches!(
                 draft.event_type.as_str(),
-                pos_core::EVENT_TYPE_CONSENT_GRANTED_V1
-                    | pos_core::EVENT_TYPE_CONSENT_REVOKED_V1
+                pos_core::EVENT_TYPE_CONSENT_GRANTED_V1 | pos_core::EVENT_TYPE_CONSENT_REVOKED_V1
             )
         })
     {
@@ -147,13 +143,10 @@ pub(crate) fn ensure_non_geographic_events(
     events: &[Event],
     timeline: TimelineId,
 ) -> Result<(), CoreError> {
-    match events
-        .iter()
-        .find(|event| {
-            pos_core::is_geographic_event_type(&event.event_type)
-                || pos_core::is_consent_event_type(&event.event_type)
-        })
-    {
+    match events.iter().find(|event| {
+        pos_core::is_geographic_event_type(&event.event_type)
+            || pos_core::is_consent_event_type(&event.event_type)
+    }) {
         Some(_) => Err(CoreError::TimelineNotFound(timeline)),
         None => Ok(()),
     }

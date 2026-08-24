@@ -904,7 +904,7 @@ fn protected_result_export_and_faulted_projection_fail_closed() {
         },
     );
     let result = session
-        .with_protected_token(token, 0)
+        .with_protected_token(token)
         .run_to_completion()
         .test_ok();
     assert!(matches!(
@@ -979,7 +979,7 @@ fn protected_result_export_succeeds_with_a_durable_authority() {
         },
     );
     let manifest = session
-        .with_protected_token(token, 0)
+        .with_protected_token(token)
         .run_to_completion()
         .test_ok()
         .into_reproduction_manifest(ReproductionRecipe::new(
@@ -1025,7 +1025,7 @@ fn protected_session_fork_succeeds_from_a_durable_timeline() {
             grant_seq: 1,
         },
     );
-    let mut protected = session.with_protected_token(token, 0);
+    let mut protected = session.with_protected_token(token);
     let child = protected.fork("protected-session-child").test_ok();
     assert_ne!(child.timeline().id(), parent_id);
 }

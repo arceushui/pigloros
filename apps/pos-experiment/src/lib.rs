@@ -1206,11 +1206,8 @@ impl ExperimentSession {
     }
 
     /// Bind a timeline-issued capability for protected Tick Boundaries.
-    ///
-    /// The legacy time argument is retained for source compatibility but is
-    /// not cached: every protected boundary samples the host clock afresh.
     #[must_use]
-    pub const fn with_protected_token(mut self, token: ConsentCapabilityToken, _: u64) -> Self {
+    pub const fn with_protected_token(mut self, token: ConsentCapabilityToken) -> Self {
         self.operation_token = Some(token);
         self
     }
@@ -1402,7 +1399,32 @@ impl ExperimentSession {
         proposal: &pos_core::ProposedAction,
     ) -> Result<u64, ExperimentError> {
         let draft = self.registry.submit_action(proposal)?;
-        self.append_events(std::slice::from_ref(&draft))
+        let Some(token) = self.operation_token.clone() else {
+            return self.append_events(std::slice::from_ref(&draft));
+        };
+        let gate = self
+            .registry
+            .clone_consent_gate()
+            .ok_or(ExperimentError::Runtime(
+                pos_runtime::RuntimeError::ConsentOperationUnavailable,
+            ))?;
+        let timeline_head =
+            lock_store(&self.store).and_then(|store| store.logical_head(self.timeline.id()))?;
+        let mut result = Err(ExperimentError::Runtime(
+            pos_runtime::RuntimeError::ConsentOperationUnavailable,
+        ));
+        let mut append = || {
+            result = self.append_events(std::slice::from_ref(&draft));
+        };
+        gate.with_token_fence(
+            self.timeline.id(),
+            &token,
+            timeline_head.as_u64(),
+            current_now_secs(),
+            &mut append,
+        )
+        .map_err(|error| map_runtime_error(pos_runtime::RuntimeError::Consent(error)))?;
+        result
     }
 
     /// Revoke the default session subject's consent at the next Tick Boundary.
@@ -2240,7 +2262,7 @@ mod tests {
         let token = authority.record_grant_on_timeline(session.timeline().id(), &grant);
         session
             .with_consent_authority(authority)
-            .with_protected_token(token, 0)
+            .with_protected_token(token)
     }
 
     trait TestErrorExt<E> {
@@ -2451,7 +2473,7 @@ mod tests {
         );
         let session = session
             .with_consent_authority(authority)
-            .with_protected_token(token.clone(), 0);
+            .with_protected_token(token.clone());
         assert!(matches!(
             session.projection_state_for_reducer("missing", subject_id, &token, 11),
             Err(ExperimentError::Runtime(
@@ -2488,7 +2510,7 @@ mod tests {
         );
         let mut session = session
             .with_consent_authority(authority.clone())
-            .with_protected_token(token.clone(), 0);
+            .with_protected_token(token.clone());
         session.revoke_consent_for_subject_at_boundary(subject_id);
         assert!(matches!(
             session.projection_state_for_reducer("missing", subject_id, &token, 0),
@@ -2705,6 +2727,42 @@ mod tests {
         );
 
         assert!(session.submit_action(&denied).is_err());
+        assert_eq!(session.submit_action(&proposal).test_ok(), 1);
+        assert_eq!(session.source_events().test_ok().len(), 1);
+    }
+
+    #[test]
+    fn protected_session_submit_action_holds_the_token_fence() {
+        let plugin = CompositionPlugin(CompositionPluginSpec {
+            id: PluginId::new(),
+            name: "protected-submit-plugin",
+            version: "1",
+            event_type: "protected.submit.event",
+        });
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "protected-submit-action".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        });
+        experiment
+            .register_with_approver(
+                &plugin,
+                None,
+                None,
+                Some(Box::new(AcceptingApprover)),
+                [Kind::new("protected.submit.event")],
+            )
+            .test_ok();
+        let session = experiment.start().test_ok();
+        let subject = EntityId::new();
+        let mut session = protect_session(session, subject);
+        let proposal = ProposedAction::new(
+            Kind::new("protected.submit.event"),
+            subject,
+            CanonicalBytes::from_static(b"protected-approved"),
+            Kind::new("protected.submit.event.submit"),
+        );
+
         assert_eq!(session.submit_action(&proposal).test_ok(), 1);
         assert_eq!(session.source_events().test_ok().len(), 1);
     }
@@ -5847,7 +5905,7 @@ mod tests {
         );
         session = session
             .with_consent_authority(authority)
-            .with_protected_token(token.clone(), 0);
+            .with_protected_token(token.clone());
         assert!(session
             .projection_state_for_reducer("missing", subject, &token, current_now_secs())
             .test_ok()
@@ -5895,7 +5953,7 @@ mod tests {
         );
         let mut session = session
             .with_consent_authority(authority.clone())
-            .with_protected_token(token.clone(), 0);
+            .with_protected_token(token.clone());
         assert_eq!(session.append_events(&[]).test_ok(), 0);
         assert_eq!(
             session
@@ -5974,7 +6032,7 @@ mod tests {
                 grant_seq: 1,
             },
         );
-        let mut session = session.with_protected_token(token, 0);
+        let mut session = session.with_protected_token(token);
         let child = session.fork("unit-protected-child").test_ok();
         assert_eq!(
             child.timeline().meta.name.as_deref(),
@@ -6679,7 +6737,7 @@ mod coverage_entrypoints {
                 grant_seq: 1,
             },
         );
-        let mut session = session.with_protected_token(token, 0);
+        let mut session = session.with_protected_token(token);
         expect_err(&session.fork("coverage-restore-child"));
     }
 
@@ -7016,7 +7074,7 @@ mod coverage_entrypoints {
                 grant_seq: 1,
             },
         );
-        let mut session = session.with_protected_token(token, 0);
+        let mut session = session.with_protected_token(token);
         let child = ok(session.fork("coverage-child"));
         assert_eq!(
             child.timeline().meta.name.as_deref(),
@@ -7049,7 +7107,7 @@ mod coverage_entrypoints {
                 grant_seq: 1,
             },
         );
-        let mut session = session.with_protected_token(token, 0);
+        let mut session = session.with_protected_token(token);
         assert!(matches!(
             session.fork("coverage-denied-child"),
             Err(ExperimentError::Runtime(RuntimeError::Consent(
@@ -8019,7 +8077,7 @@ mod fault_injection_tests {
             .start()
             .test_ok();
         let token = authority.record_grant_on_timeline(session.timeline().id(), &export_grant(1));
-        let mut session = session.with_protected_token(token, 0);
+        let mut session = session.with_protected_token(token);
         assert!(session.step_tick().is_err());
 
         let directory = tempfile::tempdir().test_ok();
@@ -8108,7 +8166,7 @@ mod fault_injection_tests {
             .test_ok();
         let token =
             authority.record_grant_on_timeline(session.timeline().id(), &branch_grant(true, 0));
-        let mut session = session.with_protected_token(token, 0);
+        let mut session = session.with_protected_token(token);
         assert!(session.fork("child").is_err());
 
         let authority = ConsentAuthority::new();
@@ -8119,7 +8177,7 @@ mod fault_injection_tests {
             .test_ok();
         let token =
             authority.record_grant_on_timeline(session.timeline().id(), &branch_grant(true, 1));
-        let mut session = session.with_protected_token(token, 0);
+        let mut session = session.with_protected_token(token);
         assert!(session.fork("child").is_err());
 
         let failing_store = FailLogicalHeadStore {

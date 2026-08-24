@@ -17,6 +17,7 @@ use ciborium::Value;
 
 use crate::{
     event::{CanonicalBytes, Kind},
+    erasure::ErasureReplayClaimV1,
     ids::{EntityId, TimelineId},
 };
 
@@ -422,15 +423,15 @@ pub struct ConsentRevokedV1 {
 impl ConsentRevokedV1 {
     /// Validate the Timeline coordinates carried by this V1 revocation.
     ///
-    /// A revocation is a durable Timeline event, so its fence coordinate must
-    /// not use the zero sentinel. The host's append fence separately verifies
-    /// that the coordinate is the next committed sequence.
+    /// A revocation is a durable Timeline event, so neither its grant nor its
+    /// fence coordinate may use the zero sentinel. The host's append fence
+    /// separately verifies that the fence is the next committed sequence.
     ///
     /// # Errors
     ///
-    /// Returns [`ConsentCodecError::FieldOutOfBounds`] when `fence_seq` is zero.
+    /// Returns [`ConsentCodecError::FieldOutOfBounds`] when either coordinate is zero.
     pub const fn validate(&self) -> Result<(), ConsentCodecError> {
-        if self.fence_seq == 0 {
+        if self.grant_seq == 0 || self.fence_seq == 0 {
             Err(ConsentCodecError::FieldOutOfBounds)
         } else {
             Ok(())
@@ -1301,21 +1302,47 @@ pub trait ConsentGate: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// FieldState — Replay sentinel for destroyed keys (ADR-039/ADR-060)
+// FieldStateV1 — Replay sentinel for destroyed keys (ADR-039/ADR-060)
 // ---------------------------------------------------------------------------
 
 /// Deterministic state of a protected field during replay.
 ///
 /// Key destruction is an expected consequence of consent revocation. Replay
-/// therefore returns [`FieldState::RedactedDestroyed`] instead of failing or
+/// therefore returns [`FieldStateV1::RedactedDestroyed`] instead of failing or
 /// manufacturing a value. The sentinel composes with ADR-060 claim
 /// degradation rules: it can only remove evidence, never strengthen it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FieldState {
+pub enum FieldStateV1 {
     /// The protected field remains available as canonical bytes.
     Present(CanonicalBytes),
     /// The field's data key was destroyed by the host's revocation lifecycle.
     RedactedDestroyed,
+}
+
+impl FieldStateV1 {
+    /// Apply the replay-evidence floor implied by this field state.
+    ///
+    /// A destroyed field key removes the field's authoritative bytes, so an
+    /// exact claim can only degrade to structural evidence. Existing weaker
+    /// claims and profile incompatibility remain unchanged.
+    #[must_use]
+    pub const fn weaken_replay_claim(
+        self,
+        current: ErasureReplayClaimV1,
+    ) -> ErasureReplayClaimV1 {
+        match self {
+            Self::Present(_) => current,
+            Self::RedactedDestroyed => match current {
+                ErasureReplayClaimV1::Exact
+                | ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews => {
+                    ErasureReplayClaimV1::StructuralOnly
+                }
+                ErasureReplayClaimV1::StructuralOnly
+                | ErasureReplayClaimV1::UnverifiableArtifactsMissing
+                | ErasureReplayClaimV1::IncompatibleProfile => current,
+            },
+        }
+    }
 }
 
 impl ConsentGate for ConsentAuthority {
@@ -1957,7 +1984,10 @@ mod tests {
             ]);
             CanonicalBytes::from_vec(cbor_encode(&arr).test_ok())
         };
-        assert_eq!(ConsentRevokedV1::decode(&bytes).test_err(), ConsentCodecError::FieldOutOfBounds);
+        assert_eq!(
+            ConsentRevokedV1::decode(&bytes).test_err(),
+            ConsentCodecError::FieldOutOfBounds
+        );
     }
 
     #[test]
@@ -3444,6 +3474,32 @@ mod tests {
             authority.validate_on_timeline(timeline, &second_token, 4, 0),
             Err(ConsentError::Revoked)
         );
+    }
+
+    #[test]
+    fn destroyed_field_state_weakens_replay_claim_without_upgrading_it() {
+        let present = FieldStateV1::Present(CanonicalBytes::from_static(b"value"));
+        assert_eq!(
+            present.weaken_replay_claim(ErasureReplayClaimV1::Exact),
+            ErasureReplayClaimV1::Exact
+        );
+
+        let destroyed = FieldStateV1::RedactedDestroyed;
+        assert_eq!(
+            destroyed.weaken_replay_claim(ErasureReplayClaimV1::Exact),
+            ErasureReplayClaimV1::StructuralOnly
+        );
+        assert_eq!(
+            destroyed.weaken_replay_claim(ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews),
+            ErasureReplayClaimV1::StructuralOnly
+        );
+        for claim in [
+            ErasureReplayClaimV1::StructuralOnly,
+            ErasureReplayClaimV1::UnverifiableArtifactsMissing,
+            ErasureReplayClaimV1::IncompatibleProfile,
+        ] {
+            assert_eq!(destroyed.weaken_replay_claim(claim), claim);
+        }
     }
 
     // -- Error display --
