@@ -6904,6 +6904,187 @@ pub mod tests {
     }
 
     #[test]
+    fn public_report_case_predicates_and_boundaries_are_fail_closed() {
+        let valid = test_report().cases[0].clone();
+        let assert_case_rejects = |case: CaseOutcomeV1| {
+            let mut keys = BTreeSet::new();
+            assert_eq!(
+                validate_conformance_case(&case, &mut keys),
+                Err(EvidenceError::InvalidConformanceReport)
+            );
+        };
+        let assert_case_accepts = |case: CaseOutcomeV1| {
+            let mut keys = BTreeSet::new();
+            assert_eq!(validate_conformance_case(&case, &mut keys), Ok(()));
+        };
+
+        let mut at_limit = valid.clone();
+        at_limit.case_id = "x".repeat(128);
+        at_limit.first_coordinate = Some(vec![b'x'; 128]);
+        assert_case_accepts(at_limit);
+        let mut too_long = valid.clone();
+        too_long.case_id = "x".repeat(129);
+        assert_case_rejects(too_long);
+        let mut too_long_coordinate = valid.clone();
+        too_long_coordinate.first_coordinate = Some(vec![b'x'; 129]);
+        assert_case_rejects(too_long_coordinate);
+
+        let duplicate = valid.clone();
+        let mut keys = BTreeSet::new();
+        assert!(keys.insert((
+            duplicate.case_id.as_str(),
+            duplicate.mode,
+            duplicate.claim_layer,
+            duplicate.fixture_digest,
+        )));
+        assert_eq!(
+            validate_conformance_case(&duplicate, &mut keys),
+            Err(EvidenceError::InvalidConformanceReport)
+        );
+
+        for invalid in [
+            {
+                let mut value = valid.clone();
+                value.case_id = "   ".to_owned();
+                value
+            },
+            {
+                let mut value = valid.clone();
+                value.fixture_digest = [0; 32];
+                value
+            },
+            {
+                let mut value = valid.clone();
+                value.execution_profile_digest = [0; 32];
+                value
+            },
+            {
+                let mut value = valid.clone();
+                value.provenance_digest = [0; 32];
+                value
+            },
+        ] {
+            assert_case_rejects(invalid);
+        }
+
+        let mut invalid_result = valid.clone();
+        invalid_result.expected_digest = None;
+        invalid_result.actual_digest = None;
+        assert!(!valid_conformance_case_result(&invalid_result));
+        assert_case_rejects(invalid_result.clone());
+
+        let mut mismatched_digest = valid.clone();
+        mismatched_digest.actual_digest = Some([15; 32]);
+        assert!(!valid_conformance_case_result(&mismatched_digest));
+        assert_case_rejects(mismatched_digest);
+
+        let mut mismatched_error = valid.clone();
+        mismatched_error.expected_digest = None;
+        mismatched_error.actual_digest = None;
+        mismatched_error.expected_error = Some(SafeErrorCodeV1::ClosureIncomplete);
+        mismatched_error.actual_error = None;
+        assert!(!valid_conformance_case_result(&mismatched_error));
+        assert_case_rejects(mismatched_error);
+
+        let mut coordinate_without_match = valid.clone();
+        coordinate_without_match.first_coordinate = Some(vec![1]);
+        assert!(!valid_conformance_case_result(&coordinate_without_match));
+        assert_case_rejects(coordinate_without_match);
+
+        for state in [
+            RedactionStateV1::StructuralOnly,
+            RedactionStateV1::EvidenceMissing,
+        ] {
+            let mut wrong_replay = valid.clone();
+            wrong_replay.redaction_state = state;
+            wrong_replay.replay_claim = ReplayClaimV1::Exact;
+            assert!(!valid_redacted_case(&wrong_replay));
+            assert_case_rejects(wrong_replay);
+        }
+
+        let mut structural = valid.clone();
+        structural.redaction_state = RedactionStateV1::StructuralOnly;
+        structural.replay_claim = ReplayClaimV1::StructuralOnly;
+        structural.expected_digest = None;
+        structural.actual_digest = None;
+        structural.expected_error = None;
+        structural.actual_error = None;
+        structural.first_coordinate = None;
+        assert!(valid_redacted_case(&structural));
+        let changes: [fn(&mut CaseOutcomeV1); 6] = [
+            |case: &mut CaseOutcomeV1| case.replay_claim = ReplayClaimV1::Exact,
+            |case: &mut CaseOutcomeV1| case.expected_digest = Some([1; 32]),
+            |case: &mut CaseOutcomeV1| case.actual_digest = Some([1; 32]),
+            |case: &mut CaseOutcomeV1| {
+                case.expected_error = Some(SafeErrorCodeV1::ClosureIncomplete)
+            },
+            |case: &mut CaseOutcomeV1| case.actual_error = Some(SafeErrorCodeV1::ClosureIncomplete),
+            |case: &mut CaseOutcomeV1| case.first_coordinate = Some(vec![1]),
+        ];
+        for change in changes {
+            let mut invalid = structural.clone();
+            change(&mut invalid);
+            assert!(!valid_redacted_case(&invalid));
+            assert_case_rejects(invalid);
+        }
+
+        let mut evidence_missing = structural;
+        evidence_missing.redaction_state = RedactionStateV1::EvidenceMissing;
+        evidence_missing.replay_claim = ReplayClaimV1::UnverifiableArtifactsMissing;
+        evidence_missing.outcome = CaseOutcomeStatusV1::Fail;
+        assert!(valid_redacted_case(&evidence_missing));
+        let mut missing_pass = evidence_missing.clone();
+        missing_pass.outcome = CaseOutcomeStatusV1::Pass;
+        assert!(!valid_redacted_case(&missing_pass));
+        assert_case_rejects(missing_pass);
+    }
+
+    #[test]
+    fn public_report_shape_boundaries_and_verifier_claims_are_exact() {
+        let mut at_limit = test_report();
+        at_limit.implementation.implementation_id = "x".repeat(128);
+        at_limit.implementation.organization_id = Some("o".repeat(128));
+        at_limit.independence.reviewer_ids = (0..32)
+            .map(|index| format!("reviewer-{index:02}"))
+            .collect();
+        at_limit.cases[0].case_id = "c".repeat(128);
+        at_limit.cases[0].first_coordinate = Some(vec![b'x'; 128]);
+        refresh_test_report(&mut at_limit);
+        assert_eq!(at_limit.validate(), Ok(()));
+        let encoded = at_limit.to_canonical_cbor().unwrap_or_default();
+        assert!(encoded.len() > 1_025);
+        assert_eq!(
+            ConformanceReportV1::from_canonical_cbor(&encoded),
+            Ok(at_limit)
+        );
+
+        let mut invalid = evidence();
+        invalid.manifest.replay_claim = ReplayClaimV1::StructuralOnly;
+        invalid.contract.conformance_report.replay_claim = ReplayClaimV1::Exact;
+        invalid.contract.counterfactual.replay_claim = ReplayClaimV1::StructuralOnly;
+        assert_eq!(
+            verify_conformance_report(&invalid),
+            Err(EvidenceError::InvalidConformanceReport)
+        );
+
+        let mut invalid = evidence();
+        invalid.manifest.replay_claim = ReplayClaimV1::StructuralOnly;
+        invalid.contract.conformance_report.replay_claim = ReplayClaimV1::StructuralOnly;
+        invalid.contract.counterfactual.replay_claim = ReplayClaimV1::Exact;
+        assert_eq!(
+            verify_conformance_report(&invalid),
+            Err(EvidenceError::InvalidConformanceReport)
+        );
+
+        let mut invalid = evidence();
+        invalid.manifest.execution_mode = ExecutionModeV1::Replay;
+        assert_eq!(
+            verify_conformance_report(&invalid),
+            Err(EvidenceError::InvalidConformanceReport)
+        );
+    }
+
+    #[test]
     fn public_cnr1_codec_validates_shape_and_fields_zero_through_twenty_two() {
         let report = test_report();
         let bytes = report.to_canonical_cbor().unwrap_or_default();

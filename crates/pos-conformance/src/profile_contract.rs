@@ -4894,6 +4894,182 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_request_authorities_are_revalidated_after_each_identity_change() {
+        let reject = |change: fn(&mut EvaluatorRequestV1)| {
+            let mut value = request();
+            change(&mut value);
+            value.output_capability.capability_digest = value.expected_output_capability_digest();
+            value.request_digest = value.digest();
+            assert!(value.validate().is_err());
+        };
+        reject(|value| value.conformance_profile_digest = [0; 32]);
+        reject(|value| value.fixture_bundle_digest = [0; 32]);
+        reject(|value| value.subject_artifact_digest = [0; 32]);
+        reject(|value| value.execution_profile_digest = [0; 32]);
+        reject(|value| value.trust_policy_snapshot_digest = [0; 32]);
+        reject(|value| value.evaluator_protocol_digest = [0; 32]);
+        reject(|value| value.evaluator_hard_caps_digest = [0; 32]);
+        reject(|value| value.output_capability.report_bytes_limit = 0);
+        reject(|value| value.output_capability.diagnostic_bytes_limit = MAX_DIAGNOSTIC_BYTES + 1);
+        let mut invalid_capability = request();
+        invalid_capability.output_capability.capability_digest = [0; 32];
+        invalid_capability.request_digest = invalid_capability.digest();
+        assert_eq!(
+            invalid_capability.validate(),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+
+        let value = request();
+        assert_ne!(value.expected_output_capability_digest(), [1; 32]);
+        assert_eq!(value.validate_against_profile(&profile()), Ok(()));
+
+        let reject_against_profile = |change: fn(&mut EvaluatorRequestV1)| {
+            let mut value = request();
+            change(&mut value);
+            value.output_capability.capability_digest = value.expected_output_capability_digest();
+            value.request_digest = value.digest();
+            assert!(value.validate_against_profile(&profile()).is_err());
+        };
+        reject_against_profile(|value| value.conformance_profile_digest = [99; 32]);
+        reject_against_profile(|value| value.fixture_bundle_digest = [99; 32]);
+        reject_against_profile(|value| value.trust_policy_snapshot_digest = [99; 32]);
+        reject_against_profile(|value| value.evaluator_protocol_digest = [99; 32]);
+        reject_against_profile(|value| value.evaluator_hard_caps_digest = [99; 32]);
+        reject_against_profile(|value| {
+            value.subject_adapter = SubjectAdapterKindV1::PublicGatewayProtocol
+        });
+
+        let mut invalid_profile = profile();
+        invalid_profile.normative_spec_digest = [0; 32];
+        invalid_profile.profile_digest = invalid_profile.digest();
+        assert_eq!(
+            request().validate_against_profile_with_trust_policy(
+                &invalid_profile,
+                &trusted_root_policy(),
+            ),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+
+        let protocol = profile().evaluator_protocol;
+        let mut exact = request();
+        exact.output_capability.report_bytes_limit = protocol.hard_caps.max_profile_bytes;
+        exact.output_capability.diagnostic_bytes_limit = protocol.hard_caps.max_diagnostic_bytes;
+        exact.output_capability.capability_digest = exact.expected_output_capability_digest();
+        exact.request_digest = exact.digest();
+        assert_eq!(exact.validate_with_protocol(&protocol), Ok(()));
+        assert_eq!(request().validate_with_protocol(&protocol), Ok(()));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_profile_and_encoding_boundaries_are_inclusive() {
+        let caps = original_hard_caps();
+        assert_eq!(caps.validate_compression_expansion(7, 700), Ok(()));
+        assert_eq!(
+            caps.validate_compression_expansion(7, 701),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+
+        let mut at_profile_limit = profile();
+        for _ in 0..8 {
+            let encoded_len = encode_value(&encode_profile(&at_profile_limit, true))
+                .unwrap_or_default()
+                .len();
+            at_profile_limit
+                .evaluator_protocol
+                .hard_caps
+                .max_profile_bytes = u64::try_from(encoded_len).unwrap_or(u64::MAX);
+            at_profile_limit.profile_digest = at_profile_limit.digest();
+        }
+        let encoded_len = encode_value(&encode_profile(&at_profile_limit, true))
+            .unwrap_or_default()
+            .len();
+        at_profile_limit
+            .evaluator_protocol
+            .hard_caps
+            .max_profile_bytes = u64::try_from(encoded_len).unwrap_or(u64::MAX);
+        at_profile_limit.profile_digest = at_profile_limit.digest();
+        assert!(at_profile_limit.validate().is_ok());
+
+        let mut below = at_profile_limit.clone();
+        below.evaluator_protocol.hard_caps.max_profile_bytes = below
+            .evaluator_protocol
+            .hard_caps
+            .max_profile_bytes
+            .saturating_sub(1);
+        below.profile_digest = below.digest();
+        assert_eq!(
+            below.validate(),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+
+        let exact_bytes = Value::Bytes(vec![0; MAX_PROFILE_BYTES - 5]);
+        assert_eq!(
+            encode_bounded(&exact_bytes).map(|bytes| bytes.len()),
+            Ok(MAX_PROFILE_BYTES)
+        );
+        let over_bytes = Value::Bytes(vec![0; MAX_PROFILE_BYTES - 4]);
+        assert_eq!(
+            encode_bounded(&over_bytes),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_stable_preconditions_and_policy_membership_fail_closed() {
+        let profile_value = candidate();
+        let mut first = stable_evidence("alpha", 30);
+        let mut second = stable_evidence("beta", 40);
+        refresh_stable_report_for_profile(&mut first, &profile_value);
+        refresh_stable_report_for_profile(&mut second, &profile_value);
+        assert_eq!(
+            validate_stable_evidence(&profile_value, Some(&trusted_root_policy())),
+            Ok(())
+        );
+
+        let mut same_source = first.clone();
+        same_source.implementation.source_digest = second.implementation.source_digest;
+        refresh_stable_report_for_profile(&mut same_source, &profile_value);
+        let mut same_source_profile = profile_value.clone();
+        same_source_profile.stable_evidence = vec![same_source, second.clone()];
+        assert_eq!(
+            validate_stable_evidence(&same_source_profile, Some(&trusted_root_policy())),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+
+        let mut wrong_subject = first.clone();
+        wrong_subject.report.subject_artifact_digest = [99; 32];
+        wrong_subject.report.report_digest = wrong_subject.report.digest().unwrap_or([0; 32]);
+        refresh_stable_attestation(&mut wrong_subject);
+        let mut pair_profile = profile_value.clone();
+        pair_profile.stable_evidence = vec![wrong_subject.clone(), second.clone()];
+        assert_eq!(
+            validate_stable_evidence(&pair_profile, Some(&trusted_root_policy())),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+
+        let mut wrong_key_policy = trusted_root_policy();
+        wrong_key_policy.trusted_root_public_keys =
+            vec![ed25519_dalek::SigningKey::from_bytes(&[7; 32])
+                .verifying_key()
+                .to_bytes()];
+        wrong_key_policy.trust_policy_snapshot_digest = profile_value
+            .independence_requirements
+            .trust_policy_snapshot_digest;
+        assert_eq!(
+            validate_stable_attestation(
+                &first,
+                &profile_value.independence_requirements,
+                Some(&wrong_key_policy),
+            ),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+        assert_ne!(trusted_root_policy().digest(), [1; 32]);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn public_fixture_members_provenance_and_divergence_reject_each_single_change() {
         reject_profile_change(
             |value| {
@@ -5894,6 +6070,15 @@ mod tests {
             value.validate(),
             Err(ConformanceContractError::ExpectedResultMissing)
         );
+
+        assert!(!valid_identifiers("01", true));
+        assert!(valid_identifiers("01", false));
+        assert!(semantic_version("1.2.3"));
+        let exact_length = format!("1.2.3+{}", "x".repeat(MAX_STRING_BYTES - 6));
+        assert_eq!(exact_length.len(), MAX_STRING_BYTES);
+        assert!(semantic_version(&exact_length));
+        let over_length = format!("1.2.3+{}", "x".repeat(MAX_STRING_BYTES - 5));
+        assert!(!semantic_version(&over_length));
     }
 
     #[test]
