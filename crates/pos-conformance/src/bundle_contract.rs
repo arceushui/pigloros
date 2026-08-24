@@ -299,6 +299,15 @@ impl ConformanceBundleV1 {
             if descriptor.path != member.path {
                 return Err(BundleContractErrorV1::UndeclaredMember);
             }
+            let expected_reference_count = self
+                .manifest
+                .expected_results
+                .iter()
+                .filter(|expected| expected.member_path == member.path)
+                .count();
+            if member.expected_result && expected_reference_count != 1 {
+                return Err(BundleContractErrorV1::UndeclaredMember);
+            }
             if !member.expected_result
                 && member.path != PROFILE_MEMBER_PATH
                 && !profile.fixtures.iter().any(|fixture| {
@@ -440,29 +449,6 @@ fn validate_expected_results(
     if !strictly_ordered(&manifest.expected_results) {
         return Err(BundleContractErrorV1::NonCanonicalOrder);
     }
-    let required_layers = [
-        ClaimLayerV1::ArtifactIntegrity,
-        ClaimLayerV1::ReplayConformance,
-        ClaimLayerV1::KnowledgeNonInterference,
-        ClaimLayerV1::GatewayClientConformance,
-        ClaimLayerV1::PluginConformance,
-        ClaimLayerV1::MetricConformance,
-        ClaimLayerV1::EmpiricalEvaluation,
-    ];
-    if !required_layers.iter().all(|required_layer| {
-        profile.fixtures.iter().any(|fixture| {
-            fixture.claim_layer == *required_layer
-                && fixture.modes.iter().any(|mode| {
-                    matches!(
-                        (manifest.mode, mode),
-                        (BundleModeV1::Local, ExecutionModeV1::Local)
-                            | (BundleModeV1::AirGapped, ExecutionModeV1::AirGapped)
-                    )
-                })
-        })
-    }) {
-        return Err(BundleContractErrorV1::MemberMissing);
-    }
     for expected in &manifest.expected_results {
         if expected.mode != manifest.mode || expected.digest == [0; 32] {
             return Err(BundleContractErrorV1::ExpectedResultMismatch);
@@ -487,10 +473,26 @@ fn validate_expected_results(
         }) {
             return Err(BundleContractErrorV1::ExpectedResultMismatch);
         }
-        if let ExpectedResultV1::CanonicalBytes { digest, bytes } = &fixture.expected {
-            if *digest != expected.digest || bytes.is_empty() {
-                return Err(BundleContractErrorV1::ExpectedResultMismatch);
+        let expected_bytes = match &fixture.expected {
+            ExpectedResultV1::CanonicalBytes { bytes, digest } => {
+                if *digest != expected.digest
+                    || *digest != *blake3::hash(bytes).as_bytes()
+                    || bytes.is_empty()
+                {
+                    return Err(BundleContractErrorV1::ExpectedResultMismatch);
+                }
+                bytes.clone()
             }
+            typed_or_divergent => {
+                crate::profile_contract::expected_result_bytes(typed_or_divergent)
+                    .map_err(|_| BundleContractErrorV1::ExpectedResultMismatch)?
+            }
+        };
+        if expected.digest != *blake3::hash(&expected_bytes).as_bytes() {
+            return Err(BundleContractErrorV1::ExpectedResultMismatch);
+        }
+        if member.bytes != expected_bytes {
+            return Err(BundleContractErrorV1::ExpectedResultMismatch);
         }
         if expected.mode == BundleModeV1::AirGapped && fixture.capability_policy.network_allowed {
             return Err(BundleContractErrorV1::AirGappedNetwork);
@@ -534,8 +536,11 @@ fn validate_member_path(path: &str) -> Result<(), BundleContractErrorV1> {
     if path.is_empty()
         || path.len() > MAX_MEMBER_PATH_BYTES
         || path.starts_with('/')
-        || path.contains("..")
-        || path.split('/').any(str::is_empty)
+        || !path.is_ascii()
+        || path.contains('\\')
+        || path
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
     {
         Err(BundleContractErrorV1::MemberOutOfBounds)
     } else {
@@ -784,8 +789,9 @@ mod tests {
             }
             let bytes = match &fixture.expected {
                 ExpectedResultV1::CanonicalBytes { bytes, .. } => bytes.clone(),
-                ExpectedResultV1::TypedFailure(_) | ExpectedResultV1::AllowedDivergence { .. } => {
-                    format!("expected-result-{index}").into_bytes()
+                typed_or_divergent => {
+                    crate::profile_contract::expected_result_bytes(typed_or_divergent)
+                        .expect("test fixture expected result must encode")
                 }
             };
             let path = format!("expected/case-{index:02}.bin");
@@ -848,6 +854,22 @@ mod tests {
         );
         assert_eq!(
             validate_member_path("nested//empty"),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+        assert_eq!(
+            validate_member_path("nested/./result"),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+        assert_eq!(
+            validate_member_path("nested/../result"),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+        assert_eq!(
+            validate_member_path("nested\\result"),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+        assert_eq!(
+            validate_member_path("résultat"),
             Err(BundleContractErrorV1::MemberOutOfBounds)
         );
         assert!(validate_member_path("nested/result").is_ok());
@@ -1146,7 +1168,7 @@ mod tests {
         missing_layer.fixtures.remove(0);
         assert_eq!(
             validate_expected_results(&missing_layer, &bundle.manifest, &bundle.members),
-            Err(BundleContractErrorV1::MemberMissing)
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
         );
 
         let mut unsupported_mode = profile.clone();
@@ -1184,12 +1206,31 @@ mod tests {
         let mut noncanonical_expected = profile.clone();
         noncanonical_expected.fixtures[0].expected =
             ExpectedResultV1::TypedFailure(SafeErrorCodeV1::InvalidEncoding);
-        assert!(validate_expected_results(
-            &noncanonical_expected,
-            &bundle.manifest,
-            &bundle.members
-        )
-        .is_ok());
+        assert_eq!(
+            validate_expected_results(&noncanonical_expected, &bundle.manifest, &bundle.members),
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
+        );
+
+        let mut typed_profile = profile.clone();
+        typed_profile.fixtures[0].expected =
+            ExpectedResultV1::TypedFailure(SafeErrorCodeV1::InvalidEncoding);
+        let typed_bytes =
+            crate::profile_contract::expected_result_bytes(&typed_profile.fixtures[0].expected)
+                .expect("typed failure has a canonical public representation");
+        let typed_digest = *blake3::hash(&typed_bytes).as_bytes();
+        let mut typed_members = bundle.members.clone();
+        let typed_member_index = typed_members
+            .iter()
+            .position(|member| member.path == "expected/case-00.bin")
+            .expect("case-00 expected member");
+        typed_members[typed_member_index] =
+            BundleMemberV1::new("expected/case-00.bin", typed_bytes, true);
+        let mut typed_manifest = bundle.manifest.clone();
+        typed_manifest.expected_results[0].digest = typed_digest;
+        assert_eq!(
+            validate_expected_results(&typed_profile, &typed_manifest, &typed_members),
+            Ok(())
+        );
         Ok(())
     }
 
@@ -1338,6 +1379,18 @@ mod tests {
         undeclared.rebuild_member_descriptors();
         assert_eq!(
             undeclared.validate(),
+            Err(BundleContractErrorV1::UndeclaredMember)
+        );
+
+        let mut undeclared_expected = signed_bundle(&profile, BundleModeV1::Local)?;
+        undeclared_expected.members.push(BundleMemberV1::new(
+            "expected/undeclared.bin",
+            b"undeclared expected result".to_vec(),
+            true,
+        ));
+        undeclared_expected.rebuild_member_descriptors();
+        assert_eq!(
+            undeclared_expected.validate(),
             Err(BundleContractErrorV1::UndeclaredMember)
         );
         Ok(())
