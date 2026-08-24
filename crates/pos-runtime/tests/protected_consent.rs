@@ -848,6 +848,30 @@ fn public_registry_gate_projection_and_control_marker_seams_are_distinguishable(
 }
 
 #[test]
+fn authorized_projection_snapshot_retain_subject_is_explicit() {
+    let subject = EntityId::new();
+    let unrelated = EntityId::new();
+    let mut projections = pos_state::ProjectionRegistry::new();
+    projections.register("projection-public-seam", Box::new(CountingReducer));
+    projections.fold_events(&[
+        projection_event(subject, "projection.public", 1),
+        projection_event(subject, "projection.public", 2),
+        projection_event(unrelated, "projection.public", 3),
+    ]);
+    projections.retain_subject(&subject);
+    assert_eq!(
+        projections
+            .state_for_reducer("projection-public-seam", &subject)
+            .and_then(|state| state.get("count"))
+            .and_then(serde_json::Value::as_u64),
+        Some(2)
+    );
+    assert!(projections
+        .state_for_reducer("projection-public-seam", &unrelated)
+        .is_none());
+}
+
+#[test]
 fn protected_projection_seams_reject_foreign_subjects_and_missing_or_foreign_gates() {
     let timeline = TimelineId::new();
     let subject = EntityId::new();

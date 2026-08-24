@@ -737,6 +737,156 @@ fn boundary_driver_paths_cover_quiescence_runtime_and_schema_failures() {
 }
 
 #[test]
+fn public_branch_guards_reject_protected_history_and_invalid_capabilities() {
+    let config = |name: &str| ExperimentConfig {
+        name: name.to_owned(),
+        stop: StopCondition::MaxTicks(1),
+        store_config: StoreConfig::Memory,
+    };
+    let grant = |fork_permitted: bool| ConsentGranted {
+        subject_id: EntityId::new(),
+        grantee_id: EntityId::new(),
+        purpose: "public-branch-guard".to_owned(),
+        modalities: 0,
+        min_geo_resolution: 0,
+        fork_permitted,
+        export_permitted: false,
+        retention_days: 0,
+        expiry_secs: 0,
+        grant_seq: 1,
+    };
+
+    let protected_name = "public-branch-protected";
+    let mut protected_store = MemoryStore::new();
+    let protected_timeline = protected_store.create_timeline(protected_name).test_ok();
+    protected_store
+        .append(
+            protected_timeline.id(),
+            &[EventDraft::new(
+                EntityId::new(),
+                Kind::new("consent.granted.v1"),
+                CanonicalBytes::from_static(b"host-owned"),
+            )],
+        )
+        .test_ok();
+    assert!(matches!(
+        Experiment::new(config(protected_name)).branch("protected-child", &mut protected_store),
+        Err(ExperimentError::Runtime(
+            RuntimeError::ConsentOperationUnavailable
+        ))
+    ));
+
+    let authority = ConsentAuthority::new();
+    let protected_token = authority.record_grant_on_timeline(protected_timeline.id(), &grant(true));
+    let mut missing_timeline_store = MemoryStore::new();
+    assert!(matches!(
+        Experiment::new(config(protected_name)).branch_with_token(
+            "missing-child",
+            &mut missing_timeline_store,
+            &protected_token,
+            0,
+        ),
+        Err(ExperimentError::Store(CoreError::Storage(_)))
+    ));
+
+    let no_gate_name = "public-branch-no-gate";
+    let mut no_gate_store = MemoryStore::new();
+    let no_gate_timeline = no_gate_store.create_timeline(no_gate_name).test_ok();
+    let no_gate_token = authority.record_grant_on_timeline(no_gate_timeline.id(), &grant(true));
+    assert!(matches!(
+        Experiment::new(config(no_gate_name))
+            .without_consent_gate()
+            .branch_with_token("no-gate-child", &mut no_gate_store, &no_gate_token, 0),
+        Err(ExperimentError::Runtime(
+            RuntimeError::ConsentOperationUnavailable
+        ))
+    ));
+
+    let denied_name = "public-branch-denied";
+    let mut denied_store = MemoryStore::new();
+    let denied_timeline = denied_store.create_timeline(denied_name).test_ok();
+    let denied_token = authority.record_grant_on_timeline(denied_timeline.id(), &grant(false));
+    assert!(matches!(
+        Experiment::new(config(denied_name)).branch_with_token(
+            "denied-child",
+            &mut denied_store,
+            &denied_token,
+            0,
+        ),
+        Err(ExperimentError::Runtime(RuntimeError::Consent(
+            pos_core::ConsentError::ForkNotPermitted
+        )))
+    ));
+}
+
+#[test]
+fn protected_result_export_and_faulted_projection_fail_closed() {
+    let authority = ConsentAuthority::new();
+    let experiment = Experiment::new(ExperimentConfig {
+        name: "protected-result-export".to_owned(),
+        stop: StopCondition::MaxTicks(1),
+        store_config: StoreConfig::Memory,
+    })
+    .with_consent_authority(authority.clone());
+    let session = experiment.start().test_ok();
+    let token = authority.record_grant_on_timeline(
+        session.timeline().id(),
+        &ConsentGranted {
+            subject_id: EntityId::new(),
+            grantee_id: EntityId::new(),
+            purpose: "protected-result-export".to_owned(),
+            modalities: 0,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        },
+    );
+    let result = session
+        .with_protected_token(token, 0)
+        .run_to_completion()
+        .test_ok();
+    assert!(matches!(
+        result.into_reproduction_manifest(ReproductionRecipe::new(
+            "protected-result-export",
+            1,
+            serde_json::json!({}),
+        )),
+        Err(ExperimentError::Runtime(RuntimeError::Consent(
+            pos_core::ConsentError::ExportNotPermitted
+        )))
+    ));
+
+    let fault_authority = ConsentAuthority::new();
+    let mut faulted = boundary_experiment("protected-projection-fault", BoundaryDriver::Fails)
+        .with_consent_authority(fault_authority.clone())
+        .start()
+        .test_ok();
+    let fault_token = fault_authority.record_grant_on_timeline(
+        faulted.timeline().id(),
+        &ConsentGranted {
+            subject_id: EntityId::new(),
+            grantee_id: EntityId::new(),
+            purpose: "protected-projection-fault".to_owned(),
+            modalities: 0,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        },
+    );
+    assert!(faulted.step_tick().is_err());
+    assert!(matches!(
+        faulted.projection_state_for_reducer("agent", EntityId::new(), &fault_token, 0),
+        Err(ExperimentError::SessionFaulted)
+    ));
+}
+
+#[test]
 fn post_append_capture_failure_faults_the_session() {
     let host = HostFixture::new();
     let response = accepted_response_bytes(0, CONFIDENCE);

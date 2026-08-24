@@ -3135,6 +3135,88 @@ mod tests {
             .is_err());
     }
 
+    #[test]
+    fn public_restore_decodes_revocation_history() {
+        fn event(
+            event_type: &str,
+            entity: EntityId,
+            payload: CanonicalBytes,
+            seq: u64,
+        ) -> Event {
+            Event {
+                id: EventId::new(),
+                entity,
+                event_type: Kind::new(event_type),
+                payload,
+                wall_time: WallTime::from_micros(1),
+                seq: crate::clock::Seq::from_u64(seq),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: SchemaVersion::V1,
+                signature: None,
+                payload_hash: Hash::from_bytes([0; 32]),
+            }
+        }
+
+        let authority = ConsentAuthority::new();
+        let timeline = TimelineId::new();
+        let grant = sample_granted();
+        let token = authority.record_grant_on_timeline(timeline, &grant);
+        let revocation = sample_revoked(&grant);
+        authority
+            .restore_from_history(
+                timeline,
+                &[
+                    event(
+                        EVENT_TYPE_CONSENT_GRANTED_V1,
+                        grant.subject_id,
+                        grant.encode().test_ok(),
+                        grant.grant_seq,
+                    ),
+                    event(
+                        EVENT_TYPE_CONSENT_REVOKED_V1,
+                        revocation.subject_id,
+                        revocation.encode().test_ok(),
+                        revocation.fence_seq,
+                    ),
+                ],
+            )
+            .test_ok();
+
+        assert_eq!(
+            authority.validate_on_timeline(timeline, &token, 100, 0),
+            Err(ConsentError::Revoked)
+        );
+    }
+
+    #[test]
+    fn public_timeline_fence_invalidates_all_active_subjects() {
+        let authority = ConsentAuthority::new();
+        let timeline = TimelineId::new();
+        let first = sample_granted();
+        let mut second = sample_granted();
+        second.subject_id = EntityId::new();
+        let first_token = authority.record_grant_on_timeline(timeline, &first);
+        let second_token = authority.record_grant_on_timeline(timeline, &second);
+        let append_count = std::cell::Cell::new(0);
+
+        authority
+            .with_revocation_fence(timeline, None, 5, &mut || {
+                append_count.set(append_count.get() + 1);
+            })
+            .test_ok();
+
+        assert_eq!(append_count.get(), 1);
+        assert_eq!(
+            authority.validate_on_timeline(timeline, &first_token, 4, 0),
+            Err(ConsentError::Revoked)
+        );
+        assert_eq!(
+            authority.validate_on_timeline(timeline, &second_token, 4, 0),
+            Err(ConsentError::Revoked)
+        );
+    }
+
     // -- Error display --
 
     #[test]
