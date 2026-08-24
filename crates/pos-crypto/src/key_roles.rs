@@ -193,6 +193,25 @@ mod tests {
             ),
             Err(KeyRegistryErrorV1::InvalidEpoch)
         );
+        let mut registry = KeyRegistryStateV1::new();
+        assert_eq!(
+            sign_for_registered_role(
+                &mut registry,
+                &signing_key,
+                KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 0),
+                &value,
+            ),
+            Err(KeyRegistryErrorV1::InvalidEpoch)
+        );
+        assert_eq!(
+            sign_for_registered_role(
+                &mut registry,
+                &signing_key,
+                KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 1),
+                &value,
+            ),
+            Err(KeyRegistryErrorV1::SigningRoleRequired)
+        );
         assert!(verify_for_role(
             &verifying_key,
             KeyRoleV1::SubjectAttributionSigning,
