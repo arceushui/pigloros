@@ -857,6 +857,30 @@ fn live_boundaries_are_atomic_byte_stable_and_provider_free_on_replay() {
     assert_eq!(adapter.append_batch_sizes(), [2, 1]);
 
     let events = session.source_events().test_ok();
+    assert_live_record_evidence(
+        &host,
+        timeline,
+        &events,
+        &accepted_response,
+        &no_action_response,
+    );
+    assert_agent_projection_state(&session, host.agent, &token);
+
+    let before_replay_calls = calls.get();
+    let checkpoint = host.verifier(timeline).verify(&events, None).test_ok();
+    assert_eq!(checkpoint.last_verified(), Seq::from_u64(3));
+    assert_eq!(calls.get(), before_replay_calls);
+
+    assert_supplied_store_has_no_recovery_recipe(&adapter, session);
+}
+
+fn assert_live_record_evidence(
+    host: &HostFixture,
+    timeline: TimelineId,
+    events: &[Event],
+    accepted_response: &[u8],
+    no_action_response: &[u8],
+) {
     assert_eq!(
         events
             .iter()
@@ -872,12 +896,11 @@ fn live_boundaries_are_atomic_byte_stable_and_provider_free_on_replay() {
         [RECORDER_EVENT_TYPE, EVENT_TYPE_ACTION, RECORDER_EVENT_TYPE]
     );
     assert!(events.iter().all(|event| event.entity == host.agent));
-
     let accepted_record = host.expected_record(
         timeline,
         0,
         0,
-        &accepted_response,
+        accepted_response,
         ExpectedResult::Accepted {
             action_index: 0,
             confidence: CONFIDENCE,
@@ -895,15 +918,21 @@ fn live_boundaries_are_atomic_byte_stable_and_provider_free_on_replay() {
         timeline,
         2,
         1,
-        &no_action_response,
+        no_action_response,
         ExpectedResult::NoAction { code: 5 },
     );
     assert_eq!(events[0].payload.as_slice(), accepted_record);
     assert_eq!(events[1].payload.as_slice(), expected_action);
     assert_eq!(events[2].payload.as_slice(), no_action_record);
+}
 
+fn assert_agent_projection_state(
+    session: &ExperimentSession,
+    agent: EntityId,
+    token: &pos_core::ConsentCapabilityToken,
+) {
     let state = session
-        .projection_state_for_reducer("agent", host.agent, &token)
+        .projection_state_for_reducer("agent", agent, token)
         .test_ok()
         .test_ok();
     assert_eq!(
@@ -916,13 +945,6 @@ fn live_boundaries_are_atomic_byte_stable_and_provider_free_on_replay() {
         state.get("last_action").and_then(serde_json::Value::as_str),
         Some("move")
     );
-
-    let before_replay_calls = calls.get();
-    let checkpoint = host.verifier(timeline).verify(&events, None).test_ok();
-    assert_eq!(checkpoint.last_verified(), Seq::from_u64(3));
-    assert_eq!(calls.get(), before_replay_calls);
-
-    assert_supplied_store_has_no_recovery_recipe(&adapter, session);
 }
 
 #[test]
