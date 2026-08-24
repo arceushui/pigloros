@@ -45,6 +45,8 @@ jobs:
           git diff --relative --unified=0 \
             "origin/${base_ref}...HEAD" \
             > "${RUNNER_TEMP}/changes.diff"
+      # Four workers fit the hosted runner and shorten feedback without
+      # changing the mutant set or weakening the gate.
       - name: Run mutants in changed lines
         run: >
           cargo mutants
@@ -52,7 +54,7 @@ jobs:
           --all-features
           --in-diff "${{ runner.temp }}/changes.diff"
           --no-shuffle
-          --jobs 2
+          --jobs 4
           --timeout 1800
           --cap-lints true
           --cargo-arg=--locked
