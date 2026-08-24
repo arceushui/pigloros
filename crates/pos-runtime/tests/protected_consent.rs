@@ -204,11 +204,15 @@ impl ConsentGate for MismatchedDraftGate {
     fn validate_token(
         &self,
         _: TimelineId,
-        _: &ConsentCapabilityToken,
+        token: &ConsentCapabilityToken,
         _: u64,
         _: u64,
     ) -> Result<(), ConsentError> {
-        Ok(())
+        if token == &self.returned {
+            Ok(())
+        } else {
+            Err(ConsentError::NoConsent)
+        }
     }
 }
 
@@ -271,7 +275,7 @@ impl ConsentGate for RejectingDraftGate {
         _: u64,
         _: u64,
     ) -> Result<(), ConsentError> {
-        Ok(())
+        Err(ConsentError::NoConsent)
     }
 }
 
@@ -385,6 +389,34 @@ fn protected_append_fence_rejects_before_store_append() {
         Seq::ZERO,
         "a rejected consent fence must not append drafts"
     );
+}
+
+#[test]
+fn append_fence_revalidates_caller_supplied_drafts() {
+    use pos_store::{open_store, StoreConfig};
+
+    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let timeline = test_ok(store.create_timeline("protected-draft-replacement"));
+    let subject = EntityId::new();
+    let authority = ConsentAuthority::new();
+    let token = authority.record_grant_on_timeline(timeline.id(), &grant(subject));
+    let mut registry = PluginRegistry::new().with_consent_authority(authority);
+    registry.register_driver(Box::new(ProtectedEventDriver { entity: subject }));
+    let _staged =
+        test_ok(registry.step_all_anchored_protected(timeline.id(), Seq::ZERO, token, 1, &[]));
+    let replacement = vec![EventDraft::new(
+        subject,
+        Kind::new("consent.granted.v1"),
+        CanonicalBytes::from_static(b"forged"),
+    )];
+
+    let error =
+        test_err(registry.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 1, &replacement));
+    assert!(matches!(
+        error,
+        RuntimeError::ConsentDraft { ref event_type } if event_type == "consent.granted.v1"
+    ));
+    assert_eq!(test_ok(store.logical_head(timeline.id())), Seq::ZERO);
 }
 
 #[test]

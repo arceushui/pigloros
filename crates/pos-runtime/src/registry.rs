@@ -278,8 +278,11 @@ fn validate_recovery_evidence(
 }
 
 fn reject_host_owned_drafts(output: &StepOutput) -> Result<(), RuntimeError> {
-    output
-        .drafts
+    reject_host_owned_draft_slice(&output.drafts)
+}
+
+fn reject_host_owned_draft_slice(drafts: &[EventDraft]) -> Result<(), RuntimeError> {
+    drafts
         .iter()
         .find(|draft| {
             pos_core::is_geographic_event_type(&draft.event_type)
@@ -588,8 +591,6 @@ impl PluginRegistry {
                     token
                         .authorize_event_type(&draft.event_type)
                         .map_err(RuntimeError::Consent)?;
-                    gate.validate_token(timeline, token, timeline_head.as_u64(), now_secs)
-                        .map_err(RuntimeError::Consent)?;
                 }
                 None => gate
                     .authorize_event(
@@ -887,6 +888,20 @@ impl PluginRegistry {
                     let _ = self.abort_drivers(&pending.driver_ids);
                     return Err(RuntimeError::ConsentOperationUnavailable);
                 };
+                if let Err(error) = reject_host_owned_draft_slice(drafts).and_then(|()| {
+                    self.validate_protected_drafts(
+                        pending_timeline,
+                        &OperationContext::Protected {
+                            token: token.clone(),
+                            now_secs: commit_now_secs,
+                        },
+                        timeline_head,
+                        drafts,
+                    )
+                }) {
+                    let _ = self.abort_drivers(&pending.driver_ids);
+                    return Err(error);
+                }
                 let mut append_result = Ok(Vec::new());
                 let mut append = || {
                     append_result = store.append(pending_timeline, drafts);
@@ -916,6 +931,17 @@ impl PluginRegistry {
                     timeline_head,
                     Some(commit_now_secs),
                 ) {
+                    let _ = self.abort_drivers(&pending.driver_ids);
+                    return Err(error);
+                }
+                if let Err(error) = reject_host_owned_draft_slice(drafts).and_then(|()| {
+                    self.validate_protected_drafts(
+                        pending_timeline,
+                        &OperationContext::Public,
+                        timeline_head,
+                        drafts,
+                    )
+                }) {
                     let _ = self.abort_drivers(&pending.driver_ids);
                     return Err(error);
                 }
