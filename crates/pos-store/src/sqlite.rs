@@ -9155,13 +9155,22 @@ mod tests {
             .contains("transaction commit failed"));
 
         let rollback_conn = Connection::open_in_memory().test_ok();
-        let rollback_error = finish_immediate_transaction::<()>(
-            &rollback_conn,
+        rollback_conn.execute_batch("BEGIN").test_ok();
+        rollback_conn.commit_hook(Some(|| true)).test_ok();
+        let rollback_error = finish_immediate_transaction::<()>(&rollback_conn, Ok(())).test_err();
+        assert!(matches!(rollback_error, CoreError::Storage(_)));
+        assert!(rollback_error
+            .to_string()
+            .contains("transaction commit failed; rollback failed"));
+
+        let error_conn = Connection::open_in_memory().test_ok();
+        let error_rollback = finish_immediate_transaction::<()>(
+            &error_conn,
             Err(CoreError::Storage("operation failed".to_owned())),
         )
         .test_err();
-        assert!(matches!(rollback_error, CoreError::Storage(_)));
-        assert!(rollback_error.to_string().contains("rollback failed"));
+        assert!(matches!(error_rollback, CoreError::Storage(_)));
+        assert!(error_rollback.to_string().contains("rollback failed"));
     }
 
     #[test]
