@@ -1677,9 +1677,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         let requested_transition = transition;
         self.record(request).and_then(|mut record| {
             if record.freeze_provenance.is_some() {
-                return if requested_transition.lifecycle == ErasureLifecycleV1::AccessFrozen
-                    && requested_transition.freeze_position == record.state.freeze_position()
-                {
+                return if requested_transition.lifecycle == ErasureLifecycleV1::AccessFrozen {
                     Ok(record.state)
                 } else {
                     Err(ErasureErrorV1::PolicyConflict)
