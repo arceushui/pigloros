@@ -1,7 +1,10 @@
 //! Role/epoch-bound cryptographic operations for the key-registry boundary.
 
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
-use pos_core::{CanonicalBytes, Hash, KeyRegistryErrorV1, KeyRoleV1, Signature};
+use pos_core::{
+    CanonicalBytes, Hash, KeyIdentityV1, KeyRegistryErrorV1, KeyRegistrySigningPortV1, KeyRoleV1,
+    Signature,
+};
 
 const KEY_MATERIAL_DOMAIN: &[u8] = b"pigloros/key-material/v1";
 const ROLE_SIGNATURE_DOMAIN: &[u8] = b"pigloros/role-signature/v1";
@@ -11,7 +14,7 @@ const ROLE_SIGNATURE_DOMAIN: &[u8] = b"pigloros/role-signature/v1";
 /// The fingerprint intentionally does not include role or epoch.  That makes
 /// the core registry able to detect one private key being registered for two
 /// roles or two epochs.  Role and epoch are bound separately by the registry
-/// identity and by [`sign_for_role`].
+/// identity and by [`sign_for_registered_role`].
 #[must_use]
 pub fn key_material_digest(private_material: &[u8]) -> Hash {
     let mut hasher = blake3::Hasher::new();
@@ -27,7 +30,7 @@ pub fn key_material_digest(private_material: &[u8]) -> Hash {
 /// Returns [`KeyRegistryErrorV1::SigningRoleRequired`] when an encryption role
 /// is supplied.  Legacy subject-data-key signatures must remain on the
 /// verify-only compatibility path and cannot be reissued here.
-pub fn sign_for_role(
+fn sign_for_role(
     signing_key: &SigningKey,
     role: KeyRoleV1,
     epoch: u64,
@@ -41,6 +44,39 @@ pub fn sign_for_role(
     }
     let message = role_bound_message(role, epoch, payload);
     Ok(Signature::from_bytes(signing_key.sign(&message).to_bytes()))
+}
+
+/// Sign a role/epoch-bound payload under the registry's atomic authorization.
+///
+/// The registry adapter validates that the identity is active and that the
+/// supplied signing key matches its registered public key and private-material
+/// digest.  It must hold its transaction or lock through the signing callback,
+/// so destruction and signing have a defined ordering.  A copied
+/// [`SigningKey`] used outside this function is intentionally outside the
+/// revocation boundary.
+///
+/// # Errors
+///
+/// Returns a closed [`KeyRegistryErrorV1`] when the identity is invalid,
+/// inactive, destroyed, absent, or does not match the supplied signing key.
+pub fn sign_for_registered_role<R: KeyRegistrySigningPortV1>(
+    registry: &mut R,
+    signing_key: &SigningKey,
+    identity: KeyIdentityV1,
+    payload: &CanonicalBytes,
+) -> Result<Signature, KeyRegistryErrorV1> {
+    if identity.epoch == 0 {
+        return Err(KeyRegistryErrorV1::InvalidEpoch);
+    }
+    if !identity.role.is_signing() {
+        return Err(KeyRegistryErrorV1::SigningRoleRequired);
+    }
+    let material_digest = key_material_digest(&signing_key.to_bytes());
+    let public_verification_key =
+        crate::signing::public_key_from_verifying_key(&signing_key.verifying_key());
+    registry.with_signing_authorization(identity, material_digest, public_verification_key, || {
+        sign_for_role(signing_key, identity.role, identity.epoch, payload)
+    })
 }
 
 /// Verify a role/epoch-bound signature.
@@ -189,12 +225,17 @@ mod tests {
         ))?;
 
         let value = payload(b"historical attribution");
-        let signature = sign_for_role(&signing_key, identity.role, identity.epoch, &value)?;
+        let signature = sign_for_registered_role(&mut registry, &signing_key, identity, &value)?;
         registry.destroy_key(KeyDestructionRequestV1::new(
             identity,
             material_digest,
             Hash::from_bytes([7; 32]),
         ))?;
+
+        assert_eq!(
+            sign_for_registered_role(&mut registry, &signing_key, identity, &value),
+            Err(KeyRegistryErrorV1::Destroyed)
+        );
 
         assert!(verify_for_role(
             &verifying_key,

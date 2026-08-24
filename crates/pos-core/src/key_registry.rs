@@ -261,6 +261,15 @@ pub enum KeyRegistryErrorV1 {
     /// No live record exists for the identity.
     #[error("key identity is not registered")]
     NotFound,
+    /// The identity is registered but is no longer the active role epoch.
+    #[error("key identity is not the active epoch for its role")]
+    InactiveKey,
+    /// The supplied signer does not match the registered key material.
+    #[error("signing key does not match the registered identity")]
+    SigningKeyMismatch,
+    /// The registry adapter could not provide its atomic signing boundary.
+    #[error("key registry is unavailable for authorized signing")]
+    RegistryUnavailable,
     /// The destruction request does not match the live record.
     #[error("destruction request has the wrong material fingerprint")]
     MaterialDigestMismatch,
@@ -287,6 +296,33 @@ pub trait KeyRegistryPortV1 {
     fn key_record(&self, identity: KeyIdentityV1) -> Option<KeyRecordV1>;
     /// Return the immutable tombstone for an identity.
     fn tombstone(&self, identity: KeyIdentityV1) -> Option<KeyTombstoneV1>;
+}
+
+/// Atomic signing boundary supplied by a key-registry adapter.
+///
+/// The adapter must validate the supplied identity, private-material digest,
+/// and public verification key, then hold its transaction/lock through
+/// `operation`.  This makes the callback the linearization point: destruction
+/// that wins before authorization prevents the callback, while destruction
+/// that follows the callback cannot be observed as preceding the signature.
+/// The callback receives no bearer token that can outlive the operation.
+pub trait KeyRegistrySigningPortV1 {
+    /// Run one signing operation while its registry authorization is held.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed [`KeyRegistryErrorV1`] when the identity is absent,
+    /// destroyed, inactive, mismatched, or the adapter cannot provide the
+    /// authorization boundary.  The callback is not invoked on failure.
+    fn with_signing_authorization<T, F>(
+        &mut self,
+        identity: KeyIdentityV1,
+        private_material_digest: Hash,
+        public_verification_key: PublicKey,
+        operation: F,
+    ) -> Result<T, KeyRegistryErrorV1>
+    where
+        F: FnOnce() -> T;
 }
 
 /// The irreversible destruction operation is kept separate from registration
@@ -396,6 +432,49 @@ impl KeyRegistryStateV1 {
         self.tombstones.get(&identity).copied()
     }
 
+    /// Run one signing operation under the active registry authorization.
+    ///
+    /// The reference state machine is synchronous, so its mutable borrow
+    /// covers validation and the callback as one operation.  Durable adapters
+    /// must provide the equivalent transaction or lock boundary.
+    pub fn with_signing_authorization<T, F>(
+        &mut self,
+        identity: KeyIdentityV1,
+        private_material_digest: Hash,
+        public_verification_key: PublicKey,
+        operation: F,
+    ) -> Result<T, KeyRegistryErrorV1>
+    where
+        F: FnOnce() -> T,
+    {
+        if identity.epoch == 0 {
+            return Err(KeyRegistryErrorV1::InvalidEpoch);
+        }
+        if !identity.role.is_signing() {
+            return Err(KeyRegistryErrorV1::SigningRoleRequired);
+        }
+        let record = self
+            .records
+            .get(&identity)
+            .copied()
+            .ok_or(KeyRegistryErrorV1::NotFound)?;
+        if record.private_material_digest.is_none() {
+            return Err(KeyRegistryErrorV1::Destroyed);
+        }
+        let active = self
+            .active_key(identity.role)
+            .ok_or(KeyRegistryErrorV1::NotFound)?;
+        if active.identity != identity {
+            return Err(KeyRegistryErrorV1::InactiveKey);
+        }
+        if record.private_material_digest != Some(private_material_digest)
+            || record.public_verification_key != Some(public_verification_key)
+        {
+            return Err(KeyRegistryErrorV1::SigningKeyMismatch);
+        }
+        Ok(operation())
+    }
+
     /// Destroy private material and retain the public record plus tombstone.
     ///
     /// # Errors
@@ -477,6 +556,27 @@ impl KeyDestructionPortV1 for KeyRegistryStateV1 {
     }
 }
 
+impl KeyRegistrySigningPortV1 for KeyRegistryStateV1 {
+    fn with_signing_authorization<T, F>(
+        &mut self,
+        identity: KeyIdentityV1,
+        private_material_digest: Hash,
+        public_verification_key: PublicKey,
+        operation: F,
+    ) -> Result<T, KeyRegistryErrorV1>
+    where
+        F: FnOnce() -> T,
+    {
+        Self::with_signing_authorization(
+            self,
+            identity,
+            private_material_digest,
+            public_verification_key,
+            operation,
+        )
+    }
+}
+
 const fn validate_registration(registration: KeyRegistrationV1) -> Result<(), KeyRegistryErrorV1> {
     if registration.identity.epoch == 0 {
         return Err(KeyRegistryErrorV1::InvalidEpoch);
@@ -545,6 +645,70 @@ mod tests {
             disposition,
             LegacySubjectDataSignatureDispositionV1::VerifyOnlyNoReplayUpgrade
         );
+    }
+
+    #[test]
+    fn signing_authorization_is_fail_closed_and_scoped() -> Result<(), KeyRegistryErrorV1> {
+        let mut registry = KeyRegistryStateV1::new();
+        registry.register_key(signing_registration(ATTRIBUTION, 2))?;
+        let mut called = false;
+        assert_eq!(
+            KeyRegistrySigningPortV1::with_signing_authorization(
+                &mut registry,
+                ATTRIBUTION,
+                digest(2),
+                PublicKey::from_bytes([2; 32]),
+                || {
+                    called = true;
+                    7_u8
+                },
+            ),
+            Ok(7)
+        );
+        assert!(called);
+
+        let before_mismatch = registry.clone();
+        called = false;
+        assert_eq!(
+            KeyRegistrySigningPortV1::with_signing_authorization(
+                &mut registry,
+                ATTRIBUTION,
+                digest(9),
+                PublicKey::from_bytes([2; 32]),
+                || {
+                    called = true;
+                },
+            ),
+            Err(KeyRegistryErrorV1::SigningKeyMismatch)
+        );
+        assert!(!called);
+        assert_eq!(registry, before_mismatch);
+
+        let next = KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 2);
+        registry.register_key(signing_registration(next, 4))?;
+        assert_eq!(
+            KeyRegistrySigningPortV1::with_signing_authorization(
+                &mut registry,
+                ATTRIBUTION,
+                digest(2),
+                PublicKey::from_bytes([2; 32]),
+                || (),
+            ),
+            Err(KeyRegistryErrorV1::InactiveKey)
+        );
+
+        registry.destroy_key(KeyDestructionRequestV1::new(next, digest(4), digest(5)))?;
+        assert_eq!(
+            KeyRegistrySigningPortV1::with_signing_authorization(
+                &mut registry,
+                next,
+                digest(4),
+                PublicKey::from_bytes([4; 32]),
+                || (),
+            ),
+            Err(KeyRegistryErrorV1::Destroyed)
+        );
+        Ok(())
     }
 
     #[test]
