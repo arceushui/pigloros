@@ -22,7 +22,7 @@ use pos_core::{
     ids::{EntityId, PluginId, TimelineId},
     plugin::{ActionApprover, ActionRejected, Capability, Plugin, ProposedAction},
     store::EventStore,
-    ConsentAuthority, ConsentGranted, CoreError, Timeline,
+    ConsentAuthority, ConsentGrantedV1, CoreError, Timeline,
 };
 use pos_experiment::{
     BacktestConfig, BacktestRunner, Experiment, ExperimentConfig, ExperimentError,
@@ -794,7 +794,7 @@ fn public_branch_guards_reject_protected_history_and_invalid_capabilities() {
         stop: StopCondition::MaxTicks(1),
         store_config: StoreConfig::Memory,
     };
-    let grant = |fork_permitted: bool| ConsentGranted {
+    let grant = |fork_permitted: bool| ConsentGrantedV1 {
         subject_id: EntityId::new(),
         grantee_id: EntityId::new(),
         purpose: "public-branch-guard".to_owned(),
@@ -890,7 +890,7 @@ fn protected_result_export_and_faulted_projection_fail_closed() {
     let session = experiment.start().test_ok();
     let token = authority.record_grant_on_timeline(
         session.timeline().id(),
-        &ConsentGranted {
+        &ConsentGrantedV1 {
             subject_id: EntityId::new(),
             grantee_id: EntityId::new(),
             purpose: "protected-result-export".to_owned(),
@@ -925,7 +925,7 @@ fn protected_result_export_and_faulted_projection_fail_closed() {
         .test_ok();
     let fault_token = fault_authority.record_grant_on_timeline(
         faulted.timeline().id(),
-        &ConsentGranted {
+        &ConsentGrantedV1 {
             subject_id: EntityId::new(),
             grantee_id: EntityId::new(),
             purpose: "protected-projection-fault".to_owned(),
@@ -965,7 +965,7 @@ fn protected_result_export_succeeds_with_a_durable_authority() {
     let session = experiment.start().test_ok();
     let token = authority.record_grant_on_timeline(
         session.timeline().id(),
-        &ConsentGranted {
+        &ConsentGrantedV1 {
             subject_id: EntityId::new(),
             grantee_id: EntityId::new(),
             purpose: "protected-result-export-success".to_owned(),
@@ -1012,7 +1012,7 @@ fn protected_session_fork_succeeds_from_a_durable_timeline() {
     let parent_id = session.timeline().id();
     let token = authority.record_grant_on_timeline(
         parent_id,
-        &ConsentGranted {
+        &ConsentGrantedV1 {
             subject_id: host.agent,
             grantee_id: EntityId::new(),
             purpose: "protected-session-fork".to_owned(),
@@ -1037,7 +1037,7 @@ fn public_branch_with_token_and_durable_session_boundaries_are_reachable() {
     let timeline = store.create_timeline("public-branch-success").test_ok();
     let token = authority.record_grant_on_timeline(
         timeline.id(),
-        &ConsentGranted {
+        &ConsentGrantedV1 {
             subject_id: EntityId::new(),
             grantee_id: EntityId::new(),
             purpose: "public-branch-success".to_owned(),
@@ -1096,7 +1096,7 @@ fn durable_session_reads_appends_empty_boundaries_and_revocations() {
     let timeline = session.timeline().id();
     let token = authority.record_grant_on_timeline(
         timeline,
-        &ConsentGranted {
+        &ConsentGrantedV1 {
             subject_id: subject,
             grantee_id: EntityId::new(),
             purpose: "durable-session-boundaries".to_owned(),
@@ -1132,7 +1132,7 @@ fn durable_session_reads_appends_empty_boundaries_and_revocations() {
     ));
     assert!(matches!(
         session.projection_state_for_reducer("missing", subject, &token, 0),
-        Err(ExperimentError::ConsentRevoked)
+        Err(ExperimentError::ConsentRevokedV1)
     ));
     assert!(matches!(
         session.step_tick().test_ok(),
@@ -1251,7 +1251,7 @@ fn live_boundaries_are_atomic_byte_stable_and_provider_free_on_replay() {
     let timeline = session.timeline().id();
     let token = authority.record_grant_on_timeline(
         timeline,
-        &ConsentGranted {
+        &ConsentGrantedV1 {
             subject_id: host.agent,
             grantee_id: EntityId::new(),
             purpose: "agent-projection-test".to_owned(),
@@ -1393,7 +1393,7 @@ fn append_fault_commits_neither_pair_nor_tick_and_fresh_session_recovers() {
     let timeline = failed_session.timeline().id();
     let token = authority.record_grant_on_timeline(
         timeline,
-        &ConsentGranted {
+        &ConsentGrantedV1 {
             subject_id: host.agent,
             grantee_id: EntityId::new(),
             purpose: "agent-projection-recovery-test".to_owned(),

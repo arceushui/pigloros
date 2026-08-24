@@ -6,7 +6,7 @@ use pos_core::{
     event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
     ids::{EntityId, EventId, TimelineId},
     Capability, ConsentAuthority, ConsentCapabilityToken, ConsentError, ConsentGate,
-    ConsentGranted, Plugin, PluginId, Reducer, State,
+    ConsentGrantedV1, Plugin, PluginId, Reducer, State,
 };
 use pos_runtime::{
     Driver, ObservationView, PluginRegistry, RuntimeError, StepOutput, TimelineHistorySegment,
@@ -301,8 +301,8 @@ impl Driver for SubscribedDriver {
     }
 }
 
-fn grant(subject_id: EntityId) -> ConsentGranted {
-    ConsentGranted {
+fn grant(subject_id: EntityId) -> ConsentGrantedV1 {
+    ConsentGrantedV1 {
         subject_id,
         grantee_id: EntityId::new(),
         purpose: "runtime-public-seam".to_owned(),
@@ -332,7 +332,7 @@ fn protected_public_seam_checks_timeline_and_rechecks_at_commit_head() {
 
     test_ok(authority.record_revocation_on_timeline(
         timeline,
-        &pos_core::ConsentRevoked {
+        &pos_core::ConsentRevokedV1 {
             subject_id: subject,
             grantee_id: grant.grantee_id,
             grant_seq: grant.grant_seq,

@@ -891,7 +891,7 @@ mod tests {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("loop").test_ok();
         let authority = pos_core::ConsentAuthority::new();
-        let grant = pos_core::ConsentGranted {
+        let grant = pos_core::ConsentGrantedV1 {
             subject_id: entity,
             grantee_id: pos_core::EntityId::new(),
             purpose: "persona-eval-test".to_owned(),

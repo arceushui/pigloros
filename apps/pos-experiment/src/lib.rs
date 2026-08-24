@@ -473,7 +473,7 @@ pub enum ExperimentError {
     #[error("the experiment session is faulted; rebuild it from persisted Timeline history")]
     SessionFaulted,
     #[error("consent has been revoked at the completed Tick Boundary")]
-    ConsentRevoked,
+    ConsentRevokedV1,
     #[error("cadence time regressed from {previous_ns}ns to {requested_ns}ns")]
     CadenceTimeRegressed {
         previous_ns: u128,
@@ -1286,7 +1286,7 @@ impl ExperimentSession {
             || self.consent_revocation_pending.is_some()
             || self.revoked_subjects.contains(&subject)
         {
-            return Err(ExperimentError::ConsentRevoked);
+            return Err(ExperimentError::ConsentRevokedV1);
         }
         let timeline_head = lock_store(&self.store)
             .and_then(|store| Ok(store.logical_head(self.timeline.id())?))?;
@@ -1353,13 +1353,13 @@ impl ExperimentSession {
                 .iter()
                 .any(|draft| self.revoked_subjects.contains(&draft.entity))
         {
-            return Err(ExperimentError::ConsentRevoked);
+            return Err(ExperimentError::ConsentRevokedV1);
         }
         if drafts
             .iter()
             .any(|draft| pos_core::is_consent_event_type(&draft.event_type))
         {
-            return Err(ExperimentError::ConsentRevoked);
+            return Err(ExperimentError::ConsentRevokedV1);
         }
         self.registry.schemas.validate_batch(drafts)?;
         if drafts.is_empty() {
@@ -1534,7 +1534,7 @@ impl ExperimentSession {
             .any(|draft| self.revoked_subjects.contains(&draft.entity))
         {
             self.registry.abort_step();
-            return Err(ExperimentError::ConsentRevoked);
+            return Err(ExperimentError::ConsentRevokedV1);
         }
         if let Err(error) = self.registry.schemas.validate_batch(&drafts) {
             self.registry.abort_step();
@@ -2225,7 +2225,7 @@ mod tests {
 
     fn protect_session(session: ExperimentSession, subject_id: EntityId) -> ExperimentSession {
         let authority = ConsentAuthority::new();
-        let grant = ConsentGranted {
+        let grant = ConsentGrantedV1 {
             subject_id,
             grantee_id: EntityId::new(),
             purpose: "protected-projection-test".to_owned(),
@@ -2258,7 +2258,7 @@ mod tests {
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         ids::{EntityId, PluginId, TimelineId},
-        ActionApprover, ActionRejected, Capability, ConsentGranted, CoreError, Event, EventStore,
+        ActionApprover, ActionRejected, Capability, ConsentGrantedV1, CoreError, Event, EventStore,
         Plugin, ProposedAction, Reducer, State,
     };
     use pos_runtime::{Driver, ObservationView, ProjectionKey, RuntimeError, StepOutput};
@@ -2348,7 +2348,7 @@ mod tests {
         let authority = ConsentAuthority::new();
         let token = authority.record_grant_on_timeline(
             timeline_id,
-            &ConsentGranted {
+            &ConsentGrantedV1 {
                 subject_id,
                 grantee_id: EntityId::new(),
                 purpose: "run-result-policy".to_owned(),
@@ -2436,7 +2436,7 @@ mod tests {
         let authority = ConsentAuthority::new();
         let token = authority.record_grant_on_timeline(
             timeline_id,
-            &ConsentGranted {
+            &ConsentGrantedV1 {
                 subject_id,
                 grantee_id: EntityId::new(),
                 purpose: "fresh-projection-time".to_owned(),
@@ -2473,7 +2473,7 @@ mod tests {
         let authority = ConsentAuthority::new();
         let token = authority.record_grant_on_timeline(
             timeline_id,
-            &ConsentGranted {
+            &ConsentGrantedV1 {
                 subject_id,
                 grantee_id: EntityId::new(),
                 purpose: "subject-revocation-fence".to_owned(),
@@ -2492,7 +2492,7 @@ mod tests {
         session.revoke_consent_for_subject_at_boundary(subject_id);
         assert!(matches!(
             session.projection_state_for_reducer("missing", subject_id, &token, 0),
-            Err(ExperimentError::ConsentRevoked)
+            Err(ExperimentError::ConsentRevokedV1)
         ));
         assert!(matches!(
             session.step_tick(),
@@ -2524,7 +2524,7 @@ mod tests {
         .start()
         .test_ok();
         let timeline_id = session.timeline().id();
-        let grant = |subject_id| ConsentGranted {
+        let grant = |subject_id| ConsentGrantedV1 {
             subject_id,
             grantee_id: EntityId::new(),
             purpose: "subject-recovery".to_owned(),
@@ -4850,7 +4850,7 @@ mod tests {
                 Kind::new("experiment.tick"),
                 CanonicalBytes::from_static(b"blocked"),
             )]),
-            Err(ExperimentError::ConsentRevoked)
+            Err(ExperimentError::ConsentRevokedV1)
         ));
         let revocation_boundary = session.step_tick();
         assert!(
@@ -4912,7 +4912,7 @@ mod tests {
                 Kind::new("experiment.tick"),
                 CanonicalBytes::from_static(b"still-blocked"),
             )]),
-            Err(ExperimentError::ConsentRevoked)
+            Err(ExperimentError::ConsentRevokedV1)
         ));
         let resumed_events = resumed.source_events_with_control().test_ok();
         assert!(resumed_events
@@ -5263,7 +5263,7 @@ mod tests {
         let authority = ConsentAuthority::new();
         let token = authority.record_grant_on_timeline(
             timeline.id(),
-            &ConsentGranted {
+            &ConsentGrantedV1 {
                 subject_id: subject,
                 grantee_id: EntityId::new(),
                 purpose: "branch-public-boundary".to_owned(),
@@ -5289,7 +5289,7 @@ mod tests {
         let denied_authority = ConsentAuthority::new();
         let denied_token = denied_authority.record_grant_on_timeline(
             timeline.id(),
-            &ConsentGranted {
+            &ConsentGrantedV1 {
                 subject_id: subject,
                 grantee_id: EntityId::new(),
                 purpose: "branch-public-denied".to_owned(),
@@ -5753,7 +5753,7 @@ mod tests {
         let authority = ConsentAuthority::new();
         let token = authority.record_grant_on_timeline(
             timeline.id(),
-            &ConsentGranted {
+            &ConsentGrantedV1 {
                 subject_id: EntityId::new(),
                 grantee_id: EntityId::new(),
                 purpose: "unit-result-boundary".to_owned(),
@@ -5802,7 +5802,7 @@ mod tests {
         let authority = ConsentAuthority::new();
         let token = authority.record_grant_on_timeline(
             timeline.id(),
-            &ConsentGranted {
+            &ConsentGrantedV1 {
                 subject_id: EntityId::new(),
                 grantee_id: EntityId::new(),
                 purpose: "unit-token-branch".to_owned(),
@@ -5832,7 +5832,7 @@ mod tests {
         let authority = ConsentAuthority::new();
         let token = authority.record_grant_on_timeline(
             session.timeline().id(),
-            &ConsentGranted {
+            &ConsentGrantedV1 {
                 subject_id: subject,
                 grantee_id: EntityId::new(),
                 purpose: "unit-session-projection".to_owned(),
@@ -5880,7 +5880,7 @@ mod tests {
         let authority = ConsentAuthority::new();
         let token = authority.record_grant_on_timeline(
             timeline_id,
-            &ConsentGranted {
+            &ConsentGrantedV1 {
                 subject_id: subject,
                 grantee_id: EntityId::new(),
                 purpose: "unit-session-events".to_owned(),
@@ -5944,7 +5944,7 @@ mod tests {
             .test_ok();
         assert!(matches!(
             resumed.projection_state_for_reducer("missing", subject, &token, current_now_secs()),
-            Err(ExperimentError::ConsentRevoked)
+            Err(ExperimentError::ConsentRevokedV1)
         ));
     }
 
@@ -5961,7 +5961,7 @@ mod tests {
         let session = experiment.start().test_ok();
         let token = authority.record_grant_on_timeline(
             session.timeline().id(),
-            &ConsentGranted {
+            &ConsentGrantedV1 {
                 subject_id: EntityId::new(),
                 grantee_id: EntityId::new(),
                 purpose: "unit-protected-fork".to_owned(),
@@ -6018,7 +6018,7 @@ mod tests {
 mod coverage_entrypoints {
     use super::*;
     use pos_core::store::EventStore;
-    use pos_core::{Capability, ConsentGranted, Plugin, PluginId};
+    use pos_core::{Capability, ConsentGrantedV1, Plugin, PluginId};
     use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 
     struct CoveragePlugin {
@@ -6148,7 +6148,7 @@ mod coverage_entrypoints {
             Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
             pos_core::CanonicalBytes::from_static(b"coverage"),
         )]);
-        assert!(matches!(result, Err(ExperimentError::ConsentRevoked)));
+        assert!(matches!(result, Err(ExperimentError::ConsentRevokedV1)));
     }
 
     #[test]
@@ -6181,7 +6181,7 @@ mod coverage_entrypoints {
         let _ = ok(session.step_tick());
         assert!(matches!(
             session.step_tick(),
-            Err(ExperimentError::ConsentRevoked)
+            Err(ExperimentError::ConsentRevokedV1)
         ));
 
         let failing_plugin = CoveragePlugin {
@@ -6199,7 +6199,7 @@ mod coverage_entrypoints {
         let authority = ConsentAuthority::new();
         let token = authority.record_grant_on_timeline(
             faulted.timeline().id(),
-            &ConsentGranted {
+            &ConsentGrantedV1 {
                 subject_id: EntityId::new(),
                 grantee_id: EntityId::new(),
                 purpose: "coverage-faulted-projection".to_owned(),
@@ -6460,7 +6460,7 @@ mod coverage_entrypoints {
         let subject = EntityId::new();
         let authority = ConsentAuthority::new();
         let timeline = pos_core::ids::TimelineId::new();
-        let grant = ConsentGranted {
+        let grant = ConsentGrantedV1 {
             subject_id: subject,
             grantee_id: EntityId::new(),
             purpose: "coverage-result-errors".to_owned(),
@@ -6666,7 +6666,7 @@ mod coverage_entrypoints {
         let session = ok(experiment.start());
         let token = authority.record_grant_on_timeline(
             session.timeline().id(),
-            &ConsentGranted {
+            &ConsentGrantedV1 {
                 subject_id: EntityId::new(),
                 grantee_id: EntityId::new(),
                 purpose: "coverage-restore-fork".to_owned(),
@@ -6786,7 +6786,7 @@ mod coverage_entrypoints {
         let authority = ConsentAuthority::new();
         let protected_token = authority.record_grant_on_timeline(
             timeline.id(),
-            &ConsentGranted {
+            &ConsentGrantedV1 {
                 subject_id: EntityId::new(),
                 grantee_id: EntityId::new(),
                 purpose: "coverage-result-protected".to_owned(),
@@ -6829,7 +6829,7 @@ mod coverage_entrypoints {
         let timeline = ok(memory.create_timeline("coverage-token-branch"));
         let token = ConsentAuthority::new().record_grant_on_timeline(
             timeline.id(),
-            &ConsentGranted {
+            &ConsentGrantedV1 {
                 subject_id: EntityId::new(),
                 grantee_id: EntityId::new(),
                 purpose: "coverage-token-branch".to_owned(),
@@ -6862,7 +6862,7 @@ mod coverage_entrypoints {
         let authority = ConsentAuthority::new();
         let token = authority.record_grant_on_timeline(
             timeline.id(),
-            &ConsentGranted {
+            &ConsentGrantedV1 {
                 subject_id: EntityId::new(),
                 grantee_id: EntityId::new(),
                 purpose: "coverage-result-guards".to_owned(),
@@ -6953,7 +6953,7 @@ mod coverage_entrypoints {
         let authority = ConsentAuthority::new();
         let token = authority.record_grant_on_timeline(
             timeline.id(),
-            &ConsentGranted {
+            &ConsentGrantedV1 {
                 subject_id: EntityId::new(),
                 grantee_id: EntityId::new(),
                 purpose: "coverage-result-export".to_owned(),
@@ -7003,7 +7003,7 @@ mod coverage_entrypoints {
         let session = ok(experiment.start());
         let token = authority.record_grant_on_timeline(
             session.timeline().id(),
-            &ConsentGranted {
+            &ConsentGrantedV1 {
                 subject_id: EntityId::new(),
                 grantee_id: EntityId::new(),
                 purpose: "coverage-protected-fork".to_owned(),
@@ -7036,7 +7036,7 @@ mod coverage_entrypoints {
         let session = ok(experiment.start());
         let token = authority.record_grant_on_timeline(
             session.timeline().id(),
-            &ConsentGranted {
+            &ConsentGrantedV1 {
                 subject_id: EntityId::new(),
                 grantee_id: EntityId::new(),
                 purpose: "coverage-denied-fork".to_owned(),
@@ -7064,7 +7064,7 @@ mod coverage_entrypoints {
         let subject = EntityId::new();
         let token = authority.record_grant_on_timeline(
             pos_core::ids::TimelineId::new(),
-            &ConsentGranted {
+            &ConsentGrantedV1 {
                 subject_id: subject,
                 grantee_id: EntityId::new(),
                 purpose: "coverage-result".to_owned(),
@@ -7115,7 +7115,7 @@ mod coverage_entrypoints {
         let untrusted_authority = ConsentAuthority::new();
         let token = untrusted_authority.record_grant_on_timeline(
             session.timeline().id(),
-            &ConsentGranted {
+            &ConsentGrantedV1 {
                 subject_id: subject,
                 grantee_id: EntityId::new(),
                 purpose: "coverage-session-projection".to_owned(),
@@ -7130,7 +7130,7 @@ mod coverage_entrypoints {
         );
         let _revoked_token = authority.record_grant_on_timeline(
             session.timeline().id(),
-            &ConsentGranted {
+            &ConsentGrantedV1 {
                 subject_id: revoked_subject,
                 grantee_id: EntityId::new(),
                 purpose: "coverage-session-revocation".to_owned(),
@@ -7711,7 +7711,7 @@ mod fault_injection_tests {
         event::{CanonicalBytes, EventDraft, Kind},
         ids::{EntityId, PluginId},
         store::EventStore,
-        Capability, ConsentGranted, CoreError, Plugin,
+        Capability, ConsentGrantedV1, CoreError, Plugin,
     };
     use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
     use pos_store::{open_store, StoreConfig};
@@ -8196,8 +8196,8 @@ mod fault_injection_tests {
         }
     }
 
-    fn export_grant(expiry_secs: u32) -> ConsentGranted {
-        ConsentGranted {
+    fn export_grant(expiry_secs: u32) -> ConsentGrantedV1 {
+        ConsentGrantedV1 {
             subject_id: EntityId::new(),
             grantee_id: EntityId::new(),
             purpose: "coverage-export-errors".to_owned(),
@@ -8211,8 +8211,8 @@ mod fault_injection_tests {
         }
     }
 
-    fn branch_grant(fork_permitted: bool, expiry_secs: u32) -> ConsentGranted {
-        ConsentGranted {
+    fn branch_grant(fork_permitted: bool, expiry_secs: u32) -> ConsentGrantedV1 {
+        ConsentGrantedV1 {
             fork_permitted,
             expiry_secs,
             ..export_grant(expiry_secs)

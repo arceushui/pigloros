@@ -2690,6 +2690,17 @@ impl EventStore for SqliteStore {
             .and_then(|()| self.append_bounded_visible(timeline, drafts, max_owned_events))
     }
 
+    fn append_consent_bounded(
+        &mut self,
+        timeline: TimelineId,
+        drafts: &[EventDraft],
+        max_owned_events: u64,
+    ) -> Result<Option<Vec<Event>>, CoreError> {
+        crate::ensure_gateway_consent_drafts(drafts, timeline)
+            .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
+            .and_then(|()| self.append_bounded_visible(timeline, drafts, max_owned_events))
+    }
+
     fn append_or_duplicate(
         &mut self,
         timeline: TimelineId,

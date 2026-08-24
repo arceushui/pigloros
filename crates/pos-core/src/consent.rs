@@ -45,7 +45,7 @@ const MAGIC_CGV1: [u8; 4] = *b"CGV1";
 const MAGIC_CRV1: [u8; 4] = *b"CRV1";
 const VERSION_V1: u8 = 1;
 
-/// Maximum UTF-8 bytes for the `purpose` field in `ConsentGranted`.
+/// Maximum UTF-8 bytes for the `purpose` field in `ConsentGrantedV1`.
 pub const MAX_PURPOSE_BYTES: usize = 128;
 
 /// Modality bitmask: location data.
@@ -273,7 +273,7 @@ fn decode_tstr_max(val: &Value, max: usize) -> Result<String, ConsentCodecError>
 }
 
 // ---------------------------------------------------------------------------
-// ConsentGranted
+// ConsentGrantedV1
 // ---------------------------------------------------------------------------
 
 /// A consent grant event (ADR-039, `consent.granted.v1`).
@@ -287,7 +287,7 @@ fn decode_tstr_max(val: &Value, max: usize) -> Result<String, ConsentCodecError>
 /// `expiry_secs`: 0 = no expiry. `retention_days`: 0 = session-only.
 /// `grant_seq`: Timeline.seq at the time this event was appended.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConsentGranted {
+pub struct ConsentGrantedV1 {
     pub subject_id: EntityId,
     pub grantee_id: EntityId,
     /// UTF-8 string, max 128 bytes.
@@ -306,7 +306,7 @@ pub struct ConsentGranted {
     pub grant_seq: u64,
 }
 
-impl ConsentGranted {
+impl ConsentGrantedV1 {
     /// Validate every value-level constraint of the V1 grant contract.
     ///
     /// This single validation boundary is used both before encoding and after
@@ -398,7 +398,7 @@ impl ConsentGranted {
 }
 
 // ---------------------------------------------------------------------------
-// ConsentRevoked
+// ConsentRevokedV1
 // ---------------------------------------------------------------------------
 
 /// A consent revocation event (ADR-039, `consent.revoked.v1`).
@@ -410,7 +410,7 @@ impl ConsentGranted {
 /// `fence_seq`: Timeline.seq at revocation. Sessions with
 /// `logical_head >= fence_seq` must terminate immediately.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConsentRevoked {
+pub struct ConsentRevokedV1 {
     pub subject_id: EntityId,
     pub grantee_id: EntityId,
     /// Timeline.seq of the `consent.granted.v1` being revoked.
@@ -419,12 +419,7 @@ pub struct ConsentRevoked {
     pub fence_seq: u64,
 }
 
-/// Current V1 name for the consent grant contract.
-pub type ConsentGrantedV1 = ConsentGranted;
-/// Current V1 name for the consent revocation contract.
-pub type ConsentRevokedV1 = ConsentRevoked;
-
-impl ConsentRevoked {
+impl ConsentRevokedV1 {
     /// Validate the Timeline coordinates carried by this V1 revocation.
     ///
     /// A revocation is a durable Timeline event, so its fence coordinate must
@@ -628,7 +623,7 @@ impl ConsentCapabilityToken {
     ///
     /// # Errors
     /// Returns the closed no-consent error when the revocation names another grant.
-    pub fn invalidate_with(&mut self, revocation: &ConsentRevoked) -> Result<(), ConsentError> {
+    pub fn invalidate_with(&mut self, revocation: &ConsentRevokedV1) -> Result<(), ConsentError> {
         if self.subject_id != revocation.subject_id
             || self.grantee_id != revocation.grantee_id
             || self.grant_seq != revocation.grant_seq
@@ -649,8 +644,8 @@ struct ActiveConsent {
 type ActiveConsentSessions = HashMap<(TimelineId, EntityId, EntityId, u64), ActiveConsent>;
 
 enum RestoredConsentEvent {
-    Granted(ConsentGranted),
-    Revoked(ConsentRevoked),
+    Granted(ConsentGrantedV1),
+    Revoked(ConsentRevokedV1),
 }
 
 /// Host-owned reservation that serializes a durable revocation with protected
@@ -774,7 +769,7 @@ impl ConsentAuthority {
     pub fn record_grant_on_timeline(
         &self,
         timeline_id: TimelineId,
-        grant: &ConsentGranted,
+        grant: &ConsentGrantedV1,
     ) -> ConsentCapabilityToken {
         self.record_grant_with_timeline(timeline_id, grant)
     }
@@ -782,7 +777,7 @@ impl ConsentAuthority {
     fn record_grant_with_timeline(
         &self,
         timeline_id: TimelineId,
-        grant: &ConsentGranted,
+        grant: &ConsentGrantedV1,
     ) -> ConsentCapabilityToken {
         let token = ConsentCapabilityToken {
             authority_id: self.authority_id,
@@ -822,7 +817,7 @@ impl ConsentAuthority {
     pub fn validate_revocation_on_timeline(
         &self,
         timeline_id: TimelineId,
-        revocation: &ConsentRevoked,
+        revocation: &ConsentRevokedV1,
     ) -> Result<(), ConsentError> {
         self.validate_revocation_with_timeline(timeline_id, revocation)
     }
@@ -841,7 +836,7 @@ impl ConsentAuthority {
     pub fn begin_revocation_on_timeline(
         &self,
         timeline_id: TimelineId,
-        revocation: &ConsentRevoked,
+        revocation: &ConsentRevokedV1,
     ) -> Result<ConsentRevocationReservation, ConsentError> {
         let pending_fence_seq = revocation.fence_seq.saturating_sub(1);
         let key = (
@@ -913,7 +908,7 @@ impl ConsentAuthority {
     fn validate_revocation_with_timeline(
         &self,
         timeline_id: TimelineId,
-        revocation: &ConsentRevoked,
+        revocation: &ConsentRevokedV1,
     ) -> Result<(), ConsentError> {
         let key = (
             timeline_id,
@@ -941,7 +936,7 @@ impl ConsentAuthority {
     pub fn record_revocation_on_timeline(
         &self,
         timeline_id: TimelineId,
-        revocation: &ConsentRevoked,
+        revocation: &ConsentRevokedV1,
     ) -> Result<(), ConsentError> {
         self.record_revocation_with_timeline(timeline_id, revocation)
     }
@@ -949,7 +944,7 @@ impl ConsentAuthority {
     fn record_revocation_with_timeline(
         &self,
         timeline_id: TimelineId,
-        revocation: &ConsentRevoked,
+        revocation: &ConsentRevokedV1,
     ) -> Result<(), ConsentError> {
         let key = (
             timeline_id,
@@ -1060,14 +1055,14 @@ impl ConsentAuthority {
         for event in events {
             match event.event_type.as_str() {
                 EVENT_TYPE_CONSENT_GRANTED_V1 => {
-                    let grant = ConsentGranted::decode(&event.payload)?;
+                    let grant = ConsentGrantedV1::decode(&event.payload)?;
                     if event.entity != grant.subject_id || event.seq.as_u64() != grant.grant_seq {
                         return Err(ConsentCodecError::HistoryCoordinateMismatch);
                     }
                     decoded.push(RestoredConsentEvent::Granted(grant));
                 }
                 EVENT_TYPE_CONSENT_REVOKED_V1 => {
-                    let revocation = ConsentRevoked::decode(&event.payload)?;
+                    let revocation = ConsentRevokedV1::decode(&event.payload)?;
                     if event.entity != revocation.subject_id
                         || event.seq.as_u64() != revocation.fence_seq
                     {
@@ -1560,8 +1555,8 @@ mod tests {
         }
     }
 
-    fn sample_granted() -> ConsentGranted {
-        ConsentGranted {
+    fn sample_granted() -> ConsentGrantedV1 {
+        ConsentGrantedV1 {
             subject_id: EntityId::new(),
             grantee_id: EntityId::new(),
             purpose: "decision-preview".to_owned(),
@@ -1575,8 +1570,8 @@ mod tests {
         }
     }
 
-    fn sample_revoked(grant: &ConsentGranted) -> ConsentRevoked {
-        ConsentRevoked {
+    fn sample_revoked(grant: &ConsentGrantedV1) -> ConsentRevokedV1 {
+        ConsentRevokedV1 {
             subject_id: grant.subject_id,
             grantee_id: grant.grantee_id,
             grant_seq: grant.grant_seq,
@@ -1586,7 +1581,7 @@ mod tests {
 
     fn record_test_grant(
         authority: &ConsentAuthority,
-        grant: &ConsentGranted,
+        grant: &ConsentGrantedV1,
     ) -> (TimelineId, ConsentCapabilityToken) {
         let timeline = TimelineId::new();
         let token = authority.record_grant_on_timeline(timeline, grant);
@@ -1606,14 +1601,14 @@ mod tests {
         assert!(!is_consent_event_type(&Kind::new("world.observation.v1")));
     }
 
-    // -- ConsentGranted --
+    // -- ConsentGrantedV1 --
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn consent_granted_round_trip() {
         let g = sample_granted();
         let bytes = g.encode().test_ok();
-        let d = ConsentGranted::decode(&bytes).test_ok();
+        let d = ConsentGrantedV1::decode(&bytes).test_ok();
         assert_eq!(d.subject_id, g.subject_id);
         assert_eq!(d.grantee_id, g.grantee_id);
         assert_eq!(d.purpose, g.purpose);
@@ -1633,7 +1628,7 @@ mod tests {
         g.modalities = MODALITY_LOCATION | MODALITY_PERSONA | MODALITY_MODEL_FIT | MODALITY_EXPORT;
         g.export_permitted = true;
         let bytes = g.encode().test_ok();
-        let d = ConsentGranted::decode(&bytes).test_ok();
+        let d = ConsentGrantedV1::decode(&bytes).test_ok();
         assert_eq!(d.modalities, 0x0F);
         assert!(d.export_permitted);
     }
@@ -1644,7 +1639,7 @@ mod tests {
         let mut g = sample_granted();
         g.expiry_secs = 86_400;
         let bytes = g.encode().test_ok();
-        let d = ConsentGranted::decode(&bytes).test_ok();
+        let d = ConsentGrantedV1::decode(&bytes).test_ok();
         assert_eq!(d.expiry_secs, 86_400);
     }
 
@@ -1666,7 +1661,7 @@ mod tests {
         grant.purpose = "x".repeat(MAX_PURPOSE_BYTES);
 
         let encoded = grant.encode().test_ok();
-        assert_eq!(ConsentGranted::decode(&encoded).test_ok(), grant);
+        assert_eq!(ConsentGrantedV1::decode(&encoded).test_ok(), grant);
     }
 
     #[test]
@@ -1677,7 +1672,7 @@ mod tests {
         // byte[2] is the first payload byte of the magic bstr
         bytes[2] = b'X';
         assert!(matches!(
-            ConsentGranted::decode(&CanonicalBytes::from_vec(bytes)),
+            ConsentGrantedV1::decode(&CanonicalBytes::from_vec(bytes)),
             Err(ConsentCodecError::WrongMagic)
         ));
     }
@@ -1689,7 +1684,7 @@ mod tests {
         let mut bytes = g.encode().test_ok().as_slice().to_vec();
         bytes.push(0x00);
         assert!(matches!(
-            ConsentGranted::decode(&CanonicalBytes::from_vec(bytes)),
+            ConsentGrantedV1::decode(&CanonicalBytes::from_vec(bytes)),
             Err(ConsentCodecError::TrailingBytes)
         ));
     }
@@ -1702,7 +1697,7 @@ mod tests {
         let mut non_canonical = vec![0x98, 12];
         non_canonical.extend_from_slice(&canonical.as_slice()[1..]);
         assert_eq!(
-            ConsentGranted::decode(&CanonicalBytes::from_vec(non_canonical)).test_err(),
+            ConsentGrantedV1::decode(&CanonicalBytes::from_vec(non_canonical)).test_err(),
             ConsentCodecError::NonCanonicalEncoding
         );
     }
@@ -1720,7 +1715,7 @@ mod tests {
         let mut buf = Vec::new();
         ciborium::into_writer(&val, &mut buf).test_ok();
         assert!(matches!(
-            ConsentGranted::decode(&CanonicalBytes::from_vec(buf)),
+            ConsentGrantedV1::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::WrongVersion)
         ));
     }
@@ -1735,7 +1730,7 @@ mod tests {
         let mut buf = Vec::new();
         ciborium::into_writer(&truncated, &mut buf).test_ok();
         assert!(matches!(
-            ConsentGranted::decode(&CanonicalBytes::from_vec(buf)),
+            ConsentGrantedV1::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::WrongArrayLength)
         ));
     }
@@ -1747,7 +1742,7 @@ mod tests {
         let mut buf = Vec::new();
         ciborium::into_writer(&scalar, &mut buf).test_ok();
         assert!(matches!(
-            ConsentGranted::decode(&CanonicalBytes::from_vec(buf)),
+            ConsentGrantedV1::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::CborError)
         ));
     }
@@ -1765,7 +1760,7 @@ mod tests {
         let mut buf = Vec::new();
         ciborium::into_writer(&val, &mut buf).test_ok();
         assert!(matches!(
-            ConsentGranted::decode(&CanonicalBytes::from_vec(buf)),
+            ConsentGrantedV1::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::WrongFieldType)
         ));
     }
@@ -1784,7 +1779,7 @@ mod tests {
         let mut buf = Vec::new();
         ciborium::into_writer(&val, &mut buf).test_ok();
         assert!(matches!(
-            ConsentGranted::decode(&CanonicalBytes::from_vec(buf)),
+            ConsentGrantedV1::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::WrongFieldType)
         ));
     }
@@ -1802,7 +1797,7 @@ mod tests {
         let mut buf = Vec::new();
         ciborium::into_writer(&val, &mut buf).test_ok();
         assert!(matches!(
-            ConsentGranted::decode(&CanonicalBytes::from_vec(buf)),
+            ConsentGrantedV1::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::WrongFieldType)
         ));
     }
@@ -1820,7 +1815,7 @@ mod tests {
         let mut buf = Vec::new();
         ciborium::into_writer(&val, &mut buf).test_ok();
         assert!(matches!(
-            ConsentGranted::decode(&CanonicalBytes::from_vec(buf)),
+            ConsentGrantedV1::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::WrongFieldType)
         ));
     }
@@ -1838,7 +1833,7 @@ mod tests {
         let mut buf = Vec::new();
         ciborium::into_writer(&val, &mut buf).test_ok();
         assert!(matches!(
-            ConsentGranted::decode(&CanonicalBytes::from_vec(buf)),
+            ConsentGrantedV1::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::WrongFieldType)
         ));
     }
@@ -1857,7 +1852,7 @@ mod tests {
         let mut buf = Vec::new();
         ciborium::into_writer(&val, &mut buf).test_ok();
         assert!(matches!(
-            ConsentGranted::decode(&CanonicalBytes::from_vec(buf)),
+            ConsentGrantedV1::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::WrongFieldType)
         ));
     }
@@ -1875,7 +1870,7 @@ mod tests {
         let mut buf = Vec::new();
         ciborium::into_writer(&val, &mut buf).test_ok();
         assert!(matches!(
-            ConsentGranted::decode(&CanonicalBytes::from_vec(buf)),
+            ConsentGrantedV1::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::WrongFieldType)
         ));
     }
@@ -1893,7 +1888,7 @@ mod tests {
         let mut overlong = Vec::new();
         ciborium::into_writer(&value, &mut overlong).test_ok();
         assert!(matches!(
-            ConsentGranted::decode(&CanonicalBytes::from_vec(overlong)),
+            ConsentGrantedV1::decode(&CanonicalBytes::from_vec(overlong)),
             Err(ConsentCodecError::PurposeTooLong { .. })
         ));
 
@@ -1904,7 +1899,7 @@ mod tests {
         let mut out_of_bounds = Vec::new();
         ciborium::into_writer(&value, &mut out_of_bounds).test_ok();
         assert_eq!(
-            ConsentGranted::decode(&CanonicalBytes::from_vec(out_of_bounds)).test_err(),
+            ConsentGrantedV1::decode(&CanonicalBytes::from_vec(out_of_bounds)).test_err(),
             ConsentCodecError::FieldOutOfBounds
         );
     }
@@ -1922,12 +1917,12 @@ mod tests {
         ciborium::into_writer(&value, &mut encoded).test_ok();
 
         assert_eq!(
-            ConsentGranted::decode(&CanonicalBytes::from_vec(encoded)).test_err(),
+            ConsentGrantedV1::decode(&CanonicalBytes::from_vec(encoded)).test_err(),
             ConsentCodecError::FieldOutOfBounds
         );
     }
 
-    // -- ConsentRevoked --
+    // -- ConsentRevokedV1 --
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -1935,7 +1930,7 @@ mod tests {
         let g = sample_granted();
         let r = sample_revoked(&g);
         let bytes = r.encode().test_ok();
-        let d = ConsentRevoked::decode(&bytes).test_ok();
+        let d = ConsentRevokedV1::decode(&bytes).test_ok();
         assert_eq!(d.subject_id, r.subject_id);
         assert_eq!(d.grantee_id, r.grantee_id);
         assert_eq!(d.grant_seq, r.grant_seq);
@@ -1962,7 +1957,7 @@ mod tests {
             ]);
             CanonicalBytes::from_vec(cbor_encode(&arr).test_ok())
         };
-        assert_eq!(ConsentRevoked::decode(&bytes).test_err(), ConsentCodecError::FieldOutOfBounds);
+        assert_eq!(ConsentRevokedV1::decode(&bytes).test_err(), ConsentCodecError::FieldOutOfBounds);
     }
 
     #[test]
@@ -1973,7 +1968,7 @@ mod tests {
         let mut bytes = r.encode().test_ok().as_slice().to_vec();
         bytes[2] = b'X';
         assert!(matches!(
-            ConsentRevoked::decode(&CanonicalBytes::from_vec(bytes)),
+            ConsentRevokedV1::decode(&CanonicalBytes::from_vec(bytes)),
             Err(ConsentCodecError::WrongMagic)
         ));
     }
@@ -1986,7 +1981,7 @@ mod tests {
         let mut bytes = r.encode().test_ok().as_slice().to_vec();
         bytes.push(0xFF);
         assert!(matches!(
-            ConsentRevoked::decode(&CanonicalBytes::from_vec(bytes)),
+            ConsentRevokedV1::decode(&CanonicalBytes::from_vec(bytes)),
             Err(ConsentCodecError::TrailingBytes)
         ));
     }
@@ -1998,7 +1993,7 @@ mod tests {
         let mut buf = Vec::new();
         ciborium::into_writer(&truncated, &mut buf).test_ok();
         assert!(matches!(
-            ConsentRevoked::decode(&CanonicalBytes::from_vec(buf)),
+            ConsentRevokedV1::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::WrongArrayLength)
         ));
     }
@@ -2010,7 +2005,7 @@ mod tests {
         let mut buf = Vec::new();
         ciborium::into_writer(&scalar, &mut buf).test_ok();
         assert!(matches!(
-            ConsentRevoked::decode(&CanonicalBytes::from_vec(buf)),
+            ConsentRevokedV1::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::CborError)
         ));
     }
@@ -2029,7 +2024,7 @@ mod tests {
         let mut buf = Vec::new();
         ciborium::into_writer(&val, &mut buf).test_ok();
         assert!(matches!(
-            ConsentRevoked::decode(&CanonicalBytes::from_vec(buf)),
+            ConsentRevokedV1::decode(&CanonicalBytes::from_vec(buf)),
             Err(ConsentCodecError::WrongFieldType)
         ));
     }
@@ -2133,7 +2128,7 @@ mod tests {
         let revocation = sample_revoked(&grant);
         assert!(token.invalidate_with(&revocation).is_ok());
         assert!(!token.is_valid_at(revocation.fence_seq));
-        let later = ConsentRevoked {
+        let later = ConsentRevokedV1 {
             fence_seq: revocation.fence_seq + 1,
             ..revocation
         };
@@ -2200,7 +2195,7 @@ mod tests {
             Err(ConsentError::NoConsent)
         );
 
-        let revocation = ConsentRevoked {
+        let revocation = ConsentRevokedV1 {
             subject_id: grant.subject_id,
             grantee_id: grant.grantee_id,
             grant_seq: grant.grant_seq,
@@ -2219,7 +2214,7 @@ mod tests {
         assert_eq!(
             authority.validate_revocation_on_timeline(
                 timeline,
-                &ConsentRevoked {
+                &ConsentRevokedV1 {
                     grant_seq: grant.grant_seq + 1,
                     ..revocation
                 },
@@ -2456,7 +2451,7 @@ mod tests {
             Err(ConsentError::NoConsent)
         );
 
-        let wrong_session_revocation = ConsentRevoked {
+        let wrong_session_revocation = ConsentRevokedV1 {
             grant_seq: grant.grant_seq + 1,
             ..wrong_timeline_revocation
         };
@@ -2473,7 +2468,7 @@ mod tests {
         let timeline = TimelineId::new();
         let grant = sample_granted();
         let token = authority.record_grant_on_timeline(timeline, &grant);
-        let revocation = ConsentRevoked {
+        let revocation = ConsentRevokedV1 {
             subject_id: grant.subject_id,
             grantee_id: grant.grantee_id,
             grant_seq: grant.grant_seq,
@@ -2517,7 +2512,7 @@ mod tests {
         let timeline = TimelineId::new();
         let grant = sample_granted();
         let token = authority.record_grant_on_timeline(timeline, &grant);
-        let revocation = ConsentRevoked {
+        let revocation = ConsentRevokedV1 {
             subject_id: grant.subject_id,
             grantee_id: grant.grantee_id,
             grant_seq: grant.grant_seq,
@@ -3076,7 +3071,7 @@ mod tests {
         let grant = sample_granted();
         let _token = authority.record_grant_on_timeline(timeline, &grant);
 
-        let revocation = ConsentRevoked {
+        let revocation = ConsentRevokedV1 {
             subject_id: grant.subject_id,
             grantee_id: grant.grantee_id,
             grant_seq: grant.grant_seq,

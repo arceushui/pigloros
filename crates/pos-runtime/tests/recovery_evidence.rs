@@ -295,7 +295,7 @@ fn scheduler_skips_metadata_only_plugins_and_rejects_cadence_overflow() {
     let mut cadenced = PluginRegistry::new();
     let key = ProjectionKey::new(EntityId::new());
     let authority = pos_core::ConsentAuthority::new();
-    let grant = pos_core::ConsentGranted {
+    let grant = pos_core::ConsentGrantedV1 {
         subject_id: key.entity_id().to_owned(),
         grantee_id: EntityId::new(),
         purpose: "cadence-overflow-test".to_owned(),

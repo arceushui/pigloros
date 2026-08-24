@@ -1,8 +1,8 @@
 use piglor_gateway::{router, ActionPrincipal, AppState, Gateway, GatewayError, LedgerWriteMode};
 use piglor_ledger::LedgerView;
 use pos_core::{
-    Capability, ConsentAuthority, ConsentGranted, ConsentRevoked, EntityId, Kind, Plugin, PluginId,
-    TimelineId, WallTime,
+    Capability, ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId, Kind, Plugin,
+    PluginId, TimelineId, WallTime,
 };
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition, TickOutcome};
 use pos_plugin_agent::{
@@ -478,7 +478,7 @@ fn register_experiment(
         )
         .test_ok()?;
     let authority = ConsentAuthority::new();
-    let grant = ConsentGranted {
+    let grant = ConsentGrantedV1 {
         subject_id: scenario.human_entity,
         grantee_id: EntityId::new(),
         purpose: "multi-rate-projection-observation".to_owned(),
@@ -672,7 +672,7 @@ fn assert_projection_state(
     let read_state = |reducer: &str, subject: EntityId| {
         let token = authority.record_grant_on_timeline(
             scenario.timeline,
-            &ConsentGranted {
+            &ConsentGrantedV1 {
                 subject_id: subject,
                 grantee_id: EntityId::new(),
                 purpose: "multi-rate-projection-read".to_owned(),
@@ -801,7 +801,7 @@ async fn gateway_reloads_durable_consent_before_revocation(
         .await
         .test_ok()?;
     let subject_id = EntityId::new();
-    let grant = ConsentGranted {
+    let grant = ConsentGrantedV1 {
         subject_id,
         grantee_id: EntityId::new(),
         purpose: "gateway-recovery".to_owned(),
@@ -823,7 +823,7 @@ async fn gateway_reloads_durable_consent_before_revocation(
     let unknown_error = recovered_gateway
         .issue_consent_revocation(
             &timeline.id().to_string(),
-            ConsentRevoked {
+            ConsentRevokedV1 {
                 subject_id: EntityId::new(),
                 grantee_id: token.grantee_id(),
                 grant_seq: token.grant_seq(),
@@ -840,7 +840,7 @@ async fn gateway_reloads_durable_consent_before_revocation(
     let revocation = recovered_gateway
         .issue_consent_revocation(
             &timeline.id().to_string(),
-            ConsentRevoked {
+            ConsentRevokedV1 {
                 subject_id,
                 grantee_id: token.grantee_id(),
                 grant_seq: token.grant_seq(),

@@ -2,7 +2,7 @@ use pos_core::{
     clock::WallTime,
     consent::{ConsentGate, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1},
     event::{CanonicalBytes, Event, Kind, SchemaVersion},
-    ConsentAuthority, ConsentError, ConsentGranted, ConsentRevoked, EntityId, EventId, Hash,
+    ConsentAuthority, ConsentError, ConsentGrantedV1, ConsentRevokedV1, EntityId, EventId, Hash,
     TimelineId,
 };
 
@@ -28,8 +28,8 @@ fn event(event_type: &str, entity: EntityId, payload: CanonicalBytes, seq: u64) 
     }
 }
 
-fn grant(subject_id: EntityId, grant_seq: u64) -> ConsentGranted {
-    ConsentGranted {
+fn grant(subject_id: EntityId, grant_seq: u64) -> ConsentGrantedV1 {
+    ConsentGrantedV1 {
         subject_id,
         grantee_id: EntityId::new(),
         purpose: "public-consent-boundary".to_owned(),
@@ -49,7 +49,7 @@ fn durable_revocation_decode_and_timeline_fence_are_public_seams() {
     let timeline = TimelineId::new();
     let subject = EntityId::new();
     let durable_grant = grant(subject, 1);
-    let durable_revocation = ConsentRevoked {
+    let durable_revocation = ConsentRevokedV1 {
         subject_id: durable_grant.subject_id,
         grantee_id: durable_grant.grantee_id,
         grant_seq: durable_grant.grant_seq,

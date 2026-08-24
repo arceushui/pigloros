@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use pos_core::{
-    ConsentRevocationFoldListener, ConsentRevoked, EntityId, Event, Reducer, Relationship, State,
+    ConsentRevocationFoldListener, ConsentRevokedV1, EntityId, Event, Reducer, Relationship, State,
     StateRegistry, EVENT_TYPE_CONSENT_REVOKED_V1,
 };
 
@@ -109,7 +109,7 @@ impl ProjectionRegistry {
     /// Apply a single event to every registered reducer.
     pub fn apply_event(&mut self, event: &Event) {
         if event.event_type.as_str() == EVENT_TYPE_CONSENT_REVOKED_V1 {
-            if let Ok(revocation) = ConsentRevoked::decode(&event.payload) {
+            if let Ok(revocation) = ConsentRevokedV1::decode(&event.payload) {
                 self.on_consent_revoked(revocation.subject_id, revocation.fence_seq);
             }
             return;
@@ -435,7 +435,7 @@ mod tests {
         registry.apply_event(&make_event(subject));
         registry.apply_event(&make_event(other));
 
-        let revocation = ConsentRevoked {
+        let revocation = ConsentRevokedV1 {
             subject_id: subject,
             grantee_id: EntityId::new(),
             grant_seq: 1,

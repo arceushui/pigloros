@@ -1777,7 +1777,7 @@ fn execute_append_consent_grant_command(
                 .map_err(|error| CoreError::Storage(error.to_string()))
         })
         .and_then(|payload| {
-            store.append_bounded(
+            store.append_consent_bounded(
                 timeline,
                 &[EventDraft::new(
                     grant.subject_id,
@@ -1816,7 +1816,7 @@ fn execute_append_consent_revocation_command(
                 .map_err(|error| CoreError::Storage(error.to_string()))
         })
         .and_then(|payload| {
-            store.append_bounded(
+            store.append_consent_bounded(
                 timeline,
                 &[EventDraft::new(
                     revocation.subject_id,

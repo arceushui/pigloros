@@ -863,6 +863,42 @@ impl MemoryStore {
         Ok(selected)
     }
 
+    fn append_bounded_with_boundary(
+        &mut self,
+        timeline: TimelineId,
+        drafts: &[EventDraft],
+        max_owned_events: u64,
+        gateway_consent: bool,
+    ) -> Result<Option<Vec<Event>>, CoreError> {
+        let validate = if gateway_consent {
+            crate::ensure_gateway_consent_drafts
+        } else {
+            crate::ensure_non_geographic_drafts
+        };
+        validate(drafts, timeline)
+            .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
+            .and_then(|()| {
+                // Visibility checked this key immediately above and no mutation
+                // occurs between the check and this read.
+                let timeline_state = &self.timelines[&timeline].timeline;
+                let owned_head = timeline_state.head.as_u64();
+                let logical_prefix = timeline_state
+                    .meta
+                    .fork_point
+                    .map_or(0, |(_, fork)| fork.as_u64());
+                let batch_len = u64::try_from(drafts.len()).unwrap_or(u64::MAX);
+                if let Some(next_head) =
+                    crate::bounded_owned_head(owned_head, batch_len, max_owned_events)?
+                {
+                    crate::checked_logical_head(logical_prefix, next_head)?;
+                    self.append_visible_with_prefix(timeline, drafts, logical_prefix)
+                        .map(Some)
+                } else {
+                    Ok(None)
+                }
+            })
+    }
+
     /// Walk the fork chain from `timeline_id` back to the root, returning [root, ..., `timeline_id`].
     fn fork_chain(&self, timeline_id: TimelineId) -> Result<ForkChain, CoreError> {
         let mut chain = Vec::new();
@@ -1519,28 +1555,16 @@ impl EventStore for MemoryStore {
         drafts: &[EventDraft],
         max_owned_events: u64,
     ) -> Result<Option<Vec<Event>>, CoreError> {
-        crate::ensure_non_geographic_drafts(drafts, timeline)
-            .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
-            .and_then(|()| {
-                // Visibility checked this key immediately above and no mutation
-                // occurs between the check and this read.
-                let timeline_state = &self.timelines[&timeline].timeline;
-                let owned_head = timeline_state.head.as_u64();
-                let logical_prefix = timeline_state
-                    .meta
-                    .fork_point
-                    .map_or(0, |(_, fork)| fork.as_u64());
-                let batch_len = u64::try_from(drafts.len()).unwrap_or(u64::MAX);
-                if let Some(next_head) =
-                    crate::bounded_owned_head(owned_head, batch_len, max_owned_events)?
-                {
-                    crate::checked_logical_head(logical_prefix, next_head)?;
-                    self.append_visible_with_prefix(timeline, drafts, logical_prefix)
-                        .map(Some)
-                } else {
-                    Ok(None)
-                }
-            })
+        self.append_bounded_with_boundary(timeline, drafts, max_owned_events, false)
+    }
+
+    fn append_consent_bounded(
+        &mut self,
+        timeline: TimelineId,
+        drafts: &[EventDraft],
+        max_owned_events: u64,
+    ) -> Result<Option<Vec<Event>>, CoreError> {
+        self.append_bounded_with_boundary(timeline, drafts, max_owned_events, true)
     }
 
     fn append_or_duplicate(

@@ -297,7 +297,7 @@ mod coverage_entrypoints {
         crypto::Hash,
         event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
         ids::{EntityId, EventId, TimelineId},
-        ConsentAuthority, ConsentGranted,
+        ConsentAuthority, ConsentGrantedV1,
     };
 
     struct NoopDriver;
@@ -435,7 +435,7 @@ mod coverage_entrypoints {
         let authority = ConsentAuthority::new();
         let token = authority.record_grant_on_timeline(
             timeline,
-            &ConsentGranted {
+            &ConsentGrantedV1 {
                 subject_id: subject,
                 grantee_id: EntityId::new(),
                 purpose: "coverage".to_owned(),
@@ -1944,7 +1944,7 @@ mod tests {
         crypto::Hash,
         event::{CanonicalBytes, EventDraft, Kind, SchemaVersion},
         ids::{EntityId, EventId, PluginId, TimelineId},
-        Capability, ConsentGranted, ConsentRevoked, CoreError, Event, Plugin, Reducer, State,
+        Capability, ConsentGrantedV1, ConsentRevokedV1, CoreError, Event, Plugin, Reducer, State,
     };
     use pos_store::{open_store, StoreConfig};
     use std::{
@@ -2663,7 +2663,7 @@ mod tests {
         let authority = ConsentAuthority::new();
         let token = authority.record_grant_on_timeline(
             timeline,
-            &ConsentGranted {
+            &ConsentGrantedV1 {
                 subject_id: subject,
                 grantee_id: EntityId::new(),
                 purpose: "projection-seam".to_owned(),
@@ -2971,7 +2971,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn protected_operation_validation_fails_closed_and_checks_the_bound_authority() {
-        let grant = ConsentGranted {
+        let grant = ConsentGrantedV1 {
             subject_id: EntityId::new(),
             grantee_id: EntityId::new(),
             purpose: "runtime-test".to_owned(),
@@ -3001,7 +3001,7 @@ mod tests {
         authority
             .record_revocation_on_timeline(
                 timeline,
-                &ConsentRevoked {
+                &ConsentRevokedV1 {
                     subject_id: grant.subject_id,
                     grantee_id: grant.grantee_id,
                     grant_seq: grant.grant_seq,
@@ -3020,7 +3020,7 @@ mod tests {
         let timeline = TimelineId::new();
         let key = ProjectionKey::new(EntityId::new());
         let authority = ConsentAuthority::new();
-        let grant = ConsentGranted {
+        let grant = ConsentGrantedV1 {
             subject_id: key.entity_id().to_owned(),
             grantee_id: EntityId::new(),
             purpose: "missing-gate-coverage".to_owned(),
@@ -3252,7 +3252,7 @@ mod tests {
         reg.projections.register("counter", Box::new(CountReducer));
         reg.projections.apply_event(&event);
         let authority = ConsentAuthority::new();
-        let grant = ConsentGranted {
+        let grant = ConsentGrantedV1 {
             subject_id: observed_entity,
             grantee_id: EntityId::new(),
             purpose: "projection-test".to_owned(),
@@ -3322,7 +3322,7 @@ mod tests {
         };
         let plugin = plugin_with_caps("dup-key-plugin", &[], true, false);
         let authority = ConsentAuthority::new();
-        let grant = ConsentGranted {
+        let grant = ConsentGrantedV1 {
             subject_id,
             grantee_id: EntityId::new(),
             purpose: "projection-dedup-test".to_owned(),
@@ -3447,7 +3447,7 @@ mod tests {
         let timeline = TimelineId::new();
         let subject = EntityId::new();
         let authority = ConsentAuthority::new();
-        let grant = ConsentGranted {
+        let grant = ConsentGrantedV1 {
             subject_id: subject,
             grantee_id: EntityId::new(),
             purpose: "append-boundary".to_owned(),
@@ -3564,7 +3564,7 @@ mod tests {
         let timeline = TimelineId::new();
         let subject = EntityId::new();
         let authority = ConsentAuthority::new();
-        let grant = ConsentGranted {
+        let grant = ConsentGrantedV1 {
             subject_id: subject,
             grantee_id: EntityId::new(),
             purpose: "cadenced-boundary".to_owned(),
@@ -3789,7 +3789,7 @@ mod tests {
         let shared_key = ProjectionKey::new(EntityId::new());
         let observed = Arc::new(Mutex::new(Vec::new()));
         let authority = ConsentAuthority::new();
-        let grant = pos_core::ConsentGranted {
+        let grant = pos_core::ConsentGrantedV1 {
             subject_id: shared_key.entity_id().to_owned(),
             grantee_id: EntityId::new(),
             purpose: "projection-dedup-test".to_owned(),
