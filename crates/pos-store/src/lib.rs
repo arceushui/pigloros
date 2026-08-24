@@ -364,10 +364,10 @@ mod tests {
 
     #[test]
     fn unbounded_append_outcome_maps_both_optional_states() {
-        assert_eq!(
+        assert!(matches!(
             unbounded_append_outcome(Some(AppendOrDuplicateOutcome::Conflict)),
             Ok(AppendOrDuplicateOutcome::Conflict)
-        );
+        ));
         assert!(unbounded_append_outcome(None).is_err());
     }
 
