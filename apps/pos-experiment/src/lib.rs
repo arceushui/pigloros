@@ -6470,6 +6470,7 @@ mod coverage_entrypoints {
             session.step_tick(),
             Ok(TickOutcome::Advanced { .. })
         ));
+        assert!(matches!(session.step_tick(), Ok(TickOutcome::Stopped)));
         session.revoke_consent_at_boundary();
         session.revoke_consent_for_subject_at_boundary(revoked_subject);
         assert!(matches!(session.step_tick(), Ok(TickOutcome::Stopped)));
