@@ -1415,6 +1415,27 @@ mod tests {
             .save_key_registry(&crate::KeyRegistryStateV1::new())
             .test_err()?;
         assert!(error.to_string().contains("unsupported"));
+
+        let mut create_event = |_registry: &crate::KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        let error = store
+            .append_signed_authorized(
+                TimelineId::new(),
+                &crate::KeyRegistryStateV1::new(),
+                &mut create_event,
+            )
+            .test_err()?;
+        assert!(error.to_string().contains("unavailable"));
+
+        let error = store
+            .destroy_key_registry(crate::KeyDestructionRequestV1::new(
+                crate::KeyIdentityV1::new(crate::KeyRoleV1::TimelineIntegritySigning, 1),
+                crate::Hash::from_bytes([1; 32]),
+                crate::Hash::from_bytes([2; 32]),
+            ))
+            .test_err()?;
+        assert!(error.to_string().contains("unavailable"));
         Ok(())
     }
 

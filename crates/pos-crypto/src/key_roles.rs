@@ -28,8 +28,7 @@ pub fn key_material_digest(private_material: &[u8; 32]) -> Hash {
 /// # Errors
 ///
 /// Returns [`KeyRegistryErrorV1::SigningRoleRequired`] when an encryption role
-/// is supplied.  Legacy subject-data-key signatures must remain on the
-/// verify-only compatibility path and cannot be reissued here.
+/// is supplied.
 #[cfg(test)]
 fn sign_for_role(
     signing_key: &SigningKey,

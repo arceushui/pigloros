@@ -28,23 +28,6 @@ pub enum KeyRoleV1 {
     ExportRecipientEncryption,
 }
 
-/// Compatibility policy for signatures emitted by the pre-#183 subject-data
-/// key path described by ADR-041.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LegacySubjectDataSignatureDispositionV1 {
-    /// Existing signatures may be verified with their recorded public key,
-    /// but cannot be reissued, migrated, or used to upgrade a replay claim.
-    VerifyOnlyNoReplayUpgrade,
-}
-
-impl LegacySubjectDataSignatureDispositionV1 {
-    /// Return the fixed compatibility disposition.
-    #[must_use]
-    pub const fn current() -> Self {
-        Self::VerifyOnlyNoReplayUpgrade
-    }
-}
-
 impl KeyRoleV1 {
     /// Return the stable wire code for this role.
     #[must_use]
@@ -659,15 +642,6 @@ mod tests {
         assert_eq!(
             KeyRoleV1::from_code(99),
             Err(KeyRegistryErrorV1::InvalidRoleCode)
-        );
-    }
-
-    #[test]
-    fn legacy_subject_signatures_are_verify_only() {
-        let disposition = LegacySubjectDataSignatureDispositionV1::current();
-        assert_eq!(
-            disposition,
-            LegacySubjectDataSignatureDispositionV1::VerifyOnlyNoReplayUpgrade
         );
     }
 

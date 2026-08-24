@@ -67,6 +67,13 @@ fn ledger_signing_registry(
     signing_key: &ed25519_dalek::SigningKey,
 ) -> Result<(Arc<Mutex<KeyRegistryStateV1>>, KeyIdentityV1), CliError> {
     let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+    ledger_signing_registry_for(signing_key, identity)
+}
+
+fn ledger_signing_registry_for(
+    signing_key: &ed25519_dalek::SigningKey,
+    identity: KeyIdentityV1,
+) -> Result<(Arc<Mutex<KeyRegistryStateV1>>, KeyIdentityV1), CliError> {
     let mut registry = KeyRegistryStateV1::new();
     registry
         .register_key(KeyRegistrationV1::new(
@@ -1849,6 +1856,17 @@ mod tests {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
+    fn ledger_signing_registry_rejects_invalid_identity() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (signing_key, _) = pos_crypto::signing::generate_keypair();
+        let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 0);
+        let error = ledger_signing_registry_for(&signing_key, identity).test_err()?;
+        assert!(error.to_string().contains("key epoch zero"), "{error}");
+        Ok(())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
     fn hex_decode_second_nibble_error() -> Result<(), Box<dyn std::error::Error>> {
         // Covers L71: `nib(l)?` — the second nibble error sub-region.
         // "0g" has a valid first nibble ('0') and an invalid second nibble ('g').
@@ -2258,6 +2276,8 @@ mod tests {
         // in cmd_build when pos_store::open_store fails for the store source.
         let tmp = TempDir::new().test_ok()?;
         let bad_db = tmp.path().join("no_such_dir").join("ledger.db");
+        let key_path = tmp.path().join("sk");
+        run_keygen(&key_path)?;
         let err = run(&[
             "piglor-ledger".into(),
             "build".into(),
@@ -2265,6 +2285,8 @@ mod tests {
             format!("store:{}", bad_db.display()),
             "--site".into(),
             tmp.path().join("site").to_str().test_ok()?.to_owned(),
+            "--key".into(),
+            key_path.to_str().test_ok()?.to_owned(),
         ]);
         assert!(err.is_err(), "expected error for invalid store path");
 
@@ -2282,6 +2304,8 @@ mod tests {
         }
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
+        let key_path = tmp.path().join("sk");
+        run_keygen(&key_path)?;
         {
             let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
                 path: db.to_string_lossy().into_owned(),
@@ -2297,6 +2321,8 @@ mod tests {
             format!("store:{}", db.display()),
             "--site".into(),
             tmp.path().join("site").to_str().test_ok()?.to_owned(),
+            "--key".into(),
+            key_path.to_str().test_ok()?.to_owned(),
         ]);
         std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).test_ok()?;
         assert!(err.is_err(), "expected error from read-only DB");
@@ -2311,6 +2337,8 @@ mod tests {
         // when the today string is not a valid date.
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
+        let key_path = tmp.path().join("sk");
+        run_keygen(&key_path)?;
         let err = run(&[
             "piglor-ledger".into(),
             "build".into(),
@@ -2320,6 +2348,8 @@ mod tests {
             tmp.path().join("site").to_str().test_ok()?.to_owned(),
             "--today".into(),
             "bad-date".into(),
+            "--key".into(),
+            key_path.to_str().test_ok()?.to_owned(),
         ]);
         assert!(err.is_err(), "expected error for invalid today");
 

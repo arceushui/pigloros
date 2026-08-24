@@ -8958,6 +8958,30 @@ mod tests {
         store
             .conn
             .execute(
+                "UPDATE events SET signature_role = 99, signature_epoch = 1
+                 WHERE timeline_id = ?1",
+                params![timeline.id().to_string()],
+            )
+            .test_ok();
+        assert!(matches!(
+            store.read(timeline.id(), SeqRange::all()),
+            Err(CoreError::Serialization(_))
+        ));
+        store
+            .conn
+            .execute(
+                "UPDATE events SET signature_role = 1, signature_epoch = -1
+                 WHERE timeline_id = ?1",
+                params![timeline.id().to_string()],
+            )
+            .test_ok();
+        assert!(matches!(
+            store.read(timeline.id(), SeqRange::all()),
+            Err(CoreError::Serialization(_))
+        ));
+        store
+            .conn
+            .execute(
                 "UPDATE events SET signature_role = NULL, signature_epoch = 1
                  WHERE timeline_id = ?1",
                 params![timeline.id().to_string()],
@@ -8976,6 +9000,29 @@ mod tests {
         assert!(matches!(
             store.load_key_registry(),
             Err(CoreError::Storage(_))
+        ));
+
+        let mut save_store = new_store();
+        save_store
+            .conn
+            .execute("DROP TABLE key_registry", [])
+            .test_ok();
+        assert!(matches!(
+            save_store.save_key_registry(&KeyRegistryStateV1::new()),
+            Err(CoreError::Storage(_))
+        ));
+
+        let malformed = new_store();
+        malformed
+            .conn
+            .execute(
+                "UPDATE key_registry SET state_cbor = X'01' WHERE singleton = 1",
+                [],
+            )
+            .test_ok();
+        assert!(matches!(
+            malformed.load_key_registry(),
+            Err(CoreError::Serialization(_))
         ));
 
         let mut missing = new_store();
@@ -9014,6 +9061,39 @@ mod tests {
             .test_err();
         assert!(error.to_string().contains("changed during signing"));
         assert!(!callback_called);
+
+        let mut successful = new_store();
+        successful.save_key_registry(&persisted).test_ok();
+        let successful_timeline = successful.create_timeline("successful-signing").test_ok();
+        let mut event = successful
+            .append(
+                successful_timeline.id(),
+                &[make_draft(EntityId::new(), b"seed")],
+            )
+            .test_ok()
+            .remove(0);
+        event.id = EventId::new();
+        let mut create_event = |_: &KeyRegistryStateV1, seq: Seq| {
+            event.seq = seq;
+            Ok::<Event, CoreError>(event.clone())
+        };
+        successful
+            .append_signed_authorized(successful_timeline.id(), &persisted, &mut create_event)
+            .test_ok();
+
+        let mut missing_timeline = new_store();
+        missing_timeline.save_key_registry(&persisted).test_ok();
+        let mut create_event = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        assert!(matches!(
+            missing_timeline.append_signed_authorized(
+                TimelineId::new(),
+                &persisted,
+                &mut create_event,
+            ),
+            Err(CoreError::TimelineNotFound(_))
+        ));
     }
 
     #[test]
