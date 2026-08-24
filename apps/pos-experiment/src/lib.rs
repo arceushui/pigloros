@@ -7895,7 +7895,7 @@ mod fault_injection_tests {
             Experiment::new(config("branch-token-expired", StopCondition::MaxTicks(1)))
                 .with_consent_authority(authority);
         assert!(experiment
-            .branch_with_token("child", &mut expired_store, &token, 0)
+            .branch_with_token("child", &mut expired_store, &token, 2)
             .is_err());
     }
 
