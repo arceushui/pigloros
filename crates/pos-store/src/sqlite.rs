@@ -11250,6 +11250,7 @@ mod key_registry_coverage {
         store.destroy_key_registry(request)
     }
 
+    #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     mod sqlite_key_registry_failure_paths {
         use super::{
