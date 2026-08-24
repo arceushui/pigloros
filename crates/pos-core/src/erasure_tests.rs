@@ -1054,6 +1054,35 @@ fn coordinator_exposes_unknown_and_port_failure_contracts() -> Result<(), Erasur
 }
 
 #[test]
+fn freeze_retry_reuses_the_reserved_v1_admission_after_commit_failure() -> Result<(), ErasureErrorV1>
+{
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let mut port = test_port(true, vec![target]);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+    coordinator.submit(request()?, reference(3))?;
+    coordinator.authorize(reference(1), reference(9))?;
+    coordinator.port.commit_error = Some(ErasureErrorV1::ReceiptCommitFailed);
+
+    let requested = change(
+        ErasureLifecycleV1::AccessFrozen,
+        Some(10),
+        Vec::new(),
+        Vec::new(),
+    );
+    assert_eq!(
+        coordinator.freeze_inventory(reference(1), requested.clone()),
+        Err(ErasureErrorV1::ReceiptCommitFailed)
+    );
+
+    coordinator.port.commit_error = None;
+    let retry = coordinator.freeze_inventory(reference(1), requested)?;
+    assert_eq!(retry.lifecycle(), ErasureLifecycleV1::AccessFrozen);
+    assert_eq!(retry.freeze_position(), Some(10));
+    assert_eq!(retry.provenance(), reference(9));
+    Ok(())
+}
+
+#[test]
 fn coordinator_rejects_receipt_admission_after_terminal_derivation() -> Result<(), ErasureErrorV1> {
     let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
     let mut port = test_port(true, vec![target]);

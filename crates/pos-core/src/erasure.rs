@@ -1194,6 +1194,11 @@ pub trait ErasureCoordinatorPortV1 {
     fn authenticate(&self, request: &ErasureRequestV1) -> Result<(), ErasureErrorV1>;
     /// Return the authoritative required-target closure at the freeze boundary.
     ///
+    /// Once a matching `admit_freeze` succeeds, an exact retry for the same
+    /// request must return the same sorted closure. The host must not replace
+    /// a reserved closure with a later inventory while the V1 freeze admission
+    /// is awaiting durable coordinator commit.
+    ///
     /// # Errors
     ///
     /// Returns a closed error when the host cannot freeze the inventory.
@@ -1210,6 +1215,14 @@ pub trait ErasureCoordinatorPortV1 {
     ///
     /// Returns a closed error when the host cannot authenticate or perform the
     /// freeze boundary.
+    ///
+    /// A successful admission is a durable V1 reservation keyed by
+    /// `request`. The host must retain the exact target closure, Tick Boundary
+    /// position, and provenance returned for that request before returning.
+    /// If the following `commit_record` fails, an exact retry must return the
+    /// same admission rather than observe a later Tick Boundary or rediscover
+    /// a different closure. This reservation is operational metadata; it does
+    /// not replace the committed ERS1 record.
     fn admit_freeze(
         &self,
         request: ErasureReferenceV1,
