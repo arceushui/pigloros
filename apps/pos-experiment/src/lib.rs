@@ -25,6 +25,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 // consent issuer.  Keep this durable lifecycle marker outside the canonical
 // `consent.*` namespace so only Gateway APIs can create consent events.
 const EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE: &str = pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE;
+const EXPERIMENT_CONSENT_TIMELINE_MARKER: &[u8] = b"timeline";
+const EXPERIMENT_CONSENT_SUBJECT_MARKER_PREFIX: &[u8] = b"subject:";
 
 pub mod moat_proof;
 
@@ -63,11 +65,14 @@ pub struct RunResult {
     pub timeline_id: pos_core::ids::TimelineId,
     pub ticks: u64,
     pub total_events: u64,
+    timeline_head: u64,
     /// Exported manifest for reproducibility.
     pub manifest: ReproManifest,
     /// Final projection state after all ticks.
     projections: pos_state::ProjectionRegistry,
     consent_gate: Option<Arc<dyn ConsentGate>>,
+    protected_token: Option<ConsentCapabilityToken>,
+    protected_now_secs: u64,
     /// Accurate recipe for re-opening the run's store, when one is known.
     pub store_config: Option<StoreConfig>,
 }
@@ -79,6 +84,7 @@ impl Debug for RunResult {
             .field("timeline_id", &self.timeline_id)
             .field("ticks", &self.ticks)
             .field("total_events", &self.total_events)
+            .field("timeline_head", &self.timeline_head)
             .field("manifest", &self.manifest)
             .field("store_config", &self.store_config)
             .finish_non_exhaustive()
@@ -140,7 +146,7 @@ impl RunResult {
         gate.authorize_projection(
             self.timeline_id,
             subject,
-            self.total_events,
+            self.timeline_head,
             now_secs,
             token,
         )
@@ -151,12 +157,39 @@ impl RunResult {
             .cloned())
     }
 
-    /// Reopen the store and branch from this result's timeline at its head.
+    /// Reopen the store and branch from this result's Timeline at its head.
+    ///
+    /// A result produced with [`ExperimentSession::with_protected_token`] is
+    /// capability-scoped: its token is revalidated at the durable Timeline
+    /// head and must carry `fork_permitted`. Results from an explicitly public
+    /// run carry no consent capability and are public artifacts; they do not
+    /// expose a protected projection through this API.
     ///
     /// # Errors
     /// Returns [`ExperimentError`] if no accurate recovery recipe is available,
     /// the store cannot be opened, or the fork fails.
     pub fn branch(&self, name: &str) -> Result<Timeline, ExperimentError> {
+        match (self.consent_gate.as_ref(), self.protected_token.as_ref()) {
+            (Some(gate), Some(token)) => {
+                gate.validate_token(
+                    self.timeline_id,
+                    token,
+                    self.timeline_head,
+                    self.protected_now_secs,
+                )
+                .map_err(pos_runtime::RuntimeError::Consent)?;
+                if !token.fork_permitted() {
+                    return Err(pos_runtime::RuntimeError::Consent(
+                        pos_core::ConsentError::ForkNotPermitted,
+                    )
+                    .into());
+                }
+            }
+            (Some(_), None) => {
+                return Err(pos_runtime::RuntimeError::ConsentOperationUnavailable.into());
+            }
+            (None, _) => {}
+        }
         let store_config = self
             .store_config
             .clone()
@@ -177,12 +210,42 @@ impl RunResult {
     }
 
     /// Consume this result to form a host-executable reproduction manifest.
-    #[must_use]
-    pub fn into_reproduction_manifest(self, recipe: ReproductionRecipe) -> ReproductionManifest {
-        ReproductionManifest {
+    ///
+    /// Capability-scoped results require a live token with `export_permitted`.
+    /// An explicitly public result has no protected capability to export.
+    ///
+    /// # Errors
+    /// Returns [`ExperimentError::Runtime`] when a protected result has no
+    /// live export-capable token or its host authority rejects the token.
+    pub fn into_reproduction_manifest(
+        self,
+        recipe: ReproductionRecipe,
+    ) -> Result<ReproductionManifest, ExperimentError> {
+        match (self.consent_gate.as_ref(), self.protected_token.as_ref()) {
+            (Some(gate), Some(token)) => {
+                gate.validate_token(
+                    self.timeline_id,
+                    token,
+                    self.timeline_head,
+                    self.protected_now_secs,
+                )
+                .map_err(pos_runtime::RuntimeError::Consent)?;
+                if !token.export_permitted() {
+                    return Err(pos_runtime::RuntimeError::Consent(
+                        pos_core::ConsentError::ExportNotPermitted,
+                    )
+                    .into());
+                }
+            }
+            (Some(_), None) => {
+                return Err(pos_runtime::RuntimeError::ConsentOperationUnavailable.into());
+            }
+            (None, _) => {}
+        }
+        Ok(ReproductionManifest {
             manifest: self.manifest,
             recipe,
-        }
+        })
     }
 }
 
@@ -215,7 +278,7 @@ pub struct ExperimentSession {
     step_mode: Option<StepMode>,
     last_simulation_time_ns: Option<u128>,
     consent_revoked: bool,
-    consent_revocation_pending: Option<String>,
+    consent_revocation_pending: Option<PendingConsentRevocation>,
     operation_token: Option<ConsentCapabilityToken>,
     operation_now_secs: u64,
 }
@@ -240,6 +303,17 @@ pub enum TickOutcome {
 enum SessionHealth {
     Healthy,
     Faulted,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PendingConsentRevocation {
+    /// Close every capability on the session Timeline.
+    Timeline { marker_entity: EntityId },
+    /// Fence one capability subject, then persist the session closure marker.
+    Subject {
+        subject_id: EntityId,
+        marker_entity: EntityId,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -862,6 +936,34 @@ impl Experiment {
         let consent_revoked = events
             .iter()
             .any(|event| event.event_type.as_str() == EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE);
+        if consent_revoked {
+            if let Some(gate) = self.registry.clone_consent_gate() {
+                // Subject-scoped markers retain their actual subject in the
+                // payload. Legacy or malformed markers conservatively close
+                // the whole Timeline so no capability survives a restart.
+                for marker in events.iter().filter(|event| {
+                    event.event_type.as_str() == EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE
+                }) {
+                    let result = marker
+                        .payload
+                        .as_slice()
+                        .strip_prefix(EXPERIMENT_CONSENT_SUBJECT_MARKER_PREFIX)
+                        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                        .and_then(|text| ulid::Ulid::from_string(text).ok())
+                        .map_or_else(
+                            || gate.fence_timeline_at(timeline_id, marker.seq.as_u64()),
+                            |subject| {
+                                gate.fence_subject_at(
+                                    timeline_id,
+                                    EntityId::from_ulid(subject),
+                                    marker.seq.as_u64(),
+                                )
+                            },
+                        );
+                    result.map_err(pos_runtime::RuntimeError::Consent)?;
+                }
+            }
+        }
         Ok(ExperimentSession {
             config: self.config,
             registry: self.registry,
@@ -1012,15 +1114,19 @@ impl ExperimentSession {
         reducer: &str,
         subject: EntityId,
         token: &ConsentCapabilityToken,
+        now_secs: u64,
     ) -> Result<Option<pos_core::State>, ExperimentError> {
         if self.health == SessionHealth::Faulted {
             return Err(ExperimentError::SessionFaulted);
+        }
+        if self.consent_revoked || self.consent_revocation_pending.is_some() {
+            return Err(ExperimentError::ConsentRevoked);
         }
         self.registry
             .projection_state_for_reducer(
                 self.timeline.id(),
                 self.boundary.folded_through,
-                self.operation_now_secs,
+                now_secs,
                 token,
                 reducer,
                 subject,
@@ -1129,7 +1235,11 @@ impl ExperimentSession {
     /// only the experiment-owned lifecycle marker; a following step returns
     /// [`TickOutcome::Stopped`] without invoking or committing any Driver.
     pub fn revoke_consent_at_boundary(&mut self) {
-        self.revoke_consent_for_subject_at_boundary("session");
+        if !self.consent_revoked {
+            self.consent_revocation_pending = Some(PendingConsentRevocation::Timeline {
+                marker_entity: consent_marker_entity("session"),
+            });
+        }
     }
 
     /// Schedule a durable, subject-scoped consent revocation.
@@ -1138,9 +1248,12 @@ impl ExperimentSession {
     /// persists an experiment-owned lifecycle marker as the next atomic boundary;
     /// Drivers are not invoked for that boundary. Recovery derives the closed
     /// state from that marker rather than from process memory.
-    pub fn revoke_consent_for_subject_at_boundary(&mut self, subject: impl Into<String>) {
+    pub fn revoke_consent_for_subject_at_boundary(&mut self, subject: EntityId) {
         if !self.consent_revoked {
-            self.consent_revocation_pending = Some(subject.into());
+            self.consent_revocation_pending = Some(PendingConsentRevocation::Subject {
+                subject_id: subject,
+                marker_entity: consent_marker_entity(&subject.to_string()),
+            });
         }
     }
 
@@ -1218,8 +1331,8 @@ impl ExperimentSession {
     }
 
     fn step_boundary(&mut self, request: StepRequest) -> Result<TickOutcome, ExperimentError> {
-        if let Some(subject) = self.consent_revocation_pending.take() {
-            return self.commit_consent_revocation(&subject);
+        if let Some(revocation) = self.consent_revocation_pending.take() {
+            return self.commit_consent_revocation(revocation);
         }
         if self.consent_revoked || self.complete || self.reached_stop_condition() {
             self.complete = true;
@@ -1302,15 +1415,46 @@ impl ExperimentSession {
         }
     }
 
-    fn commit_consent_revocation(&mut self, subject: &str) -> Result<TickOutcome, ExperimentError> {
-        let subject_id = consent_marker_entity(subject);
+    fn commit_consent_revocation(
+        &mut self,
+        revocation: PendingConsentRevocation,
+    ) -> Result<TickOutcome, ExperimentError> {
+        let (marker_entity, subject) = match revocation {
+            PendingConsentRevocation::Timeline { marker_entity } => (marker_entity, None),
+            PendingConsentRevocation::Subject {
+                subject_id,
+                marker_entity,
+            } => (marker_entity, Some(subject_id)),
+        };
+        let marker_payload = subject.map_or_else(
+            || pos_core::event::CanonicalBytes::from_static(EXPERIMENT_CONSENT_TIMELINE_MARKER),
+            |subject_id| {
+                let mut bytes = EXPERIMENT_CONSENT_SUBJECT_MARKER_PREFIX.to_vec();
+                bytes.extend_from_slice(subject_id.to_string().as_bytes());
+                pos_core::event::CanonicalBytes::from_vec(bytes)
+            },
+        );
         let emitted_events = lock_store(&self.store)
             .and_then(|mut store| {
-                let _head = store.logical_head(self.timeline.id())?;
+                let head = store.logical_head(self.timeline.id())?;
+                if let Some(gate) = self.registry.clone_consent_gate() {
+                    let result = match subject {
+                        Some(subject_id) => gate.fence_subject_at(
+                            self.timeline.id(),
+                            subject_id,
+                            head.as_u64().saturating_add(1),
+                        ),
+                        None => gate
+                            .fence_timeline_at(self.timeline.id(), head.as_u64().saturating_add(1)),
+                    };
+                    result.map_err(|error| {
+                        ExperimentError::Runtime(pos_runtime::RuntimeError::Consent(error))
+                    })?;
+                }
                 let draft = EventDraft::new(
-                    subject_id,
+                    marker_entity,
                     Kind::new(EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE),
-                    pos_core::event::CanonicalBytes::from_static(b"closed"),
+                    marker_payload,
                 );
                 let events = store.append(self.timeline.id(), std::slice::from_ref(&draft))?;
                 Ok(u64::try_from(events.len()).unwrap_or(u64::MAX))
@@ -1368,6 +1512,11 @@ impl ExperimentSession {
     /// Driver state from host-filtered bounded evidence, and can be stepped
     /// immediately without reopening persistence.
     ///
+    /// A session bound with [`Self::with_protected_token`] must still hold a
+    /// live token whose `fork_permitted` flag is set at this exact Timeline
+    /// head. An explicitly public session has no consent capability to carry
+    /// into the child.
+    ///
     /// # Errors
     /// Returns [`ExperimentError::Runtime`] if fresh runtime construction fails,
     /// [`ExperimentError::Store`] if history hydration or forking fails, or
@@ -1376,11 +1525,38 @@ impl ExperimentSession {
         if self.health == SessionHealth::Faulted {
             return Err(ExperimentError::SessionFaulted);
         }
+        match (
+            self.registry.clone_consent_gate(),
+            self.operation_token.as_ref(),
+        ) {
+            (Some(gate), Some(token)) => {
+                gate.validate_token(
+                    self.timeline.id(),
+                    token,
+                    self.boundary.folded_through.as_u64(),
+                    self.operation_now_secs,
+                )
+                .map_err(pos_runtime::RuntimeError::Consent)?;
+                if !token.fork_permitted() {
+                    return Err(pos_runtime::RuntimeError::Consent(
+                        pos_core::ConsentError::ForkNotPermitted,
+                    )
+                    .into());
+                }
+            }
+            (Some(_), None) => {
+                return Err(pos_runtime::RuntimeError::ConsentOperationUnavailable.into());
+            }
+            (None, _) => {}
+        }
         let factory = self
             .fork_registry_factory
             .as_ref()
             .ok_or(ExperimentError::MissingForkRegistryFactory)?;
         let mut registry = factory()?;
+        if let Some(gate) = self.registry.clone_consent_gate() {
+            registry = registry.with_consent_gate(gate);
+        }
         if registry.composition() != self.parent_composition {
             return Err(ExperimentError::IncompatibleForkRegistry);
         }
@@ -1429,9 +1605,9 @@ impl ExperimentSession {
                 step_mode: None,
                 last_simulation_time_ns: None,
                 consent_revoked: self.consent_revoked,
-                consent_revocation_pending: self.consent_revocation_pending.clone(),
-                operation_token: None,
-                operation_now_secs: 0,
+                consent_revocation_pending: self.consent_revocation_pending,
+                operation_token: self.operation_token.clone(),
+                operation_now_secs: self.operation_now_secs,
             })
     }
 
@@ -1474,9 +1650,12 @@ impl ExperimentSession {
                     timeline_id,
                     ticks: self.ticks,
                     total_events: self.total_events,
+                    timeline_head: self.boundary.folded_through.as_u64(),
                     manifest,
                     projections: self.registry.projections,
                     consent_gate,
+                    protected_token: self.operation_token,
+                    protected_now_secs: self.operation_now_secs,
                     store_config: self.recovery_store_config,
                 }
             })
@@ -1647,15 +1826,19 @@ impl BacktestRunner {
 
         let train_manifest = ReproManifest::new(train_tl_id, train_chain_head, WallTime::now());
         let eval_manifest = ReproManifest::new(eval_tl_id, eval_chain_head, WallTime::now());
+        let eval_head_seq = store.logical_head(eval_tl_id)?;
 
         let train_consent_gate = train_registry.clone_consent_gate();
         let train_result = RunResult {
             timeline_id: train_tl_id,
             ticks: train_ticks,
             total_events: train_events,
+            timeline_head: train_head_seq.as_u64(),
             manifest: train_manifest,
             projections: train_registry.projections,
             consent_gate: train_consent_gate,
+            protected_token: None,
+            protected_now_secs: 0,
             store_config: Some(store_config.clone()),
         };
         let eval_consent_gate = eval_registry.clone_consent_gate();
@@ -1663,9 +1846,12 @@ impl BacktestRunner {
             timeline_id: eval_tl_id,
             ticks: eval_ticks,
             total_events: eval_events,
+            timeline_head: eval_head_seq.as_u64(),
             manifest: eval_manifest,
             projections: eval_registry.projections,
             consent_gate: eval_consent_gate,
+            protected_token: None,
+            protected_now_secs: 0,
             store_config: Some(store_config),
         };
 
@@ -1787,6 +1973,17 @@ mod tests {
         }
     }
 
+    fn assert_subject_marker_payload(events: &[Event]) {
+        let marker = events
+            .iter()
+            .find(|event| event.event_type.as_str() == EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE)
+            .test_ok();
+        assert!(marker
+            .payload
+            .as_slice()
+            .starts_with(EXPERIMENT_CONSENT_SUBJECT_MARKER_PREFIX));
+    }
+
     #[test]
     fn reproduction_manifest_wraps_a_host_owned_recipe() {
         let timeline_id = pos_core::ids::TimelineId::new();
@@ -1794,6 +1991,7 @@ mod tests {
             timeline_id,
             ticks: 0,
             total_events: 0,
+            timeline_head: 0,
             manifest: ReproManifest::new(
                 timeline_id,
                 pos_core::crypto::Hash::zero(),
@@ -1801,13 +1999,17 @@ mod tests {
             ),
             projections: pos_state::ProjectionRegistry::new(),
             consent_gate: None,
+            protected_token: None,
+            protected_now_secs: 0,
             store_config: None,
         };
-        let manifest = result.into_reproduction_manifest(ReproductionRecipe::new(
-            "test-host",
-            1,
-            serde_json::json!({"provider": "fixture-local"}),
-        ));
+        let manifest = result
+            .into_reproduction_manifest(ReproductionRecipe::new(
+                "test-host",
+                1,
+                serde_json::json!({"provider": "fixture-local"}),
+            ))
+            .test_ok();
 
         assert_eq!(manifest.manifest.timeline_id, timeline_id);
         assert_eq!(manifest.recipe.host_id, "test-host");
@@ -1816,6 +2018,172 @@ mod tests {
             manifest.recipe.configuration,
             serde_json::json!({"provider": "fixture-local"})
         );
+    }
+
+    #[test]
+    fn protected_run_result_enforces_fork_and_export_capabilities() {
+        let timeline_id = pos_core::ids::TimelineId::new();
+        let subject_id = EntityId::new();
+        let authority = ConsentAuthority::new();
+        let token = authority.record_grant_on_timeline(
+            timeline_id,
+            &ConsentGranted {
+                subject_id,
+                grantee_id: EntityId::new(),
+                purpose: "run-result-policy".to_owned(),
+                modalities: 0,
+                min_geo_resolution: 0,
+                fork_permitted: false,
+                export_permitted: false,
+                retention_days: 0,
+                expiry_secs: 0,
+                grant_seq: 1,
+            },
+        );
+        let gate: Arc<dyn ConsentGate> = Arc::new(authority);
+        let mut result = RunResult {
+            timeline_id,
+            ticks: 0,
+            total_events: 0,
+            timeline_head: 0,
+            manifest: ReproManifest::new(
+                timeline_id,
+                pos_core::crypto::Hash::zero(),
+                pos_core::clock::WallTime::from_micros(0),
+            ),
+            projections: pos_state::ProjectionRegistry::new(),
+            consent_gate: Some(Arc::clone(&gate)),
+            protected_token: Some(token.clone()),
+            protected_now_secs: 0,
+            store_config: Some(StoreConfig::Memory),
+        };
+        result
+            .projections
+            .register("projection", Box::new(CountReducer));
+        result.projections.apply_event(&Event {
+            id: pos_core::EventId::new(),
+            entity: subject_id,
+            event_type: Kind::new("projection.event"),
+            payload: pos_core::CanonicalBytes::from_static(b"projection"),
+            wall_time: pos_core::clock::WallTime::from_micros(0),
+            seq: pos_core::clock::Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: pos_core::event::SchemaVersion::V1,
+            signature: None,
+            payload_hash: pos_core::crypto::Hash::zero(),
+        });
+        let projected = result
+            .projection_state_for_reducer("projection", subject_id, &token, 0)
+            .test_ok()
+            .test_ok();
+        assert_eq!(
+            projected.get("n").and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+        assert!(result
+            .projection_state_for_reducer("missing", subject_id, &token, 0)
+            .test_ok()
+            .is_none());
+        assert!(matches!(
+            result.branch("forbidden"),
+            Err(ExperimentError::Runtime(
+                pos_runtime::RuntimeError::Consent(pos_core::ConsentError::ForkNotPermitted)
+            ))
+        ));
+        assert!(matches!(
+            result.into_reproduction_manifest(ReproductionRecipe::new(
+                "test-host",
+                1,
+                serde_json::json!({}),
+            )),
+            Err(ExperimentError::Runtime(
+                pos_runtime::RuntimeError::Consent(pos_core::ConsentError::ExportNotPermitted)
+            ))
+        ));
+    }
+
+    #[test]
+    fn session_projection_reads_use_the_caller_time_and_reject_expiry() {
+        let experiment = Experiment::new(ExperimentConfig {
+            name: "fresh-projection-time".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        });
+        let session = experiment.start().test_ok();
+        let timeline_id = session.timeline().id();
+        let subject_id = EntityId::new();
+        let authority = ConsentAuthority::new();
+        let token = authority.record_grant_on_timeline(
+            timeline_id,
+            &ConsentGranted {
+                subject_id,
+                grantee_id: EntityId::new(),
+                purpose: "fresh-projection-time".to_owned(),
+                modalities: 0,
+                min_geo_resolution: 0,
+                fork_permitted: false,
+                export_permitted: false,
+                retention_days: 0,
+                expiry_secs: 10,
+                grant_seq: 1,
+            },
+        );
+        let session = session
+            .with_consent_authority(authority)
+            .with_protected_token(token.clone(), 0);
+        assert!(matches!(
+            session.projection_state_for_reducer("missing", subject_id, &token, 11),
+            Err(ExperimentError::Runtime(
+                pos_runtime::RuntimeError::Consent(pos_core::ConsentError::Expired)
+            ))
+        ));
+    }
+
+    #[test]
+    fn subject_revocation_fences_capability_before_the_closure_marker() {
+        let experiment = Experiment::new(ExperimentConfig {
+            name: "subject-revocation-fence".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        });
+        let session = experiment.start().test_ok();
+        let timeline_id = session.timeline().id();
+        let subject_id = EntityId::new();
+        let authority = ConsentAuthority::new();
+        let token = authority.record_grant_on_timeline(
+            timeline_id,
+            &ConsentGranted {
+                subject_id,
+                grantee_id: EntityId::new(),
+                purpose: "subject-revocation-fence".to_owned(),
+                modalities: 0,
+                min_geo_resolution: 0,
+                fork_permitted: true,
+                export_permitted: true,
+                retention_days: 0,
+                expiry_secs: 0,
+                grant_seq: 1,
+            },
+        );
+        let mut session = session
+            .with_consent_authority(authority.clone())
+            .with_protected_token(token.clone(), 0);
+        session.revoke_consent_for_subject_at_boundary(subject_id);
+        assert!(matches!(
+            session.projection_state_for_reducer("missing", subject_id, &token, 0),
+            Err(ExperimentError::ConsentRevoked)
+        ));
+        assert!(matches!(
+            session.step_tick(),
+            Ok(TickOutcome::Advanced {
+                emitted_events: 1,
+                ..
+            })
+        ));
+        assert!(authority
+            .validate_on_timeline(timeline_id, &token, 0, 0)
+            .is_err());
     }
 
     fn make_plugin_with_reducer(name: &'static str, event_types: &[&str]) -> TestPlugin {
@@ -3907,7 +4275,7 @@ mod tests {
             "first driver boundary must advance: {first_tick:?}"
         );
         let timeline_id = session.timeline().id();
-        session.revoke_consent_for_subject_at_boundary("subject");
+        session.revoke_consent_for_subject_at_boundary(entity);
         assert!(matches!(
             session.append_events(&[EventDraft::new(
                 entity,
@@ -3968,11 +4336,11 @@ mod tests {
             )]),
             Err(ExperimentError::ConsentRevoked)
         ));
-        assert!(resumed
-            .source_events()
-            .test_ok()
+        let resumed_events = resumed.source_events().test_ok();
+        assert!(resumed_events
             .iter()
             .any(|event| event.event_type.as_str() == EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE));
+        assert_subject_marker_payload(&resumed_events);
     }
 
     #[test]
@@ -4530,6 +4898,7 @@ mod tests {
             timeline_id: pos_core::ids::TimelineId::new(),
             ticks: 0,
             total_events: 0,
+            timeline_head: 0,
             manifest: ReproManifest::new(
                 pos_core::ids::TimelineId::new(),
                 pos_core::crypto::Hash::zero(),
@@ -4537,6 +4906,8 @@ mod tests {
             ),
             projections: pos_state::ProjectionRegistry::new(),
             consent_gate: None,
+            protected_token: None,
+            protected_now_secs: 0,
             store_config: Some(StoreConfig::Memory),
         };
         // Branching will fail because the timeline doesn't exist in a fresh Memory store
@@ -4786,6 +5157,7 @@ mod coverage_entrypoints {
             timeline_id: pos_core::ids::TimelineId::new(),
             ticks: 0,
             total_events: 0,
+            timeline_head: 0,
             manifest: ReproManifest::new(
                 pos_core::ids::TimelineId::new(),
                 pos_core::crypto::Hash::from_bytes([0; 32]),
@@ -4793,6 +5165,8 @@ mod coverage_entrypoints {
             ),
             projections: pos_state::ProjectionRegistry::new(),
             consent_gate: None,
+            protected_token: None,
+            protected_now_secs: 0,
             store_config: None,
         };
         expect_err(&result.branch("missing-recipe"));
@@ -5607,6 +5981,7 @@ mod fault_injection_tests {
             timeline_id: pos_core::ids::TimelineId::new(),
             ticks: 0,
             total_events: 0,
+            timeline_head: 0,
             manifest: ReproManifest::new(
                 pos_core::ids::TimelineId::new(),
                 pos_core::crypto::Hash::zero(),
@@ -5614,6 +5989,8 @@ mod fault_injection_tests {
             ),
             projections: pos_state::ProjectionRegistry::new(),
             consent_gate: None,
+            protected_token: None,
+            protected_now_secs: 0,
             store_config: Some(StoreConfig::Sqlite {
                 path: dir.path().to_str().test_ok().to_owned(),
             }),

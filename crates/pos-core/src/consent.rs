@@ -1173,6 +1173,42 @@ pub trait ConsentGate: Send + Sync {
         self.validate_token(timeline_id, token, timeline_head, now_secs)
     }
 
+    /// Fence every capability on one Timeline before a host-owned closure
+    /// marker is appended.
+    ///
+    /// The default gate has no mutable authority state and therefore fails
+    /// closed. A concrete host authority may implement this seam when a
+    /// session-level consent closure must invalidate all capabilities before
+    /// its durable marker becomes visible.
+    ///
+    /// # Errors
+    /// Returns [`ConsentError::NoConsent`] when the gate cannot publish a
+    /// Timeline fence.
+    fn fence_timeline_at(
+        &self,
+        timeline_id: TimelineId,
+        fence_seq: u64,
+    ) -> Result<(), ConsentError> {
+        let _ = (timeline_id, fence_seq);
+        Err(ConsentError::NoConsent)
+    }
+
+    /// Fence one subject's capabilities before a host-owned closure marker is
+    /// appended.
+    ///
+    /// # Errors
+    /// Returns [`ConsentError::NoConsent`] when the gate cannot publish a
+    /// subject fence.
+    fn fence_subject_at(
+        &self,
+        timeline_id: TimelineId,
+        subject: EntityId,
+        fence_seq: u64,
+    ) -> Result<(), ConsentError> {
+        let _ = (timeline_id, subject, fence_seq);
+        Err(ConsentError::NoConsent)
+    }
+
     /// Hold the host's consent fence while the caller performs its durable
     /// append. Authorities that share revocation state with this gate override
     /// this method so revocation cannot interleave between validation and the
@@ -1326,6 +1362,45 @@ impl ConsentGate for ConsentAuthority {
             return Err(ConsentError::NoConsent);
         }
         let _ = (timeline_id, subject, timeline_head, now_secs);
+        Ok(())
+    }
+
+    fn fence_timeline_at(
+        &self,
+        timeline_id: TimelineId,
+        fence_seq: u64,
+    ) -> Result<(), ConsentError> {
+        let pending_fence_seq = fence_seq.saturating_sub(1);
+        let mut sessions = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for ((active_timeline, _, _, _), active) in &mut *sessions {
+            if *active_timeline == timeline_id {
+                active.token.fence_seq = active.token.fence_seq.min(pending_fence_seq);
+            }
+        }
+        drop(sessions);
+        Ok(())
+    }
+
+    fn fence_subject_at(
+        &self,
+        timeline_id: TimelineId,
+        subject: EntityId,
+        fence_seq: u64,
+    ) -> Result<(), ConsentError> {
+        let pending_fence_seq = fence_seq.saturating_sub(1);
+        let mut sessions = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for ((active_timeline, active_subject, _, _), active) in &mut *sessions {
+            if *active_timeline == timeline_id && *active_subject == subject {
+                active.token.fence_seq = active.token.fence_seq.min(pending_fence_seq);
+            }
+        }
+        drop(sessions);
         Ok(())
     }
 }

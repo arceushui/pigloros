@@ -932,7 +932,7 @@ fn assert_agent_projection_state(
     token: &pos_core::ConsentCapabilityToken,
 ) {
     let state = session
-        .projection_state_for_reducer("agent", agent, token)
+        .projection_state_for_reducer("agent", agent, token, 0)
         .test_ok()
         .test_ok();
     assert_eq!(
@@ -1035,7 +1035,7 @@ fn append_fault_commits_neither_pair_nor_tick_and_fresh_session_recovers() {
     assert_eq!(failed_calls.get(), 1);
     assert_eq!(recovery_calls.get(), 1);
     let recovered_state = recovered
-        .projection_state_for_reducer("agent", host.agent, &token)
+        .projection_state_for_reducer("agent", host.agent, &token, 0)
         .test_ok()
         .test_ok();
     assert_eq!(
@@ -1345,11 +1345,13 @@ fn completed_run_wraps_the_host_reproduction_recipe() {
     let (experiment, _, _) = host.experiment("agent-provider-reproduction-manifest", vec![]);
     let result = experiment.start().test_ok().run_to_completion().test_ok();
     let timeline_id = result.timeline_id;
-    let manifest = result.into_reproduction_manifest(ReproductionRecipe::new(
-        "pigloros.agent-provider",
-        1,
-        serde_json::json!({"provider": "fixture-local"}),
-    ));
+    let manifest = result
+        .into_reproduction_manifest(ReproductionRecipe::new(
+            "pigloros.agent-provider",
+            1,
+            serde_json::json!({"provider": "fixture-local"}),
+        ))
+        .test_ok();
 
     assert_eq!(manifest.recipe.host_id, "pigloros.agent-provider");
     assert_eq!(manifest.recipe.format_version, 1);

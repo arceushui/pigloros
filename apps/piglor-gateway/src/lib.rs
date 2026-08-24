@@ -1364,10 +1364,10 @@ impl Gateway {
             }
             Err(error) => return Err(error.into()),
         };
-        if events
-            .iter()
-            .any(|event| pos_core::is_geographic_event_type(&event.event_type))
-        {
+        if events.iter().any(|event| {
+            pos_core::is_geographic_event_type(&event.event_type)
+                || pos_core::is_consent_event_type(&event.event_type)
+        }) {
             return Err(GatewayError::ResourceUnavailable);
         }
         let next_from_seq = events
@@ -1686,6 +1686,9 @@ impl Gateway {
     }
 
     fn publish_notice(&self, timeline: TimelineId, event: &Event) {
+        if pos_core::is_consent_event_type(&event.event_type) {
+            return;
+        }
         let notice = EventNotice {
             timeline_id: timeline.to_string(),
             event_id: event.id.to_string(),
@@ -1924,7 +1927,9 @@ impl TryFrom<&Event> for EventView {
     type Error = GatewayError;
 
     fn try_from(event: &Event) -> Result<Self, Self::Error> {
-        if pos_core::is_geographic_event_type(&event.event_type) {
+        if pos_core::is_geographic_event_type(&event.event_type)
+            || pos_core::is_consent_event_type(&event.event_type)
+        {
             return Err(GatewayError::ResourceUnavailable);
         }
         let bytes = event.payload.as_slice();
@@ -2380,6 +2385,7 @@ mod tests {
         Duplicate,
         DuplicateReadError,
         GeographicRead(&'static str),
+        ConsentRead(&'static str),
         MissingTimeline,
     }
 
@@ -2466,7 +2472,9 @@ mod tests {
             if let Some(error) = bounded_error {
                 return Err(error);
             }
-            if let ScriptMode::GeographicRead(event_type) = self.mode {
+            if let ScriptMode::GeographicRead(event_type) | ScriptMode::ConsentRead(event_type) =
+                self.mode
+            {
                 let payload = CanonicalBytes::from_vec(b"protected".to_vec());
                 return Ok(vec![Event {
                     id: EventId::new(),
@@ -2756,6 +2764,7 @@ mod tests {
     async fn gateway_issues_only_canonical_consent_events_at_the_bound_sequence() {
         let gateway = memory_gw();
         let timeline = gateway.create_timeline("consent-host").await.test_ok();
+        let mut notices = gateway.subscribe();
         let grant = consent_grant(EntityId::new(), 1);
 
         let (grant_event, token) = gateway
@@ -2771,6 +2780,10 @@ mod tests {
             grant
         );
         assert_eq!(token.grant_seq(), 1);
+        assert!(matches!(
+            notices.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
 
         let revocation = ConsentRevokedV1 {
             subject_id: token.subject_id(),
@@ -2790,6 +2803,10 @@ mod tests {
             ConsentRevokedV1::decode(&revocation_event.payload).test_ok(),
             revocation
         );
+        assert!(matches!(
+            notices.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
         let already_fenced = gateway
             .issue_consent_revocation(&timeline.id().to_string(), revocation)
             .await
@@ -3026,6 +3043,15 @@ mod tests {
             assert!(matches!(error, GatewayError::ResourceUnavailable));
             drop(gateway);
         }
+        let gateway = Gateway::new(Box::new(ScriptedStore {
+            mode: ScriptMode::ConsentRead(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+        }));
+        let error = gateway
+            .read_events_page(&TimelineId::new().to_string(), 0, 1)
+            .await
+            .test_err();
+        assert!(matches!(error, GatewayError::ResourceUnavailable));
+        drop(gateway);
     }
 
     #[tokio::test]
@@ -4342,6 +4368,12 @@ mod tests {
         geographic.event_type = Kind::new(pos_core::GEOGRAPHIC_EVENT_TYPE);
         let error = EventView::try_from(&geographic).test_err();
         assert!(error.to_string().contains("not found"));
+        let mut consent = geographic;
+        consent.event_type = Kind::new(EVENT_TYPE_CONSENT_GRANTED_V1);
+        assert!(matches!(
+            EventView::try_from(&consent),
+            Err(GatewayError::ResourceUnavailable)
+        ));
         drop(gw);
     }
 

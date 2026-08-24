@@ -686,7 +686,7 @@ fn assert_projection_state(
             },
         );
         session
-            .projection_state_for_reducer(reducer, subject, &token)
+            .projection_state_for_reducer(reducer, subject, &token, 0)
             .test_ok()?
             .test_ok()
     };

@@ -595,7 +595,7 @@ fn cmd_experiment_run(path: &str, ticks: u64) -> Result<(), Box<dyn std::error::
             let completed_ticks = result.ticks;
             let total_events = result.total_events;
             let timeline_id = result.timeline_id;
-            let reproduction = result.into_reproduction_manifest(cli_reproduction_recipe(ticks));
+            let reproduction = result.into_reproduction_manifest(cli_reproduction_recipe(ticks))?;
             let manifest_path = path.replace(".db", "-manifest.json");
 
             save_run_manifest(&manifest_path, &reproduction).map(|()| {

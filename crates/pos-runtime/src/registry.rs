@@ -2375,6 +2375,70 @@ mod tests {
     }
 
     #[test]
+    fn capability_projection_and_gate_clone_are_bound_public_seams() {
+        let timeline = TimelineId::new();
+        let subject = EntityId::new();
+        let authority = ConsentAuthority::new();
+        let token = authority.record_grant_on_timeline(
+            timeline,
+            &ConsentGranted {
+                subject_id: subject,
+                grantee_id: EntityId::new(),
+                purpose: "projection-seam".to_owned(),
+                modalities: 0,
+                min_geo_resolution: 0,
+                fork_permitted: false,
+                export_permitted: false,
+                retention_days: 0,
+                expiry_secs: 0,
+                grant_seq: 1,
+            },
+        );
+        let unbound = PluginRegistry::new();
+        assert!(unbound.clone_consent_gate().is_none());
+        assert!(matches!(
+            unbound.projection_state_for_reducer(
+                timeline,
+                Seq::ZERO,
+                0,
+                &token,
+                "projection",
+                subject,
+            ),
+            Err(RuntimeError::ConsentOperationUnavailable)
+        ));
+
+        let plugin = plugin_with_caps("projection", &["projection.event"], false, true);
+        let mut bound = PluginRegistry::new().with_consent_authority(authority);
+        bound
+            .register(&plugin, Some(Box::new(CountReducer)), None)
+            .test_ok();
+        assert!(bound.clone_consent_gate().is_some());
+        bound.projections.apply_event(&Event {
+            id: EventId::new(),
+            entity: subject,
+            event_type: Kind::new("projection.event"),
+            payload: CanonicalBytes::from_static(b"projection"),
+            wall_time: WallTime::from_micros(0),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        });
+        let state = bound
+            .projection_state_for_reducer(timeline, Seq::ZERO, 0, &token, "projection", subject)
+            .test_ok()
+            .test_ok();
+        assert_eq!(state.get("n").and_then(serde_json::Value::as_u64), Some(1));
+        assert!(bound
+            .projection_state_for_reducer(timeline, Seq::ZERO, 0, &token, "missing", subject,)
+            .test_ok()
+            .is_none());
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn duplicate_plugin_returns_error() {
         let mut reg = PluginRegistry::new();

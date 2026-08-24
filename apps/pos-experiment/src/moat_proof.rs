@@ -1607,7 +1607,7 @@ fn commit_consent_boundary(
         .source_events()?
         .last()
         .map_or(0, |event| event.seq.as_u64());
-    session.revoke_consent_for_subject_at_boundary(subject);
+    session.revoke_consent_for_subject_at_boundary(fixed_id(5));
     let post_revocation_append = session.append_events(&[EventDraft::new(
         fixed_id(5),
         Kind::new("proof.consent.tick"),
