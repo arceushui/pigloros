@@ -425,6 +425,7 @@ fn profile_for_digest() -> ConformanceProfileV1 {
         limitations_digest: [19; 32],
         provenance_digest: [20; 32],
         previous_profile_digest: None,
+        stable_evidence: Vec::new(),
         profile_digest: [0; 32],
     };
     profile.profile_digest = profile.digest();
