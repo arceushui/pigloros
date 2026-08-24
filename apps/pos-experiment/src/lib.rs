@@ -4594,7 +4594,7 @@ mod tests {
 #[cfg(test)]
 mod coverage_entrypoints {
     use super::*;
-    use pos_core::{clock::Seq, Capability, Plugin, PluginId};
+    use pos_core::{Capability, Plugin, PluginId};
     use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 
     struct CoveragePlugin {
