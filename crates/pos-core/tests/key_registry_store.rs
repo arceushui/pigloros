@@ -12,6 +12,53 @@ struct RegistryStore {
     committed: bool,
 }
 
+struct MinimalStore {
+    timeline: Timeline,
+}
+
+impl MinimalStore {
+    fn new() -> Self {
+        Self {
+            timeline: Timeline::new(TimelineMeta::root("minimal-test")),
+        }
+    }
+}
+
+impl EventStore for MinimalStore {
+    fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
+        Ok(Timeline::new(TimelineMeta::root(name)))
+    }
+
+    fn append(
+        &mut self,
+        _timeline: TimelineId,
+        _drafts: &[EventDraft],
+    ) -> Result<Vec<Event>, CoreError> {
+        Ok(Vec::new())
+    }
+
+    fn read(&self, _timeline: TimelineId, _range: SeqRange) -> Result<Vec<Event>, CoreError> {
+        Ok(Vec::new())
+    }
+
+    fn fork(
+        &mut self,
+        _parent: TimelineId,
+        _at_seq: Seq,
+        name: &str,
+    ) -> Result<Timeline, CoreError> {
+        Ok(Timeline::new(TimelineMeta::root(name)))
+    }
+
+    fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+        Ok(vec![self.timeline.clone()])
+    }
+
+    fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+        Ok((self.timeline.id() == id).then(|| self.timeline.clone()))
+    }
+}
+
 impl RegistryStore {
     fn new(registry: Option<KeyRegistryStateV1>) -> Self {
         Self {
@@ -108,7 +155,7 @@ fn event_at(seq: Seq) -> Event {
 
 #[test]
 fn event_store_key_registry_defaults_are_closed_and_exercised() -> Result<(), CoreError> {
-    let mut store = RegistryStore::new(None);
+    let mut store = MinimalStore::new();
     assert!(store.load_key_registry()?.is_none());
     assert!(matches!(
         store.save_key_registry(&KeyRegistryStateV1::new()),
