@@ -203,7 +203,7 @@ impl RunResult {
                 )
                 .map_err(|error| map_runtime_error(pos_runtime::RuntimeError::Consent(error)))
             })
-            .map(|_| {
+            .map(|()| {
                 self.projections
                     .state_for_reducer(reducer, &subject)
                     .cloned()
