@@ -78,13 +78,16 @@ pub fn open_store(source: &Source, key: Option<&Path>) -> Result<Box<dyn LedgerS
             })
             .map_err(|e| CliError::BadSource(e.to_string()))?;
             let timeline_id = find_or_create_ledger_timeline(&mut *event_store)?;
-            Ok(Box::new(EventLedgerStore::new(
-                event_store,
-                timeline_id,
-                crate::well_known_entity(),
-                signing_key,
-                Box::new(Blake3Hasher),
-            )))
+            Ok(Box::new(
+                EventLedgerStore::new(
+                    event_store,
+                    timeline_id,
+                    crate::well_known_entity(),
+                    signing_key,
+                    Box::new(Blake3Hasher),
+                )
+                .map_err(|error| CliError::BadSource(error.to_string()))?,
+            ))
         }
     }
 }
@@ -323,7 +326,8 @@ fn cmd_build(args: &[String]) -> Result<(), CliError> {
                 crate::well_known_entity(),
                 sk,
                 Box::new(Blake3Hasher),
-            );
+            )
+            .map_err(|error| CliError::BadSource(error.to_string()))?;
             ledger_store.load(&today)?
         }
     };

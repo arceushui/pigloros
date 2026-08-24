@@ -149,7 +149,8 @@ fn build_store(db: &Path, today: &str, pubkey: Option<String>) -> Result<ExportM
         crate::well_known_entity(),
         sk,
         Box::new(pos_crypto::chain::Blake3Hasher),
-    );
+    )
+    .map_err(|error| CliError::BadSource(error.to_string()))?;
     let ledger = ledger_store.load(today)?;
     let view = LedgerView::from(&ledger);
     let records: Vec<SignedEventRecord> = events

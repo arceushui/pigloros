@@ -9,7 +9,8 @@
 use std::path::Path;
 
 use pos_core::store::SeqRange;
-use pos_crypto::signing::{verify, verifying_key_from_public_key};
+use pos_core::KeyRoleV1;
+use pos_crypto::{key_roles::verify_for_role, signing::verifying_key_from_public_key};
 use pos_plugin_ledger::EVENT_TYPE_PREDICTION;
 
 use crate::{cli::Source, export::ExportManifest, hex::hex_decode, CliError};
@@ -199,13 +200,19 @@ fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, Cli
                 },
             });
         };
-        if let Err(e) = verify(&vk, &event.payload, sig) {
+        if let Err(error) = verify_for_role(
+            &vk,
+            KeyRoleV1::TimelineIntegritySigning,
+            1,
+            &event.payload,
+            sig,
+        ) {
             return Ok(VerifyReport {
                 tier: "store".to_owned(),
                 n,
                 outcome: VerifyOutcome::Mismatch {
                     which: format!("seq={}", event.seq.as_u64()),
-                    reason: e.to_string(),
+                    reason: error.to_string(),
                 },
             });
         }

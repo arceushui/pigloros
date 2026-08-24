@@ -1018,12 +1018,14 @@ mod tests {
             store::TimelineExport,
             timeline::{Timeline, TimelineMeta},
         };
-        use pos_crypto::signing::{generate_keypair, public_key_from_verifying_key, sign};
+        use pos_crypto::signing::{
+            generate_keypair, public_key_from_verifying_key, sign_legacy_unbound,
+        };
 
         let (sk, vk) = generate_keypair();
         let pk = public_key_from_verifying_key(&vk);
         let payload = CanonicalBytes::from_vec(b"signed".to_vec());
-        let sig = sign(&sk, &payload);
+        let sig = sign_legacy_unbound(&sk, &payload);
         let entity = EntityId::new();
         let event = Event {
             id: EventId::new(),

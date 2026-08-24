@@ -6,9 +6,12 @@ use pos_core::{
     hasher::Hasher,
     ids::{EntityId, EventId},
     store::{EventStore, SeqRange},
-    CoreError,
+    CoreError, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1,
 };
-use pos_crypto::signing::sign;
+use pos_crypto::{
+    key_roles::{key_material_digest, sign_for_registered_role},
+    signing::public_key_from_verifying_key,
+};
 
 use crate::{
     payload::{decode_outcome, decode_prediction, EVENT_TYPE_OUTCOME, EVENT_TYPE_PREDICTION},
@@ -33,6 +36,8 @@ pub struct EventLedgerStore {
     timeline_id: pos_core::ids::TimelineId,
     entity: EntityId,
     signing_key: SigningKey,
+    key_registry: KeyRegistryStateV1,
+    signing_identity: KeyIdentityV1,
     hasher: Box<dyn Hasher>,
 }
 
@@ -44,14 +49,26 @@ impl EventLedgerStore {
         entity: EntityId,
         signing_key: SigningKey,
         hasher: Box<dyn Hasher>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, LedgerError> {
+        let signing_identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+        let public_verification_key = public_key_from_verifying_key(&signing_key.verifying_key());
+        let mut key_registry = KeyRegistryStateV1::new();
+        key_registry
+            .register_key(KeyRegistrationV1::new(
+                signing_identity,
+                key_material_digest(&signing_key.to_bytes()),
+                Some(public_verification_key),
+            ))
+            .map_err(|error| LedgerError::Store(format!("ledger signing registration: {error}")))?;
+        Ok(Self {
             store,
             timeline_id,
             entity,
             signing_key,
+            key_registry,
+            signing_identity,
             hasher,
-        }
+        })
     }
 
     fn head_seq(&self) -> Result<Seq, LedgerError> {
@@ -70,7 +87,13 @@ impl EventLedgerStore {
     ) -> Result<(), LedgerError> {
         let head = self.head_seq()?;
         let payload_hash = self.hasher.hash_payload(&payload);
-        let signature = sign(&self.signing_key, &payload);
+        let signature = sign_for_registered_role(
+            &mut self.key_registry,
+            &self.signing_key,
+            self.signing_identity,
+            &payload,
+        )
+        .map_err(|error| LedgerError::Store(format!("ledger signing authorization: {error}")))?;
 
         let event = Event {
             id: EventId::new(),
@@ -168,7 +191,10 @@ impl LedgerStore for EventLedgerStore {
 mod tests {
     use super::*;
     use crate::contract;
-    use pos_crypto::chain::{hash_payload, Blake3Hasher};
+    use pos_crypto::{
+        chain::{hash_payload, Blake3Hasher},
+        key_roles::verify_for_role,
+    };
     use pos_store::memory::MemoryStore;
 
     fn make_store() -> Result<EventLedgerStore, Box<dyn std::error::Error>> {
@@ -181,7 +207,7 @@ mod tests {
             EntityId::new(),
             sk,
             Box::new(Blake3Hasher),
-        ))
+        )?)
     }
 
     #[test]
@@ -205,6 +231,15 @@ mod tests {
         let ledger = store.load("2026-07-25")?;
         assert_eq!(ledger.entries().len(), 1);
         assert_eq!(ledger.entries()[0].prediction.prediction_id, id);
+        let events = store.store.read(store.timeline_id, SeqRange::all())?;
+        let signature = events[0].signature.as_ref().ok_or("missing signature")?;
+        verify_for_role(
+            &store.signing_key.verifying_key(),
+            KeyRoleV1::TimelineIntegritySigning,
+            1,
+            &events[0].payload,
+            signature,
+        )?;
         Ok(())
     }
 
@@ -476,7 +511,7 @@ mod tests {
             EntityId::new(),
             sk,
             Box::new(Blake3Hasher),
-        );
+        )?;
         let err = store.load("2026-07-25").err().ok_or("expected error")?;
         assert!(matches!(err, LedgerError::Store(_)));
         Ok(())
@@ -493,7 +528,7 @@ mod tests {
             EntityId::new(),
             sk,
             Box::new(Blake3Hasher),
-        );
+        )?;
         let err = store
             .resolve(LedgerOutcome::try_new(
                 "01J3B0Y5ZK2J6MGK8D7QW3N0P9".to_owned(),
@@ -525,7 +560,7 @@ mod tests {
             EntityId::new(),
             sk,
             Box::new(Blake3Hasher),
-        );
+        )?;
         let err = store
             .register(contract::sample_new_prediction("2026-08-01"))
             .err()

@@ -13,9 +13,12 @@ pub fn generate_keypair() -> (SigningKey, VerifyingKey) {
     (signing_key, verifying_key)
 }
 
-/// Sign a canonical payload with the given signing key.
-/// Returns a core `Signature` newtype.
-pub fn sign(signing_key: &SigningKey, payload: &CanonicalBytes) -> Signature {
+/// Sign a canonical payload without a role or epoch domain.
+///
+/// This is a legacy compatibility primitive for pre-#183 data and tests. New
+/// application writes must use `key_roles::sign_for_registered_role`; callers
+/// must not treat this function as revocable or role-authorized signing.
+pub fn sign_legacy_unbound(signing_key: &SigningKey, payload: &CanonicalBytes) -> Signature {
     let sig = signing_key.sign(payload.as_slice());
     Signature::from_bytes(sig.to_bytes())
 }
@@ -112,7 +115,7 @@ mod tests {
     fn sign_and_verify_round_trip() {
         let (sk, vk) = generate_keypair();
         let p = payload(b"sign me");
-        let sig = sign(&sk, &p);
+        let sig = sign_legacy_unbound(&sk, &p);
         assert!(verify(&vk, &p, &sig).is_ok());
     }
 
@@ -121,7 +124,7 @@ mod tests {
     fn tampered_payload_fails_verification() {
         let (sk, vk) = generate_keypair();
         let p = payload(b"original");
-        let sig = sign(&sk, &p);
+        let sig = sign_legacy_unbound(&sk, &p);
         let tampered = payload(b"tampered");
         assert!(verify(&vk, &tampered, &sig).is_err());
     }
@@ -132,7 +135,7 @@ mod tests {
         let (sk, _vk) = generate_keypair();
         let (_, other_vk) = generate_keypair();
         let p = payload(b"data");
-        let sig = sign(&sk, &p);
+        let sig = sign_legacy_unbound(&sk, &p);
         assert!(verify(&other_vk, &p, &sig).is_err());
     }
 
@@ -140,8 +143,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn different_payloads_produce_different_signatures() {
         let (sk, _) = generate_keypair();
-        let s1 = sign(&sk, &payload(b"a"));
-        let s2 = sign(&sk, &payload(b"b"));
+        let s1 = sign_legacy_unbound(&sk, &payload(b"a"));
+        let s2 = sign_legacy_unbound(&sk, &payload(b"b"));
         assert_ne!(s1.as_bytes(), s2.as_bytes());
     }
 
@@ -175,7 +178,7 @@ mod tests {
     fn empty_payload_signs_and_verifies() {
         let (sk, vk) = generate_keypair();
         let p = payload(b"");
-        let sig = sign(&sk, &p);
+        let sig = sign_legacy_unbound(&sk, &p);
         assert!(verify(&vk, &p, &sig).is_ok());
     }
 
@@ -183,7 +186,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn signature_is_64_bytes() {
         let (sk, _) = generate_keypair();
-        let sig = sign(&sk, &payload(b"test"));
+        let sig = sign_legacy_unbound(&sk, &payload(b"test"));
         assert_eq!(sig.as_bytes().len(), 64);
     }
 
@@ -199,7 +202,7 @@ mod tests {
 
         let (sk, vk) = generate_keypair();
         let p = payload(b"body");
-        let sig = sign(&sk, &p);
+        let sig = sign_legacy_unbound(&sk, &p);
         let signed = Event {
             id: EventId::new(),
             entity: EntityId::new(),
@@ -250,7 +253,7 @@ mod tests {
         };
         assert!(verify_events_all_signed(&vk, std::slice::from_ref(&unsigned)).is_err());
         let mut signed = unsigned;
-        signed.signature = Some(sign(&sk, &p));
+        signed.signature = Some(sign_legacy_unbound(&sk, &p));
         assert!(verify_events_all_signed(&vk, &[signed]).is_ok());
         assert!(verify_events_all_signed(&vk, &[]).is_ok());
     }

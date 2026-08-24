@@ -461,9 +461,9 @@ impl KeyRegistryStateV1 {
         if record.private_material_digest.is_none() {
             return Err(KeyRegistryErrorV1::Destroyed);
         }
-        let active = self
-            .active_key(identity.role)
-            .ok_or(KeyRegistryErrorV1::NotFound)?;
+        let Some(active) = self.active_key(identity.role) else {
+            return Err(KeyRegistryErrorV1::InactiveKey);
+        };
         if active.identity != identity {
             return Err(KeyRegistryErrorV1::InactiveKey);
         }
@@ -684,6 +684,47 @@ mod tests {
         assert!(!called);
         assert_eq!(registry, before_mismatch);
 
+        assert_eq!(
+            KeyRegistrySigningPortV1::with_signing_authorization(
+                &mut registry,
+                ATTRIBUTION,
+                digest(2),
+                PublicKey::from_bytes([9; 32]),
+                || (),
+            ),
+            Err(KeyRegistryErrorV1::SigningKeyMismatch)
+        );
+        assert_eq!(
+            KeyRegistrySigningPortV1::with_signing_authorization(
+                &mut registry,
+                KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 0),
+                digest(2),
+                PublicKey::from_bytes([2; 32]),
+                || (),
+            ),
+            Err(KeyRegistryErrorV1::InvalidEpoch)
+        );
+        assert_eq!(
+            KeyRegistrySigningPortV1::with_signing_authorization(
+                &mut registry,
+                DATA,
+                digest(2),
+                PublicKey::from_bytes([2; 32]),
+                || (),
+            ),
+            Err(KeyRegistryErrorV1::SigningRoleRequired)
+        );
+        assert_eq!(
+            KeyRegistrySigningPortV1::with_signing_authorization(
+                &mut registry,
+                KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 9),
+                digest(2),
+                PublicKey::from_bytes([2; 32]),
+                || (),
+            ),
+            Err(KeyRegistryErrorV1::NotFound)
+        );
+
         let next = KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 2);
         registry.register_key(signing_registration(next, 4))?;
         assert_eq!(
@@ -707,6 +748,16 @@ mod tests {
                 || (),
             ),
             Err(KeyRegistryErrorV1::Destroyed)
+        );
+        assert_eq!(
+            KeyRegistrySigningPortV1::with_signing_authorization(
+                &mut registry,
+                ATTRIBUTION,
+                digest(2),
+                PublicKey::from_bytes([2; 32]),
+                || (),
+            ),
+            Err(KeyRegistryErrorV1::InactiveKey)
         );
         Ok(())
     }
