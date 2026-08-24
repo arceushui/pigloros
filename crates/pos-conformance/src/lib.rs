@@ -7834,6 +7834,12 @@ pub mod tests {
             "experiment.lifecycle.consent-closed.v1".to_owned();
         valid.authoritative_events[2].event_type =
             "experiment.lifecycle.consent-closed.v1".to_owned();
+        valid.participant_views[0]
+            .hidden_event_types
+            .retain(|event_type| event_type != "consent.revoked.v1");
+        valid.participant_views[0]
+            .hidden_event_types
+            .push("experiment.lifecycle.consent-closed.v1".to_owned());
         assert_eq!(verify_evidence(&valid), Ok(()));
 
         let cases: [fn(&mut ConsentAuditV1, &mut Vec<AuthoritativeEventV1>); 9] = [
