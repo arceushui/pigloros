@@ -7299,6 +7299,21 @@ mod fault_injection_tests {
         fail_on_call: u8,
     }
 
+    struct RejectingRevocationGate;
+
+    impl ConsentGate for RejectingRevocationGate {
+        fn check_consent(
+            &self,
+            _: pos_core::ids::TimelineId,
+            _: EntityId,
+            _: &Kind,
+            _: u64,
+            _: u64,
+        ) -> Result<ConsentCapabilityToken, pos_core::ConsentError> {
+            Err(pos_core::ConsentError::NoConsent)
+        }
+    }
+
     impl EventStore for FailLogicalHeadStore {
         fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
             self.inner.create_timeline(name)
@@ -7527,7 +7542,7 @@ mod fault_injection_tests {
 
     #[test]
     fn backtest_result_build_errors_are_propagated_for_both_phases() {
-        for fail_on_call in [3, 4] {
+        for fail_on_call in [2, 3, 4] {
             let mut store = FailLogicalHeadStore {
                 inner: Box::new(pos_store::memory::MemoryStore::new()),
                 calls: Cell::new(0),
@@ -7547,6 +7562,105 @@ mod fault_injection_tests {
                 Err(ExperimentError::Store(CoreError::Storage(_)))
             ));
         }
+    }
+
+    #[test]
+    fn projection_step_and_revocation_error_boundaries_fault_closed() {
+        let failing_store = FailLogicalHeadStore {
+            inner: Box::new(pos_store::memory::MemoryStore::new()),
+            calls: Cell::new(0),
+            fail_on_call: 1,
+        };
+        let session = Experiment::new(config("projection-head-error", StopCondition::MaxTicks(1)))
+            .start_with_store(Box::new(failing_store))
+            .test_ok();
+        let authority = ConsentAuthority::new();
+        let token = authority.record_grant_on_timeline(session.timeline().id(), &export_grant(0));
+        assert!(session
+            .projection_state_for_reducer("missing", EntityId::new(), &token, 0)
+            .is_err());
+
+        let authority = ConsentAuthority::new();
+        let session = Experiment::new(config("expired-step", StopCondition::MaxTicks(1)))
+            .with_consent_authority(authority.clone())
+            .start()
+            .test_ok();
+        let token = authority.record_grant_on_timeline(session.timeline().id(), &export_grant(1));
+        let mut session = session.with_protected_token(token, 0);
+        assert!(session.step_tick().is_err());
+
+        let directory = tempfile::tempdir().test_ok();
+        let path = directory.path().join("revocation-append-error.db");
+        let authority = ConsentAuthority::new();
+        let mut session = Experiment::new(ExperimentConfig {
+            name: "revocation-append-error".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Sqlite {
+                path: path.to_str().test_ok().to_owned(),
+            },
+        })
+        .with_consent_authority(authority)
+        .start()
+        .test_ok();
+        Connection::open(&path)
+            .test_ok()
+            .execute_batch(
+                "CREATE TRIGGER fail_revocation_append
+                 BEFORE INSERT ON events
+                 BEGIN
+                   SELECT RAISE(FAIL, 'injected revocation failure');
+                 END;",
+            )
+            .test_ok();
+        session.revoke_consent_at_boundary();
+        assert!(session.step_tick().is_err());
+
+        let mut session =
+            Experiment::new(config("revocation-gate-error", StopCondition::MaxTicks(1)))
+                .without_consent_gate()
+                .start()
+                .test_ok();
+        session.registry = session
+            .registry
+            .with_consent_gate(Arc::new(RejectingRevocationGate));
+        session.revoke_consent_at_boundary();
+        assert!(session.step_tick().is_err());
+    }
+
+    #[test]
+    fn protected_fork_error_boundaries_reject_missing_and_expired_authority() {
+        let authority = ConsentAuthority::new();
+        let session = Experiment::new(config("fork-no-gate", StopCondition::MaxTicks(1)))
+            .with_fork_registry_factory(|| Ok(PluginRegistry::new()))
+            .start()
+            .test_ok();
+        let token =
+            authority.record_grant_on_timeline(session.timeline().id(), &branch_grant(true, 0));
+        let mut session = session.with_protected_token(token, 0);
+        assert!(session.fork("child").is_err());
+
+        let authority = ConsentAuthority::new();
+        let session = Experiment::new(config("fork-expired", StopCondition::MaxTicks(1)))
+            .with_consent_authority(authority.clone())
+            .with_fork_registry_factory(|| Ok(PluginRegistry::new()))
+            .start()
+            .test_ok();
+        let token =
+            authority.record_grant_on_timeline(session.timeline().id(), &branch_grant(true, 1));
+        let mut session = session.with_protected_token(token, 0);
+        assert!(session.fork("child").is_err());
+
+        let failing_store = FailLogicalHeadStore {
+            inner: Box::new(pos_store::memory::MemoryStore::new()),
+            calls: Cell::new(0),
+            fail_on_call: 1,
+        };
+        let session = Experiment::new(config("fork-head-error", StopCondition::MaxTicks(1)))
+            .start_with_store(Box::new(failing_store))
+            .test_ok();
+        assert!(session
+            .fork_timeline_at("child", pos_core::clock::Seq::ZERO)
+            .is_err());
     }
 
     #[test]
@@ -7571,6 +7685,210 @@ mod fault_injection_tests {
             }),
         };
         assert!(result.branch("fork").is_err());
+    }
+
+    fn export_result(
+        timeline_id: pos_core::ids::TimelineId,
+        authority: &ConsentAuthority,
+        token: ConsentCapabilityToken,
+        store_config: Option<StoreConfig>,
+    ) -> RunResult {
+        RunResult {
+            timeline_id,
+            ticks: 0,
+            total_events: 0,
+            timeline_head: 0,
+            manifest: ReproManifest::new(
+                timeline_id,
+                pos_core::crypto::Hash::zero(),
+                pos_core::clock::WallTime::from_micros(0),
+            ),
+            projections: pos_state::ProjectionRegistry::new(),
+            consent_gate: Some(Arc::new(authority.clone())),
+            protected_token: Some(token),
+            store_config,
+        }
+    }
+
+    fn export_grant(expiry_secs: u32) -> ConsentGranted {
+        ConsentGranted {
+            subject_id: EntityId::new(),
+            grantee_id: EntityId::new(),
+            purpose: "coverage-export-errors".to_owned(),
+            modalities: 0,
+            min_geo_resolution: 0,
+            fork_permitted: true,
+            export_permitted: true,
+            retention_days: 0,
+            expiry_secs,
+            grant_seq: 1,
+        }
+    }
+
+    fn branch_grant(fork_permitted: bool, expiry_secs: u32) -> ConsentGranted {
+        ConsentGranted {
+            fork_permitted,
+            expiry_secs,
+            ..export_grant(expiry_secs)
+        }
+    }
+
+    #[test]
+    fn protected_export_errors_are_closed_at_each_store_and_authority_boundary() {
+        let authority = ConsentAuthority::new();
+        let missing_recipe_timeline = pos_core::ids::TimelineId::new();
+        let missing_recipe_token =
+            authority.record_grant_on_timeline(missing_recipe_timeline, &export_grant(0));
+        assert!(matches!(
+            export_result(
+                missing_recipe_timeline,
+                &authority,
+                missing_recipe_token,
+                None,
+            )
+            .into_reproduction_manifest(ReproductionRecipe::new(
+                "coverage-export-missing-recipe",
+                1,
+                serde_json::json!({}),
+            )),
+            Err(ExperimentError::MissingStoreRecoveryRecipe)
+        ));
+
+        let directory = tempfile::tempdir().test_ok();
+        let directory_timeline = pos_core::ids::TimelineId::new();
+        let directory_token =
+            authority.record_grant_on_timeline(directory_timeline, &export_grant(0));
+        assert!(export_result(
+            directory_timeline,
+            &authority,
+            directory_token,
+            Some(StoreConfig::Sqlite {
+                path: directory.path().to_str().test_ok().to_owned(),
+            }),
+        )
+        .into_reproduction_manifest(ReproductionRecipe::new(
+            "coverage-export-open-error",
+            1,
+            serde_json::json!({}),
+        ))
+        .is_err());
+
+        let database = tempfile::NamedTempFile::new().test_ok();
+        let store_config = StoreConfig::Sqlite {
+            path: database.path().to_str().test_ok().to_owned(),
+        };
+        let mut store = open_store(store_config.clone()).test_ok();
+        let stored_timeline = store.create_timeline("coverage-export-head").test_ok();
+        let missing_timeline = pos_core::ids::TimelineId::new();
+        let missing_head_token =
+            authority.record_grant_on_timeline(missing_timeline, &export_grant(0));
+        drop(store);
+        assert!(export_result(
+            missing_timeline,
+            &authority,
+            missing_head_token,
+            Some(store_config.clone()),
+        )
+        .into_reproduction_manifest(ReproductionRecipe::new(
+            "coverage-export-head-error",
+            1,
+            serde_json::json!({}),
+        ))
+        .is_err());
+
+        let expired_authority = ConsentAuthority::new();
+        let expired_token =
+            expired_authority.record_grant_on_timeline(stored_timeline.id(), &export_grant(1));
+        assert!(export_result(
+            stored_timeline.id(),
+            &expired_authority,
+            expired_token,
+            Some(store_config),
+        )
+        .into_reproduction_manifest(ReproductionRecipe::new(
+            "coverage-export-expired",
+            1,
+            serde_json::json!({}),
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn protected_branch_errors_are_closed_at_each_authority_boundary() {
+        let directory = tempfile::tempdir().test_ok();
+        let path = directory.path().join("branch-token-corrupt.db");
+        let authority = ConsentAuthority::new();
+        let mut store = open_store(StoreConfig::Sqlite {
+            path: path.to_str().test_ok().to_owned(),
+        })
+        .test_ok();
+        let timeline = store.create_timeline("branch-token-corrupt").test_ok();
+        let token = authority.record_grant_on_timeline(timeline.id(), &branch_grant(true, 0));
+        Connection::open(&path)
+            .test_ok()
+            .execute("UPDATE timelines SET name = X'0102'", [])
+            .test_ok();
+        let experiment = Experiment::new(ExperimentConfig {
+            name: "branch-token-corrupt".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        })
+        .with_consent_authority(authority);
+        assert!(experiment
+            .branch_with_token("child", &mut store, &token, 0)
+            .is_err());
+
+        let authority = ConsentAuthority::new();
+        let mut failing_head = pos_store::memory::MemoryStore::new();
+        let timeline = failing_head.create_timeline("branch-token-head").test_ok();
+        let token = authority.record_grant_on_timeline(timeline.id(), &branch_grant(true, 0));
+        let mut failing_head = FailLogicalHeadStore {
+            inner: Box::new(failing_head),
+            calls: Cell::new(0),
+            fail_on_call: 1,
+        };
+        let experiment = Experiment::new(config("branch-token-head", StopCondition::MaxTicks(1)))
+            .with_consent_authority(authority);
+        assert!(experiment
+            .branch_with_token("child", &mut failing_head, &token, 0)
+            .is_err());
+
+        let authority = ConsentAuthority::new();
+        let mut denied_store = pos_store::memory::MemoryStore::new();
+        let timeline = denied_store
+            .create_timeline("branch-token-denied")
+            .test_ok();
+        let token = authority.record_grant_on_timeline(timeline.id(), &branch_grant(false, 0));
+        let experiment = Experiment::new(config("branch-token-denied", StopCondition::MaxTicks(1)))
+            .with_consent_authority(authority);
+        assert!(experiment
+            .branch_with_token("child", &mut denied_store, &token, 0)
+            .is_err());
+
+        let mut ungated_store = pos_store::memory::MemoryStore::new();
+        let timeline = ungated_store
+            .create_timeline("branch-token-ungated")
+            .test_ok();
+        let token =
+            ConsentAuthority::new().record_grant_on_timeline(timeline.id(), &branch_grant(true, 0));
+        let experiment =
+            Experiment::new(config("branch-token-ungated", StopCondition::MaxTicks(1)));
+        assert!(experiment
+            .branch_with_token("child", &mut ungated_store, &token, 0)
+            .is_err());
+
+        let authority = ConsentAuthority::new();
+        let mut expired_store = pos_store::memory::MemoryStore::new();
+        let timeline = expired_store
+            .create_timeline("branch-token-expired")
+            .test_ok();
+        let token = authority.record_grant_on_timeline(timeline.id(), &branch_grant(true, 1));
+        let experiment =
+            Experiment::new(config("branch-token-expired", StopCondition::MaxTicks(1)))
+                .with_consent_authority(authority);
+        assert!(experiment
+            .branch_with_token("child", &mut expired_store, &token, 0)
+            .is_err());
     }
 
     #[test]
