@@ -4229,7 +4229,7 @@ mod tests {
                 stable.stable_evidence.clone(),
                 &policy,
             ),
-            Ok(stable.clone())
+            Ok(stable)
         );
     }
 
