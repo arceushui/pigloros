@@ -2069,10 +2069,9 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinator for ErasureCoordinatorState
 #[path = "erasure_codec.rs"]
 mod codec;
 use codec::{
-    acknowledgements_are_closure_subset, acknowledgements_match_closure, cbor_argument,
-    cbor_argument_bytes, decode_limited, domain_digest, encode_canonical, encode_limited,
-    exact_array, freeze_is_monotonic, has_duplicate, has_duplicate_by_inventory_target,
-    has_duplicate_by_target, invalid_owner_sets, inventories_exceed_bound,
+    acknowledgements_are_closure_subset, acknowledgements_match_closure, decode_limited,
+    domain_digest, encode_canonical, encode_limited, exact_array, freeze_is_monotonic,
+    has_duplicate, has_duplicate_by_target, invalid_owner_sets, inventories_exceed_bound,
     inventories_have_duplicate_targets, inventories_match_closure, inventory_categories_match,
     inventory_transitions_preserve_or_weaken, receipt_core_value, receipt_from_fields,
     receipt_value, reference_zero, request_from_fields, request_value, sort_inventories,

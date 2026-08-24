@@ -8,7 +8,9 @@ fn test_text(value: &str) -> Value {
     Value::Text(value.to_owned())
 }
 use super::*;
-use crate::erasure::codec::array;
+use crate::erasure::codec::{
+    array, cbor_argument, cbor_argument_bytes, has_duplicate_by_inventory_target,
+};
 use ciborium::value::Value;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -1716,14 +1718,14 @@ fn codec_predicates_and_cbor_argument_widths_are_closed_at_the_public_boundary()
         replicas: Vec::new(),
         backups: Vec::new(),
     };
-    inventories.artifacts.push(inventory.clone());
+    inventories.artifacts.push(inventory);
     inventories.keys.push(ErasureInventoryResultV1 {
         category: ErasureInventoryCategoryV1::Key,
-        ..inventory.clone()
+        ..inventory
     });
     inventories.replicas.push(ErasureInventoryResultV1 {
         category: ErasureInventoryCategoryV1::Replica,
-        ..inventory.clone()
+        ..inventory
     });
     inventories.backups.push(ErasureInventoryResultV1 {
         category: ErasureInventoryCategoryV1::Backup,
@@ -1737,29 +1739,25 @@ fn codec_predicates_and_cbor_argument_widths_are_closed_at_the_public_boundary()
         &mut inventories.replicas,
         &mut inventories.backups,
     ] {
-        let first = inventory[0].clone();
+        let first = inventory[0];
         inventory.push(first);
         assert!(has_duplicate_by_inventory_target(inventory));
         inventory.clear();
     }
-    inventories.artifacts = std::iter::repeat(inventory_result(target))
-        .take(ERASURE_MAX_INVENTORY_RESULTS + 1)
-        .collect();
+    inventories.artifacts =
+        std::iter::repeat_n(inventory_result(target), ERASURE_MAX_INVENTORY_RESULTS + 1).collect();
     assert!(inventories_exceed_bound(&inventories));
     inventories.artifacts.clear();
-    inventories.keys = std::iter::repeat(inventory_result(target))
-        .take(ERASURE_MAX_INVENTORY_RESULTS + 1)
-        .collect();
+    inventories.keys =
+        std::iter::repeat_n(inventory_result(target), ERASURE_MAX_INVENTORY_RESULTS + 1).collect();
     assert!(inventories_exceed_bound(&inventories));
     inventories.keys.clear();
-    inventories.replicas = std::iter::repeat(inventory_result(target))
-        .take(ERASURE_MAX_INVENTORY_RESULTS + 1)
-        .collect();
+    inventories.replicas =
+        std::iter::repeat_n(inventory_result(target), ERASURE_MAX_INVENTORY_RESULTS + 1).collect();
     assert!(inventories_exceed_bound(&inventories));
     inventories.replicas.clear();
-    inventories.backups = std::iter::repeat(inventory_result(target))
-        .take(ERASURE_MAX_INVENTORY_RESULTS + 1)
-        .collect();
+    inventories.backups =
+        std::iter::repeat_n(inventory_result(target), ERASURE_MAX_INVENTORY_RESULTS + 1).collect();
     assert!(inventories_exceed_bound(&inventories));
     inventories.backups.clear();
     assert!(inventories_have_duplicate_targets(
