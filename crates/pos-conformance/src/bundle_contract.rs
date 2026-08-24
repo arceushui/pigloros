@@ -459,6 +459,11 @@ impl ConformanceBundleV1 {
     }
 
     /// Return the exact canonical bytes signed by this bundle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BundleContractErrorV1::EncodingFailed`] when the manifest
+    /// cannot be canonically encoded.
     pub fn manifest_bytes(&self) -> Result<Vec<u8>, BundleContractErrorV1> {
         canonical::encode(&manifest_value(&self.manifest))
             .map(|bytes| bytes.as_slice().to_vec())
@@ -479,9 +484,7 @@ impl ConformanceBundleV1 {
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, BundleContractErrorV1> {
         self.validate()?;
         let value = bundle_value(self);
-        let bytes = canonical::encode(&value)
-            .map(|encoded| encoded.as_slice().to_vec())
-            .map_err(|_| BundleContractErrorV1::EncodingFailed)?;
+        let bytes = encode_archive_value(&value)?;
         validate_archive_caps(self, &value, bytes.len())?;
         Ok(bytes)
     }
@@ -498,8 +501,8 @@ impl ConformanceBundleV1 {
         }
         let value = ciborium::from_reader(Cursor::new(bytes))
             .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
-        let canonical_bytes =
-            canonical::encode(&value).map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
+        let canonical_bytes = encode_archive_value(&value)
+            .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
         if canonical_bytes.as_slice() != bytes {
             return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
         }
@@ -563,6 +566,13 @@ fn bundle_value(bundle: &ConformanceBundleV1) -> Value {
         Value::Bytes(bundle.signer_public_key.as_bytes().to_vec()),
         Value::Bytes(bundle.signature.as_bytes().to_vec()),
     ])
+}
+
+fn encode_archive_value(value: &Value) -> Result<Vec<u8>, BundleContractErrorV1> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(value, &mut bytes)
+        .map(|()| bytes)
+        .map_err(|_| BundleContractErrorV1::EncodingFailed)
 }
 
 fn validate_archive_caps(
@@ -678,8 +688,7 @@ fn archive_bytes(value: &Value) -> Result<&[u8], BundleContractErrorV1> {
 
 fn archive_u64(value: &Value) -> Result<u64, BundleContractErrorV1> {
     match value {
-        Value::Integer(integer) => integer
-            .clone()
+        Value::Integer(integer) => (*integer)
             .try_into()
             .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid),
         _ => Err(BundleContractErrorV1::ArchiveEncodingInvalid),
@@ -693,7 +702,7 @@ fn archive_digest<const N: usize>(value: &Value) -> Result<[u8; N], BundleContra
         .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)
 }
 
-fn decode_member_role(code: u64) -> Result<BundleMemberRoleV1, BundleContractErrorV1> {
+const fn decode_member_role(code: u64) -> Result<BundleMemberRoleV1, BundleContractErrorV1> {
     match code {
         0 => Ok(BundleMemberRoleV1::FixtureInput),
         1 => Ok(BundleMemberRoleV1::ExpectedResult),
@@ -709,7 +718,7 @@ fn decode_member_role(code: u64) -> Result<BundleMemberRoleV1, BundleContractErr
     }
 }
 
-fn decode_bundle_mode(code: u64) -> Result<BundleModeV1, BundleContractErrorV1> {
+const fn decode_bundle_mode(code: u64) -> Result<BundleModeV1, BundleContractErrorV1> {
     match code {
         0 => Ok(BundleModeV1::Local),
         1 => Ok(BundleModeV1::AirGapped),
@@ -717,7 +726,7 @@ fn decode_bundle_mode(code: u64) -> Result<BundleModeV1, BundleContractErrorV1> 
     }
 }
 
-fn decode_lifecycle(code: u64) -> Result<ProfileLifecycleV1, BundleContractErrorV1> {
+const fn decode_lifecycle(code: u64) -> Result<ProfileLifecycleV1, BundleContractErrorV1> {
     match code {
         0 => Ok(ProfileLifecycleV1::Draft),
         1 => Ok(ProfileLifecycleV1::Candidate),
@@ -727,7 +736,7 @@ fn decode_lifecycle(code: u64) -> Result<ProfileLifecycleV1, BundleContractError
     }
 }
 
-fn decode_claim_layer(code: u64) -> Result<ClaimLayerV1, BundleContractErrorV1> {
+const fn decode_claim_layer(code: u64) -> Result<ClaimLayerV1, BundleContractErrorV1> {
     match code {
         0 => Ok(ClaimLayerV1::ArtifactIntegrity),
         1 => Ok(ClaimLayerV1::ReplayConformance),
@@ -2092,7 +2101,7 @@ mod tests {
 
         let mut undeclared = signed_bundle(&profile, BundleModeV1::Local)?;
         let last_descriptor = undeclared.manifest.members.len() - 1;
-        undeclared.manifest.members[last_descriptor].path = "profile/CPF1-alt.cbor".to_owned();
+        undeclared.manifest.members[last_descriptor].path = "zz-undeclared".to_owned();
         assert_eq!(
             undeclared.validate(),
             Err(BundleContractErrorV1::UndeclaredMember)
