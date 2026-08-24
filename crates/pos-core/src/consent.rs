@@ -3020,20 +3020,11 @@ mod tests {
             Err(ConsentError::NoConsent)
         }
 
-        fn fence_timeline_at(
-            &self,
-            _: TimelineId,
-            _: u64,
-        ) -> Result<(), ConsentError> {
+        fn fence_timeline_at(&self, _: TimelineId, _: u64) -> Result<(), ConsentError> {
             Ok(())
         }
 
-        fn fence_subject_at(
-            &self,
-            _: TimelineId,
-            _: EntityId,
-            _: u64,
-        ) -> Result<(), ConsentError> {
+        fn fence_subject_at(&self, _: TimelineId, _: EntityId, _: u64) -> Result<(), ConsentError> {
             Ok(())
         }
     }

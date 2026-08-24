@@ -5526,6 +5526,59 @@ mod coverage_entrypoints {
         }
     }
 
+    struct SubjectDriver {
+        subject: EntityId,
+    }
+
+    impl Driver for SubjectDriver {
+        fn name(&self) -> &'static str {
+            "coverage-subject-driver"
+        }
+
+        fn step(
+            &mut self,
+            _: pos_core::ids::TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            Ok(StepOutput {
+                drafts: vec![EventDraft::new(
+                    self.subject,
+                    Kind::new("coverage.failure"),
+                    pos_core::CanonicalBytes::from_static(b"coverage"),
+                )],
+            })
+        }
+    }
+
+    struct RestoreFailDriver;
+
+    impl Driver for RestoreFailDriver {
+        fn name(&self) -> &'static str {
+            "coverage-restore-failure"
+        }
+
+        fn step(
+            &mut self,
+            _: pos_core::ids::TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            Ok(StepOutput::empty())
+        }
+
+        fn needs_recovery_payload(&self, _: &pos_runtime::driver::RecoveryEventHeader) -> bool {
+            true
+        }
+
+        fn stage_restore_from_history(
+            &mut self,
+            _: &pos_runtime::driver::DriverRecoveryEvidence,
+        ) -> Result<(), RuntimeError> {
+            Err(RuntimeError::InvalidRecoveryEvidence {
+                reason: "coverage restore failure",
+            })
+        }
+    }
+
     #[test]
     fn consent_drafts_are_rejected_at_the_public_session_seam() {
         let experiment =
@@ -5555,6 +5608,52 @@ mod coverage_entrypoints {
     }
 
     #[test]
+    fn revoked_subject_drafts_and_faulted_projection_reads_fail_closed() {
+        let subject = EntityId::new();
+        let plugin = CoveragePlugin {
+            id: PluginId::new(),
+        };
+        let mut experiment =
+            Experiment::new(config("coverage-revoked-draft", StopCondition::MaxTicks(3)));
+        ok(experiment.register(&plugin, None, Some(Box::new(SubjectDriver { subject }))));
+        let mut session = ok(experiment.start());
+        session.revoke_consent_for_subject_at_boundary(subject);
+        let _ = ok(session.step_tick());
+        assert!(matches!(
+            session.step_tick(),
+            Err(ExperimentError::ConsentRevoked)
+        ));
+
+        let failing_plugin = CoveragePlugin {
+            id: PluginId::new(),
+        };
+        let mut failing = Experiment::new(config(
+            "coverage-faulted-projection",
+            StopCondition::MaxTicks(2),
+        ));
+        ok(failing.register(&failing_plugin, None, Some(Box::new(FailingDriver))));
+        let mut faulted = ok(failing.start());
+        let _ = faulted.step_tick();
+        let authority = ConsentAuthority::new();
+        let token = authority.record_grant_on_timeline(
+            faulted.timeline().id(),
+            &ConsentGranted {
+                subject_id: EntityId::new(),
+                grantee_id: EntityId::new(),
+                purpose: "coverage-faulted-projection".to_owned(),
+                modalities: 0,
+                min_geo_resolution: 0,
+                fork_permitted: false,
+                export_permitted: false,
+                retention_days: 0,
+                expiry_secs: 0,
+                grant_seq: 1,
+            },
+        );
+        expect_err(&faulted.projection_state_for_reducer("missing", EntityId::new(), &token, 0));
+    }
+
+    #[test]
     fn runtime_error_mapping_preserves_store_and_generic_variants() {
         let store = map_runtime_error(pos_runtime::RuntimeError::Store(
             pos_core::CoreError::Storage("coverage-store".to_owned()),
@@ -5569,6 +5668,37 @@ mod coverage_entrypoints {
             reason: "coverage-runtime",
         });
         assert!(matches!(generic, ExperimentError::Runtime(_)));
+    }
+
+    #[test]
+    fn resume_recovers_host_closure_without_a_gate() {
+        let database = ok(tempfile::NamedTempFile::new());
+        let path = ok(database
+            .path()
+            .to_str()
+            .ok_or("coverage temp path is not utf8"))
+        .to_owned();
+        let config = StoreConfig::Sqlite { path };
+        let timeline = {
+            let mut store = ok(open_store(config.clone()));
+            let timeline = ok(store.create_timeline("coverage-resume-closure"));
+            ok(store.append(
+                timeline.id(),
+                &[EventDraft::new(
+                    EntityId::new(),
+                    Kind::new(EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE),
+                    pos_core::CanonicalBytes::from_static(EXPERIMENT_CONSENT_TIMELINE_MARKER),
+                )],
+            ));
+            timeline.id()
+        };
+        let session = ok(Experiment::new(ExperimentConfig {
+            name: "coverage-resume-closure".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: config,
+        })
+        .resume(timeline));
+        assert!(session.consent_revoked);
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -5642,6 +5772,46 @@ mod coverage_entrypoints {
             child.timeline().meta.name.as_deref(),
             Some("coverage-session-child")
         );
+    }
+
+    #[test]
+    fn protected_fork_hydration_propagates_driver_restore_errors() {
+        let authority = ConsentAuthority::new();
+        let plugin = CoveragePlugin {
+            id: PluginId::new(),
+        };
+        let factory_id = plugin.id;
+        let mut experiment =
+            Experiment::new(config("coverage-restore-fork", StopCondition::MaxTicks(1)))
+                .with_consent_authority(authority.clone())
+                .with_fork_registry_factory(move || {
+                    let mut registry = PluginRegistry::new();
+                    registry.register(
+                        &CoveragePlugin { id: factory_id },
+                        None,
+                        Some(Box::new(RestoreFailDriver)),
+                    )?;
+                    Ok(registry)
+                });
+        ok(experiment.register(&plugin, None, Some(Box::new(RestoreFailDriver))));
+        let session = ok(experiment.start());
+        let token = authority.record_grant_on_timeline(
+            session.timeline().id(),
+            &ConsentGranted {
+                subject_id: EntityId::new(),
+                grantee_id: EntityId::new(),
+                purpose: "coverage-restore-fork".to_owned(),
+                modalities: 0,
+                min_geo_resolution: 0,
+                fork_permitted: true,
+                export_permitted: false,
+                retention_days: 0,
+                expiry_secs: 0,
+                grant_seq: 1,
+            },
+        );
+        let mut session = session.with_protected_token(token, 0);
+        expect_err(&session.fork("coverage-restore-child"));
     }
 
     #[test]
@@ -5795,7 +5965,100 @@ mod coverage_entrypoints {
                 grant_seq: 1,
             },
         );
+        let mut missing = pos_store::memory::MemoryStore::new();
+        expect_err(&experiment.branch_with_token("coverage-token-child", &mut missing, &token, 0));
         expect_err(&experiment.branch_with_token("coverage-token-child", &mut memory, &token, 0));
+    }
+
+    #[test]
+    fn result_branch_and_export_require_matching_capability_state() {
+        let database = ok(tempfile::NamedTempFile::new());
+        let store_config = StoreConfig::Sqlite {
+            path: ok(database
+                .path()
+                .to_str()
+                .ok_or("coverage temp path is not utf8"))
+            .to_owned(),
+        };
+        let mut store = ok(open_store(store_config.clone()));
+        let timeline = ok(store.create_timeline("coverage-result-guards"));
+        let authority = ConsentAuthority::new();
+        let token = authority.record_grant_on_timeline(
+            timeline.id(),
+            &ConsentGranted {
+                subject_id: EntityId::new(),
+                grantee_id: EntityId::new(),
+                purpose: "coverage-result-guards".to_owned(),
+                modalities: 0,
+                min_geo_resolution: 0,
+                fork_permitted: false,
+                export_permitted: false,
+                retention_days: 0,
+                expiry_secs: 0,
+                grant_seq: 1,
+            },
+        );
+        let gate: Arc<dyn ConsentGate> = Arc::new(authority);
+        let mismatched = RunResult {
+            timeline_id: timeline.id(),
+            ticks: 0,
+            total_events: 0,
+            timeline_head: 0,
+            manifest: ReproManifest::new(
+                timeline.id(),
+                pos_core::crypto::Hash::zero(),
+                pos_core::clock::WallTime::from_micros(0),
+            ),
+            projections: pos_state::ProjectionRegistry::new(),
+            consent_gate: Some(Arc::clone(&gate)),
+            protected_token: None,
+            store_config: Some(store_config.clone()),
+        };
+        expect_err(&mismatched.branch("coverage-mismatch"));
+        let no_token_export = RunResult {
+            timeline_id: timeline.id(),
+            ticks: 0,
+            total_events: 0,
+            timeline_head: 0,
+            manifest: ReproManifest::new(
+                timeline.id(),
+                pos_core::crypto::Hash::zero(),
+                pos_core::clock::WallTime::from_micros(0),
+            ),
+            projections: pos_state::ProjectionRegistry::new(),
+            consent_gate: Some(Arc::clone(&gate)),
+            protected_token: None,
+            store_config: None,
+        };
+        expect_err(
+            &no_token_export.into_reproduction_manifest(ReproductionRecipe::new(
+                "coverage-host",
+                1,
+                serde_json::json!({}),
+            )),
+        );
+        let denied_export = RunResult {
+            timeline_id: timeline.id(),
+            ticks: 0,
+            total_events: 0,
+            timeline_head: 0,
+            manifest: ReproManifest::new(
+                timeline.id(),
+                pos_core::crypto::Hash::zero(),
+                pos_core::clock::WallTime::from_micros(0),
+            ),
+            projections: pos_state::ProjectionRegistry::new(),
+            consent_gate: Some(Arc::clone(&gate)),
+            protected_token: Some(token),
+            store_config: Some(store_config),
+        };
+        expect_err(
+            &denied_export.into_reproduction_manifest(ReproductionRecipe::new(
+                "coverage-host",
+                1,
+                serde_json::json!({}),
+            )),
+        );
     }
 
     #[test]
@@ -5829,6 +6092,40 @@ mod coverage_entrypoints {
             child.timeline().meta.name.as_deref(),
             Some("coverage-child")
         );
+    }
+
+    #[test]
+    fn protected_session_fork_rejects_a_token_without_fork_permission() {
+        let authority = ConsentAuthority::new();
+        let experiment = Experiment::new(config(
+            "coverage-denied-session-fork",
+            StopCondition::MaxTicks(1),
+        ))
+        .with_consent_authority(authority.clone())
+        .with_fork_registry_factory(|| Ok(PluginRegistry::new()));
+        let session = ok(experiment.start());
+        let token = authority.record_grant_on_timeline(
+            session.timeline().id(),
+            &ConsentGranted {
+                subject_id: EntityId::new(),
+                grantee_id: EntityId::new(),
+                purpose: "coverage-denied-fork".to_owned(),
+                modalities: 0,
+                min_geo_resolution: 0,
+                fork_permitted: false,
+                export_permitted: false,
+                retention_days: 0,
+                expiry_secs: 0,
+                grant_seq: 1,
+            },
+        );
+        let mut session = session.with_protected_token(token, 0);
+        assert!(matches!(
+            session.fork("coverage-denied-child"),
+            Err(ExperimentError::Runtime(RuntimeError::Consent(
+                pos_core::ConsentError::ForkNotPermitted
+            )))
+        ));
     }
 
     #[test]
