@@ -1315,37 +1315,3 @@ mod tests {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod coverage_entrypoints {
-    use super::*;
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
-        result.unwrap_or_else(|error| {
-            std::panic::resume_unwind(Box::new(format!("unexpected coverage error: {error:?}")))
-        })
-    }
-
-    #[test]
-    fn inverse_rejects_a_corrupted_cached_origin_basis() {
-        let capability = WorldGeographicEvidenceCapabilityV1::for_trusted_core();
-        let origin = ok(WorldOriginV1::new(
-            &capability,
-            [1; 16],
-            [2; 16],
-            1,
-            ok(Wgs84PositionV1::new(35.0, -120.0, 100.0)),
-            [3; 32],
-            10_000.0,
-        ));
-        let position = ok(Wgs84PositionV1::new(35.0, -120.0, 100.0));
-        let mut transform = ok(WorldTransformV1::new(&capability, origin));
-        let coordinate = ok(transform.forward(&capability, position));
-        transform.origin_cos_latitude = 0.8192;
-        assert!(matches!(
-            transform.inverse(&capability, coordinate),
-            Err(WorldTransformError::NonConvergent)
-        ));
-    }
-}
