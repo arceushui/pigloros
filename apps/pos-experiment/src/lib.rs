@@ -1408,8 +1408,11 @@ impl ExperimentSession {
             .ok_or(ExperimentError::Runtime(
                 pos_runtime::RuntimeError::ConsentOperationUnavailable,
             ))?;
-        let timeline_head =
-            lock_store(&self.store).and_then(|store| store.logical_head(self.timeline.id()))?;
+        let timeline_head = lock_store(&self.store).and_then(|store| {
+            store
+                .logical_head(self.timeline.id())
+                .map_err(ExperimentError::from)
+        })?;
         let mut result = Err(ExperimentError::Runtime(
             pos_runtime::RuntimeError::ConsentOperationUnavailable,
         ));

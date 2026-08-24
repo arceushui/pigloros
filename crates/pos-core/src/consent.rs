@@ -1326,7 +1326,7 @@ impl FieldStateV1 {
     /// exact claim can only degrade to structural evidence. Existing weaker
     /// claims and profile incompatibility remain unchanged.
     #[must_use]
-    pub fn weaken_replay_claim(&self, current: ErasureReplayClaimV1) -> ErasureReplayClaimV1 {
+    pub const fn weaken_replay_claim(&self, current: ErasureReplayClaimV1) -> ErasureReplayClaimV1 {
         match self {
             Self::Present(_) => current,
             Self::RedactedDestroyed => match current {
