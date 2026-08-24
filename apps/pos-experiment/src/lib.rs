@@ -5714,7 +5714,7 @@ mod coverage_entrypoints {
     }
 
     #[test]
-    fn resume_rejects_host_closure_without_a_gate() {
+    fn resume_recovers_host_closure_through_the_default_gate() {
         let database = ok(tempfile::NamedTempFile::new());
         let path = ok(database
             .path()
@@ -5735,18 +5735,13 @@ mod coverage_entrypoints {
             ));
             timeline.id()
         };
-        let result = Experiment::new(ExperimentConfig {
+        let session = ok(Experiment::new(ExperimentConfig {
             name: "coverage-resume-closure".to_owned(),
             stop: StopCondition::MaxTicks(1),
             store_config: config,
         })
-        .resume(timeline);
-        assert!(matches!(
-            result,
-            Err(ExperimentError::Runtime(
-                RuntimeError::ConsentOperationUnavailable
-            ))
-        ));
+        .resume(timeline));
+        assert!(session.consent_revoked);
     }
 
     #[test]
@@ -5783,7 +5778,7 @@ mod coverage_entrypoints {
     }
 
     #[test]
-    fn no_gate_revocation_boundary_fails_closed() {
+    fn default_gate_revocation_boundary_commits_the_host_marker() {
         let mut session = ok(Experiment::new(config(
             "coverage-no-gate-revocation",
             StopCondition::MaxTicks(1),
@@ -5792,9 +5787,10 @@ mod coverage_entrypoints {
         session.revoke_consent_at_boundary();
         assert!(matches!(
             session.step_tick(),
-            Err(ExperimentError::Runtime(
-                RuntimeError::ConsentOperationUnavailable
-            ))
+            Ok(TickOutcome::Advanced {
+                emitted_events: 1,
+                ..
+            })
         ));
     }
 
@@ -6318,6 +6314,7 @@ mod coverage_entrypoints {
     fn run_result_projection_and_public_export_fail_closed_or_succeed_explicitly() {
         let authority = ConsentAuthority::new();
         let subject = EntityId::new();
+        let revoked_subject = EntityId::new();
         let token = authority.record_grant_on_timeline(
             pos_core::ids::TimelineId::new(),
             &ConsentGranted {
@@ -6382,8 +6379,23 @@ mod coverage_entrypoints {
                 grant_seq: 1,
             },
         );
+        let _revoked_token = authority.record_grant_on_timeline(
+            session.timeline().id(),
+            &ConsentGranted {
+                subject_id: revoked_subject,
+                grantee_id: EntityId::new(),
+                purpose: "coverage-session-revocation".to_owned(),
+                modalities: 0,
+                min_geo_resolution: 0,
+                fork_permitted: false,
+                export_permitted: false,
+                retention_days: 0,
+                expiry_secs: 0,
+                grant_seq: 2,
+            },
+        );
         expect_err(&session.projection_state_for_reducer("missing", subject, &token, 0));
-        session.revoke_consent_for_subject_at_boundary(EntityId::new());
+        session.revoke_consent_for_subject_at_boundary(revoked_subject);
         assert!(matches!(
             session.step_tick(),
             Ok(TickOutcome::Advanced { .. })
