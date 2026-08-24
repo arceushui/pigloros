@@ -9048,7 +9048,7 @@ mod tests {
             ))
             .test_ok();
         store.save_key_registry(&persisted).test_ok();
-        assert_eq!(store.load_key_registry().test_ok(), Some(persisted));
+        assert_eq!(store.load_key_registry().test_ok(), Some(persisted.clone()));
 
         let timeline = store.create_timeline("stale-registry").test_ok();
         let mut callback_called = false;
