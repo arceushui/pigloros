@@ -68,7 +68,7 @@ jobs:
           )
           if ((${#changed_rust_files[@]} > 0)); then
            rustfmt --edition 2021 --check "${changed_rust_files[@]}"
-           fi
+          fi
 
   rustdoc:
     name: rustdoc
