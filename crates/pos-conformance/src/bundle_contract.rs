@@ -868,24 +868,21 @@ mod archive_preflight {
             return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
         }
         let mut maximum_depth = 1;
-        for field in 0..6 {
-            if field == 3 {
-                let mut result = members(bytes, &mut index, 2)?;
-                for _ in 0..2 {
-                    let field = item(bytes, &mut index, 2)?;
-                    maximum_depth = maximum_depth.max(field.maximum_depth);
-                }
-                maximum_depth = maximum_depth.max(result.maximum_depth);
-                if index != bytes.len() {
-                    return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
-                }
-                result.maximum_depth = maximum_depth;
-                return Ok(result);
-            }
+        for _ in 0..3 {
             let field = item(bytes, &mut index, 2)?;
             maximum_depth = maximum_depth.max(field.maximum_depth);
         }
-        Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        let mut result = members(bytes, &mut index, 2)?;
+        for _ in 0..2 {
+            let field = item(bytes, &mut index, 2)?;
+            maximum_depth = maximum_depth.max(field.maximum_depth);
+        }
+        maximum_depth = maximum_depth.max(result.maximum_depth);
+        if index != bytes.len() {
+            return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+        }
+        result.maximum_depth = maximum_depth;
+        Ok(result)
     }
 }
 
@@ -3455,9 +3452,9 @@ mod coverage_entrypoints {
         huge_member.extend_from_slice(&(MAX_MEMBER_BYTES + 1).to_be_bytes());
         assert!(super::archive_preflight::scan(&raw_archive(&[0x60], &huge_member)).is_err());
 
-        let long_path = [0x81, 0x83, 0x59, 0x01, 0x01];
+        let long_path = [0x81, 0x83, 0x79, 0x01, 0x01];
         assert!(super::archive_preflight::scan(&raw_archive(&[0x60], &long_path)).is_err());
-        let oversized_member_array = [0x9a, 0, 1, 0, 1];
+        let oversized_member_array = [0x81, 0x83, 0x9a, 0, 1, 0, 1];
         assert!(
             super::archive_preflight::scan(&raw_archive(&[0x60], &oversized_member_array)).is_err()
         );
