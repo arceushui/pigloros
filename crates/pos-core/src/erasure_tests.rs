@@ -1836,6 +1836,11 @@ fn codec_predicates_and_cbor_argument_widths_are_closed_at_the_public_boundary()
         std::iter::repeat_n(inventory_result(target), ERASURE_MAX_INVENTORY_RESULTS + 1).collect();
     assert!(inventories_exceed_bound(&inventories));
     inventories.backups.clear();
+}
+
+#[test]
+fn inventory_category_duplicates_are_rejected() {
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
     assert!(inventories_have_duplicate_targets(
         &ErasureReceiptInventoriesV1 {
             artifacts: vec![inventory_result(target), inventory_result(target)],
@@ -1868,11 +1873,17 @@ fn codec_predicates_and_cbor_argument_widths_are_closed_at_the_public_boundary()
             backups: vec![inventory_result(target), inventory_result(target)],
         }
     ));
+}
 
+#[test]
+fn owner_sets_are_closed_at_the_public_boundary() {
     let owner = reference(70);
     assert!(invalid_owner_sets(&[owner], &[owner]));
     assert!(!invalid_owner_sets(&[reference(70)], &[reference(71)]));
+}
 
+#[test]
+fn cbor_argument_widths_are_closed_at_the_public_boundary() {
     assert_eq!(cbor_argument(&[0x01, 0x00], 0, 25), Ok((256, 2)));
     assert_eq!(
         cbor_argument(&[0x00, 0x01, 0x00, 0x00], 0, 26),

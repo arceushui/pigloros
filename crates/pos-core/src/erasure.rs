@@ -1954,7 +1954,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     }
 
     fn prepare_finalization(
-        &mut self,
+        &self,
         request: ErasureReferenceV1,
         record: &mut ErasureCoordinatorRecordV1,
         input: ErasureReceiptInputV1,
