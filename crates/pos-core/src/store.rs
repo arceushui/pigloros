@@ -369,17 +369,16 @@ pub trait EventStore: Send {
     ///
     /// # Errors
     ///
-    /// Returns [`CoreError::Storage`] when the adapter does not implement the
-    /// Gateway consent seam, or the same errors as [`Self::append_bounded`].
+    /// The default delegates to [`Self::append_bounded`], preserving existing
+    /// adapter failure behavior; protected adapters override it to bypass the
+    /// generic `consent.*` rejection only after validating the V1 contract.
     fn append_consent_bounded(
         &mut self,
-        _timeline: TimelineId,
-        _drafts: &[EventDraft],
-        _max_owned_events: u64,
+        timeline: TimelineId,
+        drafts: &[EventDraft],
+        max_owned_events: u64,
     ) -> Result<Option<Vec<Event>>, CoreError> {
-        Err(CoreError::Storage(
-            "Gateway consent append is unsupported by this EventStore".to_owned(),
-        ))
+        self.append_bounded(timeline, drafts, max_owned_events)
     }
 
     /// Atomically append one externally identified draft or report its prior admission.
