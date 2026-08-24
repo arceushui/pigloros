@@ -294,12 +294,8 @@ impl ConformanceBundleV1 {
             return Err(BundleContractErrorV1::NonCanonicalOrder);
         }
         let mut total_bytes = 0_u64;
-        let mut declared_paths = BTreeSet::new();
         for (member, descriptor) in self.members.iter().zip(&self.manifest.members) {
             validate_member_path(&member.path)?;
-            if !declared_paths.insert(member.path.as_str()) {
-                return Err(BundleContractErrorV1::NonCanonicalOrder);
-            }
             if descriptor.path != member.path {
                 return Err(BundleContractErrorV1::UndeclaredMember);
             }
@@ -408,10 +404,6 @@ fn validate_expected_results(
     }) {
         return Err(BundleContractErrorV1::MemberMissing);
     }
-    let paths = members
-        .iter()
-        .map(|member| member.path.as_str())
-        .collect::<BTreeSet<_>>();
     let mut seen = BTreeSet::new();
     for expected in &manifest.expected_results {
         if expected.mode != manifest.mode
@@ -420,7 +412,6 @@ fn validate_expected_results(
                 expected.claim_layer,
                 expected.mode,
             ))
-            || !paths.contains(expected.member_path.as_str())
             || expected.digest == [0; 32]
         {
             return Err(BundleContractErrorV1::ExpectedResultMismatch);
@@ -784,6 +775,11 @@ mod tests {
         let second = canonical::encode(&manifest_value(&manifest))
             .map_err(|_| BundleContractErrorV1::EncodingFailed)?;
         assert_eq!(first, second);
+        for lifecycle in [ProfileLifecycleV1::Stable, ProfileLifecycleV1::Retired] {
+            let mut lifecycle_manifest = manifest.clone();
+            lifecycle_manifest.lifecycle = lifecycle;
+            assert!(canonical::encode(&manifest_value(&lifecycle_manifest)).is_ok());
+        }
         Ok(())
     }
 
@@ -823,6 +819,110 @@ mod tests {
         assert_eq!(
             invalid_pair.validate(),
             Err(BundleContractErrorV1::ModeParityMismatch)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn validation_rejects_profile_and_manifest_contract_mismatches(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile = profile();
+        let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
+
+        let mut stable_profile = profile.clone();
+        stable_profile.lifecycle = ProfileLifecycleV1::Stable;
+        assert_eq!(
+            ConformanceBundleV1::materialize(
+                &stable_profile,
+                BundleModeV1::Local,
+                Vec::new(),
+                Vec::new(),
+            ),
+            Err(BundleContractErrorV1::LifecycleInvalid)
+        );
+
+        let mut invalid_magic = bundle.clone();
+        invalid_magic.manifest.magic = "invalid".to_owned();
+        assert_eq!(
+            invalid_magic.validate(),
+            Err(BundleContractErrorV1::LifecycleInvalid)
+        );
+
+        let mut invalid_profile_digest = bundle.clone();
+        invalid_profile_digest.manifest.profile_digest = digest(99);
+        assert_eq!(
+            invalid_profile_digest.validate(),
+            Err(BundleContractErrorV1::ProfileInvalid)
+        );
+
+        let mut unsorted_expected = bundle.clone();
+        unsorted_expected.manifest.expected_results.swap(0, 1);
+        assert_eq!(
+            unsorted_expected.validate(),
+            Err(BundleContractErrorV1::NonCanonicalOrder)
+        );
+
+        let mut missing_member = bundle;
+        missing_member.manifest.expected_results[0].member_path = "expected/missing".to_owned();
+        assert_eq!(
+            missing_member.validate(),
+            Err(BundleContractErrorV1::MemberMissing)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn expected_result_validation_rejects_each_binding_mismatch(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile = profile();
+        let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
+
+        let mut wrong_mode = bundle.manifest.clone();
+        wrong_mode.expected_results[0].mode = BundleModeV1::AirGapped;
+        assert_eq!(
+            validate_expected_results(&profile, &wrong_mode, &bundle.members),
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
+        );
+
+        let mut not_an_expected_result = bundle.members.clone();
+        not_an_expected_result[0].expected_result = false;
+        assert_eq!(
+            validate_expected_results(&profile, &bundle.manifest, &not_an_expected_result),
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
+        );
+
+        let mut unknown_fixture = bundle.manifest.clone();
+        unknown_fixture.expected_results[0].case_id = "case-00-unknown".to_owned();
+        assert_eq!(
+            validate_expected_results(&profile, &unknown_fixture, &bundle.members),
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
+        );
+
+        let mut unsupported_mode = profile.clone();
+        unsupported_mode.fixtures[0].modes = vec![ExecutionModeV1::AirGapped];
+        assert_eq!(
+            validate_expected_results(&unsupported_mode, &bundle.manifest, &bundle.members),
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
+        );
+
+        let mut wrong_fixture_digest = profile.clone();
+        match &mut wrong_fixture_digest.fixtures[0].expected {
+            ExpectedResultV1::CanonicalBytes {
+                digest: fixture_digest,
+                ..
+            } => *fixture_digest = digest(99),
+            ExpectedResultV1::TypedFailure(_) | ExpectedResultV1::AllowedDivergence { .. } => {}
+        }
+        assert_eq!(
+            validate_expected_results(&wrong_fixture_digest, &bundle.manifest, &bundle.members),
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
+        );
+
+        let mut missing_expected = bundle.manifest;
+        missing_expected.expected_results.remove(0);
+        assert_eq!(
+            validate_expected_results(&profile, &missing_expected, &bundle.members),
+            Err(BundleContractErrorV1::MemberMissing)
         );
         Ok(())
     }
