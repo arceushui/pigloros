@@ -1707,6 +1707,94 @@ fn receipt_public_inventory_and_closure_boundaries() {
 }
 
 #[test]
+fn codec_predicates_and_cbor_argument_widths_are_closed_at_the_public_boundary() {
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let inventory = inventory_result(target);
+    let mut inventories = ErasureReceiptInventoriesV1 {
+        artifacts: Vec::new(),
+        keys: Vec::new(),
+        replicas: Vec::new(),
+        backups: Vec::new(),
+    };
+    inventories.artifacts.push(inventory.clone());
+    inventories.keys.push(ErasureInventoryResultV1 {
+        category: ErasureInventoryCategoryV1::Key,
+        ..inventory.clone()
+    });
+    inventories.replicas.push(ErasureInventoryResultV1 {
+        category: ErasureInventoryCategoryV1::Replica,
+        ..inventory.clone()
+    });
+    inventories.backups.push(ErasureInventoryResultV1 {
+        category: ErasureInventoryCategoryV1::Backup,
+        ..inventory
+    });
+    assert!(!inventories_exceed_bound(&inventories));
+
+    for inventory in [
+        &mut inventories.artifacts,
+        &mut inventories.keys,
+        &mut inventories.replicas,
+        &mut inventories.backups,
+    ] {
+        let first = inventory[0].clone();
+        inventory.push(first);
+        assert!(has_duplicate_by_inventory_target(inventory));
+        inventory.clear();
+    }
+    inventories.artifacts = std::iter::repeat(inventory_result(target))
+        .take(ERASURE_MAX_INVENTORY_RESULTS + 1)
+        .collect();
+    assert!(inventories_exceed_bound(&inventories));
+    inventories.artifacts.clear();
+    inventories.keys = std::iter::repeat(inventory_result(target))
+        .take(ERASURE_MAX_INVENTORY_RESULTS + 1)
+        .collect();
+    assert!(inventories_exceed_bound(&inventories));
+    inventories.keys.clear();
+    inventories.replicas = std::iter::repeat(inventory_result(target))
+        .take(ERASURE_MAX_INVENTORY_RESULTS + 1)
+        .collect();
+    assert!(inventories_exceed_bound(&inventories));
+    inventories.replicas.clear();
+    inventories.backups = std::iter::repeat(inventory_result(target))
+        .take(ERASURE_MAX_INVENTORY_RESULTS + 1)
+        .collect();
+    assert!(inventories_exceed_bound(&inventories));
+    inventories.backups.clear();
+    assert!(inventories_have_duplicate_targets(
+        &ErasureReceiptInventoriesV1 {
+            artifacts: vec![inventory_result(target), inventory_result(target)],
+            keys: Vec::new(),
+            replicas: Vec::new(),
+            backups: Vec::new(),
+        }
+    ));
+
+    let owner = reference(70);
+    assert!(invalid_owner_sets(&[owner], &[owner]));
+    assert!(!invalid_owner_sets(&[reference(70)], &[reference(71)]));
+
+    assert_eq!(cbor_argument(&[0x01, 0x00], 0, 25), Ok((256, 2)));
+    assert_eq!(
+        cbor_argument(&[0x00, 0x01, 0x00, 0x00], 0, 26),
+        Ok((65_536, 4))
+    );
+    assert_eq!(
+        cbor_argument(&[0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00], 0, 27),
+        Ok((4_294_967_296, 8))
+    );
+    assert_eq!(
+        cbor_argument(&[0x00, 0x00], 0, 25),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+    assert_eq!(
+        cbor_argument_bytes(&[0x00, 0x00, 0x00, 0x00], 0, 4, 65_536),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+}
+
+#[test]
 fn coordinator_requires_host_admission_for_acknowledgements() -> Result<(), ErasureErrorV1> {
     let ack = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
     let mut port = test_port(true, vec![ack.target]);

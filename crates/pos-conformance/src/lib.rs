@@ -4487,7 +4487,10 @@ pub mod strict_codec {
                 consume(decode_value(&[0, 0]));
                 consume(decode_value(&[0x18, 0]));
                 consume(decode_value(&[0xa0]));
-                consume(encode_value(&Value::Map(Vec::new())));
+                assert_eq!(
+                    encode_value(&Value::Map(Vec::new())),
+                    Err(StrictCborError::ForbiddenValue)
+                );
                 consume(encode_value(&Value::Tag(0, Box::new(Value::Null))));
                 consume(encode_value(&Value::Float(1.0)));
                 consume(validate_value(&Value::Array(vec![Value::Null])));
