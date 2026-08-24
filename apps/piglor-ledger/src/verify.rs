@@ -626,10 +626,10 @@ mod tests {
 
         let report = run(&Source::Store(db), Some(&wrong_pubkey), None).test_ok()?;
         let (_which, reason) = expect_mismatch(report.outcome)?;
-        // Ed25519 signature verification failures include "signature" (case-insensitive).
+        // The persisted registry is authoritative before Ed25519 verification.
         assert!(
-            reason.to_lowercase().contains("signature"),
-            "expected signature error, got: {reason}"
+            reason.contains("persisted registry"),
+            "expected persisted-registry mismatch, got: {reason}"
         );
 
         Ok(())
