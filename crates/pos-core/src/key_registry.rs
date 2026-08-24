@@ -277,6 +277,11 @@ pub enum KeyRegistryErrorV1 {
 /// Registry operations needed by the core and its storage adapters.
 pub trait KeyRegistryPortV1 {
     /// Register one role/epoch record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed [`KeyRegistryErrorV1`] when the epoch, role material,
+    /// or identity conflicts with registry state.
     fn register_key(
         &mut self,
         registration: KeyRegistrationV1,
@@ -289,10 +294,15 @@ pub trait KeyRegistryPortV1 {
     fn tombstone(&self, identity: KeyIdentityV1) -> Option<KeyTombstoneV1>;
 }
 
-/// The irreversible destruction operation kept separate from registration so
-/// adapters can place it behind their own durable transaction boundary.
+/// The irreversible destruction operation is kept separate from registration
+/// so adapters can place it behind their own durable transaction boundary.
 pub trait KeyDestructionPortV1 {
     /// Destroy private material and commit an immutable tombstone.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed [`KeyRegistryErrorV1`] when the identity is missing or
+    /// the expected material fingerprint does not match.
     fn destroy_key(
         &mut self,
         request: KeyDestructionRequestV1,
@@ -319,13 +329,16 @@ impl KeyRegistryStateV1 {
     }
 
     /// Register one role/epoch record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed [`KeyRegistryErrorV1`] when the epoch, role material,
+    /// or identity conflicts with registry state.
     pub fn register_key(
         &mut self,
         registration: KeyRegistrationV1,
     ) -> Result<KeyRegistrationOutcomeV1, KeyRegistryErrorV1> {
-        if let Err(error) = validate_registration(registration) {
-            return Err(error);
-        }
+        validate_registration(registration)?;
         let identity = registration.identity;
         if self.tombstones.contains_key(&identity) {
             return Err(KeyRegistryErrorV1::Destroyed);
@@ -385,6 +398,11 @@ impl KeyRegistryStateV1 {
     }
 
     /// Destroy private material and retain the public record plus tombstone.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed [`KeyRegistryErrorV1`] when the identity is missing or
+    /// the expected material fingerprint does not match.
     pub fn destroy_key(
         &mut self,
         request: KeyDestructionRequestV1,
@@ -453,7 +471,7 @@ impl KeyDestructionPortV1 for KeyRegistryStateV1 {
     }
 }
 
-fn validate_registration(registration: KeyRegistrationV1) -> Result<(), KeyRegistryErrorV1> {
+const fn validate_registration(registration: KeyRegistrationV1) -> Result<(), KeyRegistryErrorV1> {
     if registration.identity.epoch == 0 {
         return Err(KeyRegistryErrorV1::InvalidEpoch);
     }
