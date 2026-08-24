@@ -1342,7 +1342,7 @@ mod coverage_entrypoints {
         let position = ok(Wgs84PositionV1::new(35.0, -120.0, 100.0));
         let mut transform = ok(WorldTransformV1::new(&capability, origin));
         let coordinate = ok(transform.forward(&capability, position));
-        transform.origin_cos_latitude = 0.5;
+        transform.origin_cos_latitude = 0.8192;
         assert!(matches!(
             transform.inverse(&capability, coordinate),
             Err(WorldTransformError::NonConvergent)
