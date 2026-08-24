@@ -963,7 +963,7 @@ mod tests {
             Err(BundleContractErrorV1::ExpectedResultMismatch)
         );
 
-        let mut missing_expected = bundle.manifest;
+        let mut missing_expected = bundle.manifest.clone();
         missing_expected.expected_results.remove(0);
         assert_eq!(
             validate_expected_results(&profile, &missing_expected, &bundle.members),
