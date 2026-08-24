@@ -454,6 +454,20 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn malformed_consent_revocation_does_not_evict_projection_cache() {
+        let mut registry = ProjectionRegistry::new();
+        registry.register("events", Box::new(EntityStateProjection));
+        let subject = EntityId::new();
+        registry.apply_event(&make_event(subject));
+
+        let malformed = make_event_typed(subject, EVENT_TYPE_CONSENT_REVOKED_V1);
+        registry.apply_event(&malformed);
+
+        assert!(registry.state_for(&subject).is_some());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducers_never_observe_reserved_consent_namespace_events() {
         let mut registry = ProjectionRegistry::new();
         registry.register("events", Box::new(EntityStateProjection));
