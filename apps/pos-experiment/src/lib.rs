@@ -5613,7 +5613,8 @@ mod tests {
     }
 
     #[test]
-    fn durable_session_append_empty_boundary_and_subject_recovery_are_public() {
+    fn durable_session_append_empty_boundary_and_subject_recovery_are_public() -> Result<(), String>
+    {
         let database = tempfile::NamedTempFile::new().test_ok();
         let store_config = StoreConfig::Sqlite {
             path: database.path().to_str().test_ok().to_owned(),
@@ -5692,19 +5693,19 @@ mod tests {
         let resumed = resumed_experiment
             .with_consent_authority(authority)
             .resume(timeline_id)
-            .test_ok();
+            .map_err(|error| format!("resume failed: {error:?}"))?;
         let projection =
             resumed.projection_state_for_reducer("missing", subject, &token, current_now_secs());
         let projection_debug = format!("{projection:?}");
-        assert!(
-            matches!(
-                projection,
-                Err(ExperimentError::Runtime(RuntimeError::Consent(
-                    pos_core::ConsentError::Revoked
-                )))
-            ),
-            "projection={projection_debug}"
-        );
+        if !matches!(
+            projection,
+            Err(ExperimentError::Runtime(RuntimeError::Consent(
+                pos_core::ConsentError::Revoked
+            )))
+        ) {
+            return Err(format!("projection={projection_debug}"));
+        }
+        Ok(())
     }
 
     #[test]
