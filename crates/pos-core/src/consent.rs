@@ -3006,6 +3006,98 @@ mod tests {
         );
     }
 
+    #[test]
+    fn default_gate_control_seams_fail_closed_before_append() {
+        struct DefaultGate;
+
+        impl ConsentGate for DefaultGate {
+            fn check_consent(
+                &self,
+                _: TimelineId,
+                _: EntityId,
+                _: &Kind,
+                _: u64,
+                _: u64,
+            ) -> Result<ConsentCapabilityToken, ConsentError> {
+                Err(ConsentError::NoConsent)
+            }
+        }
+
+        let authority = ConsentAuthority::new();
+        let timeline = TimelineId::new();
+        let grant = sample_granted();
+        let token = authority.record_grant_on_timeline(timeline, &grant);
+        let gate = DefaultGate;
+
+        assert_eq!(
+            gate.authorize_event(
+                timeline,
+                grant.subject_id,
+                &Kind::new("world.observation.v1"),
+                0,
+                0,
+            ),
+            Err(ConsentError::NoConsent)
+        );
+        assert_eq!(
+            gate.authorize_projection(timeline, grant.subject_id, 0, 0, &token),
+            Err(ConsentError::NoConsent)
+        );
+        assert_eq!(
+            gate.authorize_projection(timeline, EntityId::new(), 0, 0, &token),
+            Err(ConsentError::NoConsent)
+        );
+
+        let mut appended = false;
+        let mut append = || appended = true;
+        assert_eq!(
+            gate.with_revocation_fence(timeline, None, 1, &mut append),
+            Err(ConsentError::NoConsent)
+        );
+        assert!(!appended);
+        assert_eq!(
+            gate.with_revocation_fence(
+                timeline,
+                Some(grant.subject_id),
+                1,
+                &mut append,
+            ),
+            Err(ConsentError::NoConsent)
+        );
+        assert!(!appended);
+        assert_eq!(
+            gate.with_token_fence(timeline, &token, 0, 0, &mut append),
+            Err(ConsentError::NoConsent)
+        );
+        assert!(!appended);
+    }
+
+    #[test]
+    fn authority_fence_seams_invalidate_matching_capabilities() {
+        let authority = ConsentAuthority::new();
+        let timeline = TimelineId::new();
+        let first = sample_granted();
+        let mut second = sample_granted();
+        second.subject_id = EntityId::new();
+        let first_token = authority.record_grant_on_timeline(timeline, &first);
+        let second_token = authority.record_grant_on_timeline(timeline, &second);
+
+        assert!(authority
+            .fence_subject_at(timeline, first.subject_id, 5)
+            .is_ok());
+        assert!(authority
+            .validate_token(timeline, &first_token, 5, 0)
+            .is_err());
+        assert!(authority
+            .validate_token(timeline, &second_token, 4, 0)
+            .is_ok());
+
+        assert!(authority.fence_timeline_at(timeline, 5).is_ok());
+        assert!(authority
+            .validate_token(timeline, &second_token, 5, 0)
+            .is_err());
+    }
+
     // -- Error display --
 
     #[test]

@@ -283,7 +283,13 @@ mod coverage_paths {
 mod coverage_entrypoints {
     use super::*;
     use crate::driver::{Driver, ObservationView, StepOutput, TimelineHistorySegment};
-    use pos_core::TimelineId;
+    use pos_core::{
+        clock::{Seq, WallTime},
+        crypto::Hash,
+        event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
+        ids::{EntityId, EventId, TimelineId},
+        ConsentAuthority, ConsentGranted,
+    };
 
     struct NoopDriver;
 
@@ -293,7 +299,13 @@ mod coverage_entrypoints {
             _: TimelineId,
             _: ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
-            Ok(StepOutput::empty())
+            Ok(StepOutput {
+                drafts: vec![EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("coverage.public.tick"),
+                    CanonicalBytes::from_static(b"coverage"),
+                )],
+            })
         }
 
         fn name(&self) -> &'static str {
@@ -310,6 +322,81 @@ mod coverage_entrypoints {
             .restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[],)
             .is_ok());
         assert!(registry.tick_cadenced(timeline, 0).is_ok());
+    }
+
+    fn event(event_type: &str, seq: u64) -> Event {
+        Event {
+            id: EventId::new(),
+            entity: EntityId::new(),
+            event_type: Kind::new(event_type),
+            payload: CanonicalBytes::from_static(b"coverage"),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(seq),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        }
+    }
+
+    #[test]
+    fn authorized_projection_public_and_protected_evidence_paths_are_explicit() {
+        let timeline = TimelineId::new();
+        assert!(matches!(
+            PluginRegistry::new().into_authorized_projections(
+                timeline,
+                Seq::ZERO,
+                0,
+                None,
+                None,
+            ),
+            Err(RuntimeError::ConsentOperationUnavailable)
+        ));
+        assert!(PluginRegistry::new()
+            .into_authorized_projections(timeline, Seq::ZERO, 0, None, Some(&[]))
+            .is_ok());
+
+        for protected_type in [
+            "consent.granted.v1",
+            pos_core::GEOGRAPHIC_EVENT_TYPE,
+            "persona.profile.v1",
+            "timeline.fork.created.v1",
+            "retention.policy.v1",
+        ] {
+            assert!(matches!(
+                PluginRegistry::new().into_authorized_projections(
+                    timeline,
+                    Seq::from_u64(1),
+                    0,
+                    None,
+                    Some(&[event(protected_type, 1)]),
+                ),
+                Err(RuntimeError::ConsentOperationUnavailable)
+            ));
+        }
+
+        let subject = EntityId::new();
+        let authority = ConsentAuthority::new();
+        let token = authority.record_grant_on_timeline(
+            timeline,
+            &ConsentGranted {
+                subject_id: subject,
+                grantee_id: EntityId::new(),
+                purpose: "coverage".to_owned(),
+                modalities: 0,
+                min_geo_resolution: 0,
+                fork_permitted: false,
+                export_permitted: false,
+                retention_days: 0,
+                expiry_secs: 0,
+                grant_seq: 1,
+            },
+        );
+        assert!(PluginRegistry::new()
+            .with_consent_authority(authority)
+            .into_authorized_projections(timeline, Seq::ZERO, 0, Some(&token), None)
+            .is_ok());
     }
 }
 
