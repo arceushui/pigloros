@@ -1642,7 +1642,10 @@ impl ErasureCoordinatorRecordV1 {
         lifecycle: ErasureLifecycleV1,
         coordinator: ErasureReferenceV1,
     ) -> Result<(), ErasureErrorV1> {
-        if !lifecycle.is_terminal() {
+        if !matches!(
+            lifecycle,
+            ErasureLifecycleV1::Complete | ErasureLifecycleV1::PartialFailure
+        ) {
             return Ok(());
         }
         let Some(receipt) = self.receipt.as_ref() else {

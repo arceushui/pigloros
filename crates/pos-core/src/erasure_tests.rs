@@ -854,7 +854,7 @@ fn durable_authorized_shape_checks_each_persisted_field() -> Result<(), ErasureE
     with_acknowledgements.acknowledgements = vec![acknowledgement];
     assert_eq!(
         ErasureCoordinatorRecordV1::from_parts(with_acknowledgements, reference(2)),
-        Err(ErasureErrorV1::PolicyConflict)
+        Err(ErasureErrorV1::ScopeInvalid)
     );
 
     let mut with_receipt = authorized.clone();
