@@ -6,7 +6,7 @@
 //! private-material fingerprint from the live record and leaves an immutable
 //! tombstone so that the identity cannot be restored or reused.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -381,12 +381,18 @@ impl KeyRegistryStateV1 {
     /// Returns [`KeyRegistryErrorV1::InvalidState`] when a tombstone and its
     /// retained record disagree about whether private material still exists.
     pub fn validate(&self) -> Result<(), KeyRegistryErrorV1> {
+        let mut reserved_material = HashSet::new();
         for (identity, record) in &self.records {
             if record.identity != *identity {
                 return Err(KeyRegistryErrorV1::InvalidState);
             }
             if !self.highest_epoch.contains_key(&identity.role) {
                 return Err(KeyRegistryErrorV1::InvalidState);
+            }
+            if let Some(private_material_digest) = record.private_material_digest {
+                if !reserved_material.insert(private_material_digest) {
+                    return Err(KeyRegistryErrorV1::InvalidState);
+                }
             }
             if record.private_material_digest.is_none() && !self.tombstones.contains_key(identity) {
                 return Err(KeyRegistryErrorV1::InvalidState);
@@ -430,6 +436,9 @@ impl KeyRegistryStateV1 {
                 return Err(KeyRegistryErrorV1::InvalidState);
             };
             if tombstone.identity != *identity || record.private_material_digest.is_some() {
+                return Err(KeyRegistryErrorV1::InvalidState);
+            }
+            if !reserved_material.insert(tombstone.destroyed_material_digest) {
                 return Err(KeyRegistryErrorV1::InvalidState);
             }
         }
@@ -972,6 +981,25 @@ mod tests {
         rollback.active.insert(second.role, second);
         rollback.highest_epoch.insert(second.role, 1);
         assert_eq!(rollback.validate(), Err(KeyRegistryErrorV1::InvalidState));
+
+        let mut reused_material = KeyRegistryStateV1::new();
+        reused_material.register_key(signing_registration(first, 32))?;
+        reused_material.records.insert(
+            second,
+            KeyRecordV1 {
+                identity: second,
+                private_material_digest: Some(digest(32)),
+                public_verification_key: Some(PublicKey::from_bytes([33; 32])),
+            },
+        );
+        reused_material.active.insert(second.role, second);
+        reused_material
+            .highest_epoch
+            .insert(second.role, second.epoch);
+        assert_eq!(
+            reused_material.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
         Ok(())
     }
 
