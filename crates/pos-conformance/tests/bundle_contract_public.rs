@@ -505,10 +505,16 @@ pub mod fixtures {
     > {
         let (authority_members, provenance_bytes) = candidate_authority_data()?;
         let mut profile = profile(digest(&provenance_bytes));
-        profile.fixtures[0].provenance.publication_review_digest = [99; 32];
+        profile.fixtures[0].provenance.publication_review_digest =
+            profile.fixtures[0].provenance.notices_digest;
         profile.profile_digest = profile.digest();
-        let (members, expected_result) =
+        let (mut members, expected_result) =
             candidate_members(&profile, provenance_bytes, authority_members);
+        members.push(BundleMemberV1::supporting(
+            "support/publication-review",
+            include_bytes!("../../../fixtures/conformance/support/NOTICE").to_vec(),
+            BundleMemberRoleV1::Provenance,
+        ));
         Ok(ConformanceBundleV1::materialize(
             &profile,
             BundleModeV1::Local,
