@@ -489,6 +489,7 @@ impl KeyRegistryStateV1 {
                 {
                     return Err(KeyRegistryErrorV1::InvalidState);
                 }
+                (Some(_), Some(_)) => {}
                 (Some(previous_digest), None) => {
                     let Some(tombstone) = next.tombstones.get(identity) else {
                         return Err(KeyRegistryErrorV1::InvalidState);
