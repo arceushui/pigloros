@@ -2815,6 +2815,7 @@ mod tests {
             Command::AppendConsentRevocation {
                 timeline,
                 revocation,
+                cleanup_scope: AppendDedupScope::from_keyed_hash([0; 32]),
                 permit: authority.append_permit(),
                 maximum: 1,
                 reservation,
