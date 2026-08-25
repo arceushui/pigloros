@@ -33,6 +33,51 @@ const AUTHORITY_FIXTURE_IDS: [&str; 11] = [
     "RPL-001", "PRF-001", "PRF-002", "DIV-001", "INV-001", "INV-002", "INV-003", "RES-001",
     "LIVE-001", "ERA-001", "SEC-001",
 ];
+const NON_INTERFERENCE_ROW_IDS: [&str; 12] = [
+    "NI-TOOL-001",
+    "NI-CACHE-002",
+    "NI-STATE-003",
+    "NI-OBS-004",
+    "NI-TIME-005",
+    "NI-PUBLIC-006",
+    "NI-EVAL-007",
+    "NI-FORK-008",
+    "NI-ARCHIVE-009",
+    "NI-NET-010",
+    "NI-SERVICE-011",
+    "NI-CRASH-012",
+];
+const NON_INTERFERENCE_VARIANTS: [&str; 4] = ["S", "D", "W", "C"];
+const NON_INTERFERENCE_MODES: [&str; 4] = ["L", "A", "R", "F"];
+const NON_INTERFERENCE_AUTH_EQ: &str = "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes";
+const NON_INTERFERENCE_PUBLIC_EQ: [&str; 12] = [
+    "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+    "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+    "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+    "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+    "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+    "byte-identical including category, status order, cursor count, page count, and padded length; operational diagnostics omitted",
+    "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+    "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+    "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+    "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+    "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+    "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+];
+const NON_INTERFERENCE_OP_EQ: [&str; 12] = [
+    "count/category/digest, with provider text absent",
+    "bounded hit-class counters after all key/value/latency fields are removed",
+    "migration phase/category; no canary bytes or canary-derived digest",
+    "schema/category/count/padded length; text, stack, path, raw IDs absent",
+    "after deleting wall timestamps/durations; watchdog cannot create an authoritative Event or change public error category",
+    "operational diagnostics omitted",
+    "evaluator input member names/order/bytes/digests and ordered case outcomes are identical in all four modes",
+    "all listed artifact bytes/digests/order and ADR-060 ReplayClaim are identical",
+    "member names/order/modes/lengths/decompressed bytes are identical; canonical archive mode also requires archive bytes identical",
+    "identical category/count with endpoint/body/timing absent; zero live calls in Air-Gapped, Replay, and Fork",
+    "request digests, call ordinals, projected response bytes, dependency edges, and outputs are identical",
+    "safe category/count/padded length, with strings/stacks/dumps/paths absent",
+];
 
 /// Closed bundle failures.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -1637,51 +1682,6 @@ const fn hex_nibble(value: u8) -> Option<u8> {
 }
 
 fn validate_execution_matrix(matrix: &JsonValue) -> Result<(), BundleContractErrorV1> {
-    const ROW_IDS: [&str; 12] = [
-        "NI-TOOL-001",
-        "NI-CACHE-002",
-        "NI-STATE-003",
-        "NI-OBS-004",
-        "NI-TIME-005",
-        "NI-PUBLIC-006",
-        "NI-EVAL-007",
-        "NI-FORK-008",
-        "NI-ARCHIVE-009",
-        "NI-NET-010",
-        "NI-SERVICE-011",
-        "NI-CRASH-012",
-    ];
-    const VARIANTS: [&str; 4] = ["S", "D", "W", "C"];
-    const MODES: [&str; 4] = ["L", "A", "R", "F"];
-    const AUTH_EQ: &str = "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes";
-    const PUBLIC_EQ: [&str; 12] = [
-        "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
-        "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
-        "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
-        "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
-        "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
-        "byte-identical including category, status order, cursor count, page count, and padded length; operational diagnostics omitted",
-        "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
-        "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
-        "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
-        "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
-        "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
-        "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
-    ];
-    const OP_EQ: [&str; 12] = [
-        "count/category/digest, with provider text absent",
-        "bounded hit-class counters after all key/value/latency fields are removed",
-        "migration phase/category; no canary bytes or canary-derived digest",
-        "schema/category/count/padded length; text, stack, path, raw IDs absent",
-        "after deleting wall timestamps/durations; watchdog cannot create an authoritative Event or change public error category",
-        "operational diagnostics omitted",
-        "evaluator input member names/order/bytes/digests and ordered case outcomes are identical in all four modes",
-        "all listed artifact bytes/digests/order and ADR-060 ReplayClaim are identical",
-        "member names/order/modes/lengths/decompressed bytes are identical; canonical archive mode also requires archive bytes identical",
-        "identical category/count with endpoint/body/timing absent; zero live calls in Air-Gapped, Replay, and Fork",
-        "request digests, call ordinals, projected response bytes, dependency edges, and outputs are identical",
-        "safe category/count/padded length, with strings/stacks/dumps/paths absent",
-    ];
     let rows = matrix
         .get("rows")
         .and_then(JsonValue::as_array)
@@ -1698,9 +1698,9 @@ fn validate_execution_matrix(matrix: &JsonValue) -> Result<(), BundleContractErr
         || rows.len() != 12
         || cases.len() != 192
         || rows.iter().enumerate().any(|(index, row)| {
-            json_text(row, "fixture_id") != Ok(ROW_IDS[index])
-                || json_string_array(row, "variants") != Ok(VARIANTS.to_vec())
-                || json_string_array(row, "modes") != Ok(MODES.to_vec())
+            json_text(row, "fixture_id") != Ok(NON_INTERFERENCE_ROW_IDS[index])
+                || json_string_array(row, "variants") != Ok(NON_INTERFERENCE_VARIANTS.to_vec())
+                || json_string_array(row, "modes") != Ok(NON_INTERFERENCE_MODES.to_vec())
         })
         || cases.iter().enumerate().any(|(index, case)| {
             let row_index = index / 16;
@@ -1708,11 +1708,13 @@ fn validate_execution_matrix(matrix: &JsonValue) -> Result<(), BundleContractErr
             let mode_index = index % 4;
             let expected_case_id = format!(
                 "{}-{}-{}",
-                ROW_IDS[row_index], VARIANTS[variant_index], MODES[mode_index]
+                NON_INTERFERENCE_ROW_IDS[row_index],
+                NON_INTERFERENCE_VARIANTS[variant_index],
+                NON_INTERFERENCE_MODES[mode_index]
             );
-            json_text(case, "fixture_id") != Ok(ROW_IDS[row_index])
-                || json_text(case, "variant") != Ok(VARIANTS[variant_index])
-                || json_text(case, "mode") != Ok(MODES[mode_index])
+            json_text(case, "fixture_id") != Ok(NON_INTERFERENCE_ROW_IDS[row_index])
+                || json_text(case, "variant") != Ok(NON_INTERFERENCE_VARIANTS[variant_index])
+                || json_text(case, "mode") != Ok(NON_INTERFERENCE_MODES[mode_index])
                 || json_text(case, "case_id") != Ok(expected_case_id.as_str())
         })
         || rows
@@ -1731,12 +1733,12 @@ fn validate_execution_matrix(matrix: &JsonValue) -> Result<(), BundleContractErr
             .get("equality_predicates")
             .and_then(JsonValue::as_array)
             .ok_or(BundleContractErrorV1::MemberDigestMismatch)?;
-        if predicates.len() != ROW_IDS.len()
+        if predicates.len() != NON_INTERFERENCE_ROW_IDS.len()
             || predicates.iter().enumerate().any(|(index, predicate)| {
-                json_text(predicate, "fixture_id") != Ok(ROW_IDS[index])
-                    || json_text(predicate, "AuthEq") != Ok(AUTH_EQ)
-                    || json_text(predicate, "PublicEq") != Ok(PUBLIC_EQ[index])
-                    || json_text(predicate, "OpEq") != Ok(OP_EQ[index])
+                json_text(predicate, "fixture_id") != Ok(NON_INTERFERENCE_ROW_IDS[index])
+                    || json_text(predicate, "AuthEq") != Ok(NON_INTERFERENCE_AUTH_EQ)
+                    || json_text(predicate, "PublicEq") != Ok(NON_INTERFERENCE_PUBLIC_EQ[index])
+                    || json_text(predicate, "OpEq") != Ok(NON_INTERFERENCE_OP_EQ[index])
             })
         {
             Err(BundleContractErrorV1::MemberDigestMismatch)
