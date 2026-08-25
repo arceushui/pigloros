@@ -423,11 +423,8 @@ impl KeyRegistryStateV1 {
         }
         for (role, highest_epoch) in &self.highest_epoch {
             let identity = KeyIdentityV1::new(*role, *highest_epoch);
-            if self.tombstones.contains_key(&identity) {
-                if self.active.contains_key(role) {
-                    return Err(KeyRegistryErrorV1::InvalidState);
-                }
-            } else if self.active.get(role) != Some(&identity) {
+            if !self.tombstones.contains_key(&identity) && self.active.get(role) != Some(&identity)
+            {
                 return Err(KeyRegistryErrorV1::InvalidState);
             }
         }
@@ -441,13 +438,6 @@ impl KeyRegistryStateV1 {
             if !reserved_material.insert(tombstone.destroyed_material_digest) {
                 return Err(KeyRegistryErrorV1::InvalidState);
             }
-        }
-        if self
-            .active
-            .values()
-            .any(|identity| self.tombstones.contains_key(identity))
-        {
-            return Err(KeyRegistryErrorV1::InvalidState);
         }
         Ok(())
     }
@@ -557,9 +547,6 @@ impl KeyRegistryStateV1 {
             .copied()
             .ok_or(KeyRegistryErrorV1::NotFound)?;
         if self.tombstones.contains_key(&identity) {
-            return Err(KeyRegistryErrorV1::Destroyed);
-        }
-        if record.private_material_digest.is_none() {
             return Err(KeyRegistryErrorV1::Destroyed);
         }
         let Some(active) = self.active_key(identity.role) else {
@@ -982,6 +969,23 @@ mod tests {
         }
     }
 
+    fn replace_first_integer(value: &mut ciborium::value::Value, from: u64, to: u64) -> bool {
+        match value {
+            ciborium::value::Value::Integer(integer) if *integer == from.into() => {
+                *integer = to.into();
+                true
+            }
+            ciborium::value::Value::Array(values) => values
+                .iter_mut()
+                .any(|value| replace_first_integer(value, from, to)),
+            ciborium::value::Value::Map(entries) => entries.iter_mut().any(|(key, value)| {
+                replace_first_integer(key, from, to) || replace_first_integer(value, from, to)
+            }),
+            ciborium::value::Value::Tag(_, value) => replace_first_integer(value, from, to),
+            _ => false,
+        }
+    }
+
     #[test]
     fn malformed_state_without_tombstone_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
         let mut state = KeyRegistryStateV1::new();
@@ -991,6 +995,39 @@ mod tests {
                 Ok(())
             } else {
                 Err("private-material digest was not encoded".into())
+            }
+        })?;
+        assert_eq!(state.validate(), Err(KeyRegistryErrorV1::InvalidState));
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_state_without_high_water_entry_is_rejected(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = KeyRegistryStateV1::new();
+        state.register_key(signing_registration(ATTRIBUTION, 23))?;
+        let state = edit_state(&state, |value| {
+            let highest_epoch = top_level_field(value, "highest_epoch")?;
+            let ciborium::value::Value::Map(entries) = highest_epoch else {
+                return Err("highest_epoch is not a CBOR map".into());
+            };
+            entries.clear();
+            Ok(())
+        })?;
+        assert_eq!(state.validate(), Err(KeyRegistryErrorV1::InvalidState));
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_state_with_mismatched_record_identity_is_rejected(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = KeyRegistryStateV1::new();
+        state.register_key(signing_registration(ATTRIBUTION, 24))?;
+        let state = edit_state(&state, |value| {
+            if replace_first_integer(value, 1, 2) {
+                Ok(())
+            } else {
+                Err("record identity epoch was not encoded".into())
             }
         })?;
         assert_eq!(state.validate(), Err(KeyRegistryErrorV1::InvalidState));
@@ -1066,6 +1103,16 @@ mod tests {
             Ok(())
         })?;
         assert_eq!(rollback.validate(), Err(KeyRegistryErrorV1::InvalidState));
+
+        let no_active = edit_state(&both, |value| {
+            let active = top_level_field(value, "active")?;
+            let ciborium::value::Value::Map(entries) = active else {
+                return Err("active is not a CBOR map".into());
+            };
+            entries.clear();
+            Ok(())
+        })?;
+        assert_eq!(no_active.validate(), Err(KeyRegistryErrorV1::InvalidState));
 
         let reused = edit_state(&both, |value| {
             if replace_first_bytes(
