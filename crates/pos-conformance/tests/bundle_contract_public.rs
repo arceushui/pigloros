@@ -738,6 +738,14 @@ fn archive_paths(root: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>
     Ok(archives)
 }
 
+struct TemporaryOutput(PathBuf);
+
+impl Drop for TemporaryOutput {
+    fn drop(&mut self) {
+        drop(std::fs::remove_dir_all(&self.0));
+    }
+}
+
 #[test]
 fn public_materializer_and_verifier_binaries_round_trip() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -748,31 +756,25 @@ fn public_materializer_and_verifier_binaries_round_trip() -> Result<(), Box<dyn 
             .duration_since(std::time::UNIX_EPOCH)?
             .as_nanos()
     ));
-    struct TemporaryOutput(PathBuf);
-    impl Drop for TemporaryOutput {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
     let _temporary_output = TemporaryOutput(output_root.clone());
 
-    let materializer = std::env::var_os("CARGO_BIN_EXE_materialize-conformance-bundles")
+    let materializer_binary = std::env::var_os("CARGO_BIN_EXE_materialize-conformance-bundles")
         .ok_or("materializer binary path is unavailable")?;
-    let materialized = Command::new(materializer)
+    let materializer_status = Command::new(materializer_binary)
         .env(
             "PIGLOROS_CONFORMANCE_SIGNING_KEY",
             "0707070707070707070707070707070707070707070707070707070707070707",
         )
         .arg(&output_root)
         .status()?;
-    assert!(materialized.success());
+    assert!(materializer_status.success());
 
     let archives = archive_paths(&output_root)?;
     assert_eq!(archives.len(), 7);
-    let verifier = std::env::var_os("CARGO_BIN_EXE_verify-conformance-bundle")
+    let verifier_binary = std::env::var_os("CARGO_BIN_EXE_verify-conformance-bundle")
         .ok_or("verifier binary path is unavailable")?;
-    let verified = Command::new(verifier).args(&archives).status()?;
-    assert!(verified.success());
+    let verifier_status = Command::new(verifier_binary).args(&archives).status()?;
+    assert!(verifier_status.success());
     Ok(())
 }
 
