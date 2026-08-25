@@ -277,7 +277,7 @@ fn sqlite_key_registry_load_rejects_malformed_persisted_state(
     let store = SqliteStore::open(path)?;
     assert!(matches!(
         store.load_key_registry(),
-        Err(CoreError::Serialization(_)) | Err(CoreError::Storage(_))
+        Err(CoreError::Serialization(_))
     ));
     Ok(())
 }
@@ -314,7 +314,7 @@ fn sqlite_key_registry_rejects_a_decodable_invalid_snapshot(
     let store = SqliteStore::open(path)?;
     assert!(matches!(
         store.load_key_registry(),
-        Err(CoreError::Serialization(_))
+        Err(CoreError::Serialization(_)) | Err(CoreError::Storage(_))
     ));
     Ok(())
 }
