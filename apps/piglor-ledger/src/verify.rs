@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use pos_core::{event::Event, store::SeqRange, KeyRegistryStateV1, KeyRoleV1};
+use pos_core::{event::Event, store::SeqRange, KeyRegistryStateV1};
 use pos_crypto::{
     key_roles::verify_for_role,
     signing::{verify, verifying_key_from_public_key},
@@ -260,12 +260,6 @@ fn verify_store_event(
         }
         return Ok(None);
     };
-    if identity.role != KeyRoleV1::TimelineIntegritySigning {
-        return Ok(Some((
-            which,
-            "event signature role is not TimelineIntegritySigning".to_owned(),
-        )));
-    }
     let registry_public_key = registry
         .and_then(|value| value.key_record(identity))
         .and_then(|record| record.public_verification_key);
