@@ -150,13 +150,6 @@ mod lifecycle_coverage_tests {
 }
 
 enum Command {
-    #[allow(dead_code)]
-    AdmitOwnTracksIngress {
-        basic_handle: [u8; 32],
-        basic_secret: [u8; 32],
-        payload: pos_core::CanonicalBytes,
-        reply: oneshot::Sender<Result<OwnTracksIngressOutcome, StoreExecutorError>>,
-    },
     PrepareOwnTracksIngress {
         basic_handle: [u8; 32],
         basic_secret: [u8; 32],
@@ -253,8 +246,7 @@ impl Command {
             | Self::ReadOne { .. }
             | Self::GetTimeline { .. }
             | Self::LogicalHead { .. } => CommandClass::Read,
-            Self::AdmitOwnTracksIngress { .. }
-            | Self::PrepareOwnTracksIngress { .. }
+            Self::PrepareOwnTracksIngress { .. }
             | Self::AdmitGeoLocation { .. }
             | Self::Purge { .. }
             | Self::RemoveAppendIdentitiesBounded { .. }
@@ -1035,20 +1027,6 @@ impl StoreExecutor {
     ) -> Result<GeoLocationAdmissionOutcome, StoreExecutorError> {
         submit!(self, |reply| Command::AdmitGeoLocation { request, reply })
     }
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) async fn admit_owntracks_ingress(
-        &self,
-        basic_handle: [u8; 32],
-        basic_secret: [u8; 32],
-        payload: pos_core::CanonicalBytes,
-    ) -> Result<OwnTracksIngressOutcome, StoreExecutorError> {
-        submit!(self, |reply| Command::AdmitOwnTracksIngress {
-            basic_handle,
-            basic_secret,
-            payload,
-            reply
-        })
-    }
     pub(crate) async fn prepare_owntracks_ingress(
         &self,
         basic_handle: [u8; 32],
@@ -1452,9 +1430,6 @@ fn select_pending_index(pending: &[CommandEnvelope], reads_since_write: u8) -> u
 
 fn expire_command(command: Command) {
     match command {
-        Command::AdmitOwnTracksIngress { reply, .. } => {
-            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
-        }
         Command::PrepareOwnTracksIngress { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
@@ -1628,12 +1603,6 @@ enum CommandExecution {
 
 fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
     match command {
-        Command::AdmitOwnTracksIngress {
-            basic_handle,
-            basic_secret,
-            payload,
-            reply,
-        } => execute_owntracks_command(state, basic_handle, basic_secret, payload, reply),
         Command::PrepareOwnTracksIngress {
             basic_handle,
             basic_secret,
@@ -1728,19 +1697,6 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
         }
     }
     CommandExecution::Completed
-}
-
-fn execute_owntracks_command(
-    state: &mut ExecutorState,
-    basic_handle: [u8; 32],
-    basic_secret: [u8; 32],
-    payload: pos_core::CanonicalBytes,
-    reply: oneshot::Sender<Result<OwnTracksIngressOutcome, StoreExecutorError>>,
-) {
-    send_store_result(
-        reply,
-        execute_owntracks_ingress(state, basic_handle, basic_secret, payload),
-    );
 }
 
 fn execute_geo_location_command(
@@ -2630,7 +2586,7 @@ mod tests {
     fn expired_admission_commands_reply() {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(
-            Command::AdmitOwnTracksIngress {
+            Command::PrepareOwnTracksIngress {
                 basic_handle: [1; 32],
                 basic_secret: [2; 32],
                 payload: CanonicalBytes::from_static(b"payload"),
