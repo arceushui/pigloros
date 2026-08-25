@@ -1501,68 +1501,73 @@ impl SqliteStore {
         max_owned_events: Option<u64>,
     ) -> Result<Option<AppendOrDuplicateOutcome>, CoreError> {
         let logical_prefix = self.logical_prefix(timeline)?;
-        let head_seq = match self.get_head_seq(timeline) {
-            Ok(head_seq) => head_seq.as_u64(),
-            Err(error) => return Err(error),
-        };
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(Self::into_storage_error)?;
-        let existing = tx.query_row(
-            "SELECT event_id, expires_at FROM append_identities WHERE dedup_key = ?1",
-            params![identity.dedup_key.as_bytes().as_slice()],
-            |row| {
-                row.get::<_, String>(0)
-                    .and_then(|event_id| row.get::<_, i64>(1).map(|expires| (event_id, expires)))
-            },
-        );
-        match existing {
-            Ok((event_id, expires_at))
-                if u64::try_from(expires_at).unwrap_or(0) > admitted_at.as_micros() =>
-            {
-                return Self::retained_event_matches_draft(&tx, &event_id, timeline, draft)
-                    .and_then(|matches| {
-                        if matches {
-                            parse_event_id(&event_id).map(|id| {
-                                Some(AppendOrDuplicateOutcome::Duplicate { event_id: id })
-                            })
-                        } else {
-                            Ok(Some(AppendOrDuplicateOutcome::Conflict))
-                        }
-                    });
-            }
-            Err(rusqlite::Error::QueryReturnedNoRows) => {}
-            Err(error) => return Err(CoreError::Storage(error.to_string())),
-            Ok(_) => {
-                tx.execute(
-                    "DELETE FROM append_identities WHERE dedup_key = ?1",
+        self.get_head_seq(timeline)
+            .map(|head_seq| head_seq.as_u64())
+            .and_then(|head_seq| {
+                let tx = self
+                    .conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(Self::into_storage_error)?;
+                let existing = tx.query_row(
+                    "SELECT event_id, expires_at FROM append_identities WHERE dedup_key = ?1",
                     params![identity.dedup_key.as_bytes().as_slice()],
+                    |row| {
+                        row.get::<_, String>(0).and_then(|event_id| {
+                            row.get::<_, i64>(1).map(|expires| (event_id, expires))
+                        })
+                    },
+                );
+                match existing {
+                    Ok((event_id, expires_at))
+                        if u64::try_from(expires_at).unwrap_or(0) > admitted_at.as_micros() =>
+                    {
+                        return Self::retained_event_matches_draft(&tx, &event_id, timeline, draft)
+                            .and_then(|matches| {
+                                if matches {
+                                    parse_event_id(&event_id).map(|id| {
+                                        Some(AppendOrDuplicateOutcome::Duplicate { event_id: id })
+                                    })
+                                } else {
+                                    Ok(Some(AppendOrDuplicateOutcome::Conflict))
+                                }
+                            });
+                    }
+                    Err(rusqlite::Error::QueryReturnedNoRows) => {}
+                    Err(error) => return Err(CoreError::Storage(error.to_string())),
+                    Ok(_) => {
+                        tx.execute(
+                            "DELETE FROM append_identities WHERE dedup_key = ?1",
+                            params![identity.dedup_key.as_bytes().as_slice()],
+                        )
+                        .map_err(|error| CoreError::Storage(error.to_string()))?;
+                    }
+                }
+                if max_owned_events.is_some_and(|maximum| head_seq >= maximum) {
+                    return Ok(None);
+                }
+                let expires_at = checked_append_identity_expires_at(admitted_at)?;
+                let event = Self::append_one_in_transaction(
+                    &tx,
+                    self.hasher.as_ref(),
+                    timeline,
+                    draft.clone(),
+                )?;
+                tx.execute(
+                    "INSERT INTO append_identities (dedup_key, scope_key, event_id, expires_at)
+             VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        identity.dedup_key.as_bytes().as_slice(),
+                        identity.scope.as_bytes().as_slice(),
+                        event.id.to_string(),
+                        i64::try_from(expires_at.as_micros()).unwrap_or(i64::MAX),
+                    ],
                 )
                 .map_err(|error| CoreError::Storage(error.to_string()))?;
-            }
-        }
-        if max_owned_events.is_some_and(|maximum| head_seq >= maximum) {
-            return Ok(None);
-        }
-        let expires_at = checked_append_identity_expires_at(admitted_at)?;
-        let event =
-            Self::append_one_in_transaction(&tx, self.hasher.as_ref(), timeline, draft.clone())?;
-        tx.execute(
-            "INSERT INTO append_identities (dedup_key, scope_key, event_id, expires_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                identity.dedup_key.as_bytes().as_slice(),
-                identity.scope.as_bytes().as_slice(),
-                event.id.to_string(),
-                i64::try_from(expires_at.as_micros()).unwrap_or(i64::MAX),
-            ],
-        )
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
-        tx.commit()
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        Self::logical_event(logical_prefix, event)
-            .map(|event| Some(AppendOrDuplicateOutcome::Appended(Box::new(event))))
+                tx.commit()
+                    .map_err(|error| CoreError::Storage(error.to_string()))?;
+                Self::logical_event(logical_prefix, event)
+                    .map(|event| Some(AppendOrDuplicateOutcome::Appended(Box::new(event))))
+            })
     }
 }
 
