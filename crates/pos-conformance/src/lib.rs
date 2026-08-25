@@ -2979,6 +2979,7 @@ pub mod strict_codec {
     }
 
     /// Encode the canonical consent-audit record for strict CBOR composition.
+    #[must_use]
     pub fn encode_consent(audit: &ConsentAuditV1) -> Value {
         Value::Array(vec![
             text(&audit.subject),
