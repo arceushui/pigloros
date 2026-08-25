@@ -1401,7 +1401,11 @@ fn validate_authority_members(
     let provenance = parse_authority_json(&provenance.bytes)?;
     let inventory_json = parse_authority_json(&inventory.bytes)?;
     let matrix_json = parse_authority_json(&matrix.bytes)?;
-    validate_provenance_authority_binding(&provenance)?;
+    let inventory_lifecycle = json_text(&inventory_json, "lifecycle")?;
+    if profile.lifecycle == ProfileLifecycleV1::Candidate && inventory_lifecycle != "Candidate" {
+        return Err(BundleContractErrorV1::CandidateEvidenceMissing);
+    }
+    validate_provenance_authority_binding(&provenance, inventory_lifecycle)?;
     validate_authority_inventory(&inventory_json, members)?;
     validate_execution_matrix(&matrix_json)
 }
@@ -1452,12 +1456,14 @@ fn json_object<'a>(
 
 fn validate_provenance_authority_binding(
     provenance: &JsonValue,
+    inventory_lifecycle: &str,
 ) -> Result<(), BundleContractErrorV1> {
     let inventory = json_object(provenance, "authority_inventory")?;
     let matrix = json_object(provenance, "adr_059_execution_matrix")?;
     if json_text(inventory, "path")? != "expected-authority/inventory.json"
         || json_text(inventory, "digest_algorithm")? != "SHA-256"
-        || json_text(inventory, "status")? != "Candidate"
+        || json_text(inventory, "status")? != inventory_lifecycle
+        || !matches!(inventory_lifecycle, "Draft" | "Candidate")
         || json_text(matrix, "path")? != "matrix/adr-059-complete.json"
         || json_text(matrix, "digest_algorithm")? != "BLAKE3-256"
         || json_text(matrix, "status")? != "Draft"
@@ -1475,7 +1481,7 @@ fn validate_authority_inventory(
 ) -> Result<(), BundleContractErrorV1> {
     if json_text(inventory, "magic")? != "W8H1"
         || json_u64(inventory, "version")? != 1
-        || json_text(inventory, "lifecycle")? != "Candidate"
+        || !matches!(json_text(inventory, "lifecycle")?, "Draft" | "Candidate")
         || json_text(inventory, "digest_algorithm")? != "BLAKE3-256"
     {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
@@ -1486,6 +1492,29 @@ fn validate_authority_inventory(
         .ok_or(BundleContractErrorV1::MemberDigestMismatch)?;
     if entries.len() != 11 {
         return Err(BundleContractErrorV1::MemberMissing);
+    }
+    if json_text(inventory, "lifecycle")? == "Draft" {
+        let mut fixture_ids = BTreeSet::new();
+        for entry in entries {
+            if !fixture_ids.insert(json_text(entry, "fixture_id")?)
+                || json_text(entry, "materialization_status")? != "pending"
+                || !entry
+                    .get("fixture_bytes_path")
+                    .is_some_and(JsonValue::is_null)
+                || !entry
+                    .get("fixture_bytes_digest")
+                    .is_some_and(JsonValue::is_null)
+                || !entry
+                    .get("expected_result_path")
+                    .is_some_and(JsonValue::is_null)
+                || !entry
+                    .get("expected_result_digest")
+                    .is_some_and(JsonValue::is_null)
+            {
+                return Err(BundleContractErrorV1::MemberDigestMismatch);
+            }
+        }
+        return Ok(());
     }
     if members
         .iter()
@@ -1770,6 +1799,9 @@ fn validate_candidate_publication(
     profile: &ConformanceProfileV1,
     members: &[BundleMemberV1],
 ) -> Result<(), BundleContractErrorV1> {
+    if profile.lifecycle != ProfileLifecycleV1::Candidate {
+        return Err(BundleContractErrorV1::CandidateEvidenceMissing);
+    }
     if profile.fixtures.iter().any(|fixture| {
         fixture.redaction_state == crate::RedactionStateV1::EvidenceMissing
             || fixture.replay_claim == crate::ReplayClaimV1::UnverifiableArtifactsMissing
@@ -2050,7 +2082,7 @@ mod tests {
         let mut profile = ConformanceProfileV1 {
             profile_id: "pigloros.w8.conformance-bundle".to_owned(),
             semantic_version: "1.0.0".to_owned(),
-            lifecycle: ProfileLifecycleV1::Candidate,
+            lifecycle: ProfileLifecycleV1::Draft,
             normative_spec_digest: digest(12),
             execution_profile_digests: vec![digest(1)],
             public_schema_digests: vec![digest(2)],
@@ -2242,197 +2274,46 @@ mod tests {
                 BundleMemberRoleV1::ExecutionMatrix,
             ),
         ]);
-        members.extend(authority_artifact_members());
+        let authority_inventory = parse_authority_json(include_bytes!(
+            "../../../fixtures/conformance/expected-authority/inventory.json"
+        ))?;
+        if json_text(&authority_inventory, "lifecycle")? == "Candidate" {
+            members.extend(authority_artifact_members_from_inventory()?);
+        }
         Ok((members, expected_results))
     }
 
-    fn authority_artifact_members() -> Vec<BundleMemberV1> {
-        authority_fixture_members()
-            .into_iter()
-            .chain(authority_result_members())
-            .collect()
-    }
-
-    fn authority_fixture_members() -> Vec<BundleMemberV1> {
-        [
-            (
-                "DIV-001",
-                include_bytes!(
-                    "../../../fixtures/conformance/expected-authority/fixtures/DIV-001.json"
-                )
-                .as_slice(),
-            ),
-            (
-                "ERA-001",
-                include_bytes!(
-                    "../../../fixtures/conformance/expected-authority/fixtures/ERA-001.json"
-                )
-                .as_slice(),
-            ),
-            (
-                "INV-001",
-                include_bytes!(
-                    "../../../fixtures/conformance/expected-authority/fixtures/INV-001.json"
-                )
-                .as_slice(),
-            ),
-            (
-                "INV-002",
-                include_bytes!(
-                    "../../../fixtures/conformance/expected-authority/fixtures/INV-002.json"
-                )
-                .as_slice(),
-            ),
-            (
-                "INV-003",
-                include_bytes!(
-                    "../../../fixtures/conformance/expected-authority/fixtures/INV-003.json"
-                )
-                .as_slice(),
-            ),
-            (
-                "LIVE-001",
-                include_bytes!(
-                    "../../../fixtures/conformance/expected-authority/fixtures/LIVE-001.json"
-                )
-                .as_slice(),
-            ),
-            (
-                "PRF-001",
-                include_bytes!(
-                    "../../../fixtures/conformance/expected-authority/fixtures/PRF-001.json"
-                )
-                .as_slice(),
-            ),
-            (
-                "PRF-002",
-                include_bytes!(
-                    "../../../fixtures/conformance/expected-authority/fixtures/PRF-002.json"
-                )
-                .as_slice(),
-            ),
-            (
-                "RES-001",
-                include_bytes!(
-                    "../../../fixtures/conformance/expected-authority/fixtures/RES-001.json"
-                )
-                .as_slice(),
-            ),
-            (
-                "RPL-001",
-                include_bytes!(
-                    "../../../fixtures/conformance/expected-authority/fixtures/RPL-001.json"
-                )
-                .as_slice(),
-            ),
-            (
-                "SEC-001",
-                include_bytes!(
-                    "../../../fixtures/conformance/expected-authority/fixtures/SEC-001.json"
-                )
-                .as_slice(),
-            ),
-        ]
-        .into_iter()
-        .map(|(fixture_id, bytes)| {
-            BundleMemberV1::authority(
-                format!("authority/expected-authority/fixtures/{fixture_id}.json"),
-                bytes.to_vec(),
+    fn authority_artifact_members_from_inventory(
+    ) -> Result<Vec<BundleMemberV1>, Box<dyn std::error::Error>> {
+        let inventory_bytes =
+            include_bytes!("../../../fixtures/conformance/expected-authority/inventory.json");
+        let inventory = parse_authority_json(inventory_bytes)?;
+        let entries = inventory
+            .get("entries")
+            .and_then(JsonValue::as_array)
+            .ok_or(BundleContractErrorV1::MemberDigestMismatch)?;
+        let fixture_root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/conformance");
+        let mut members = Vec::with_capacity(entries.len() * 2);
+        for entry in entries {
+            let fixture_path = json_text(entry, "fixture_bytes_path")?;
+            let result_path = json_text(entry, "expected_result_path")?;
+            validate_member_path(fixture_path)?;
+            validate_member_path(result_path)?;
+            let fixture_bytes = std::fs::read(fixture_root.join(fixture_path))?;
+            let result_bytes = std::fs::read(fixture_root.join(result_path))?;
+            members.push(BundleMemberV1::authority(
+                format!("authority/{fixture_path}"),
+                fixture_bytes,
                 BundleMemberRoleV1::AuthorityFixture,
-            )
-        })
-        .collect()
-    }
-
-    fn authority_result_members() -> Vec<BundleMemberV1> {
-        [
-            (
-                "DIV-001",
-                include_bytes!(
-                    "../../../fixtures/conformance/expected-authority/results/DIV-001.json"
-                )
-                .as_slice(),
-            ),
-            (
-                "ERA-001",
-                include_bytes!(
-                    "../../../fixtures/conformance/expected-authority/results/ERA-001.json"
-                )
-                .as_slice(),
-            ),
-            (
-                "INV-001",
-                include_bytes!(
-                    "../../../fixtures/conformance/expected-authority/results/INV-001.json"
-                )
-                .as_slice(),
-            ),
-            (
-                "INV-002",
-                include_bytes!(
-                    "../../../fixtures/conformance/expected-authority/results/INV-002.json"
-                )
-                .as_slice(),
-            ),
-            (
-                "INV-003",
-                include_bytes!(
-                    "../../../fixtures/conformance/expected-authority/results/INV-003.json"
-                )
-                .as_slice(),
-            ),
-            (
-                "LIVE-001",
-                include_bytes!(
-                    "../../../fixtures/conformance/expected-authority/results/LIVE-001.json"
-                )
-                .as_slice(),
-            ),
-            (
-                "PRF-001",
-                include_bytes!(
-                    "../../../fixtures/conformance/expected-authority/results/PRF-001.json"
-                )
-                .as_slice(),
-            ),
-            (
-                "PRF-002",
-                include_bytes!(
-                    "../../../fixtures/conformance/expected-authority/results/PRF-002.json"
-                )
-                .as_slice(),
-            ),
-            (
-                "RES-001",
-                include_bytes!(
-                    "../../../fixtures/conformance/expected-authority/results/RES-001.json"
-                )
-                .as_slice(),
-            ),
-            (
-                "RPL-001",
-                include_bytes!(
-                    "../../../fixtures/conformance/expected-authority/results/RPL-001.json"
-                )
-                .as_slice(),
-            ),
-            (
-                "SEC-001",
-                include_bytes!(
-                    "../../../fixtures/conformance/expected-authority/results/SEC-001.json"
-                )
-                .as_slice(),
-            ),
-        ]
-        .into_iter()
-        .map(|(fixture_id, bytes)| {
-            BundleMemberV1::authority(
-                format!("authority/expected-authority/results/{fixture_id}.json"),
-                bytes.to_vec(),
+            ));
+            members.push(BundleMemberV1::authority(
+                format!("authority/{result_path}"),
+                result_bytes,
                 BundleMemberRoleV1::AuthorityExpectedResult,
-            )
-        })
-        .collect()
+            ));
+        }
+        Ok(members)
     }
 
     fn signed_bundle(
@@ -2505,14 +2386,22 @@ mod tests {
             (ClaimLayerV1::MetricConformance, "metric-conformance"),
             (ClaimLayerV1::EmpiricalEvaluation, "empirical-evaluation"),
         ];
-        for (index, (claim_layer, layer_name)) in layers.into_iter().enumerate() {
-            let template = profile_for_claim_layer(index, claim_layer);
-            for (lifecycle, lifecycle_name) in [
+        let authority_inventory = parse_authority_json(include_bytes!(
+            "../../../fixtures/conformance/expected-authority/inventory.json"
+        ))?;
+        let lifecycles = match json_text(&authority_inventory, "lifecycle")? {
+            "Draft" => vec![(ProfileLifecycleV1::Draft, "draft")],
+            "Candidate" => vec![
                 (ProfileLifecycleV1::Draft, "draft"),
                 (ProfileLifecycleV1::Candidate, "candidate"),
-            ] {
+            ],
+            _ => return Err("unsupported authority inventory lifecycle".into()),
+        };
+        for (index, (claim_layer, layer_name)) in layers.into_iter().enumerate() {
+            let template = profile_for_claim_layer(index, claim_layer);
+            for (lifecycle, lifecycle_name) in &lifecycles {
                 let mut profile = template.clone();
-                profile.lifecycle = lifecycle;
+                profile.lifecycle = *lifecycle;
                 profile.profile_digest = profile.digest();
                 let profile_bytes = profile.to_canonical_cbor()?;
                 let profile_name = format!(
@@ -4041,7 +3930,7 @@ mod tests {
         ))?;
         provenance["authority_inventory"] = JsonValue::Null;
         assert_eq!(
-            validate_provenance_authority_binding(&provenance),
+            validate_provenance_authority_binding(&provenance, "Candidate"),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
         let mut invalid_status_provenance: JsonValue = serde_json::from_slice(include_bytes!(
@@ -4050,7 +3939,7 @@ mod tests {
         invalid_status_provenance["authority_inventory"]["status"] =
             JsonValue::String("Draft".to_owned());
         assert_eq!(
-            validate_provenance_authority_binding(&invalid_status_provenance),
+            validate_provenance_authority_binding(&invalid_status_provenance, "Candidate"),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
         for (section, field, value) in [
@@ -4066,7 +3955,7 @@ mod tests {
             ))?;
             invalid[section][field] = JsonValue::String(value.to_owned());
             assert_eq!(
-                validate_provenance_authority_binding(&invalid),
+                validate_provenance_authority_binding(&invalid, "Candidate"),
                 Err(BundleContractErrorV1::MemberDigestMismatch)
             );
         }
@@ -4076,7 +3965,7 @@ mod tests {
         invalid_executed_count["adr_059_execution_matrix"]["executed_case_count"] =
             JsonValue::Number(1_u64.into());
         assert_eq!(
-            validate_provenance_authority_binding(&invalid_executed_count),
+            validate_provenance_authority_binding(&invalid_executed_count, "Candidate"),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
         Ok(())
@@ -4090,69 +3979,45 @@ mod tests {
         let mut invalid_inventory: JsonValue = serde_json::from_slice(inventory_bytes)?;
         invalid_inventory["magic"] = JsonValue::String("wrong".to_owned());
         assert_eq!(
-            validate_authority_inventory(&invalid_inventory, &authority_artifact_members()),
+            validate_authority_inventory(&invalid_inventory, &[]),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
         invalid_inventory["magic"] = JsonValue::String("W8H1".to_owned());
         invalid_inventory["entries"] = JsonValue::Array(Vec::new());
         assert_eq!(
-            validate_authority_inventory(&invalid_inventory, &authority_artifact_members()),
+            validate_authority_inventory(&invalid_inventory, &[]),
             Err(BundleContractErrorV1::MemberMissing)
         );
 
         let mut pending_inventory: JsonValue = serde_json::from_slice(inventory_bytes)?;
         pending_inventory["entries"][0]["materialization_status"] =
-            JsonValue::String("pending".to_owned());
+            JsonValue::String("materialized".to_owned());
         assert_eq!(
-            validate_authority_inventory(&pending_inventory, &authority_artifact_members()),
+            validate_authority_inventory(&pending_inventory, &[]),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
 
-        let authority_members = authority_artifact_members();
-        authority_inventory_membership_rejections(inventory_bytes, &authority_members)?;
-        let mut missing_artifact_inventory: JsonValue = serde_json::from_slice(inventory_bytes)?;
-        missing_artifact_inventory["entries"][0]["fixture_bytes_path"] =
-            JsonValue::String("expected-authority/fixtures/missing.json".to_owned());
+        authority_inventory_membership_rejections(inventory_bytes, &[])?;
+        let mut candidate_inventory: JsonValue = serde_json::from_slice(inventory_bytes)?;
+        candidate_inventory["lifecycle"] = JsonValue::String("Candidate".to_owned());
         assert_eq!(
-            validate_authority_inventory(&missing_artifact_inventory, &authority_members),
+            validate_authority_inventory(&candidate_inventory, &[]),
             Err(BundleContractErrorV1::MemberMissing)
-        );
-
-        let mut wrong_id_members = authority_members.clone();
-        let wrong_id_index = wrong_id_members
-            .iter()
-            .position(|member| member.path.ends_with("fixtures/RPL-001.json"))
-            .ok_or("missing RPL-001 fixture")?;
-        wrong_id_members[wrong_id_index].bytes = br#"{"fixture_id":"WRONG"}"#.to_vec();
-        wrong_id_members[wrong_id_index].digest =
-            *blake3::hash(&wrong_id_members[wrong_id_index].bytes).as_bytes();
-        let mut wrong_id_inventory: JsonValue = serde_json::from_slice(inventory_bytes)?;
-        wrong_id_inventory["entries"][0]["fixture_bytes_digest"] =
-            JsonValue::String(materialized_hex(&wrong_id_members[wrong_id_index].digest));
-        assert_eq!(
-            validate_authority_inventory(&wrong_id_inventory, &wrong_id_members),
-            Err(BundleContractErrorV1::MemberDigestMismatch)
         );
 
         let mut duplicate_inventory: JsonValue = serde_json::from_slice(inventory_bytes)?;
         duplicate_inventory["entries"][1]["fixture_id"] =
             duplicate_inventory["entries"][0]["fixture_id"].clone();
         assert_eq!(
-            validate_authority_inventory(&duplicate_inventory, &authority_members),
+            validate_authority_inventory(&duplicate_inventory, &[]),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
 
-        let mut short_digest_inventory: JsonValue = serde_json::from_slice(inventory_bytes)?;
-        short_digest_inventory["entries"][0]["fixture_bytes_digest"] =
-            JsonValue::String("00".to_owned());
+        let mut nonnull_path_inventory: JsonValue = serde_json::from_slice(inventory_bytes)?;
+        nonnull_path_inventory["entries"][0]["fixture_bytes_path"] =
+            JsonValue::String("expected-authority/fixtures/RPL-001.json".to_owned());
         assert_eq!(
-            validate_authority_inventory(&short_digest_inventory, &authority_members),
-            Err(BundleContractErrorV1::MemberDigestMismatch)
-        );
-        short_digest_inventory["entries"][0]["fixture_bytes_digest"] =
-            JsonValue::String("g".repeat(64));
-        assert_eq!(
-            validate_authority_inventory(&short_digest_inventory, &authority_members),
+            validate_authority_inventory(&nonnull_path_inventory, &[]),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
         Ok(())
@@ -4165,13 +4030,13 @@ mod tests {
         for (field, value) in [
             ("magic", JsonValue::String("wrong".to_owned())),
             ("version", JsonValue::Number(2_u64.into())),
-            ("lifecycle", JsonValue::String("Draft".to_owned())),
+            ("lifecycle", JsonValue::String("Stable".to_owned())),
             ("digest_algorithm", JsonValue::String("SHA-256".to_owned())),
         ] {
             let mut invalid: JsonValue = serde_json::from_slice(inventory_bytes)?;
             invalid[field] = value;
             assert_eq!(
-                validate_authority_inventory(&invalid, &authority_artifact_members()),
+                validate_authority_inventory(&invalid, &[]),
                 Err(BundleContractErrorV1::MemberDigestMismatch)
             );
         }
@@ -4181,36 +4046,15 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn authority_inventory_membership_rejections(
         inventory_bytes: &[u8],
-        authority_members: &[BundleMemberV1],
+        _authority_members: &[BundleMemberV1],
     ) -> Result<(), Box<dyn std::error::Error>> {
         let valid_inventory: JsonValue = serde_json::from_slice(inventory_bytes)?;
+        assert_eq!(validate_authority_inventory(&valid_inventory, &[]), Ok(()));
+        let mut nonnull_digest_inventory = valid_inventory;
+        nonnull_digest_inventory["entries"][0]["fixture_bytes_digest"] =
+            JsonValue::String("00".repeat(32));
         assert_eq!(
-            validate_authority_inventory(&valid_inventory, authority_members),
-            Ok(())
-        );
-        let mut missing_fixture_members = authority_members.to_vec();
-        missing_fixture_members.retain(|member| {
-            !(member.role == BundleMemberRoleV1::AuthorityFixture
-                && member.path.ends_with("fixtures/RPL-001.json"))
-        });
-        assert_eq!(
-            validate_authority_inventory(&valid_inventory, &missing_fixture_members),
-            Err(BundleContractErrorV1::MemberMissing)
-        );
-        let mut missing_result_members = authority_members.to_vec();
-        missing_result_members.retain(|member| {
-            !(member.role == BundleMemberRoleV1::AuthorityExpectedResult
-                && member.path.ends_with("results/RPL-001.json"))
-        });
-        assert_eq!(
-            validate_authority_inventory(&valid_inventory, &missing_result_members),
-            Err(BundleContractErrorV1::MemberMissing)
-        );
-        let mut duplicate_inventory = valid_inventory;
-        duplicate_inventory["entries"][1]["fixture_id"] =
-            duplicate_inventory["entries"][0]["fixture_id"].clone();
-        assert_eq!(
-            validate_authority_inventory(&duplicate_inventory, authority_members),
+            validate_authority_inventory(&nonnull_digest_inventory, &[]),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
         Ok(())
@@ -5371,7 +5215,7 @@ mod instrumented_candidate_entrypoints {
     use super::{BundleContractErrorV1, BundleMemberRoleV1, BundleModeV1, ConformanceBundleV1};
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn signed_candidate_bundle() -> Result<ConformanceBundleV1, Box<dyn std::error::Error>> {
+    fn signed_draft_bundle() -> Result<ConformanceBundleV1, Box<dyn std::error::Error>> {
         let profile = tests::profile();
         let (members, expected_results) = tests::bundle_inputs(&profile, BundleModeV1::Local)?;
         let bundle = ConformanceBundleV1::materialize(
@@ -5386,9 +5230,8 @@ mod instrumented_candidate_entrypoints {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn valid_candidate_bundle_reaches_public_validation() -> Result<(), Box<dyn std::error::Error>>
-    {
-        assert!(signed_candidate_bundle()?.validate().is_ok());
+    fn valid_draft_bundle_reaches_public_validation() -> Result<(), Box<dyn std::error::Error>> {
+        assert!(signed_draft_bundle()?.validate().is_ok());
         Ok(())
     }
 
@@ -5427,59 +5270,34 @@ mod instrumented_candidate_entrypoints {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn public_validation_rejects_missing_or_tampered_authority_artifacts(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut missing = signed_candidate_bundle()?;
-        missing
-            .members
-            .retain(|member| member.role != BundleMemberRoleV1::AuthorityFixture);
-        missing.rebuild_member_descriptors();
-        assert_eq!(
-            missing.validate(),
-            Err(BundleContractErrorV1::MemberMissing)
-        );
-
-        let mut tampered = signed_candidate_bundle()?;
-        let member = tampered
-            .members
-            .iter_mut()
-            .find(|member| member.role == BundleMemberRoleV1::AuthorityExpectedResult)
-            .ok_or(BundleContractErrorV1::MemberMissing)?;
-        member.bytes.push(b'!');
-        member.digest = *blake3::hash(&member.bytes).as_bytes();
-        tampered.rebuild_member_descriptors();
-        assert_eq!(
-            tampered.validate(),
-            Err(BundleContractErrorV1::MemberDigestMismatch)
-        );
+    fn draft_validation_omits_pending_authority_artifacts() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut draft = signed_draft_bundle()?;
+        draft.members.retain(|member| {
+            !matches!(
+                member.role,
+                BundleMemberRoleV1::AuthorityFixture | BundleMemberRoleV1::AuthorityExpectedResult
+            )
+        });
+        draft.rebuild_member_descriptors();
+        assert!(draft.validate().is_ok());
         Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn candidate_publication_rejects_a_mismatched_review_digest(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut bundle = signed_candidate_bundle()?;
+    fn candidate_requires_concrete_authority_inventory() -> Result<(), Box<dyn std::error::Error>> {
         let mut profile = tests::profile();
-        profile.fixtures[0].provenance.publication_review_digest =
-            *blake3::hash(b"different review evidence").as_bytes();
+        profile.lifecycle = super::ProfileLifecycleV1::Candidate;
         profile.profile_digest = profile.digest();
-        let profile_member = bundle
-            .members
-            .iter_mut()
-            .find(|member| member.role == BundleMemberRoleV1::Profile)
-            .ok_or(BundleContractErrorV1::MemberMissing)?;
-        profile_member.bytes = profile.to_canonical_cbor()?;
-        profile_member.digest = *blake3::hash(&profile_member.bytes).as_bytes();
-        bundle.manifest.profile_digest = profile.profile_digest;
-        bundle.members.push(super::BundleMemberV1::supporting(
-            "support/review-evidence.json",
-            b"different review evidence".to_vec(),
-            BundleMemberRoleV1::Provenance,
-        ));
-        bundle.rebuild_member_descriptors();
+        let (members, expected_results) = tests::bundle_inputs(&profile, BundleModeV1::Local)?;
         assert_eq!(
-            bundle.validate(),
+            ConformanceBundleV1::materialize(
+                &profile,
+                BundleModeV1::Local,
+                members,
+                expected_results,
+            ),
             Err(BundleContractErrorV1::CandidateEvidenceMissing)
         );
         Ok(())

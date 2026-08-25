@@ -122,9 +122,26 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: conformance-materialization
+      - name: Check trusted materialization key availability
+        id: signing-key
+        env:
+          SIGNING_KEY: ${{ secrets.CONFORMANCE_BUNDLE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${SIGNING_KEY}" ]]; then
+            echo 'available=true' >> "${GITHUB_OUTPUT}"
+          elif [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            echo 'available=false' >> "${GITHUB_OUTPUT}"
+            echo 'No repository signing key is exposed to this pull request; Draft publication remains deferred.'
+          else
+            echo 'CONFORMANCE_BUNDLE_SIGNING_KEY is required on trusted materialization runs.' >&2
+            exit 1
+          fi
       - name: Materialize deterministic Draft/Candidate CPF1 bundles
+        if: steps.signing-key.outputs.available == 'true'
         run: bash scripts/materialize-conformance-bundles.sh
       - name: Upload materialized conformance bundles
+        if: steps.signing-key.outputs.available == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: conformance-bundles-${{ github.sha }}

@@ -31,8 +31,18 @@ PIGLOROS_CONFORMANCE_SIGNING_KEY="${PIGLOROS_CONFORMANCE_SIGNING_KEY}" \
 mapfile -t materialized_files < <(
   find "${output_root}" -type f \( -name '*.cbor' -o -name '*.cfb1' \) -print | sort
 )
-if ((${#materialized_files[@]} != 70)); then
-  echo "expected 70 deterministic CPF1/profile/manifest/archive files, found ${#materialized_files[@]}" >&2
+authority_lifecycle="$(jq -r '.lifecycle' fixtures/conformance/expected-authority/inventory.json)"
+case "${authority_lifecycle}" in
+  Draft) lifecycle_count=1 ;;
+  Candidate) lifecycle_count=2 ;;
+  *)
+    echo "unsupported authority inventory lifecycle: ${authority_lifecycle}" >&2
+    exit 1
+    ;;
+esac
+expected_file_count=$((7 * lifecycle_count * 5))
+if ((${#materialized_files[@]} != expected_file_count)); then
+  echo "expected ${expected_file_count} deterministic CPF1/profile/manifest/archive files, found ${#materialized_files[@]}" >&2
   exit 1
 fi
 

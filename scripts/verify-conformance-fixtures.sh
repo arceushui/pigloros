@@ -50,41 +50,54 @@ jq -e '
 
 jq -e '
   .magic == "W8H1" and .version == 1 and
-  .lifecycle == "Candidate" and .digest_algorithm == "BLAKE3-256" and
+  (.lifecycle == "Draft" or .lifecycle == "Candidate") and
+  .digest_algorithm == "BLAKE3-256" and
   (.entries | length == 11) and
   ([.entries[].fixture_id] == [
     "RPL-001", "PRF-001", "PRF-002", "DIV-001", "INV-001", "INV-002",
     "INV-003", "RES-001", "LIVE-001", "ERA-001", "SEC-001"
   ]) and
   ([.entries[].fixture_id] | unique | length == 11) and
-  all(.entries[];
-    (.fixture_bytes_path | type == "string") and
-    (.expected_result_path | type == "string") and
-    (.fixture_bytes_digest | type == "string" and test("^[0-9a-f]{64}$")) and
-    (.expected_result_digest | type == "string" and test("^[0-9a-f]{64}$")) and
-    .materialization_status == "materialized"
-  )
+  if .lifecycle == "Draft" then
+    all(.entries[];
+      (.fixture_bytes_path == null) and (.expected_result_path == null) and
+      (.fixture_bytes_digest == null) and (.expected_result_digest == null) and
+      .materialization_status == "pending"
+    )
+  else
+    all(.entries[];
+      (.fixture_bytes_path | type == "string") and
+      (.expected_result_path | type == "string") and
+      (.fixture_bytes_digest | type == "string" and test("^[0-9a-f]{64}$")) and
+      (.expected_result_digest | type == "string" and test("^[0-9a-f]{64}$")) and
+      .materialization_status == "materialized"
+    )
+  end
 ' "${authority_path}" >/dev/null || {
-  echo "invalid #172 Candidate expected-authority inventory" >&2
+  echo "invalid #172 expected-authority inventory lifecycle or entries" >&2
   exit 1
 }
 
-mapfile -t authority_files < <(
-  jq -r '.entries[] | .fixture_bytes_path, .expected_result_path' "${authority_path}"
-)
-if (( ${#authority_files[@]} != 22 )); then
-  echo "expected eleven authority fixture/result pairs" >&2
-  exit 1
-fi
-for authority_file in "${authority_files[@]}"; do
-  [[ -s "${fixture_root}/${authority_file}" ]] || {
-    echo "missing authority artifact: ${fixture_root}/${authority_file}" >&2
+authority_lifecycle="$(jq -r '.lifecycle' "${authority_path}")"
+if [[ "${authority_lifecycle}" == "Candidate" ]]; then
+  mapfile -t authority_files < <(
+    jq -r '.entries[] | .fixture_bytes_path, .expected_result_path' "${authority_path}"
+  )
+  if (( ${#authority_files[@]} != 22 )); then
+    echo "expected eleven authority fixture/result pairs" >&2
     exit 1
-  }
-done
+  fi
+  for authority_file in "${authority_files[@]}"; do
+    [[ -s "${fixture_root}/${authority_file}" ]] || {
+      echo "missing authority artifact: ${fixture_root}/${authority_file}" >&2
+      exit 1
+    }
+  done
+fi
 
 authority_inventory_sha256="$(sha256sum "${authority_path}" | awk '{print $1}')"
 matrix_blake3_digest="$(b3sum "${matrix_path}" | awk '{print $1}')"
+if [[ "${authority_lifecycle}" == "Candidate" ]]; then
 while IFS=$'\t' read -r fixture_id fixture_path fixture_digest result_path result_digest _expected_outcome; do
   for value in "${fixture_path}" "${result_path}"; do
     [[ "${value}" != /* && "${value}" != *".."* ]] || {
@@ -118,6 +131,7 @@ done < <(
     .expected_outcome
   ] | @tsv' "${authority_path}"
 )
+fi
 
 mapfile -t inputs < <(find "${fixture_root}/inputs" -type f -print | sort)
 mapfile -t expected < <(find "${fixture_root}/expected" -type f -print | sort)
@@ -179,13 +193,13 @@ if [[ ! -s "${fixture_root}/SHA256SUMS" ]]; then
   exit 1
 fi
 
-jq -e '
-  .candidate_status == "approved" and
-  .deletion_review == "approved" and
+jq -e --arg authority_lifecycle "${authority_lifecycle}" '
+  .candidate_status == (if $authority_lifecycle == "Candidate" then "approved" else "pending" end) and
+  .deletion_review == (if $authority_lifecycle == "Candidate" then "approved" else "pending" end) and
   .secret_scan == "clean" and
   .authority_inventory.path == "expected-authority/inventory.json" and
   .authority_inventory.digest_algorithm == "SHA-256" and
-  .authority_inventory.status == "Candidate" and
+  .authority_inventory.status == $authority_lifecycle and
   .adr_059_execution_matrix.path == "matrix/adr-059-complete.json" and
   .adr_059_execution_matrix.digest_algorithm == "BLAKE3-256" and
   .adr_059_execution_matrix.status == "Draft" and
