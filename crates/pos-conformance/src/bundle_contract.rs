@@ -7039,7 +7039,10 @@ mod coverage_entrypoints {
 #[cfg(test)]
 mod instrumented_candidate_entrypoints {
     use super::tests;
-    use super::{BundleContractErrorV1, BundleMemberRoleV1, BundleModeV1, ConformanceBundleV1};
+    use super::{
+        verify_archive_independently, BundleContractErrorV1, BundleMemberRoleV1, BundleModeV1,
+        ConformanceBundleV1,
+    };
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn signed_draft_bundle() -> Result<ConformanceBundleV1, Box<dyn std::error::Error>> {
