@@ -283,6 +283,7 @@ fn replacement_rejects_tombstone_rewrite_at_public_boundary(
         material_digest,
         Hash::from_bytes([2; 32]),
     ))?;
+    assert_eq!(destroyed.validate_replacement(&destroyed), Ok(()));
     let changed_tombstone = changed_tombstone_digest(&destroyed)?;
     assert_eq!(
         destroyed.validate_replacement(&changed_tombstone),

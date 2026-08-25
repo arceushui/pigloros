@@ -118,25 +118,60 @@ fn public_store_verification_accepts_legacy_signature_with_explicit_pubkey(
     })?;
     let timeline = store.create_timeline("ledger")?;
     let (signing_key, verifying_key) = pos_crypto::signing::generate_keypair();
+    let (registry_signing_key, registry_verifying_key) = pos_crypto::signing::generate_keypair();
+    let registry_identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+    let mut registry = KeyRegistryStateV1::new();
+    registry.register_key(KeyRegistrationV1::new(
+        registry_identity,
+        pos_crypto::key_roles::key_material_digest(&registry_signing_key.to_bytes()),
+        Some(pos_core::PublicKey::from_bytes(
+            registry_verifying_key.to_bytes(),
+        )),
+    ))?;
+    store.save_key_registry(&registry)?;
     let event_id = EventId::new();
     let payload = CanonicalBytes::from_static(b"legacy prediction");
+    let bound_payload = CanonicalBytes::from_static(b"registry-bound prediction");
+    let bound_signature = pos_crypto::key_roles::sign_for_registered_role(
+        &mut registry,
+        &registry_signing_key,
+        registry_identity,
+        &bound_payload,
+    )?;
     store.append_committed(
         timeline.id(),
-        &[Event {
-            id: event_id,
-            entity: EntityId::new(),
-            event_type: Kind::new(pos_plugin_ledger::EVENT_TYPE_PREDICTION),
-            payload: payload.clone(),
-            wall_time: WallTime::from_micros(1),
-            seq: Seq::from_u64(1),
-            causation_id: None,
-            correlation_id: None,
-            schema_version: SchemaVersion::V1,
-            signature: None,
-            signature_identity: None,
-            payload_hash: pos_crypto::chain::hash_payload(&payload),
-        }],
+        &[
+            Event {
+                id: event_id,
+                entity: EntityId::new(),
+                event_type: Kind::new(pos_plugin_ledger::EVENT_TYPE_PREDICTION),
+                payload: payload.clone(),
+                wall_time: WallTime::from_micros(1),
+                seq: Seq::from_u64(1),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: SchemaVersion::V1,
+                signature: None,
+                signature_identity: None,
+                payload_hash: pos_crypto::chain::hash_payload(&payload),
+            },
+            Event {
+                id: EventId::new(),
+                entity: EntityId::new(),
+                event_type: Kind::new(pos_plugin_ledger::EVENT_TYPE_PREDICTION),
+                payload: bound_payload.clone(),
+                wall_time: WallTime::from_micros(2),
+                seq: Seq::from_u64(2),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: SchemaVersion::V1,
+                signature: Some(bound_signature),
+                signature_identity: Some(registry_identity),
+                payload_hash: pos_crypto::chain::hash_payload(&bound_payload),
+            },
+        ],
     )?;
+    store.save_key_registry(&registry)?;
     drop(store);
 
     let signature = signing_key.sign(payload.as_slice()).to_bytes().to_vec();
