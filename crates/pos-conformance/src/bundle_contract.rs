@@ -4658,6 +4658,7 @@ mod tests {
         let mut missing_deletion = missing_review_profile.clone();
         missing_deletion.fixtures[0].redaction_state = RedactionStateV1::EvidenceMissing;
         missing_deletion.fixtures[0].replay_claim = ReplayClaimV1::UnverifiableArtifactsMissing;
+        missing_deletion.profile_digest = missing_deletion.digest();
         assert_eq!(
             materialize_candidate_for_test(&missing_deletion, &missing_review_members)?,
             Err(BundleContractErrorV1::CandidateEvidenceMissing)
@@ -4947,7 +4948,7 @@ mod tests {
         missing_provenance.retain(|member| member.role != BundleMemberRoleV1::Provenance);
         assert_eq!(
             materialize_candidate_for_test(&candidate, &missing_provenance)?,
-            Err(BundleContractErrorV1::CandidateEvidenceMissing)
+            Err(BundleContractErrorV1::MemberMissing)
         );
 
         let mut malformed_provenance = members;
@@ -4959,7 +4960,7 @@ mod tests {
         provenance.digest = candidate.provenance_digest;
         assert_eq!(
             materialize_candidate_for_test(&candidate, &malformed_provenance)?,
-            Err(BundleContractErrorV1::CandidateEvidenceMissing)
+            Err(BundleContractErrorV1::MemberDigestMismatch)
         );
         Ok(())
     }
@@ -5389,6 +5390,8 @@ mod tests {
             let mut invalid_candidate = candidate.clone();
             invalid_candidate.provenance_digest = digest;
             for fixture in &mut invalid_candidate.fixtures {
+                fixture.provenance.source_digest = digest;
+                fixture.provenance.build_digest = digest;
                 fixture.provenance.publication_review_digest = digest;
             }
             invalid_candidate.profile_digest = invalid_candidate.digest();
@@ -5821,7 +5824,7 @@ mod tests {
         members.retain(|member| member.role != BundleMemberRoleV1::Provenance);
         assert_eq!(
             materialize_candidate_for_test(&candidate, &members)?,
-            Err(BundleContractErrorV1::CandidateEvidenceMissing)
+            Err(BundleContractErrorV1::MemberMissing)
         );
         let (mut malformed_members, _) = bundle_inputs(&candidate, BundleModeV1::Local)?;
         let provenance = malformed_members
@@ -5832,7 +5835,7 @@ mod tests {
         provenance.digest = candidate.provenance_digest;
         assert_eq!(
             materialize_candidate_for_test(&candidate, &malformed_members)?,
-            Err(BundleContractErrorV1::CandidateEvidenceMissing)
+            Err(BundleContractErrorV1::MemberDigestMismatch)
         );
         Ok(())
     }
@@ -6992,7 +6995,7 @@ mod instrumented_candidate_entrypoints {
                 unbound_inventory,
                 expected_results,
             ),
-            Err(BundleContractErrorV1::MemberDigestMismatch)
+            Err(BundleContractErrorV1::MemberMissing)
         );
         Ok(())
     }
