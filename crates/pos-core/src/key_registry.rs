@@ -1141,7 +1141,7 @@ mod tests {
         live.register_key(signing_registration(ATTRIBUTION, 22))?;
         let mut live_value = state_value(&live)?;
         let active = top_level_field(&mut live_value, "active")?.clone();
-        let state = edit_state(&destroyed, |value| {
+        let mut state = edit_state(&destroyed, |value| {
             *top_level_field(value, "active")? = active;
             Ok(())
         })?;
