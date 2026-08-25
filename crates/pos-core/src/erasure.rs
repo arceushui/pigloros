@@ -2135,14 +2135,15 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     ) -> Result<ErasureReceiptV1, ErasureErrorV1> {
         self.record(request).and_then(|mut record| {
             if let Some(stored) = record.receipt.clone() {
+                let authority_input = input;
                 let normalized = Self::normalize_receipt_input(
                     request,
                     self.coordinator,
                     &record,
-                    input.clone(),
+                    authority_input.clone(),
                 )?;
                 return if record.receipt_input.as_ref() == Some(&normalized)
-                    && Self::receipt_input_matches_authority(&input, &normalized)
+                    && Self::receipt_input_matches_authority(&authority_input, &normalized)
                 {
                     Ok(stored)
                 } else {
