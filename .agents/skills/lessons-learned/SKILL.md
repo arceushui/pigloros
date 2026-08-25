@@ -102,6 +102,8 @@ This is an internal PiglorOS skill and the canonical source of durable project l
 
 33. **Treat hosted CI as an independent environment probe.** Permission, non-root process identity, ordering, cache, target, and runner behavior can differ from a root local checkout. Overlap independent review with hosted latency, but do not substitute either evidence stream for the other.
 
+- **Separate status evidence from diagnostic evidence.** Batch or reduce GitHub polling; if REST quota is exhausted, use an exact-head GraphQL check rollup to preserve status, but do not change code or classify a failure until the authoritative hosted job log is available.
+
 34. **Validate workflow changes through a canary pull request.** Inspect every hosted job, fix failures in the isolated worktree, require a clean ruleset, merge, and verify the post-merge `main` workflows.
 
 35. **Compile documentation explicitly with rustdoc warnings denied.** Compiler, test, and Clippy success do not validate rustdoc links.
