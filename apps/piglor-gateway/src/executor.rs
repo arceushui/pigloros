@@ -2857,7 +2857,8 @@ mod tests {
         let authority = ConsentAuthority::new();
         store
             .bind_consent_authority(authority.append_permit())
-            .test_ok();
+            .test_ok()
+            .test_value();
         let executor = super::StoreExecutor::spawn_with_observer_for_test(
             super::ExecutorStore::Generic(Box::new(store)),
             Arc::clone(&observer),
