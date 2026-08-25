@@ -34,32 +34,43 @@ fn run_with_verifier(
 fn verify_path(path: &Path) -> Result<(), Box<dyn Error>> {
     let file = File::open(path)?;
     let metadata = file.metadata()?;
-    if metadata.len() > MAX_CONFORMANCE_BUNDLE_BYTES_V1 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "conformance bundle archive exceeds the public size limit",
-        )
-        .into());
-    }
-    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
-    file.take(MAX_CONFORMANCE_BUNDLE_BYTES_V1 + 1)
-        .read_to_end(&mut bytes)?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_CONFORMANCE_BUNDLE_BYTES_V1 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "conformance bundle archive exceeds the public size limit",
-        )
-        .into());
-    }
+    let bytes = read_bounded(file, metadata.len(), MAX_CONFORMANCE_BUNDLE_BYTES_V1)?;
     verify_archive_independently(&bytes).map_err(Into::into)
+}
+
+fn read_bounded(
+    mut reader: impl Read,
+    declared_len: u64,
+    limit: u64,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    if declared_len > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "conformance bundle archive exceeds the public size limit",
+        )
+        .into());
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(declared_len).unwrap_or(0));
+    reader
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "conformance bundle archive exceeds the public size limit",
+        )
+        .into());
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::{main, run, run_with_verifier, verify_path};
+    use super::{main, read_bounded, run, run_with_verifier, verify_path};
     use std::ffi::OsString;
     use std::fs;
+    use std::io::Cursor;
 
     #[test]
     fn verifier_argument_errors_are_explicit() {
@@ -89,5 +100,11 @@ mod tests {
         fs::remove_file(&path)?;
         assert!(result.is_err());
         Ok(())
+    }
+
+    #[test]
+    fn bounded_reader_rejects_declared_and_observed_oversize() {
+        assert!(read_bounded(Cursor::new([]), 6, 5).is_err());
+        assert!(read_bounded(Cursor::new([0_u8; 6]), 5, 5).is_err());
     }
 }

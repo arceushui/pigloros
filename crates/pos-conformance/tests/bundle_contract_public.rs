@@ -88,6 +88,19 @@ fn encode_archive(value: &Value) -> Result<Vec<u8>, Box<dyn std::error::Error>> 
     Ok(bytes)
 }
 
+fn replace_first_byte(
+    bytes: &mut Vec<u8>,
+    needle: u8,
+    replacement: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let position = bytes
+        .iter()
+        .position(|byte| *byte == needle)
+        .ok_or("byte sequence is missing")?;
+    bytes.splice(position..=position, replacement.iter().copied());
+    Ok(())
+}
+
 fn signed_archive_variant(
     bundle: &ConformanceBundleV1,
     signing_key: &SigningKey,
@@ -480,6 +493,96 @@ pub mod fixtures {
         ))
     }
 
+    /// Construct a Candidate bundle whose publication-review digest is wrong.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the checked-in authority fixture data cannot be
+    /// decoded or serialized into the test bundle.
+    pub fn candidate_bundle_with_review_mismatch() -> Result<
+        Result<ConformanceBundleV1, pos_conformance::BundleContractErrorV1>,
+        Box<dyn std::error::Error>,
+    > {
+        let (authority_members, provenance_bytes) = candidate_authority_data()?;
+        let mut profile = profile(digest(&provenance_bytes));
+        profile.fixtures[0].provenance.publication_review_digest = [99; 32];
+        profile.profile_digest = profile.digest();
+        let (members, expected_result) =
+            candidate_members(&profile, provenance_bytes, authority_members);
+        Ok(ConformanceBundleV1::materialize(
+            &profile,
+            BundleModeV1::Local,
+            members,
+            vec![expected_result],
+        ))
+    }
+
+    /// Construct a Candidate bundle with an invalid provenance authority path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the checked-in authority fixture data cannot be
+    /// decoded or serialized into the test bundle.
+    pub fn candidate_bundle_with_invalid_provenance_binding() -> Result<
+        Result<ConformanceBundleV1, pos_conformance::BundleContractErrorV1>,
+        Box<dyn std::error::Error>,
+    > {
+        let (authority_members, provenance_bytes) = candidate_authority_data()?;
+        let mut provenance: JsonValue = serde_json::from_slice(&provenance_bytes)?;
+        provenance["authority_inventory"]["path"] = JsonValue::String("wrong.json".to_owned());
+        let provenance_bytes = serde_json::to_vec(&provenance)?;
+        let profile = profile(digest(&provenance_bytes));
+        let (members, expected_result) =
+            candidate_members(&profile, provenance_bytes, authority_members);
+        Ok(ConformanceBundleV1::materialize(
+            &profile,
+            BundleModeV1::Local,
+            members,
+            vec![expected_result],
+        ))
+    }
+
+    /// Construct a Candidate bundle with a matrix coordinate outside the
+    /// independently supplied authority-result set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the checked-in authority fixture data cannot be
+    /// decoded or serialized into the test bundle.
+    pub fn candidate_bundle_with_invalid_matrix_coordinate() -> Result<
+        Result<ConformanceBundleV1, pos_conformance::BundleContractErrorV1>,
+        Box<dyn std::error::Error>,
+    > {
+        let (mut authority_members, provenance_bytes) = candidate_authority_data()?;
+        let matrix_index = authority_members
+            .iter()
+            .position(|member| member.role == BundleMemberRoleV1::ExecutionMatrix)
+            .ok_or("missing execution matrix")?;
+        let mut matrix: JsonValue =
+            serde_json::from_slice(&authority_members[matrix_index].bytes)?;
+        matrix["cases"][0]["expected_result_digest"] =
+            JsonValue::String("00".repeat(32));
+        let matrix_bytes = serde_json::to_vec(&matrix)?;
+        authority_members[matrix_index]
+            .bytes
+            .clone_from(&matrix_bytes);
+        authority_members[matrix_index].digest = digest(&matrix_bytes);
+
+        let mut provenance: JsonValue = serde_json::from_slice(&provenance_bytes)?;
+        provenance["adr_059_execution_matrix"]["sha256_digest"] =
+            JsonValue::String(hex(&Sha256::digest(&matrix_bytes)));
+        let provenance_bytes = serde_json::to_vec(&provenance)?;
+        let profile = profile(digest(&provenance_bytes));
+        let (members, expected_result) =
+            candidate_members(&profile, provenance_bytes, authority_members);
+        Ok(ConformanceBundleV1::materialize(
+            &profile,
+            BundleModeV1::Local,
+            members,
+            vec![expected_result],
+        ))
+    }
+
     /// Construct a valid Draft bundle for public archive-path coverage.
     ///
     /// # Errors
@@ -790,6 +893,19 @@ fn assert_archive_profile_rejections(
         archive_array(value, 2)?[3] = Value::Bytes(vec![7; 32]);
         Ok(())
     })?;
+    assert_archive_rejected(bundle, signing_key, |value| {
+        let profile_member = archive_member(value, "profile/CPF1.cbor")?;
+        let Some(Value::Bytes(profile_bytes)) = profile_member.get(1) else {
+            return Err("profile bytes are missing".into());
+        };
+        let mut profile_bytes = profile_bytes.clone();
+        replace_first_byte(&mut profile_bytes, 0x01, &[0x18, 0x01])?;
+        profile_member[1] = Value::Bytes(profile_bytes.clone());
+        let descriptor = archive_descriptor(value, "profile/CPF1.cbor")?;
+        descriptor[1] = Value::Integer((profile_bytes.len() as u64).into());
+        descriptor[2] = Value::Bytes(blake3::hash(&profile_bytes).as_bytes().to_vec());
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -808,5 +924,70 @@ fn public_independent_archive_rejection_paths_fail_closed() -> Result<(), Box<dy
     assert_archive_member_rejections(&bundle, &signing_key)?;
     assert_archive_expected_rejections(&bundle, &signing_key)?;
     assert_archive_profile_rejections(&bundle, &signing_key)?;
+
+    let mut noncanonical_archive = signed_archive_variant(&bundle, &signing_key, |_| Ok(()))?;
+    replace_first_byte(&mut noncanonical_archive, 0x01, &[0x18, 0x01])?;
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&noncanonical_archive),
+        Err(pos_conformance::BundleContractErrorV1::ArchiveEncodingInvalid)
+    );
+
+    for (mutate, expected) in [
+        (
+            Box::new(|value: &mut Value| {
+                mutate_profile(value, |fields| {
+                    if let Some(Value::Array(protocol)) = fields.get_mut(10) {
+                        if let Some(Value::Array(caps)) = protocol.get_mut(4) {
+                            caps.pop();
+                        }
+                    }
+                })
+            }) as Box<dyn FnOnce(&mut Value) -> Result<(), Box<dyn std::error::Error>>>,
+            pos_conformance::BundleContractErrorV1::ProfileInvalid,
+        ),
+        (
+            Box::new(|value: &mut Value| {
+                mutate_profile(value, |fields| {
+                    if let Some(Value::Array(protocol)) = fields.get_mut(10) {
+                        if let Some(Value::Array(caps)) = protocol.get_mut(4) {
+                            caps[0] = Value::Integer(0_u64.into());
+                        }
+                    }
+                })
+            }),
+            pos_conformance::BundleContractErrorV1::MemberOutOfBounds,
+        ),
+        (
+            Box::new(|value: &mut Value| {
+                mutate_profile(value, |fields| {
+                    if let Some(Value::Array(protocol)) = fields.get_mut(10) {
+                        if let Some(Value::Array(caps)) = protocol.get_mut(4) {
+                            caps[5] = Value::Integer(1_u64.into());
+                        }
+                    }
+                })
+            }),
+            pos_conformance::BundleContractErrorV1::MemberOutOfBounds,
+        ),
+    )] {
+        let archive = signed_archive_variant(&bundle, &signing_key, mutate)?;
+        assert_eq!(
+            pos_conformance::verify_archive_independently(&archive),
+            Err(expected)
+        );
+    }
+
+    assert_eq!(
+        fixtures::candidate_bundle_with_review_mismatch()?,
+        Err(pos_conformance::BundleContractErrorV1::CandidateEvidenceMissing)
+    );
+    assert_eq!(
+        fixtures::candidate_bundle_with_invalid_provenance_binding()?,
+        Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
+    );
+    assert_eq!(
+        fixtures::candidate_bundle_with_invalid_matrix_coordinate()?,
+        Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
+    );
     Ok(())
 }
