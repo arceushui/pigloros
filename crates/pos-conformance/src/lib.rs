@@ -2978,7 +2978,8 @@ pub mod strict_codec {
             .collect()
     }
 
-    pub(crate) fn encode_consent(audit: &ConsentAuditV1) -> Value {
+    /// Encode the canonical consent-audit record for strict CBOR composition.
+    pub fn encode_consent(audit: &ConsentAuditV1) -> Value {
         Value::Array(vec![
             text(&audit.subject),
             uint(audit.requested_after_seq),
@@ -2990,7 +2991,12 @@ pub mod strict_codec {
         ])
     }
 
-    pub(crate) fn decode_consent(value: &Value) -> Result<ConsentAuditV1, StrictCborError> {
+    /// Decode a canonical consent-audit record from a strict CBOR value.
+    ///
+    /// # Errors
+    /// Returns [`StrictCborError`] when the value does not match the closed
+    /// seven-field consent-audit shape.
+    pub fn decode_consent(value: &Value) -> Result<ConsentAuditV1, StrictCborError> {
         let fields = array(value, "consent_audit", 7)?;
         Ok(ConsentAuditV1 {
             subject: string(&fields[0], "consent_subject")?,
@@ -5385,7 +5391,12 @@ fn verify_plugin_failures(failures: &[PluginFailureV1]) -> Result<(), EvidenceEr
     }
 }
 
-pub(crate) fn verify_consent_audit(
+/// Verify a canonical `consent.revoked.v1` audit against authoritative Events.
+///
+/// # Errors
+/// Returns [`EvidenceError::InvalidConsentAudit`] when the audit is not a
+/// single effective canonical revocation at a completed Tick Boundary.
+pub fn verify_consent_audit(
     audit: &ConsentAuditV1,
     events: &[AuthoritativeEventV1],
 ) -> Result<(), EvidenceError> {
