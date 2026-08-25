@@ -4280,6 +4280,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "ciborium",
+ "ciborium-io",
  "ed25519-dalek",
  "pos-core",
  "pos-crypto",
