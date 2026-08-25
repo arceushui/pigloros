@@ -1,3 +1,5 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
 use pos_conformance::verify_archive_independently;
 use std::env;
 use std::error::Error;
