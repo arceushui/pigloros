@@ -225,7 +225,7 @@ mod coverage_entrypoints {
             &ciborium::Value::Map(Vec::new()),
         )));
         expect_err(&verify_host_closure(
-            &evidence.consent_audit,
+            &evidence.host_closure,
             &evidence.authoritative_events,
         ));
         let value = decode_value(ok(evidence.to_canonical_cbor()));
@@ -633,11 +633,10 @@ pub enum PluginFailureClassV1 {
     ResourceExhaustion,
 }
 
-/// Auditable Gateway revocation or host-owned closure at a completed Tick
-/// Boundary.
+/// Auditable Gateway consent revocation at a completed Tick Boundary.
 ///
-/// The experiment closure marker is never a consent revocation and
-/// cannot rehydrate or authorize a `ConsentAuthority` session.
+/// This type is reserved for the canonical `consent.revoked.v1` event. Local
+/// Experiment shutdown uses [`HostClosureAuditV1`] instead.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConsentAuditV1 {
@@ -647,6 +646,23 @@ pub struct ConsentAuditV1 {
     pub revocation_event_seq: u64,
     pub revocation_event_type: String,
     pub revocation_payload_digest: [u8; 32],
+    pub halted_at_tick_boundary: bool,
+}
+
+/// Auditable local Experiment/session closure at a completed Tick Boundary.
+///
+/// A host closure is not a durable consent revocation and cannot rehydrate or
+/// authorize a `ConsentAuthority` session. Its lifecycle evidence therefore
+/// has a distinct type and closure-specific field names.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostClosureAuditV1 {
+    pub subject: String,
+    pub requested_after_seq: u64,
+    pub effective_after_seq: u64,
+    pub closure_event_seq: u64,
+    pub closure_event_type: String,
+    pub closure_payload_digest: [u8; 32],
     pub halted_at_tick_boundary: bool,
 }
 
@@ -1387,7 +1403,7 @@ pub struct MoatProofEvidenceV1 {
     pub uncertainty: Vec<UncertaintyV1>,
     pub participant_views: Vec<ParticipantViewV1>,
     pub plugin_failures: Vec<PluginFailureV1>,
-    pub consent_audit: ConsentAuditV1,
+    pub host_closure: HostClosureAuditV1,
     pub contract: Wave8ProofContractV1,
 }
 
@@ -1688,17 +1704,17 @@ pub mod strict_codec {
         CaseOutcomeStatusV1, CaseOutcomeV1, CausalTraceEntryV1, ClaimLayerV1, ConformanceReportV1,
         ConsentAuditV1, CounterfactualContractV1, Cursor, DependencyClassV1, DependencyNodeV1,
         DigestSizeV1, DivergenceLocationKindV1, DivergenceMismatchKindV1, DivergenceReportV1,
-        ExecutionModeV1, FollowOnMismatchV1, ImplementationIdentityV1, IndependenceEvidenceV1,
-        InputDependencyV1, InterventionV1, InvalidArtifactV1, KnowledgeSnapshotV1,
-        MoatProofEvidenceV1, NonInterferenceCaseV1, NonInterferenceVariantV1, OwnerFrontierV1,
-        ParticipantEventV1, ParticipantViewV1, PluginBoundaryV1, PluginFailureClassV1,
-        PluginFailureV1, PrincipalRefV1, ProjectionEvidenceV1, RecomputationFrontierV1,
-        RedactionStateV1, ReplayClaimV1, ReproManifestV1, ReproducibilityClassV1, SafeErrorCodeV1,
-        ScenarioRoomFixtureV1, SuffixInvalidationReasonV1, SuffixInvalidationV1, TickAtomicityV1,
-        UncertaintyV1, UnknownEdgePolicyV1, Value, VerificationErrorV1, VerificationOutcomeV1,
-        VerificationResultV1, Wave8ProofContractV1, CONFORMANCE_REPORT_MAGIC_V1,
-        DIVERGENCE_RECORD_MAGIC_V1, EVIDENCE_ENVELOPE_MAGIC_V1, EVIDENCE_FORMAT_V1,
-        RECOMPUTATION_FRONTIER_MAGIC_V1, SUFFIX_INVALIDATION_MAGIC_V1,
+        ExecutionModeV1, FollowOnMismatchV1, HostClosureAuditV1, ImplementationIdentityV1,
+        IndependenceEvidenceV1, InputDependencyV1, InterventionV1, InvalidArtifactV1,
+        KnowledgeSnapshotV1, MoatProofEvidenceV1, NonInterferenceCaseV1, NonInterferenceVariantV1,
+        OwnerFrontierV1, ParticipantEventV1, ParticipantViewV1, PluginBoundaryV1,
+        PluginFailureClassV1, PluginFailureV1, PrincipalRefV1, ProjectionEvidenceV1,
+        RecomputationFrontierV1, RedactionStateV1, ReplayClaimV1, ReproManifestV1,
+        ReproducibilityClassV1, SafeErrorCodeV1, ScenarioRoomFixtureV1, SuffixInvalidationReasonV1,
+        SuffixInvalidationV1, TickAtomicityV1, UncertaintyV1, UnknownEdgePolicyV1, Value,
+        VerificationErrorV1, VerificationOutcomeV1, VerificationResultV1, Wave8ProofContractV1,
+        CONFORMANCE_REPORT_MAGIC_V1, DIVERGENCE_RECORD_MAGIC_V1, EVIDENCE_ENVELOPE_MAGIC_V1,
+        EVIDENCE_FORMAT_V1, RECOMPUTATION_FRONTIER_MAGIC_V1, SUFFIX_INVALIDATION_MAGIC_V1,
         VERIFICATION_RECORD_MAGIC_V1,
     };
 
@@ -1765,7 +1781,7 @@ pub mod strict_codec {
                     .map(encode_plugin_failure)
                     .collect(),
             ),
-            encode_consent(&evidence.consent_audit),
+            encode_host_closure(&evidence.host_closure),
             encode_contract(&evidence.contract),
         ]);
         encode_value(&root)
@@ -1788,7 +1804,7 @@ pub mod strict_codec {
             uncertainty: decode_uncertainty(&fields[6])?,
             participant_views: decode_participant_views(&fields[7])?,
             plugin_failures: decode_plugin_failures(&fields[8])?,
-            consent_audit: decode_consent(&fields[9])?,
+            host_closure: decode_host_closure(&fields[9])?,
             contract: decode_contract(&fields[10])?,
         })
     }
@@ -2987,6 +3003,31 @@ pub mod strict_codec {
         })
     }
 
+    fn encode_host_closure(audit: &HostClosureAuditV1) -> Value {
+        Value::Array(vec![
+            text(&audit.subject),
+            uint(audit.requested_after_seq),
+            uint(audit.effective_after_seq),
+            uint(audit.closure_event_seq),
+            text(&audit.closure_event_type),
+            digest(&audit.closure_payload_digest),
+            Value::Bool(audit.halted_at_tick_boundary),
+        ])
+    }
+
+    fn decode_host_closure(value: &Value) -> Result<HostClosureAuditV1, StrictCborError> {
+        let fields = array(value, "host_closure", 7)?;
+        Ok(HostClosureAuditV1 {
+            subject: string(&fields[0], "closure_subject")?,
+            requested_after_seq: uint_value(&fields[1], "closure_requested_seq")?,
+            effective_after_seq: uint_value(&fields[2], "closure_effective_seq")?,
+            closure_event_seq: uint_value(&fields[3], "closure_event_seq")?,
+            closure_event_type: string(&fields[4], "closure_event_type")?,
+            closure_payload_digest: bytes(&fields[5], "closure_digest")?,
+            halted_at_tick_boundary: bool_value(&fields[6], "closure_boundary")?,
+        })
+    }
+
     fn array_values<'a>(value: &'a Value, field: &str) -> Result<&'a [Value], StrictCborError> {
         match value {
             Value::Array(values) => Ok(values),
@@ -4125,7 +4166,9 @@ pub mod strict_codec {
                 consume(decode_plugin_failures(&Value::Array(vec![
                     encode_plugin_failure(&failure_evidence.plugin_failures[0]),
                 ])));
-                consume(decode_consent(&encode_consent(&evidence.consent_audit)));
+                consume(decode_host_closure(&encode_host_closure(
+                    &evidence.host_closure,
+                )));
                 let plugin_failure = encode_plugin_failure(&failure_evidence.plugin_failures[0]);
                 reject_each_field(&plugin_failure, |value| {
                     decode_plugin_failures(&Value::Array(vec![value.clone()]))
@@ -4133,8 +4176,8 @@ pub mod strict_codec {
                 consume(decode_plugin_failures(&Value::Array(vec![Value::Map(
                     Vec::new(),
                 )])));
-                let consent = encode_consent(&evidence.consent_audit);
-                reject_each_field(&consent, decode_consent);
+                let closure = encode_host_closure(&evidence.host_closure);
+                reject_each_field(&closure, decode_host_closure);
                 consume(array_values(&Value::Null, "not-an-array"));
 
                 let principal = &contract.scenario_room.principals[0];
@@ -5147,7 +5190,7 @@ pub fn compare(
     } else if left.uncertainty != right.uncertainty
         || left.participant_views != right.participant_views
         || left.plugin_failures != right.plugin_failures
-        || left.consent_audit != right.consent_audit
+        || left.host_closure != right.host_closure
         || left.contract != right.contract
     {
         DivergenceClassV1::Observability
@@ -5221,15 +5264,7 @@ pub fn verify_evidence(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceErr
         &sequences,
     )?;
     verify_plugin_failures(&evidence.plugin_failures)?;
-    match evidence.consent_audit.revocation_event_type.as_str() {
-        "consent.revoked.v1" => {
-            verify_consent_audit(&evidence.consent_audit, &evidence.authoritative_events)?;
-        }
-        "experiment.lifecycle.consent-closed.v1" => {
-            verify_host_closure(&evidence.consent_audit, &evidence.authoritative_events)?;
-        }
-        _ => return Err(EvidenceError::InvalidConsentAudit),
-    }
+    verify_host_closure(&evidence.host_closure, &evidence.authoritative_events)?;
     verify_wave8_contract(evidence)?;
     Ok(())
 }
@@ -5383,26 +5418,26 @@ fn verify_consent_audit(
 /// Gateway consent revocation. It is a host lifecycle proof only; it never
 /// rehydrates `ConsentAuthority` or authorizes protected work.
 fn verify_host_closure(
-    audit: &ConsentAuditV1,
+    audit: &HostClosureAuditV1,
     events: &[AuthoritativeEventV1],
 ) -> Result<(), EvidenceError> {
     if audit.subject.trim().is_empty()
-        || audit.revocation_payload_digest == [0; 32]
+        || audit.closure_payload_digest == [0; 32]
         || audit.effective_after_seq <= audit.requested_after_seq
-        || audit.revocation_event_seq != audit.effective_after_seq
+        || audit.closure_event_seq != audit.effective_after_seq
         || !audit.halted_at_tick_boundary
         || events
             .iter()
-            .filter(|event| event.event_type == "experiment.lifecycle.consent-closed.v1")
+            .filter(|event| event.event_type == audit.closure_event_type)
             .count()
             != 1
         || events
             .iter()
             .find(|event| {
-                event.event_type == "experiment.lifecycle.consent-closed.v1"
-                    && event.seq == audit.revocation_event_seq
+                event.event_type == audit.closure_event_type && event.seq == audit.closure_event_seq
             })
-            .is_none_or(|event| event.payload_digest != audit.revocation_payload_digest)
+            .is_none_or(|event| event.payload_digest != audit.closure_payload_digest)
+        || audit.closure_event_type != "experiment.lifecycle.consent-closed.v1"
     {
         Err(EvidenceError::InvalidConsentAudit)
     } else {
@@ -6582,7 +6617,7 @@ pub mod tests {
                     seq: 3,
                     tick: 2,
                     entity: "host".to_owned(),
-                    event_type: "consent.revoked.v1".to_owned(),
+                    event_type: "experiment.lifecycle.consent-closed.v1".to_owned(),
                     payload_digest: [7; 32],
                     causation_seq: None,
                 },
@@ -6611,7 +6646,7 @@ pub mod tests {
                 hidden_event_types: vec![
                     "private.note".to_owned(),
                     "proof.agent.reaction.v1".to_owned(),
-                    "consent.revoked.v1".to_owned(),
+                    "experiment.lifecycle.consent-closed.v1".to_owned(),
                 ],
                 visible_events: vec![ParticipantEventV1 {
                     seq: 1,
@@ -6620,13 +6655,13 @@ pub mod tests {
                 }],
             }],
             plugin_failures: Vec::new(),
-            consent_audit: ConsentAuditV1 {
+            host_closure: HostClosureAuditV1 {
                 subject: "subject".to_owned(),
                 requested_after_seq: 1,
                 effective_after_seq: 3,
-                revocation_event_seq: 3,
-                revocation_event_type: "consent.revoked.v1".to_owned(),
-                revocation_payload_digest: [7; 32],
+                closure_event_seq: 3,
+                closure_event_type: "experiment.lifecycle.consent-closed.v1".to_owned(),
+                closure_payload_digest: [7; 32],
                 halted_at_tick_boundary: true,
             },
             contract: test_contract(),
@@ -7519,7 +7554,7 @@ pub mod tests {
             DivergenceClassV1::Observability
         );
         right = left;
-        right.consent_audit.halted_at_tick_boundary = false;
+        right.host_closure.halted_at_tick_boundary = false;
         assert_eq!(
             compare(&evidence(), &right)?.divergence,
             DivergenceClassV1::Observability
@@ -7587,7 +7622,7 @@ pub mod tests {
             Err(EvidenceError::CommittedPluginFailure)
         );
         let mut invalid = valid;
-        invalid.consent_audit.halted_at_tick_boundary = false;
+        invalid.host_closure.halted_at_tick_boundary = false;
         assert_eq!(
             verify_evidence(&invalid),
             Err(EvidenceError::InvalidConsentAudit)
@@ -7626,7 +7661,7 @@ pub mod tests {
         );
 
         let mut invalid = valid;
-        invalid.consent_audit.revocation_payload_digest = [0; 32];
+        invalid.host_closure.closure_payload_digest = [0; 32];
         assert_eq!(
             verify_evidence(&invalid),
             Err(EvidenceError::InvalidConsentAudit)
@@ -7800,11 +7835,11 @@ pub mod tests {
     #[test]
     fn verifier_rejects_each_consent_boundary() {
         let cases: Vec<EvidenceMutation> = vec![
-            Box::new(|value| value.consent_audit.subject.clear()),
-            Box::new(|value| value.consent_audit.revocation_event_type = "other".to_owned()),
-            Box::new(|value| value.consent_audit.effective_after_seq = 0),
-            Box::new(|value| value.consent_audit.revocation_event_seq = 2),
-            Box::new(|value| value.consent_audit.halted_at_tick_boundary = false),
+            Box::new(|value| value.host_closure.subject.clear()),
+            Box::new(|value| value.host_closure.closure_event_type = "other".to_owned()),
+            Box::new(|value| value.host_closure.effective_after_seq = 0),
+            Box::new(|value| value.host_closure.closure_event_seq = 2),
+            Box::new(|value| value.host_closure.halted_at_tick_boundary = false),
         ];
         for mutate in cases {
             let mut invalid = evidence();
@@ -7818,20 +7853,19 @@ pub mod tests {
 
     #[test]
     fn verifier_accepts_host_closure_and_rejects_each_host_closure_boundary() {
-        fn host_fixture() -> (ConsentAuditV1, Vec<AuthoritativeEventV1>) {
+        fn host_fixture() -> (HostClosureAuditV1, Vec<AuthoritativeEventV1>) {
             let mut value = evidence();
-            value.consent_audit.revocation_event_type =
+            value.host_closure.closure_event_type =
                 "experiment.lifecycle.consent-closed.v1".to_owned();
             value.authoritative_events[2].event_type =
                 "experiment.lifecycle.consent-closed.v1".to_owned();
-            (value.consent_audit, value.authoritative_events)
+            (value.host_closure, value.authoritative_events)
         }
 
         let (valid_audit, valid_events) = host_fixture();
         assert_eq!(verify_host_closure(&valid_audit, &valid_events), Ok(()));
         let mut valid = evidence();
-        valid.consent_audit.revocation_event_type =
-            "experiment.lifecycle.consent-closed.v1".to_owned();
+        valid.host_closure.closure_event_type = "experiment.lifecycle.consent-closed.v1".to_owned();
         valid.authoritative_events[2].event_type =
             "experiment.lifecycle.consent-closed.v1".to_owned();
         valid.participant_views[0]
@@ -7842,12 +7876,12 @@ pub mod tests {
             .push("experiment.lifecycle.consent-closed.v1".to_owned());
         assert_eq!(verify_evidence(&valid), Ok(()));
 
-        let cases: [fn(&mut ConsentAuditV1, &mut Vec<AuthoritativeEventV1>); 9] = [
+        let cases: [fn(&mut HostClosureAuditV1, &mut Vec<AuthoritativeEventV1>); 9] = [
             |audit, _| audit.subject.clear(),
-            |audit, _| audit.revocation_payload_digest = [0; 32],
+            |audit, _| audit.closure_payload_digest = [0; 32],
             |audit, _| audit.requested_after_seq = audit.effective_after_seq,
             |audit, events| {
-                audit.revocation_event_seq = 2;
+                audit.closure_event_seq = 2;
                 events[2].seq = 2;
             },
             |audit, _| audit.halted_at_tick_boundary = false,
@@ -8002,7 +8036,15 @@ pub mod tests {
                 });
             assert_eq!(
                 verify_consent_audit(
-                    &duplicate_revocation.consent_audit,
+                    &ConsentAuditV1 {
+                        subject: duplicate_revocation.host_closure.subject.clone(),
+                        requested_after_seq: duplicate_revocation.host_closure.requested_after_seq,
+                        effective_after_seq: duplicate_revocation.host_closure.effective_after_seq,
+                        revocation_event_seq: duplicate_revocation.host_closure.closure_event_seq,
+                        revocation_event_type: "consent.revoked.v1".to_owned(),
+                        revocation_payload_digest: duplicate_revocation.host_closure.closure_payload_digest,
+                        halted_at_tick_boundary: duplicate_revocation.host_closure.halted_at_tick_boundary,
+                    },
                     &duplicate_revocation.authoritative_events,
                 ),
                 Err(EvidenceError::InvalidConsentAudit)
@@ -8839,8 +8881,8 @@ pub mod tests {
         baseline
             .authoritative_events
             .push(AuthoritativeEventV1 { seq: 4, ..marker });
-        baseline.consent_audit.effective_after_seq = 4;
-        baseline.consent_audit.revocation_event_seq = 4;
+        baseline.host_closure.effective_after_seq = 4;
+        baseline.host_closure.closure_event_seq = 4;
         baseline.causal_trace.push(CausalTraceEntryV1 {
             cause_seq: 2,
             effect_seq: 3,

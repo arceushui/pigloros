@@ -356,7 +356,7 @@ pub struct ExperimentSession {
     last_simulation_time_ns: Option<u128>,
     consent_revoked: bool,
     revoked_subjects: HashSet<EntityId>,
-    consent_revocation_pending: Option<PendingConsentRevocation>,
+    consent_revocation_pending: Option<PendingHostClosure>,
     operation_token: Option<ConsentCapabilityToken>,
 }
 
@@ -383,10 +383,10 @@ enum SessionHealth {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum PendingConsentRevocation {
-    /// Close every capability on the session Timeline.
+enum PendingHostClosure {
+    /// Close the local host session on its Timeline.
     Timeline { marker_entity: EntityId },
-    /// Fence one capability subject, then persist the session closure marker.
+    /// Fence one local subject operation, then persist the session closure marker.
     Subject {
         subject_id: EntityId,
         marker_entity: EntityId,
@@ -1431,32 +1431,33 @@ impl ExperimentSession {
         result
     }
 
-    /// Revoke the default session subject's consent at the next Tick Boundary.
+    /// Close this host session at the next Tick Boundary.
     ///
     /// The current completed boundary remains readable. With a bound consent
-    /// authority, the next step commits only the experiment-owned lifecycle
-    /// marker; a following step returns [`TickOutcome::Stopped`] without
-    /// invoking or committing any Driver. Without an authority, that next
-    /// step fails closed before appending the marker.
-    pub fn revoke_consent_at_boundary(&mut self) {
+    /// gate, the next step commits only the experiment-owned lifecycle marker;
+    /// a following step returns [`TickOutcome::Stopped`] without invoking or
+    /// committing any Driver. Without a gate, that next step fails closed
+    /// before appending the marker. This is host/session closure, not a
+    /// durable `consent.revoked.v1` event.
+    pub fn close_session_at_boundary(&mut self) {
         if !self.consent_revoked {
-            self.consent_revocation_pending = Some(PendingConsentRevocation::Timeline {
+            self.consent_revocation_pending = Some(PendingHostClosure::Timeline {
                 marker_entity: consent_marker_entity("session"),
             });
         }
     }
 
-    /// Schedule a durable, subject-scoped consent revocation.
+    /// Schedule a local subject-scoped host closure.
     ///
     /// The request immediately closes external append authority. With a bound
-    /// consent authority, the host persists an experiment-owned lifecycle
-    /// marker as the next atomic boundary; Drivers are not invoked for that
-    /// boundary. Recovery derives the closed state from that marker rather
-    /// than from process memory. Without an authority, the next step fails
-    /// closed before appending the marker.
-    pub fn revoke_consent_for_subject_at_boundary(&mut self, subject: EntityId) {
+    /// consent gate, the host persists an experiment-owned lifecycle marker as
+    /// the next atomic boundary; Drivers are not invoked for that boundary.
+    /// Recovery derives the closed state from that marker rather than from
+    /// process memory. Without a gate, the next step fails closed before
+    /// appending the marker. This is not a durable consent revocation.
+    pub fn close_subject_at_boundary(&mut self, subject: EntityId) {
         if !self.consent_revoked {
-            self.consent_revocation_pending = Some(PendingConsentRevocation::Subject {
+            self.consent_revocation_pending = Some(PendingHostClosure::Subject {
                 subject_id: subject,
                 marker_entity: consent_marker_entity(&subject.to_string()),
             });
@@ -1538,7 +1539,7 @@ impl ExperimentSession {
 
     fn step_boundary(&mut self, request: StepRequest) -> Result<TickOutcome, ExperimentError> {
         if let Some(revocation) = self.consent_revocation_pending.take() {
-            return self.commit_consent_revocation(revocation);
+            return self.commit_host_closure(revocation);
         }
         if self.consent_revoked || self.complete || self.reached_stop_condition() {
             self.complete = true;
@@ -1625,13 +1626,13 @@ impl ExperimentSession {
         }
     }
 
-    fn commit_consent_revocation(
+    fn commit_host_closure(
         &mut self,
-        revocation: PendingConsentRevocation,
+        revocation: PendingHostClosure,
     ) -> Result<TickOutcome, ExperimentError> {
         let (marker_entity, subject) = match revocation {
-            PendingConsentRevocation::Timeline { marker_entity } => (marker_entity, None),
-            PendingConsentRevocation::Subject {
+            PendingHostClosure::Timeline { marker_entity } => (marker_entity, None),
+            PendingHostClosure::Subject {
                 subject_id,
                 marker_entity,
             } => (marker_entity, Some(subject_id)),
@@ -2515,7 +2516,7 @@ mod tests {
         let mut session = session
             .with_consent_authority(authority.clone())
             .with_protected_token(token.clone());
-        session.revoke_consent_for_subject_at_boundary(subject_id);
+        session.close_subject_at_boundary(subject_id);
         assert!(matches!(
             session.projection_state_for_reducer("missing", subject_id, &token, 0),
             Err(ExperimentError::ConsentRevokedV1)
@@ -2564,7 +2565,7 @@ mod tests {
         };
         let subject_token = authority.record_grant_on_timeline(timeline_id, &grant(subject));
         let unrelated_token = authority.record_grant_on_timeline(timeline_id, &grant(unrelated));
-        session.revoke_consent_for_subject_at_boundary(subject);
+        session.close_subject_at_boundary(subject);
         session.step_tick().test_ok();
         drop(session);
 
@@ -4905,7 +4906,7 @@ mod tests {
             "first driver boundary must advance: {first_tick:?}"
         );
         let timeline_id = session.timeline().id();
-        session.revoke_consent_at_boundary();
+        session.close_session_at_boundary();
         assert!(matches!(
             session.append_events(&[EventDraft::new(
                 entity,
@@ -4966,7 +4967,7 @@ mod tests {
         let resumed_outcome = resumed.step_tick();
         assert!(
             matches!(resumed_outcome, Ok(TickOutcome::Stopped)),
-            "the durable revocation marker must close the resumed session: {resumed_outcome:?}"
+            "the durable host-closure marker must close the resumed session: {resumed_outcome:?}"
         );
         assert!(matches!(
             resumed.append_events(&[EventDraft::new(
@@ -5975,7 +5976,7 @@ mod tests {
             .test_ok()
             .is_none());
 
-        session.revoke_consent_for_subject_at_boundary(subject);
+        session.close_subject_at_boundary(subject);
         assert!(matches!(
             session.step_tick(),
             Ok(TickOutcome::Advanced {
@@ -6239,7 +6240,7 @@ mod coverage_entrypoints {
                 .with_consent_authority(ConsentAuthority::new());
         ok(experiment.register(&plugin, None, Some(Box::new(SubjectDriver { subject }))));
         let mut session = ok(experiment.start());
-        session.revoke_consent_for_subject_at_boundary(subject);
+        session.close_subject_at_boundary(subject);
         let _ = ok(session.step_tick());
         assert!(matches!(
             session.step_tick(),
@@ -6401,7 +6402,7 @@ mod coverage_entrypoints {
             StopCondition::MaxTicks(1),
         ))
         .start());
-        session.revoke_consent_at_boundary();
+        session.close_session_at_boundary();
         assert!(matches!(
             session.step_tick(),
             Ok(TickOutcome::Advanced {
@@ -6419,7 +6420,7 @@ mod coverage_entrypoints {
         ))
         .without_consent_gate();
         let mut session = ok(experiment.start());
-        session.revoke_consent_at_boundary();
+        session.close_session_at_boundary();
         assert!(matches!(
             session.step_tick(),
             Err(ExperimentError::Runtime(
@@ -7206,7 +7207,7 @@ mod coverage_entrypoints {
             },
         );
         expect_err(&session.projection_state_for_reducer("missing", subject, &token, 0));
-        session.revoke_consent_for_subject_at_boundary(revoked_subject);
+        session.close_subject_at_boundary(revoked_subject);
         assert!(matches!(
             session.step_tick(),
             Ok(TickOutcome::Advanced { .. })
@@ -7215,14 +7216,14 @@ mod coverage_entrypoints {
             .source_events()
             .is_ok_and(|events| events.is_empty()));
 
-        session.revoke_consent_at_boundary();
+        session.close_session_at_boundary();
         assert!(matches!(
             session.step_tick(),
             Ok(TickOutcome::Advanced { .. })
         ));
         assert!(matches!(session.step_tick(), Ok(TickOutcome::Stopped)));
-        session.revoke_consent_at_boundary();
-        session.revoke_consent_for_subject_at_boundary(revoked_subject);
+        session.close_session_at_boundary();
+        session.close_subject_at_boundary(revoked_subject);
         assert!(matches!(session.step_tick(), Ok(TickOutcome::Stopped)));
     }
 
@@ -8107,7 +8108,7 @@ mod fault_injection_tests {
                  END;",
             )
             .test_ok();
-        session.revoke_consent_at_boundary();
+        session.close_session_at_boundary();
         assert!(session.step_tick().is_err());
 
         let mut session =
@@ -8118,7 +8119,7 @@ mod fault_injection_tests {
         session.registry = session
             .registry
             .with_consent_gate(Arc::new(RejectingRevocationGate));
-        session.revoke_consent_at_boundary();
+        session.close_session_at_boundary();
         assert!(session.step_tick().is_err());
     }
 
@@ -8551,7 +8552,7 @@ mod fault_injection_tests {
         .with_consent_authority(authority)
         .start()
         .test_ok();
-        session.revoke_consent_at_boundary();
+        session.close_session_at_boundary();
         assert!(matches!(
             session.step_tick(),
             Ok(TickOutcome::Advanced {
@@ -8583,7 +8584,7 @@ mod fault_injection_tests {
                 fail_on_call: 1,
             });
         }
-        session.revoke_consent_at_boundary();
+        session.close_session_at_boundary();
         assert!(matches!(
             session.step_tick(),
             Err(ExperimentError::Store(_))
@@ -8616,7 +8617,7 @@ mod fault_injection_tests {
                 fail_on_call: 2,
             });
         }
-        session.revoke_consent_at_boundary();
+        session.close_session_at_boundary();
         assert!(matches!(
             session.step_tick(),
             Err(ExperimentError::Store(_))

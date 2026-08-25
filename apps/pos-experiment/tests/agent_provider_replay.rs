@@ -1125,7 +1125,7 @@ fn durable_session_reads_appends_empty_boundaries_and_revocations() {
     );
     assert_eq!(session.submit_action(&proposal).test_ok(), 1);
     assert_eq!(session.source_events().test_ok().len(), 1);
-    session.revoke_consent_at_boundary();
+    session.close_session_at_boundary();
     assert!(matches!(
         session.step_tick().test_ok(),
         TickOutcome::Advanced { .. }
