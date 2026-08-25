@@ -7236,20 +7236,7 @@ mod instrumented_candidate_entrypoints {
         Ok(())
     }
 
-    #[test]
-    fn public_archive_boundaries_are_instrumented() -> Result<(), Box<dyn std::error::Error>> {
-        let profile = tests::profile();
-        let (members, expected_results) = tests::bundle_inputs(&profile, BundleModeV1::Local)?;
-        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
-        let bundle = ConformanceBundleV1::materialize(
-            &profile,
-            BundleModeV1::Local,
-            members,
-            expected_results,
-        )?
-        .sign(&signing_key)?;
-        let archive = bundle.to_canonical_cbor()?;
-
+    fn public_archive_decode_boundaries(archive: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
         for malformed in [
             vec![0x01, 0],
             vec![0xa0],
@@ -7268,13 +7255,16 @@ mod instrumented_candidate_entrypoints {
 
         let mut encoded_value: ciborium::value::Value =
             ciborium::from_reader(std::io::Cursor::new(&archive))?;
-        if let ciborium::value::Value::Array(fields) = &mut encoded_value {
-            if let ciborium::value::Value::Array(members) = &mut fields[3] {
-                if let ciborium::value::Value::Array(member) = &mut members[0] {
-                    member[2] = ciborium::value::Value::Integer(14_u64.into());
-                }
-            }
-        }
+        let ciborium::value::Value::Array(fields) = &mut encoded_value else {
+            return Err("encoded bundle is not an array".into());
+        };
+        let ciborium::value::Value::Array(members) = &mut fields[3] else {
+            return Err("encoded members are not an array".into());
+        };
+        let ciborium::value::Value::Array(member) = &mut members[0] else {
+            return Err("encoded member is not an array".into());
+        };
+        member[2] = ciborium::value::Value::Integer(14_u64.into());
         let mut invalid_member_role = Vec::new();
         ciborium::into_writer(&encoded_value, &mut invalid_member_role)?;
         assert_eq!(
@@ -7310,7 +7300,12 @@ mod instrumented_candidate_entrypoints {
             exact_members.extend_from_slice(&[0x83, 0x60, 0x40, 0x00]);
         }
         assert!(verify_archive_independently(&raw_archive(&[0x60], &exact_members)).is_err());
+        Ok(())
+    }
 
+    fn public_archive_validation_boundaries(
+        bundle: ConformanceBundleV1,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut invalid_unsigned = bundle.clone();
         invalid_unsigned.manifest.lifecycle = ProfileLifecycleV1::Stable;
         assert_eq!(
@@ -7331,7 +7326,12 @@ mod instrumented_candidate_entrypoints {
             missing_profile.validate(),
             Err(BundleContractErrorV1::MemberMissing)
         );
+        Ok(())
+    }
 
+    fn public_archive_cap_boundaries(
+        profile: &super::ConformanceProfileV1,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut limited_profiles = [profile.clone(), profile.clone(), profile];
         limited_profiles[0]
             .evaluator_protocol
@@ -7360,5 +7360,25 @@ mod instrumented_candidate_entrypoints {
             );
         }
         Ok(())
+    }
+
+    #[test]
+    fn public_archive_boundaries_are_instrumented() -> Result<(), Box<dyn std::error::Error>> {
+        let profile = tests::profile();
+        let (members, expected_results) = tests::bundle_inputs(&profile, BundleModeV1::Local)?;
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+        let bundle = ConformanceBundleV1::materialize(
+            &profile,
+            BundleModeV1::Local,
+            members,
+            expected_results,
+        )?
+        .sign(&signing_key)?;
+        let archive = bundle.to_canonical_cbor()?;
+        assert_eq!(ConformanceBundleV1::from_canonical_cbor(&archive)?, bundle);
+        assert_eq!(verify_archive_independently(&archive), Ok(()));
+        public_archive_decode_boundaries(&archive)?;
+        public_archive_validation_boundaries(bundle)?;
+        public_archive_cap_boundaries(&profile)
     }
 }
