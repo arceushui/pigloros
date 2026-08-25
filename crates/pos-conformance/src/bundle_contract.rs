@@ -4326,6 +4326,7 @@ mod tests {
         let mut invalid_inventory: JsonValue = serde_json::from_slice(&inventory.bytes)?;
         invalid_inventory["lifecycle"] = JsonValue::Null;
         inventory.bytes = serde_json::to_vec(&invalid_inventory)?;
+        inventory.digest = *blake3::hash(&inventory.bytes).as_bytes();
         assert_eq!(
             validate_authority_members(&profile, &missing_lifecycle),
             Err(BundleContractErrorV1::MemberDigestMismatch)
@@ -4339,6 +4340,7 @@ mod tests {
         let mut invalid_inventory: JsonValue = serde_json::from_slice(&inventory.bytes)?;
         invalid_inventory["entries"] = JsonValue::Array(Vec::new());
         inventory.bytes = serde_json::to_vec(&invalid_inventory)?;
+        inventory.digest = *blake3::hash(&inventory.bytes).as_bytes();
         assert_eq!(
             validate_authority_members(&profile, &invalid_entries),
             Err(BundleContractErrorV1::MemberMissing)
@@ -4347,45 +4349,24 @@ mod tests {
     }
 
     #[test]
-    fn archive_integer_type_error_seams_are_counted() -> Result<(), Box<dyn std::error::Error>> {
+    fn public_archive_rejects_non_integer_manifest_fields() -> Result<(), Box<dyn std::error::Error>>
+    {
         let bundle = signed_bundle(&profile(), BundleModeV1::Local)?;
-        let manifest = manifest_value(&bundle.manifest);
-        assert!(decode_manifest(&replace_member_field(
-            &manifest,
-            3,
-            Value::Text("role".to_owned()),
-        )?)
-        .is_err());
-        assert!(decode_manifest(&replace_expected_field(
-            &manifest,
-            1,
-            Value::Text("claim-layer".to_owned()),
-        )?)
-        .is_err());
-        assert!(decode_manifest(&replace_expected_field(
-            &manifest,
-            3,
-            Value::Text("mode".to_owned()),
-        )?)
-        .is_err());
-        assert!(decode_manifest(&replace_array_field(
-            &manifest,
-            1,
-            Value::Text("lifecycle".to_owned()),
-        )?)
-        .is_err());
-        assert!(decode_manifest(&replace_array_field(
-            &manifest,
-            2,
-            Value::Text("mode".to_owned()),
-        )?)
-        .is_err());
-        assert!(decode_member(&Value::Array(vec![
-            Value::Text("member".to_owned()),
-            Value::Bytes(vec![1]),
-            Value::Text("role".to_owned()),
-        ]))
-        .is_err());
+        let archive: Value =
+            ciborium::from_reader(std::io::Cursor::new(bundle.to_canonical_cbor()?))?;
+        for path in [[2, 1], [2, 2], [2, 4, 0, 3], [2, 5, 0, 1], [2, 5, 0, 3]] {
+            let invalid = replace_nested_array_field(
+                &archive,
+                &path,
+                Value::Text("not-an-integer".to_owned()),
+            )?;
+            let mut invalid_bytes = Vec::new();
+            ciborium::into_writer(&invalid, &mut invalid_bytes)?;
+            assert_eq!(
+                ConformanceBundleV1::from_canonical_cbor(&invalid_bytes),
+                Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+            );
+        }
         Ok(())
     }
 
@@ -4407,6 +4388,7 @@ mod tests {
             fixture.provenance.build_digest = approved_digest;
             fixture.provenance.publication_review_digest = approved_digest;
         }
+        candidate.profile_digest = candidate.digest();
         let (mut members, _) = bundle_inputs(&candidate, BundleModeV1::Local)?;
         let provenance = members
             .iter_mut()
@@ -5016,6 +4998,24 @@ mod tests {
             return Err(std::io::Error::other("expected array"));
         };
         fields[index] = replacement;
+        Ok(Value::Array(fields))
+    }
+
+    fn replace_nested_array_field(
+        value: &Value,
+        path: &[usize],
+        replacement: Value,
+    ) -> Result<Value, std::io::Error> {
+        let Some((&index, remaining)) = path.split_first() else {
+            return Ok(replacement);
+        };
+        let Value::Array(mut fields) = value.clone() else {
+            return Err(std::io::Error::other("expected array"));
+        };
+        let field = fields
+            .get(index)
+            .ok_or_else(|| std::io::Error::other("array index out of bounds"))?;
+        fields[index] = replace_nested_array_field(field, remaining, replacement)?;
         Ok(Value::Array(fields))
     }
 
