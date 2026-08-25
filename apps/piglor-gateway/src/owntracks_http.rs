@@ -66,7 +66,7 @@ fn owntracks_response(result: &Result<OwnTracksIngressResult, GatewayError>) -> 
         }
         Err(error_value) => {
             #[cfg(test)]
-            eprintln!("owntracks admission error: {error_value:?}");
+            panic!("owntracks admission error: {error_value:?}");
             #[cfg(not(test))]
             let _ = error_value;
             error(StatusCode::SERVICE_UNAVAILABLE, "unavailable")
