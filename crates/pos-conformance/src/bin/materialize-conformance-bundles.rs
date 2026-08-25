@@ -41,6 +41,18 @@ fn run(
     mut arguments: impl Iterator<Item = OsString>,
     encoded_signing_key: Result<String, std::env::VarError>,
 ) -> Result<(), Box<dyn Error>> {
+    run_with_inventory(
+        &mut arguments,
+        encoded_signing_key,
+        include_bytes!("../../../../fixtures/conformance/expected-authority/inventory.json"),
+    )
+}
+
+fn run_with_inventory(
+    arguments: &mut impl Iterator<Item = OsString>,
+    encoded_signing_key: Result<String, std::env::VarError>,
+    inventory_bytes: &[u8],
+) -> Result<(), Box<dyn Error>> {
     let _program = arguments.next();
     let output_root = arguments
         .next()
@@ -53,7 +65,7 @@ fn run(
         return Err("materialization output directory already exists".into());
     }
     let signing_key = signing_key_from_encoded(encoded_signing_key)?;
-    let lifecycles = publication_lifecycles()?;
+    let lifecycles = publication_lifecycles_from_bytes(inventory_bytes)?;
     let layers = [
         (ClaimLayerV1::ArtifactIntegrity, "artifact-integrity"),
         (ClaimLayerV1::ReplayConformance, "replay-conformance"),
@@ -112,12 +124,6 @@ const fn hex_nibble(value: u8) -> Option<u8> {
     }
 }
 
-fn publication_lifecycles() -> Result<Vec<(ProfileLifecycleV1, &'static str)>, Box<dyn Error>> {
-    publication_lifecycles_from_bytes(include_bytes!(
-        "../../../../fixtures/conformance/expected-authority/inventory.json"
-    ))
-}
-
 fn publication_lifecycles_from_bytes(
     bytes: &[u8],
 ) -> Result<Vec<(ProfileLifecycleV1, &'static str)>, Box<dyn Error>> {
@@ -144,7 +150,25 @@ fn materialize_profile(
     lifecycle: ProfileLifecycleV1,
     lifecycle_name: &str,
 ) -> Result<(), Box<dyn Error>> {
-    let mut profile = profile_for_claim_layer(claim_layer);
+    let profile = profile_for_claim_layer(claim_layer);
+    materialize_profile_from_profile(
+        output_root,
+        signing_key,
+        profile,
+        lifecycle,
+        lifecycle_name,
+        layer_name,
+    )
+}
+
+fn materialize_profile_from_profile(
+    output_root: &Path,
+    signing_key: &SigningKey,
+    mut profile: ConformanceProfileV1,
+    lifecycle: ProfileLifecycleV1,
+    lifecycle_name: &str,
+    layer_name: &str,
+) -> Result<(), Box<dyn Error>> {
     profile.lifecycle = lifecycle;
     profile.profile_digest = profile.digest();
     let profile_bytes = profile.to_canonical_cbor()?;
@@ -522,6 +546,21 @@ mod tests {
         ))
     }
 
+    fn local_bundle_digest(
+        profile: &ConformanceProfileV1,
+        signing_key: &SigningKey,
+    ) -> Result<[u8; 32], Box<dyn Error>> {
+        let (members, expected_results) = bundle_inputs(profile, BundleModeV1::Local)?;
+        Ok(ConformanceBundleV1::materialize(
+            profile,
+            BundleModeV1::Local,
+            members,
+            expected_results,
+        )?
+        .sign(signing_key)?
+        .bundle_digest()?)
+    }
+
     #[test]
     fn materializer_run_covers_all_profile_layers() -> Result<(), Box<dyn Error>> {
         let output = output_root("run");
@@ -538,6 +577,8 @@ mod tests {
 
     #[test]
     fn materializer_argument_and_key_errors_are_explicit() -> Result<(), Box<dyn Error>> {
+        let entry: fn() -> Result<(), Box<dyn Error>> = main;
+        assert!(entry().is_err());
         assert!(run(
             [OsString::from("materialize")].into_iter(),
             Ok(signing_key_hex())
@@ -557,6 +598,18 @@ mod tests {
         ];
         assert!(run(arguments.into_iter(), Ok(signing_key_hex())).is_err());
         std::fs::remove_dir_all(output)?;
+        let arguments = [OsString::from("materialize"), OsString::from("missing")];
+        assert!(run(
+            arguments.into_iter(),
+            std::env::var("PIGLOROS_CONFORMANCE_MISSING_SIGNING_KEY")
+        )
+        .is_err());
+        let blocker = output_root("blocker");
+        std::fs::write(&blocker, b"not a directory")?;
+        let child = blocker.join("child");
+        let arguments = [OsString::from("materialize"), child.into_os_string()];
+        assert!(run(arguments.into_iter(), Ok(signing_key_hex())).is_err());
+        std::fs::remove_file(blocker)?;
         assert!(signing_key_from_encoded(std::env::var(
             "PIGLOROS_CONFORMANCE_MISSING_SIGNING_KEY"
         ))
@@ -569,6 +622,9 @@ mod tests {
     fn helper_validation_seams_cover_alternate_records() -> Result<(), Box<dyn Error>> {
         assert_eq!(decode_hex("00"), None);
         assert_eq!(decode_hex(&"gg".repeat(32)), None);
+        assert_eq!(decode_hex(&"0g".repeat(32)), None);
+        assert_eq!(decode_hex(&"ab".repeat(32)), Some([0xab; 32]));
+        assert_eq!(decode_hex(&"AB".repeat(32)), Some([0xab; 32]));
         assert_eq!(hex(&[0xabu8; 32]), "ab".repeat(32));
 
         let candidate = br#"{"lifecycle":"Candidate"}"#;
@@ -579,18 +635,101 @@ mod tests {
                 (ProfileLifecycleV1::Candidate, "candidate")
             ]
         );
-        assert!(publication_lifecycles_from_bytes(br#"{}"#).is_err());
+        assert!(publication_lifecycles_from_bytes(b"{}").is_err());
         assert!(publication_lifecycles_from_bytes(br#"{"lifecycle":"Retired"}"#).is_err());
         assert!(publication_lifecycles_from_bytes(b"{").is_err());
+        let mut invalid_inventory = [
+            OsString::from("materialize"),
+            OsString::from("invalid-inventory"),
+        ]
+        .into_iter();
+        assert!(run_with_inventory(&mut invalid_inventory, Ok(signing_key_hex()), b"{}").is_err());
 
         let mut invalid_expected = profile_for_claim_layer(ClaimLayerV1::ArtifactIntegrity);
         invalid_expected.fixtures[0].expected =
             ExpectedResultV1::TypedFailure(SafeErrorCodeV1::InvalidEncoding);
-        assert!(bundle_inputs(&invalid_expected, BundleModeV1::Local).is_err());
+        let output = output_root("invalid-expected");
+        assert!(materialize_profile_from_profile(
+            &output,
+            &SigningKey::from_bytes(&[7; 32]),
+            invalid_expected,
+            ProfileLifecycleV1::Draft,
+            "draft",
+            "artifact-integrity",
+        )
+        .is_err());
+        std::fs::remove_dir_all(output)?;
+
+        let mut invalid_profile = profile_for_claim_layer(ClaimLayerV1::ArtifactIntegrity);
+        invalid_profile.fixtures.clear();
+        let output = output_root("invalid-profile");
+        assert!(materialize_profile_from_profile(
+            &output,
+            &SigningKey::from_bytes(&[7; 32]),
+            invalid_profile,
+            ProfileLifecycleV1::Draft,
+            "draft",
+            "artifact-integrity",
+        )
+        .is_err());
+        std::fs::remove_dir_all(output)?;
 
         let mut unsupported_mode = profile_for_claim_layer(ClaimLayerV1::ArtifactIntegrity);
         unsupported_mode.fixtures[0].modes.clear();
         assert!(bundle_inputs(&unsupported_mode, BundleModeV1::Local).is_err());
+
+        let output = output_root("write-error");
+        std::fs::create_dir_all(output.join("directory"))?;
+        assert!(write_materialized_file(&output, "directory", b"bytes").is_err());
+        std::fs::remove_dir_all(output)?;
+        Ok(())
+    }
+
+    #[test]
+    fn materializer_manifest_and_bundle_write_errors_are_explicit() -> Result<(), Box<dyn Error>> {
+        let signing_key = SigningKey::from_bytes(&[7; 32]);
+        let profile = profile_for_claim_layer(ClaimLayerV1::ArtifactIntegrity);
+        let digest = local_bundle_digest(&profile, &signing_key)?;
+        let prefix = "artifact-integrity/draft";
+
+        let manifest_root = output_root("manifest-error");
+        std::fs::create_dir_all(manifest_root.join(prefix))?;
+        std::fs::create_dir_all(
+            manifest_root.join(format!("{prefix}/manifest-local-{}.cbor", hex(&digest))),
+        )?;
+        assert!(materialize_profile_from_profile(
+            &manifest_root,
+            &signing_key,
+            profile,
+            ProfileLifecycleV1::Draft,
+            "draft",
+            "artifact-integrity",
+        )
+        .is_err());
+        std::fs::remove_dir_all(manifest_root)?;
+
+        let signing_key = SigningKey::from_bytes(&[7; 32]);
+        let profile = profile_for_claim_layer(ClaimLayerV1::ArtifactIntegrity);
+        let digest = local_bundle_digest(&profile, &signing_key)?;
+        let bundle_root = output_root("bundle-error");
+        std::fs::create_dir_all(bundle_root.join(prefix))?;
+        std::fs::write(
+            bundle_root.join(format!("{prefix}/manifest-local-{}.cbor", hex(&digest))),
+            b"existing",
+        )?;
+        std::fs::create_dir_all(
+            bundle_root.join(format!("{prefix}/bundle-local-{}.cfb1", hex(&digest))),
+        )?;
+        assert!(materialize_profile_from_profile(
+            &bundle_root,
+            &signing_key,
+            profile,
+            ProfileLifecycleV1::Draft,
+            "draft",
+            "artifact-integrity",
+        )
+        .is_err());
+        std::fs::remove_dir_all(bundle_root)?;
         Ok(())
     }
 }
