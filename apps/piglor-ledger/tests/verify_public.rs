@@ -75,11 +75,13 @@ fn public_store_verification_rejects_an_invalid_registry_public_key(
     })?;
     let timeline = store.create_timeline("ledger")?;
     let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+    let mut invalid_public_key = [0_u8; 32];
+    invalid_public_key[31] = 0xff;
     let mut registry = KeyRegistryStateV1::new();
     registry.register_key(KeyRegistrationV1::new(
         identity,
         pos_crypto::key_roles::key_material_digest(&[3; 32]),
-        Some(pos_core::PublicKey::from_bytes([0xff; 32])),
+        Some(pos_core::PublicKey::from_bytes(invalid_public_key)),
     ))?;
     store.save_key_registry(&registry)?;
     let payload = CanonicalBytes::from_static(b"invalid registry public key");
