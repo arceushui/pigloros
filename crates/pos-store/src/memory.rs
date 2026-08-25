@@ -42,7 +42,7 @@ use pos_core::{
         SeqRange,
     },
     timeline::{Timeline, TimelineMeta},
-    ConsentAppendPermit, GEOGRAPHIC_EVENT_TYPE,
+    ConsentAppendPermit, ConsentAuthority, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]

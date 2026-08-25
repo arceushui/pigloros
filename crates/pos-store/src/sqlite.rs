@@ -40,7 +40,7 @@ use pos_core::{
         AppendOrDuplicateOutcome, EventReadBounds, EventStore, PurgeOutcome, SeqRange,
     },
     timeline::{Timeline, TimelineMeta, TimelineMode},
-    ConsentAppendPermit, CoreError, Hash, GEOGRAPHIC_EVENT_TYPE,
+    ConsentAppendPermit, ConsentAuthority, CoreError, Hash, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
