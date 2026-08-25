@@ -10085,6 +10085,139 @@ mod coverage_entrypoints {
     }
 
     #[test]
+    fn consent_owner_and_timeline_transaction_authorizers_fail_closed() {
+        let subject = EntityId::new();
+        let permit = ConsentAuthority::new().append_permit();
+
+        let mut owned = tests::new_store();
+        let timeline = ok(owned.create_timeline_with_meta(
+            pos_core::timeline::TimelineMeta::root_owned("pre-owned-consent", subject),
+        ));
+        ok(owned.bind_consent_authority(permit));
+        ok(owned.append_consent_bounded(
+            timeline.id(),
+            std::slice::from_ref(&grant_draft(subject, EntityId::new(), 1)),
+            permit,
+            1,
+        ));
+
+        let mut begin_error = tests::new_store();
+        ok(begin_error.conn.authorizer(Some(|context| {
+            if matches!(
+                context.action,
+                rusqlite::hooks::AuthAction::Transaction {
+                    operation: rusqlite::hooks::TransactionOperation::Begin
+                }
+            ) {
+                rusqlite::hooks::Authorization::Deny
+            } else {
+                rusqlite::hooks::Authorization::Allow
+            }
+        })));
+        expect_err(begin_error.create_timeline_with_meta(
+            pos_core::timeline::TimelineMeta::root_owned("begin-authorizer", subject),
+        ));
+        ok(begin_error.conn.authorizer(
+            None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+        ));
+
+        let mut nested_write_error = tests::new_store();
+        ok(nested_write_error.conn.execute_batch("BEGIN IMMEDIATE"));
+        ok(nested_write_error.conn.authorizer(Some(|context| {
+            if matches!(
+                context.action,
+                rusqlite::hooks::AuthAction::Insert {
+                    table_name: "timeline_owners"
+                }
+            ) {
+                rusqlite::hooks::Authorization::Deny
+            } else {
+                rusqlite::hooks::Authorization::Allow
+            }
+        })));
+        expect_err(nested_write_error.create_timeline_with_meta(
+            pos_core::timeline::TimelineMeta::root_owned("nested-authorizer", subject),
+        ));
+        ok(nested_write_error.conn.authorizer(
+            None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+        ));
+        ok(nested_write_error.conn.execute_batch("ROLLBACK"));
+    }
+
+    #[test]
+    fn consent_resolver_rejects_durable_type_and_revision_errors() {
+        let id = ok(AdmissionSnapshotId::from_canonical(
+            "01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+        ));
+        let mut malformed_type = tests::new_store();
+        ok(malformed_type
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints = ON"));
+        ok(malformed_type.conn.execute(
+            "INSERT INTO geographic_cell_admission_consent_records
+             (consent_record_id, consent_revision, consent_record_hash, consent_record_cbor)
+             VALUES (?1, 'bad', zeroblob(32), zeroblob(1))",
+            rusqlite::params![id.as_str()],
+        ));
+        expect_err(malformed_type.resolve_admission_consent(&id, 12));
+
+        let id = ok(AdmissionSnapshotId::from_canonical(
+            "01ARZ3NDEKTSV4RRFFQ69G5FB0",
+        ));
+        let mut malformed_revision = tests::new_store();
+        ok(malformed_revision
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints = ON"));
+        ok(malformed_revision.conn.execute(
+            "INSERT INTO geographic_cell_admission_consent_records
+             (consent_record_id, consent_revision, consent_record_hash, consent_record_cbor)
+             VALUES (?1, -1, zeroblob(32), zeroblob(1))",
+            rusqlite::params![id.as_str()],
+        ));
+        expect_err(malformed_revision.resolve_admission_consent(&id, 12));
+    }
+
+    #[test]
+    fn deleting_an_enrolled_timeline_revokes_enrollment_state() {
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("delete-enrolled"));
+        let request = OwnTracksEnrollmentRequestV1::new(
+            timeline.id(),
+            EntityId::new(),
+            pos_core::geo_admission::GeoLocationAdmissionFenceV1::new(
+                7,
+                ([1; 32], 8, [2; 32]),
+                (1, false, 9),
+            ),
+            [42; 32],
+        );
+        ok(store.pair_owntracks_enrollment(request));
+        ok(store.delete_timeline(timeline.id()));
+        std::mem::drop(store.owntracks_enrollment_status());
+    }
+
+    #[test]
+    fn fork_creation_fails_closed_when_parent_history_is_corrupt() {
+        let mut store = tests::new_store();
+        let parent = ok(store.create_timeline("corrupt-fork-parent"));
+        ok(store.append(
+            parent.id(),
+            &[tests::make_draft(EntityId::new(), b"fork-event")],
+        ));
+        ok(store.conn.execute(
+            "UPDATE events SET payload = NULL WHERE timeline_id = ?1 AND seq = 1",
+            rusqlite::params![parent.id().to_string()],
+        ));
+        expect_err(
+            store.create_timeline_with_meta(pos_core::timeline::TimelineMeta::forked_from(
+                parent.id(),
+                Seq::from_u64(1),
+                "corrupt-fork-child",
+            )),
+        );
+    }
+
+    #[test]
     fn enrollment_paths_fail_closed_on_transaction_state_and_commit_errors() {
         let request_for = |timeline: TimelineId| {
             OwnTracksEnrollmentRequestV1::new(
